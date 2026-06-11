@@ -77,6 +77,9 @@ regressions instead of relying only on wall-clock test duration.
 It also records `timing_budget_us`, `timing_budget_status`, and
 `timing_budget_reason`; the current focused budgets are 250000 us for the
 backend-executed reduced scene and 1000000 us for generated widget rendering.
+Use the matching `*_pixels_per_second` fields for cross-resolution comparisons;
+raw elapsed microseconds are useful for a fixed fixture, while throughput is the
+stable signal when scene dimensions change.
 
 The generated-GUI matrix intentionally records
 `text_normalization_pixels=269` for the fixture-specific text antialiasing

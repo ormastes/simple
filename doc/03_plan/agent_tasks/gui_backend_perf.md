@@ -39,6 +39,11 @@ Updated: 2026-06-11
   widget rendering and backend-executed Engine2D rendering. Evidence:
   `production_gui_web_renderer_parity_hardening_spec.spl` asserts focused paths
   remain within budget, and the backend evidence wrapper emits the budget fields.
+- this commit -- render throughput evidence: production GUI parity reports now
+  derive per-backend and total pixels-per-second from pixel counts and measured
+  elapsed time. Evidence: `production_gui_web_renderer_parity_hardening_spec.spl`
+  asserts positive throughput, and the backend evidence wrapper emits throughput
+  fields for software, CPU SIMD, Metal, and total render paths.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
@@ -48,7 +53,7 @@ Updated: 2026-06-11
 
 1. Collect and record additional startup/render evidence (timing + throughput + parity)
    - Run and archive the full production GUI web renderer parity evidence wrapper with
-     the new timing fields.
+     the new timing and throughput fields.
    - Add broader throughput thresholds after enough host-stable samples exist.
 2. Provide GPU/font offload proof
    - Demonstrate measured proof of real GPU/font offload path behavior or explicit typed unavailability.

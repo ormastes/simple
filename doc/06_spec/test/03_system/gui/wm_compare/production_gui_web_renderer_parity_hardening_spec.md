@@ -68,7 +68,7 @@ expect(html.contains("data-font-corpus=\"known-site-fonts\"")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -82,6 +82,10 @@ expect(report.software_render_elapsed_us).to_be_greater_than(0)
 expect(report.cpu_simd_render_elapsed_us).to_be_greater_than(0)
 expect(report.metal_render_elapsed_us).to_be_greater_than(0)
 expect(report.total_elapsed_us).to_be_greater_than(0)
+expect(report.software_pixels_per_second).to_be_greater_than(0)
+expect(report.cpu_simd_pixels_per_second).to_be_greater_than(0)
+expect(report.metal_pixels_per_second).to_be_greater_than(0)
+expect(report.total_pixels_per_second).to_be_greater_than(0)
 expect(report.timing_budget_us).to_be_greater_than(0)
 expect(report.timing_budget_status).to_equal("pass")
 expect(report.timing_budget_reason).to_equal("within-render-budget")
@@ -139,7 +143,7 @@ expect(report.exact_backend_parity).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -157,6 +161,10 @@ expect(report.software_render_elapsed_us).to_be_greater_than(0)
 expect(report.cpu_simd_render_elapsed_us).to_be_greater_than(0)
 expect(report.metal_render_elapsed_us).to_be_greater_than(0)
 expect(report.total_elapsed_us).to_be_greater_than(0)
+expect(report.software_pixels_per_second).to_be_greater_than(0)
+expect(report.cpu_simd_pixels_per_second).to_be_greater_than(0)
+expect(report.metal_pixels_per_second).to_be_greater_than(0)
+expect(report.total_pixels_per_second).to_be_greater_than(0)
 expect(report.timing_budget_us).to_be_greater_than(0)
 expect(report.timing_budget_status).to_equal("pass")
 expect(report.timing_budget_reason).to_equal("within-render-budget")
