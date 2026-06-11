@@ -343,6 +343,11 @@ with an `export use <tier>.<module>*` wrapper in `nogc_async_mut`
 (wrapper first, native port second). `common/` stays tier-neutral pure
 functions. See `doc/04_architecture/lib/runtime_family_tier_defaults.md`.
 
+Export strictness (E0410): `pub val` alone exports nothing — add explicit
+`export NAME` statements; shims need `export use X.*` (plain `use` re-exports
+nothing); stale sibling `.smf` files shadow `.spl` edits. Full rules:
+`doc/07_guide/language/module_system.md` (E0410 section).
+
 References:
 - Full guide: `doc/07_guide/compiler/deps_tool.md`
 - Lazy parsing prior art: `doc/01_research/compiler/parser/lazy_parsing_prior_art.md`

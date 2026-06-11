@@ -64,15 +64,30 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
          suffix fallback + fn-valued struct fields now IndirectCall.
          Stage-4 binary now runs parse → typecheck → monomorphize →
          mode_dispatch.
-      4. [ ] Remaining (5th distinct site, precisely diagnosed): SIGSEGV
-         in `CompileContext.create_outlined_4` — outlined lambda from
-         `driver_types.spl:56` (`run_fn: fn(m): interp_impl.process_module(m)`):
-         capture hydration correct, but lambda param `m` HIR-lowered as
-         `GlobalLoad "m"` → codegen emits `xor rsi,rsi` →
-         `process_module(self, m=0)`. Suspect: struct-literal named-arg
-         field context or nested-def hoist path skips param scope in
-         `lower_lambda` (hir/lower/expr/control.rs:79). Diagnostics +
-         full patch backup: /tmp/stage4diag/. Until fixed, self-hosted
+      4. [x] Sites 5–8 fixed (2026-06-11): SIGSEGV chain fully resolved —
+         stage4 runs the whole pipeline in docker with exit 0, zero
+         crashes, flat process count. (5) lambda params were stripped by
+         `apply_bootstrap_rewrite`'s fn-type→any pass matching lambda
+         *expressions* (`fn(m):` became literal `"fn()"` → param `m`
+         lowered as nil `GlobalLoad`); fix preserves lambda param lists
+         in `pipeline/native_project/compiler.rs`. (6) match-arm leading
+         statements dropped by `lower_match_arm_body` — now delegates to
+         `lower_do_block`. (7) `for item in dict` lowered as
+         array-index over keys — new `rt_for_iterable`/`rt_dict_entries`
+         runtime fns yield (k,v) tuples matching interpreter semantics.
+         (8) array literal returned from tuple-typed fn read back via
+         `rt_tuple_get` → NIL; `rt_tuple_get` now falls back to
+         `rt_array_get` for Arrays. Pure-Simple parity verified clean:
+         50.mir uses the iterator protocol for non-range for-loops, HIR
+         lowers full `arm.body`, and the bootstrap rewrite is seed-only.
+      5. [ ] Remaining (9th site, silent/semantic — NOT a crash):
+         `process_module` (`src/compiler/70.backend/backend/interpreter.spl:38`)
+         finds no `fn` named "main" in the self-hosted frontend's HIR
+         module for the entry file, returns `Ok(Unit)` without calling
+         `call_hir_function` — "hello stage4" never prints. dict.keys()
+         and Option `.?` verified working compiled; suspect the
+         self-hosted frontend produces an empty or differently-keyed
+         `module.functions` for the entry file. Until fixed, self-hosted
          deploys stay blocked and `bin/simple` remains the Rust seed.
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the

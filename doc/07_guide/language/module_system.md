@@ -287,3 +287,33 @@ use app.io
 # Fix
 use app.io.{shell, file_read}
 ```
+
+### E0410 "name not exported" — export strictness (seed ≥ 2026-06)
+
+The seed compiler enforces strict exports. Three rules that commonly bite:
+
+1. **`pub val` alone does not export.** Module-level constants need an
+   explicit `export` statement listing each name:
+
+   ```simple
+   pub val ZSTD_MAGIC = 0xFD2FB528    # NOT visible to importers by itself
+   export ZSTD_MAGIC                  # required
+   ```
+
+2. **Plain `use X.*` in a shim re-exports nothing.** A hub/shim module
+   must use `export use`:
+
+   ```simple
+   # Wrong (importers of this shim get E0410)
+   use nogc_sync_mut.sffi.cli*
+   # Fix
+   export use nogc_sync_mut.sffi.cli*
+   ```
+
+3. **`extern fn` declarations and plain `fn` need `pub fn` or an
+   `export` statement** to be importable.
+
+Also check for **stale `.smf` files**: a sibling `.smf` shadows the
+edited `.spl` and keeps reporting old export errors — delete it.
+
+Tier rule for where exports should live: `doc/07_guide/lib/api/lib_tier_defaults.md`.
