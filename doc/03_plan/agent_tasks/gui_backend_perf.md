@@ -115,6 +115,10 @@ Updated: 2026-06-11
   list scene now participates in the shared fixture-marker booleans for
   recognition, solid-fill exclusion, and dispatch, with focused exact-pixel unit
   coverage for the branch.
+- this commit -- block dimension marker reuse: the Engine2D fallback block
+  painter now caches margin, width, and height marker booleans once before
+  choosing block geometry, avoiding repeated HTML scans while preserving the
+  existing geometry priority order.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
