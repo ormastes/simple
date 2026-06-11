@@ -302,8 +302,14 @@ Open gaps tied to the active browser objective:
     flex-start
   - renderer update: no new renderer change was needed beyond the existing
     column-flex stretch/default-width path
+- The same live geometry lane now passes for `49_flex_column_justify_space_around`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's column-flex
+    `justify-content:space-around` start and inter-item gap distribution
+  - renderer update: the Simple column-flex main-axis path now applies
+    focused `space-around` start and gap offsets
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=45`, `pass_count=45`, `fail_count=0`, and
+    now reports `fixture_count=46`, `pass_count=46`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`

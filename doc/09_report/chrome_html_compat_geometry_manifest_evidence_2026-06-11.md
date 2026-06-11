@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 45
-- pass count: 45
+- fixtures: 46
+- pass count: 46
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -68,6 +68,7 @@ pixels, or text antialiasing normalization.
 | `46_flex_column_align_items_stretch` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/46_flex_column_align_items_stretch_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/46_flex_column_align_items_stretch_structural_report.sdn` |
 | `47_flex_column_align_self_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/47_flex_column_align_self_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/47_flex_column_align_self_center_structural_report.sdn` |
 | `48_flex_column_align_self_stretch` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/48_flex_column_align_self_stretch_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/48_flex_column_align_self_stretch_structural_report.sdn` |
+| `49_flex_column_justify_space_around` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/49_flex_column_justify_space_around_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/49_flex_column_justify_space_around_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -122,3 +123,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `46_flex_column_align_items_stretch` | 0 | 0.000 | `` |
 | `47_flex_column_align_self_center` | 0 | 0.000 | `` |
 | `48_flex_column_align_self_stretch` | 0 | 0.000 | `` |
+| `49_flex_column_justify_space_around` | 0 | 0.000 | `` |
