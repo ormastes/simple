@@ -37,11 +37,31 @@ walk terminates in ≤ fuel+1 clusters.
   - FREE / BAD mid-chain → Err
   - invalid start (cluster 0, cluster 1) → Err
 
+### What was implemented (wave-4c, 2026-06-11)
+
+- `Fat32Filesystem.read(dev, h, buf)` — signature extended with `dev: BlockDevice`
+  parameter; implementation replaced the `root_dir_data` shortcut with a proper
+  cluster-chain walk via `read_cluster_chain(dev, h.start_cluster)`.
+- File bytes are assembled in chain order: each cluster's sectors are fetched via
+  `dev.read_sector(lba)` and copied into `buf`, respecting `h.file_size` so
+  cluster padding past the real EOF is never returned.
+- `Fat32Filesystem.make_for_read_test(...)` — additional test factory exposing
+  explicit `data_start_sector` and `sectors_per_cluster` for read-unit specs.
+- `test/01_unit/os/kernel/fs/fat32_read_spec.spl` — 10 tests:
+  single-cluster exact read, buf-smaller-than-file read, size-truncation of
+  last cluster, two-cluster and three-cluster assembly in chain order,
+  multi-cluster truncation, EOF/empty-buf early exits, cyclic FAT → Err(EIO),
+  FREE mid-chain → Err(EIO).
+
+### FINDING-T1 — CLOSED (wave-4c done)
+
+`read()` now walks the guarded cluster chain via `read_cluster_chain`.  Any
+cyclic or corrupt FAT encountered during a `read()` call surfaces as
+`Err(EIO=-5)` rather than hanging. Wave-4d (allocator + crossLinkFree wiring)
+remains open as FINDING-T2.
+
 ### Open items (not part of this fix)
 
-- FINDING-T1: `read()` still uses the wave-4b `root_dir_data` shortcut; it
-  does NOT call `read_cluster_chain`.  Full `read()` wiring (wave-4c+) requires
-  threading `dev` through the `read()` call signature — a separate change.
 - FINDING-T2: No allocator (`write()` remains an ENOSYS stub). The
   `crossLinkFree` invariant cannot be wired until wave-4d lands.
 

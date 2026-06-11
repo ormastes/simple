@@ -1,8 +1,8 @@
 # FAT32 kernel filesystem driver — IF-07 wave-4a/4b/4c.
 #
 # Wave-4a: BPB parse + cluster-to-lba arithmetic + real mount().
-# Wave-4b: readdir("/") via stashed root-dir data; next_cluster + read_cluster_chain.
-# Wave-4c: open() + read() + stat() for root-dir 8.3 names.
+# Wave-4b: readdir("/") via stashed root-dir data; read_cluster_chain (guarded, cycle-safe).
+# Wave-4c: open() + stat() for root-dir 8.3 names; read() wired through cluster-chain walk.
 
 # -- Error codes ---------------------------------------------------------------
 
@@ -279,11 +279,17 @@ impl Fat32Filesystem:
             is_open: true
         ))
 
-    fn read(self, h: FileHandle, buf: [u8]) -> Result<u64, i32>:
-        """Read up to buf.len() bytes from h into buf (wave-4c).
+    fn read(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<u64, i32>:
+        """Read up to buf.len() bytes from the file described by h (wave-4c).
 
-        Reads sequentially from h.current_cluster using root_dir_data
-        cluster chain. Updates h.offset. Returns bytes actually read.
+        Walks the FAT32 cluster chain via read_cluster_chain(dev,
+        h.start_cluster), then reads each cluster's sectors from dev,
+        assembling file bytes in chain order.  Truncates at h.file_size
+        so the caller never sees cluster padding past the real EOF.
+
+        Updates h.offset. Returns the number of bytes actually copied into buf.
+        Returns Ok(0) when already at EOF or buf is empty.
+        Returns Err(EIO=-5) on any block-device or chain-walk failure.
         """
         val remaining = h.file_size - h.offset
         var to_read = buf.len().to_u64()
@@ -291,13 +297,47 @@ impl Fat32Filesystem:
             to_read = remaining
         if to_read == 0u64:
             return Ok(0u64)
+
+        # Walk the full chain from the file's start cluster.
+        val chain_result = self.read_cluster_chain(dev, h.start_cluster)
+        if chain_result.is_err():
+            return Err(EIO)
+        val chain = chain_result.unwrap()
+        if chain.len() == 0:
+            return Ok(0u64)
+
         val cluster_bytes = self.cluster_size.to_u64()
+        val spc = self.sectors_per_cluster.to_u64()
+        val bps = self.bytes_per_sector.to_u64()
+
+        # Determine which cluster in the chain h.offset falls into,
+        # and the byte offset within that cluster.
+        var cluster_idx: u64 = h.offset / cluster_bytes
+        var byte_in_cluster: u64 = h.offset % cluster_bytes
+
         var copied: u64 = 0u64
-        var bi: u64 = h.offset % cluster_bytes
-        while bi < cluster_bytes and copied < to_read:
-            buf[copied.to_i32()] = self.root_dir_data[bi.to_i32()]
-            copied = copied + 1u64
-            bi = bi + 1u64
+        while copied < to_read and cluster_idx.to_i32() < chain.len():
+            val cluster = chain[cluster_idx.to_i32()]
+            # Compute the LBA of the first sector of this cluster.
+            val first_sector = self.data_start_sector.to_u64() + (cluster - 2u32).to_u64() * spc
+            # Within this cluster, start reading from byte_in_cluster.
+            var sec_off: u64 = byte_in_cluster / bps
+            var byte_in_sec: u64 = byte_in_cluster % bps
+            while copied < to_read and sec_off < spc:
+                val lba = first_sector + sec_off
+                val sec_result = dev.read_sector(lba)
+                if sec_result.is_err():
+                    return Err(EIO)
+                val sec = sec_result.unwrap()
+                while copied < to_read and byte_in_sec < bps:
+                    buf[copied.to_i32()] = sec[byte_in_sec.to_i32()]
+                    copied = copied + 1u64
+                    byte_in_sec = byte_in_sec + 1u64
+                sec_off = sec_off + 1u64
+                byte_in_sec = 0u64
+            cluster_idx = cluster_idx + 1u64
+            byte_in_cluster = 0u64
+
         h.offset = h.offset + copied
         Ok(copied)
 
@@ -461,6 +501,26 @@ impl Fat32Filesystem:
             data_start_sector:   fat_start_sector + 8u32,
             root_cluster:        2u32,
             sectors_per_cluster: 1u32,
+            bytes_per_sector:    bytes_per_sector,
+            data_clusters:       data_clusters,
+            root_dir_data:       []
+        )
+
+    static fn make_for_read_test(fat_start_sector: u32, data_start_sector: u32, bytes_per_sector: u32, sectors_per_cluster: u32, data_clusters: u32) -> Fat32Filesystem:
+        """Create a pre-configured Fat32Filesystem for read() unit tests.
+
+        Allows explicit data_start_sector and sectors_per_cluster so callers
+        can place data sectors at known LBAs.  Caller supplies a mock
+        BlockDevice to read().  Not for production use.
+        """
+        Fat32Filesystem(
+            device_id:           0u64,
+            bpb_parsed:          true,
+            cluster_size:        bytes_per_sector * sectors_per_cluster,
+            fat_start_sector:    fat_start_sector,
+            data_start_sector:   data_start_sector,
+            root_cluster:        2u32,
+            sectors_per_cluster: sectors_per_cluster,
             bytes_per_sector:    bytes_per_sector,
             data_clusters:       data_clusters,
             root_dir_data:       []
