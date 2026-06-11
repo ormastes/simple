@@ -1,6 +1,6 @@
 # Cooperative Green Compiled Handle-Array Blocker
 
-> This SSpec keeps the remaining compiled cooperative-green function-spawn crash explicit. A minimal workload that stores multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` runs in the interpreter, but currently crashes in both SMF and native execution.
+> This SSpec keeps the remaining compiled cooperative-green function-spawn crash explicit. A minimal workload that stores multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` runs in the interpreter and in SMF, but the standalone native artifact still crashes.
 
 <!-- sdn-diagram:id=cooperative_green_compiled_handle_array_blocker_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ cooperative_green_compiled_handle_array_blocker_spec -> std
 
 # Cooperative Green Compiled Handle-Array Blocker
 
-This SSpec keeps the remaining compiled cooperative-green function-spawn crash explicit. A minimal workload that stores multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` runs in the interpreter, but currently crashes in both SMF and native execution.
+This SSpec keeps the remaining compiled cooperative-green function-spawn crash explicit. A minimal workload that stores multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` runs in the interpreter and in SMF, but the standalone native artifact still crashes.
 
 ## At a Glance
 
@@ -54,8 +54,8 @@ This SSpec keeps the remaining compiled cooperative-green function-spawn crash e
 
 This SSpec keeps the remaining compiled cooperative-green function-spawn crash
 explicit. A minimal workload that stores multiple `GreenThreadHandle` values
-returned from `cooperative_green_spawn(worker)` runs in the interpreter, but
-currently crashes in both SMF and native execution.
+returned from `cooperative_green_spawn(worker)` runs in the interpreter and in
+SMF, but the standalone native artifact still crashes.
 
 ## Requirements
 
@@ -90,8 +90,9 @@ currently crashes in both SMF and native execution.
    - Expected: native_compile_code equals `0`
 - Run the fixture in the interpreter as the control
    - Expected: interp_code equals `0`
-- Keep the current SMF crash explicit
-- Keep the current native crash explicit
+- Keep the fixed SMF path green
+   - Expected: smf_code equals `0`
+- Keep the remaining native crash explicit
 
 
 <details>
@@ -122,12 +123,12 @@ val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
 expect(interp_out).to_contain("cooperative_green_handle_array_pass=true")
 expect(interp_code).to_equal(0)
 
-step("Keep the current SMF crash explicit")
+step("Keep the fixed SMF path green")
 val (smf_out, smf_code) = shell("timeout 20s " + SIMPLE_BIN + " " + SMF_PATH)
-expect(smf_out.contains("cooperative_green_handle_array_pass=true")).to_be(false)
-expect(smf_code).to_be_greater_than(0)
+expect(smf_out).to_contain("cooperative_green_handle_array_pass=true")
+expect(smf_code).to_equal(0)
 
-step("Keep the current native crash explicit")
+step("Keep the remaining native crash explicit")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
 expect(native_out.contains("cooperative_green_handle_array_pass=true")).to_be(false)
 expect(native_code).to_be_greater_than(0)

@@ -187,7 +187,7 @@ low-overhead queued work, but it is not a Go-goroutine equivalent. It does not
 run tasks in parallel and cannot preempt a long-running closure. The profile
 lane still uses `cooperative_green_spawn_value` for its compiled cooperative
 queue rows because the direct function-spawn surface has a separate SMF/native
-handle-array blocker tracked in
+standalone-native handle-array blocker tracked in
 `doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md`.
 `cooperative_green_spawn_value` remains available when a caller already has a
 computed result instead of a closure. For Go-like CPU-parallel benchmarks, use

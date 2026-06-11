@@ -1,6 +1,6 @@
-# Cooperative Green Imported Fallback Blocker
+# Cooperative Green Imported Fallback Native Blocker
 
-> This SSpec pins the narrower compiled blocker behind the cooperative-green AOT crashes. Even a minimal value-only workload that calls `cooperative_green_spawn_value(...)` from an imported stdlib module runs in the interpreter, but current SMF and native artifacts fall back to interpreter lookup for that imported helper and then crash.
+> This SSpec pins the remaining standalone-native blocker behind the cooperative- green AOT crashes. A minimal value-only workload that calls `cooperative_green_spawn_value(...)` from an imported stdlib module now runs in the interpreter and in SMF, but the standalone native artifact still crashes.
 
 <!-- sdn-diagram:id=cooperative_green_imported_fallback_blocker_spec.arch -->
 <details class="sdn-source">
@@ -32,16 +32,16 @@ cooperative_green_imported_fallback_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Cooperative Green Imported Fallback Blocker
+# Cooperative Green Imported Fallback Native Blocker
 
-This SSpec pins the narrower compiled blocker behind the cooperative-green AOT crashes. Even a minimal value-only workload that calls `cooperative_green_spawn_value(...)` from an imported stdlib module runs in the interpreter, but current SMF and native artifacts fall back to interpreter lookup for that imported helper and then crash.
+This SSpec pins the remaining standalone-native blocker behind the cooperative- green AOT crashes. A minimal value-only workload that calls `cooperative_green_spawn_value(...)` from an imported stdlib module now runs in the interpreter and in SMF, but the standalone native artifact still crashes.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #green-cooperative-imported-fallback |
-| Category | Runtime / Native / SMF / Interpreter Fallback |
+| Feature IDs | #green-cooperative-imported-fallback-native |
+| Category | Runtime / Native / Interpreter Fallback |
 | Status | Known Blocker |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
@@ -52,11 +52,10 @@ This SSpec pins the narrower compiled blocker behind the cooperative-green AOT c
 
 ## Overview
 
-This SSpec pins the narrower compiled blocker behind the cooperative-green AOT
-crashes. Even a minimal value-only workload that calls
-`cooperative_green_spawn_value(...)` from an imported stdlib module runs in the
-interpreter, but current SMF and native artifacts fall back to interpreter
-lookup for that imported helper and then crash.
+This SSpec pins the remaining standalone-native blocker behind the cooperative-
+green AOT crashes. A minimal value-only workload that calls
+`cooperative_green_spawn_value(...)` from an imported stdlib module now runs in
+the interpreter and in SMF, but the standalone native artifact still crashes.
 
 ## Requirements
 
@@ -78,9 +77,9 @@ lookup for that imported helper and then crash.
 
 ## Scenarios
 
-### cooperative green imported fallback blocker
+### cooperative green imported fallback native blocker
 
-#### keeps imported cooperative_green_spawn_value fallback failure explicit
+#### keeps the remaining native cooperative_green_spawn_value crash explicit
 
 - Write the minimal imported cooperative-green value-only fixture
    - Expected: mkdir_code equals `0`
@@ -91,14 +90,15 @@ lookup for that imported helper and then crash.
    - Expected: native_compile_code equals `0`
 - Run the fixture in the interpreter as the control
    - Expected: interp_code equals `0`
-- Keep the current imported-function SMF fallback miss explicit
-- Keep the current native crash explicit
+- Keep the fixed imported-function SMF path green
+   - Expected: smf_code equals `0`
+- Keep the remaining native crash explicit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -123,13 +123,12 @@ val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
 expect(interp_out).to_contain("cooperative_green_spawn_value_literal_pass=true")
 expect(interp_code).to_equal(0)
 
-step("Keep the current imported-function SMF fallback miss explicit")
+step("Keep the fixed imported-function SMF path green")
 val (smf_out, smf_code) = shell("timeout 20s " + SIMPLE_BIN + " " + SMF_PATH)
-expect(smf_out).to_contain("function `green_spawn_value` not found")
-expect(smf_out.contains("cooperative_green_spawn_value_literal_pass=true")).to_be(false)
-expect(smf_code).to_be_greater_than(0)
+expect(smf_out).to_contain("cooperative_green_spawn_value_literal_pass=true")
+expect(smf_code).to_equal(0)
 
-step("Keep the current native crash explicit")
+step("Keep the remaining native crash explicit")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
 expect(native_out.contains("cooperative_green_spawn_value_literal_pass=true")).to_be(false)
 expect(native_code).to_be_greater_than(0)
