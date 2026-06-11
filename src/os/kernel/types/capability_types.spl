@@ -90,8 +90,21 @@ struct CapabilitySet:
 
 impl CapabilitySet:
     static fn full() -> CapabilitySet:
-        """All capabilities (init process only)."""
+        """All capabilities (init process only).
+
+        SECURITY: full() is the god-mode set — only the init task (pid 1) and
+        explicit privileged boot tasks may hold it. All other tasks must start
+        with empty() and receive explicit capability grants via cap_grant().
+        """
         CapabilitySet(caps: [], is_pledged: false)
+
+    static fn empty() -> CapabilitySet:
+        """Deny-all pledged capability set (default for unknown/new tasks).
+
+        A pledged set with zero tokens denies every capability check.
+        This is the safe default: tasks escalate via explicit cap_grant().
+        """
+        CapabilitySet(caps: [], is_pledged: true)
 
     fn has(kind: CapabilityKind) -> bool:
         """Check if this set contains a matching capability."""
@@ -212,8 +225,12 @@ fn _path_prefix_allows(held_prefix: text, required_path: text) -> bool:
     required_path[0:held_prefix.len()] == held_prefix
 
 fn _rights_allow(held_rights: u32, required_rights: u32) -> bool:
+    # Deny zero-zero wildcard: a request with no rights specified is always denied.
+    # A held_rights of 0 (no rights) must also never satisfy any requirement.
     if required_rights == 0:
-        return true
+        return false
+    if held_rights == 0:
+        return false
     (held_rights & required_rights) == required_rights
 
 # ============================================================================

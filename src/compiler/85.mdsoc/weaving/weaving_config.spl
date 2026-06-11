@@ -99,12 +99,19 @@ fn weavingconfig_with_security_aspects(base: WeavingConfig) -> WeavingConfig:
         Adds audit logging, auth checking, and input validation aspects.
         Security aspects are always-on when the security dimension is enabled.
         """
+        # Security aspects use the reserved priority band (>= 1_000_000) so they always
+        # run before any user-registered advice. Order (highest first):
+        #   deny (1_000_030) > auth (1_000_020) > validation (1_000_010) > audit (1_000_000)
+        #
+        # This matches RESERVED_SECURITY_MIN defined in aop.spl; user-registered aspects
+        # are clamped to RESERVED_SECURITY_MIN - 1 by AspectRegistry.register().
+
         # Audit: Around advice for HTTP request handling
         val audit_request = WeavingRule(
             predicate_text: "execution(*.handle_request) & within(http_server.**)",
             advice_function: "std.security.aspects.audit_advice.log_request_advice",
             form: AdviceForm.Around,
-            priority: 1000
+            priority: 1000000
         )
 
         # Audit: AfterSuccess for auth successes
@@ -112,7 +119,7 @@ fn weavingconfig_with_security_aspects(base: WeavingConfig) -> WeavingConfig:
             predicate_text: "execution(*.authenticate*) | execution(*.verify_password*)",
             advice_function: "std.security.aspects.audit_advice.log_auth_success_advice",
             form: AdviceForm.AfterSuccess,
-            priority: 900
+            priority: 1000000
         )
 
         # Audit: AfterError for auth failures
@@ -120,40 +127,40 @@ fn weavingconfig_with_security_aspects(base: WeavingConfig) -> WeavingConfig:
             predicate_text: "execution(*.authenticate*) | execution(*.verify_password*)",
             advice_function: "std.security.aspects.audit_advice.log_auth_failure_advice",
             form: AdviceForm.AfterError,
-            priority: 900
+            priority: 1000000
         )
 
         # Deny: Before advice for @deny_all annotated endpoints (maintenance/deprecated).
-        # Priority 850 — runs before auth_check so maintenance mode short-circuits early.
+        # Priority 1_000_030 — highest so maintenance mode short-circuits before auth/validation.
         val deny_all = WeavingRule(
             predicate_text: "attr(deny_all) & within(http_server.**)",
             advice_function: "std.security.aspects.deny_advice.deny_all_before",
             form: AdviceForm.Before,
-            priority: 850
+            priority: 1000030
         )
 
-        # Auth: Before advice for @requires_auth functions
+        # Auth: Before advice for @requires_auth functions — priority 1_000_020.
         val auth_check = WeavingRule(
             predicate_text: "attr(requires_auth) & within(http_server.**)",
             advice_function: "std.security.aspects.auth_advice.check_auth_before",
             form: AdviceForm.Before,
-            priority: 800
+            priority: 1000020
         )
 
-        # Validation: Around advice for HTML render output sanitization
+        # Validation: Around advice for HTML render output sanitization — priority 1_000_010.
         val sanitize_output = WeavingRule(
             predicate_text: "execution(*.render_html*) & within(ui.**)",
             advice_function: "std.security.aspects.validation_advice.sanitize_html_output",
             form: AdviceForm.Around,
-            priority: 700
+            priority: 1000010
         )
 
-        # Validation: Before advice for request input validation
+        # Validation: Before advice for request input validation — priority 1_000_010.
         val validate_input = WeavingRule(
             predicate_text: "attr(validates_input) & within(http_server.**)",
             advice_function: "std.security.aspects.validation_advice.validate_request_input",
             form: AdviceForm.Before,
-            priority: 750
+            priority: 1000010
         )
 
         # Merge into base config

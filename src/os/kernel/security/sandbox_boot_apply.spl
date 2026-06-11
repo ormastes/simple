@@ -10,14 +10,11 @@ extern fn rt_simple_sandbox_section_end() -> u64
 val SIMPLE_SANDBOX_SECTION_START_SYMBOL: text = "__simple_sandbox_start"
 val SIMPLE_SANDBOX_SECTION_END_SYMBOL: text = "__simple_sandbox_end"
 
-val ARM_MPU_CTRL: u64 = 0xE000ED94
-val ARM_MPU_RNR: u64 = 0xE000ED98
-val ARM_MPU_RBAR: u64 = 0xE000ED9C
-val ARM_MPU_RASR: u64 = 0xE000EDA0
-val ARM_MPU_CTRL_ENABLE_PRIVDEF: u32 = 0x00000005
-val ARM_MPU_RBAR_VALID: u32 = 0x00000010
-val ARM_MPU_RASR_ENABLE: u32 = 0x00000001
-val ARM_MPU_RASR_XN: u32 = 1 << 28
+# SECURITY NOTE: ARM MPU register addresses and bitmasks are NOT declared as
+# module-level val constants. On baremetal LLVM targets, BSS clearing zeroes all
+# module-level globals after runtime init, turning register addresses and mask
+# values to 0. All ARM_MPU_* literals are inlined as function-local vals in the
+# functions below so they survive BSS clear and are safe to use at early boot.
 
 struct SandboxBootApplyPlan:
     """Architecture-specific boot protection operations from sandbox lowering."""
@@ -67,10 +64,15 @@ fn arm_mpu_access_permission_bits(permissions: text) -> u32:
 
 fn arm_mpu_rbar_value(base: u64, region_index: u32) -> u32:
     """Build RBAR with VALID and region index for the selected MPU slot."""
+    # SECURITY: function-local — survives baremetal BSS clear (module-level vals would be zeroed).
+    val ARM_MPU_RBAR_VALID: u32 = 0x00000010
     ((base & 0xFFFFFFE0).to_u32()) | ARM_MPU_RBAR_VALID | region_index
 
 fn arm_mpu_rasr_value(size: u64, permissions: text) -> u32:
     """Build RASR from lowered size and permission text."""
+    # SECURITY: function-local — survives baremetal BSS clear (module-level vals would be zeroed).
+    val ARM_MPU_RASR_ENABLE: u32 = 0x00000001
+    val ARM_MPU_RASR_XN: u32 = 0x10000000
     var value = ARM_MPU_RASR_ENABLE | (arm_mpu_region_size_encoding(size) << 1) | arm_mpu_access_permission_bits(permissions)
     if not permissions.contains("x"):
         value = value | ARM_MPU_RASR_XN
@@ -78,6 +80,12 @@ fn arm_mpu_rasr_value(size: u64, permissions: text) -> u32:
 
 fn arm_mpu_mmio_write_plan_from_sandbox_lowering(sandbox_lowering_sdn: text) -> [ArmMpuMmioWrite]:
     """Build volatile ARM MPU register writes from generated sandbox lowering."""
+    # SECURITY: function-local — survives baremetal BSS clear (module-level vals would be zeroed).
+    val ARM_MPU_CTRL: u64 = 0xE000ED94
+    val ARM_MPU_RNR: u64 = 0xE000ED98
+    val ARM_MPU_RBAR: u64 = 0xE000ED9C
+    val ARM_MPU_RASR: u64 = 0xE000EDA0
+    val ARM_MPU_CTRL_ENABLE_PRIVDEF: u32 = 0x00000005
     var writes: [ArmMpuMmioWrite] = []
     val regions = pmp_regions_from_sandbox_lowering(sandbox_lowering_sdn)
     if regions.len() == 0:
@@ -146,6 +154,13 @@ fn sandbox_boot_apply_embedded_riscv64() -> i64:
     """Early boot entrypoint for applying embedded RISC-V PMP sandbox lowering."""
     sandbox_boot_apply_riscv64_count(embedded_sandbox_lowering_sdn())
 
-fn sandbox_boot_apply_embedded_arm_mpu() -> i64:
-    """Early boot entrypoint for applying embedded ARM MPU sandbox lowering."""
-    sandbox_boot_apply_arm_mpu(embedded_sandbox_lowering_sdn())
+fn sandbox_boot_apply_embedded_arm_mpu() -> bool:
+    """Early boot entrypoint for applying embedded ARM MPU sandbox lowering.
+
+    Returns true only if at least one non-zero-address MPU write was applied.
+    Returns false if the sandbox section was empty, malformed, or all regions
+    had zero base addresses (indicating BSS-zeroed data or no lowering present).
+    Callers MUST halt if this returns false — a failed MPU apply is fail-closed.
+    """
+    val write_count = sandbox_boot_apply_arm_mpu(embedded_sandbox_lowering_sdn())
+    write_count > 0

@@ -224,3 +224,36 @@ Compiler and CLI output must stay deterministic over the checked source set:
 3. Route HTTP handler context through scheduler task ids everywhere, then retire worker/fd fallback authority.
 4. Install backend sandbox lowering in hosted, WASI, Simple VM, baremetal, RISC-V, and SimpleOS paths with fail-closed defaults.
 5. Move live provider validation from secret credentials to OIDC lane by lane, preserving the `secret` compatibility path until provider environments are migrated.
+
+## Hardened Invariants (2026-06-11 security audit)
+
+The audit (`doc/09_report/security_hardening_audit_2026-06-11.md`) closed a set of
+fail-open holes and established these invariants. See the developer guide
+`doc/07_guide/infra/security/fail_closed_security_model.md` for usage rules.
+
+- **Security advice fails closed.** AOP security advice returns `Result<(), text>`; an
+  `Err` aborts the gated call. A `void`-returning advice cannot deny (the weaver's
+  `is_err()` gate never fires) and is therefore prohibited for enforcement.
+- **Capability parsing fails closed.** `parse_capability` returns `Result`; malformed or
+  unknown input is `Err` (never a wildcard `Custom(scope:"*")` grant). Capability-path
+  matching uses a separator boundary (`/data` does not authorize `/data-evil`).
+- **AOP registry is sealed.** `init_aop` seals the global registry; `disable_unsafe` and
+  `unregister_unsafe` are no-ops post-seal, so business modules cannot remove the auth aspect.
+- **Reserved priority band.** Security aspects occupy priorities `>= RESERVED_SECURITY_MIN`
+  (1,000,000). Runtime-registered (user) aspects are clamped below it, so they cannot run
+  ahead of auth/audit. Priority comparison is overflow-safe (no subtraction).
+- **Context capabilities are validated.** Enforcement gates reject any `SecurityContext`
+  whose capability strings fail `parse_capability` (no forged/malformed entries trusted).
+- **Web middleware invariants.** No CORS reflect-with-credentials and no reflected `null`
+  origin; constant-time CSRF token comparison; CRLF rejected in headers; HSTS `max-age`
+  clamped; default CSP excludes `unsafe-inline`.
+- **Sanitizers are allowlist-based.** URL/path sanitizers allowlist schemes and reject
+  absolute paths, mixed-case `%2e` traversal, `user@` userinfo (SSRF), and `%`-encoded hosts.
+
+### Open architecture follow-ups (tracked)
+- Kernel capability default model: uninitialized tasks now default to `CapabilitySet.empty()`
+  (deny-all); baremetal security constants are BSS-zero-safe; sandbox boot is fail-closed.
+  Remaining: pid-scoped restriction of explicit full-capability grants (boot-path audit).
+- AOP runtime `Around` advice lacks a real `proceed()` (compile-time layer has one); the
+  `Advice.handler` contract reconciliation is deferred.
+- `secure_random` CSPRNG seeding source is compiled (`.smf`) and unaudited here.
