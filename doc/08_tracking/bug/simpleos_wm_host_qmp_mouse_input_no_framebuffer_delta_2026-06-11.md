@@ -68,6 +68,17 @@ window. QEMU HMP `mouse_move` / `mouse_button` and direct QMP
 reports no PS/2 aux packets. Adding a USB tablet device is diagnostic only until
 the guest has a USB HID/tablet input path.
 
+Additional matrix:
+
+```text
+q35 + HMP mouse_move/mouse_button       -> [host-input] no-host-mouse-packets
+pc  + HMP mouse_move/mouse_button       -> [host-input] no-host-mouse-packets
+q35 + QMP input-send-event rel/button   -> [host-input] no-host-mouse-packets
+```
+
+This narrows the remaining work away from the current framebuffer wrapper and
+toward a guest-visible QEMU pointer device path.
+
 ## Required Fix
 
 Either:
