@@ -28,11 +28,12 @@ use compiler.core.tokens.{TOK_SUFFIXED_INT, TOK_SUFFIXED_FLOAT}
 use compiler.core.tokens.{TOK_KW_DO, TOK_KW_CE}
 use compiler.core.tokens.{TOK_BACKTICK_IDENT}
 use compiler.core.tokens.{TOK_AT, TOK_KW_KEYOF, TOK_KW_MIXIN, TOK_STAR}
-use compiler.core.tokens.{TOK_AMP_COLON}
+use compiler.core.tokens.{TOK_AMP_COLON, TOK_BACKSLASH}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_IF, TOK_KW_IN}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use compiler.core.ast.{expr_unary, expr_call, expr_array_lit, expr_method_call, expr_lambda}
+use compiler.core.ast.{expr_block}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_dict_lit}
@@ -480,6 +481,45 @@ fn parse_primary_expr() -> i64:
         var body_stmts: [i64] = []
         body_stmts.push(call)
         return expr_lambda(param_names, body_stmts, 0)
+
+    # Backslash lambda: \params: expr  or  \params:\n INDENT stmts DEDENT
+    # Syntax: \: expr         — zero params
+    #         \x: expr        — single param
+    #         \x, y: expr     — multiple params (comma-separated idents before :)
+    #         \: (newline+indent block) — block body
+    if par_kind_get() == 220:
+        parser_advance()
+        # Collect parameter names (comma-separated idents) until ':'
+        var lam_params: [i64] = []
+        if par_kind_get() == 6:
+            val p0 = par_text_get()
+            parser_advance()
+            lam_params.push(expr_ident(p0, 0))
+            for lpi in 0..100:
+                if par_kind_get() != 160:
+                    break
+                parser_advance()
+                if par_kind_get() != 6:
+                    parser_error("expected parameter name after ','")
+                    break
+                val pn = par_text_get()
+                parser_advance()
+                lam_params.push(expr_ident(pn, 0))
+        # Expect ':'
+        parser_expect(161)
+        # Block body or expression body. EXPR_LAMBDA's stmts list holds body
+        # EXPRESSIONS (eval_lambda contract), so a block body is wrapped in a
+        # single EXPR_BLOCK that owns the real statement list.
+        var lam_stmts: [i64] = []
+        if par_kind_get() == 181:
+            # Block body: \params:\n INDENT stmts DEDENT
+            val blk_stmts = parse_block()
+            lam_stmts.push(expr_block(blk_stmts, -1, 0))
+        else:
+            # Expression body (single expression becomes sole body expr)
+            val body_e = parse_expr()
+            lam_stmts.push(body_e)
+        return expr_lambda(lam_params, lam_stmts, 0)
 
     if par_kind_get() == 169:
         parser_advance()

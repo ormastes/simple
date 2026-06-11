@@ -42,3 +42,28 @@ parser (`parse_primary` / expression descent) does not handle:
 Add lambda expression parsing so `\params: body` and `fn(params): body` are valid
 primary expressions (usable as call arguments). Until fixed, all E-PAR-006 end-to-end
 green tests that use lambda syntax are blocked in interpreter/self-hosted mode.
+
+## Fix status (2026-06-11, later same day)
+
+Expression-form backslash lambdas now parse self-hosted: `\: expr`, `\x: expr`,
+`\x, y: expr`. Changes: TOK_BACKSLASH=220 (tokens.spl), `\` tokenized in all
+three lexers (lexer.spl, lexer_struct.spl — the active one for parse_module —
+and lexer_scanners.spl), lambda production in parse_primary_expr building
+EXPR_LAMBDA per the eval_lambda contract (args = EXPR_IDENT params,
+stmts = body EXPRS; block bodies wrapped in one EXPR_BLOCK). The E-PAR-006
+lint's lambda handling was aligned to the same contract (it had walked body
+exprs as stmt indices → OOB).
+
+Verified end-to-end: green_spawn + multicore_green shared-var fixtures parse
+(errors=false) and E-PAR-006 fires with the correct message via
+check_concurrency_share_nothing.
+
+Still open:
+- Block-body lambda inside call parens (`spawn(\:` NEWLINE INDENT stmts `)`)
+  still fails — newline/indent tokens inside parenthesized args; cooperative
+  fixture remains seed-only.
+- Pre-existing (NOT a regression; reproduced at HEAD before this change):
+  parse_module on src/lib/nogc_async_mut/concurrent/green_thread.spl hangs
+  >100s in interpreter mode.
+- parse_module no-ops (errors=false, decls=0) on concatenation-built strings;
+  only rt_file_read_text sources parse — interpreter string/env issue.

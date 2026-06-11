@@ -195,6 +195,17 @@ fn check_expr_for_share_nothing(
                 ai = ai + 1
             return findings
 
+    # EXPR_LAMBDA stores body EXPRESSIONS in its stmts list and param idents in
+    # args (see eval_ops_part2 eval_lambda) — recurse the body as exprs and skip
+    # the generic stmt walk, which would read the stmt arena at expr indices.
+    if tag == EXPR_LAMBDA:
+        for body_e in expr_get_stmts(e):
+            if body_e >= 0:
+                val fs = check_expr_for_share_nothing(body_e, outer_vars, module_vars)
+                for f in fs:
+                    findings.push(f)
+        return findings
+
     # Recurse into sub-expressions for non-spawn calls
     val left = expr_get_left(e)
     if left >= 0:
@@ -241,26 +252,31 @@ fn check_lambda_share_nothing(
     """Check a lambda (first arg to a green spawn) for share-nothing violations."""
     var findings: [ShareNothingFinding] = []
 
-    # Collect lambda's own params and locals — these are NOT violations
+    # Lambda params are EXPR_IDENT nodes in args; their names are local
     var lambda_locals: {text: bool} = {}
-    val lambda_body_stmts = expr_get_stmts(lambda_expr)
-    collect_local_var_decls_sn(lambda_body_stmts, lambda_locals)
+    for pid in expr_get_args(lambda_expr):
+        if pid >= 0:
+            val pname = expr_get_str(pid)
+            if pname != "":
+                lambda_locals[pname] = true
 
-    # Also collect lambda params from extra field (param list)
-    # expr_get_extra encodes the parameter list for EXPR_LAMBDA
-    # We walk body statements to gather VAR_DECL / VAL_DECL defined inside
-
-    # Check body stmts for violations
-    val body_findings = check_lambda_stmts(lambda_body_stmts, callee_name, outer_vars, module_vars, lambda_locals)
-    for f in body_findings:
-        findings.push(f)
-
-    # Also check the body expression (right child)
-    val body_expr = expr_get_right(lambda_expr)
-    if body_expr >= 0:
-        val ef = check_lambda_expr(body_expr, callee_name, outer_vars, module_vars, lambda_locals)
-        for f in ef:
-            findings.push(f)
+    # Body entries are EXPRESSIONS (eval_ops_part2 EXPR_LAMBDA contract:
+    # args = [EXPR_IDENT params], stmts = [body exprs]). A block-bodied lambda
+    # arrives as one EXPR_BLOCK whose own stmts list holds real statements.
+    val lambda_body_exprs = expr_get_stmts(lambda_expr)
+    for be in lambda_body_exprs:
+        if be < 0:
+            continue
+        if expr_get_tag(be) == EXPR_BLOCK:
+            val blk_stmts = expr_get_stmts(be)
+            collect_local_var_decls_sn(blk_stmts, lambda_locals)
+            val bf = check_lambda_stmts(blk_stmts, callee_name, outer_vars, module_vars, lambda_locals)
+            for f in bf:
+                findings.push(f)
+        else:
+            val ef = check_lambda_expr(be, callee_name, outer_vars, module_vars, lambda_locals)
+            for f in ef:
+                findings.push(f)
 
     findings
 
