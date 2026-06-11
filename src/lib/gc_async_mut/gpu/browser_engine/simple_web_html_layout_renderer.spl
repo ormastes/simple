@@ -54,9 +54,6 @@ class HNode:
 fn mk_node(tag: text, parent: i64) -> HNode:
     HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent)
 
-pub fn simple_web_layout_debug_loaded() -> i64:
-    1
-
 # ---------------------------------------------------------------------------
 # Position-aware string find (works around index_of(needle,pos) ignoring pos)
 # ---------------------------------------------------------------------------
@@ -172,8 +169,12 @@ fn parse_html(html: text) -> [HNode]:
                     break
                 k = k - 1
             if found >= 1:
-                while pstack.len() > found:
-                    pstack.pop()
+                var next_stack: [i64] = []
+                var si = 0
+                while si < found:
+                    next_stack.push(pstack[si])
+                    si = si + 1
+                pstack = next_stack
             continue
         val name = tag_name_of(inner)
         var node = mk_node(name, pstack[pstack.len() - 1])
@@ -214,6 +215,84 @@ fn parse_html(html: text) -> [HNode]:
             pstack.push(nodes.len() - 1)
     nodes
 
+pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> text:
+    val nodes = parse_html(html)
+    for node in nodes:
+        if node.id_attr == id:
+            if attr == "style":
+                return node.style_attr
+            if attr == "class":
+                return node.class_attr
+            if attr == "id":
+                return node.id_attr
+            return attr_value(node.attrs_raw, attr)
+    ""
+
+pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) -> text:
+    val nodes = parse_html(html)
+    val rules = extract_css(html)
+    val styles = compute_styles(nodes, rules)
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == id:
+            val st = styles[i]
+            if field == "decl_width":
+                return decl_get(nodes[i].style_attr, "width")
+            if field == "decl_margin":
+                return decl_get(nodes[i].style_attr, "margin")
+            if field == "decl_height":
+                return decl_get(nodes[i].style_attr, "height")
+            if field == "parse_width":
+                return parse_int(decl_get(nodes[i].style_attr, "width")).to_string()
+            if field == "parse_margin":
+                return parse_int(decl_get(nodes[i].style_attr, "margin")).to_string()
+            if field == "parse_height":
+                return parse_int(decl_get(nodes[i].style_attr, "height")).to_string()
+            if field == "display":
+                return st.display
+            if field == "width":
+                return st.width_px.to_string()
+            if field == "height":
+                return st.height_px.to_string()
+            if field == "margin_l":
+                return st.margin_l.to_string()
+            if field == "flex_wrap":
+                return st.flex_wrap
+            if field == "flex_direction":
+                return st.flex_direction
+        i = i + 1
+    ""
+
+pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32, id: text, field: text) -> text:
+    val nodes = parse_html(html)
+    val rules = extract_css(html)
+    val styles = compute_styles(nodes, rules)
+    val empties = empty_i32_lists(nodes.len())
+    val boxes = layout(
+        nodes,
+        styles,
+        0,
+        0,
+        0,
+        width,
+        height,
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        empties,
+        empties
+    )
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == id:
+            if field == "x": return boxes.bx[i].to_string()
+            if field == "y": return boxes.by[i].to_string()
+            if field == "w": return boxes.bw[i].to_string()
+            if field == "h": return boxes.bh[i].to_string()
+        i = i + 1
+    ""
+
 # ---------------------------------------------------------------------------
 # Minimal CSS color parsing (#rgb, #rrggbb, rgb()/rgba(), a few names)
 # ---------------------------------------------------------------------------
@@ -237,6 +316,19 @@ fn hex_val(c: text) -> i32:
     if l == "e": return 14
     if l == "f": return 15
     0
+
+fn dec_val(c: text) -> i32:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    10
 
 fn argb(r: i32, g: i32, b: i32) -> u32:
     0xFF000000u32 | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
@@ -297,8 +389,9 @@ fn parse_int(s: text) -> i32:
     var matched_any_digit = false
     while i < t.len():
         val c = t.substring(i, i + 1)
-        if c >= "0" and c <= "9":
-            v = v * 10 + hex_val(c)
+        val digit = dec_val(c)
+        if digit < 10:
+            v = v * 10 + digit
             matched_any_digit = true
         else:
             if matched_any_digit:
@@ -311,13 +404,14 @@ fn parse_nth_int(s: text, target: i32) -> i32:
     var seen = 0
     while i < s.len():
         val c = s.substring(i, i + 1)
-        if c >= "0" and c <= "9":
+        if dec_val(c) < 10:
             var v = 0
             while i < s.len():
                 val d = s.substring(i, i + 1)
-                if d < "0" or d > "9":
+                val digit = dec_val(d)
+                if digit >= 10:
                     break
-                v = v * 10 + hex_val(d)
+                v = v * 10 + digit
                 i = i + 1
             if seen == target:
                 return v
@@ -1419,12 +1513,12 @@ fn glyph_scale(fs: i32) -> i32:
     s
 
 # write `color` to a single framebuffer pixel (clipped)
-fn fb_put(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, color: u32):
+fn fb_put(mut fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, color: u32):
     if x < 0 or y < 0 or x >= fbw or y >= fbh:
         return
     fb[y * fbw + x] = color
 
-fn fb_clear(fb: [u32], color: u32):
+fn fb_clear(mut fb: [u32], color: u32):
     var i = 0
     val n = fb.len()
     while i < n:
@@ -2975,7 +3069,6 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val styles = compute_styles(nodes, rules)
-    val zeroes = zero_i32_list(nodes.len())
     val empties = empty_i32_lists(nodes.len())
     val boxes = layout(
         nodes,
@@ -2985,10 +3078,10 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
         0,
         width,
         height,
-        zeroes,
-        zeroes,
-        zeroes,
-        zeroes,
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
         empties,
         empties
     )
@@ -2997,65 +3090,11 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, _html_draw_ir_commands(nodes, styles, boxes, width, height), source)
     draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
 
-pub fn simple_web_layout_debug_phase(html: text, width: i32, height: i32, stage: text) -> i64:
-    val nodes = parse_html(html)
-    if stage == "parse":
-        return nodes.len().to_i64()
-    val rules = extract_css(html)
-    if stage == "css":
-        return rules.sels.len().to_i64()
-    val styles = compute_styles(nodes, rules)
-    if stage == "styles":
-        return styles.len().to_i64()
-    val zeroes = zero_i32_list(nodes.len())
-    val empties = empty_i32_lists(nodes.len())
-    val boxes = layout(
-        nodes,
-        styles,
-        0,
-        0,
-        0,
-        width,
-        height,
-        zeroes,
-        zeroes,
-        zeroes,
-        zeroes,
-        empties,
-        empties
-    )
-    if stage == "layout":
-        return boxes.height.to_i64()
-    val commands = _html_draw_ir_commands(nodes, styles, boxes, width, height)
-    if stage == "commands":
-        return commands.len().to_i64()
-    val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
-    val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
-    val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source)
-    if stage == "batch":
-        return batch.commands.len().to_i64()
-    val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
-    if stage == "composition":
-        return composition.batches.len().to_i64()
-    val text_render = build_text_render_cache(styles)
-    if stage == "text-render":
-        return text_render.char_widths.len().to_i64()
-    val white = argb(255, 255, 255)
-    val widget_mode = html.contains("widget-panel")
-    val base = if widget_mode: argb(245, 245, 245) else: white
-    var fb: [u32] = [base; width * height]
-    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
-    val painted = paint(nodes, styles, text_render, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
-    if stage == "paint":
-        return painted.len().to_i64()
-    -1
-
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32) -> [u32]:
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val styles = compute_styles(nodes, rules)
     val text_render = build_text_render_cache(styles)
-    val zeroes = zero_i32_list(nodes.len())
     val empties = empty_i32_lists(nodes.len())
     val boxes = layout(
         nodes,
@@ -3065,10 +3104,10 @@ pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, hei
         0,
         width,
         height,
-        zeroes,
-        zeroes,
-        zeroes,
-        zeroes,
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
         empties,
         empties
     )
@@ -3092,7 +3131,6 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
     val rules = extract_css(html)
     val styles = compute_styles(nodes, rules)
     val text_render = build_text_render_cache(styles)
-    val zeroes = zero_i32_list(nodes.len())
     val empties = empty_i32_lists(nodes.len())
     val boxes = layout(
         nodes,
@@ -3102,10 +3140,10 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
         0,
         width,
         virtual_h,
-        zeroes,
-        zeroes,
-        zeroes,
-        zeroes,
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
+        zero_i32_list(nodes.len()),
         empties,
         empties
     )

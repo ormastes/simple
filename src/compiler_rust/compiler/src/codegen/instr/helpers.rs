@@ -59,9 +59,13 @@ pub(crate) fn inline_runtime_len_value(
 
     builder.switch_to_block(type_block);
     let ptr_bits = builder.ins().band(value, ptr_mask);
+    let kind_u32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 0);
     let object_type = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
-    // HeapObjectType::String = 0x01, HeapObjectType::Array = 0x02.
-    let is_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
+    // Match the LLVM len fast path: strings may use the RtCoreString STR1
+    // magic, while arrays use the first-byte heap object tag.
+    let is_core_string = builder.ins().icmp_imm(IntCC::Equal, kind_u32, 0x5354_5231);
+    let is_heap_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
+    let is_string = builder.ins().bor(is_core_string, is_heap_string);
     let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
     // RuntimeString and RuntimeArray both store len at offset 8.
     let has_len = builder.ins().bor(is_string, is_array);

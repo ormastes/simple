@@ -129,43 +129,37 @@ Open gaps tied to the active browser objective:
   - focused fix: treat `flex-wrap` as a mode instead of a boolean, place
     wrapped lines from the opposite cross-axis edge for `wrap-reverse`, and
     compute the container height from total stacked line height
-- The focused geometry spec file is green again in the default runner:
-  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl`
-    passes after refactoring the file into helper functions behind one `it`
-    block, which preserves the runner-state workaround without leaving one
-    giant test body
-- Native-mode proof for that spec is still missing:
-  - `simple test ... --mode=native --json` still fails with `error: null`
-  - direct execution of the emitted ELF crashes with a NULL `SIGSEGV`
-  - so focused Chromium geometry evidence is strong in the live Electron lane
-    and default interpreter-style spec lane, but not yet in native spec mode
-  - follow-up isolation reduced the native fault surface:
-    - a minimal native spec calling only
-      `html_compat_fixture_simple_boxes("02_block_boxes", 320, 240)` still
-      reproduces the crash, proving the problem is in the renderer-backed box
-      export path rather than the higher-level fixture spec shape
-    - replacing `FONT_CHARSET.index_of(...)` with a local glyph charset scan
-      removed the `FONT_CHARSET_dot_index_of` unresolved stub from the native
-      artifact
-    - splitting the CLI compare wrapper out of
-      `html_compat_geometry_probe.spl` removed `json_deep_equals` from the
-      minimal probe’s unresolved set
-    - the remaining native unresolved set for the minimal probe is now only
-      the `spl_*` dynamic-loader quartet, which points at a smaller transitive
-      GPU/runtime closure issue
-    - after splitting `Engine2D` presentation into
-      `simple_web_html_engine2d_presenter.spl`, the native geometry-spec
-      rebuild no longer carries the `spl_*` loader quartet; the remaining
-      unresolved symbol is `json_deep_equals`, which belongs to the compare
-      bridge rather than the renderer-backed box export
-    - a standalone native smoke entry at
-      `src/app/wm_compare/html_compat_geometry_probe_native_smoke.spl`
-      now builds cleanly after fixing the stale `TextRenderCache.char_w`
-      debug-field reference, and its artifact contains the renderer-backed
-      Draw IR entry without `spl_*`, `json_deep_equals`, or
-      `rt_bdd_expect_eq_rv`
-    - the file-backed path still leaves `rt_file_read_text_rv` unresolved, so
-      the smoke uses a direct inline HTML fixture; that binary now runs without
-      the previous NULL `SIGSEGV` but fails with `status=fail` /
-      `reason=no-boxes`, leaving native geometry proof incomplete and narrowed
-      to the direct-HTML box extraction path
+- The focused geometry spec file is green in the default no-cache runner:
+  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
+    passes with one listed scenario and zero failures
+- Native executable smoke is green, but native no-cache spec mode remains red:
+  - the standalone native smoke at
+    `src/app/wm_compare/html_compat_geometry_probe_native_smoke.spl` builds
+    with `0 failed` and runs with `status=pass`, `box_count=4`
+  - the fixture-24 native full smoke at
+    `src/app/wm_compare/html_compat_geometry_probe_native_full_smoke.spl`
+    builds with `0 failed` and runs with
+    `fixture=24_flex_wrap_reverse_basic count=4`, `status=pass`
+  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --mode=native --json --no-cache`
+    still reports one failed file without an assertion detail
+  - the core-C native runtime now exports `rt_file_read_text_rv`, and the
+    diagnostic native file-read smoke passes, so the earlier file-read ABI
+    blocker is closed
+  - direct execution of the broad native SSpec ELF still segfaults after the
+    fixture-24 smokes pass; the remaining gap is tracked as native
+    SSpec/full-file runner evidence, not as a fixture-24 layout mismatch
+  - fixes that moved this forward:
+    - Cranelift inline `.len()` now recognizes runtime string values instead
+      of returning the tagged `-1` sentinel for text
+    - `parse_html` no longer uses `pstack.pop()` for closing-tag stack
+      truncation, avoiding the native `spl_array_pop` crash
+    - structural box extraction uses indexed lookup instead of optional
+      command binding in the native smoke path
+    - Electron geometry JSON extraction has a focused fallback for pretty
+      CDP output, so fixture-24 no longer parses as zero boxes
+    - CSS numeric parsing now uses explicit digit matching, and the renderer
+      uses separate x/y/w/h layout arrays instead of aliasing one zero array
+  - live Electron wrapper evidence is green again for
+    `24_flex_wrap_reverse_basic` after fixing closing-tag stack truncation:
+    `scripts/check/check-electron-html-compat-geometry-evidence.shs` reports
+    `layout_match`, `mismatch_count=0`

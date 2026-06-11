@@ -1510,6 +1510,88 @@ int64_t rt_enum_payload(int64_t value) {
     return e ? e->payload : rt_core_nil();
 }
 
+static int64_t rt_bdd_passed = 0;
+static int64_t rt_bdd_failed = 0;
+static int rt_bdd_current_failed = 0;
+
+static void rt_bdd_print_text(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s || s->len == 0) return;
+    fwrite(s->data, 1, (size_t)s->len, stdout);
+}
+
+void rt_bdd_describe_start_rv(int64_t name_rv) {
+    rt_bdd_print_text(name_rv);
+    fputc('\n', stdout);
+}
+
+void rt_bdd_describe_end(void) {
+    printf("%lld examples, %lld failures\n",
+           (long long)(rt_bdd_passed + rt_bdd_failed),
+           (long long)rt_bdd_failed);
+}
+
+void rt_bdd_it_start_rv(int64_t name_rv) {
+    rt_bdd_current_failed = 0;
+    fputs("  ", stdout);
+    rt_bdd_print_text(name_rv);
+}
+
+void rt_bdd_it_end(int64_t passed) {
+    if (passed != 0 && !rt_bdd_current_failed) {
+        rt_bdd_passed += 1;
+        fputs(" pass\n", stdout);
+    } else {
+        rt_bdd_failed += 1;
+        fputs(" fail\n", stdout);
+    }
+}
+
+int64_t rt_bdd_has_failure(void) {
+    return rt_bdd_current_failed ? 1 : 0;
+}
+
+void rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len) {
+    rt_bdd_current_failed = 1;
+    if (msg_ptr != 0 && msg_len > 0) {
+        fputs("\n    ", stdout);
+        fwrite((const void*)(uintptr_t)msg_ptr, 1, (size_t)msg_len, stdout);
+    }
+}
+
+void rt_bdd_expect_eq_rv(int64_t actual, int64_t expected) {
+    RtCoreString* actual_string = rt_core_as_string(actual);
+    RtCoreString* expected_string = rt_core_as_string(expected);
+    int bool_equal =
+        (actual == 1 && (expected == 16 || expected == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_TRUE))) ||
+        (expected == 1 && (actual == 16 || actual == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_TRUE))) ||
+        (actual == 0 && (expected == 24 || expected == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_FALSE))) ||
+        (expected == 0 && (actual == 24 || actual == (int64_t)rt_core_from_special(RT_VALUE_SPECIAL_FALSE)));
+    int64_t equal = (actual_string || expected_string)
+        ? rt_native_eq(actual, expected)
+        : (bool_equal || rt_core_numeric_arg(actual) == rt_core_numeric_arg(expected));
+    if (equal != 1) {
+        rt_bdd_current_failed = 1;
+    }
+}
+
+void rt_bdd_expect_truthy_rv(int64_t value) {
+    if (value == 0 || value == rt_core_nil()) {
+        rt_bdd_current_failed = 1;
+    }
+}
+
+int64_t rt_bdd_format_results(void) {
+    rt_bdd_describe_end();
+    return rt_bdd_failed;
+}
+
+void rt_bdd_clear_state(void) {
+    rt_bdd_passed = 0;
+    rt_bdd_failed = 0;
+    rt_bdd_current_failed = 0;
+}
+
 int64_t rt_hash_text(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (!s) return 0;
@@ -1592,8 +1674,22 @@ int64_t rt_dict_len(SplDict* d) {
  * native CLI binaries built against the core-c runtime can read files
  * and query the environment without segfaulting on nil stubs. */
 
+static char* rt_core_string_to_cpath(int64_t value);
+
 const char* rt_file_read_text(const char* path) {
     return spl_file_read(path);
+}
+
+int64_t rt_file_read_text_rv(int64_t path_value) {
+    char* path = rt_core_string_to_cpath(path_value);
+    if (!path) return rt_string_new(NULL, 0);
+    char* content = spl_file_read(path);
+    free(path);
+    if (!content) return rt_string_new(NULL, 0);
+    size_t len = strlen(content);
+    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
+    free(content);
+    return result;
 }
 
 int rt_file_exists(const char* path) {

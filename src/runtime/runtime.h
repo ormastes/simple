@@ -448,7 +448,12 @@ void     rt_bdd_describe_start_rv(int64_t name_rv);
 void     rt_bdd_describe_end(void);
 void     rt_bdd_it_start_rv(int64_t name_rv);
 void     rt_bdd_it_end(int64_t passed);
+int64_t  rt_bdd_has_failure(void);
+void     rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len);
 void     rt_bdd_expect_eq_rv(int64_t actual, int64_t expected);
+void     rt_bdd_expect_truthy_rv(int64_t value);
+int64_t  rt_bdd_format_results(void);
+void     rt_bdd_clear_state(void);
 
 /* ===== Command-Line Arguments ===== */
 
@@ -469,6 +474,7 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 /* ===== rt_ Aliases (FFI-compatible wrappers) ===== */
 
 const char* rt_file_read_text(const char* path);
+int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const char* path);
 int         rt_file_write(const char* path, const char* content);
 int         rt_file_write_text(const char* path, const char* content);

@@ -129,6 +129,7 @@ const RT_KEEP: &[&str] = &[
     "rt_file_mmap_read_text_rv",
     "rt_file_mmap_read_bytes",
     "rt_file_mmap_read_bytes_rv",
+    "rt_file_read_text_rv",
     "rt_file_read_text_at",
     "rt_file_read_bytes_at",
     "rt_file_write_text_at",

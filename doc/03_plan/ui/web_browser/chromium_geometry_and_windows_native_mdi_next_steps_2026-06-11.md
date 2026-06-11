@@ -223,54 +223,45 @@ Smallest next implementation step:
     passes after restructuring the spec into helper functions invoked from a
     single `it`, which avoids the earlier runner state corruption across many
     separate examples.
-- Native spec mode is still not proven for this lane:
-  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --mode=native --json`
-    still fails with `error: null`
-  - the produced ELF crashes immediately with `SIGSEGV` at `si_addr=NULL`
-    under direct `strace`, so this is now narrowed to a real native/runtime bug
-    rather than a geometry mismatch or a default-runner reporting issue
-  - follow-up isolation on 2026-06-11 narrowed the crash further:
-    - a minimal native spec that only calls
-      `html_compat_fixture_simple_boxes("02_block_boxes", 320, 240)` still
-      reproduces the crash
-    - replacing `FONT_CHARSET.index_of(...)` with a local char-code scan in
-      the bitmap glyph lookup removed the unresolved
-      `FONT_CHARSET_dot_index_of` stub from the native artifact
-    - splitting `src/app/wm_compare/html_compat_geometry_probe.spl` into:
-      - core renderer-backed export: `html_compat_geometry_probe.spl`
-      - CLI compare wrapper: `html_compat_geometry_probe_cli.spl`
-      removed `json_deep_equals` from the minimal probe’s unresolved set
-    - the remaining unresolved native surface for the minimal renderer-backed
-      probe is now only `spl_dlclose`, `spl_dlopen`, `spl_dlsym`,
-      `spl_wffi_call_i64`, which indicates the crash has been reduced to a
-      smaller transitive GPU/runtime closure problem rather than the compare
-      bridge or glyph charset lookup
-  - a further module split reduced that closure again:
-    - `simple_web_html_layout_renderer.spl` now exposes software-layout /
-      Draw-IR-only entrypoints
-    - `simple_web_html_engine2d_presenter.spl` now owns the `Engine2D`
-      presentation path and the backend-dependent pixel entrypoints
-    - after that split, native rebuilds of
-      `html_compat_geometry_probe_spec.spl` no longer carry the `spl_*`
-      dynamic-loader quartet; the remaining unresolved symbol is
-      `json_deep_equals`, which belongs to the compare/JSON lane
-  - a standalone native smoke binary now proves the renderer-backed closure can
+- Native/default evidence is split:
+  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
+    passes with one scenario and zero failures.
+  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --mode=native --json --no-cache`
+    still reports one failed file without detailed assertion output.
+  - a standalone native smoke binary proves the renderer-backed closure can
     be built and entered without `spl_*`, `json_deep_equals`, or spec-runtime
     BDD symbols:
     - entry: `src/app/wm_compare/html_compat_geometry_probe_native_smoke.spl`
     - build: `simple native-build ... --entry src/app/wm_compare/html_compat_geometry_probe_native_smoke.spl`
-    - after fixing the stale `TextRenderCache.char_w` debug-field reference,
-      the build completes with `0 failed` and no generated renderer stubs
+    - after fixing the stale `TextRenderCache.char_w` debug-field reference
+      and the Cranelift text `.len()` fast path, the build completes with
+      `0 failed` and no generated renderer stubs
     - artifact contains `simple_web_layout_render_html_draw_ir`; it has no
       `spl_dlopen`, `spl_dlsym`, `spl_dlclose`, `spl_wffi_call_i64`,
       `json_deep_equals`, or `rt_bdd_expect_eq_rv`
-    - the file-backed helper still pulls an unresolved `rt_file_read_text_rv`
-      symbol, so the smoke uses a direct inline HTML fixture to avoid treating
-      native file I/O ABI failure as layout evidence
-    - the standalone binary now runs and fails honestly with
-      `status=fail` / `reason=no-boxes`; native renderer-backed geometry is
-      therefore not proven yet, but the blocker is narrowed past link/runtime
-      startup crash into the direct-HTML box extraction path
+    - `parse_html` no longer uses native `spl_array_pop` for closing-tag stack
+      truncation
+    - the standalone binary now runs with `status=pass`, `box_count=4`
+  - a fixture-24 native full smoke at
+    `src/app/wm_compare/html_compat_geometry_probe_native_full_smoke.spl`
+    now builds with `0 failed` and runs with
+    `fixture=24_flex_wrap_reverse_basic count=4`, `status=pass`
+  - the core-C native runtime now exports `rt_file_read_text_rv`, and the
+    diagnostic native file-read smoke passes, so the earlier file-read ABI
+    blocker is closed.
+  - native file-backed full-spec proof remains incomplete: direct execution
+    of the broad native SSpec ELF still segfaults, while the SSpec native
+    runner still reports one failed file without assertion detail.
+  - live Electron wrapper evidence for fixture `24_flex_wrap_reverse_basic`
+    is green again after fixing closing-tag stack truncation:
+    `scripts/check/check-electron-html-compat-geometry-evidence.shs` reports
+    `layout_match`, `mismatch_count=0`.
+- Additional fixture-24 hardening:
+  - Electron geometry JSON extraction has a focused fallback for pretty CDP
+    output, so the live report no longer parses as zero boxes.
+  - CSS numeric parsing now uses explicit digit matching.
+  - renderer layout calls now pass separate x/y/w/h arrays instead of aliasing
+    one zero array, which had collapsed distinct geometry fields together.
 - The focused wrap-reverse fix was:
   - extend `flex-wrap` from a boolean to a mode: `nowrap`, `wrap`,
     `wrap-reverse`
