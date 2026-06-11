@@ -96,6 +96,19 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
          run broader validation (real specs through stage4 in docker)
          before replacing the seed, and follow the smoke protocol
          (setsid + timeout + pgrep, no respawns) on any deploy.
+      6. [ ] Broader validation matrix run 2026-06-11 (docker,
+         pids-limit 256, vs seed baseline): **NOT green — deploy
+         blocked.** Pass: `--version`, file interpretation, flat proc
+         count. Fail (10th-site cluster, all new): (a) all 4 real spec
+         runs exit 1 with "simple test recursion guard triggered
+         (SIMPLE_TEST_DEPTH=1)" — stage4's `test` path re-invokes the
+         runner with depth already set; (b) `check src/lib/common/text.spl
+         --mode=interpreter` reports "1 error(s) found in 1 of 0
+         file(s)" where seed passes (note the 0-files counter); (c)
+         `-c 'print(1+1)'` prints a stray `0` line after the correct
+         `2`; (d) `lint` hangs past 240s (seed completes; last output
+         "workspace-root-guard: OK"). `bin/simple` remains the Rust
+         seed until these are fixed and the matrix matches.
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).
