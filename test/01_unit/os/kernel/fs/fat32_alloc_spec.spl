@@ -1,0 +1,321 @@
+"""
+# FAT32 Allocator — Wave-4d Spec
+
+**Bug:** fat32_no_cycle_guard_chain_walk_2026-06-11  FINDING-T2
+**Feature:** kernel FAT32 driver (IF-07) cluster allocator + write path
+
+Verifies:
+  1. allocate_cluster picks cluster 2 from an empty FAT and marks it EOC.
+  2. allocate_cluster skips clusters already in use.
+  3. Full FAT (all clusters used) → Err(ENOSPC=-28).
+  4. append_cluster links chain_end → new_cluster correctly.
+  5. write() to a fresh handle allocates a cluster and stores bytes
+     readable back via read().
+  6. Multi-cluster write extends the chain.
+  7. _write_fat_entry preserves the top 4 reserved bits.
+
+Geometry used throughout:
+  fat_start=32, data_start=64, bps=512, spc=1, data_clusters=8.
+  Cluster N → LBA = 64 + (N - 2).
+  FAT entry for cluster N: 4-byte little-endian at sector 32 byte-offset N*4.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.fs.fat32.{Fat32Filesystem, FileHandle}
+
+# ============================================================================
+# In-memory mock block device — supports read_sector and write_sector
+# ============================================================================
+
+struct MockSector:
+    lba: u64
+    data: [u8]
+
+class MockAllocDev:
+    sectors: [MockSector]
+
+impl MockAllocDev:
+    static fn new() -> MockAllocDev:
+        MockAllocDev(sectors: [])
+
+    me fn with_sector(lba: u64, data: [u8]) -> MockAllocDev:
+        self.sectors.push(MockSector(lba: lba, data: data))
+        self
+
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                return Ok(self.sectors[i].data)
+            i = i + 1
+        # Unregistered LBA: return zeroed sector (models blank disk).
+        var z: [u8] = []
+        var zi = 0
+        while zi < 512:
+            z.push(0u8)
+            zi = zi + 1
+        Ok(z)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        # Update existing sector or append new one.
+        # Rebuild the sectors array to avoid value-copy mutation issue.
+        var found = false
+        var new_sectors: [MockSector] = []
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                new_sectors.push(MockSector(lba: lba, data: data))
+                found = true
+            else:
+                new_sectors.push(self.sectors[i])
+            i = i + 1
+        if not found:
+            new_sectors.push(MockSector(lba: lba, data: data))
+        self.sectors = new_sectors
+        Ok(true)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+# fat_start=32, data_start=64, bps=512, spc=1, data_clusters=8
+fn _make_fs() -> Fat32Filesystem:
+    Fat32Filesystem.make_for_alloc_test(32u32, 64u32, 512u32, 1u32, 8u32)
+
+# Cluster N → LBA 64 + (N-2)
+fn _cluster_lba(cluster: u32) -> u64:
+    64u64 + (cluster - 2u32).to_u64()
+
+# FAT sector LBA
+fn _fat_lba() -> u64: 32u64
+
+fn _zero_sector() -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 512:
+        b.push(0u8)
+        i = i + 1
+    b
+
+fn _poke32(buf: [u8], offset: i32, value: u32) -> [u8]:
+    buf[offset]     = (value & 0xFFu32).to_u8()
+    buf[offset + 1] = ((value >> 8u32)  & 0xFFu32).to_u8()
+    buf[offset + 2] = ((value >> 16u32) & 0xFFu32).to_u8()
+    buf[offset + 3] = ((value >> 24u32) & 0xFFu32).to_u8()
+    buf
+
+fn _fat_put(buf: [u8], cluster: u32, entry: u32) -> [u8]:
+    _poke32(buf, (cluster * 4u32).to_i32(), entry)
+
+fn _eoc() -> u32: 0x0FFFFFFFu32
+fn _free() -> u32: 0x00000000u32
+
+fn _read_fat32_entry(buf: [u8], cluster: u32) -> u32:
+    val off = (cluster * 4u32).to_i32()
+    val raw = ((buf[off + 3].to_u32() << 24u32) |
+               (buf[off + 2].to_u32() << 16u32) |
+               (buf[off + 1].to_u32() << 8u32)  |
+                buf[off].to_u32()) & 0x0FFFFFFFu32
+    raw
+
+fn _make_fresh_handle() -> FileHandle:
+    FileHandle(
+        fd: 0u64,
+        start_cluster: 0u32,
+        current_cluster: 0u32,
+        offset: 0u64,
+        file_size: 0u64,
+        is_open: true
+    )
+
+fn _fill_bytes(value: u8, count: i32) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < count:
+        b.push(value)
+        i = i + 1
+    b
+
+fn _make_buf(n: i32) -> [u8]:
+    _fill_bytes(0u8, n)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "fat32 allocator — wave-4d":
+
+    describe "allocate_cluster":
+
+        it "allocates cluster 2 from an empty FAT and marks it EOC":
+            # Empty FAT: all entries are 0 (FREE).
+            val fat = _zero_sector()
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            val result = fs.allocate_cluster(dev)
+            assert_true(result.is_ok())
+            expect(result.unwrap()).to_equal(2u32)
+            # Verify the FAT sector was written with EOC at cluster 2.
+            val written_fat_result = dev.read_sector(_fat_lba())
+            assert_true(written_fat_result.is_ok())
+            val written_fat = written_fat_result.unwrap()
+            val entry2 = _read_fat32_entry(written_fat, 2u32)
+            expect(entry2).to_equal(_eoc())
+
+        it "skips used clusters and allocates the first free one":
+            # Mark clusters 2 and 3 as used (EOC); cluster 4 is free.
+            var fat = _zero_sector()
+            fat = _fat_put(fat, 2u32, _eoc())
+            fat = _fat_put(fat, 3u32, _eoc())
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            val result = fs.allocate_cluster(dev)
+            assert_true(result.is_ok())
+            expect(result.unwrap()).to_equal(4u32)
+
+        it "returns Err(ENOSPC=-28) when all clusters are used":
+            # data_clusters=8 means clusters 2..9 are valid.
+            # Mark all 8 as used.
+            var fat = _zero_sector()
+            var ci: u32 = 2u32
+            while ci < 10u32:
+                fat = _fat_put(fat, ci, _eoc())
+                ci = ci + 1u32
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            val result = fs.allocate_cluster(dev)
+            assert_true(result.is_err())
+            expect(result.unwrap_err()).to_equal(-28)
+
+    describe "append_cluster":
+
+        it "links chain_end to new_cluster in the FAT":
+            # cluster 2 is EOC (chain end), cluster 3 is EOC (freshly allocated).
+            var fat = _zero_sector()
+            fat = _fat_put(fat, 2u32, _eoc())
+            fat = _fat_put(fat, 3u32, _eoc())
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            val result = fs.append_cluster(dev, 2u32, 3u32)
+            assert_true(result.is_ok())
+            # cluster 2 should now point to cluster 3.
+            val written_fat_result = dev.read_sector(_fat_lba())
+            assert_true(written_fat_result.is_ok())
+            val written_fat = written_fat_result.unwrap()
+            val entry2 = _read_fat32_entry(written_fat, 2u32)
+            expect(entry2).to_equal(3u32)
+            # cluster 3 should still be EOC.
+            val entry3 = _read_fat32_entry(written_fat, 3u32)
+            expect(entry3).to_equal(_eoc())
+
+        it "keeps EOC at new tail after append":
+            var fat = _zero_sector()
+            fat = _fat_put(fat, 2u32, _eoc())
+            fat = _fat_put(fat, 3u32, _eoc())
+            fat = _fat_put(fat, 4u32, _eoc())
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            # Append 3 after 2, then 4 after 3.
+            val r1 = fs.append_cluster(dev, 2u32, 3u32)
+            assert_true(r1.is_ok())
+            val r2 = fs.append_cluster(dev, 3u32, 4u32)
+            assert_true(r2.is_ok())
+            val written_fat_result = dev.read_sector(_fat_lba())
+            assert_true(written_fat_result.is_ok())
+            val wf = written_fat_result.unwrap()
+            # 2 → 3 → 4 → EOC
+            expect(_read_fat32_entry(wf, 2u32)).to_equal(3u32)
+            expect(_read_fat32_entry(wf, 3u32)).to_equal(4u32)
+            expect(_read_fat32_entry(wf, 4u32)).to_equal(_eoc())
+
+    describe "_write_fat_entry preserves reserved top 4 bits":
+
+        it "preserves bits 28-31 of existing entry when writing":
+            # Plant an entry at cluster 5 with top nibble 0xF0 (bits 28-31 set).
+            var fat = _zero_sector()
+            val off5 = (5u32 * 4u32).to_i32()
+            # Write raw bytes: value = 0xF0000000 (top nibble set, lower 28 bits zero).
+            fat[off5 + 3] = 0xF0u8
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            # Write value 0x00000003 — should result in on-disk word 0xF0000003.
+            val wr = fs._write_fat_entry(dev, 5u32, 3u32)
+            assert_true(wr.is_ok())
+            val read_back_result = dev.read_sector(_fat_lba())
+            assert_true(read_back_result.is_ok())
+            val rb = read_back_result.unwrap()
+            # Check raw byte 3 of entry 5: top nibble preserved = 0xF0.
+            val byte3 = rb[off5 + 3]
+            expect(byte3).to_equal(0xF0u8)
+            # Bottom 3 bytes encode value 3 = 0x00000003.
+            expect(rb[off5]).to_equal(0x03u8)
+            expect(rb[off5 + 1]).to_equal(0x00u8)
+            expect(rb[off5 + 2]).to_equal(0x00u8)
+
+    describe "write()":
+
+        it "allocates a cluster and stores bytes on a fresh handle":
+            var fat = _zero_sector()
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            val h0 = _make_fresh_handle()
+            val data = _fill_bytes(0xBBu8, 10)
+            val wr = fs.write(dev, h0, data)
+            assert_true(wr.is_ok())
+            var h = wr.unwrap()
+            # h.start_cluster should be set to cluster 2.
+            expect(h.start_cluster).to_equal(2u32)
+            # h.file_size should now be 10.
+            expect(h.file_size).to_equal(10u64)
+            # Read back the bytes via read().
+            var rbuf = _make_buf(10)
+            h.offset = 0u64
+            val rd = fs.read(dev, h, rbuf)
+            assert_true(rd.is_ok())
+            expect(rd.unwrap()).to_equal(10u64)
+            expect(rbuf[0]).to_equal(0xBBu8)
+            expect(rbuf[9]).to_equal(0xBBu8)
+
+        it "multi-cluster write extends the chain":
+            # Write 600 bytes — spans 2 sectors = 2 clusters (spc=1, bps=512).
+            var fat = _zero_sector()
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            val h0 = _make_fresh_handle()
+            val data = _fill_bytes(0xCCu8, 600)
+            val wr = fs.write(dev, h0, data)
+            assert_true(wr.is_ok())
+            var h = wr.unwrap()
+            expect(h.file_size).to_equal(600u64)
+            # Read back.
+            var rbuf = _make_buf(600)
+            h.offset = 0u64
+            val rd = fs.read(dev, h, rbuf)
+            assert_true(rd.is_ok())
+            expect(rd.unwrap()).to_equal(600u64)
+            expect(rbuf[0]).to_equal(0xCCu8)
+            expect(rbuf[599]).to_equal(0xCCu8)
+
+        it "write to full FAT returns Err(ENOSPC)":
+            # Mark all 8 clusters used.
+            var fat = _zero_sector()
+            var ci: u32 = 2u32
+            while ci < 10u32:
+                fat = _fat_put(fat, ci, _eoc())
+                ci = ci + 1u32
+            var dev = MockAllocDev.new()
+            dev = dev.with_sector(_fat_lba(), fat)
+            val fs = _make_fs()
+            val h0 = _make_fresh_handle()
+            val data = _fill_bytes(0xAAu8, 10)
+            val wr = fs.write(dev, h0, data)
+            assert_true(wr.is_err())
+            expect(wr.unwrap_err()).to_equal(-28)

@@ -1,8 +1,10 @@
-# FAT32 kernel filesystem driver — IF-07 wave-4a/4b/4c.
+# FAT32 kernel filesystem driver — IF-07 wave-4a/4b/4c/4d.
 #
 # Wave-4a: BPB parse + cluster-to-lba arithmetic + real mount().
 # Wave-4b: readdir("/") via stashed root-dir data; read_cluster_chain (guarded, cycle-safe).
 # Wave-4c: open() + stat() for root-dir 8.3 names; read() wired through cluster-chain walk.
+# Wave-4d: cluster allocator (_write_fat_entry / allocate_cluster / append_cluster);
+#          write() wired through allocate+extend path.
 
 # -- Error codes ---------------------------------------------------------------
 
@@ -10,6 +12,7 @@ val EINVAL: i32 = -22   # bad signature
 val EIO: i32    = -5    # wrong FS type
 val ENOSYS: i32 = -38   # not implemented
 val ENOENT: i32 = -2    # file not found
+val ENOSPC: i32 = -28   # no space left on device
 
 # -- BPB boot sector signature -------------------------------------------------
 
@@ -173,6 +176,7 @@ class Fat32Filesystem:
     Wave-4a: mount() parses BPB and stores geometry.
     Wave-4b: readdir("/") via stashed root-dir data; next_cluster + read_cluster_chain public for wave-4c.
     Wave-4c: open/read/stat for root-dir 8.3 names.
+    Wave-4d: cluster allocator + write() path.
     """
     device_id: u64          # BlockDevice handle assigned by bus registration
     bpb_parsed: bool        # True once mount() has validated the BPB
@@ -475,12 +479,181 @@ impl Fat32Filesystem:
             current = next
         Ok(chain)
 
-    fn write(self, fd: u64, offset: u64, length: u64) -> i64:
-        """Write — wave-4d."""
-        val _fd = fd
-        val _o = offset
-        val _l = length
-        ENOSYS.to_i64()
+    fn _write_fat_entry(self, dev: BlockDevice, cluster: u32, value: u32) -> Result<(), text>:
+        """Write a 28-bit FAT32 entry for cluster to the FAT region on dev.
+
+        Preserves the top 4 reserved bits of the existing on-disk word.
+        value must already be a 28-bit quantity (top 4 bits ignored).
+        """
+        val fat_offset = cluster * 4u32
+        val fat_sector = self.fat_start_sector.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
+        val entry_off  = (fat_offset % self.bytes_per_sector).to_i32()
+        # Read the current sector so we can preserve the top 4 reserved bits.
+        val sec_result = dev.read_sector(fat_sector)
+        if sec_result.is_err():
+            return Err("fat32: failed to read FAT sector for write to cluster {cluster}")
+        var sec = sec_result.unwrap()
+        # Preserve bits 28-31 of the existing entry; replace bits 0-27 with value.
+        val existing_top = sec[entry_off + 3].to_u32() & 0xF0u32
+        val masked = value & 0x0FFFFFFFu32
+        sec[entry_off]     = (masked & 0xFFu32).to_u8()
+        sec[entry_off + 1] = ((masked >> 8u32)  & 0xFFu32).to_u8()
+        sec[entry_off + 2] = ((masked >> 16u32) & 0xFFu32).to_u8()
+        sec[entry_off + 3] = (existing_top | ((masked >> 24u32) & 0x0Fu32)).to_u8()
+        val wr = dev.write_sector(fat_sector, sec)
+        if wr.is_err():
+            return Err("fat32: failed to write FAT sector for cluster {cluster}")
+        if not wr.unwrap():
+            return Err("fat32: write_sector returned false for cluster {cluster}")
+        Ok(())
+
+    fn allocate_cluster(self, dev: BlockDevice) -> Result<u32, i32>:
+        """Scan FAT for a FREE entry starting at cluster 2; mark it EOC and return it.
+
+        crossLinkFree ordering: marks the new cluster EOC before the caller
+        links any predecessor to it, so no FREE cluster is ever linked.
+        Returns Err(ENOSPC=-28) when no free cluster exists.
+        Scan is bounded by data_clusters (no unbounded loops).
+        """
+        var candidate: u32 = 2u32
+        var limit = self.data_clusters
+        while limit > 0u32:
+            val entry_result = self._read_fat_entry(dev, candidate)
+            if entry_result.is_err():
+                return Err(EIO)
+            val entry = entry_result.unwrap()
+            if entry == 0x00000000u32:
+                # Found a FREE cluster — mark it EOC before returning.
+                val wr = self._write_fat_entry(dev, candidate, 0x0FFFFFFFu32)
+                if wr.is_err():
+                    return Err(EIO)
+                return Ok(candidate)
+            candidate = candidate + 1u32
+            limit = limit - 1u32
+        Err(ENOSPC)
+
+    fn append_cluster(self, dev: BlockDevice, chain_end: u32, new_cluster: u32) -> Result<(), i32>:
+        """Link chain_end -> new_cluster in the FAT.
+
+        crossLinkFree ORDERING CONTRACT:
+          new_cluster must already be marked EOC (done by allocate_cluster) before
+          this function is called.  We then overwrite chain_end's FAT entry to
+          point at new_cluster.  At no point does a FREE cluster appear mid-chain.
+        """
+        val wr = self._write_fat_entry(dev, chain_end, new_cluster)
+        if wr.is_err():
+            return Err(EIO)
+        Ok(())
+
+    fn write(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<FileHandle, i32>:
+        """Write buf to the file described by h (wave-4d).
+
+        Allocates clusters as needed (extending the chain on each cluster
+        boundary).  Writes data via dev.write_sector.
+
+        Returns Ok(updated_handle) where updated_handle.file_size reflects bytes
+        written, and updated_handle.start_cluster is set for fresh files.
+        Returns Err(ENOSPC=-28) when no free clusters remain.
+        Returns Err(EIO=-5) on any block-device failure.
+
+        FileHandle is a value type in Simple: callers must use the returned
+        handle to observe updated start_cluster and file_size.
+
+        NOTE: On-disk directory-entry file_size persistence is not updated here;
+        that requires locating and rewriting the dirent in the root-dir cluster,
+        which is tracked separately in
+        doc/08_tracking/bug/fat32_no_cycle_guard_chain_walk_2026-06-11.md
+        (FINDING-T2 follow-up: dirent persistence).
+        """
+        val n = buf.len().to_u64()
+        if n == 0u64:
+            return Ok(h)
+
+        val bps = self.bytes_per_sector.to_u64()
+        val spc = self.sectors_per_cluster.to_u64()
+        val cluster_bytes = self.cluster_size.to_u64()
+
+        # Walk or build the cluster chain.
+        # If h.start_cluster < 2 the file has no cluster yet — allocate first.
+        var chain_tail: u32 = 0u32
+        var file_clusters: u64 = 0u64
+
+        if h.start_cluster < 2u32:
+            # Fresh file: allocate the first cluster and set start_cluster.
+            val nc_result = self.allocate_cluster(dev)
+            if nc_result.is_err():
+                return Err(nc_result.unwrap_err())
+            h.start_cluster = nc_result.unwrap()
+            h.current_cluster = h.start_cluster
+            chain_tail = h.start_cluster
+            file_clusters = 1u64
+        else:
+            # Existing file: walk the chain to find its tail and length.
+            val chain_result = self.read_cluster_chain(dev, h.start_cluster)
+            if chain_result.is_err():
+                return Err(EIO)
+            val chain = chain_result.unwrap()
+            if chain.len() == 0:
+                return Err(EIO)
+            chain_tail = chain[chain.len() - 1]
+            file_clusters = chain.len().to_u64()
+
+        # Extend chain until allocated space covers current file + new bytes.
+        val bytes_needed = h.file_size + n
+        var allocated_bytes = file_clusters * cluster_bytes
+        while allocated_bytes < bytes_needed:
+            val nc_result = self.allocate_cluster(dev)
+            if nc_result.is_err():
+                return Err(nc_result.unwrap_err())
+            val nc = nc_result.unwrap()
+            # append_cluster: new cluster already marked EOC by allocate_cluster
+            val ap_result = self.append_cluster(dev, chain_tail, nc)
+            if ap_result.is_err():
+                return Err(ap_result.unwrap_err())
+            chain_tail = nc
+            file_clusters = file_clusters + 1u64
+            allocated_bytes = file_clusters * cluster_bytes
+
+        # Re-walk chain to get the full ordered list for sector computation.
+        val full_chain_result = self.read_cluster_chain(dev, h.start_cluster)
+        if full_chain_result.is_err():
+            return Err(EIO)
+        val full_chain = full_chain_result.unwrap()
+
+        # Write buf into the chain starting at h.file_size (append-only).
+        var written: u64 = 0u64
+        var write_offset: u64 = h.file_size
+        while written < n:
+            val cluster_idx = (write_offset / cluster_bytes).to_i32()
+            val byte_in_cluster = write_offset % cluster_bytes
+            if cluster_idx >= full_chain.len():
+                return Err(EIO)
+            val cluster = full_chain[cluster_idx]
+            val first_sector = self.data_start_sector.to_u64() + (cluster - 2u32).to_u64() * spc
+            var sec_off: u64 = byte_in_cluster / bps
+            var byte_in_sec: u64 = byte_in_cluster % bps
+            while written < n and sec_off < spc:
+                val lba = first_sector + sec_off
+                # Read-modify-write: read existing sector, overlay our bytes.
+                val sec_result = dev.read_sector(lba)
+                if sec_result.is_err():
+                    return Err(EIO)
+                var sec = sec_result.unwrap()
+                while written < n and byte_in_sec < bps:
+                    sec[byte_in_sec.to_i32()] = buf[written.to_i32()]
+                    written = written + 1u64
+                    write_offset = write_offset + 1u64
+                    byte_in_sec = byte_in_sec + 1u64
+                val wr = dev.write_sector(lba, sec)
+                if wr.is_err():
+                    return Err(EIO)
+                if not wr.unwrap():
+                    return Err(EIO)
+                sec_off = sec_off + 1u64
+                byte_in_sec = 0u64
+
+        h.file_size = h.file_size + written
+        Ok(h)
 
     fn close(self, fd: u64) -> i32:
         """Close — wave-4d."""
@@ -512,6 +685,26 @@ impl Fat32Filesystem:
         Allows explicit data_start_sector and sectors_per_cluster so callers
         can place data sectors at known LBAs.  Caller supplies a mock
         BlockDevice to read().  Not for production use.
+        """
+        Fat32Filesystem(
+            device_id:           0u64,
+            bpb_parsed:          true,
+            cluster_size:        bytes_per_sector * sectors_per_cluster,
+            fat_start_sector:    fat_start_sector,
+            data_start_sector:   data_start_sector,
+            root_cluster:        2u32,
+            sectors_per_cluster: sectors_per_cluster,
+            bytes_per_sector:    bytes_per_sector,
+            data_clusters:       data_clusters,
+            root_dir_data:       []
+        )
+
+    static fn make_for_alloc_test(fat_start_sector: u32, data_start_sector: u32, bytes_per_sector: u32, sectors_per_cluster: u32, data_clusters: u32) -> Fat32Filesystem:
+        """Create a pre-configured Fat32Filesystem for allocator/write unit tests.
+
+        Same geometry as make_for_read_test; separated so alloc specs can evolve
+        independently.  Caller supplies a mock BlockDevice that supports both
+        read_sector and write_sector.  Not for production use.
         """
         Fat32Filesystem(
             device_id:           0u64,

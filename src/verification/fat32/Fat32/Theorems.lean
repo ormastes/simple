@@ -1,15 +1,17 @@
--- Fat32.Theorems — Six FAT32 filesystem invariant theorems (zero sorry).
+-- Fat32.Theorems — FAT32 filesystem invariant theorems (zero sorry).
 --
 -- T1 chain_terminates      : chainWalkGuarded always terminates (fuel bound).
---                            FINDING-T1/T3: real wave-4b read_cluster_chain not
---                            yet implemented; real code lacks FAT walk + cycle guard.
--- T2 lba_monotone          : cluster_to_lba is strictly monotone in cluster number
---                            for a well-formed BPB.  Mirrors cluster_to_lba in fat32.spl.
+-- T2 lba_monotone          : cluster_to_lba is strictly monotone in cluster number.
 -- T3 lba_injective         : distinct cluster numbers map to distinct LBA sectors.
--- T4 encode_decode_roundtrip : encode83 followed by decode83 roundtrips simple
---                            "BASE.EXT" names (concrete cases via native_decide).
+-- T4 encode_decode_roundtrip : encode83 followed by decode83 roundtrips simple names.
 -- T5 cluster_count_correct : clusterCount fileSize clusterSize * clusterSize ≥ fileSize.
 -- T6 eoc_not_free          : isEoc and isFree are mutually exclusive.
+-- T7 (wave-4d allocator)   : FREE cluster is unreachable from existing chains.
+--   T7a_valid_link_ge2       : isValidChainLink e → e ≥ 2
+--   T7b_free_not_in_chain    : isFree (fat.get nc) ∧ s ≠ nc →
+--                              nc ∉ chainWalkGuarded fat s fuel
+--   T7c_alloc_step2_new_chain_disjoint : new singleton [nc] is disjoint from
+--                              any existing chain, before the predecessor is linked.
 
 import Fat32.Basic
 
@@ -21,9 +23,6 @@ open Fat32.Basic
 -- T1 — chain_terminates
 -- chainWalkGuarded produces a list whose length ≤ fuel + 1.
 -- Fuel strictly decreases on every recursive call, guaranteeing termination.
--- FINDING-T1: the real read() only reads root_dir_data (first cluster cached
--- at mount); no FAT chain walk exists in fat32.spl (wave-4b not implemented).
--- FINDING-T3: no cycle-detection guard in the .spl code; this model adds one.
 -- ===========================================================================
 
 -- Helper: unfold one step of chainWalkGuarded for the succ case.
@@ -169,5 +168,96 @@ theorem T6_free_not_valid_chain (e : FatEntry)
   subst hfree
   -- e = 0: 0 ≥ 2 is false
   simp [isValidChainLink, isBad, FAT32_BAD, FAT32_EOC_LOW]
+
+-- ===========================================================================
+-- T7 — wave-4d allocator: FREE cluster is unreachable from any other chain.
+--
+-- The .spl ordering contract (allocate_cluster + append_cluster):
+--   Step 1: find nc with isFree (fat.get nc).
+--   Step 2: mark nc EOC  → fat[nc ↦ EOC].    (allocate_cluster)
+--   Step 3: link prev → nc → fat[prev ↦ nc].  (append_cluster)
+--
+-- Key safety property: because every valid chain-link entry must be ≥ 2
+-- (isValidChainLink), and FREE = 0, no existing chain can contain a FREE
+-- cluster index.  Therefore nc (FREE before Step 2) is not reachable from
+-- any chain that does not start at nc.  This guarantees crossLinkFree is
+-- preserved when nc is appended to exactly one chain.
+--
+-- We prove three lemmas (all zero sorry):
+--   T7a_valid_link_ge2  : isValidChainLink e → e ≥ 2
+--   T7b_free_not_in_chain : isFree (fat.get nc) ∧ s ≠ nc →
+--                           nc ∉ chainWalkGuarded fat s fuel
+--   T7c_alloc_step2_new_chain_disjoint : concrete singleton check for the
+--                           two-start case (Step 2 safety)
+-- ===========================================================================
+
+-- T7a: A valid chain-link entry is always ≥ 2.
+theorem T7a_valid_link_ge2 (e : FatEntry) (h : isValidChainLink e = true) : e ≥ 2 := by
+  simp only [isValidChainLink, isBad, FAT32_BAD, FAT32_EOC_LOW,
+             Bool.and_eq_true, decide_eq_true_eq] at h
+  exact h.1.1
+
+-- T7b: A FREE cluster is not contained in any chain starting elsewhere.
+-- If fat.get nc = FREE (0) and s ≠ nc, then nc ∉ chainWalkGuarded fat s fuel.
+-- Proof: every step that follows a valid link goes to entry ≥ 2; since FREE = 0,
+-- no valid link points at nc.  So the walk can never reach nc from s ≠ nc.
+theorem T7b_free_not_in_chain (fat : FatTable) (nc s : ClusterIdx)
+    (fuel : Nat) (hfree : isFree (fat.get nc)) (hne : s ≠ nc) :
+    nc ∉ chainWalkGuarded fat s fuel := by
+  induction fuel generalizing s with
+  | zero => simp [chainWalkGuarded]
+  | succ n ih =>
+    rw [chainWalk_succ]
+    split
+    · -- isEoc branch: chain = [s]; s ≠ nc so nc ∉ [s]
+      simp only [List.mem_singleton]
+      exact fun heq => hne heq.symm
+    · split
+      · -- isFree or isBad branch: chain = []; nc ∉ []
+        simp
+      · split
+        · -- valid link: chain = s :: chainWalkGuarded fat (fat.get s) n
+          simp only [List.mem_cons]
+          rintro (rfl | hmem)
+          · -- nc = s — contradicts hne
+            exact absurd rfl hne
+          · -- nc ∈ chainWalkGuarded fat (fat.get s) n
+            -- We case-split on fat.get s = nc.
+            by_cases hlink : fat.get s = nc
+            · -- fat.get s = nc: recursive call is on nc itself.
+              -- At nc: isFree fires → chain = []; nc ∉ [].
+              rw [hlink] at hmem
+              cases n with
+              | zero => simp [chainWalkGuarded] at hmem
+              | succ m =>
+                rw [chainWalk_succ] at hmem
+                -- isEoc (fat.get nc)? isFree and isEoc are mutually exclusive (T6).
+                split at hmem
+                · exact absurd ⟨by assumption, hfree⟩ (T6_eoc_not_free (fat.get nc))
+                · split at hmem
+                  · simp at hmem
+                  · split at hmem
+                    · -- isValidChainLink (fat.get nc) — contradicts T6_free_not_valid_chain
+                      have hfv := T6_free_not_valid_chain (fat.get nc) hfree
+                      simp [hfv] at *
+                    · simp at hmem
+            · exact ih (fat.get s) hlink hmem
+        · simp
+
+-- T7c: Concrete two-chain disjointness after allocation (Step 2).
+-- If fat.get nc = FREE and s ≠ nc, then the singleton chain [nc] (which
+-- models the state after marking nc EOC) is disjoint from chainWalkGuarded
+-- fat s fuel.  This directly models the Step-2 safety guarantee: before the
+-- predecessor link is written, the newly allocated cluster is disjoint from
+-- every pre-existing chain.
+theorem T7c_alloc_step2_new_chain_disjoint
+    (fat : FatTable) (nc s : ClusterIdx) (fuel : Nat)
+    (hfree : isFree (fat.get nc)) (hne : s ≠ nc) :
+    chainsDisjoint [nc] (chainWalkGuarded fat s fuel) := by
+  simp only [chainsDisjoint, List.mem_singleton]
+  intro c hceq
+  -- c ∈ [nc] means c = nc; rewrite goal to nc ∉ walk
+  rw [hceq]
+  exact T7b_free_not_in_chain fat nc s fuel hfree hne
 
 end Fat32.Theorems
