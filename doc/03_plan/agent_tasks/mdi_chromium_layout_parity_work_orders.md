@@ -49,6 +49,17 @@ Prove and harden the requested GUI stack:
   pointer/text input forwarding, MDI titlebar drag focus/move commands,
   traffic-light close/minimize/maximize commands, and title-command input
   routing through `test/02_integration/app/ui.web/wm_bridge_test.spl`.
+- Pure Simple shared-MDI source evidence now covers the actual Terminal window
+  HTML emitted by `src/app/ui_shared_mdi/main.spl`:
+  `test/03_system/gui/ui_shared_mdi_titlebar_widget_spec.spl` imports
+  `shared_mdi_terminal_window_html()` and asserts the shared renderer source
+  contains the title text, titlebar widget slot, titlebar `Run` button
+  `data-simple-titlebar-widget="button"`, `data-action="mdi_terminal_action"`,
+  body `Run` button, body input `data-target-id="mdi_terminal_input"`,
+  `value="ready"`, and the CSS hook
+  `.simple-titlebar-widget{background:rgb(18,58,52);border-color:rgb(52,211,153);color:rgb(236,254,255);}`.
+  This proves the shared MDI app source carries the requested button/input/CSS
+  hooks before host-shell rendering.
 - Live Chromium browser evidence now runs through
   `scripts/check/check-wm-browser-event-routing-evidence.shs`: it loads the real
   `src/app/ui.web/wm.js`, opens an MDI window through the Electron IPC path,
