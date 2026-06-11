@@ -17,10 +17,8 @@ use app.wm_compare.html_compat.{
 use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{simple_web_render_html_to_pixels_with_corpus_fixtures}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
 use std.gc_async_mut.gpu.browser_engine.text_painter.{
-    br_famous_site_corpus_layout_lines,
-    br_famous_site_corpus_layout_line_widths_sdn,
-    br_famous_site_corpus_layout_paint_runs,
-    br_famous_site_corpus_layout_lines_sdn}
+    BrowserTextPaintRun,
+    br_famous_site_corpus_layout_paint_runs}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -354,34 +352,34 @@ fn _sdn_text_escape(value: text) -> text:
     val slash_escaped = value.replace("\\", "\\\\")
     slash_escaped.replace("\"", "\\\"")
 
-fn _production_text_line_ink_delta_sdn(sample: SiteSample, chrome: CaptureResult, simple: CaptureResult, opts: SiteCorpusCompatOpts) -> text:
+fn _production_text_line_ink_delta_sdn(runs: [BrowserTextPaintRun], chrome: CaptureResult, simple: CaptureResult, opts: SiteCorpusCompatOpts) -> text:
     if not chrome.success or not simple.success:
         return "(text_line_ink_delta status: \"capture_failed\")"
     if chrome.pixels.len() != opts.width * opts.height or simple.pixels.len() != opts.width * opts.height:
         return "(text_line_ink_delta status: \"pixel_size_mismatch\")"
-    val runs = br_famous_site_corpus_layout_paint_runs(sample.html, 16, 120, 8, 8, 18)
     var entries: [text] = []
     var i = 0
-    while i < runs.len():
+    val run_count = runs.len()
+    while i < run_count:
         val run = runs[i]
         val label = "line_" + i.to_string()
         val region = _region_text_ink_delta_sdn(label, chrome.pixels, simple.pixels, opts.width, opts.height, run.x, run.y, run.x + run.width, run.y + 18)
         entries.push("    (line index: " + i.to_string() + " text: \"" + _sdn_text_escape(run.line) + "\" x: " + run.x.to_string() + " y: " + run.y.to_string() + " width: " + run.width.to_string() + " region: " + region + ")")
         i = i + 1
-    "(text_line_ink_delta count: " + runs.len().to_string() + "\n" + entries.join("\n") + "\n)"
+    "(text_line_ink_delta count: " + run_count.to_string() + "\n" + entries.join("\n") + "\n)"
 
-fn _production_glyph_compositing_signature_sdn(sample: SiteSample, chrome: CaptureResult, simple: CaptureResult, pair: SiteCorpusPair, opts: SiteCorpusCompatOpts) -> text:
+fn _production_glyph_compositing_signature_sdn(runs: [BrowserTextPaintRun], chrome: CaptureResult, simple: CaptureResult, pair: SiteCorpusPair, opts: SiteCorpusCompatOpts) -> text:
     if not chrome.success or not simple.success:
         return "(glyph_compositing_signature status: \"capture_failed\")"
     if chrome.pixels.len() != opts.width * opts.height or simple.pixels.len() != opts.width * opts.height:
         return "(glyph_compositing_signature status: \"pixel_size_mismatch\")"
-    val runs = br_famous_site_corpus_layout_paint_runs(sample.html, 16, 120, 8, 8, 18)
     var different_pixels_total = 0
     var chrome_exact_black_pixels_total = 0
     var simple_background_mismatch_pixels_total = 0
     var detail_entries: [text] = []
     var i = 0
-    while i < runs.len():
+    val run_count = runs.len()
+    while i < run_count:
         val run = runs[i]
         val delta = _region_text_ink_delta("line_" + i.to_string(), chrome.pixels, simple.pixels, opts.width, opts.height, run.x, run.y, run.x + run.width, run.y + 18)
         different_pixels_total = different_pixels_total + delta.different_pixels
@@ -390,7 +388,7 @@ fn _production_glyph_compositing_signature_sdn(sample: SiteSample, chrome: Captu
         detail_entries.push("    (line index: " + i.to_string() + " text: \"" + _sdn_text_escape(run.line) + "\" x: " + run.x.to_string() + " y: " + run.y.to_string() + " width: " + run.width.to_string() + " different_pixels: " + delta.different_pixels.to_string() + " chrome_exact_black_pixels: " + delta.chrome_exact_black_pixels.to_string() + " simple_background_mismatch_pixels: " + delta.simple_background_mismatch_pixels.to_string() + ")")
         i = i + 1
     val unexplained = pair.different_pixels.to_i32() - different_pixels_total
-    "(glyph_compositing_signature kind: \"per_line_missing_ink_v1\" line_count: " + runs.len().to_string() +
+    "(glyph_compositing_signature kind: \"per_line_missing_ink_v1\" line_count: " + run_count.to_string() +
         " different_pixels_total: " + different_pixels_total.to_string() +
         " unexplained_different_pixels: " + unexplained.to_string() +
         " chrome_exact_black_pixels_total: " + chrome_exact_black_pixels_total.to_string() +
@@ -402,13 +400,15 @@ fn _count_text_occurrences(haystack: text, needle: text) -> i32:
         return 0
     var count = 0
     var offset = 0
-    while offset < haystack.len():
+    val haystack_len = haystack.len()
+    val needle_len = needle.len()
+    while offset < haystack_len:
         val tail = haystack.substring(offset)
         val idx = tail.index_of(needle)
         if idx == -1:
             return count
         count = count + 1
-        offset = offset + idx + needle.len()
+        offset = offset + idx + needle_len
     count
 
 fn _section_between(text_value: text, start_marker: text, end_marker: text) -> text:
@@ -427,42 +427,65 @@ fn _json_number_after(text_value: text, marker: text) -> text:
         return ""
     val rest = text_value.substring(idx + marker.len())
     var end = 0
-    while end < rest.len():
+    val rest_len = rest.len()
+    while end < rest_len:
         val c = rest.char_at(end)
         if c == "," or c == "\n" or c == "}" or c == ")" or c == " ":
             break
         end = end + 1
     rest.substring(0, end)
 
-fn _first_line_width_from_sdn(widths_sdn: text) -> text:
-    _json_number_after(widths_sdn, "width: ")
-
-fn _all_simple_lines_in_chrome_metrics(simple_lines: [text], metrics: text) -> bool:
-    if simple_lines.len() == 0:
+fn _all_run_lines_in_chrome_metrics(runs: [BrowserTextPaintRun], metrics: text) -> bool:
+    val run_count = runs.len()
+    if run_count == 0:
         return false
-    for line in simple_lines:
-        if not metrics.contains("\"text\": \"" + line + "\""):
+    var i = 0
+    while i < run_count:
+        val run = runs[i]
+        if not metrics.contains("\"text\": \"" + run.line + "\""):
             return false
+        i = i + 1
     true
 
-fn _production_text_geometry_delta_sdn(sample: SiteSample) -> text:
+fn _layout_lines_sdn_from_runs(runs: [BrowserTextPaintRun]) -> text:
+    var entries: [text] = []
+    var i = 0
+    val run_count = runs.len()
+    while i < run_count:
+        val run = runs[i]
+        entries.push("    (line text: \"" + run.line + "\")")
+        i = i + 1
+    "(text_lines count: " + run_count.to_string() + "\n" + entries.join("\n") + "\n)"
+
+fn _layout_line_widths_sdn_from_runs(runs: [BrowserTextPaintRun]) -> text:
+    var entries: [text] = []
+    var i = 0
+    val run_count = runs.len()
+    while i < run_count:
+        val run = runs[i]
+        entries.push("    (line text: \"" + run.line + "\" width: " + run.width.to_string() + ")")
+        i = i + 1
+    "(text_lines count: " + run_count.to_string() + "\n" + entries.join("\n") + "\n)"
+
+fn _production_text_geometry_delta_sdn(sample: SiteSample, runs: [BrowserTextPaintRun]) -> text:
     val metrics_path = famous_site_sample_chrome_metrics_path(sample.id)
     if not rt_file_exists(metrics_path):
         return "(text_geometry_delta chrome_text_metrics_path: \"" + metrics_path + "\" status: \"missing_chrome_metrics\")"
     val metrics = rt_file_read_text(metrics_path) ?? ""
-    val simple_lines = br_famous_site_corpus_layout_lines(sample.html, 16, 120)
     val text_lines_section = _section_between(metrics, "\"textLines\"", "\"canvasTextMetrics\"")
     val canvas_section = _section_between(metrics, "\"canvasTextMetrics\"", "\n  }\n}")
     val chrome_line_count = _count_text_occurrences(text_lines_section, "\"index\"")
     val chrome_canvas_count = _count_text_occurrences(canvas_section, "\"index\"")
-    val simple_first_width = _first_line_width_from_sdn(br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, 120))
+    var simple_first_width = ""
+    if runs.len() > 0:
+        simple_first_width = runs[0].width.to_string()
     val chrome_first_canvas_width = _json_number_after(canvas_section, "\"width\": ")
-    val layout_match = _all_simple_lines_in_chrome_metrics(simple_lines, text_lines_section)
+    val layout_match = _all_run_lines_in_chrome_metrics(runs, text_lines_section)
     "(text_geometry_delta chrome_text_metrics_path: \"" + metrics_path + "\" " +
-        "simple_line_count: " + simple_lines.len().to_string() + " " +
+        "simple_line_count: " + runs.len().to_string() + " " +
         "chrome_text_line_count: " + chrome_line_count.to_string() + " " +
         "chrome_canvas_metric_count: " + chrome_canvas_count.to_string() + " " +
-        "text_line_count_delta: " + (simple_lines.len() - chrome_line_count).to_string() + " " +
+        "text_line_count_delta: " + (runs.len() - chrome_line_count).to_string() + " " +
         "layout_text_match: " + _bool_text(layout_match) + " " +
         "simple_first_width: \"" + simple_first_width + "\" " +
         "chrome_first_canvas_width: \"" + chrome_first_canvas_width + "\")"
@@ -561,12 +584,13 @@ fn write_site_corpus_report(sample: SiteSample, chrome: CaptureResult, simple: C
     body = body + "  simple: (success: {_bool_text(simple.success)} error: \"{simple.error}\")\n"
     body = body + "  compare: (exact: {_bool_text(pair.exact)} accepted: {_bool_text(pair.accepted)} acceptance_policy: \"exact_pixels_required_perceptual_diagnostic_only\" acceptance_policy_flags: (exact_required: true perceptual_diagnostic_only: true tolerance_acceptance_allowed: false) different_pixels: {pair.different_pixels} match_pct_10000: {pair.match_pct_10000} perceptual_pct_10000: {pair.perceptual_pct_10000} max_channel_diff: {pair.max_channel_diff})\n"
     if opts.production_renderer:
-        body = body + "  simple_layout_lines: " + br_famous_site_corpus_layout_lines_sdn(sample.html, 16, 120) + "\n"
-        body = body + "  simple_layout_line_widths: " + br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, 120) + "\n"
-        body = body + "  text_geometry_delta: " + _production_text_geometry_delta_sdn(sample) + "\n"
+        val runs = br_famous_site_corpus_layout_paint_runs(sample.html, 16, 120, 8, 8, 18)
+        body = body + "  simple_layout_lines: " + _layout_lines_sdn_from_runs(runs) + "\n"
+        body = body + "  simple_layout_line_widths: " + _layout_line_widths_sdn_from_runs(runs) + "\n"
+        body = body + "  text_geometry_delta: " + _production_text_geometry_delta_sdn(sample, runs) + "\n"
         body = body + "  text_ink_delta: " + _production_text_ink_delta_sdn(chrome, simple, opts) + "\n"
-        body = body + "  text_line_ink_delta: " + _production_text_line_ink_delta_sdn(sample, chrome, simple, opts) + "\n"
-        body = body + "  glyph_compositing_signature: " + _production_glyph_compositing_signature_sdn(sample, chrome, simple, pair, opts) + "\n"
+        body = body + "  text_line_ink_delta: " + _production_text_line_ink_delta_sdn(runs, chrome, simple, opts) + "\n"
+        body = body + "  glyph_compositing_signature: " + _production_glyph_compositing_signature_sdn(runs, chrome, simple, pair, opts) + "\n"
     body = body + ")\n"
     dir_create_all(famous_site_sample_baseline_dir(sample.id))
     file_write_text(report_path, body)
@@ -581,7 +605,8 @@ fn _report_different_pixels(report: text) -> i64:
         return 0
     val rest = report.substring(idx + marker.len())
     var end = 0
-    while end < rest.len():
+    val rest_len = rest.len()
+    while end < rest_len:
         val c = rest.char_at(end)
         if c < "0" or c > "9":
             break
