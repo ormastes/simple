@@ -249,9 +249,12 @@ Smallest next implementation step:
   - the core-C native runtime now exports `rt_file_read_text_rv`, and the
     diagnostic native file-read smoke passes, so the earlier file-read ABI
     blocker is closed.
-  - native file-backed full-spec proof remains incomplete: direct execution
-    of the broad native SSpec ELF still segfaults, while the SSpec native
-    runner still reports one failed file without assertion detail.
+  - native file-backed full-spec proof remains incomplete: the latest
+    reduction fixed the native zero-command path for `04_button` and
+    `05_text_input` by consuming non-rendered head metadata before parser arena
+    insertion, but `06_card_panel` still returns zero boxes natively for the
+    multi-text block case; the SSpec now guards that length before indexing so
+    the lane fails honestly instead of dereferencing missing boxes.
   - live Electron wrapper evidence for fixture `24_flex_wrap_reverse_basic`
     is green again after fixing closing-tag stack truncation:
     `scripts/check/check-electron-html-compat-geometry-evidence.shs` reports

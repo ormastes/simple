@@ -145,9 +145,14 @@ Open gaps tied to the active browser objective:
   - the core-C native runtime now exports `rt_file_read_text_rv`, and the
     diagnostic native file-read smoke passes, so the earlier file-read ABI
     blocker is closed
-  - direct execution of the broad native SSpec ELF still segfaults after the
-    fixture-24 smokes pass; the remaining gap is tracked as native
-    SSpec/full-file runner evidence, not as a fixture-24 layout mismatch
+  - the latest reduction found a native renderer divergence before fixture 24:
+    full-document metadata parsing (`head` + `meta` + `title`) made native
+    `04_button`/`05_text_input` return zero Draw IR commands; the parser now
+    consumes non-rendered metadata before arena insertion, and the native
+    staged probe reaches `06_card_panel`
+  - broad native SSpec mode remains red: `06_card_panel` still returns zero
+    boxes natively for the multi-text block case, and the full native runner
+    reports one failed file / timeout-style failure rather than proving parity
   - fixes that moved this forward:
     - Cranelift inline `.len()` now recognizes runtime string values instead
       of returning the tagged `-1` sentinel for text
@@ -159,6 +164,11 @@ Open gaps tied to the active browser objective:
       CDP output, so fixture-24 no longer parses as zero boxes
     - CSS numeric parsing now uses explicit digit matching, and the renderer
       uses separate x/y/w/h layout arrays instead of aliasing one zero array
+    - non-rendered head metadata is consumed before parser arena insertion,
+      fixing the native zero-command path for `04_button` and `05_text_input`
+    - the executable spec now guards `06_card_panel` length before indexing,
+      so native evidence can fail honestly instead of dereferencing missing
+      boxes
   - live Electron wrapper evidence is green again for
     `24_flex_wrap_reverse_basic` after fixing closing-tag stack truncation:
     `scripts/check/check-electron-html-compat-geometry-evidence.shs` reports
