@@ -6,7 +6,7 @@ Current state as of 2026-06-11:
 
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
-  layers `10..17`, and flex rows `18..25`.
+  layers `10..17`, and flex rows `18..26`.
 - The newer focused fixture lane described in some earlier progress notes
   (`146+`, client-rect/box-model parity rows, no-cheat guard summaries) is not
   present in the current worktree and must not be treated as current evidence.
@@ -15,7 +15,7 @@ Current state as of 2026-06-11:
   parity. Exact Chrome/Simple pixel rows now exist for flex fixtures 18, 19,
   20, 21, 23, 24, and 25; fixture 22 remains blocked by text glyph
   raster/default font differences.
-- Important live-run caveat: the current CLI catalog reports 24 fixtures and
+- Important live-run caveat: the current CLI catalog reports 25 fixtures and
   `test/09_baselines/html_compat/18_flex_grow_weights/report.sdn` contains an
   exact checked-in row, but a fresh live source-B run on 2026-06-11 still times
   out:
@@ -172,6 +172,18 @@ Open gaps tied to the active browser objective:
   - focused fix: treat `flex-wrap` as a mode instead of a boolean, place
     wrapped lines from the opposite cross-axis edge for `wrap-reverse`, and
     compute the container height from total stacked line height
+- The same live geometry lane now passes for `25_flex_justify_space_between`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: confirms the row-flex free-space distribution path matches
+    Chromium's `justify-content: space-between` geometry for the fixture
+- The same live geometry lane now passes for `26_flex_gap_basic`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused fix: preserve the existing row-flex `gap` spacing and add
+    Chromium-like first-child top margin collapse through the default `body`
+    margin, matching Chrome's y=16 top edge without resetting body margin
+  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+    now reports `fixture_count=23`, `pass_count=23`, `fail_count=0`, and
+    `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
     passes with one listed scenario and zero failures

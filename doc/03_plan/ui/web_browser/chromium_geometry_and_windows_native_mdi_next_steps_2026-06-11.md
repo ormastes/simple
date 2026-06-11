@@ -31,7 +31,9 @@ Scope:
   and this Linux host can only prove the explicit `requires-macos` skip lane.
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
-  `structural_layout_report.spl`.
+  `structural_layout_report.spl`. The live Chrome structural geometry manifest
+  now covers 23 labeled fixtures through `26_flex_gap_basic` with exact
+  geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
 
@@ -218,9 +220,19 @@ Smallest next implementation step:
 - The focused flex-wrap fix was:
   - add `flex-wrap` style state and parse `flex-wrap: wrap`
   - add a wrapped row-flex path that starts a new flex line when the next
-    explicit-width or flex-basis item no longer fits the current line
+    item no longer fits the current line
   - accumulate container height from multiple wrapped lines instead of a single
     row max-height
+- Live `25_flex_justify_space_between` evidence now passes with
+  `layout_match` and `mismatch_count=0`.
+- Live `26_flex_gap_basic` evidence now passes with `layout_match` and
+  `mismatch_count=0`.
+- The focused fixture-26 fix was:
+  - keep the real Chrome/default-body fixture rather than resetting body margin
+  - collapse the first in-flow child top margin through the default body top
+    margin when the body has no top border or padding
+  - preserve exact row-flex gap positions (`x=24,76,138`) and match Chrome's
+    y=16 top edge
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -242,12 +254,12 @@ Smallest next implementation step:
   - center the block of wrapped lines inside the explicit cross size for the
     focused `align-content:center` case
 - Chrome headless manifest evidence now includes
-  `25_flex_justify_space_between`:
+  `25_flex_justify_space_between` and `26_flex_gap_basic`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `25` in its default manifest, excluding only
+    covers fixtures `02` through `26` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `22` fixtures, `22` passes, `0` failures, and
+    reports `23` fixtures, `23` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without

@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 22
-- pass count: 22
+- fixtures: 23
+- pass count: 23
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_manifest_full`
@@ -45,6 +45,7 @@ pixels, or text antialiasing normalization.
 | `23_flex_wrap_align_content_center` | pass | 0 | `build/chrome_manifest_full/23_flex_wrap_align_content_center_chrome_geometry.json` | `build/chrome_manifest_full/23_flex_wrap_align_content_center_structural_report.sdn` |
 | `24_flex_wrap_reverse_basic` | pass | 0 | `build/chrome_manifest_full/24_flex_wrap_reverse_basic_chrome_geometry.json` | `build/chrome_manifest_full/24_flex_wrap_reverse_basic_structural_report.sdn` |
 | `25_flex_justify_space_between` | pass | 0 | `build/chrome_manifest_full/25_flex_justify_space_between_chrome_geometry.json` | `build/chrome_manifest_full/25_flex_justify_space_between_structural_report.sdn` |
+| `26_flex_gap_basic` | pass | 0 | `build/chrome_manifest_full/26_flex_gap_basic_chrome_geometry.json` | `build/chrome_manifest_full/26_flex_gap_basic_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -76,3 +77,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `23_flex_wrap_align_content_center` | 0 | 0.000 | `` |
 | `24_flex_wrap_reverse_basic` | 0 | 0.000 | `` |
 | `25_flex_justify_space_between` | 0 | 0.000 | `` |
+| `26_flex_gap_basic` | 0 | 0.000 | `` |
