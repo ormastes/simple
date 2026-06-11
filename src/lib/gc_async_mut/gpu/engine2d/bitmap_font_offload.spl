@@ -11,9 +11,11 @@ class BitmapFontOffloadEvidence:
     width: i64
     height: i64
     generated: Generated2DOperationProvenance
+    glyph_raster_generated: Generated2DOperationProvenance
     generated_ready: bool
     cpu_glyph_preprocess_required: bool
     gpu_copy_upload_ready: bool
+    gpu_glyph_raster_plan_ready: bool
     gpu_glyph_rasterized: bool
     production_ready: bool
     status_code: text
@@ -21,37 +23,49 @@ class BitmapFontOffloadEvidence:
 
     static fn create(backend: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> BitmapFontOffloadEvidence:
         val generated = generated_2d_operation_provenance(backend, "bitmap_font", width, height, runtime_ready, module_ready, args_ptr)
+        val raster_generated = generated_2d_operation_provenance(backend, "bitmap_glyph_raster", width, height, runtime_ready, module_ready, args_ptr)
         val copy_ready = generated.ready and generated.cpu_preprocess_required and generated.generated_artifact_required
-        val status = _bitmap_font_offload_status(generated, copy_ready)
+        val raster_plan_ready = raster_generated.ready and raster_generated.generated_artifact_required and not raster_generated.cpu_preprocess_required
+        val status = _bitmap_font_offload_status(generated, raster_generated, copy_ready, raster_plan_ready)
         BitmapFontOffloadEvidence(
             backend_name: backend,
             width: width,
             height: height,
             generated: generated,
+            glyph_raster_generated: raster_generated,
             generated_ready: generated.ready,
             cpu_glyph_preprocess_required: generated.cpu_preprocess_required,
             gpu_copy_upload_ready: copy_ready,
+            gpu_glyph_raster_plan_ready: raster_plan_ready,
             gpu_glyph_rasterized: false,
             production_ready: false,
             status_code: status,
-            reason: _bitmap_font_offload_reason(generated, copy_ready)
+            reason: _bitmap_font_offload_reason(generated, raster_generated, copy_ready, raster_plan_ready)
         )
 
     fn diagnostic_text() -> text:
-        "BitmapFontOffloadEvidence[backend={self.backend_name} size={self.width}x{self.height} generated_ready={self.generated_ready.to_text()} cpu_glyph_preprocess={self.cpu_glyph_preprocess_required.to_text()} gpu_copy_upload_ready={self.gpu_copy_upload_ready.to_text()} gpu_glyph_rasterized={self.gpu_glyph_rasterized.to_text()} production_ready={self.production_ready.to_text()} status={self.status_code} reason={self.reason} generated={self.generated.diagnostic_text()}]"
+        "BitmapFontOffloadEvidence[backend={self.backend_name} size={self.width}x{self.height} generated_ready={self.generated_ready.to_text()} cpu_glyph_preprocess={self.cpu_glyph_preprocess_required.to_text()} gpu_copy_upload_ready={self.gpu_copy_upload_ready.to_text()} gpu_glyph_raster_plan_ready={self.gpu_glyph_raster_plan_ready.to_text()} gpu_glyph_rasterized={self.gpu_glyph_rasterized.to_text()} production_ready={self.production_ready.to_text()} status={self.status_code} reason={self.reason} generated={self.generated.diagnostic_text()} raster_generated={self.glyph_raster_generated.diagnostic_text()}]"
 
-fn _bitmap_font_offload_status(generated: Generated2DOperationProvenance, copy_ready: bool) -> text:
+fn _bitmap_font_offload_status(generated: Generated2DOperationProvenance, raster_generated: Generated2DOperationProvenance, copy_ready: bool, raster_plan_ready: bool) -> text:
     if not generated.ready:
         return generated.typed_status
+    if raster_plan_ready:
+        return "gpu-raster-plan-without-readback"
+    if not raster_generated.ready and raster_generated.typed_status != "":
+        return "gpu-raster-plan-not-ready:" + raster_generated.typed_status
     if copy_ready:
         return "gpu-copy-with-cpu-glyph"
     if generated.ready and generated.cpu_preprocess_required:
         return "cpu-glyph-baseline"
     "bitmap-font-copy-not-ready"
 
-fn _bitmap_font_offload_reason(generated: Generated2DOperationProvenance, copy_ready: bool) -> text:
+fn _bitmap_font_offload_reason(generated: Generated2DOperationProvenance, raster_generated: Generated2DOperationProvenance, copy_ready: bool, raster_plan_ready: bool) -> text:
     if not generated.ready:
         return generated.reason
+    if raster_plan_ready:
+        return "bitmap-font-gpu-raster-kernel-ready-readback-required"
+    if not raster_generated.ready and raster_generated.reason != "":
+        return raster_generated.reason
     if copy_ready:
         return "bitmap-font-glyphs-rasterized-on-cpu-then-uploaded"
     if generated.ready and generated.cpu_preprocess_required:

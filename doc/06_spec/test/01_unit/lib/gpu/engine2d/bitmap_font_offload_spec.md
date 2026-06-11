@@ -38,12 +38,12 @@ bitmap_font_offload_spec -> std
 
 ### Engine2D bitmap font offload evidence
 
-#### marks CUDA bitmap font as GPU copy with CPU glyph preprocessing
+#### marks CUDA bitmap font as GPU raster plan pending readback
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -52,12 +52,17 @@ val evidence = bitmap_font_offload_evidence("cuda", 64, 32, true, true, 4096)
 expect(evidence.generated_ready).to_equal(true)
 expect(evidence.cpu_glyph_preprocess_required).to_equal(true)
 expect(evidence.gpu_copy_upload_ready).to_equal(true)
+expect(evidence.gpu_glyph_raster_plan_ready).to_equal(true)
 expect(evidence.gpu_glyph_rasterized).to_equal(false)
 expect(evidence.production_ready).to_equal(false)
-expect(evidence.status_code).to_equal("gpu-copy-with-cpu-glyph")
-expect(evidence.reason).to_equal("bitmap-font-glyphs-rasterized-on-cpu-then-uploaded")
+expect(evidence.status_code).to_equal("gpu-raster-plan-without-readback")
+expect(evidence.reason).to_equal("bitmap-font-gpu-raster-kernel-ready-readback-required")
 expect(evidence.generated.generated_operation).to_equal("copy")
+expect(evidence.glyph_raster_generated.generated_operation).to_equal("bitmap_glyph_raster")
+expect(evidence.glyph_raster_generated.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+expect(evidence.glyph_raster_generated.cpu_preprocess_required).to_equal(false)
 expect(evidence.diagnostic_text()).to_contain("family=bitmap_font")
+expect(evidence.diagnostic_text()).to_contain("family=bitmap_glyph_raster")
 ```
 
 </details>
@@ -67,7 +72,7 @@ expect(evidence.diagnostic_text()).to_contain("family=bitmap_font")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -76,11 +81,13 @@ val evidence = bitmap_font_offload_evidence("cpu_simd_x86", 64, 32, false, false
 expect(evidence.generated_ready).to_equal(true)
 expect(evidence.cpu_glyph_preprocess_required).to_equal(true)
 expect(evidence.gpu_copy_upload_ready).to_equal(false)
+expect(evidence.gpu_glyph_raster_plan_ready).to_equal(false)
 expect(evidence.gpu_glyph_rasterized).to_equal(false)
 expect(evidence.status_code).to_equal("cpu-glyph-baseline")
 expect(evidence.reason).to_equal("bitmap-font-glyphs-rasterized-on-cpu")
 expect(evidence.generated.compute_target).to_equal("cpu_simd")
 expect(evidence.generated.entry_name).to_equal("RenderBackend.draw_text_or_text_blit")
+expect(evidence.glyph_raster_generated.generated_operation).to_equal("bitmap_glyph_raster")
 ```
 
 </details>
@@ -90,7 +97,7 @@ expect(evidence.generated.entry_name).to_equal("RenderBackend.draw_text_or_text_
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -98,6 +105,7 @@ val evidence = bitmap_font_offload_evidence("opencl", 64, 32, false, false, 4096
 
 expect(evidence.generated_ready).to_equal(false)
 expect(evidence.gpu_copy_upload_ready).to_equal(false)
+expect(evidence.gpu_glyph_raster_plan_ready).to_equal(false)
 expect(evidence.gpu_glyph_rasterized).to_equal(false)
 expect(evidence.production_ready).to_equal(false)
 expect(evidence.status_code).to_equal("opencl-runtime-or-queue-unavailable")

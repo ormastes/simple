@@ -558,3 +558,15 @@ dev-done
   offload 7, Intel backend 26, Intel kernels 34, WebGPU backend 69,
   backend-order spec 12, and zero opportunities for bitmap-font, Intel text
   fallback, and WebGPU text fallback specs.
+- impl: Added a first-class generated Engine2D bitmap glyph raster operation.
+  `generated_kernel_dispatch.spl` now exposes `bitmap_glyph_raster` with the
+  `simple_2d_bitmap_glyph_raster_u32` entry and a glyph-oriented args layout.
+  `bitmap_font_offload.spl` keeps the existing CPU glyph + GPU copy evidence
+  but also records whether a GPU bitmap glyph raster launch plan is available.
+  The evidence still refuses to mark bitmap font production-ready until real
+  device execution/readback proves glyph pixels came from the GPU.
+- verify: Focused generated-dispatch and bitmap-font checks pass, and specs
+  pass: generated-kernel dispatch 23/23 and bitmap-font offload 3/3. Generated
+  manuals were refreshed under `doc/06_spec`. This moves bitmap-font offload
+  beyond copy/upload provenance without pretending that readback-verified
+  GPU-side glyph rasterization exists yet.

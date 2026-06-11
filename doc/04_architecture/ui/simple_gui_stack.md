@@ -289,9 +289,10 @@ Font offload evidence is intentionally split by font class:
 `src/lib/gc_async_mut/gpu/engine2d/vector_font_offload.spl` proves when vector
 glyph pixels have actually returned from a GPU path, while
 `src/lib/gc_async_mut/gpu/engine2d/bitmap_font_offload.spl` records the current
-bitmap-font state as CPU glyph preprocessing plus optional GPU copy/upload. Do
-not treat generated copy/upload evidence as GPU-side bitmap glyph
-rasterization.
+bitmap-font state as CPU glyph preprocessing plus optional GPU copy/upload and
+the `bitmap_glyph_raster` generated-kernel launch plan. Do not treat generated
+copy/upload or raster-plan evidence as GPU-side bitmap glyph rasterization
+until device execution and readback prove the glyph pixels came from the GPU.
 
 ### Event Target Translation
 

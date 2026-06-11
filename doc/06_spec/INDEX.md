@@ -12,9 +12,9 @@
 
 ---
 
-## Other (1 features)
+## Standard Library (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Simple Web Layout Child Index Specification](test/02_integration/rendering/simple_web_layout_child_index_spec.md) | Auto-generated | N/A | 2 | 0% | 0 lines |
+| [Bitmap Font Offload Specification](test/01_unit/lib/gpu/engine2d/bitmap_font_offload_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
 
