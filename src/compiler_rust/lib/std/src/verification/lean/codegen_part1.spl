@@ -8,20 +8,20 @@ use compiler_rust.lib.std.src.verification.lean.codegen.*
 # - Helper functions for regeneration scripts
 # - Integration with all submodules (types, expressions, traits, etc.)
 
-use verification.lean.emitter as emitter
-use verification.lean.types as types
-use verification.lean.expressions as expressions
-use verification.lean.naming as naming
-use verification.lean.functions as functions
-use verification.lean.traits as traits
-use verification.lean.memory_safety as memory_safety
-use verification.lean.verification_checker as checker
-use verification.lean.verification_diagnostics as diagnostics
-use verification.lean.runner as runner
-use verification.lean.lean_block as lean_block
-use verification.lean.proof_ref as proof_ref
-use verification.models.contracts as models_contracts
-use io.fs as fs
+use verification.lean.emitter.{LeanEmitter}
+use verification.lean.types
+use verification.lean.expressions.{translate_contract_expr}
+use verification.lean.naming
+use verification.lean.functions
+use verification.lean.traits
+use verification.lean.memory_safety
+use verification.lean.verification_checker
+use verification.lean.verification_diagnostics
+use verification.lean.runner
+use verification.lean.lean_block.{LeanBlock}
+use verification.lean.proof_ref.{CollisionError, ProofRefResolver}
+use verification.models.contracts.{FunctionContract}
+use io.fs.{create_dir_all, write_text}
 
 # Lean code generation options
 class LeanCodegenOptions:
@@ -148,7 +148,7 @@ class LeanCodegen:
     theorems: List<LeanTheorem>
     imports: List<text>
     raw_output: text  # For raw line output mode (string concatenation)
-    lean_blocks: List<lean_block.LeanBlock>  # Embedded lean{} blocks from source
+    lean_blocks: List<LeanBlock>  # Embedded lean{} blocks from source
 
     fn new(options: LeanCodegenOptions) -> LeanCodegen:
         LeanCodegen(options, [], [], [], [], ["Mathlib.Data.Nat.Basic"], "", [])
@@ -185,7 +185,7 @@ class LeanCodegen:
         self
 
     # Add an embedded lean{} block from source
-    me add_lean_block(block: lean_block.LeanBlock) -> LeanCodegen:
+    me add_lean_block(block: LeanBlock) -> LeanCodegen:
         self.lean_blocks = self.lean_blocks + [block]
         self
 
@@ -219,12 +219,12 @@ class LeanCodegen:
 
     # Check for theorem name collisions between structured theorems and lean{} blocks.
     # Returns CollisionErrors if any theorem name appears in both.
-    fn check_lean_block_collisions(self) -> List<proof_ref.CollisionError>:
+    fn check_lean_block_collisions(self) -> List<CollisionError>:
         var generated_names: List<text> = []
         for thm in self.theorems:
             generated_names = generated_names + [thm.name]
         val block_names = self.lean_block_theorem_names()
-        proof_ref.ProofRefResolver.check_collisions(generated_names, block_names)
+        ProofRefResolver.check_collisions(generated_names, block_names)
 
     # Raw line output methods for flexible code generation
     # All methods return self for method chaining
@@ -478,25 +478,25 @@ class LeanCodegen:
         result
 
     # Generate Lean code for a function contract
-    me generate_contract_theorems(func_name: text, contract: models_contracts.FunctionContract) -> LeanCodegen:
+    me generate_contract_theorems(func_name: text, contract: FunctionContract) -> LeanCodegen:
         # Generate precondition theorem
         for (i, clause) in contract.preconditions.enumerate():
             val theorem_name = "{func_name}_pre_{i}"
-            val statement = expressions.translate_contract_expr(clause.expr)
+            val statement = translate_contract_expr(clause.expr)
             val theorem = LeanTheorem.new(theorem_name, statement)
             self.add_theorem(theorem)
 
         # Generate postcondition theorems
         for (i, clause) in contract.postconditions.enumerate():
             val theorem_name = "{func_name}_post_{i}"
-            val statement = expressions.translate_contract_expr(clause.expr)
+            val statement = translate_contract_expr(clause.expr)
             val theorem = LeanTheorem.new(theorem_name, statement)
             self.add_theorem(theorem)
 
         # Generate invariant theorems
         for (i, clause) in contract.invariants.enumerate():
             val theorem_name = "{func_name}_inv_{i}"
-            val statement = expressions.translate_contract_expr(clause.expr)
+            val statement = translate_contract_expr(clause.expr)
             val theorem = LeanTheorem.new(theorem_name, statement)
             self.add_theorem(theorem)
 
@@ -504,7 +504,7 @@ class LeanCodegen:
 
     # Generate complete Lean module
     me generate() -> text:
-        var emit = emitter.LeanEmitter.new()
+        var emit = LeanEmitter.new()
 
         # Merge deduplicated lean{} block imports into the import list
         val extra_imports = self.deduplicated_lean_block_imports()
@@ -575,10 +575,10 @@ class LeanCodegen:
         val path = "{self.options.output_dir}/{filename}.lean"
 
         # Ensure output directory exists
-        fs.create_dir_all(self.options.output_dir)
+        create_dir_all(self.options.output_dir)
 
         # Write file
-        fs.write_text(path, content)
+        write_text(path, content)
 
 # Convenience function to generate Lean for a module
 fn generate_module(module_name: text, output_dir: text) -> LeanCodegen:

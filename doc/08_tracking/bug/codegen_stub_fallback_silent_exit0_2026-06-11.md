@@ -1,6 +1,6 @@
 # BUG: [CODEGEN-STUB-FALLBACK] silently replaces functions with empty stubs and exits 0
 
-Status: OPEN
+Status: FIXED (2026-06-11)
 
 **Date:** 2026-06-11
 **Status:** OPEN
@@ -29,4 +29,22 @@ binary silently does nothing where the stubbed function is called.
 ## Expected
 
 Unresolved rt_* symbols at codegen must fail the compile (non-zero exit) unless an
-explicit `--allow-stub-fallback` opt-in is given.
+explicit opt-in is given.
+
+## Fix
+
+**File:** `src/compiler_rust/compiler/src/codegen/common_backend.rs`
+**Site:** `compile_all_functions`, lines ~1434–1497 (the `failed_functions` branch)
+
+**Change:** Inverted the gate logic.
+- **Before:** default = emit stub silently; `SIMPLE_NO_STUB_FALLBACK=1` = hard error
+- **After:** default = hard error listing all failing function names; `SIMPLE_ALLOW_STUB_FALLBACK` (presence, any value) = old stub path with one warning line per stubbed function to stderr
+
+The escape hatch follows the repo convention `std::env::var_os("SIMPLE_...").is_some()`.
+
+**Tests added** (same file, `tests` module):
+- `stub_fallback_default_is_hard_error` — asserts `compile_all_functions` returns `Err` containing the function name when a body fails and `SIMPLE_ALLOW_STUB_FALLBACK` is unset
+- `stub_fallback_allowed_when_env_var_set` — asserts `compile_all_functions` returns `Ok` when `SIMPLE_ALLOW_STUB_FALLBACK=1`, confirming the escape hatch works
+
+**cargo check -p simple-compiler:** clean (0 new warnings/errors)
+**cargo test -p simple-compiler stub_fallback:** 3 passed, 0 failed (includes pre-existing `test_no_stub_fallback_rejects_unresolved_host_symbols` in `stubs.rs`, which is a separate linker-level gate and was unchanged)

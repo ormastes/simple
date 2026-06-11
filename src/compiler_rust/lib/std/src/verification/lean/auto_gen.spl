@@ -10,14 +10,14 @@
 #
 # Key principle: Generate scaffolding, not proofs. Never introduce `sorry` or `axiom`.
 
-use verification.lean.structure_gen as structure_gen
-use verification.lean.lookup_gen as lookup_gen
-use verification.lean.instantiation_gen as instantiation_gen
-use verification.lean.beq_gen as beq_gen
-use verification.lean.theorem_gen as theorem_gen
-use verification.lean.emitter as emitter
-use verification.lean.naming as naming
-use io.fs as fs
+use verification.lean.structure_gen.{AutoLeanMode, SimpleClassDef, SimpleEnumDef, SimpleEnumVariant, SimpleFieldDef, StructureGenerator}
+use verification.lean.lookup_gen.{LookupGenerator, RegistryDef}
+use verification.lean.instantiation_gen.{GenericTypeDef, InstantiationGenerator}
+use verification.lean.beq_gen.{BeqGenerator, BeqTypeDef, BeqVariant}
+use verification.lean.theorem_gen.{FunctionDef, TheoremGenerator, TheoremParam}
+use verification.lean.emitter
+use verification.lean.naming.{to_pascal_case}
+use io.fs.{create_dir_all, write_text}
 
 # Re-export AutoLeanMode for convenience
 # Note: Direct re-export via alias not supported; users should import from structure_gen directly
@@ -62,61 +62,61 @@ class AutoGenConfig:
 
 # Type registry for collecting types to generate
 class TypeRegistry:
-    classes: List<structure_gen.SimpleClassDef>
-    enums: List<structure_gen.SimpleEnumDef>
-    registry_types: List<lookup_gen.RegistryDef>
-    generic_types: List<instantiation_gen.GenericTypeDef>
-    beq_types: List<beq_gen.BeqTypeDef>
-    deterministic_funcs: List<theorem_gen.FunctionDef>
+    classes: List<SimpleClassDef>
+    enums: List<SimpleEnumDef>
+    registry_types: List<RegistryDef>
+    generic_types: List<GenericTypeDef>
+    beq_types: List<BeqTypeDef>
+    deterministic_funcs: List<FunctionDef>
 
     static fn new() -> TypeRegistry:
         TypeRegistry([], [], [], [], [], [])
 
     # Add a class for structure generation
-    me add_class(class_def: structure_gen.SimpleClassDef) -> TypeRegistry:
+    me add_class(class_def: SimpleClassDef) -> TypeRegistry:
         self.classes = self.classes + [class_def]
 
         # Auto-register for lookups if full mode
         if class_def.auto_lean_mode.generates_lookups():
-            val pascal_name = naming.to_pascal_case(class_def.name)
-            val registry = lookup_gen.RegistryDef.new(class_def.name)
+            val pascal_name = to_pascal_case(class_def.name)
+            val registry = RegistryDef.new(class_def.name)
             self.registry_types = self.registry_types + [registry]
 
         self
 
     # Add an enum for inductive generation
-    me add_enum(enum_def: structure_gen.SimpleEnumDef) -> TypeRegistry:
+    me add_enum(enum_def: SimpleEnumDef) -> TypeRegistry:
         self.enums = self.enums + [enum_def]
 
         # Auto-register for BEq if full mode
         if enum_def.auto_lean_mode.generates_beq():
-            var beq_def = beq_gen.BeqTypeDef.new(enum_def.name)
+            var beq_def = BeqTypeDef.new(enum_def.name)
             for variant in enum_def.variants:
                 var param_types: List<text> = []
                 for (_, ty) in variant.params:
                     param_types = param_types + [ty]
-                beq_def = beq_def.add_variant(beq_gen.BeqVariant.new(variant.name, param_types))
+                beq_def = beq_def.add_variant(BeqVariant.new(variant.name, param_types))
             self.beq_types = self.beq_types + [beq_def]
 
         self
 
     # Add a registry type for lookup generation
-    me add_registry(registry: lookup_gen.RegistryDef) -> TypeRegistry:
+    me add_registry(registry: RegistryDef) -> TypeRegistry:
         self.registry_types = self.registry_types + [registry]
         self
 
     # Add a generic type for instantiation generation
-    me add_generic_type(generic_def: instantiation_gen.GenericTypeDef) -> TypeRegistry:
+    me add_generic_type(generic_def: GenericTypeDef) -> TypeRegistry:
         self.generic_types = self.generic_types + [generic_def]
         self
 
     # Add a type for BEq generation
-    me add_beq_type(beq_def: beq_gen.BeqTypeDef) -> TypeRegistry:
+    me add_beq_type(beq_def: BeqTypeDef) -> TypeRegistry:
         self.beq_types = self.beq_types + [beq_def]
         self
 
     # Add a function for determinism theorem generation
-    me add_deterministic_func(func: theorem_gen.FunctionDef) -> TypeRegistry:
+    me add_deterministic_func(func: FunctionDef) -> TypeRegistry:
         self.deterministic_funcs = self.deterministic_funcs + [func]
         self
 
@@ -162,7 +162,7 @@ class AutoGenerator:
 
     # Generate Generated_Types.lean
     fn generate_types_file() -> text:
-        var struct_gen = structure_gen.StructureGenerator.new()
+        var struct_gen = StructureGenerator.new()
         val types_content = struct_gen.generate_all(self.registry.classes, self.registry.enums)
 
         var out = self.generate_file_header("Types")
@@ -171,11 +171,11 @@ class AutoGenerator:
 
     # Generate Generated_Lookups.lean
     fn generate_lookups_file() -> text:
-        var lookup_gen_inst = lookup_gen.LookupGenerator.new()
+        var lookup_gen_inst = LookupGenerator.new()
         val lookups_content = lookup_gen_inst.generate_all(self.registry.registry_types)
 
         # Generate instantiation functions
-        var inst_gen = instantiation_gen.InstantiationGenerator.new()
+        var inst_gen = InstantiationGenerator.new()
         val inst_content = inst_gen.generate_all(self.registry.generic_types)
 
         var out = self.generate_file_header("Lookups")
@@ -186,7 +186,7 @@ class AutoGenerator:
 
     # Generate Generated_BEq.lean
     fn generate_beq_file() -> text:
-        var beq_gen_inst = beq_gen.BeqGenerator.new()
+        var beq_gen_inst = BeqGenerator.new()
         val beq_content = beq_gen_inst.generate_all(self.registry.beq_types)
 
         var out = self.generate_file_header("BEq")
@@ -196,7 +196,7 @@ class AutoGenerator:
 
     # Generate Generated_Theorems.lean
     fn generate_theorems_file() -> text:
-        var theorem_gen_inst = theorem_gen.TheoremGenerator.new()
+        var theorem_gen_inst = TheoremGenerator.new()
 
         # Generate determinism theorems
         val det_content = theorem_gen_inst.generate_all_determinism(self.registry.deterministic_funcs)
@@ -239,11 +239,11 @@ class AutoGenerator:
         val files = self.generate_all()
 
         # Ensure output directory exists
-        fs.create_dir_all(self.config.output_dir)
+        create_dir_all(self.config.output_dir)
 
         for (filename, content) in files:
             val path = "{self.config.output_dir}/{filename}"
-            fs.write_text(path, content)
+            write_text(path, content)
             self.generated_files = self.generated_files + [path]
 
         true
@@ -262,28 +262,28 @@ class AutoGenBuilder:
 
     # Add a class with fields
     me add_class(name: text, fields: List<(text, text)>) -> AutoGenBuilder:
-        var class_def = structure_gen.SimpleClassDef.new(name)
+        var class_def = SimpleClassDef.new(name)
         for (field_name, field_type) in fields:
-            val field = structure_gen.SimpleFieldDef.new(field_name, field_type)
+            val field = SimpleFieldDef.new(field_name, field_type)
             class_def = class_def.add_field(field)
         self.generator.registry = self.generator.registry.add_class(class_def)
         self
 
     # Add a class with mode
-    me add_class_with_mode(name: text, fields: List<(text, text)>, mode: structure_gen.AutoLeanMode) -> AutoGenBuilder:
-        var class_def = structure_gen.SimpleClassDef.new(name)
+    me add_class_with_mode(name: text, fields: List<(text, text)>, mode: AutoLeanMode) -> AutoGenBuilder:
+        var class_def = SimpleClassDef.new(name)
         class_def = class_def.with_mode(mode)
         for (field_name, field_type) in fields:
-            val field = structure_gen.SimpleFieldDef.new(field_name, field_type)
+            val field = SimpleFieldDef.new(field_name, field_type)
             class_def = class_def.add_field(field)
         self.generator.registry = self.generator.registry.add_class(class_def)
         self
 
     # Add an enum with variants
     me add_enum(name: text, variants: List<(text, List<text>)>) -> AutoGenBuilder:
-        var enum_def = structure_gen.SimpleEnumDef.new(name)
+        var enum_def = SimpleEnumDef.new(name)
         for (variant_name, param_types) in variants:
-            var variant = structure_gen.SimpleEnumVariant.new(variant_name)
+            var variant = SimpleEnumVariant.new(variant_name)
             for (i, ty) in param_types.enumerate():
                 variant = variant.add_param("arg{i}", ty)
             enum_def = enum_def.add_variant(variant)
@@ -292,7 +292,7 @@ class AutoGenBuilder:
 
     # Add a generic type for instantiation
     me add_generic(name: text, substitutable_fields: List<text>) -> AutoGenBuilder:
-        var def = instantiation_gen.GenericTypeDef.new(name)
+        var def = GenericTypeDef.new(name)
         for field in substitutable_fields:
             def = def.add_nested_field(field)
         self.generator.registry = self.generator.registry.add_generic_type(def)
@@ -300,9 +300,9 @@ class AutoGenBuilder:
 
     # Add a deterministic function
     me add_deterministic(name: text, params: List<(text, text)>, result_type: text) -> AutoGenBuilder:
-        var func = theorem_gen.FunctionDef.new(name)
+        var func = FunctionDef.new(name)
         for (param_name, param_type) in params:
-            func = func.add_param(theorem_gen.TheoremParam.explicit(param_name, param_type))
+            func = func.add_param(TheoremParam.explicit(param_name, param_type))
         func = func.with_option_return(result_type)
         self.generator.registry = self.generator.registry.add_deterministic_func(func)
         self

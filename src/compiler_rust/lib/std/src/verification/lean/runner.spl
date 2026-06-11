@@ -6,8 +6,8 @@
 # - Parsing Lean output for errors
 # - Tracking proof status
 
-use io.fs as fs
-use host.process as process
+use io.fs.{create_dir_all, write_text}
+use host.process.{monotonic_ms, ProcessResult, run}
 
 # Result of running Lean on a file
 class LeanCheckResult:
@@ -149,25 +149,25 @@ class LeanRunner:
 
     # Ensure the output directory exists
     fn ensure_output_dir():
-        fs.create_dir_all(self.output_dir)
+        create_dir_all(self.output_dir)
 
     # Write a Lean file to the output directory
     fn write_lean_file(name: text, content: text) -> text:
         self.ensure_output_dir()
         val file_path = "{self.output_dir}/{name}.lean"
-        fs.write_text(file_path, content)
+        write_text(file_path, content)
         if self.verbose:
             print("[lean] Wrote {file_path}")
         file_path
 
     # Check if Lean is available
     fn is_lean_available() -> bool:
-        val result = process.run(self.lean_path, ["--version"])
+        val result = run(self.lean_path, ["--version"])
         result.success
 
     # Get Lean version
     fn lean_version() -> Option<text>:
-        val result = process.run(self.lean_path, ["--version"])
+        val result = run(self.lean_path, ["--version"])
         if result.success:
             Some(result.stdout.trim())
         else:
@@ -178,7 +178,7 @@ class LeanRunner:
         if self.verbose:
             print("[lean] Checking {file}")
 
-        val result = process.run(self.lean_path, [file])
+        val result = run(self.lean_path, [file])
         self.parse_output(file, result)
 
     # Run Lean on generated content
@@ -187,7 +187,7 @@ class LeanRunner:
         self.check_file(file_path)
 
     # Parse Lean output
-    fn parse_output(file: text, result: process.ProcessResult) -> LeanCheckResult:
+    fn parse_output(file: text, result: ProcessResult) -> LeanCheckResult:
         val stdout = result.stdout
         val stderr = result.stderr
 
@@ -211,7 +211,7 @@ class LeanRunner:
         if self.verbose:
             print("[lean] Running lake build in {project_dir}")
 
-        val result = process.run("lake", ["build"], project_dir)
+        val result = run("lake", ["build"], project_dir)
         if not result.success and self.verbose:
             print("[lean] Lake build failed:")
             print(result.stderr)
@@ -223,18 +223,18 @@ class LeanRunner:
     fn check_with_toolchain(file: text) -> StructuredProofResult:
         use verification.toolchain as toolchain
 
-        val start_ms = process.monotonic_ms()
+        val start_ms = monotonic_ms()
 
         # Validate toolchain
         val tc_info = toolchain.ToolchainInfo.detect()
         if not tc_info.lean_available:
-            val elapsed = process.monotonic_ms() - start_ms
+            val elapsed = monotonic_ms() - start_ms
             return StructuredProofResult.env_error(
                 toolchain.ToolchainError.LeanNotFound.to_string(), elapsed)
 
         # Run the proof check
         val check_result = self.check_file(file)
-        val elapsed = process.monotonic_ms() - start_ms
+        val elapsed = monotonic_ms() - start_ms
 
         # Parse into structured result
         val lean_ver = tc_info.lean_version ?? "unknown"

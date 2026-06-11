@@ -8,20 +8,20 @@ use compiler_rust.lib.std.src.verification.lean.codegen.*
 # - Helper functions for regeneration scripts
 # - Integration with all submodules (types, expressions, traits, etc.)
 
-use verification.lean.emitter as emitter
-use verification.lean.types as types
-use verification.lean.expressions as expressions
-use verification.lean.naming as naming
-use verification.lean.functions as functions
-use verification.lean.traits as traits
-use verification.lean.memory_safety as memory_safety
-use verification.lean.verification_checker as checker
-use verification.lean.verification_diagnostics as diagnostics
-use verification.lean.runner as runner
-use verification.lean.lean_block as lean_block
-use verification.lean.proof_ref as proof_ref
-use verification.models.contracts as models_contracts
-use io.fs as fs
+use verification.lean.emitter
+use verification.lean.types.{LeanType, TypeTranslator}
+use verification.lean.expressions
+use verification.lean.naming
+use verification.lean.functions
+use verification.lean.traits.{LeanBinding, LeanClass, LeanInstance, LeanMethodSig}
+use verification.lean.memory_safety.{generate_memory_safety_lean}
+use verification.lean.verification_checker.{CheckResult, validate_verified_function}
+use verification.lean.verification_diagnostics
+use verification.lean.runner.{check_lean_file, is_lean_installed, LeanCheckResult}
+use verification.lean.lean_block
+use verification.lean.proof_ref
+use verification.models.contracts
+use io.fs.{create_dir_all, write_text}
 
 # Lean code generation options
 fn make_bool_type() -> text:
@@ -135,7 +135,7 @@ fn generate_verified_module(
 
     # Add memory safety section if requested
     if include_memory_safety:
-        val mem_code = memory_safety.generate_memory_safety_lean(module_name)
+        val mem_code = generate_memory_safety_lean(module_name)
         codegen = codegen.add_raw_line("-- Memory Safety Verification")
         codegen = codegen.add_raw_line(mem_code)
 
@@ -148,8 +148,8 @@ fn check_for_violations(
     has_termination: bool,
     called_io_functions: List<text>,
     has_unsafe_ops: bool
-) -> checker.CheckResult:
-    checker.validate_verified_function(
+) -> CheckResult:
+    validate_verified_function(
         func_name,
         is_recursive,
         has_termination,
@@ -158,19 +158,19 @@ fn check_for_violations(
     )
 
 # Run Lean to check generated code
-fn verify_lean_file(file_path: text) -> runner.LeanCheckResult:
-    runner.check_lean_file(file_path)
+fn verify_lean_file(file_path: text) -> LeanCheckResult:
+    check_lean_file(file_path)
 
 # Check if Lean toolchain is available
 fn is_lean_available() -> bool:
-    runner.is_lean_installed()
+    is_lean_installed()
 
 # Generate and verify a complete module
 fn generate_and_verify(
     module_name: text,
     output_dir: text,
     content_builder: fn(LeanCodegen) -> LeanCodegen
-) -> (text, Option<runner.LeanCheckResult>):
+) -> (text, Option<LeanCheckResult>):
     var options = LeanCodegenOptions.new()
     options = options.with_module_name(module_name)
     options = options.with_output_dir(output_dir)
@@ -184,8 +184,8 @@ fn generate_and_verify(
 
     # Write to file
     val file_path = "{output_dir}/{module_name}.lean"
-    fs.create_dir_all(output_dir)
-    fs.write_text(file_path, lean_code)
+    create_dir_all(output_dir)
+    write_text(file_path, lean_code)
 
     # Try to verify if Lean is available
     if is_lean_available():
@@ -199,28 +199,28 @@ fn generate_and_verify(
 # =============================================================================
 
 # Build a type class from trait definition
-fn build_type_class(name: text, type_param: text, methods: List<(text, List<text>, text)>) -> traits.LeanClass:
-    var cls = traits.LeanClass.new(name)
+fn build_type_class(name: text, type_param: text, methods: List<(text, List<text>, text)>) -> LeanClass:
+    var cls = LeanClass.new(name)
     cls = cls.with_type_param(type_param)
     for (method_name, param_types, ret_type) in methods:
-        var params: List<types.LeanType> = []
+        var params: List<LeanType> = []
         for pt in param_types:
-            params = params + [types.TypeTranslator.translate_primitive(pt)]
-        val ret = types.TypeTranslator.translate_primitive(ret_type)
-        cls = cls.add_method(traits.LeanMethodSig.create(method_name, params, ret))
+            params = params + [TypeTranslator.translate_primitive(pt)]
+        val ret = TypeTranslator.translate_primitive(ret_type)
+        cls = cls.add_method(LeanMethodSig.create(method_name, params, ret))
     cls
 
 # Build an instance
-fn build_instance(class_name: text, for_type: text, methods: List<(text, text)>) -> traits.LeanInstance:
-    val ty = types.TypeTranslator.translate_primitive(for_type)
-    var inst = traits.LeanInstance.new(class_name, ty)
+fn build_instance(class_name: text, for_type: text, methods: List<(text, text)>) -> LeanInstance:
+    val ty = TypeTranslator.translate_primitive(for_type)
+    var inst = LeanInstance.new(class_name, ty)
     for (name, body) in methods:
         inst = inst.add_method(name, body)
     inst
 
 # Build a binding for static dispatch
-fn build_binding(interface_name: text, impl_type: text) -> traits.LeanBinding:
-    val ty = types.TypeTranslator.translate_primitive(impl_type)
-    traits.LeanBinding.new(interface_name, ty)
+fn build_binding(interface_name: text, impl_type: text) -> LeanBinding:
+    val ty = TypeTranslator.translate_primitive(impl_type)
+    LeanBinding.new(interface_name, ty)
 
 # Export all public classes and functions
