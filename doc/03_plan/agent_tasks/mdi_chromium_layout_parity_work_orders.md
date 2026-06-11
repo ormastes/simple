@@ -187,6 +187,15 @@ Prove and harden the requested GUI stack:
   `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`;
   result `status=pass`, `pass_count=21`, `fail_count=0`,
   `blur_or_tolerance_used=false`.
+- Focused flex geometry follow-up (2026-06-11):
+  `scripts/check/check-electron-html-compat-geometry-evidence.shs` was run for
+  `HTML_COMPAT_GEOMETRY_FIXTURE=18_flex_grow_weights` with Electron/Chromium
+  geometry capture. Report:
+  `doc/09_report/electron_html_compat_geometry_evidence_18_flex_grow_weights_2026-06-11.md`;
+  result `report_status=layout_match`, `mismatch_count=0`. The older pixel
+  baseline tree still has no checked-in directories for flex fixtures 18-24;
+  tracked separately in
+  `doc/08_tracking/bug/html_compat_flex_pixel_baselines_missing_2026-06-11.md`.
 - Famous-site corpus div geometry evidence (2026-06-11):
   `test/03_system/gui/wm_compare/structural_layout_report_spec.spl` now checks
   `build_site_corpus_div_geometry_report` for `site_0_google` and
