@@ -15,6 +15,7 @@ FIXTURES="${HTML_COMPAT_GEOMETRY_FIXTURES:-02_block_boxes 03_list 04_button 05_t
 BASE_HTML_PATH="test/fixtures/html_compat/02_block_boxes.html"
 SUMMARY="$BUILD_DIR/summary.env"
 ROWS="$BUILD_DIR/rows.md"
+SUBPIXEL_ROWS="$BUILD_DIR/subpixel_rows.md"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$SUMMARY" "$ROWS" "$REPORT_PATH"
@@ -38,6 +39,51 @@ fail_unavailable() {
     } >"$REPORT_PATH"
     cat "$SUMMARY"
     exit 1
+}
+
+subpixel_summary() {
+    geometry_path="$1"
+    if [ ! -s "$geometry_path" ]; then
+        printf '%s\n' "0|0.000|"
+        return
+    fi
+    python3 - "$geometry_path" <<'PY'
+import json
+import math
+import sys
+
+path = sys.argv[1]
+try:
+    data = json.load(open(path, "r", encoding="utf-8"))
+except Exception:
+    print("0|0.000|")
+    raise SystemExit(0)
+
+fields = ("rectLeft", "rectTop", "rectWidth", "rectHeight")
+count = 0
+max_residue = 0.0
+labels = []
+for item in data.get("items", []):
+    item_has_fraction = False
+    for field in fields:
+        raw = item.get(field, "")
+        try:
+            value = float(raw)
+        except Exception:
+            continue
+        residue = abs(value - round(value))
+        residue = min(residue, 1.0 - residue)
+        if residue > 0.0005:
+            item_has_fraction = True
+            max_residue = max(max_residue, residue)
+    if item_has_fraction:
+        count += 1
+        label = str(item.get("label", ""))
+        if label:
+            labels.append(label)
+
+print(f"{count}|{max_residue:.3f}|{','.join(labels[:4])}")
+PY
 }
 
 command -v node >/dev/null 2>&1 || fail_unavailable "node-not-found"
@@ -72,6 +118,10 @@ fixture_count=0
     echo "| Fixture | Status | Mismatches | Geometry | Structural report |"
     echo "|---------|--------|-----------:|----------|-------------------|"
 } >"$ROWS"
+{
+    echo "| Fixture | Fractional boxes | Max fractional residue | Labels |"
+    echo "|---------|-----------------:|-----------------------:|--------|"
+} >"$SUBPIXEL_ROWS"
 
 for fixture in $FIXTURES; do
     fixture_count=$((fixture_count + 1))
@@ -85,6 +135,9 @@ for fixture in $FIXTURES; do
 
     status=fail
     mismatch_count="-"
+    fractional_boxes=0
+    max_fractional_residue="0.000"
+    fractional_labels=""
     if [ "$html_path" = "" ]; then
         reason="missing-fixture"
         echo "fixture=$fixture status=fail reason=$reason" >"$simple_log"
@@ -142,6 +195,12 @@ for fixture in $FIXTURES; do
             fi
         fi
     fi
+    if [ -s "$geometry_json" ]; then
+        subpixel_line="$(subpixel_summary "$geometry_json")"
+        fractional_boxes="$(printf '%s\n' "$subpixel_line" | cut -d '|' -f 1)"
+        max_fractional_residue="$(printf '%s\n' "$subpixel_line" | cut -d '|' -f 2)"
+        fractional_labels="$(printf '%s\n' "$subpixel_line" | cut -d '|' -f 3)"
+    fi
 
     if [ "$status" = "pass" ]; then
         pass_count=$((pass_count + 1))
@@ -149,6 +208,7 @@ for fixture in $FIXTURES; do
         fail_count=$((fail_count + 1))
     fi
     echo "| \`$fixture\` | $status | $mismatch_count | \`$geometry_json\` | \`$structural_sdn\` |" >>"$ROWS"
+    echo "| \`$fixture\` | $fractional_boxes | $max_fractional_residue | \`$fractional_labels\` |" >>"$SUBPIXEL_ROWS"
 done
 
 overall=pass
@@ -193,6 +253,14 @@ fi
     echo "## Rows"
     echo
     cat "$ROWS"
+    echo
+    echo "## Subpixel Diagnostics"
+    echo
+    echo "Fractional boxes are Chrome boxes whose captured client rect has a"
+    echo "non-integer left, top, width, or height. Max fractional residue is"
+    echo "the largest distance from an integer CSS pixel among those fields."
+    echo
+    cat "$SUBPIXEL_ROWS"
 } >"$REPORT_PATH"
 
 cat "$SUMMARY"
