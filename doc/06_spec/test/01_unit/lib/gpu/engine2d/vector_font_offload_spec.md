@@ -27,7 +27,7 @@ vector_font_offload_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -244,6 +244,56 @@ expect(evidence.diagnostic_text()).to_contain("gpu_glyph_readback_matched=true")
 
 </details>
 
+#### uses the Engine2D font offload order before vector glyph readback proof
+
+- accel
+- accel
+   - Expected: evidence.backend_name equals `rocm`
+   - Expected: evidence.submit.request.plan.compute_target equals `hip`
+   - Expected: evidence.execution.device_executed is true
+   - Expected: evidence.production_ready is true
+   - Expected: evidence.status_code equals `vector-font-glyph-readback-matched`
+   - Expected: fallback.backend_name equals `cpu`
+   - Expected: fallback.execution.device_executed is false
+   - Expected: fallback.production_ready is false
+   - Expected: fallback.status_code equals `vector-font-glyph-not-submitted`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val pixels = [0u8, 24u8, 255u8, 6u8]
+val checksum = vector_font_glyph_pixels_checksum(pixels)
+val evidence = vector_font_preferred_glyph_readback_evidence(
+    ["vulkan", "amd-hip", "cpu"],
+    4, 1, 4096, 7, 11, true, true, true,
+    accel(1, 0, 0, 0, 1, 4, "rocm-vector-font-glyph-pixels-returned"),
+    pixels, checksum
+)
+val fallback = vector_font_preferred_glyph_readback_evidence(
+    ["unknown"],
+    4, 1, 4096, 7, 11, true, true, true,
+    accel(1, 0, 0, 1, 1, 4, "no-known-vector-font-readback-backend"),
+    pixels, checksum
+)
+
+expect(evidence.backend_name).to_equal("rocm")
+expect(evidence.submit.request.plan.compute_target).to_equal("hip")
+expect(evidence.execution.device_executed).to_equal(true)
+expect(evidence.production_ready).to_equal(true)
+expect(evidence.status_code).to_equal("vector-font-glyph-readback-matched")
+expect(fallback.backend_name).to_equal("cpu")
+expect(fallback.execution.device_executed).to_equal(false)
+expect(fallback.production_ready).to_equal(false)
+expect(fallback.status_code).to_equal("vector-font-glyph-not-submitted")
+```
+
+</details>
+
 #### keeps vector font glyph readback incomplete without GPU returned glyph evidence
 
 - accel
@@ -299,8 +349,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

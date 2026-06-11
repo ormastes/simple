@@ -27,7 +27,7 @@ bitmap_font_offload_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -154,6 +154,32 @@ expect(evidence.status_code).to_equal("gpu-glyph-raster-readback-matched")
 
 </details>
 
+#### uses the Engine2D font offload order before bitmap glyph readback proof
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val expected_checksum = bitmap_glyph_raster_mask_checksum([1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32)
+val evidence = bitmap_glyph_raster_preferred_mask_readback_evidence(["vulkan", "amd-hip", "cpu"], [1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32, 4096, 7, 11, true, true, true, expected_checksum)
+val fallback = bitmap_glyph_raster_preferred_mask_readback_evidence(["unknown"], [1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32, 4096, 7, 11, true, true, true, expected_checksum)
+
+expect(evidence.backend_name).to_equal("rocm")
+expect(evidence.submit.request.plan.compute_target).to_equal("hip")
+expect(evidence.execution.device_executed).to_equal(true)
+expect(evidence.production_ready).to_equal(true)
+expect(evidence.status_code).to_equal("gpu-glyph-raster-readback-matched")
+expect(fallback.backend_name).to_equal("cpu")
+expect(fallback.execution.device_executed).to_equal(false)
+expect(fallback.production_ready).to_equal(false)
+expect(fallback.status_code).to_equal("gpu-glyph-raster-not-submitted")
+```
+
+</details>
+
 #### keeps mask-derived bitmap glyph raster evidence incomplete on invalid masks
 
 <details>
@@ -193,8 +219,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -132,11 +132,12 @@ The Simple web renderer has two code paths:
   (Metal, CUDA, ROCm/HIP, Qualcomm, Vulkan, DirectX, OpenCL, OpenGL, Intel,
   WebGPU, CPU SIMD, software, CPU) before building evidence, and fall back to
   explicit CPU evidence when no candidate maps to a supported lane. Use
-  `vector_font_glyph_readback_evidence(...)` for device samples: it derives the
-  expected checksum from returned glyph alpha pixels and only marks vector font
-  readback production-ready when GPU-returned glyph counters are present and
+  `vector_font_preferred_glyph_readback_evidence(...)` for device samples:
+  it resolves the backend from the same preferred lane order before calling
+  `vector_font_glyph_readback_evidence(...)`, then marks vector font readback
+  production-ready only when GPU-returned glyph counters are present and
   checksum-matched device readback succeeds. `bitmap_font_offload.spl`
-  records the current bitmap-font path as CPU glyph preprocessing plus optional
+  records the bitmap-font path as CPU glyph preprocessing plus optional
   GPU copy/upload, plus the typed `bitmap_glyph_raster` generated-kernel launch
   plan. The portable compiler emitter and the CUDA/OpenCL/HIP Engine2D paths
   expose `simple_2d_bitmap_glyph_raster_u32`; CUDA routes the generated
@@ -147,11 +148,12 @@ The Simple web renderer has two code paths:
   glyph mask to the expected color/zero output and
   `bitmap_glyph_raster_checksum(...)` derives the expected checksum used by
   `bitmap_glyph_raster_readback_evidence(...)`.
-  `bitmap_glyph_raster_mask_readback_evidence(...)` is the preferred device
-  sample wrapper because it uses `bitmap_glyph_raster_mask_checksum(...)` to
-  derive the expected checksum directly from the glyph mask and color, avoiding
-  a temporary expected-pixel allocation and avoiding caller-supplied expected
-  values. That readback wrapper is the production proof gate: it only marks
+  `bitmap_glyph_raster_preferred_mask_readback_evidence(...)` is the preferred
+  device sample wrapper; it applies the same Engine2D lane order before dispatch,
+  then invokes `bitmap_glyph_raster_mask_readback_evidence(...)`, which uses
+  `bitmap_glyph_raster_mask_checksum(...)` to derive expected checksum from the
+  glyph mask and color (avoids temporary expected-pixel arrays and caller-supplied
+  expected values). That readback wrapper is the production proof gate: it only marks
   bitmap glyph rasterization ready after generated-kernel submit and
   checksum-matched device readback.
 - **No anti-aliasing**: Binary black/white pixels vs Chrome's subpixel AA.

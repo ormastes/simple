@@ -17,6 +17,11 @@ Updated: 2026-06-11
   backend candidates before building typed evidence. Evidence:
   `vector_font_offload_spec.spl` and `bitmap_font_offload_spec.spl` cover ROCm
   alias selection before Vulkan and explicit CPU fallback behavior.
+- this slice -- preferred font readback evidence wrappers: added
+  `vector_font_preferred_glyph_readback_evidence(...)` and
+  `bitmap_glyph_raster_preferred_mask_readback_evidence(...)` so glyph readback
+  evidence now applies Engine2D font offload lane preference before submit/readback
+  classification.
 - `275a221f5d` -- production GUI web parity render path: replaced O(n^2)
   distinct-color scan with dictionary membership, reused deterministic parity
   reports, skipped Metal fallback rerender/compare on software hosts, and added
@@ -35,7 +40,8 @@ Updated: 2026-06-11
    - Update plan/spec references to point to the new evidence.
 2. Provide GPU/font offload proof
    - Demonstrate measured proof of real GPU/font offload path behavior or explicit typed unavailability.
-   - Ensure evidence includes device submit/readback behavior after the preferred-backend decision path.
+   - Ensure device submit/readback evidence uses preferred glyph readback wrappers after
+     candidate ordering.
 3. Execute focused pure Simple GUI text/layout optimization pass
    - Target isolated hot-path opportunities in text layout, line width handling, and browser text path.
    - Keep changes small and attributable with before/after measurements.

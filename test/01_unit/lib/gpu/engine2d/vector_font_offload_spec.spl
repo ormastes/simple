@@ -1,7 +1,7 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/vector_font_offload.spl 90%
 # @tag: unit, gpu, engine2d, vector-font
 
-use std.gpu.engine2d.vector_font_offload.{vector_font_glyph_pixels_checksum, vector_font_glyph_readback_evidence, vector_font_offload_evidence, vector_font_preferred_offload_evidence}
+use std.gpu.engine2d.vector_font_offload.{vector_font_glyph_pixels_checksum, vector_font_glyph_readback_evidence, vector_font_offload_evidence, vector_font_preferred_offload_evidence, vector_font_preferred_glyph_readback_evidence}
 use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
 
 fn accel(attempts: i64, cuda_hits: i64, opencl_hits: i64, cpu_hits: i64, returned_glyphs: i64, returned_pixels: i64, reason: text) -> VectorFontAcceleratorStats:
@@ -103,6 +103,32 @@ describe "Engine2D vector font offload evidence":
         expect(evidence.production_ready).to_equal(true)
         expect(evidence.status_code).to_equal("vector-font-glyph-readback-matched")
         expect(evidence.diagnostic_text()).to_contain("gpu_glyph_readback_matched=true")
+
+    it "uses the Engine2D font offload order before vector glyph readback proof":
+        val pixels = [0u8, 24u8, 255u8, 6u8]
+        val checksum = vector_font_glyph_pixels_checksum(pixels)
+        val evidence = vector_font_preferred_glyph_readback_evidence(
+            ["vulkan", "amd-hip", "cpu"],
+            4, 1, 4096, 7, 11, true, true, true,
+            accel(1, 0, 0, 0, 1, 4, "rocm-vector-font-glyph-pixels-returned"),
+            pixels, checksum
+        )
+        val fallback = vector_font_preferred_glyph_readback_evidence(
+            ["unknown"],
+            4, 1, 4096, 7, 11, true, true, true,
+            accel(1, 0, 0, 1, 1, 4, "no-known-vector-font-readback-backend"),
+            pixels, checksum
+        )
+
+        expect(evidence.backend_name).to_equal("rocm")
+        expect(evidence.submit.request.plan.compute_target).to_equal("hip")
+        expect(evidence.execution.device_executed).to_equal(true)
+        expect(evidence.production_ready).to_equal(true)
+        expect(evidence.status_code).to_equal("vector-font-glyph-readback-matched")
+        expect(fallback.backend_name).to_equal("cpu")
+        expect(fallback.execution.device_executed).to_equal(false)
+        expect(fallback.production_ready).to_equal(false)
+        expect(fallback.status_code).to_equal("vector-font-glyph-not-submitted")
 
     it "keeps vector font glyph readback incomplete without GPU returned glyph evidence":
         val pixels = [0u8, 24u8, 255u8, 6u8]

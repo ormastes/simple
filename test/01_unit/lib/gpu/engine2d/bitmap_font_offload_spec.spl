@@ -1,7 +1,7 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/bitmap_font_offload.spl 90%
 # @tag: unit, gpu, engine2d, bitmap-font
 
-use std.gpu.engine2d.bitmap_font_offload.{bitmap_font_offload_evidence, bitmap_font_preferred_offload_evidence, bitmap_glyph_raster_checksum, bitmap_glyph_raster_expected_pixels, bitmap_glyph_raster_mask_checksum, bitmap_glyph_raster_mask_readback_evidence}
+use std.gpu.engine2d.bitmap_font_offload.{bitmap_font_offload_evidence, bitmap_font_preferred_offload_evidence, bitmap_glyph_raster_checksum, bitmap_glyph_raster_expected_pixels, bitmap_glyph_raster_mask_checksum, bitmap_glyph_raster_mask_readback_evidence, bitmap_glyph_raster_preferred_mask_readback_evidence}
 
 describe "Engine2D bitmap font offload evidence":
 
@@ -65,6 +65,21 @@ describe "Engine2D bitmap font offload evidence":
         expect(evidence.gpu_glyph_rasterized).to_equal(true)
         expect(evidence.production_ready).to_equal(true)
         expect(evidence.status_code).to_equal("gpu-glyph-raster-readback-matched")
+
+    it "uses the Engine2D font offload order before bitmap glyph readback proof":
+        val expected_checksum = bitmap_glyph_raster_mask_checksum([1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32)
+        val evidence = bitmap_glyph_raster_preferred_mask_readback_evidence(["vulkan", "amd-hip", "cpu"], [1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32, 4096, 7, 11, true, true, true, expected_checksum)
+        val fallback = bitmap_glyph_raster_preferred_mask_readback_evidence(["unknown"], [1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32, 4096, 7, 11, true, true, true, expected_checksum)
+
+        expect(evidence.backend_name).to_equal("rocm")
+        expect(evidence.submit.request.plan.compute_target).to_equal("hip")
+        expect(evidence.execution.device_executed).to_equal(true)
+        expect(evidence.production_ready).to_equal(true)
+        expect(evidence.status_code).to_equal("gpu-glyph-raster-readback-matched")
+        expect(fallback.backend_name).to_equal("cpu")
+        expect(fallback.execution.device_executed).to_equal(false)
+        expect(fallback.production_ready).to_equal(false)
+        expect(fallback.status_code).to_equal("gpu-glyph-raster-not-submitted")
 
     it "keeps mask-derived bitmap glyph raster evidence incomplete on invalid masks":
         val evidence = bitmap_glyph_raster_mask_readback_evidence("cuda", [1u32], 2, 2, 0xff224466u32, 4096, 7, 11, true, true, true, 999)
