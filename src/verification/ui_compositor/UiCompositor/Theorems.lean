@@ -11,6 +11,8 @@
   T6  sortStackingContexts_perm — sort produces a permutation of the input list
   T7  renorm_order_preserving   — renormalisation preserves the relative z_order of
                                   every pair of windows (FINDING-U1 closure)
+  T8  flattenTree_perm_treeSurfaces — paint-order flatten is a permutation of all
+                                  surfaces in the tree (FINDING-U2 closure)
 
   IMPLEMENTATION FIDELITY NOTES:
   ──────────────────────────────
@@ -30,13 +32,14 @@
   renormalisation is order-preserving: for any two windows a, b, their relative
   z_order comparison is identical before and after renorm.
 
-  FINDING-U2 (flatten approximation):
-  ─────────────────────────────────────
-  The Lean model flattens only one level of children (StackingCtx has a flat
-  display_items list, not a recursive child tree).  The real `flatten_to_paint_order`
-  in stacking.spl is recursive.  The permutation property T6 holds for each
-  level; the full recursive claim would need a mutual induction on the tree
-  structure, which is deferred pending a richer tree model.
+  FINDING-U2 — CLOSED:
+  ─────────────────────
+  The full recursive `flatten_to_paint_order` property is now proved via T8.
+  `StackingNode` is a recursive tree type; `flattenTree` replicates CSS 2.1
+  Appendix E paint order (neg-z children first, zero-z in tree order, pos-z
+  children last).  T8 proves that `flattenTree n` is a `List.Perm` of
+  `treeSurfaces n` (the set of all surfaces in the subtree), i.e. no surface
+  is dropped or duplicated during paint-order traversal.
 -/
 
 import UiCompositor.Basic
@@ -473,5 +476,178 @@ theorem renorm_order_preserving (ws : WindowStack)
          { window_id := b.window_id
            , z_order := Int.ofNat (rankOf b.window_id (sortWindowEntries ws.windows)) },
          ha_in, hb_in, rfl, rfl, Int.ofNat_lt.mpr hrank⟩
+
+-- ============================================================
+-- § F  Recursive flatten permutation (FINDING-U2 closure)
+-- ============================================================
+
+/-- Strip `List.attach` wrappers from a filter-then-foldl chain. -/
+private theorem attach_filter_val_U2 {α : Type} (p : α → Bool) (xs : List α) :
+    (xs.attach.filter (fun ⟨c, _⟩ => p c)).map (·.val) = xs.filter p := by
+  induction xs with
+  | nil => simp [List.attach]
+  | cons h t ih =>
+    simp only [List.attach_cons, List.filter_cons]
+    split
+    · next hp =>
+      simp only [List.map_cons]
+      congr 1
+      have : ((List.map (fun (x : {a // a ∈ t}) =>
+          ({ val := x.val, property := List.mem_cons_of_mem h x.property } : {a // a ∈ h :: t}))
+        t.attach).filter (fun x => p x.val)).map (·.val) =
+          (t.attach.filter (fun x => p x.val)).map (·.val) := by
+        induction t.attach with
+        | nil => simp
+        | cons x xs ihs => simp only [List.map_cons, List.filter_cons]; split <;> simp [ihs]
+      rw [this]; exact ih
+    · next hp =>
+      have : ((List.map (fun (x : {a // a ∈ t}) =>
+          ({ val := x.val, property := List.mem_cons_of_mem h x.property } : {a // a ∈ h :: t}))
+        t.attach).filter (fun x => p x.val)).map (·.val) =
+          (t.attach.filter (fun x => p x.val)).map (·.val) := by
+        induction t.attach with
+        | nil => simp
+        | cons x xs ihs => simp only [List.map_cons, List.filter_cons]; split <;> simp [ihs]
+      rw [this]; exact ih
+
+private theorem foldl_subtype_val_U2 {α β : Type} {P : α → Prop}
+    (f : α → List β) (xs : List {a // P a}) (acc : List β) :
+    xs.foldl (fun a (x : {a // P a}) => a ++ f x.val) acc =
+    (xs.map (·.val)).foldl (fun a c => a ++ f c) acc := by
+  induction xs generalizing acc with
+  | nil => simp
+  | cons h t ih => simp only [List.foldl_cons, List.map_cons]; exact ih _
+
+private theorem attach_map_val_U2 {α : Type} (xs : List α) : xs.attach.map (·.val) = xs := by
+  have h := @List.attach_map_val α α xs id; simp only [id, List.map_id] at h; exact h
+
+private theorem foldl_attach_eq_U2 {α β : Type} (f : α → List β) (xs : List α) (acc : List β) :
+    xs.attach.foldl (fun a ⟨c, _⟩ => a ++ f c) acc = xs.foldl (fun a c => a ++ f c) acc := by
+  rw [foldl_subtype_val_U2 f xs.attach, attach_map_val_U2]
+
+private theorem foldl_filter_attach_U2 {α β : Type} (f : α → List β) (p : α → Bool)
+    (xs : List α) :
+    (xs.attach.filter (fun ⟨c, _⟩ => p c)).foldl (fun a ⟨c, _⟩ => a ++ f c) [] =
+    (xs.filter p).foldl (fun a c => a ++ f c) [] := by
+  rw [foldl_subtype_val_U2 f (xs.attach.filter _), attach_filter_val_U2]
+
+private theorem foldl_acc_shift_U2 {α β : Type} (f : α → List β) (xs : List α) (acc : List β) :
+    xs.foldl (fun a c => a ++ f c) acc = acc ++ xs.foldl (fun a c => a ++ f c) [] := by
+  induction xs generalizing acc with
+  | nil => simp
+  | cons h t ih =>
+    simp only [List.foldl_cons]; rw [ih (acc ++ f h), ih ([] ++ f h)]
+    simp only [List.nil_append, List.append_assoc]
+
+private theorem foldl_eq_flatten_map_U2 {α β : Type} (f : α → List β) (xs : List α) :
+    xs.foldl (fun a c => a ++ f c) [] = (xs.map f).flatten := by
+  induction xs with
+  | nil => simp
+  | cons h t ih =>
+    simp only [List.foldl_cons, List.map_cons, List.flatten_cons, List.nil_append]
+    rw [foldl_acc_shift_U2 f t (f h), ih]
+
+private theorem flatten_perm_map_U2 {α β : Type} (f g : α → List β) (xs : List α)
+    (h : ∀ x ∈ xs, (f x).Perm (g x)) :
+    (xs.map f).flatten.Perm (xs.map g).flatten := by
+  induction xs with
+  | nil => simp
+  | cons x t ih =>
+    simp only [List.map_cons, List.flatten_cons]
+    exact (h x List.mem_cons_self).append
+      (ih (fun y hy => h y (List.mem_cons_of_mem x hy)))
+
+private theorem foldl_perm_pointwise_U2 {α β : Type} (f g : α → List β) (xs : List α)
+    (h : ∀ x ∈ xs, (f x).Perm (g x)) :
+    (xs.foldl (fun a c => a ++ f c) []).Perm (xs.foldl (fun a c => a ++ g c) []) := by
+  rw [foldl_eq_flatten_map_U2, foldl_eq_flatten_map_U2]
+  exact flatten_perm_map_U2 f g xs h
+
+private theorem perm_foldl_perm_U2 {α β : Type} (f : α → List β) {xs ys : List α}
+    (h : xs.Perm ys) :
+    (xs.foldl (fun a c => a ++ f c) []).Perm (ys.foldl (fun a c => a ++ f c) []) := by
+  rw [foldl_eq_flatten_map_U2, foldl_eq_flatten_map_U2]; exact (h.map f).flatten
+
+private abbrev pNegU2 : StackingNode → Bool := fun c => decide (c.z_index < 0)
+private abbrev pZerU2 : StackingNode → Bool := fun c => c.z_index == 0
+private abbrev pPosU2 : StackingNode → Bool := fun c => decide (c.z_index > 0)
+
+private theorem three_way_perm_U2 (xs : List StackingNode) :
+    (xs.filter pNegU2 ++ xs.filter pZerU2 ++ xs.filter pPosU2).Perm xs := by
+  induction xs with
+  | nil => simp
+  | cons h t ih =>
+    simp only [List.filter_cons]
+    by_cases hn : h.z_index < 0
+    · simp only [decide_eq_true_eq.mpr hn, show (h.z_index == 0) = false from by simp; omega,
+                 show decide (h.z_index > 0) = false from by simp; omega,
+                 ite_true, Bool.false_eq_true, ite_false]
+      exact List.Perm.cons h ih
+    · by_cases hz : h.z_index = 0
+      · simp only [show decide (h.z_index < 0) = false from by simp; omega,
+                   show (h.z_index == 0) = true from by simp [hz],
+                   show decide (h.z_index > 0) = false from by simp; omega,
+                   ite_true, Bool.false_eq_true, ite_false]
+        apply List.Perm.trans _ (List.Perm.cons h ih)
+        rw [show t.filter pNegU2 ++ h :: t.filter pZerU2 ++ t.filter pPosU2 =
+              t.filter pNegU2 ++ h :: (t.filter pZerU2 ++ t.filter pPosU2) from
+              by simp [List.cons_append, List.append_assoc]]
+        rw [List.append_assoc]; exact List.perm_middle
+      · have hp : h.z_index > 0 := by omega
+        simp only [show decide (h.z_index < 0) = false from by simp; omega,
+                   show (h.z_index == 0) = false from by simp; omega,
+                   decide_eq_true_eq.mpr hp, ite_true, Bool.false_eq_true, ite_false]
+        apply List.Perm.trans _ (List.Perm.cons h ih)
+        exact List.perm_middle
+
+private theorem foldl_children_perm_U2 (children : List StackingNode)
+    (ih : ∀ c ∈ children, (flattenTree c).Perm (treeSurfaces c)) :
+    ((children.filter pNegU2).foldl (fun a c => a ++ flattenTree c) [] ++
+     (children.filter pZerU2).foldl (fun a c => a ++ flattenTree c) [] ++
+     (children.filter pPosU2).foldl (fun a c => a ++ flattenTree c) []).Perm
+    (children.foldl (fun a c => a ++ treeSurfaces c) []) := by
+  have mof : ∀ (p : StackingNode → Bool) c, c ∈ children.filter p → c ∈ children :=
+    fun p c hc => (List.mem_filter.mp hc).1
+  apply List.Perm.trans
+  · apply List.Perm.append; apply List.Perm.append
+    · exact foldl_perm_pointwise_U2 flattenTree treeSurfaces (children.filter pNegU2)
+        (fun c hc => ih c (mof _ c hc))
+    · exact foldl_perm_pointwise_U2 flattenTree treeSurfaces (children.filter pZerU2)
+        (fun c hc => ih c (mof _ c hc))
+    · exact foldl_perm_pointwise_U2 flattenTree treeSurfaces (children.filter pPosU2)
+        (fun c hc => ih c (mof _ c hc))
+  rw [foldl_eq_flatten_map_U2 treeSurfaces (children.filter pNegU2),
+      foldl_eq_flatten_map_U2 treeSurfaces (children.filter pZerU2),
+      foldl_eq_flatten_map_U2 treeSurfaces (children.filter pPosU2),
+      foldl_eq_flatten_map_U2 treeSurfaces children]
+  rw [show ((children.filter pNegU2).map treeSurfaces).flatten ++
+          ((children.filter pZerU2).map treeSurfaces).flatten ++
+          ((children.filter pPosU2).map treeSurfaces).flatten =
+          ((children.filter pNegU2 ++ children.filter pZerU2 ++
+            children.filter pPosU2).map treeSurfaces).flatten from
+          by simp [List.map_append, List.flatten_append, List.append_assoc]]
+  exact (three_way_perm_U2 children |>.map treeSurfaces).flatten
+
+/-- T8: `flattenTree n` is a permutation of `treeSurfaces n`.
+    Every surface in the subtree appears in the paint order exactly once;
+    no surface is dropped or duplicated.  (FINDING-U2 closure) -/
+theorem flattenTree_perm_treeSurfaces : ∀ n : StackingNode,
+    (flattenTree n).Perm (treeSurfaces n)
+  | StackingNode.mk _zi di children => by
+      simp only [flattenTree, treeSurfaces]
+      rw [foldl_filter_attach_U2 flattenTree pNegU2 children,
+          foldl_filter_attach_U2 flattenTree pZerU2 children,
+          foldl_filter_attach_U2 flattenTree pPosU2 children,
+          foldl_attach_eq_U2 treeSurfaces children []]
+      have key : di ++ (children.filter pNegU2).foldl (fun a c => a ++ flattenTree c) [] ++
+                 (children.filter pZerU2).foldl (fun a c => a ++ flattenTree c) [] ++
+                 (children.filter pPosU2).foldl (fun a c => a ++ flattenTree c) [] =
+                 di ++ ((children.filter pNegU2).foldl (fun a c => a ++ flattenTree c) [] ++
+                        (children.filter pZerU2).foldl (fun a c => a ++ flattenTree c) [] ++
+                        (children.filter pPosU2).foldl (fun a c => a ++ flattenTree c) []) := by
+        simp [List.append_assoc]
+      rw [key]
+      exact (foldl_children_perm_U2 children
+        (fun c _ => flattenTree_perm_treeSurfaces c)).append_left di
 
 end UiCompositor

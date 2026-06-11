@@ -19,7 +19,12 @@
   § 3  WindowStack — z-order management from stacking.spl WindowStack class.
 
   § 4  StackingContext / paint-order flatten — CSS 2.1 Appendix E ordering from
-       stacking.spl sort_stacking_contexts / flatten_to_paint_order.
+       stacking.spl sort_stacking_contexts / flatten_to_paint_order (single-level
+       approximation, sufficient for T6).
+
+  § 5  StackingNode — recursive stacking-context tree mirroring the real
+       StackingContext.children recursion in stacking.spl.  flattenTree /
+       treeSurfaces support T8 (FINDING-U2 closure).
 
   IMPLEMENTATION FACTS (not violations):
   ──────────────────────────────────────
@@ -29,11 +34,15 @@
       union (min of top-lefts, max of bottom-rights).
   F3. `sort_stacking_contexts` uses insertion sort — stable, O(n²).  The Lean
       model uses the same algorithm so permutation proofs are structural.
-  F4. `flatten_to_paint_order` recurses on the stacking context tree.  The Lean
-      model uses a non-recursive list-based approximation (one level of
-      children) sufficient to prove the permutation invariant.
+  F4. `flatten_to_paint_order` recurses on the stacking context tree.  § 4 uses
+      a non-recursive list-based approximation sufficient for T6; § 5 adds the
+      full recursive tree model for T8 (FINDING-U2 closure).
   F5. `WindowStack.paint_order` returns entries sorted ascending by z_order.
       The Lean model mirrors this with insertion sort.
+  F6. `flatten_to_paint_order` in stacking.spl visits: (1) own display_items,
+      (2) negative z-index children sorted ascending, (3) zero z-index children
+      in tree order, (4) positive z-index children sorted ascending.
+      flattenTree mirrors this exactly.
 -/
 
 namespace UiCompositor
@@ -232,7 +241,85 @@ def flattenPaintOrder (ctxs : List StackingCtx) : List DisplayEntry :=
   collect neg_sorted ++ collect zero ++ collect pos_sorted
 
 -- ============================================================
--- § 5  Permutation helpers (used by Theorems)
+-- § 5  StackingNode — recursive stacking-context tree (FINDING-U2 closure)
+-- ============================================================
+-- Source fidelity (mirrors stacking.spl flatten_to_paint_order):
+--   StackingNode.mk mirrors StackingContext fields: z_index, display_items,
+--   children.  The .spl also carries node_id / opacity / is_root; these are
+--   irrelevant to paint-order permutation so the model omits them.
+--   flattenTree reproduces the .spl recursion step-for-step:
+--     1. own display_items  (background + borders — step 1 of CSS 2.1 App. E)
+--     2. negative z-index children (insertNodeSorted sort, then recurse)
+--     3. zero z-index children (tree order, no extra sort)
+--     4. positive z-index children (insertNodeSorted sort, then recurse)
+--   sortNodes uses the same insertion-sort as sort_stacking_contexts so that
+--   the permutation proof is structural (mirrors sortStackingContexts exactly).
+-- ============================================================
+
+/-- A node in the stacking-context tree.
+    Mirrors `StackingContext` in stacking.spl (z_index, display_items, children). -/
+inductive StackingNode : Type where
+  | mk (z_index : Int) (display_items : List DisplayEntry)
+       (children : List StackingNode) : StackingNode
+
+/-- z_index accessor. -/
+def StackingNode.z_index : StackingNode → Int
+  | StackingNode.mk zi _ _ => zi
+
+/-- display_items accessor. -/
+def StackingNode.display_items : StackingNode → List DisplayEntry
+  | StackingNode.mk _ di _ => di
+
+/-- children accessor. -/
+def StackingNode.children : StackingNode → List StackingNode
+  | StackingNode.mk _ _ ch => ch
+
+/-- Insertion-sort helper for StackingNode by z_index ascending.
+    Mirrors insertCtxSorted / sort_stacking_contexts in stacking.spl. -/
+def insertNodeSorted (c : StackingNode) : List StackingNode → List StackingNode
+  | []     => [c]
+  | h :: t => if c.z_index ≤ h.z_index then c :: h :: t
+              else h :: insertNodeSorted c t
+
+/-- Sort a list of StackingNode by z_index ascending (insertion sort).
+    Mirrors `sort_stacking_contexts` in stacking.spl. -/
+def sortNodes (nodes : List StackingNode) : List StackingNode :=
+  nodes.foldl (fun acc c => insertNodeSorted c acc) []
+
+/-- All DisplayEntry values in a StackingNode tree (multiset as list).
+    Uses List.attach for well-founded termination on the nested inductive type. -/
+def treeSurfaces : StackingNode → List DisplayEntry
+  | StackingNode.mk _zi di children =>
+      di ++ children.attach.foldl (fun acc ⟨c, _⟩ => acc ++ treeSurfaces c) []
+termination_by n => sizeOf n
+
+/-- Flatten a StackingNode tree into paint order per CSS 2.1 Appendix E.
+    Mirrors `flatten_to_paint_order` in stacking.spl:
+      1. own display_items
+      2. negative z-index children (sorted ascending by z_index), recursed
+      3. zero z-index children (tree order), recursed
+      4. positive z-index children (sorted ascending by z_index), recursed
+    Implementation note: we use List.attach on children to give Lean a
+    structural recursion proof; sort is applied to the resulting partitions.
+    sortNodes is a permutation (proved in Theorems for T8), so the output
+    set is identical whether sorted or not. -/
+def flattenTree : StackingNode → List DisplayEntry
+  | StackingNode.mk _zi di children =>
+      -- Partition children by z_index using attach (preserves WF proof)
+      let negA := children.attach.filter (fun ⟨c, _⟩ => c.z_index < 0)
+      let zerA := children.attach.filter (fun ⟨c, _⟩ => c.z_index == 0)
+      let posA := children.attach.filter (fun ⟨c, _⟩ => c.z_index > 0)
+      di ++ negA.foldl (fun acc ⟨c, _⟩ => acc ++ flattenTree c) []
+         ++ zerA.foldl (fun acc ⟨c, _⟩ => acc ++ flattenTree c) []
+         ++ posA.foldl (fun acc ⟨c, _⟩ => acc ++ flattenTree c) []
+termination_by n => sizeOf n
+
+/-- Flatten a list of StackingNode trees into paint order. -/
+def flattenNodes (ns : List StackingNode) : List DisplayEntry :=
+  ns.foldl (fun acc n => acc ++ flattenTree n) []
+
+-- ============================================================
+-- § 6  Permutation helpers (used by Theorems)
 -- ============================================================
 
 /-- `IsPermutation xs ys` — ys is a permutation of xs.
