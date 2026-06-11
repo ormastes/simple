@@ -19,6 +19,14 @@ Scope:
   hosted MDI lane checks the titlebar widget CSS contract in addition to the
   titlebar button, body button, text input, drag, focus, minimize, and restore
   fields.
+  The Windows screenshot validator also counts custom titlebar CSS-colored
+  pixels and the wrapper emits
+  `windows_native_mdi_evidence_titlebar_css_pixels`, so the Windows pass lane
+  requires rendered evidence of the styled titlebar widget colors.
+  The probe additionally scans the Win32 hosted backend DIB after Simple Web
+  rendering and emits
+  `windows_native_mdi_evidence_rendered_titlebar_css_pixels`, tying the CSS
+  proof to exact rendered compositor pixels instead of only source markup.
 - macOS live-window evidence is still host-gated (`check-macos-gui-live-window-evidence.shs`),
   and this Linux host can only prove the explicit `requires-macos` skip lane.
 - Current checked-in Chromium parity lane is still the older
@@ -50,6 +58,12 @@ Missing today:
 - The Win32 proof contract now includes `titlebar_css_present=true`. This is a
   source/probe contract check until the wrapper is run on a Windows host and
   captures live screenshot evidence.
+- The live Windows screenshot validator now rejects captures that lack
+  custom titlebar CSS color pixels. This remains host-gated: Linux still proves
+  only the explicit `requires-windows` skip lane.
+- The Win32 probe also records exact DIB pixels for the custom titlebar widget
+  CSS colors inside the terminal content band. The wrapper requires
+  `rendered_titlebar_css_applied=true` before reporting a Windows pass.
 
 Smallest next implementation step:
 

@@ -295,6 +295,14 @@ Open gaps tied to the active browser objective:
     `windows_native_mdi_evidence_spec.spl` fail the Windows pass lane if that
     field is missing; on Linux this still only proves the explicit
     `requires-windows` skip path
+  - the Win32 live screenshot validator also requires
+    `titlebar_css_pixels > 19` for the custom titlebar widget green colors and
+    the wrapper exposes that as
+    `windows_native_mdi_evidence_titlebar_css_pixels`
+  - the Win32 hosted probe scans the compositor DIB after Simple Web rendering
+    and requires `rendered_titlebar_css_applied=true`, exposing the exact
+    rendered count as
+    `windows_native_mdi_evidence_rendered_titlebar_css_pixels`
 - Flex main-axis distribution now has a Chromium-captured fixture:
   - added `25_flex_justify_space_between` to the HTML compatibility catalog
     and structural geometry probe
