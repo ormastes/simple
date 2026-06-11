@@ -1,6 +1,6 @@
 # Window Scene Specification
 
-> 1. var manager = WindowManager for backend
+> <details>
 
 <!-- sdn-diagram:id=window_scene_spec.arch -->
 <details class="sdn-source">
@@ -28,7 +28,7 @@ window_scene_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,11 +41,9 @@ window_scene_spec -> common
 
 #### projects WindowManager state and registry identity into a common scene
 
-1. var manager = WindowManager for backend
-
-2. var registry = UiWindowSurfaceRegistry new
-
-3. registry bind with kind
+- var manager = WindowManager for backend
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
    - Expected: scene.width equals `800`
    - Expected: scene.height equals `600`
    - Expected: scene.backend equals `tauri`
@@ -57,7 +55,7 @@ window_scene_spec -> common
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -84,16 +82,15 @@ expect(shared_wm_focused_window_id(scene)).to_equal("win1")
 
 #### omits minimized windows from the visible projection
 
-1. var manager = WindowManager new
-
-2. manager minimize window
+- var manager = WindowManager new
+- manager minimize window
    - Expected: scene.windows.len() equals `2`
    - Expected: visible.len() equals `1`
    - Expected: visible[0].surface_id equals `surf1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -117,7 +114,7 @@ expect(visible[0].surface_id).to_equal("surf1")
 
 #### projects top command lane, bottom taskbar, background, and DPI scaled content bounds
 
-1. var manager = WindowManager new
+- var manager = WindowManager new
    - Expected: chrome.background_color equals `#101418`
    - Expected: chrome.command_lane.x equals `0`
    - Expected: chrome.command_lane.y equals `0`
@@ -136,7 +133,7 @@ expect(visible[0].surface_id).to_equal("surf1")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -170,7 +167,7 @@ expect(hi_dpi.content_area.height).to_equal(440)
 
 #### clamps inner window drag to the desktop content area
 
-1. var manager = WindowManager new
+- var manager = WindowManager new
    - Expected: dragged_min.windows[0].x equals `0`
    - Expected: dragged_min.windows[0].y equals `32`
    - Expected: dragged_min.windows[0].focused is true
@@ -179,7 +176,7 @@ expect(hi_dpi.content_area.height).to_equal(440)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -203,7 +200,7 @@ expect(dragged_max.windows[0].y).to_equal(352)
 
 #### dispatches command lane clock and right icon clicks
 
-1. var manager = WindowManager new
+- var manager = WindowManager new
    - Expected: clock.action equals `command_lane_clock`
    - Expected: clock.target_id equals `clock`
    - Expected: icon.action equals `command_lane_icon`
@@ -211,7 +208,7 @@ expect(dragged_max.windows[0].y).to_equal(352)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -234,13 +231,10 @@ expect(icon.target_id).to_equal("right_icon_1")
 
 #### dispatches bottom taskbar pinned app launch and running window focus
 
-1. var manager = WindowManager new
-
-2. var registry = UiWindowSurfaceRegistry new
-
-3. registry bind with kind
-
-4. registry bind with kind
+- var manager = WindowManager new
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
+- registry bind with kind
    - Expected: launch.action equals `launch_app`
    - Expected: launch.app_id equals `browser`
    - Expected: focus.action equals `focus_window`
@@ -249,7 +243,7 @@ expect(icon.target_id).to_equal("right_icon_1")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -278,13 +272,10 @@ expect(shared_wm_focused_window_id(focus.scene)).to_equal("win1")
 
 #### dispatches titlebar clicks as window drag starts and body clicks as focus
 
-1. var manager = WindowManager new
-
-2. var registry = UiWindowSurfaceRegistry new
-
-3. registry bind with kind
-
-4. registry bind with kind
+- var manager = WindowManager new
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
+- registry bind with kind
    - Expected: drag.action equals `begin_drag_window`
    - Expected: drag.target_id equals `surf2`
    - Expected: shared_wm_focused_window_id(drag.scene) equals `win2`
@@ -294,7 +285,7 @@ expect(shared_wm_focused_window_id(focus.scene)).to_equal("win1")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -324,15 +315,13 @@ expect(background.action).to_equal("desktop_background")
 
 #### translates pointer locations to draw component event targets with backend metadata
 
-1. var manager = WindowManager new
-
-2. var registry = UiWindowSurfaceRegistry new
-
-3. registry bind with kind
-
-4. registry bind with kind
+- var manager = WindowManager new
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
+- registry bind with kind
    - Expected: translated.action equals `begin_drag_window`
    - Expected: translated.target_id equals `surf2`
+   - Expected: translated.app_id equals `demo.two`
    - Expected: translated.window_id equals `win2`
    - Expected: translated.component_kind equals `window`
    - Expected: translated.local_x equals `10`
@@ -342,9 +331,9 @@ expect(background.action).to_equal("desktop_background")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -360,6 +349,7 @@ val translated = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "
 
 expect(translated.action).to_equal("begin_drag_window")
 expect(translated.target_id).to_equal("surf2")
+expect(translated.app_id).to_equal("demo.two")
 expect(translated.window_id).to_equal("win2")
 expect(translated.component_kind).to_equal("window")
 expect(translated.local_x).to_equal(10)
@@ -370,15 +360,57 @@ expect(translated.cache_hit).to_equal(false)
 
 </details>
 
+#### routes Simple Web titlebar pointer input with app window and layout identity
+
+- var manager = WindowManager new
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
+- registry bind with kind
+   - Expected: translated.action equals `begin_drag_window`
+   - Expected: translated.target_id equals `surf2`
+   - Expected: translated.app_id equals `demo.two`
+   - Expected: translated.window_id equals `win2`
+   - Expected: translated.local_x equals `10`
+   - Expected: translated.local_y equals `5`
+   - Expected: translated.backend_target equals `simple_web`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var manager = WindowManager.new()
+val _one = manager.open_window("surf1", "One", 10, 40, 300, 200, _tree("one"))
+val _two = manager.open_window("surf2", "Two", 80, 120, 300, 200, _tree("two"))
+var registry = UiWindowSurfaceRegistry.new()
+registry.bind_with_kind("win1", "surf1", 42u64, "demo.app", "Window One", UI_SURFACE_KIND_SIMPLE_WEB)
+registry.bind_with_kind("win2", "surf2", 43u64, "demo.two", "Window Two", UI_SURFACE_KIND_SIMPLE_WEB)
+val scene = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
+
+val translated = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, "simple_web").translation
+
+expect(translated.action).to_equal("begin_drag_window")
+expect(translated.target_id).to_equal("surf2")
+expect(translated.app_id).to_equal("demo.two")
+expect(translated.window_id).to_equal("win2")
+expect(translated.local_x).to_equal(10)
+expect(translated.local_y).to_equal(5)
+expect(translated.backend_target).to_equal("simple_web")
+expect(translated.input_key).to_contain("backend=simple_web")
+expect(translated.scene_key).to_contain("surf2:win2:80,120,300,200")
+```
+
+</details>
+
 #### caches event target translations and rejects stale scene layout cache after drag
 
-1. var manager = WindowManager new
-
-2. var registry = UiWindowSurfaceRegistry new
-
-3. registry bind with kind
-
-4. registry bind with kind
+- var manager = WindowManager new
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
+- registry bind with kind
    - Expected: second.translation.cache_hit is true
    - Expected: second.translation.stale_cache_rejected is false
    - Expected: shared_wm_scene_layout_key(scene) == shared_wm_scene_layout_key(moved) is false
@@ -389,7 +421,7 @@ expect(translated.cache_hit).to_equal(false)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -438,8 +470,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
