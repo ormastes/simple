@@ -1,4 +1,4 @@
-# Native Function Value Helper Return Debug Blocker
+# Native Function Value Helper Return Runtime Blocker
 
 Date: 2026-06-11
 Status: open
@@ -10,49 +10,47 @@ The current callback boundary under the multicore-green resumable-stepper
 experiment is narrower than “function values are broken” and narrower than the
 earlier generic hosted-native claim:
 
-- the checked-in `bin/release/simple` path now handles helper-returned function
-  values in standalone native binaries
-- the fresh debug seed binary still segfaults when a helper returns a function
-  value and the caller invokes it in the standalone native artifact
+- the native symbol-collision sub-bug (`undefined symbol: worker.1`) is now
+  fixed in current-source rebuilt release/debug compilers
+- current-source rebuilt release and debug binaries now both compile the helper
+  probes to standalone native artifacts
+- those same rebuilt binaries still lose the returned function value at runtime:
+  - value-only helper probe prints raw nil tag `3`
+  - helper-returned indirect call still segfaults with `EXIT=139`
 
-That leaves a smaller debug-seed blocker under the callback-id resumable
-scheduler experiment layered over the current hosted worker pool.
+That leaves a smaller runtime/value-shape blocker under the callback-id
+resumable scheduler experiment layered over the current hosted worker pool.
 
 ## Minimal Contrast
 
-Working release native probe:
-
-- global `var FUNCS: [fn() -> i64]`
-- `FUNCS.push(worker)`
-- helper-returned call: `get0()()`
-- observed:
+Previously failing compile-time release sub-boundary, now fixed:
 
 ```text
-direct=7
-via_helper=7
-EXIT=0
+Compiled /tmp/helper_return_value_only_probe.spl -> ...release_after.bin
+Compiled /tmp/helper_return_fn_value_probe.spl -> ...release_after.bin
 ```
 
-Failing debug-seed native probe:
+Current failing rebuilt native probes:
 
 - same global function array
 - helper returns the function value:
   - `fn get0() -> fn() -> i64: FUNCS[0]`
-- indirect call:
-  - `get0()()`
 - observed:
 
 ```text
-Segmentation fault (core dumped)
-EXIT=139
+value-only: f=3
+helper-call: direct=7
+helper-call: Segmentation fault (core dumped)
+helper-call: EXIT=139
 ```
 
 ## Why This Matters
 
 The earlier resumable-stepper blocker is downstream of this lower boundary on
-the debug-seed path. That experiment used callback-id lookup plus
-helper-returned function values before invoking the next step. The checked-in
-release path no longer blocks there, but the fresh debug seed binary still does.
+both rebuilt release and rebuilt debug seed paths. That experiment used
+callback-id lookup plus helper-returned function values before invoking the
+next step. The symbol-collision layer is gone; the remaining blocker is the
+returned function value itself collapsing to nil / crashing when invoked.
 
 ## Executable Evidence
 

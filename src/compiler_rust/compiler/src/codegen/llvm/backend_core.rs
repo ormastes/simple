@@ -218,12 +218,18 @@ impl LlvmBackend {
         };
         let rv_type = self.runtime_int_type();
 
+        let function_names: std::collections::HashSet<&str> =
+            module_ir.functions.iter().map(|f| f.name.as_str()).collect();
+
         for (name, _ty, is_mutable) in &module_ir.globals {
             // Extern/runtime functions are modeled as globals in MIR so GlobalLoad
             // can treat them as values, but they must not become LLVM data globals.
             // A same-named data global makes later call lowering add suffixed
             // function decls like `rt_mmio_write_u64.1`, which then fail to link.
             if module_ir.extern_fn_names.contains(name) {
+                continue;
+            }
+            if function_names.contains(name.as_str()) {
                 continue;
             }
             if m.get_global(name).is_some() {

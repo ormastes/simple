@@ -2429,16 +2429,81 @@ impl LlvmBackend {
             // Global variable access
             MirInst::GlobalLoad { dest, global_name, ty } => {
                 let i64_type = self.runtime_int_type();
-                let global = module.get_global(global_name).ok_or_else(|| {
-                    CompileError::semantic(format!(
-                        "llvm global load referenced undeclared symbol `{}`",
-                        global_name
-                    ))
-                })?;
-                let loaded = builder
-                    .build_load(i64_type, global.as_pointer_value(), "gload")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("global load", &e))?;
-                vreg_map.insert(*dest, loaded);
+                if let Some(global) = module.get_global(global_name) {
+                    let loaded = builder
+                        .build_load(i64_type, global.as_pointer_value(), "gload")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("global load", &e))?;
+                    vreg_map.insert(*dest, loaded);
+                } else {
+                    let resolved_name = self
+                        .use_map
+                        .get(global_name.as_str())
+                        .or_else(|| self.import_map.get(global_name.as_str()))
+                        .map(|s| s.as_str())
+                        .unwrap_or(global_name.as_str());
+                    let resolved_dotted = resolved_name.replace("_dot_", ".");
+                    let func = module
+                        .get_function(resolved_name)
+                        .or_else(|| module.get_function(&resolved_dotted))
+                        .or_else(|| module.get_function(global_name));
+
+                    if let Some(func) = func {
+                        let alloc_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        let alloc_fn = module
+                            .get_function("rt_alloc")
+                            .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
+                        let closure_size = i64_type.const_int(16, false);
+                        let alloc_call = builder
+                            .build_call(alloc_fn, &[closure_size.into()], "alloc_closure")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc", &e))?;
+                        let closure_i64 = alloc_call.try_as_basic_value().left().ok_or_else(|| {
+                            CompileError::semantic("rt_alloc did not return closure storage")
+                        })?;
+                        let closure_ptr = builder
+                            .build_int_to_ptr(
+                                closure_i64.into_int_value(),
+                                self.context_ref().ptr_type(inkwell::AddressSpace::default()),
+                                "closure_ptr",
+                            )
+                            .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?;
+                        let fn_addr = builder
+                            .build_ptr_to_int(
+                                func.as_global_value().as_pointer_value(),
+                                i64_type,
+                                "fn_addr",
+                            )
+                            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
+                        let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
+                        let slot_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+                        let fn_slot = builder
+                            .build_pointer_cast(closure_ptr, slot_ptr_type, "fn_slot")
+                            .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot", &e))?;
+                        builder
+                            .build_store(fn_slot, fn_addr)
+                            .map_err(|e| crate::error::factory::llvm_build_failed("store fn addr", &e))?;
+                        let marker_ptr = unsafe {
+                            builder.build_gep(
+                                self.context_ref().i8_type(),
+                                closure_ptr,
+                                &[self.context_ref().i32_type().const_int(8, false)],
+                                "closure_marker_ptr",
+                            )
+                        }
+                        .map_err(|e| crate::error::factory::llvm_build_failed("gep marker", &e))?;
+                        let marker_slot = builder
+                            .build_pointer_cast(marker_ptr, slot_ptr_type, "marker_slot")
+                            .map_err(|e| crate::error::factory::llvm_cast_failed("cast marker slot", &e))?;
+                        builder
+                            .build_store(marker_slot, direct_marker)
+                            .map_err(|e| crate::error::factory::llvm_build_failed("store marker", &e))?;
+                        vreg_map.insert(*dest, closure_i64);
+                    } else {
+                        return Err(CompileError::semantic(format!(
+                            "llvm global load referenced undeclared symbol `{}`",
+                            global_name
+                        )));
+                    }
+                }
             }
             MirInst::GlobalStore { global_name, value, ty } => {
                 let i64_type = self.runtime_int_type();

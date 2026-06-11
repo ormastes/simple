@@ -81,13 +81,13 @@ Related active host-side blocker:
   function-valued queue items, but a single completed stepper still segfaults
   in the debug-seed hosted native path with `EXIT=139`.
 - `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`
-  now tracks the narrower helper-return boundary directly.
+  now tracks the narrower helper-return runtime boundary directly.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records the newer evidence split: the checked-in `bin/release/simple` binary
   is stale for this lane, while current-source rebuilt `release` and `debug`
-  binaries both still crash on the helper-return and resumable-stepper native
-  probes. Current-source rebuilt artifacts are now the stronger evidence for
-  the remaining hosted-native blocker.
+  artifacts are the stronger evidence for the remaining hosted-native blocker.
+  The native symbol-collision sub-bug (`worker.1`) is fixed there, but the
+  rebuilt helper-return and resumable-stepper probes still fail at runtime.
 
 ## Current Evidence Boundary
 
