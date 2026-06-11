@@ -247,8 +247,16 @@ Open gaps tied to the active browser objective:
   - focused result: records Chrome's row-flex end placement when `gap:10px`
     contributes to the run width and `justify-content:flex-end` applies the
     remaining 80px as the start offset
+- The same live geometry lane now passes for `40_flex_column_gap_justify_center`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's column-flex centering when `gap:10px`
+    contributes to the vertical run and `justify-content:center` applies a
+    25px start offset
+  - renderer update: the Simple column-flex path now precomputes the
+    non-absolute child run height and applies main-axis free space for
+    `center`, `flex-end`, and `space-between`
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=36`, `pass_count=36`, `fail_count=0`, and
+    now reports `fixture_count=37`, `pass_count=37`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
