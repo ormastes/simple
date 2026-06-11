@@ -6,7 +6,8 @@ Current state as of 2026-06-11:
 
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
-  layers `10..17`, and flex rows `18..26`.
+  layers `10..17`, flex rows `18..26`, absolute positioning fixture `27`, and
+  display-contents fixture `28`.
 - The newer focused fixture lane described in some earlier progress notes
   (`146+`, client-rect/box-model parity rows, no-cheat guard summaries) is not
   present in the current worktree and must not be treated as current evidence.
@@ -189,8 +190,13 @@ Open gaps tied to the active browser objective:
   - focused result: records Chrome's absolute-position geometry inside a
     padded, bordered `position:relative` containing block; the child border box
     lands at `x=46`, `y=33`, matching the existing Simple path exactly
+- The same live geometry lane now passes for `28_display_contents_basic`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's `display:contents` behavior without
+    treating the wrapper as a generated layout box; the wrapper children flow
+    directly under the padded section at `y=20`, `y=38`, and `y=56`
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=24`, `pass_count=24`, `fail_count=0`, and
+    now reports `fixture_count=25`, `pass_count=25`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`

@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 24
-- pass count: 24
+- fixtures: 25
+- pass count: 25
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_manifest_full`
@@ -47,6 +47,7 @@ pixels, or text antialiasing normalization.
 | `25_flex_justify_space_between` | pass | 0 | `build/chrome_manifest_full/25_flex_justify_space_between_chrome_geometry.json` | `build/chrome_manifest_full/25_flex_justify_space_between_structural_report.sdn` |
 | `26_flex_gap_basic` | pass | 0 | `build/chrome_manifest_full/26_flex_gap_basic_chrome_geometry.json` | `build/chrome_manifest_full/26_flex_gap_basic_structural_report.sdn` |
 | `27_absolute_position_basic` | pass | 0 | `build/chrome_manifest_full/27_absolute_position_basic_chrome_geometry.json` | `build/chrome_manifest_full/27_absolute_position_basic_structural_report.sdn` |
+| `28_display_contents_basic` | pass | 0 | `build/chrome_manifest_full/28_display_contents_basic_chrome_geometry.json` | `build/chrome_manifest_full/28_display_contents_basic_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -80,3 +81,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `25_flex_justify_space_between` | 0 | 0.000 | `` |
 | `26_flex_gap_basic` | 0 | 0.000 | `` |
 | `27_absolute_position_basic` | 0 | 0.000 | `` |
+| `28_display_contents_basic` | 0 | 0.000 | `` |
