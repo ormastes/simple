@@ -80,15 +80,22 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
          `rt_array_get` for Arrays. Pure-Simple parity verified clean:
          50.mir uses the iterator protocol for non-range for-loops, HIR
          lowers full `arm.body`, and the bootstrap rewrite is seed-only.
-      5. [ ] Remaining (9th site, silent/semantic — NOT a crash):
-         `process_module` (`src/compiler/70.backend/backend/interpreter.spl:38`)
-         finds no `fn` named "main" in the self-hosted frontend's HIR
-         module for the entry file, returns `Ok(Unit)` without calling
-         `call_hir_function` — "hello stage4" never prints. dict.keys()
-         and Option `.?` verified working compiled; suspect the
-         self-hosted frontend produces an empty or differently-keyed
-         `module.functions` for the entry file. Until fixed, self-hosted
-         deploys stay blocked and `bin/simple` remains the Rust seed.
+      5. [x] 9th site fixed (2026-06-11): not a miscompile — a real
+         pure-Simple bug. `get_cli_args` (src/app/cli/main_part1.spl)
+         skipped argv[1] whenever it merely `ends_with("main.spl")`
+         (meant to skip the CLI's own script path in interpreted mode);
+         in the compiled stage4 binary this swallowed user files like
+         `h_main.spl` and dropped into the REPL with empty stdin —
+         silent exit 0, no output. Fix: precise
+         `arg_is_cli_entry_script` predicate matching only
+         `*/app/cli/main.spl` / `bootstrap_main.spl` forms. Verified in
+         docker (pids-limit 128): stage4 prints "hello stage4" for both
+         plain and `*main.spl`-named files, exit 0, flat process count.
+         **Stage4 now interprets files end-to-end.** Deploy of the
+         self-hosted binary to `bin/simple` remains a separate decision:
+         run broader validation (real specs through stage4 in docker)
+         before replacing the seed, and follow the smoke protocol
+         (setsid + timeout + pgrep, no respawns) on any deploy.
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).
