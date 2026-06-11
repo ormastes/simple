@@ -1,12 +1,13 @@
 # Chrome Famous-Site Corpus Div Geometry Evidence
 
 Date: 2026-06-11
-Status: pass for focused smoke row
+Status: pass for bounded first-six-row corpus smoke
 
 ## Scope
 
-This report covers one deterministic famous-site corpus row:
-`site_0_google`.
+This report covers the first six deterministic famous-site corpus rows:
+`site_0_google`, `site_1_youtube`, `site_2_facebook`,
+`site_3_instagram`, `site_4_x`, and `site_5_tiktok`.
 
 It compares the generated fixture div from stored Chrome metrics against the
 Pure Simple web renderer Draw IR. It does not claim full famous-site corpus
@@ -20,22 +21,28 @@ coverage, live-site coverage, text raster parity, or glyph antialiasing parity.
   `src/app/wm_compare/site_corpus_layout_report.spl`
 - Generated manual:
   `doc/06_spec/test/03_system/gui/wm_compare/structural_layout_report_spec.md`
-- Chrome sidecar:
+- Chrome sidecars:
   `test/09_baselines/famous_site_corpus/site_0_google/chrome_metrics.json`
+  through
+  `test/09_baselines/famous_site_corpus/site_5_tiktok/chrome_metrics.json`
 
-The executable scenario calls `build_site_corpus_div_geometry_report(sample,
-metrics, 160, 120)` and requires:
+The executable scenarios call `build_site_corpus_div_geometry_report(sample,
+metrics, 160, 120)` for the single-row detailed report and
+`build_site_corpus_div_geometry_summary(6, 160, 120)` for the bounded corpus
+summary. They require:
 
 - `status: "layout_match"`
+- `summary: (selected: 6 matched: 6 mismatched: 0 missing_metrics: 0 ...)`
 - `source_a: "chrome_metrics_div"`
 - `source_b: "simple_renderer_div"`
 - `width: 120`
 - `height: 40`
 - `background_color: "rgb(37, 99, 235)"`
 
-Temporary probe output before deletion showed both Chrome and Simple boxes at
-`x=8`, `y=8`, `width=120`, `height=40`, with matching background color and
-fixture text.
+The first-six summary proves each checked row reports `layout_match`. The
+single-row detailed report also shows both Chrome and Simple boxes at `x=8`,
+`y=8`, `width=120`, `height=40`, with matching background color and fixture
+text.
 
 ## Verification
 
@@ -58,14 +65,15 @@ SIMPLE_LIB=src /home/ormastes/dev/pub/simple/src/compiler_rust/target/release/si
 Results:
 
 - `simple check`: pass
-- SSpec: 8 passed, 0 failed
+- SSpec: 9 passed, 0 failed
 - Docgen: generated the structural layout report manual; docgen emitted
   unrelated existing warnings and classified the source as a stub because there
   is no prose doc block.
 
 ## Remaining Work
 
-- Emit or compare geometry artifacts for more famous-site corpus rows.
+- Extend the bounded summary to more famous-site corpus rows or emit per-row
+  geometry artifacts for the whole corpus.
 - Keep box geometry evidence separate from the known browser text
   metric/raster/compositing gap.
 - Do not use blur, tolerance, downscaling, or captured-pixel overlays to claim

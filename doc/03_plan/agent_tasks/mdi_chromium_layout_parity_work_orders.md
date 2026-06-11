@@ -166,12 +166,15 @@ Prove and harden the requested GUI stack:
   `blur_or_tolerance_used=false`.
 - Famous-site corpus div geometry evidence (2026-06-11):
   `test/03_system/gui/wm_compare/structural_layout_report_spec.spl` now checks
-  `build_site_corpus_div_geometry_report` for `site_0_google` against stored
-  Chrome metrics. The report compares one generated div's border-box
-  `x=8`, `y=8`, `width=120`, `height=40`, background
-  `rgb(37, 99, 235)`, and fixture text against Simple Draw IR and passes with
-  `mismatch_count=0`. This is intentionally a narrow corpus smoke, not full
-  famous-site corpus geometry coverage and not text raster parity.
+  `build_site_corpus_div_geometry_report` for `site_0_google` and
+  `build_site_corpus_div_geometry_summary(6, 160, 120)` for the first six
+  deterministic corpus rows against stored Chrome metrics. The detailed report
+  compares the generated div border-box `x=8`, `y=8`, `width=120`,
+  `height=40`, background `rgb(37, 99, 235)`, and fixture text against Simple
+  Draw IR. The bounded summary currently reports `selected=6`, `matched=6`,
+  `mismatched=0`, `missing_metrics=0`. This is intentionally bounded corpus
+  evidence, not full famous-site corpus geometry coverage and not text raster
+  parity.
 
 ## Agent A: MDI Render And Event Evidence
 
@@ -250,10 +253,10 @@ Small tasks:
    `html_compat` manifest rows. Remaining work is broader than this manifest:
    extend equivalent exact geometry/style evidence to larger famous-site corpus
    rows and unresolved browser text/font raster behavior.
-5. DONE (2026-06-11): add a focused famous-site corpus structural-box smoke for
-   the generated `site_0_google` div using stored Chrome metrics and Simple
-   Draw IR. Remaining work is to emit and compare per-row corpus geometry
-   artifacts for the wider corpus instead of one deterministic smoke row.
+5. DONE (2026-06-11): add focused famous-site corpus structural-box evidence
+   for the generated `site_0_google` div and a first-six-row summary using
+   stored Chrome metrics and Simple Draw IR. Remaining work is to emit and
+   compare per-row corpus geometry artifacts for the wider corpus.
 
 Exit gate:
 
