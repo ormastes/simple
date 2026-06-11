@@ -797,3 +797,10 @@ dev-done
   `simple_web_layout_child_index_spec.spl` remains 15/15, including the
   existing spaced descendant/child selector oracle. Docker optimizer scan
   completed for the renderer with 754 remaining static opportunities.
+- impl: Removed redundant trim work from compound class selector matching.
+  `class_has_all(...)` now reuses class suffixes from pretrimmed selector parts
+  instead of trimming each suffix during every selector match.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` remains 15/15, including existing
+  compound class and spaced selector oracles. Docker optimizer scan completed
+  for the renderer with 754 remaining static opportunities.

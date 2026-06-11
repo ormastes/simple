@@ -1256,3 +1256,21 @@ Verification:
 - `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
   `15 passed, 0 failed`
 - Docker optimizer scan: renderer `754` remaining static opportunities.
+
+## 2026-06-11 Compound class selector suffix trim removal
+
+Compound class selector matching split suffixes such as `.target.marker` and
+then trimmed every suffix during each selector match. Selector parts are already
+trimmed during preprocessing, so those suffixes do not need another trim in the
+hot node/ancestor match path.
+
+`class_has_all(...)` now reuses the split suffixes directly. Existing compound
+class and spaced selector oracles continue to cover the behavior.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `15 passed, 0 failed`
+- Docker optimizer scan: renderer `754` remaining static opportunities.
