@@ -45,10 +45,11 @@ coverage:
     completion
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
   is the narrowed blocker record for that path
-- `test/03_system/feature/usage/native_function_value_array_literal_blocker_spec.spl`
+- `test/03_system/feature/usage/native_function_value_param_array_blocker_spec.spl`
   now records the lower current-source native blocker beneath that path: a
-  plain array literal containing function values already crashes on native
-- `doc/08_tracking/bug/native_function_value_array_literal_blocker_2026-06-11.md`
+  function-valued local or parameter stored into an array already degrades on
+  native even though source-run still passes
+- `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
   is the narrowed blocker record for that lower path
 
 Current hosted blocking-compensation evidence now includes:
@@ -94,11 +95,10 @@ Related active host-side blocker:
 - `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`
   now records the closed helper-return regression that used to sit below the
   stepper path.
-- `doc/08_tracking/bug/native_function_value_array_literal_blocker_2026-06-11.md`
-  now records the lower current-source native blocker underneath the worker
-  pool stepper path: array literals containing function values still crash,
-  and the stepper lane currently depends on that shape through
-  `CALLBACKS + [step_fn]`.
+- `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
+  now records the better lower current-source native blocker underneath the
+  worker pool stepper path: function-valued locals or parameters stored into
+  arrays still degrade before the later indirect call.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records the newer evidence split: the checked-in `bin/release/simple` binary
   is stale for this lane, while current-source rebuilt `release` and `debug`

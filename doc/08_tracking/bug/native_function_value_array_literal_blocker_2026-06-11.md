@@ -6,9 +6,10 @@ Owner: multicore-green lane
 
 ## Summary
 
-The remaining hosted-native `multicore_green` resumable-stepper crash is not
-the first bad boundary anymore. A smaller native bug already reproduces with a
-plain array literal containing function values.
+This tracker still captures a real lower native bug, but it is no longer the
+best single lower bound for the hosted `multicore_green` resumable-stepper
+lane. The current narrower active blocker for that lane is tracked separately
+in `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`.
 
 Current minimal native probe:
 
@@ -30,15 +31,19 @@ before
 EXIT=139
 ```
 
-The same shape also reproduces with named function values in array literals.
-By contrast, the lower `append` path is currently green:
+The same inline-lambda shape still reproduces today. By contrast, a named
+function array literal is current-source native green, and the lower `append`
+path is also green:
 
 - `var callbacks: [fn() -> i64] = []`
 - `callbacks.append(\: 7)`
 - `callbacks[0]()` -> returns `7`
 
-So the current lower blocker is not generic function-value dispatch anymore. It
-is the native path for array literals whose elements are function values.
+So this tracker now means something narrower:
+
+- inline lambda array literals containing function values still crash on native
+- it is not a generic named-function array-literal failure anymore
+- it is not the best single lower bound for the current hosted fairness lane
 
 ## Why This Matters
 
@@ -47,17 +52,18 @@ The active resumable-stepper experiment depends on exactly this shape:
 - `CALLBACKS = CALLBACKS + [step_fn]`
 
 That expression creates a one-element array literal containing a function
-value, then feeds it into array concatenation. Until function-value array
-literals are correct on hosted native, the higher worker-pool stepper lane
-cannot be closed honestly.
+value, then feeds it into array concatenation. But the more accurate current
+lower bound for the stepper lane is the function-valued local or parameter
+array path tracked separately in
+`doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`.
 
 ## Relationship To Higher Blockers
 
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
 - `doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md`
 
-Those higher trackers remain open, but this file is now the lower native
-boundary beneath them.
+Those higher trackers remain open, but this file is now a neighboring lower
+native boundary rather than the best single blocker under them.
 
 ## Executable Evidence
 

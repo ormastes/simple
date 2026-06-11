@@ -18,7 +18,7 @@ native binary still segfaults before returning the first completion. The
 earlier helper-returned function-value blocker that sat below this path is now
 closed. The direct helper-side `Channel.id()` native fallback is also closed.
 The current lower blocker beneath this path is now tracked separately in
-`doc/08_tracking/bug/native_function_value_array_literal_blocker_2026-06-11.md`.
+`doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`.
 The earlier lower pool-plus-struct-send blocker in
 `doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md`
 is already closed. Historical loop-return tracking remains in
@@ -48,7 +48,7 @@ worker-pool blocker is:
 - that crash remains after the helper-returned function-value regression was
   fixed and moved out of the critical path
 - the earlier loop/search helper-return path is now green
-- the lower plain array-literal function-value path is still open beneath it
+- the lower function-valued local or parameter array path is still open beneath it
 
 ## Why This Matters
 

@@ -37,8 +37,9 @@ Date: 2026-06-06
   function-value probes, helper-side `Channel.id()` native path, and the
   smaller pool-worker struct-send path are now fixed on rebuilt debug
   binaries. The current lower native boundary under the remaining stepper lane
-  is now function-value array literals such as `[step_fn]`, while the
-  resumable-stepper native probe still crashes. The
+  is now function-valued local or parameter array storage such as
+  `val callbacks = [step_fn]`, while the resumable-stepper native probe still
+  crashes. The
   checked-in release binary remains tracked as stale evidence in
   `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 
