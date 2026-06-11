@@ -32,6 +32,12 @@ Date: 2026-06-06
   `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` marker triplet proof and
   remains separately gated so readiness markers cannot be mistaken for final
   hardware proof.
+- Current source-built hosted-native fairness evidence is stricter than the
+  checked-in `bin/release/simple` binary for this lane: a rebuilt
+  `src/compiler_rust/target/release/simple` still crashes on the helper-return
+  function-value probe and on the resumable-stepper native probe, while the
+  checked-in release binary now disagrees and is tracked as stale evidence in
+  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 
 ## Coordination Contract
 

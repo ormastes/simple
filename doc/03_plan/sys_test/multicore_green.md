@@ -44,6 +44,12 @@
 - `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` checks that `doc/03_plan/agent_tasks/multicore_green.md` uses meaningful parallel-agent lane names instead of `Agent A`/`Agent B` labels, and keeps each lane tied to deliverables and acceptance evidence.
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the remaining hosted fairness/preemption gap explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths.
 - `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so the remaining host gap is deeper than a missing OS-thread yield primitive.
+- `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
+  records that the checked-in `bin/release/simple` binary has drifted from the
+  current-source rebuilt `release` and `debug` compilers for the helper-return
+  and resumable-stepper native probes. For this lane, rebuilt current-source
+  artifacts are stronger evidence than the checked-in release binary until the
+  source/runtime/compiler state is made consistent again.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` checks the pure Simple green-channel contract: empty recv parks a logical green task, send unparks the oldest waiter, FIFO buffering works, and bounded backpressure does not block the carrier worker.
 
 ## Blocking Evidence To Track
@@ -71,6 +77,10 @@
   sessions are active in this checkout; future sync work must keep those files
   out of multicore-green commits unless the user explicitly asks for an
   integration commit.
+- Current-source rebuilt `src/compiler_rust/target/release/simple` now compiles
+  both the helper-return probe and the resumable-stepper probe, but both native
+  binaries still crash with `EXIT=139`. The checked-in `bin/release/simple`
+  instead disagrees on the same probes and is tracked as stale lane evidence.
 - Hosted SimpleOS feature specs rerun during the later doc-alignment passes
   still pass: cooperative green `3`, multicore green `6`, green-channel wake
   `4`, and the final handoff blocker contract `3`.
