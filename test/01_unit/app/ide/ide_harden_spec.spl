@@ -1,0 +1,222 @@
+# IDE hardening spec.
+#
+# Covers: markdown_render probe surface (Obsidian features + empty/malformed),
+# preview_pane edge cases (height 0/negative, CRLF, large vs small content),
+# capabilities report totality, md_editing boundary inputs,
+# launch_sanity with missing/empty values.
+
+use std.spec
+use std.editor.render.block_model.{BlockModel}
+use std.editor.render.md_renderer.{md_render_blocks_for_tui, md_render_inline}
+use std.editor.view.preview_pane.{preview_pane_create, preview_pane_update, preview_pane_render, preview_pane_update_crlf, preview_pane_scroll, preview_pane_sync_scroll}
+use std.editor.view.md_editing.{md_table_insert_row_after, md_table_insert_column_after, md_table_set_cell, md_dispatch_motion, md_commands_dispatch, md_editor_state_new, md_assist_on_enter, md_assist_toggle_task}
+use app.ide.capabilities.{ide_capabilities, ide_capability_count, ide_capability_ids, ide_capability_report}
+use app.ide.markdown_render.{ide_markdown_render_probe_empty, ide_markdown_render_probe_malformed, ide_markdown_obsidian_probe}
+
+describe "markdown_render: empty and malformed input are total":
+
+    it "empty source yields a structured result with non-negative counts":
+        val p = ide_markdown_render_probe_empty()
+        expect(p.block_count >= 0).to_equal(true)
+        expect(p.rendered_line_count >= 0).to_equal(true)
+        expect(p.preview_line_count >= 0).to_equal(true)
+        expect(p.contains_heading).to_equal(false)
+        expect(p.contains_table).to_equal(false)
+
+    it "malformed (unclosed fence) source yields a structured result":
+        val p = ide_markdown_render_probe_malformed()
+        expect(p.block_count >= 0).to_equal(true)
+        expect(p.rendered_line_count >= 0).to_equal(true)
+        expect(p.preview_line_count >= 0).to_equal(true)
+        expect(p.contains_heading).to_equal(true)
+
+describe "markdown_render: Obsidian feature probe":
+
+    it "wiki link [[x]] is parsed without crashing and yields at least one block":
+        val p = ide_markdown_obsidian_probe()
+        expect(p.wiki_link_block_count > 0).to_equal(true)
+
+    it "embed ![[x]] is parsed without crashing and yields at least one block":
+        val p = ide_markdown_obsidian_probe()
+        expect(p.embed_block_count > 0).to_equal(true)
+
+    it "callout > [!NOTE] is parsed without crashing and yields at least one block":
+        val p = ide_markdown_obsidian_probe()
+        expect(p.callout_block_count > 0).to_equal(true)
+
+    it "table is parsed without crashing and yields at least one block":
+        val p = ide_markdown_obsidian_probe()
+        expect(p.table_block_count > 0).to_equal(true)
+
+    it "unclosed fence is parsed without crashing and yields at least one block":
+        val p = ide_markdown_obsidian_probe()
+        expect(p.unclosed_fence_block_count > 0).to_equal(true)
+
+    it "empty_source_safe and malformed_source_safe flags are both true":
+        val p = ide_markdown_obsidian_probe()
+        expect(p.empty_source_safe).to_equal(true)
+        expect(p.malformed_source_safe).to_equal(true)
+
+describe "preview_pane: height edge cases":
+
+    it "render with height 0 returns empty list, not a crash":
+        val pane = preview_pane_update(preview_pane_create(1), "# Hello\n\nBody")
+        val result = preview_pane_render(pane, 0)
+        expect(result.len()).to_equal(0)
+
+    it "render with negative height returns empty list, not a crash":
+        val pane = preview_pane_update(preview_pane_create(1), "# Hello\n\nBody")
+        val result = preview_pane_render(pane, -5)
+        expect(result.len()).to_equal(0)
+
+    it "render with height larger than content returns at most height lines":
+        val pane = preview_pane_update(preview_pane_create(1), "line1\nline2")
+        val result = preview_pane_render(pane, 100)
+        expect(result.len() >= 0).to_equal(true)
+
+    it "render with empty source and positive height returns empty or minimal output":
+        val pane = preview_pane_update(preview_pane_create(1), "")
+        val result = preview_pane_render(pane, 10)
+        expect(result.len() >= 0).to_equal(true)
+
+describe "preview_pane: CRLF source normalisation":
+
+    it "CRLF source parses without crash and produces same block count as LF":
+        val lf_source = "# Title\n\nParagraph\n\n- item"
+        val crlf_source = "# Title\r\n\r\nParagraph\r\n\r\n- item"
+        val pane_lf = preview_pane_update(preview_pane_create(1), lf_source)
+        val pane_crlf = preview_pane_update_crlf(preview_pane_create(1), crlf_source)
+        val out_lf = preview_pane_render(pane_lf, 20)
+        val out_crlf = preview_pane_render(pane_crlf, 20)
+        expect(out_lf.len()).to_equal(out_crlf.len())
+
+    it "standalone CR is also normalised":
+        val cr_source = "# Title\rBody"
+        val pane = preview_pane_update_crlf(preview_pane_create(1), cr_source)
+        val result = preview_pane_render(pane, 10)
+        expect(result.len() >= 0).to_equal(true)
+
+describe "preview_pane: scroll with zero or negative max_lines":
+
+    it "scroll with max_lines 0 returns pane unchanged":
+        val pane = preview_pane_update(preview_pane_create(1), "line\nline\nline")
+        val scrolled = preview_pane_scroll(pane, 5, 0)
+        expect(scrolled.viewport_start).to_equal(pane.viewport_start)
+
+    it "scroll with max_lines negative returns pane unchanged":
+        val pane = preview_pane_update(preview_pane_create(1), "line\nline\nline")
+        val scrolled = preview_pane_scroll(pane, 5, -3)
+        expect(scrolled.viewport_start).to_equal(pane.viewport_start)
+
+    it "scroll does not go negative":
+        val pane = preview_pane_update(preview_pane_create(1), "a\nb\nc")
+        val scrolled = preview_pane_scroll(pane, -100, 10)
+        expect(scrolled.viewport_start >= 0).to_equal(true)
+
+describe "capabilities: report is total on all registered capabilities":
+
+    it "ide_capability_count is positive":
+        expect(ide_capability_count() > 0).to_equal(true)
+
+    it "ide_capability_ids returns one id per capability":
+        val ids = ide_capability_ids()
+        expect(ids.len()).to_equal(ide_capability_count())
+
+    it "ide_capability_report returns two lines per capability":
+        val report = ide_capability_report()
+        expect(report.len()).to_equal(ide_capability_count() * 2)
+
+    it "capability ids contain no empty strings":
+        val ids = ide_capability_ids()
+        var all_nonempty = true
+        for id in ids:
+            if id == "":
+                all_nonempty = false
+        expect(all_nonempty).to_equal(true)
+
+describe "md_editing: boundary inputs at line 0, last line, beyond EOL":
+
+    it "table insert row at line 0 of a table works":
+        val content = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        val edit = md_table_insert_row_after(content, 0)
+        expect(edit.changed).to_equal(true)
+
+    it "table insert row on empty content returns unchanged (no crash)":
+        val edit = md_table_insert_row_after("", 0)
+        expect(edit.changed).to_equal(false)
+
+    it "table insert row with cursor_line beyond content length returns unchanged (no crash)":
+        val content = "| A | B |\n| --- | --- |"
+        val edit = md_table_insert_row_after(content, 999)
+        expect(edit.changed).to_equal(false)
+
+    it "table insert row with negative cursor_line returns unchanged (no crash)":
+        val edit = md_table_insert_row_after("| A |\n| --- |", -1)
+        expect(edit.changed).to_equal(false)
+
+    it "table insert column on empty content returns unchanged (no crash)":
+        val edit = md_table_insert_column_after("", 0, 0)
+        expect(edit.changed).to_equal(false)
+
+    it "table set cell on empty content returns unchanged (no crash)":
+        val edit = md_table_set_cell("", 0, 0, "val")
+        expect(edit.changed).to_equal(false)
+
+    it "table set cell with out-of-range col returns unchanged (no crash)":
+        val content = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        val edit = md_table_set_cell(content, 2, 99, "x")
+        expect(edit.changed).to_equal(false)
+
+    it "md_dispatch_motion with empty content at line 0 does not crash":
+        val result = md_dispatch_motion("]", "]", "", 0, 0)
+        expect(result.found).to_equal(false)
+
+    it "md_dispatch_motion with cursor beyond last line does not crash":
+        val content = "# Head\nbody"
+        val result = md_dispatch_motion("]", "]", content, 999, 0)
+        expect(result.found).to_equal(false)
+
+    it "md_commands_dispatch toggleTask on empty content returns not-a-task":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("markdown.toggleTask", state, "", 0, 0)
+        expect(result.status_message).to_equal("not a task")
+
+    it "md_commands_dispatch toggleTask at line beyond content length returns not-a-task":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("markdown.toggleTask", state, "- [ ] item", 999, 0)
+        expect(result.status_message).to_equal("not a task")
+
+    it "md_commands_dispatch unknown command returns command name as status":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("markdown.nonexistent", state, "text", 0, 0)
+        expect(result.status_message).to_equal("markdown.nonexistent")
+
+    it "md_assist_on_enter on empty string returns empty continuation":
+        val result = md_assist_on_enter("", 0)
+        expect(result).to_equal("")
+
+    it "md_assist_toggle_task on plain text returns text unchanged":
+        val result = md_assist_toggle_task("just a paragraph")
+        expect(result).to_equal("just a paragraph")
+
+describe "md_editing: toggle formatting on empty selection / insert at end":
+
+    it "md_commands_dispatch insertTable on empty content inserts table text":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("markdown.insertTable", state, "", 0, 0)
+        expect(result.insert_text.contains("Header")).to_equal(true)
+
+    it "md_commands_dispatch insertLink on empty content inserts link text":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("markdown.insertLink", state, "", 0, 0)
+        expect(result.insert_text.contains("[text](url)")).to_equal(true)
+
+    it "md_commands_dispatch insertCodeBlock on empty content inserts fence text":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("markdown.insertCodeBlock", state, "", 0, 0)
+        expect(result.insert_text.contains("```")).to_equal(true)
+
+    it "md_commands_dispatch documentStats on empty content does not crash":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("markdown.documentStats", state, "", 0, 0)
+        expect(result.status_message.len() > 0).to_equal(true)

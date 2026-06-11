@@ -31,11 +31,14 @@ fn md_render_block(block: RenderBlock) -> [text]:
             block.rendered_lines
 
 fn md_render_block_with_wiki(block: RenderBlock, index: MdWikiIndex) -> [text]:
-    _mdr_render_block_with_wiki_depth(block, index, 0)
+    _mdr_render_block_with_wiki_depth_visited(block, index, 0, [])
 
 fn _mdr_render_block_with_wiki_depth(block: RenderBlock, index: MdWikiIndex, depth: i64) -> [text]:
+    _mdr_render_block_with_wiki_depth_visited(block, index, depth, [])
+
+fn _mdr_render_block_with_wiki_depth_visited(block: RenderBlock, index: MdWikiIndex, depth: i64, visited: [text]) -> [text]:
     if block.kind == "embed":
-        val transcluded = _mdr_render_embed_transclusion_depth(block, index, depth)
+        val transcluded = _mdr_render_embed_transclusion_depth_visited(block, index, depth, visited)
         if transcluded.len() > 0:
             return transcluded
     md_render_block(block)
@@ -57,9 +60,12 @@ fn md_render_blocks(model: BlockModel) -> [text]:
     result
 
 fn md_render_blocks_with_wiki(model: BlockModel, index: MdWikiIndex) -> [text]:
-    _mdr_render_blocks_with_wiki_depth(model, index, 0)
+    _mdr_render_blocks_with_wiki_depth_visited(model, index, 0, [])
 
 fn _mdr_render_blocks_with_wiki_depth(model: BlockModel, index: MdWikiIndex, depth: i64) -> [text]:
+    _mdr_render_blocks_with_wiki_depth_visited(model, index, depth, [])
+
+fn _mdr_render_blocks_with_wiki_depth_visited(model: BlockModel, index: MdWikiIndex, depth: i64, visited: [text]) -> [text]:
     var result: [text] = []
     var i = 0
     while i < model.block_count():
@@ -69,7 +75,7 @@ fn _mdr_render_blocks_with_wiki_depth(model: BlockModel, index: MdWikiIndex, dep
             for line in raw_lines:
                 result.push(line)
         else:
-            val rendered = _mdr_render_block_with_wiki_depth(block, index, depth)
+            val rendered = _mdr_render_block_with_wiki_depth_visited(block, index, depth, visited)
             for line in rendered:
                 result.push(line)
         i = i + 1
@@ -80,23 +86,30 @@ fn md_render_inline(line: text) -> text:
     var i = 0
     while i < line.len():
         val ch = line.char_at(i)
+        # Handle escaped markers: \* \` — emit the literal character, skip escape
+        if ch == "\\" and i + 1 < line.len():
+            val next = line.char_at(i + 1)
+            if next == "*" or next == "`" or next == "\\":
+                result = result + "\\" + next
+                i = i + 2
+                continue
         if ch == "*" and i + 1 < line.len() and line.char_at(i + 1) == "*":
             val end = _mdr_find_double(line, "**", i + 2)
-            if end > 0:
+            if end >= 0 and end > i + 1:
                 val bold_text = line.slice(i + 2, end)
                 result = result + "\x1b[1m" + bold_text + "\x1b[0m"
                 i = end + 2
                 continue
         if ch == "*":
             val end = _mdr_find_single(line, "*", i + 1)
-            if end > 0:
+            if end > i:
                 val italic_text = line.slice(i + 1, end)
                 result = result + "\x1b[3m" + italic_text + "\x1b[0m"
                 i = end + 1
                 continue
         if ch == "`":
             val end = _mdr_find_single(line, "`", i + 1)
-            if end > 0:
+            if end > i:
                 val code_text = line.slice(i + 1, end)
                 result = result + "\x1b[36m" + code_text + "\x1b[0m"
                 i = end + 1
@@ -231,9 +244,12 @@ fn _mdr_render_embed(block: RenderBlock) -> [text]:
     [rendered + "]\x1b[0m"]
 
 fn _mdr_render_embed_transclusion(block: RenderBlock, index: MdWikiIndex) -> [text]:
-    _mdr_render_embed_transclusion_depth(block, index, 0)
+    _mdr_render_embed_transclusion_depth_visited(block, index, 0, [])
 
 fn _mdr_render_embed_transclusion_depth(block: RenderBlock, index: MdWikiIndex, depth: i64) -> [text]:
+    _mdr_render_embed_transclusion_depth_visited(block, index, depth, [])
+
+fn _mdr_render_embed_transclusion_depth_visited(block: RenderBlock, index: MdWikiIndex, depth: i64, visited: [text]) -> [text]:
     if block.rendered_lines.len() == 0:
         return []
     val info = _mdr_parse_embed_marker(block.rendered_lines[0])
@@ -241,18 +257,36 @@ fn _mdr_render_embed_transclusion_depth(block: RenderBlock, index: MdWikiIndex, 
         return []
     if depth >= 4:
         return []
-    val target = info.1
+    # Normalize target: strip trailing #heading anchor for cycle detection
+    val raw_target = info.1
+    val anchor_pos = _mdr_find_single(raw_target, "#", 0)
+    val target_key = if anchor_pos > 0 then raw_target.slice(0, anchor_pos) else: raw_target
+    # Cycle guard: if this target is already on the visited path, stop
+    if _mdr_list_contains(visited, target_key):
+        return []
+    val target = raw_target
     val body = md_wiki_transclusion_content(index, target)
     if body == "":
         return []
     val nested = BlockModel.from_markdown(body)
-    val rendered_body = _mdr_render_blocks_with_wiki_depth(nested, index, depth + 1)
+    # Pass visited with target_key appended — arrays are value types so push returns new copy
+    var next_visited = visited
+    next_visited.push(target_key)
+    val rendered_body = _mdr_render_blocks_with_wiki_depth_visited(nested, index, depth + 1, next_visited)
     var result: [text] = []
     val label = if info.2 == "" then target else: info.2
     result.push("\x1b[1;35m[transclude: " + label + "]\x1b[0m")
     for line in rendered_body:
         result.push("\x1b[90m>\x1b[0m " + line)
     result
+
+fn _mdr_list_contains(lst: [text], item: text) -> bool:
+    var i = 0
+    while i < lst.len():
+        if lst[i] == item:
+            return true
+        i = i + 1
+    false
 
 fn _mdr_parse_embed_marker(line: text) -> tuple:
     val trimmed = _mdr_trim(line)
@@ -358,6 +392,8 @@ fn _mdr_split_lines(content: text) -> [text]:
             lines.push(content.slice(start, i))
             start = i + 1
         i = i + 1
-    if start <= content.len():
+    # Only push trailing segment when there is actual content after last newline.
+    # Prevents empty string input from emitting a spurious empty line.
+    if start < content.len():
         lines.push(content.slice(start, content.len()))
     lines
