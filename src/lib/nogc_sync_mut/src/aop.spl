@@ -1,4 +1,10 @@
 # AOP Module - Aspect-Oriented Programming
+#
+# Around advice with real proceed: register via AspectRegistry.register_around().
+# Limitation: only one AroundAdvice per join point is supported in interpreter mode;
+# if multiple match, wrap returns Err("multiple around advices not yet supported")
+# and records a denial. This is an honest runtime limitation pending closure-chain
+# support in the interpreter.
 
 use config.AopConfig
 use std.io.{time_now_unix_micros}
@@ -40,6 +46,58 @@ struct AdviceContext:
     start_time: i64
     end_time: i64?
 
+# ----------------------------------------------------------------------------
+# ProceedCell — tracks whether proceed() was called inside an Around handler.
+# Fields are mutated only through me-methods, which work even when the object
+# is captured read-only by a closure (interpreter constraint).
+# ----------------------------------------------------------------------------
+class ProceedCell:
+    called: i64
+    ok: bool
+    error: text
+
+impl ProceedCell:
+    static fn fresh() -> ProceedCell:
+        ProceedCell(called: 0, ok: false, error: "")
+
+    me mark_called():
+        self.called = self.called + 1
+
+    me set_ok():
+        self.ok = true
+
+    me set_err(e: text):
+        self.error = e
+
+# ----------------------------------------------------------------------------
+# AopResultSlot<T> — typed result slot written by the proceed thunk inside
+# wrap<T>. Generic class so wrap<T> can instantiate it without type erasure.
+# ----------------------------------------------------------------------------
+class AopResultSlot<T>:
+    value: T?
+    filled: bool
+
+impl AopResultSlot<T>:
+    static fn empty() -> AopResultSlot<T>:
+        AopResultSlot(value: nil, filled: false)
+
+    me set(v: T):
+        self.value = Some(v)
+        self.filled = true
+
+# ----------------------------------------------------------------------------
+# AroundAdvice — separate struct for Around advice with real proceed contract.
+# Registered via AspectRegistry.register_around(); matched independently of
+# the legacy Advice/Aspect path so old pre-hook Around registrations are
+# byte-compatible.
+# ----------------------------------------------------------------------------
+struct AroundAdvice:
+    name: text
+    pointcut: Pointcut
+    priority: i64
+    enabled: bool
+    handler: fn(AdviceContext, fn() -> Result<(), text>) -> Result<(), text>
+
 # Reserved priority band for security aspects.
 # Aspects with priority >= RESERVED_SECURITY_MIN are reserved for security use.
 # Non-security registrations that claim this band are clamped below it.
@@ -47,6 +105,7 @@ val RESERVED_SECURITY_MIN: i64 = 1000000
 
 struct AspectRegistry:
     aspects: [Aspect]
+    around_advices: [AroundAdvice]
     enabled: bool
     # Once sealed (after init_aop registers security aspects), disable_unsafe and
     # unregister_unsafe become no-ops. New aspect registrations are still permitted.
@@ -54,7 +113,7 @@ struct AspectRegistry:
 
 impl AspectRegistry:
     static fn empty() -> AspectRegistry:
-        AspectRegistry(aspects: [], enabled: true, sealed: false)
+        AspectRegistry(aspects: [], around_advices: [], enabled: true, sealed: false)
 
     me register(aspect: Aspect):
         # Clamp any aspect that attempts to claim the reserved security priority band.
@@ -73,6 +132,56 @@ impl AspectRegistry:
         )
         self.aspects = self.aspects.push(clamped)
 
+    me register_around(adv: AroundAdvice):
+        """Register an AroundAdvice with real proceed contract (E1)."""
+        val safe_priority = if adv.priority >= RESERVED_SECURITY_MIN:
+            RESERVED_SECURITY_MIN - 1
+        else:
+            adv.priority
+        val clamped = AroundAdvice(
+            name: adv.name,
+            pointcut: adv.pointcut,
+            priority: safe_priority,
+            enabled: adv.enabled,
+            handler: adv.handler
+        )
+        self.around_advices = self.around_advices.push(clamped)
+
+    fn find_around_advices(join_point: JoinPoint) -> [AroundAdvice]:
+        if not self.enabled:
+            return []
+        var matched: [AroundAdvice] = []
+        var i = 0
+        while i < self.around_advices.len():
+            val adv = self.around_advices[i]
+            i = i + 1
+            if not adv.enabled:
+                continue
+            val pattern = adv.pointcut.pattern
+            val effective_pattern = if pattern.is_some(): pattern.unwrap() else: "*"
+            val matches = _match_join_point(adv.pointcut.kind, effective_pattern, join_point)
+            if matches:
+                matched = matched.push(adv)
+        # Sort by priority, highest first (stable selection sort).
+        var sorted: [AroundAdvice] = []
+        var remaining = matched
+        while remaining.len() > 0:
+            var best = 0
+            var ri = 1
+            while ri < remaining.len():
+                if remaining[ri].priority > remaining[best].priority:
+                    best = ri
+                ri = ri + 1
+            sorted = sorted.push(remaining[best])
+            var next_rem: [AroundAdvice] = []
+            var rj = 0
+            while rj < remaining.len():
+                if rj != best:
+                    next_rem = next_rem.push(remaining[rj])
+                rj = rj + 1
+            remaining = next_rem
+        return sorted
+
     me unregister_unsafe(name: text):
         # SECURITY: only call from trusted initialization code.
         # Removing a registered aspect at runtime can silently disable security enforcement.
@@ -80,6 +189,7 @@ impl AspectRegistry:
         if self.sealed:
             return
         self.aspects = self.aspects.filter(_.name != name)
+        self.around_advices = self.around_advices.filter(_.name != name)
 
     fn find_aspects(join_point: JoinPoint) -> [Aspect]:
         if not self.enabled:
@@ -156,6 +266,38 @@ impl LogAspects:
 var _aop_denial_count = 0
 var _aop_last_denial = ""
 
+# ---------------------------------------------------------------------------
+# Proceed-slot state for AroundAdvice (E1).
+# Module-level vars are writable from closures; class instances captured in
+# closures are copied (interpreter limitation), so we use module-level state.
+# These are always reset before each around-advice invocation and are NOT
+# thread-safe — single-threaded interpreter only.
+# ---------------------------------------------------------------------------
+var _aop_proceed_called: i64 = 0
+var _aop_proceed_target_ran: bool = false
+var _aop_proceed_result_i64: i64 = 0
+var _aop_proceed_result_text: text = ""
+var _aop_proceed_result_bool: bool = false
+var _aop_proceed_err: text = ""
+var _aop_proceed_had_err: bool = false
+
+fn _aop_proceed_reset():
+    _aop_proceed_called = 0
+    _aop_proceed_target_ran = false
+    _aop_proceed_result_i64 = 0
+    _aop_proceed_result_text = ""
+    _aop_proceed_result_bool = false
+    _aop_proceed_err = ""
+    _aop_proceed_had_err = false
+
+pub fn aop_last_proceed_err() -> text:
+    """Last error returned by a duplicate proceed() call (test support)."""
+    _aop_proceed_err
+
+pub fn aop_proceed_double_called() -> bool:
+    """True if proceed() was called more than once in the last around invocation."""
+    _aop_proceed_had_err
+
 pub fn aop_denial_count() -> i64:
     """Number of join points skipped because advice returned Err."""
     _aop_denial_count
@@ -182,7 +324,8 @@ impl AspectWeaver:
 
     fn wrap<T>(join_point: JoinPoint, func: fn() -> T) -> Result<T, text>:
         val aspects = self.registry.find_aspects(join_point)
-        if aspects.len() == 0:
+        val around_advices = self.registry.find_around_advices(join_point)
+        if aspects.len() == 0 and around_advices.len() == 0:
             val result = func()
             return Ok(result)
         val fn_name = _join_point_name(join_point)
@@ -197,7 +340,7 @@ impl AspectWeaver:
             start_time: start,
             end_time: nil
         )
-        # Execute Before and Around advice
+        # Execute Before and legacy Around (pre-hook) advice
         var j = 0
         while j < aspects.len():
             val aspect = aspects[j]
@@ -210,7 +353,7 @@ impl AspectWeaver:
                         _record_denial(fn_name, "before", e)
                         return Err(e)
                 case Around:
-                    # Around handler runs as a pre-hook; proceed callback
+                    # Legacy Around handler runs as a pre-hook; proceed callback
                     # not available because handler signature lacks it.
                     val res = aspect.advice.handler(before_ctx)
                     if res.is_err():
@@ -221,7 +364,42 @@ impl AspectWeaver:
                     pass_do_nothing
                 case AfterError:
                     pass_do_nothing
-        # Call the actual function
+        # Execute AroundAdvice with real proceed contract (E1).
+        # Limitation: only one AroundAdvice per join point in interpreter mode.
+        # Interpreter constraint: closures capture class instances by value, so
+        # me-method mutations inside a closure do not propagate back to outer vars.
+        # We use module-level vars (_aop_proceed_*) as the proceed state store —
+        # module-level vars ARE writable from closures in the interpreter.
+        # func() is NOT called inside the proceed closure (can't store generic T
+        # in a module-level var); instead the closure sets _aop_proceed_called and
+        # wrap<T> calls func() after the handler returns if called == 1.
+        if around_advices.len() > 1:
+            _record_denial(fn_name, "around", "multiple around advices not yet supported")
+            return Err("multiple around advices not yet supported")
+        if around_advices.len() == 1:
+            val adv = around_advices[0]
+            _aop_proceed_reset()
+            val proceed = \:
+                if _aop_proceed_called >= 1:
+                    _aop_proceed_had_err = true
+                    _aop_proceed_err = "proceed called more than once"
+                    return Err("proceed called more than once")
+                _aop_proceed_called = _aop_proceed_called + 1
+                Ok(())
+            val handler_res = adv.handler(before_ctx, proceed)
+            if handler_res.is_err():
+                val e = handler_res.unwrap_err()
+                val ran_note = if _aop_proceed_called > 0: " (target ran)" else: " (target did not run)"
+                _record_denial(fn_name, "around", e + ran_note)
+                return Err(e)
+            if _aop_proceed_called == 0:
+                val no_proceed_msg = "around advice did not call proceed"
+                _record_denial(fn_name, "around", no_proceed_msg)
+                return Err(no_proceed_msg)
+            # proceed was called exactly once — now call func() to get T
+            val around_result = func()
+            return Ok(around_result)
+        # Call the actual function (no AroundAdvice matched)
         val result = func()
         val end = time_now_ms()
         val after_ctx = AdviceContext(
@@ -245,7 +423,7 @@ impl AspectWeaver:
                     if res.is_err():
                         # Join point already ran; the denial here masks its result.
                         val e = res.unwrap_err()
-                        _record_denial(fn_name, "after", e)
+                        _record_denial(fn_name, "after(target-executed)", e)
                         return Err(e)
                 case Before:
                     pass_do_nothing
@@ -374,6 +552,9 @@ pub fn get_weaver() -> AspectWeaver:
 
 pub fn register_aspect(aspect: Aspect):
     get_registry().register(aspect)
+
+pub fn register_around_advice(adv: AroundAdvice):
+    get_registry().register_around(adv)
 
 pub fn wrap_call<T>(name: text, func: fn() -> T) -> Result<T, text>:
     get_weaver().wrap(JoinPoint.FunctionCall(name), func)

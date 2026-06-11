@@ -8,7 +8,7 @@
 use std.spec.*
 use std.nogc_sync_mut.src.aop.{
     AspectRegistry, AspectWeaver, Aspect, Advice, AdviceKind,
-    Pointcut, JoinPoint, AdviceContext,
+    Pointcut, JoinPoint, AdviceContext, AroundAdvice,
     aop_denial_count, aop_last_denial, aop_clear_denials
 }
 
@@ -95,3 +95,32 @@ describe "AOP advice denial visibility (H10)":
             aop_clear_denials()
             expect(aop_denial_count()).to_equal(0)
             expect(aop_last_denial()).to_equal("")
+
+    context "after-denial marker (E2)":
+        it "denial message contains target-executed when after advice denies":
+            aop_clear_denials()
+            var registry = AspectRegistry.empty()
+            fn after_deny(ctx: AdviceContext) -> Result<(), text>:
+                Err("after policy blocked")
+            registry.register(make_aspect("deny_after", AdviceKind.After, after_deny))
+            val weaver = AspectWeaver.with_registry(registry)
+            val r = weaver.wrap(JoinPoint.FunctionCall(name: "after_op"), target_fn)
+            expect(r.is_err()).to_equal(true)
+            expect(aop_denial_count()).to_equal(1)
+            val denial = aop_last_denial()
+            expect(denial.contains("target-executed")).to_equal(true)
+            expect(denial.contains("after_op")).to_equal(true)
+
+    context "legacy around pre-hook still works (E1 backward compat)":
+        it "old-style Around via Advice struct runs as pre-hook":
+            aop_clear_denials()
+            var registry = AspectRegistry.empty()
+            fn around_deny(ctx: AdviceContext) -> Result<(), text>:
+                Err("old-style around denied")
+            registry.register(make_aspect("legacy_around", AdviceKind.Around, around_deny))
+            val weaver = AspectWeaver.with_registry(registry)
+            val r = weaver.wrap(JoinPoint.FunctionCall(name: "legacy_op"), target_fn)
+            expect(r.is_err()).to_equal(true)
+            expect(aop_denial_count()).to_equal(1)
+            val denial = aop_last_denial()
+            expect(denial.contains("around")).to_equal(true)
