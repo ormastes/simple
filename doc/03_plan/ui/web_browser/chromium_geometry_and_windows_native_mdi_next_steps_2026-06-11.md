@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 23 labeled fixtures through `26_flex_gap_basic` with exact
+  now covers 24 labeled fixtures through `27_absolute_position_basic` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -236,6 +236,14 @@ Smallest next implementation step:
     margin when the body has no top border or padding
   - preserve exact row-flex gap positions (`x=24,76,138`) and match Chrome's
     y=16 top edge
+- Live `27_absolute_position_basic` evidence now passes with `layout_match`
+  and `mismatch_count=0`.
+- The focused fixture-27 result records Chromium absolute-position behavior
+  inside a padded, bordered `position:relative` containing block:
+  - the parent border box is `x=24`, `y=16`, `width=184`, `height=114`
+  - the absolute child border box is `x=46`, `y=33`, `width=40`, `height=24`
+  - the result confirms the existing Simple absolute-position path matches
+    Chrome for this case without using blur, tolerance, or copied pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -257,12 +265,13 @@ Smallest next implementation step:
   - center the block of wrapped lines inside the explicit cross size for the
     focused `align-content:center` case
 - Chrome headless manifest evidence now includes
-  `25_flex_justify_space_between` and `26_flex_gap_basic`:
+  `25_flex_justify_space_between`, `26_flex_gap_basic`, and
+  `27_absolute_position_basic`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `26` in its default manifest, excluding only
+    covers fixtures `02` through `27` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `23` fixtures, `23` passes, `0` failures, and
+    reports `24` fixtures, `24` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without

@@ -184,6 +184,14 @@ Open gaps tied to the active browser objective:
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
     now reports `fixture_count=23`, `pass_count=23`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
+- The same live geometry lane now passes for `27_absolute_position_basic`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's absolute-position geometry inside a
+    padded, bordered `position:relative` containing block; the child border box
+    lands at `x=46`, `y=33`, matching the existing Simple path exactly
+  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+    now reports `fixture_count=24`, `pass_count=24`, `fail_count=0`, and
+    `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
     passes with one listed scenario and zero failures
