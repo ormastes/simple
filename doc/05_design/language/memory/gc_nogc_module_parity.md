@@ -2,7 +2,39 @@
 
 Design document tracking which modules exist in both `gc_async_mut/` and `nogc_sync_mut/`, what shared types live in `common/`, and the import mapping between modes.
 
-**Updated:** 2026-05-13
+**Updated:** 2026-06-11
+
+---
+
+## GC Boundary Enforcement (lint `gc_boundary_crossing`)
+
+**Added:** 2026-06-11 (memory_audit_gc_nogc)
+
+Family-import rules are enforced by the `gc_boundary_crossing` lint, implemented in
+BOTH compilers and required to stay in parity:
+
+- Rust seed: `src/compiler_rust/compiler/src/lint/checker_resources.rs`
+  (`check_gc_boundary_imports`, runs in every lint pass; `Deny` by default)
+- Self-hosted: `src/compiler/35.semantics/gc_boundary_check.spl` wired via the
+  semantic pass (warnings, elevatable); `src/compiler/00.common/gc_boundary.spl`
+
+Rules: nogc_* must not import gc_* families; gc_* must not import nogc_* families
+(symmetric Rule 3); *_noalloc must not import any allocating family.
+
+**Alias resolution (`GC_ALIAS_MANIFEST`)**: shim modules that re-export from a gc_*
+family (e.g. `std.gpu` / `nogc_async_mut.gpu` → `gc_async_mut.gpu` via
+`src/lib/nogc_async_mut/gpu/__init__.spl`) are resolved to their effective family
+BEFORE classification, so alias imports cannot evade the lint. The manifest exists
+in both compilers (same name) and MUST be updated in both when a new gc_*-backed
+shim is added. Specs: `test/01_unit/compiler/semantics/gc_boundary_check_spec.spl`
+(13 tests incl. alias cases); seed: `gc_alias_tests` in checker_resources.rs.
+
+Known gaps (tracked in `doc/08_tracking/bug/gc_nogc_memory_audit_findings_2026-06-11.md`):
+`# @no_gc` comment form not recognized by the seed; boundary runs at lint time only
+(`compile --native` of a violating file still exits 0); `nogc_async_mut/gpu` being
+gc-backed is itself a structural violation awaiting a true nogc GPU layer.
+Empirical context: there is currently NO runtime GC — see
+`doc/01_research/runtime/memory_tooling/memory_inspection_tooling.md`.
 
 ---
 

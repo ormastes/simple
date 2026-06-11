@@ -22,6 +22,14 @@ alwaysApply: false
 ```bash
 # Full bootstrap (recommended):
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+# WARNING: --deploy replaces bin/release/<triple>/simple with the STAGE4 CLI
+# without any smoke gate. Verified broken 2026-06-11 (lint coredumps, test
+# silent no-op, -c exit 1). After --deploy, ALWAYS smoke-test:
+#   setsid timeout 30 bin/simple -c "print(1+1)"   # expect 2
+#   bin/simple lint <any .spl>                      # must not core dump
+# If broken, restore the working seed:
+#   cp src/compiler_rust/target/release/simple bin/release/<triple>/simple.new \
+#     && mv bin/release/<triple>/simple.new bin/release/<triple>/simple
 # Windows:
 scripts/bootstrap/bootstrap-windows.sh --deploy
 # Manual stages:

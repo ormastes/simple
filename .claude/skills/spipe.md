@@ -297,7 +297,20 @@ before `kill()`/`waitpid()`) belong in the seed runtime too — a failed spawn's
 `-1` reaching `kill(-1)` SIGTERMs every user process (tmux + all SSH sessions +
 `systemd --user`). Such seed changes only take effect after a seed rebuild
 (`cargo build`) + `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`.
+Caveat: `--deploy` ships the stage4 CLI with no smoke gate (verified broken
+2026-06-11 — lint coredumps, silent test no-op); always smoke-test `bin/simple`
+afterwards and, if broken, atomically restore the fresh seed from
+`src/compiler_rust/target/release/simple` (see `.claude/rules/bootstrap.md`).
 See `doc/07_guide/runtime/process_kill_safety.md`.
+
+For memory-perspective work (gc/nogc boundary, leak checks, alloc enforcement):
+the gc-boundary lint (`gc_boundary_crossing`) resolves alias shims via
+`GC_ALIAS_MANIFEST` — kept in sync in BOTH compilers
+(`src/compiler/35.semantics/gc_boundary_check.spl` and Rust seed
+`src/compiler_rust/compiler/src/lint/checker_resources.rs`); update both when a
+new gc_*-backed shim is added. Tooling research + 3-tier on/off recommendation:
+`doc/01_research/runtime/memory_tooling/`. Open findings:
+`doc/08_tracking/bug/gc_nogc_memory_audit_findings_2026-06-11.md`.
 Mode escalation: interpreter (dev) → SMF (staging) → native (production).
 
 ## Dependency hygiene during refactoring
