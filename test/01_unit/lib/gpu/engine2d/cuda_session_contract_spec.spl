@@ -3,7 +3,7 @@
 
 use std.gc_async_mut.cuda.{cuda_available}
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
-use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_FILL}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_BITMAP_GLYPH_RASTER, GENERATED_2D_FILL}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gpu.engine2d.sffi_cuda.{CudaFfi}
 
@@ -78,6 +78,44 @@ describe "CudaSession compute contract":
         expect(missing_args.status_code).to_equal("missing-args-pointer")
         expect(missing_args.reason).to_equal("missing-generated-2d-args-pointer")
         expect(missing_args.diagnostic_text()).to_contain("CudaSessionEvidence")
+
+    it "routes generated bitmap glyph raster through the CUDA session helper":
+        var session = CudaSession.create()
+        val missing_runtime = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, 4096)
+        session.is_initialized = true
+        session.ctx = 7
+        val missing_module = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, 4096)
+        session.module_cache = 11
+        val missing_args = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, 0)
+
+        expect(missing_runtime.operation).to_equal(GENERATED_2D_BITMAP_GLYPH_RASTER)
+        expect(missing_runtime.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+        expect(missing_runtime.typed_status).to_equal("cuda-runtime-unavailable")
+        expect(missing_module.typed_status).to_equal("cuda-module-unavailable")
+        expect(missing_args.typed_status).to_equal("args-unavailable")
+        expect(missing_args.diagnostic_text()).to_contain("op=bitmap_glyph_raster")
+        session.module_cache = 0
+        expect(session.bitmap_glyph_raster_kernel(9, 4, 4096)).to_equal(1)
+
+    it "reports CUDA readback evidence through the shared checksum classifier":
+        val session = CudaSession.create()
+        val matched = session.readback_evidence(true, 1234, 1234)
+        val unavailable = session.readback_evidence(false, 1234, 1234)
+        val mismatch = session.readback_evidence(true, 1234, 999)
+        val invalid = session.readback_evidence(true, 0, 1234)
+
+        expect(matched.success).to_equal(true)
+        expect(matched.status_code).to_equal("readback-matched")
+        expect(matched.reason).to_equal("readback-checksum-matched")
+        expect(matched.readback_available).to_equal(true)
+        expect(unavailable.success).to_equal(false)
+        expect(unavailable.status_code).to_equal("readback-unavailable")
+        expect(unavailable.reason).to_equal("device-readback-required")
+        expect(mismatch.status_code).to_equal("readback-mismatch")
+        expect(mismatch.reason).to_equal("device-readback-checksum-mismatch")
+        expect(invalid.status_code).to_equal("invalid-checksum")
+        expect(invalid.reason).to_equal("device-readback-checksum-required")
+        expect(matched.diagnostic_text()).to_contain("op=readback")
 
     it "shutdown is safe on an uninitialized session":
         var session = CudaSession.create()

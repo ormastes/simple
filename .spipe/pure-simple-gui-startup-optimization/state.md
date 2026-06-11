@@ -645,3 +645,13 @@ dev-done
   readback-verified GPU glyph pixels.
 - verify: Optimizer scans completed for this slice in Docker. Counts: CUDA
   session 23 and CUDA session contract spec 0 remaining static opportunities.
+- impl: Added CUDA session readback evidence classification.
+  `CudaSession.readback_evidence(...)` now uses the shared
+  `gpu_session_readback_status(...)` classifier for readback unavailable,
+  invalid checksum, checksum match, and checksum mismatch states.
+- verify: Focused CUDA session check passes and CUDA session contract spec now
+  passes 9/9. Generated manual was refreshed under `doc/06_spec`. This proves
+  CUDA readback classification only; real device readback is still required
+  before claiming GPU-rendered glyph pixels.
+- verify: Optimizer scans completed for this slice in Docker. Counts: CUDA
+  session 23 and CUDA session contract spec 0 remaining static opportunities.

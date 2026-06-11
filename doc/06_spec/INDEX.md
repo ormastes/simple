@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Cuda Session Contract Specification](test/01_unit/lib/gpu/engine2d/cuda_session_contract_spec.md) | Auto-generated | N/A | 8 | 0% | 0 lines |
+| [Cuda Session Contract Specification](test/01_unit/lib/gpu/engine2d/cuda_session_contract_spec.md) | Auto-generated | N/A | 9 | 0% | 0 lines |
 

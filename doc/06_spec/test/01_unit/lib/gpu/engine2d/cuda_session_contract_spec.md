@@ -27,7 +27,7 @@ cuda_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -61,7 +61,7 @@ expect(session.is_valid()).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -73,7 +73,6 @@ expect(session.fill_kernel(64, 64, 4096)).to_equal(1)
 expect(session.copy_kernel(64, 64, 4096)).to_equal(1)
 expect(session.alpha_blend_kernel(64, 64, 4096)).to_equal(1)
 expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
-expect(session.bitmap_glyph_raster_kernel(64, 64, 4096)).to_equal(1)
 ```
 
 </details>
@@ -247,6 +246,37 @@ expect(session.bitmap_glyph_raster_kernel(9, 4, 4096)).to_equal(1)
 
 </details>
 
+#### reports CUDA readback evidence through the shared checksum classifier
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val session = CudaSession.create()
+val matched = session.readback_evidence(true, 1234, 1234)
+val unavailable = session.readback_evidence(false, 1234, 1234)
+val mismatch = session.readback_evidence(true, 1234, 999)
+val invalid = session.readback_evidence(true, 0, 1234)
+
+expect(matched.success).to_equal(true)
+expect(matched.status_code).to_equal("readback-matched")
+expect(matched.reason).to_equal("readback-checksum-matched")
+expect(matched.readback_available).to_equal(true)
+expect(unavailable.success).to_equal(false)
+expect(unavailable.status_code).to_equal("readback-unavailable")
+expect(unavailable.reason).to_equal("device-readback-required")
+expect(mismatch.status_code).to_equal("readback-mismatch")
+expect(mismatch.reason).to_equal("device-readback-checksum-mismatch")
+expect(invalid.status_code).to_equal("invalid-checksum")
+expect(invalid.reason).to_equal("device-readback-checksum-required")
+expect(matched.diagnostic_text()).to_contain("op=readback")
+```
+
+</details>
+
 #### shutdown is safe on an uninitialized session
 
 - var session = CudaSession create
@@ -290,8 +320,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

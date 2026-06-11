@@ -130,9 +130,10 @@ The Simple web renderer has two code paths:
   GPU copy/upload, plus the typed `bitmap_glyph_raster` generated-kernel launch
   plan. The portable compiler emitter and the CUDA/OpenCL/HIP Engine2D paths
   expose `simple_2d_bitmap_glyph_raster_u32`; CUDA routes the generated
-  operation through `bitmap_glyph_raster_kernel(...)`, OpenCL binds the packed
-  glyph/destination/size/color arguments, and HIP preflights the same packed
-  shape before launch. `bitmap_glyph_raster_expected_pixels(...)` maps the
+  operation through `bitmap_glyph_raster_kernel(...)` and classifies checksum
+  readback through `CudaSession.readback_evidence(...)`, OpenCL binds the
+  packed glyph/destination/size/color arguments, and HIP preflights the same
+  packed shape before launch. `bitmap_glyph_raster_expected_pixels(...)` maps the
   glyph mask to the expected color/zero output and
   `bitmap_glyph_raster_checksum(...)` derives the expected checksum used by
   `bitmap_glyph_raster_readback_evidence(...)`. That readback wrapper is the
