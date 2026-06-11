@@ -79,15 +79,17 @@ Related active host-side blocker:
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
   records the newer callback-id resumable-stepper prototype. That path removes
   function-valued queue items, but a single completed stepper still segfaults
-  in the debug-seed hosted native path with `EXIT=139`.
+  in the hosted native path with `EXIT=139`.
 - `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`
-  now tracks the narrower helper-return runtime boundary directly.
+  now records the closed helper-return runtime regression that first narrowed
+  this lane.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records the newer evidence split: the checked-in `bin/release/simple` binary
   is stale for this lane, while current-source rebuilt `release` and `debug`
   artifacts are the stronger evidence for the remaining hosted-native blocker.
-  The native symbol-collision sub-bug (`worker.1`) is fixed there, but the
-  rebuilt helper-return and resumable-stepper probes still fail at runtime.
+  The native symbol-collision sub-bug (`worker.1`) is fixed there, the rebuilt
+  helper-return probes now pass, and the resumable-stepper probe still fails at
+  runtime.
 
 ## Current Evidence Boundary
 

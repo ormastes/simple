@@ -1,17 +1,16 @@
 """
-# Native Function Value Helper Return Debug Blocker
+# Native Function Value Helper Return Regression
 
 **Feature IDs:** #native-function-value-helper-return
 **Category:** Runtime / Native / Function Values
-**Status:** Blocked
+**Status:** Fixed
 
 ## Overview
 
-This SSpec pins the current narrower debug-seed callback boundary under the
-hosted multicore-green resumable-stepper experiment: the checked-in
-`bin/release/simple` path now handles helper-returned function values, but the
-fresh debug seed binary still segfaults when a helper returns a function value
-and the caller invokes it in the standalone native artifact.
+This SSpec keeps regression coverage on the helper-returned function-value
+boundary under the hosted multicore-green resumable-stepper experiment. Fresh
+release and debug seed binaries now preserve a function value returned from a
+helper and invoked in the standalone native artifact.
 
 ## Requirements
 
@@ -32,7 +31,7 @@ and the caller invokes it in the standalone native artifact.
 ## Syntax
 
 ```sh
-bin/release/simple test test/03_system/feature/usage/native_function_value_helper_return_blocker_spec.spl --mode=interpreter --clean
+src/compiler_rust/target/release/simple test test/03_system/feature/usage/native_function_value_helper_return_regression_spec.spl --mode=interpreter --clean
 ```
 """
 
@@ -42,8 +41,8 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 val DEBUG_SIMPLE_BIN: text = "src/compiler_rust/target/debug/simple"
-val RELEASE_SIMPLE_BIN: text = "bin/release/simple"
-val BUILD_DIR: text = "build/test/native_function_value_helper_return_blocker"
+val RELEASE_SIMPLE_BIN: text = "src/compiler_rust/target/release/simple"
+val BUILD_DIR: text = "build/test/native_function_value_helper_return_regression"
 val DIRECT_SOURCE: text = BUILD_DIR + "/direct_array_fn_probe.spl"
 val DIRECT_NATIVE_DEBUG: text = BUILD_DIR + "/direct_array_fn_probe.debug.bin"
 val HELPER_SOURCE: text = BUILD_DIR + "/helper_array_fn_probe.spl"
@@ -90,7 +89,7 @@ fn helper_probe_source() -> text:
     ].join("")
 
 describe "native function value helper return blocker":
-    it "keeps the remaining debug-seed helper-return crash boundary explicit":
+    it "keeps helper-returned function values working in standalone native builds":
         step("Write the direct and helper-return native callback probes")
         val (_mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
         expect(mkdir_code).to_equal(0)
@@ -103,30 +102,31 @@ describe "native function value helper return blocker":
         expect(direct_compile_out).to_contain("Compiled")
         val (direct_run_out, direct_run_code) = shell("sh -c '" + DIRECT_NATIVE_DEBUG + " >/tmp/native_fn_direct.out 2>&1; code=$?; cat /tmp/native_fn_direct.out; echo EXIT=$code'")
         expect(direct_run_code).to_equal(0)
-        expect(direct_run_out).to_contain("got=<value:0x7>")
+        expect(direct_run_out).to_contain("got=7")
         expect(direct_run_out).to_contain("EXIT=0")
 
-        step("The checked-in release path now handles helper-returned function values")
+        step("The fresh release path now handles helper-returned function values")
         val (release_compile_out, release_compile_code) = shell(RELEASE_SIMPLE_BIN + " compile " + HELPER_SOURCE + " --native -o " + HELPER_NATIVE_RELEASE)
         expect(release_compile_code).to_equal(0)
         expect(release_compile_out).to_contain("Compiled")
         val (release_run_out, release_run_code) = shell("sh -c '" + HELPER_NATIVE_RELEASE + " >/tmp/native_fn_helper_release.out 2>&1; code=$?; cat /tmp/native_fn_helper_release.out; echo EXIT=$code'")
         expect(release_run_code).to_equal(0)
-        expect(release_run_out).to_contain("via_helper=7")
+        expect(release_run_out).to_contain("got=7")
         expect(release_run_out).to_contain("EXIT=0")
 
-        step("The fresh debug seed binary still crashes on the helper-return native path")
+        step("The fresh debug seed binary now matches the release helper-return path")
         val (helper_compile_out, helper_compile_code) = shell(DEBUG_SIMPLE_BIN + " compile " + HELPER_SOURCE + " --native -o " + HELPER_NATIVE_DEBUG)
         expect(helper_compile_code).to_equal(0)
         expect(helper_compile_out).to_contain("Compiled")
         val (helper_run_out, helper_run_code) = shell("sh -c '" + HELPER_NATIVE_DEBUG + " >/tmp/native_fn_helper.out 2>&1; code=$?; cat /tmp/native_fn_helper.out; echo EXIT=$code'")
         expect(helper_run_code).to_equal(0)
-        expect(helper_run_out).to_contain("EXIT=139")
+        expect(helper_run_out).to_contain("got=7")
+        expect(helper_run_out).to_contain("EXIT=0")
 
-        step("The tracker records the same debug-seed helper-return blocker")
+        step("The tracker records the helper-return fix and the remaining downstream blocker")
         val (blocker_out, blocker_code) = shell("cat doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md")
         expect(blocker_code).to_equal(0)
-        expect(blocker_out).to_contain("Status: open")
-        expect(blocker_out).to_contain("checked-in release path now handles helper-returned function values")
-        expect(blocker_out).to_contain("fresh debug seed binary still segfaults")
-        expect(blocker_out).to_contain("EXIT=139")
+        expect(blocker_out).to_contain("Status: closed")
+        expect(blocker_out).to_contain("preserve and invoke helper-returned function")
+        expect(blocker_out).to_contain("remaining hosted multicore-green resumable-stepper crash is a separate")
+        expect(blocker_out).to_contain("downstream blocker")

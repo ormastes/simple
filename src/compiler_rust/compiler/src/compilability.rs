@@ -316,11 +316,14 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             analyze_expr(receiver, reasons);
         }
 
-        // Index access needs collection runtime
+        // Index access lowers to rt_index_get / rt_array_get in MIR and the
+        // current native pipeline handles those runtime calls directly.
+        // Keep walking the receiver/index expressions for nested unsupported
+        // constructs, but do not force hybrid fallback just because a helper
+        // reads from an array or other collection.
         Expr::Index { receiver, index } => {
             analyze_expr(receiver, reasons);
             analyze_expr(index, reasons);
-            add_reason(reasons, FallbackReason::CollectionOps);
         }
 
         // Tuple index access: tuple.0, tuple.1
@@ -968,6 +971,26 @@ fn make_holder(seed: i64) -> Holder:
         assert!(
             status.is_compilable(),
             "closure holder factory should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_function_value_array_helper_compilable() {
+        let results = parse_and_analyze(
+            r#"var FUNCS: [fn() -> i64] = []
+
+fn worker() -> i64:
+    7
+
+fn get0() -> fn() -> i64:
+    FUNCS[0]
+"#,
+        );
+        let status = results.get("get0").unwrap();
+        assert!(
+            status.is_compilable(),
+            "function-valued array helper should compile natively, got {:?}",
             status.reasons()
         );
     }
