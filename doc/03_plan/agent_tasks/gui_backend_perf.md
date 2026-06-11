@@ -132,6 +132,9 @@ Updated: 2026-06-11
 - this commit -- body tag close scan allocation removal: `_html_background_color`
   now finds the body tag closing `>` directly in the original HTML buffer instead
   of allocating a body-tail substring only to locate the tag end.
+- this commit -- first block tag-end allocation removal: `_first_block_color`
+  now finds the first visual tag closing `>` in the original HTML buffer instead
+  of allocating a block-tail substring only to locate the tag end.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
