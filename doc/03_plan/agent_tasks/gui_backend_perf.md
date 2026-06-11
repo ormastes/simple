@@ -99,6 +99,12 @@ Updated: 2026-06-11
   now hoist stable `.len()` values out of loop conditions. This trims repeated
   dispatch in GUI startup scanning and pixel-fill hot paths without changing
   rendered output.
+- this commit -- CSS scan length hoisting: `_find_char_from`,
+  `_last_hex_color_after`, `_resolve_current_color`,
+  `_declaration_background_color`, and the `:not(...)` class scan now reuse
+  stable string/list lengths inside their loops. This trims repeated length
+  dispatch in color and selector parsing used by the heuristic Engine2D startup
+  path.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
