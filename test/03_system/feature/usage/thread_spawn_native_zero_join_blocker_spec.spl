@@ -1,0 +1,97 @@
+"""
+# Thread Spawn Native Zero-Join Blocker
+
+**Feature IDs:** #thread-spawn-native-zero-join
+**Category:** Runtime / Native / OS Thread
+**Status:** Blocked
+
+## Overview
+
+This SSpec pins the current standalone native `thread_spawn` fork-join blocker.
+A minimal top-level worker workload using the public `std.concurrent.thread`
+surface must stay green in the interpreter and SMF paths, while the current
+standalone native artifact still reproduces the zero-result join failure.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Research
+
+**Research:** doc/08_tracking/bug/thread_spawn_native_zero_join_2026-06-11.md
+
+## Syntax
+
+```sh
+bin/release/simple test test/03_system/feature/usage/thread_spawn_native_zero_join_blocker_spec.spl --mode=interpreter --clean
+```
+"""
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val BUILD_DIR: text = "build/test/thread_spawn_native_zero_join_blocker"
+val SOURCE_PATH: text = BUILD_DIR + "/thread_spawn_zero_join.spl"
+val SMF_PATH: text = BUILD_DIR + "/thread_spawn_zero_join.smf"
+val NATIVE_PATH: text = BUILD_DIR + "/thread_spawn_zero_join_native"
+val SIMPLE_BIN: text = "bin/release/simple"
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+fn fixture_source() -> text:
+    [
+        "use std.concurrent.thread.{thread_spawn, ThreadHandle}\n",
+        "extern fn rt_exit(code: i32)\n",
+        "fn worker() -> i64:\n",
+        "    7\n",
+        "fn main():\n",
+        "    var handles: [ThreadHandle] = []\n",
+        "    handles.push(thread_spawn(worker))\n",
+        "    handles.push(thread_spawn(worker))\n",
+        "    val total = handles[0].join() + handles[1].join()\n",
+        "    if total != 14:\n",
+        "        println(\"checksum_mismatch total=\" + total.to_text() + \" expected=14\")\n",
+        "        rt_exit(74)\n",
+        "    print(\"thread_spawn_native_join_pass=true\")\n"
+    ].join("")
+
+describe "thread_spawn native zero-join blocker":
+    it "keeps interpreter and SMF green while pinning the current standalone native join failure":
+        step("Write the minimal public thread_spawn fork-join fixture")
+        val (mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
+        expect(mkdir_out.len()).to_be_greater_than(-1)
+        expect(mkdir_code).to_equal(0)
+        expect(rt_file_write_text(SOURCE_PATH, fixture_source())).to_equal(true)
+
+        step("Compile the fixture to SMF")
+        val (smf_compile_out, smf_compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " -o " + SMF_PATH)
+        expect(smf_compile_out).to_contain("Compiled")
+        expect(smf_compile_code).to_equal(0)
+
+        step("Compile the fixture to standalone native")
+        val (native_compile_out, native_compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+        expect(native_compile_out).to_contain("Compiled")
+        expect(native_compile_code).to_equal(0)
+
+        step("Keep the interpreter control green on the public thread_spawn surface")
+        val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
+        expect(interp_out).to_contain("thread_spawn_native_join_pass=true")
+        expect(interp_code).to_equal(0)
+
+        step("Keep the SMF bytecode path green")
+        val (smf_out, smf_code) = shell("timeout 20s " + SIMPLE_BIN + " " + SMF_PATH)
+        expect(smf_out).to_contain("thread_spawn_native_join_pass=true")
+        expect(smf_code).to_equal(0)
+
+        step("Pin the current standalone native zero-result join failure")
+        val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
+        expect(native_out).to_contain("checksum_mismatch total=0 expected=14")
+        expect(native_code).to_equal(74)

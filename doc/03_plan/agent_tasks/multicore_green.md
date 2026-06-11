@@ -10,6 +10,12 @@ Date: 2026-06-06
   both stay ahead of the C pthread-per-task baseline:
   Go `6.533 ms`, Simple multicore green native `9.638 ms`, C pthreads
   `63.791 ms`.
+- Fresh isolated 2026-06-11 host/Docker evidence also confirms a separate
+  active OS-thread baseline blocker: standalone native public `thread_spawn`
+  fixtures still return zero-result joins even though the same fixtures pass in
+  the interpreter and SMF loader. Executable evidence now lives in
+  `test/03_system/feature/usage/thread_spawn_native_zero_join_blocker_spec.spl`
+  and `doc/08_tracking/bug/thread_spawn_native_zero_join_2026-06-11.md`.
 - Cooperative-green SMF mutable-global crash evidence is now closed by
   `test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl`
   and the mirrored manual under `doc/06_spec`.
