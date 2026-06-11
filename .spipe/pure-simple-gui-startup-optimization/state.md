@@ -832,3 +832,12 @@ dev-done
   duplicate class-token oracle. Docker optimizer scan completed for the
   renderer with 756 remaining static opportunities; the count rises because
   the former split intrinsic is now explicit scan loops.
+- impl: Replaced `parse_html(...)`'s grow-by-push node arena with an exact-size
+  arena. `count_html_nodes(...)` mirrors parser emission for root, non-empty
+  text nodes, skipped metadata/style/script/title nodes, comments, closers,
+  self-closing elements, and malformed-tag breaks; `parse_html(...)` now fills
+  `nodes[node_i]` directly.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` remains 15/15. Docker optimizer scan
+  completed for the renderer with 759 remaining static opportunities; the count
+  rises because the former push intrinsic is now an explicit pre-count scan.

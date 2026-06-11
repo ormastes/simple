@@ -1275,6 +1275,25 @@ Verification:
   `15 passed, 0 failed`
 - Docker optimizer scan: renderer `754` remaining static opportunities.
 
+## 2026-06-11 Selector bucket base trim removal
+
+Selector bucket classification receives rightmost selector parts from the
+preprocessed selector group part list. Those parts are already trimmed, but
+`selector_bucket_base(...)` still trimmed the part again before checking pseudo,
+attribute, id, class, and tag bucket keys.
+
+The helper now starts from the pretrimmed part directly and keeps the existing
+trim on the substring before an attribute selector. Bucket behavior stays
+covered by the focused selector bucket and spaced selector specs.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `15 passed, 0 failed`
+- Docker optimizer scan: renderer `754` remaining static opportunities.
+
 ## 2026-06-11 Selector bucket base reuse
 
 Rule bucket construction classified each rightmost selector by calling
@@ -1316,16 +1335,18 @@ Verification:
 - Docker optimizer scan: renderer `756` remaining static opportunities; the
   count rises because the former split intrinsic is now explicit scan loops.
 
-## 2026-06-11 Selector bucket base trim removal
+## 2026-06-11 Exact-size HTML node arena
 
-Selector bucket classification receives rightmost selector parts from the
-preprocessed selector group part list. Those parts are already trimmed, but
-`selector_bucket_base(...)` still trimmed the part again before checking pseudo,
-attribute, id, class, and tag bucket keys.
+`parse_html(...)` still built the top-level node arena with `var nodes: [HNode]
+= []` and repeated `nodes.push(...)` calls. On large startup pages this kept the
+parser exposed to grow-by-copy array behavior even though the emitted-node count
+is knowable from the same parse grammar.
 
-The helper now starts from the pretrimmed part directly and keeps the existing
-trim on the substring before an attribute selector. Bucket behavior stays
-covered by the focused selector bucket and spaced selector specs.
+`count_html_nodes(...)` now mirrors parser emission for the root node, non-empty
+text chunks, skipped metadata/style/script/title nodes, comments, closers,
+self-closing elements, and malformed-tag breaks. `parse_html(...)` allocates the
+exact arena size and fills `nodes[node_i]` directly, preserving parent indices
+and stack behavior.
 
 Verification:
 
@@ -1333,4 +1354,6 @@ Verification:
   passes.
 - `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
   `15 passed, 0 failed`
-- Docker optimizer scan: renderer `754` remaining static opportunities.
+- Docker optimizer scan: renderer `759` remaining static opportunities; the
+  count rises because the former push intrinsic is now an explicit pre-count
+  scan.
