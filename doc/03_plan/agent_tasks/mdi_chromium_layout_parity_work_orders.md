@@ -204,9 +204,11 @@ Prove and harden the requested GUI stack:
   interpreter text PPM fallback, so
   `--only=18_flex_grow_weights --update-baseline --skip-simple` writes
   `test/09_baselines/html_compat/18_flex_grow_weights/chrome.ppm` and exits 0.
-  The remaining pixel-baseline blocker is source B: the non-skip fixture-18 run
-  fails closed with exit 2 because the Simple browser-engine child capture
-  times out after 1000 ms before writing `simple.ppm`.
+  Source B for fixture 18 now also completes through a direct software-layout
+  renderer worker path and binary P6 PPM serialization; with `SIMPLE_BINARY`
+  set to the current release runtime, the non-skip fixture-18 run writes
+  `simple.ppm`, records `RESULT: EXACT match`, and the Chrome/Simple PPMs are
+  byte-identical. Remaining pixel-baseline work is fixtures 19-24.
   Tracked in
   `doc/08_tracking/bug/html_compat_flex_pixel_baselines_missing_2026-06-11.md`.
 - Famous-site corpus div geometry evidence (2026-06-11):
