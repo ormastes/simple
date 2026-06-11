@@ -183,6 +183,9 @@ Updated: 2026-06-11
 - this commit -- hex marker scan allocation removal:
   `_second_hex_color_after` and `_last_hex_color_after` now reuse the bounded
   text scanner instead of allocating post-marker HTML tails before searching.
+- this commit -- currentColor resolver scan allocation removal:
+  `_resolve_current_color` now scans the lowercase declaration buffer directly
+  for `color:` instead of allocating a search tail on each loop iteration.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
