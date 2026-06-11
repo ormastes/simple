@@ -13,6 +13,19 @@ pub type AopAroundFn = extern "C" fn(ctx: *mut ProceedContext, argc: u64, argv: 
 // Thread-local storage for panic payload that needs to cross SFFI boundary
 thread_local! {
     static PENDING_PANIC: Cell<Option<Box<dyn std::any::Any + Send + 'static>>> = const { Cell::new(None) };
+    // Last advice-chain failure on this thread, queryable via rt_aop_last_error.
+    // Written only on the failure path: zero overhead when advice succeeds.
+    static LAST_AOP_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 /// Proceed context passed to around advice.
@@ -110,8 +123,33 @@ pub extern "C" fn rt_aop_invoke_around(
 
     match result {
         Ok(val) => val,
-        Err(_) => RuntimeValue::NIL,
+        Err(payload) => {
+            // An advice (or its proceed contract) panicked and the join point may
+            // not have run. Surface this instead of silently returning NIL: the
+            // failure is recorded for rt_aop_last_error and reported on stderr.
+            // Failure path only — no overhead when advice succeeds.
+            let msg = panic_message(payload.as_ref());
+            eprintln!("[simple-aop] around advice chain failed (target may be skipped, returning nil): {msg}");
+            LAST_AOP_ERROR.with(|e| *e.borrow_mut() = Some(msg));
+            RuntimeValue::NIL
+        }
     }
+}
+
+/// Return the last AOP advice-chain failure on this thread as a string,
+/// or NIL when the last invocation succeeded. Reading does not clear it.
+#[no_mangle]
+pub extern "C" fn rt_aop_last_error() -> RuntimeValue {
+    LAST_AOP_ERROR.with(|e| match e.borrow().as_ref() {
+        Some(msg) => unsafe { crate::value::rt_string_new(msg.as_ptr(), msg.len() as u64) },
+        None => RuntimeValue::NIL,
+    })
+}
+
+/// Clear the recorded AOP failure for this thread.
+#[no_mangle]
+pub extern "C" fn rt_aop_clear_last_error() {
+    LAST_AOP_ERROR.with(|e| *e.borrow_mut() = None);
 }
 
 /// Continue to the next advice or the target function.

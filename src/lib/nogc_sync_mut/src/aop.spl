@@ -96,14 +96,28 @@ impl AspectRegistry:
             val matches = _match_join_point(aspect.pointcut.kind, effective_pattern, join_point)
             if matches:
                 matched = matched.push(aspect)
-        # Sort by priority, highest first.
-        # Use safe comparison (not subtraction) to avoid i64 overflow with large priorities.
-        matched = matched.sort_by(\a, b:
-            if a.priority > b.priority: -1
-            else if a.priority < b.priority: 1
-            else: 0
-        )
-        return matched
+        # Sort by priority, highest first. Hand-rolled stable selection sort:
+        # array.sort_by is unavailable in interpreter mode, which left the
+        # weaver broken for any matching aspect when interpreted. Avoids
+        # subtraction so large priorities cannot overflow i64.
+        var sorted: [Aspect] = []
+        var remaining = matched
+        while remaining.len() > 0:
+            var best = 0
+            var ri = 1
+            while ri < remaining.len():
+                if remaining[ri].priority > remaining[best].priority:
+                    best = ri
+                ri = ri + 1
+            sorted = sorted.push(remaining[best])
+            var next_rem: [Aspect] = []
+            var rj = 0
+            while rj < remaining.len():
+                if rj != best:
+                    next_rem = next_rem.push(remaining[rj])
+                rj = rj + 1
+            remaining = next_rem
+        return sorted
 
 fn time_now_ms() -> i64:
     time_now_unix_micros() / 1000
@@ -129,6 +143,35 @@ impl LogAspects:
 
     fn register_all(registry: AspectRegistry):
         pass
+
+# ============================================================================
+# Advice-denial visibility (H10 hardening)
+#
+# When Before/Around advice returns Err, the join-point function is skipped.
+# Callers that ignore the Result would otherwise silently drop the operation,
+# so every denial is recorded here. Written only on the denial path — zero
+# overhead when advice succeeds.
+# ============================================================================
+
+var _aop_denial_count = 0
+var _aop_last_denial = ""
+
+pub fn aop_denial_count() -> i64:
+    """Number of join points skipped because advice returned Err."""
+    _aop_denial_count
+
+pub fn aop_last_denial() -> text:
+    """Description of the most recent advice denial ("" if none)."""
+    _aop_last_denial
+
+pub fn aop_clear_denials():
+    """Reset denial bookkeeping (test support)."""
+    _aop_denial_count = 0
+    _aop_last_denial = ""
+
+fn _record_denial(fn_name: text, kind: text, err: text):
+    _aop_denial_count = _aop_denial_count + 1
+    _aop_last_denial = "{kind} advice denied {fn_name}: {err}"
 
 struct AspectWeaver:
     registry: AspectRegistry
@@ -163,13 +206,17 @@ impl AspectWeaver:
                 case Before:
                     val res = aspect.advice.handler(before_ctx)
                     if res.is_err():
-                        return Err(res.unwrap_err())
+                        val e = res.unwrap_err()
+                        _record_denial(fn_name, "before", e)
+                        return Err(e)
                 case Around:
                     # Around handler runs as a pre-hook; proceed callback
                     # not available because handler signature lacks it.
                     val res = aspect.advice.handler(before_ctx)
                     if res.is_err():
-                        return Err(res.unwrap_err())
+                        val e = res.unwrap_err()
+                        _record_denial(fn_name, "around", e)
+                        return Err(e)
                 case After:
                     pass_do_nothing
                 case AfterError:
@@ -196,7 +243,10 @@ impl AspectWeaver:
                 case After:
                     val res = aspect.advice.handler(after_ctx)
                     if res.is_err():
-                        return Err(res.unwrap_err())
+                        # Join point already ran; the denial here masks its result.
+                        val e = res.unwrap_err()
+                        _record_denial(fn_name, "after", e)
+                        return Err(e)
                 case Before:
                     pass_do_nothing
                 case Around:

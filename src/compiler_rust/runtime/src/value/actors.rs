@@ -168,7 +168,13 @@ pub extern "C" fn rt_actor_join(actor: RuntimeValue) -> i64 {
                         }
                         return 1;
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        // Surface why the join failed instead of a bare 0: the
+                        // body's panic message was recorded at panic time and
+                        // stays queryable via rt_actor_death_reason.
+                        let reason = crate::concurrency::actor_death_reason(actor_id)
+                            .unwrap_or(err);
+                        eprintln!("[simple-actor] join of actor {actor_id} failed: {reason}");
                         return 0;
                     }
                 }
@@ -176,6 +182,19 @@ pub extern "C" fn rt_actor_join(actor: RuntimeValue) -> i64 {
         }
     }
     0
+}
+
+/// Return the recorded death reason for an actor whose body panicked,
+/// or NIL when the actor is alive or exited normally.
+#[no_mangle]
+pub extern "C" fn rt_actor_death_reason(actor: RuntimeValue) -> RuntimeValue {
+    if let Some(actor_ptr) = as_actor_ptr(actor) {
+        let actor_id = unsafe { (*actor_ptr).actor_id };
+        if let Some(msg) = crate::concurrency::actor_death_reason(actor_id) {
+            return unsafe { crate::value::rt_string_new(msg.as_ptr(), msg.len() as u64) };
+        }
+    }
+    RuntimeValue::NIL
 }
 
 /// Get the actor ID.

@@ -1,0 +1,97 @@
+# AOP advice-denial visibility regression spec (H10)
+#
+# When Before/Around advice returns Err, the join point is skipped. Callers
+# that ignore the Result used to lose the operation silently; the weaver now
+# records every denial (count + description) queryable via aop_denial_count /
+# aop_last_denial. This spec pins that contract.
+
+use std.spec.*
+use std.nogc_sync_mut.src.aop.{
+    AspectRegistry, AspectWeaver, Aspect, Advice, AdviceKind,
+    Pointcut, JoinPoint, AdviceContext,
+    aop_denial_count, aop_last_denial, aop_clear_denials
+}
+
+fn deny_handler(ctx: AdviceContext) -> Result<(), text>:
+    Err("denied by policy")
+
+fn allow_handler(ctx: AdviceContext) -> Result<(), text>:
+    Ok(())
+
+fn target_fn() -> i64:
+    42
+
+fn make_aspect(name: text, kind: AdviceKind, handler: fn(AdviceContext) -> Result<(), text>) -> Aspect:
+    Aspect(
+        name: name,
+        pointcut: Pointcut(kind: JoinPoint.All, pattern: nil),
+        advice: Advice(kind: kind, handler: handler),
+        enabled: true,
+        priority: 10
+    )
+
+describe "AOP advice denial visibility (H10)":
+
+    context "before advice denies":
+        it "returns Err and records the denial":
+            aop_clear_denials()
+            var registry = AspectRegistry.empty()
+            registry.register(make_aspect("deny_before", AdviceKind.Before, deny_handler))
+            val weaver = AspectWeaver.with_registry(registry)
+            val result = weaver.wrap(JoinPoint.FunctionCall(name: "guarded_op"), target_fn)
+            expect(result.is_err()).to_equal(true)
+            expect(aop_denial_count()).to_equal(1)
+            val denial = aop_last_denial()
+            expect(denial.contains("before")).to_equal(true)
+            expect(denial.contains("guarded_op")).to_equal(true)
+            expect(denial.contains("denied by policy")).to_equal(true)
+
+    context "around advice denies":
+        it "records denial tagged as around":
+            aop_clear_denials()
+            var registry = AspectRegistry.empty()
+            registry.register(make_aspect("deny_around", AdviceKind.Around, deny_handler))
+            val weaver = AspectWeaver.with_registry(registry)
+            val result = weaver.wrap(JoinPoint.FunctionCall(name: "wrapped_op"), target_fn)
+            expect(result.is_err()).to_equal(true)
+            expect(aop_denial_count()).to_equal(1)
+            val denial = aop_last_denial()
+            expect(denial.contains("around")).to_equal(true)
+
+    context "advice allows":
+        it "runs the join point and records nothing":
+            aop_clear_denials()
+            var registry = AspectRegistry.empty()
+            registry.register(make_aspect("allow_all", AdviceKind.Before, allow_handler))
+            val weaver = AspectWeaver.with_registry(registry)
+            val result = weaver.wrap(JoinPoint.FunctionCall(name: "open_op"), target_fn)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap()).to_equal(42)
+            expect(aop_denial_count()).to_equal(0)
+            expect(aop_last_denial()).to_equal("")
+
+    context "denials accumulate":
+        it "counts each skipped join point":
+            aop_clear_denials()
+            var registry = AspectRegistry.empty()
+            registry.register(make_aspect("deny_before", AdviceKind.Before, deny_handler))
+            val weaver = AspectWeaver.with_registry(registry)
+            val r1 = weaver.wrap(JoinPoint.FunctionCall(name: "op_one"), target_fn)
+            val r2 = weaver.wrap(JoinPoint.FunctionCall(name: "op_two"), target_fn)
+            expect(r1.is_err()).to_equal(true)
+            expect(r2.is_err()).to_equal(true)
+            expect(aop_denial_count()).to_equal(2)
+            val denial = aop_last_denial()
+            expect(denial.contains("op_two")).to_equal(true)
+
+    context "clear resets bookkeeping":
+        it "zeroes count and clears last denial":
+            aop_clear_denials()
+            var registry = AspectRegistry.empty()
+            registry.register(make_aspect("deny_before", AdviceKind.Before, deny_handler))
+            val weaver = AspectWeaver.with_registry(registry)
+            val r = weaver.wrap(JoinPoint.FunctionCall(name: "op"), target_fn)
+            expect(r.is_err()).to_equal(true)
+            aop_clear_denials()
+            expect(aop_denial_count()).to_equal(0)
+            expect(aop_last_denial()).to_equal("")
