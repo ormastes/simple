@@ -299,12 +299,15 @@ glyph/destination/size/color arguments, and HIP preflights the same packed
 shape before launch. `bitmap_glyph_raster_expected_pixels(...)` maps the glyph
 mask to the expected color/zero output, and
 `bitmap_glyph_raster_checksum(...)` derives the expected checksum used by
-`bitmap_glyph_raster_readback_evidence(...)`. That readback wrapper is the
-production proof gate and only marks bitmap glyph rasterization ready after
-generated-kernel submit and checksum-matched device readback. Do not treat
-generated copy/upload, source export, launch binding, preflight, or raster-plan
-evidence as GPU-side bitmap glyph rasterization until that readback proof
-passes.
+`bitmap_glyph_raster_readback_evidence(...)`.
+`bitmap_glyph_raster_mask_readback_evidence(...)` is the preferred device
+sample wrapper because it derives the expected checksum from the glyph mask and
+color instead of accepting a caller-supplied expected value. That readback
+wrapper is the production proof gate and only marks bitmap glyph rasterization
+ready after generated-kernel submit and checksum-matched device readback. Do
+not treat generated copy/upload, source export, launch binding, preflight, or
+raster-plan evidence as GPU-side bitmap glyph rasterization until that readback
+proof passes.
 
 ### Event Target Translation
 

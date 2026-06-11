@@ -645,6 +645,18 @@ dev-done
   readback-verified GPU glyph pixels.
 - verify: Optimizer scans completed for this slice in Docker. Counts: CUDA
   session 23 and CUDA session contract spec 0 remaining static opportunities.
+- impl: Added mask-derived bitmap glyph raster readback evidence.
+  `bitmap_glyph_raster_mask_readback_evidence(...)` derives expected pixels and
+  checksum from the glyph mask/color before comparing a device readback
+  checksum, so future hardware samples do not pass a hand-written expected
+  checksum.
+- verify: Focused bitmap-font offload check passes and bitmap-font offload spec
+  now passes 5/5. Generated manual was refreshed under `doc/06_spec`. This
+  tightens the proof wrapper for future device samples but still is not a
+  hardware readback sample.
+- verify: Optimizer scans completed for this slice in Docker. Counts:
+  bitmap-font offload 27 and bitmap-font offload spec 4 remaining static
+  opportunities.
 - impl: Added CUDA session readback evidence classification.
   `CudaSession.readback_evidence(...)` now uses the shared
   `gpu_session_readback_status(...)` classifier for readback unavailable,

@@ -136,9 +136,13 @@ The Simple web renderer has two code paths:
   packed shape before launch. `bitmap_glyph_raster_expected_pixels(...)` maps the
   glyph mask to the expected color/zero output and
   `bitmap_glyph_raster_checksum(...)` derives the expected checksum used by
-  `bitmap_glyph_raster_readback_evidence(...)`. That readback wrapper is the
-  production proof gate: it only marks bitmap glyph rasterization ready after
-  generated-kernel submit and checksum-matched device readback.
+  `bitmap_glyph_raster_readback_evidence(...)`.
+  `bitmap_glyph_raster_mask_readback_evidence(...)` is the preferred device
+  sample wrapper because it derives the expected checksum from the glyph mask
+  and color instead of accepting a caller-supplied expected value. That readback
+  wrapper is the production proof gate: it only marks bitmap glyph
+  rasterization ready after generated-kernel submit and checksum-matched device
+  readback.
 - **No anti-aliasing**: Binary black/white pixels vs Chrome's subpixel AA.
 - **Tauri real capture**: No real WebView capture path exists yet. Chromium-via-Electron is the primary reference.
 - **Interpreter binary (v0.4.0)**: Cannot load `gc_async_mut.gpu.*` modules due to `Gpu` keyword parse error. Use native binary `src/compiler_rust/target/release/simple` (v1.0.0-beta).
