@@ -129,6 +129,9 @@ Updated: 2026-06-11
 - this commit -- body marker scan reuse: `_html_background_color` now caches
   the first `<body` index and reuses it for body-gated background checks and tag
   extraction, avoiding repeated whole-HTML scans for the same marker.
+- this commit -- body tag close scan allocation removal: `_html_background_color`
+  now finds the body tag closing `>` directly in the original HTML buffer instead
+  of allocating a body-tail substring only to locate the tag end.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
