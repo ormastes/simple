@@ -1146,3 +1146,28 @@ Verification:
   regenerated the mirrored manual.
 - Docker optimizer scans: renderer `747` and focused spec `4` remaining static
   opportunities.
+
+## 2026-06-11 Selector part pretrim
+
+Selector groups were already split once during CSS extraction, but hot selector
+matching still trimmed the same selector part strings while finding the
+rightmost bucket key and while walking ancestor selectors for each candidate
+node.
+
+`selector_group_parts(...)` now stores trimmed selector tokens up front.
+Rightmost selector lookup and ancestor matching reuse those pretrimmed tokens,
+so spaced descendant and child selectors keep their behavior while avoiding
+repeated trim calls during node matching.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `12 passed, 0 failed`
+- `bin/simple spipe-docgen test/02_integration/rendering/simple_web_layout_child_index_spec.spl --output doc/06_spec`
+  regenerated the mirrored manual.
+- Docker optimizer scans: renderer `750` and focused spec `4` remaining static
+  opportunities. The renderer static count rises because the one-time
+  preprocessing loop is now explicit; runtime selector matching avoids repeated
+  trimming of the same selector parts.

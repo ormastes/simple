@@ -751,3 +751,14 @@ dev-done
   `simple_web_layout_child_index_spec.spl` remains 11/11. Generated manual
   refreshed under `doc/06_spec`. Docker optimizer scans completed: renderer
   747 and focused spec 4 remaining static opportunities.
+- impl: Moved selector-token trimming into selector group preprocessing.
+  `selector_group_parts(...)` now stores already-trimmed parts, and the
+  selector bucket/rightmost and ancestor match paths reuse those tokens instead
+  of trimming the same selector text during every node match.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` now passes 12/12, including a
+  spaced descendant/child selector oracle. Generated manual refreshed under
+  `doc/06_spec`. Docker optimizer scans completed: renderer 750 and focused
+  spec 4 remaining static opportunities; the renderer count rises because the
+  one-time preprocessing loop is explicit, while runtime matching avoids
+  repeated trim work.
