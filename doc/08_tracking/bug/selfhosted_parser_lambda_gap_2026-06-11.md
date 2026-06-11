@@ -78,3 +78,25 @@ parse_primary_expr now uses its own block loop: parse_block's shape plus ')'
 fixture parses and E-PAR-006 fires with kind "captured mutable variable write";
 expression-form fixtures and both lint specs (9/9, 44/44) unaffected. All three
 shared-var fixtures now work end-to-end self-hosted.
+
+## Multibyte stall + string-source no-op fixes (2026-06-11, follow-up 2)
+
+- FIXED multibyte token-stream stall: CoreLexer pos walks slice units while
+  len() counts bytes, so after any multi-byte UTF-8 char (→, — in comments or
+  docstrings) pos exhausts the text before len(); handle_indentation then
+  returned token-less and the stream stalled re-serving the last NEWLINE
+  forever. at_end() now also treats an empty peek as end-of-input
+  (lexer_struct.spl). Minimal repro (comment containing →) parses.
+- FIXED parse_module string-source no-op: lex_init_with_path discarded the
+  caller-supplied source whenever a path was given and re-read from disk; a
+  virtual path made the source empty and the parse silently no-opped
+  (errors=false, decls=0). Now the reread only replaces the source when
+  non-empty (lexer.spl). Identical built-string vs file-read sources now parse
+  identically.
+- STILL OPEN: green_thread.spl full-file parse hang — now isolated to a
+  PARSER-level infinite loop, not the lexer (token dump of the repro is
+  healthy and terminates). Repro: head -96 green_thread.spl +
+  "    val pending = GreenTask(" + EOF. Minimal synthetic shapes (multi-line
+  struct literal, EOF-mid-paren, em-dash docstring combos) all terminate; the
+  trigger needs the real lines 25-96 prefix. Suspect parser error-recovery or
+  arg-list loop that does not consume EOF.
