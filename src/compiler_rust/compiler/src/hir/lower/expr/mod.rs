@@ -378,6 +378,9 @@ impl Lowerer {
     }
 
     fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {
+        if let Some(HirType::Function { ret, .. }) = self.module.types.get(fallback) {
+            return *ret;
+        }
         match callee {
             Expr::Identifier(name) => self.named_callable_return_type(name).unwrap_or(fallback),
             Expr::Path(segments) if segments.len() == 2 => self
@@ -600,6 +603,15 @@ impl Lowerer {
         if matches!(method, "unwrap" | "expect") {
             if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(recv_ty) {
                 return *inner;
+            }
+        }
+        if recv_ty != TypeId::ANY && recv_ty != TypeId::VOID {
+            if let Some(HirType::Struct { fields, .. }) = self.module.types.get(recv_ty) {
+                if let Some((_, field_ty)) = fields.iter().find(|(field_name, _)| field_name == method) {
+                    if let Some(HirType::Function { ret, .. }) = self.module.types.get(*field_ty) {
+                        return *ret;
+                    }
+                }
             }
         }
         // If receiver type is known, look up "TypeName.method"

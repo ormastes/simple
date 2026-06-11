@@ -296,7 +296,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             }
         }
 
-        // Method calls need runtime dispatch
+        // Method calls on arbitrary dynamic objects still need runtime dispatch,
+        // but typed `self.*` helpers are handled above and function-valued field
+        // calls now lower through MIR FieldGet + IndirectCall.
         Expr::MethodCall { receiver, args, .. } => {
             analyze_expr(receiver, reasons);
             for arg in args {
@@ -307,12 +309,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             }
         }
 
-        // Field access needs runtime support for dynamic objects
+        // Typed field access lowers directly to MIR FieldGet. Keep walking the
+        // receiver for nested unsupported constructs, but do not force
+        // interpreter fallback just because a field is read.
         Expr::FieldAccess { receiver, .. } => {
             analyze_expr(receiver, reasons);
-            if !matches!(receiver.as_ref(), Expr::Identifier(name) if name == "self") {
-                add_reason(reasons, FallbackReason::FieldAccess);
-            }
         }
 
         // Index access needs collection runtime
@@ -388,10 +389,12 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             }
         }
 
-        // Lambdas/closures need environment capture
+        // Closures lower through MIR ClosureCreate and current native codegen
+        // handles direct closure values. Capture codegen may still have narrower
+        // runtime bugs, but blanket hybrid fallback here prevents valid native
+        // code from being emitted at all.
         Expr::Lambda { body, .. } => {
             analyze_expr(body, reasons);
-            add_reason(reasons, FallbackReason::Closure);
         }
 
         // If expressions are compilable
@@ -414,7 +417,8 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::PatternMatch);
         }
 
-        // Struct initialization needs runtime
+        // Struct/class initialization lowers to MIR StructInit and is part of
+        // the current native surface.
         Expr::StructInit { fields, spread, .. } => {
             for (_, value) in fields {
                 analyze_expr(value, reasons);
@@ -422,7 +426,6 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             if let Some(spread_expr) = spread {
                 analyze_expr(spread_expr, reasons);
             }
-            add_reason(reasons, FallbackReason::ObjectConstruction);
         }
 
         // New/pointer operations
@@ -941,6 +944,31 @@ fn cooperative_green_spawn_value(result: i64) -> i64:
             read.is_compilable(),
             "self method helper should compile natively, got {:?}",
             read.reasons()
+        );
+    }
+
+    #[test]
+    fn test_closure_holder_factory_compilable() {
+        let results = parse_and_analyze(
+            r#"class Counter:
+    value: i64
+
+class Holder:
+    thunk: fn() -> i64
+
+fn make_holder(seed: i64) -> Holder:
+    var counter = Counter(value: seed)
+    val thunk = \:
+        counter.value = counter.value + 1
+        counter.value
+    Holder(thunk: thunk)
+"#,
+        );
+        let status = results.get("make_holder").unwrap();
+        assert!(
+            status.is_compilable(),
+            "closure holder factory should compile natively, got {:?}",
+            status.reasons()
         );
     }
 

@@ -245,6 +245,10 @@ impl Lowerer {
                         _ => {}
                     }
                 }
+                let method_ty = self.lookup_method_return_type(recv_ty, method);
+                if method_ty != TypeId::ANY {
+                    return Ok(method_ty);
+                }
                 // Cannot infer type for other method calls
                 if self.lenient_types {
                     Ok(TypeId::ANY)

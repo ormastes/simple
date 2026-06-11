@@ -105,6 +105,36 @@ fn test_lower_function_call() {
 }
 
 #[test]
+fn test_lower_local_function_value_call_uses_function_return_type() {
+    let module = parse_and_lower(
+        "class Holder:\n    thunk: fn() -> i64\n\nfn forty_two() -> i64:\n    42\n\nfn test() -> i64:\n    val holder = Holder(thunk: forty_two)\n    val thunk = holder.thunk\n    val value = thunk()\n    return value\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
+    assert_eq!(func.locals[1].ty, TypeId::I64, "call result local must be typed as the function return type");
+    let HirStmt::Return(Some(expr)) = &func.body[3] else {
+        panic!("Expected return statement");
+    };
+    assert_eq!(expr.ty, TypeId::I64);
+}
+
+#[test]
+fn test_lower_callable_field_method_call_uses_function_return_type() {
+    let module = parse_and_lower(
+        "class Holder:\n    thunk: fn() -> i64\n\nfn forty_two() -> i64:\n    42\n\nfn test() -> i64:\n    val holder = Holder(thunk: forty_two)\n    val value = holder.thunk()\n    return value\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
+    assert_eq!(func.locals[1].ty, TypeId::I64, "method-syntax callable field result must use the function return type");
+    let HirStmt::Return(Some(expr)) = &func.body[2] else {
+        panic!("Expected return statement");
+    };
+    assert_eq!(expr.ty, TypeId::I64);
+}
+
+#[test]
 fn test_lower_if_expression() {
     let module = parse_and_lower("fn test(x: i64) -> i64:\n    let y = if x > 0: 1 else: 0\n    return y\n").unwrap();
 
