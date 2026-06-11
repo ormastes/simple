@@ -205,6 +205,10 @@ Updated: 2026-06-11
   offload evidence wrapper now seeds platform-appropriate candidates in the same
   native-GPU-before-Vulkan order used by `engine2d_font_offload_backend_order`,
   including canonical `rocm` plus the `amd-hip` alias for HIP hosts.
+- this commit -- style selector routing allocation removal:
+  `_style_block_has_class_or_id_selector` now scans selector ranges in the
+  original HTML buffer instead of slicing each style block and selector while
+  deciding whether generic HTML must use the real layout renderer.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
