@@ -218,17 +218,23 @@ Failed: 0
 #### tracks the multicore-green lane as current rather than done
 
 - Read the canonical multicore-green tracking row
+- Verify the lane is current while full Go-like runtime work remains active
+   - Expected: absent_in_text(row, "\"done\"") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
+step("Verify the lane is current while full Go-like runtime work remains active")
+expect(row).to_contain("\"FR-RUNTIME-MULTICORE-GREEN-2026-06-06\"")
+expect(row).to_contain("\"current\"")
+expect(absent_in_text(row, "\"done\"")).to_equal(1)
 ```
 
 </details>
