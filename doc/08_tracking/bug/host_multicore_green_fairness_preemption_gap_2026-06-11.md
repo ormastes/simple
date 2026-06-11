@@ -34,69 +34,6 @@ Current hosted multicore-green evidence does not yet prove:
 - long-running CPU work is preempted or yield-forced with a host-side contract
 - host fairness semantics comparable to Go's scheduler under sustained loop load
 
-Current hosted fairness/yield boundary now also includes:
-
-- `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl`
-  proves that raw `thread_yield()` inside a hosted multicore-green task is not
-  enough to create Go-like fairness: with hosted parallelism pinned to `1`, a
-  long-running task that calls `thread_yield()` still keeps a later quick task
-  unfinished during the first short observation window on both source-run and
-  standalone native paths
-- this narrows the remaining host gap from a vague fairness concern to a
-  concrete implementation boundary: non-resumable pool tasks need automatic
-  preemption, compiler-inserted yield points, or task-splitting semantics,
-  because raw OS-thread yield does not hand queued multicore-green work to the
-  same worker
-
-Current hosted runtime mechanism behind that gap is now explicit:
-
-- `src/runtime/runtime_pool.c` runs each accepted task through
-  `rt_pool_worker_main -> task->entry(task->closure_ptr)` and does not return
-  to `rt_pool_pop_task(...)` until that closure returns
-- the current host compensation hook in
-  `src/compiler_rust/runtime/src/executor.rs` only marks real blocking sleep
-  through `rt_thread_sleep -> rt_pool_worker_block_begin/end`; it does not make
-  CPU loops resumable
-- so the hosted pool has work stealing and bounded worker ownership, but not
-  resumable task slices on the host lane
-- this means host fairness cannot come from plain OS-thread yield alone; it
-  needs compiler-inserted safepoints, runtime-managed preemption, or a model
-  that breaks long work into requeueable slices
-
-Current compiler insertion seam is also explicit:
-
-- interpreter loops are centralized in
-  `src/compiler_rust/compiler/src/interpreter_control.rs` through
-  `exec_while`, `exec_loop`, and `exec_for`
-- native/SMF loop lowering is centralized in
-  `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` through the
-  `HirStmt::While`, `HirStmt::Loop`, and `HirStmt::For` lowering branches
-- that MIR lowering layer is the narrowest existing place to insert a future
-  host safepoint or compiler-yield call without inventing a second loop model
-
-Current reusable resumable-body machinery is also explicit:
-
-- `src/compiler_rust/compiler/src/mir/generator.rs`
-- `src/compiler_rust/compiler/src/mir/async_sm.rs`
-- `src/compiler_rust/compiler/src/mir/state_machine_utils.rs`
-
-Those files already rewrite one body into dispatcher/resume blocks around
-`Yield` and `Await`. They are the best current seed for any hosted
-multicore-green fairness experiment that needs resumable task slices, because
-the active gap is not "missing thread_yield" but "missing resumable execution
-state for a queued task that should let another task run before final return."
-
-Current hosted fairness/preemption gap coverage now includes:
-
-- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
-  keeps the remaining host monopolization gap explicit: with hosted
-  parallelism pinned to `1`, a tight CPU task still keeps a later quick task
-  unfinished through the first short observation window on both source-run and
-  standalone native paths
-- this is the current executable proof that hosted multicore-green still lacks
-  automatic Go-like preemption or compiler-inserted yield points for non-
-  yielding tight loops
-
 Current hosted blocking-compensation evidence now includes:
 
 - `test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl`
@@ -107,18 +44,26 @@ Current hosted blocking-compensation evidence now includes:
 - blocking compensation now has executable hosted coverage; the remaining host
   parity gap is fairness/preemption
 
-Current hosted bounded-parallelism regression coverage also includes:
+Current hosted parallelism-boundary evidence also includes:
 
 - `test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.spl`
-  now keeps the blocking-aware compensation fix pinned: a requested hosted
-  parallelism of `2` stays at `2` under pure CPU saturation on both source-run
-  and standalone native paths
-- bounded parallelism now has executable hosted regression coverage; the
-  remaining host parity gap is fairness/preemption, not oversubscription
+  proves that after the compensation-worker change, a requested hosted
+  parallelism of `2` can still grow to `3` under pure CPU saturation after the
+  worker pool is fully occupied
+- that means the current hosted runtime still does not match a Go-like bounded
+  `GOMAXPROCS`-style execution cap for CPU-bound work
 
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
 lane has equivalent fairness/preemption guarantees.
+
+Related active host-side blocker:
+
+- `doc/08_tracking/bug/multicore_green_sliced_native_closure_blocker_2026-06-11.md`
+  records a reverted additive prototype for explicit resumable sliced tasks.
+  That experiment narrowed the next host-runtime boundary again: the native
+  captured-closure/state path for repeated pool-task requeue still ends in
+  `exit=139`, so explicit sliced-task support is not ready to claim yet.
 
 ## Current Evidence Boundary
 
@@ -143,9 +88,6 @@ This gap can close only when the hosted multicore-green lane has executable
 evidence for:
 
 - fairness/preemption or an equivalent enforced host-side yield contract
-- and the mechanism must be tied to one of the concrete seams above: runtime
-  worker preemption, compiler-inserted loop safepoints, or resumable task
-  slicing in the hosted pool
 
 That evidence must be tied into the canonical multicore-green feature tracking
 and must not rely on SimpleOS-only scheduler proofs.
