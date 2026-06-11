@@ -98,6 +98,29 @@
     tracked as known-divergent). Manifest gate: 16 exact + 2 tracked + 0 fail.
 - Include the layout manifest in the aggregate production renderer parity gate.
 
+## Current State -- 2026-06-11
+
+- Pushed `fix(gui): preserve native html layout box array lengths` and
+  `fix(gui): restore generated web parity html renderer import` to
+  `origin/main`.
+- Generated-GUI Electron matrix is exact for `80x64`, `96x72`, `128x96`, and
+  `160x120`: `mismatch_count=0`, matching checksums, and
+  `blur_or_tolerance=false`.
+- Electron layout manifest passes with 18 cases: 16 exact cases, 2 tracked text
+  cases, 0 failures.
+- Aggregate production wrapper still fails on the Tauri/Chrome surface
+  manifest because the Chrome text raster cases remain real divergences:
+  `text_raster_track` has `mismatch_count=1292`; `line_height_text_track` has
+  `mismatch_count=493`.
+- Review of the failing evidence shows the box geometry, borders, backgrounds,
+  and the line-height marker are stable. The remaining delta is glyph
+  rasterization/antialiasing: Chrome emits many antialiased text colors while
+  the Simple renderer still paints a flat 5x7 bitmap font.
+- Do not reintroduce captured-Chromium pixel overlays or blur/tolerance
+  matching for these cases. The next valid fix is a generic text
+  raster/compositing model or a real browser-font metric/raster bridge with
+  evidence.
+
 ## Next Agent Tasks
 
 - Continue replacing the bitmap glyph, sparse coverage heuristics, and scoped
