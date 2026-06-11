@@ -462,11 +462,13 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     reset_recursion_depth();
 
     // Clear essential interpreter state to prevent leaks between tests.
-    // Use selective module cache clear to preserve parsed stdlib modules
-    // (std.spec, std.io, etc.) across tests — avoids re-parsing on every test.
+    // Use a full module-cache clear for interpreter-mode test files. Selective
+    // stdlib cache retention can preserve stale module-level state across
+    // `simple test` runs that direct `simple run` does not carry, which makes
+    // hosted concurrency specs diverge from the plain interpreter path.
     clear_interpreter_state();
     clear_bdd_state();
-    clear_module_cache_selective();
+    clear_module_cache();
     clear_class_instantiation_state();
     clear_macro_state();
     clear_effects_state();
@@ -521,14 +523,13 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     // (Cranelift) crashes on some patterns (large functions with many var mutations
     // + string interpolation). The `run` command also uses interpreted mode for .spl files.
     //
-    // Preprocess _spec.spl files so the infix-expect form (`expect a to_start_with b`)
-    // and the method-form (`expect(x).to_be_true()`) get rewritten into primitive
-    // forms the interpreter can dispatch — previously these only ran in SMF mode.
-    // Always apply the matcher-only preprocessor so `expect(x).to_be_true()`
-    // and infix forms are rewritten to primitive `expect <expr>` before the
-    // interpreter sees them.  This is safe for all specs including those with
-    // multi-line use blocks — unlike the full SMF preprocessor it does no
-    // class-hoisting or fn-main wrapping.
+    // Preprocess _spec.spl files only for legacy infix matcher spellings like
+    // `expect value to_equal 1`. Native interpreter-mode method-form matchers
+    // such as `expect(value).to_equal(1)` are part of the public `std.spec`
+    // surface and should run unchanged here. Rewriting method-form assertions
+    // into infix `expect a == b` changes interpreter behavior for some stateful
+    // scheduler reads, while the original method-form path already works under
+    // direct `simple run`.
     let exec_path_buf: PathBuf;
     let exec_path_ref: &Path = match preprocess_matchers_only(path) {
         Ok(pp) => {
@@ -1116,10 +1117,10 @@ fn rewrite_method_expect_line(line: &str) -> String {
 
 /// Lightweight matcher-only preprocessor for interpreter mode.
 ///
-/// Runs only the two line-level expect rewrites (infix and method form) with
-/// NO class hoisting, NO part-splitting, and NO `fn main()` wrapping.  Safe
-/// for any spec, including those with multi-line use blocks that caused the
-/// old SMF preprocessor to misassemble the file.
+/// Runs only the legacy infix matcher rewrite with NO class hoisting, NO
+/// part-splitting, and NO `fn main()` wrapping. Method-form `std.spec`
+/// assertions stay unchanged in interpreter mode because the interpreter
+/// already supports them directly.
 ///
 /// If no line changed the original path is returned unchanged (no temp file).
 fn preprocess_matchers_only(path: &Path) -> Result<PathBuf, String> {
@@ -1132,11 +1133,10 @@ fn preprocess_matchers_only(path: &Path) -> Result<PathBuf, String> {
     let mut out_lines: Vec<String> = Vec::with_capacity(content.lines().count());
     for raw_line in content.lines() {
         let infix = rewrite_infix_expect_line(raw_line);
-        let rewritten = rewrite_method_expect_line(&infix);
-        if rewritten != raw_line {
+        if infix != raw_line {
             changed = true;
         }
-        out_lines.push(rewritten);
+        out_lines.push(infix);
     }
     if !changed {
         return Ok(path.to_path_buf());
@@ -2238,6 +2238,28 @@ describe "infix":
 
         assert!(wrapped_source.contains("expect value == 1"));
         assert!(wrapped_source.contains("expect (output).contains(\"ok\")"));
+    }
+
+    #[test]
+    fn preprocess_matchers_only_keeps_method_form_for_interpreter_mode() {
+        let tempdir = tempdir().expect("tempdir");
+        let spec_path = tempdir.path().join("method_expect_spec.spl");
+        fs::write(
+            &spec_path,
+            r#"use std.spec.*
+
+describe "method form":
+    it "stays intact":
+        expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(404)
+"#,
+        )
+        .expect("write spec");
+
+        let processed = preprocess_matchers_only(&spec_path).expect("preprocess");
+        let processed_source = fs::read_to_string(processed).expect("read processed");
+
+        assert!(processed_source.contains("expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(404)"));
+        assert!(!processed_source.contains("expect scheduler.green_current_task_on_cpu(0u32) == 404"));
     }
 
     #[test]

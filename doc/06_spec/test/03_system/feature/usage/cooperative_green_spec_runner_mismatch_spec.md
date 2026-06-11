@@ -1,6 +1,6 @@
-# Cooperative Green Spec Runner Mismatch
+# Cooperative Green Spec Runner Regression
 
-> This SSpec pins the current runner mismatch for green/cooperative queue APIs. The same minimal green-thread queue logic passes under `simple run`, but fails under `simple test`. Until that mismatch is fixed, hosted SimpleOS cooperative and multicore specs that assert green-queue behavior through the SSpec runner cannot be treated as green evidence.
+> This SSpec guards the interpreter-mode runner contract for green/cooperative queue APIs. The same minimal green-thread queue logic must pass under both `simple run` and `simple test`, so later runner/cache changes cannot re-open the earlier mismatch.
 
 <!-- sdn-diagram:id=cooperative_green_spec_runner_mismatch_spec.arch -->
 <details class="sdn-source">
@@ -32,17 +32,17 @@ cooperative_green_spec_runner_mismatch_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Cooperative Green Spec Runner Mismatch
+# Cooperative Green Spec Runner Regression
 
-This SSpec pins the current runner mismatch for green/cooperative queue APIs. The same minimal green-thread queue logic passes under `simple run`, but fails under `simple test`. Until that mismatch is fixed, hosted SimpleOS cooperative and multicore specs that assert green-queue behavior through the SSpec runner cannot be treated as green evidence.
+This SSpec guards the interpreter-mode runner contract for green/cooperative queue APIs. The same minimal green-thread queue logic must pass under both `simple run` and `simple test`, so later runner/cache changes cannot re-open the earlier mismatch.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #green-cooperative-spec-runner-mismatch |
+| Feature IDs | #green-cooperative-spec-runner-regression |
 | Category | Test Runner / Cooperative Green |
-| Status | Known Blocker |
+| Status | Regression Coverage |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | N/A |
@@ -53,11 +53,10 @@ This SSpec pins the current runner mismatch for green/cooperative queue APIs. Th
 
 ## Overview
 
-This SSpec pins the current runner mismatch for green/cooperative queue APIs.
-The same minimal green-thread queue logic passes under `simple run`, but fails
-under `simple test`. Until that mismatch is fixed, hosted SimpleOS cooperative
-and multicore specs that assert green-queue behavior through the SSpec runner
-cannot be treated as green evidence.
+This SSpec guards the interpreter-mode runner contract for green/cooperative
+queue APIs. The same minimal green-thread queue logic must pass under both
+`simple run` and `simple test`, so later runner/cache changes cannot re-open
+the earlier mismatch.
 
 ## Requirements
 
@@ -83,9 +82,9 @@ cannot be treated as green evidence.
 
 ## Scenarios
 
-### cooperative green spec runner mismatch
+### cooperative green spec runner regression
 
-#### keeps the simple run vs simple test mismatch explicit
+#### keeps direct value scheduling aligned between simple run and simple test
 
 - Write the direct-run and SSpec probe fixtures
    - Expected: mkdir_code equals `0`
@@ -93,7 +92,8 @@ cannot be treated as green evidence.
    - Expected: rt_file_write_text(SPEC_PATH, spec_probe_source()) is true
 - Verify the green-thread probe passes under simple run
    - Expected: run_code equals `0`
-- Keep the current simple test mismatch explicit
+- Verify the same green-thread probe also passes under simple test
+   - Expected: test_code equals `0`
 
 
 <details>
@@ -115,11 +115,11 @@ val (run_out, run_code) = shell(SIMPLE_BIN + " run " + RUN_PATH)
 expect(run_out).to_contain("green_run_probe_pass=true")
 expect(run_code).to_equal(0)
 
-step("Keep the current simple test mismatch explicit")
+step("Verify the same green-thread probe also passes under simple test")
 val (test_out, test_code) = shell(SIMPLE_BIN + " test " + SPEC_PATH + " --mode=interpreter --clean")
-expect(test_out).to_contain("FAILED")
+expect(test_out).to_contain("PASSED")
 expect(test_out).to_contain("green_probe_spec")
-expect(test_code).to_be_greater_than(0)
+expect(test_code).to_equal(0)
 ```
 
 </details>
