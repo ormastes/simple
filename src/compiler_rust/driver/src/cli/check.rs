@@ -12,7 +12,7 @@ use simple_common::target::Target;
 use simple_compiler::module_resolver::ModuleResolver;
 use simple_compiler::short_grammar::collect_short_grammar_suggestions;
 use simple_compiler::{LintChecker, LintConfig, LintLevel, LintName};
-use simple_parser::ast::{Block, Expr, ImportTarget, ModulePath, Node, Pattern, Type};
+use simple_parser::ast::{Block, Expr, ImportTarget, LambdaParam, ModulePath, Mutability, Node, Pattern, Type};
 use simple_parser::{NumericSuffix, Parser, ParseError};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -743,9 +743,58 @@ fn validate_concurrency_api_calls(file_path: &Path, items: &[Node], errors: &mut
     if imported.is_empty() {
         return;
     }
+    let ctx = ConcurrencyCheckCtx {
+        imported,
+        module_mut_globals: module_mutable_globals(items),
+    };
 
     for item in items {
-        validate_concurrency_api_node(file_path, item, &imported, errors);
+        validate_concurrency_api_node(file_path, item, &ctx, errors);
+    }
+}
+
+struct ConcurrencyCheckCtx {
+    imported: HashMap<String, String>,
+    module_mut_globals: HashSet<String>,
+}
+
+fn module_mutable_globals(items: &[Node]) -> HashSet<String> {
+    let mut globals = HashSet::new();
+    for item in items {
+        match item {
+            Node::Let(stmt) => {
+                if stmt.mutability == Mutability::Mutable {
+                    collect_pattern_identifiers(&stmt.pattern, &mut globals);
+                }
+            }
+            Node::Static(stmt) => {
+                if stmt.mutability == Mutability::Mutable {
+                    globals.insert(stmt.name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    globals
+}
+
+fn collect_pattern_identifiers(pattern: &Pattern, names: &mut HashSet<String>) {
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
+            names.insert(name.clone());
+        }
+        Pattern::Tuple(patterns) | Pattern::Array(patterns) | Pattern::Or(patterns) => {
+            for pattern in patterns {
+                collect_pattern_identifiers(pattern, names);
+            }
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, pattern) in fields {
+                collect_pattern_identifiers(pattern, names);
+            }
+        }
+        Pattern::Typed { pattern, .. } => collect_pattern_identifiers(pattern, names),
+        _ => {}
     }
 }
 
@@ -812,51 +861,51 @@ fn concurrency_wrong_surface_error_owner_accepts(owner_path: &str, name: &str) -
 fn validate_concurrency_api_node(
     file_path: &Path,
     item: &Node,
-    imported: &HashMap<String, String>,
+    ctx: &ConcurrencyCheckCtx,
     errors: &mut Vec<CheckError>,
 ) {
     match item {
         Node::Function(function) => validate_concurrency_api_block(file_path, &function.body, imported, errors),
         Node::Let(stmt) => {
             if let Some(value) = &stmt.value {
-                validate_concurrency_api_expr(file_path, value, imported, errors);
+                validate_concurrency_api_expr(file_path, value, ctx, errors);
             }
         }
         Node::Const(stmt) => validate_concurrency_api_expr(file_path, &stmt.value, imported, errors),
         Node::Static(stmt) => validate_concurrency_api_expr(file_path, &stmt.value, imported, errors),
         Node::Assignment(stmt) => {
-            validate_concurrency_api_expr(file_path, &stmt.target, imported, errors);
-            validate_concurrency_api_expr(file_path, &stmt.value, imported, errors);
+            validate_concurrency_api_expr(file_path, &stmt.target, ctx, errors);
+            validate_concurrency_api_expr(file_path, &stmt.value, ctx, errors);
         }
         Node::Return(stmt) => {
             if let Some(value) = &stmt.value {
-                validate_concurrency_api_expr(file_path, value, imported, errors);
+                validate_concurrency_api_expr(file_path, value, ctx, errors);
             }
         }
         Node::Expression(expr) => validate_concurrency_api_expr(file_path, expr, imported, errors),
         Node::If(stmt) => {
-            validate_concurrency_api_expr(file_path, &stmt.condition, imported, errors);
-            validate_concurrency_api_block(file_path, &stmt.then_block, imported, errors);
+            validate_concurrency_api_expr(file_path, &stmt.condition, ctx, errors);
+            validate_concurrency_api_block(file_path, &stmt.then_block, ctx, errors);
             for (_, condition, block) in &stmt.elif_branches {
-                validate_concurrency_api_expr(file_path, condition, imported, errors);
-                validate_concurrency_api_block(file_path, block, imported, errors);
+                validate_concurrency_api_expr(file_path, condition, ctx, errors);
+                validate_concurrency_api_block(file_path, block, ctx, errors);
             }
             if let Some(block) = &stmt.else_block {
-                validate_concurrency_api_block(file_path, block, imported, errors);
+                validate_concurrency_api_block(file_path, block, ctx, errors);
             }
         }
         Node::For(stmt) => {
-            validate_concurrency_api_expr(file_path, &stmt.iterable, imported, errors);
-            validate_concurrency_api_block(file_path, &stmt.body, imported, errors);
+            validate_concurrency_api_expr(file_path, &stmt.iterable, ctx, errors);
+            validate_concurrency_api_block(file_path, &stmt.body, ctx, errors);
         }
         Node::While(stmt) => {
-            validate_concurrency_api_expr(file_path, &stmt.condition, imported, errors);
-            validate_concurrency_api_block(file_path, &stmt.body, imported, errors);
+            validate_concurrency_api_expr(file_path, &stmt.condition, ctx, errors);
+            validate_concurrency_api_block(file_path, &stmt.body, ctx, errors);
         }
         Node::Loop(stmt) => validate_concurrency_api_block(file_path, &stmt.body, imported, errors),
         Node::Skip(stmt) => {
             if let simple_parser::ast::SkipBody::Block(block) = &stmt.body {
-                validate_concurrency_api_block(file_path, block, imported, errors);
+                validate_concurrency_api_block(file_path, block, ctx, errors);
             }
         }
         _ => {}
@@ -866,42 +915,42 @@ fn validate_concurrency_api_node(
 fn validate_concurrency_api_block(
     file_path: &Path,
     block: &Block,
-    imported: &HashMap<String, String>,
+    ctx: &ConcurrencyCheckCtx,
     errors: &mut Vec<CheckError>,
 ) {
     for statement in &block.statements {
-        validate_concurrency_api_node(file_path, statement, imported, errors);
+        validate_concurrency_api_node(file_path, statement, ctx, errors);
     }
 }
 
 fn validate_concurrency_api_expr(
     file_path: &Path,
     expr: &Expr,
-    imported: &HashMap<String, String>,
+    ctx: &ConcurrencyCheckCtx,
     errors: &mut Vec<CheckError>,
 ) {
     match expr {
         Expr::Call { callee, args } => {
-            if let Some(canonical_name) = concurrency_call_canonical_name(callee, imported) {
-                validate_concurrency_call_shape(file_path, canonical_name, args, errors);
+            if let Some(canonical_name) = concurrency_call_canonical_name(callee, &ctx.imported) {
+                validate_concurrency_call_shape(file_path, canonical_name, args, ctx, errors);
             }
-            validate_concurrency_api_expr(file_path, callee, imported, errors);
+            validate_concurrency_api_expr(file_path, callee, ctx, errors);
             for arg in args {
-                validate_concurrency_api_expr(file_path, &arg.value, imported, errors);
+                validate_concurrency_api_expr(file_path, &arg.value, ctx, errors);
             }
         }
         Expr::MethodCall { receiver, args, .. }
         | Expr::FunctionalUpdate {
             target: receiver, args, ..
         } => {
-            validate_concurrency_api_expr(file_path, receiver, imported, errors);
+            validate_concurrency_api_expr(file_path, receiver, ctx, errors);
             for arg in args {
-                validate_concurrency_api_expr(file_path, &arg.value, imported, errors);
+                validate_concurrency_api_expr(file_path, &arg.value, ctx, errors);
             }
         }
         Expr::Binary { left, right, .. } => {
-            validate_concurrency_api_expr(file_path, left, imported, errors);
-            validate_concurrency_api_expr(file_path, right, imported, errors);
+            validate_concurrency_api_expr(file_path, left, ctx, errors);
+            validate_concurrency_api_expr(file_path, right, ctx, errors);
         }
         Expr::Unary { operand, .. }
         | Expr::Await(operand)
@@ -922,20 +971,20 @@ fn validate_concurrency_api_expr(
             else_branch,
             ..
         } => {
-            validate_concurrency_api_expr(file_path, condition, imported, errors);
-            validate_concurrency_api_expr(file_path, then_branch, imported, errors);
+            validate_concurrency_api_expr(file_path, condition, ctx, errors);
+            validate_concurrency_api_expr(file_path, then_branch, ctx, errors);
             if let Some(else_branch) = else_branch {
-                validate_concurrency_api_expr(file_path, else_branch, imported, errors);
+                validate_concurrency_api_expr(file_path, else_branch, ctx, errors);
             }
         }
         Expr::Tuple(values) | Expr::Array(values) | Expr::VecLiteral(values) => {
             for value in values {
-                validate_concurrency_api_expr(file_path, value, imported, errors);
+                validate_concurrency_api_expr(file_path, value, ctx, errors);
             }
         }
         Expr::DoBlock(nodes) => {
             for node in nodes {
-                validate_concurrency_api_node(file_path, node, imported, errors);
+                validate_concurrency_api_node(file_path, node, ctx, errors);
             }
         }
         _ => {}
@@ -956,6 +1005,7 @@ fn validate_concurrency_call_shape(
     file_path: &Path,
     canonical_name: &str,
     args: &[simple_parser::ast::Argument],
+    ctx: &ConcurrencyCheckCtx,
     errors: &mut Vec<CheckError>,
 ) {
     let Some(rule) = concurrency_call_rule(canonical_name) else {
@@ -994,6 +1044,243 @@ fn validate_concurrency_call_shape(
             rule.help,
         ));
     }
+
+    if rule.share_nothing {
+        if let Expr::Lambda { params, body, .. } = &first.value {
+            for violation in lambda_share_nothing_violations(params, body, &ctx.module_mut_globals) {
+                errors.push(concurrency_shared_capture_error(
+                    file_path,
+                    first.span.line,
+                    first.span.column,
+                    canonical_name,
+                    &violation,
+                ));
+            }
+        }
+    }
+}
+
+struct ShareNothingViolation {
+    name: String,
+    shared_kind: &'static str,
+}
+
+fn lambda_share_nothing_violations(
+    params: &[LambdaParam],
+    body: &Expr,
+    module_mut_globals: &HashSet<String>,
+) -> Vec<ShareNothingViolation> {
+    let mut locals: HashSet<String> = params.iter().map(|param| param.name.clone()).collect();
+    let mut reported = HashSet::new();
+    let mut violations = Vec::new();
+    share_nothing_expr(body, module_mut_globals, &mut locals, &mut reported, &mut violations);
+    violations
+}
+
+fn share_nothing_report(
+    name: &str,
+    shared_kind: &'static str,
+    reported: &mut HashSet<String>,
+    violations: &mut Vec<ShareNothingViolation>,
+) {
+    if reported.insert(name.to_string()) {
+        violations.push(ShareNothingViolation {
+            name: name.to_string(),
+            shared_kind,
+        });
+    }
+}
+
+fn share_nothing_expr(
+    expr: &Expr,
+    globals: &HashSet<String>,
+    locals: &mut HashSet<String>,
+    reported: &mut HashSet<String>,
+    violations: &mut Vec<ShareNothingViolation>,
+) {
+    match expr {
+        Expr::Identifier(name) => {
+            if globals.contains(name) && !locals.contains(name) {
+                share_nothing_report(name, "module-level mutable variable", reported, violations);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            let mut nested_locals = locals.clone();
+            for param in params {
+                nested_locals.insert(param.name.clone());
+            }
+            share_nothing_expr(body, globals, &mut nested_locals, reported, violations);
+        }
+        Expr::Call { callee, args } => {
+            share_nothing_expr(callee, globals, locals, reported, violations);
+            for arg in args {
+                share_nothing_expr(&arg.value, globals, locals, reported, violations);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. }
+        | Expr::FunctionalUpdate {
+            target: receiver, args, ..
+        } => {
+            share_nothing_expr(receiver, globals, locals, reported, violations);
+            for arg in args {
+                share_nothing_expr(&arg.value, globals, locals, reported, violations);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            share_nothing_expr(left, globals, locals, reported, violations);
+            share_nothing_expr(right, globals, locals, reported, violations);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Await(operand)
+        | Expr::Yield(Some(operand))
+        | Expr::New { expr: operand, .. }
+        | Expr::Cast { expr: operand, .. }
+        | Expr::Spread(operand)
+        | Expr::DictSpread(operand)
+        | Expr::Try(operand)
+        | Expr::ForceUnwrap(operand)
+        | Expr::ExistsCheck(operand)
+        | Expr::UnwrapOrReturn(operand)
+        | Expr::CastOrReturn { expr: operand, .. }
+        | Expr::ContractOld(operand) => share_nothing_expr(operand, globals, locals, reported, violations),
+        Expr::Index { receiver, index } => {
+            share_nothing_expr(receiver, globals, locals, reported, violations);
+            share_nothing_expr(index, globals, locals, reported, violations);
+        }
+        Expr::TupleIndex { receiver, .. } | Expr::FieldAccess { receiver, .. } => {
+            share_nothing_expr(receiver, globals, locals, reported, violations);
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            share_nothing_expr(condition, globals, locals, reported, violations);
+            share_nothing_expr(then_branch, globals, locals, reported, violations);
+            if let Some(else_branch) = else_branch {
+                share_nothing_expr(else_branch, globals, locals, reported, violations);
+            }
+        }
+        Expr::Tuple(values) | Expr::Array(values) | Expr::VecLiteral(values) => {
+            for value in values {
+                share_nothing_expr(value, globals, locals, reported, violations);
+            }
+        }
+        Expr::DoBlock(nodes) => {
+            for node in nodes {
+                share_nothing_node(node, globals, locals, reported, violations);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn share_nothing_node(
+    item: &Node,
+    globals: &HashSet<String>,
+    locals: &mut HashSet<String>,
+    reported: &mut HashSet<String>,
+    violations: &mut Vec<ShareNothingViolation>,
+) {
+    match item {
+        Node::Let(stmt) => {
+            if let Some(value) = &stmt.value {
+                share_nothing_expr(value, globals, locals, reported, violations);
+            }
+            collect_pattern_identifiers(&stmt.pattern, locals);
+        }
+        Node::Assignment(stmt) => {
+            match assignment_root_identifier(&stmt.target) {
+                Some(root) if !locals.contains(root) => {
+                    share_nothing_report(root, "captured mutable variable write", reported, violations);
+                }
+                _ => {}
+            }
+            share_nothing_expr(&stmt.target, globals, locals, reported, violations);
+            share_nothing_expr(&stmt.value, globals, locals, reported, violations);
+        }
+        Node::Return(stmt) => {
+            if let Some(value) = &stmt.value {
+                share_nothing_expr(value, globals, locals, reported, violations);
+            }
+        }
+        Node::Expression(expr) => share_nothing_expr(expr, globals, locals, reported, violations),
+        Node::If(stmt) => {
+            share_nothing_expr(&stmt.condition, globals, locals, reported, violations);
+            share_nothing_block(&stmt.then_block, globals, locals, reported, violations);
+            for (_, condition, block) in &stmt.elif_branches {
+                share_nothing_expr(condition, globals, locals, reported, violations);
+                share_nothing_block(block, globals, locals, reported, violations);
+            }
+            if let Some(block) = &stmt.else_block {
+                share_nothing_block(block, globals, locals, reported, violations);
+            }
+        }
+        Node::For(stmt) => {
+            share_nothing_expr(&stmt.iterable, globals, locals, reported, violations);
+            collect_pattern_identifiers(&stmt.pattern, locals);
+            share_nothing_block(&stmt.body, globals, locals, reported, violations);
+        }
+        Node::While(stmt) => {
+            share_nothing_expr(&stmt.condition, globals, locals, reported, violations);
+            share_nothing_block(&stmt.body, globals, locals, reported, violations);
+        }
+        Node::Loop(stmt) => share_nothing_block(&stmt.body, globals, locals, reported, violations),
+        _ => {}
+    }
+}
+
+fn share_nothing_block(
+    block: &Block,
+    globals: &HashSet<String>,
+    locals: &mut HashSet<String>,
+    reported: &mut HashSet<String>,
+    violations: &mut Vec<ShareNothingViolation>,
+) {
+    for statement in &block.statements {
+        share_nothing_node(statement, globals, locals, reported, violations);
+    }
+}
+
+fn assignment_root_identifier(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Identifier(name) => Some(name.as_str()),
+        Expr::Index { receiver, .. } | Expr::TupleIndex { receiver, .. } | Expr::FieldAccess { receiver, .. } => {
+            assignment_root_identifier(receiver)
+        }
+        _ => None,
+    }
+}
+
+fn concurrency_shared_capture_error(
+    file_path: &Path,
+    line: usize,
+    column: usize,
+    name: &str,
+    violation: &ShareNothingViolation,
+) -> CheckError {
+    CheckError {
+        file: file_path.display().to_string(),
+        line,
+        column,
+        severity: ErrorSeverity::Error,
+        code: Some("E-PAR-006".to_string()),
+        message: format!(
+            "{name} closure must not share mutable variable '{}' ({})",
+            violation.name, violation.shared_kind
+        ),
+        expected: Some("share-nothing closure (no shared mutable variables)".to_string()),
+        found: Some(violation.name.clone()),
+        notes: vec![
+            "green tasks are share-nothing processes: a spawned closure may use its parameters, its own locals, and immutable copies, never mutable variables shared with other tasks"
+                .to_string(),
+        ],
+        help: vec![
+            "copy the value into an immutable local before spawning, or communicate through std.concurrent.green_channel messages or sealed shared datasets"
+                .to_string(),
+        ],
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1008,21 +1295,35 @@ struct ConcurrencyCallRule {
     first_arg: ConcurrencyFirstArg,
     expected: &'static str,
     help: &'static str,
+    /// Green-process surfaces are share-nothing: spawned closures must not
+    /// capture or mutate variables shared with other tasks (E-PAR-006).
+    /// OS threads (`thread_spawn`) may share through Mutex/RwLock, so they
+    /// stay exempt.
+    share_nothing: bool,
 }
 
 fn concurrency_call_rule(name: &str) -> Option<ConcurrencyCallRule> {
     match name {
-        "thread_spawn" | "green_spawn" | "cooperative_green_spawn" | "multicore_green_spawn" => Some(ConcurrencyCallRule {
+        "thread_spawn" => Some(ConcurrencyCallRule {
             expected_arity: 1,
             first_arg: ConcurrencyFirstArg::Closure,
             expected: "single zero-argument value closure",
             help: "pass a closure such as `\\: 1`; use thread_spawn_with_args for explicit thread arguments",
+            share_nothing: false,
+        }),
+        "green_spawn" | "cooperative_green_spawn" | "multicore_green_spawn" => Some(ConcurrencyCallRule {
+            expected_arity: 1,
+            first_arg: ConcurrencyFirstArg::Closure,
+            expected: "single zero-argument value closure",
+            help: "pass a closure such as `\\: 1`; use thread_spawn_with_args for explicit thread arguments",
+            share_nothing: true,
         }),
         "multicore_green_set_parallelism" => Some(ConcurrencyCallRule {
             expected_arity: 1,
             first_arg: ConcurrencyFirstArg::Integer,
             expected: "single integer worker count",
             help: "pass an integer worker count such as `4`, not text",
+            share_nothing: false,
         }),
         _ => None,
     }
