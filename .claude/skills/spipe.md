@@ -286,6 +286,18 @@ when `rt_pool_*` links. Keep `doc/07_guide/lib/misc/stdlib.md`,
 `doc/07_guide/compiler/check_perf.md`, and `.codex/skills/coding/SKILL.md`
 updated when those surfaces change.
 
+Concurrency API misuse is enforced by `simple check` as the E-PAR rule family
+(E-PAR-001..005: facade/alias/surface/call-shape/rt_pool rules; E-PAR-006:
+green-spawn closures are share-nothing — no module-level mutable `var` reads,
+no captured `var` writes; `thread_spawn` exempt). Both compilers implement the
+rules: the Rust seed in `driver/src/cli/check.rs`, the pure-Simple lints in
+`src/compiler/35.semantics/lint/concurrency_{api_misuse,share_nothing}.spl`
+wired into `src/app/cli/check.spl`. The self-hosted E-PAR-006 lane is blocked
+by the parser lambda-argument gap
+(`doc/08_tracking/bug/selfhosted_parser_lambda_gap_2026-06-11.md`). Fixtures:
+`test/fixtures/concurrency_api_misuse/` + system spec
+`test/03_system/feature/usage/concurrency_api_misuse_spec.spl`.
+
 Native-mode SPipe specs are not always a reliable oracle for runtime ABI work:
 unresolved generated BDD calls (`rt_bdd_*` / `std.spec`) can no-op or segfault
 before `it` bodies execute. For native runtime hooks, pair interpreter SPipe

@@ -168,3 +168,13 @@ Remaining item: wire `check_concurrency_api_misuse` into the self-hosted lint
 runner so it runs at `bin/simple check` time (same gap as E-PAR-006 /
 `check_closure_capture`). The lint is exported and ready; only the runner
 call-site is missing.
+
+Update (wiring, 2026-06-11): `_concurrency_lint_errors` is now wired into
+`src/app/cli/check.spl::_check_path` (commit d3feeb84dd) — E-PAR-001..005 run
+live in the self-hosted `simple check` path (verified: E-PAR-001 fires on the
+task_spawn fixture through the real lint). The E-PAR-006 AST lint is wired but
+inert: the self-hosted parser cannot parse any lambda form as a call argument
+(`\:`, `\x:`, `fn():` all fail) — recorded in
+doc/08_tracking/bug/selfhosted_parser_lambda_gap_2026-06-11.md. The lint's
+arena access was also fixed (direct cross-module array reads crashed OOB on
+real parses; now uses decl_get_/expr_get_/stmt_get_ accessors).
