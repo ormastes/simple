@@ -81,7 +81,7 @@ closed-channel signaling).
 ### 3b — New P1 models (match CURRENT architecture; verification only)
 | Model | Proves | Source of truth |
 |-------|--------|----------------|
-| `src/verification/aop_weaver/` | advice confluence, conflict-detection soundness, proceed exactly-once, no-match preservation | `compiler/10.frontend/core/aop.spl`, `85.mdsoc` matrix |
+| `src/verification/aop_weaver/` ✓ DONE 2026-06-11 | T1 selection_sorted, T2 selection_stable, T3 no_match_preserves, T4 deny_skips_target, T5 deny_monotone (handler-mono hyp), T6 proceed_linear — `lake build` zero sorry; F1 Around pre-hook/proceed-chain split, F2 stability tiebreaker divergence, F3 After-denial masks result | `src/lib/nogc_sync_mut/src/aop.spl`, `src/compiler_rust/runtime/src/aop.rs` |
 | `src/verification/gc_boundary/` (supersedes thin gc_manual_borrow/nogc_compile stubs — keep, extend) | no gc→nogc escape without copy; noalloc closure; inference monotonicity | `35.semantics/gc_boundary_check.spl`, `noalloc_checker.spl` |
 | `src/verification/kernel_capabilities/` | non-escalation, attenuation, revocation, syscall-gate soundness | `os/kernel/ipc/capability.spl` |
 | `src/verification/actor_channel/` | per-sender FIFO, actor isolation, no lost wakeup, bounded-send blocks | channel/green_channel/actor semantics incl. W2-7 closed-state |
@@ -126,3 +126,41 @@ clobber risk); push via jj, fall back to git-plumbing+SSH on reconcile races.
 3. All Lean projects build under one pinned toolchain with zero sorry; stale
    models updated; 5 new P1 models landed; check script wired.
 4. Docs/guides/spipe skill updated; everything pushed to origin/main.
+
+---
+
+## Wave 3b — gc_boundary Lean model (DELIVERED 2026-06-11)
+
+**Location:** `src/verification/gc_boundary/`
+**lake build:** zero errors, zero sorry, zero warnings (6 jobs green)
+**Toolchain:** `leanprover/lean4:v4.30.0`
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `GcBoundary/Basic.lean` | Tiers, AllocAnn lattice, Expr language, HasTier, CheckerOk, noallocBodyOk |
+| `GcBoundary/Theorems.lean` | AliasFree predicate + T1–T4 proved without sorry |
+| `GcBoundary/AliasCounterexample.lean` | Alias-blindness counterexample (documented, not a sorry) |
+
+### Theorems (zero sorry)
+
+| ID | Name | Meaning |
+|----|------|---------|
+| T1 | `check_sound_wrt_model` | Checker acceptance in nogc/noalloc ⟹ no gc tier (alias-free fragment; `AliasFree env e` explicit in hypotheses) |
+| T2 | `noalloc_closed` | `noallocBodyOk` (recursive walk) ⟹ `¬ EvalAllocates` |
+| T3 | `inference_monotone` | `a ≤ b → a ≤ join b c`; fixpoint never removes `alloc` |
+| T4 | `copy_isolates` | `HasTier fc env (Copy e) Tier.nogc` for any source; corollary: copy result ≠ gc |
+
+### Alias-blindness counterexample
+
+`counterEnv = [(0, gc)]`, `aliasExpr = Var 0`: has gc tier (proved), not AliasFree
+(proved), real checker accepts it (no import-edge violation). T1 does not apply.
+Precisely models the HIGH audit finding in `gc_nogc_memory_audit_findings_2026-06-11.md`.
+
+### Implementation notes
+
+- `HasTier.lit`/`HasTier.call` carry explicit equality hyps to avoid struct-field
+  dep-elim restriction in Lean 4 index unification.
+- `noallocBodyOk` is recursive (matches real checker's full-body walk); T2 uses
+  `private def` structural recursion because `Expr` is a nested inductive.
