@@ -106,6 +106,23 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         names.insert("rt_generator_next".to_string());
                         names.insert("rt_value_as_int".to_string());
                     }
+                    MirInst::Cast { from_ty, to_ty, .. } => {
+                        if *from_ty == TypeId::ANY
+                            && matches!(
+                                *to_ty,
+                                TypeId::I8
+                                    | TypeId::I16
+                                    | TypeId::I32
+                                    | TypeId::I64
+                                    | TypeId::U8
+                                    | TypeId::U16
+                                    | TypeId::U32
+                                    | TypeId::U64
+                            )
+                        {
+                            names.insert("rt_value_as_int".to_string());
+                        }
+                    }
                     MirInst::Yield { .. } => {
                         names.insert("rt_generator_set_state".to_string());
                         names.insert("rt_value_int".to_string());
@@ -846,13 +863,25 @@ impl<M: Module> CodegenBackend<M> {
         referenced_names: &HashSet<String>,
         locally_defined_names: &HashSet<String>,
     ) -> BackendResult<()> {
-        if self.runtime_funcs.is_empty() {
-            self.runtime_funcs = Self::declare_runtime_functions(
-                &mut self.module,
-                &self.target,
-                referenced_names,
-                locally_defined_names,
-            )?;
+        let call_conv = super::shared::platform_call_conv();
+
+        for spec in runtime_funcs_for_target(&self.target) {
+            if self.runtime_funcs.contains_key(spec.name) {
+                continue;
+            }
+            if locally_defined_names.contains(spec.name) {
+                continue;
+            }
+            if !referenced_names.contains(spec.name) && !runtime_symbol_is_codegen_root(spec.name) {
+                continue;
+            }
+
+            let sig = spec.build_signature(call_conv);
+            let id = self
+                .module
+                .declare_function(spec.name, Linkage::Import, &sig)
+                .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+            self.runtime_funcs.insert(spec.name, id);
         }
         Ok(())
     }
@@ -2134,6 +2163,35 @@ mod tests {
 
         assert!(backend.runtime_funcs.contains_key("rt_alloc"));
         assert!(backend.runtime_funcs.contains_key("rt_interp_call"));
+    }
+
+    #[test]
+    fn reused_backend_declares_runtime_helpers_needed_by_later_modules() {
+        let mut backend = test_backend();
+
+        let mut first = MirModule::new();
+        first.functions.push(main_returning_zero());
+        backend.compile_all_functions(&first).expect("first compile");
+        assert!(!backend.runtime_funcs.contains_key("rt_value_as_int"));
+
+        let mut second_main = MirFunction::new("later_any_cast".to_string(), TypeId::I64, Visibility::Public);
+        let source = second_main.new_vreg();
+        let casted = second_main.new_vreg();
+        let block = second_main.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: source, value: 7 });
+        block.instructions.push(MirInst::Cast {
+            dest: casted,
+            source,
+            from_ty: TypeId::ANY,
+            to_ty: TypeId::I64,
+        });
+        block.terminator = Terminator::Return(Some(casted));
+
+        let mut second = MirModule::new();
+        second.functions.push(second_main);
+        backend.compile_all_functions(&second).expect("second compile");
+
+        assert!(backend.runtime_funcs.contains_key("rt_value_as_int"));
     }
 
     // Serialize env-var tests that manipulate SIMPLE_ALLOW_STUB_FALLBACK so
