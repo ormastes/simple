@@ -182,6 +182,7 @@ class Fat32Filesystem:
     root_cluster: u32       # First cluster of root directory
     sectors_per_cluster: u32
     bytes_per_sector: u32
+    data_clusters: u32      # Total data clusters (fuel bound for chain walk)
     root_dir_data: [u8]     # First cluster of root dir, stashed at mount
 
 impl Fat32Filesystem:
@@ -196,6 +197,7 @@ impl Fat32Filesystem:
             root_cluster: 0u32,
             sectors_per_cluster: 0u32,
             bytes_per_sector: 512u32,
+            data_clusters: 0u32,
             root_dir_data: []
         )
 
@@ -218,6 +220,12 @@ impl Fat32Filesystem:
         self.root_cluster        = bpb.root_cluster
         self.sectors_per_cluster = bpb.sectors_per_cluster.to_u32()
         self.bytes_per_sector    = bpb.bytes_per_sector.to_u32()
+        # Fuel for cluster-chain walk: total data sectors / sectors-per-cluster.
+        # A valid chain can never contain more clusters than this.
+        if bpb.total_sectors_32 > self.data_start_sector and self.sectors_per_cluster > 0u32:
+            self.data_clusters = (bpb.total_sectors_32 - self.data_start_sector) / self.sectors_per_cluster
+        else:
+            self.data_clusters = 0u32
 
         # Stash root dir cluster sectors for readdir (wave-4b shortcut)
         val root_lba = cluster_to_lba(bpb, bpb.root_cluster)
@@ -370,6 +378,63 @@ impl Fat32Filesystem:
             idx = idx + 1
         Ok(nil)
 
+    fn _read_fat_entry(self, dev: BlockDevice, cluster: u32) -> Result<u32, text>:
+        """Read the 28-bit FAT32 entry for cluster from the FAT region on dev."""
+        val fat_offset = cluster * 4u32
+        val fat_sector = self.fat_start_sector.to_u64() + (fat_offset / self.bytes_per_sector).to_u64()
+        val entry_off  = (fat_offset % self.bytes_per_sector).to_i32()
+        val sec_result = dev.read_sector(fat_sector)
+        if sec_result.is_err():
+            return Err("fat32: failed to read FAT sector for cluster {cluster}")
+        val sec = sec_result.unwrap()
+        val raw = ((sec[entry_off + 3].to_u32() << 24) |
+                   (sec[entry_off + 2].to_u32() << 16) |
+                   (sec[entry_off + 1].to_u32() << 8)  |
+                    sec[entry_off].to_u32()) & 0x0FFFFFFFu32
+        Ok(raw)
+
+    fn read_cluster_chain(self, dev: BlockDevice, start: u32) -> Result<[u32], text>:
+        """Walk FAT chain from start cluster; return ordered cluster list.
+
+        Collects data cluster numbers until EOC (FAT entry >= 0x0FFFFFF8).
+        Returns Err on:
+          - start cluster < 2 (invalid)
+          - FREE (0x00000000) or BAD (0x0FFFFFF7) FAT entry mid-chain
+          - fuel exhaustion (> data_clusters steps) — cycle/corruption guard
+
+        Mirrors chainWalkGuarded in src/verification/fat32/Fat32/Basic.lean.
+        Fuel = self.data_clusters; a valid chain cannot exceed this count.
+        """
+        if start < 2u32:
+            return Err("fat32: invalid start cluster {start}")
+        var chain: [u32] = []
+        var current = start
+        var fuel = self.data_clusters
+        while current >= 2u32:
+            # Cycle / length guard — checked before consuming the current cluster
+            if fuel == 0u32:
+                return Err("fat32: cluster chain exceeds volume cluster count (cycle?)")
+            fuel = fuel - 1u32
+            # Append current data cluster
+            chain.push(current)
+            # Read FAT entry for current cluster to find next
+            val next_result = self._read_fat_entry(dev, current)
+            if next_result.is_err():
+                return next_result
+            val next = next_result.unwrap()
+            # EOC: >= 0x0FFFFFF8 — current was the last data cluster
+            if next >= 0x0FFFFFF8u32:
+                return Ok(chain)
+            # BAD cluster marker mid-chain — corruption
+            if next == 0x0FFFFFF7u32:
+                return Err("fat32: bad-cluster marker in chain from {start}")
+            # FREE cluster mid-chain — corruption
+            if next == 0x00000000u32:
+                return Err("fat32: free-cluster entry mid-chain from {start}")
+            # Valid next cluster; continue walk
+            current = next
+        Ok(chain)
+
     fn write(self, fd: u64, offset: u64, length: u64) -> i64:
         """Write — wave-4d."""
         val _fd = fd
@@ -381,3 +446,22 @@ impl Fat32Filesystem:
         """Close — wave-4d."""
         val _fd = fd
         ENOSYS
+
+    static fn make_for_chain_test(fat_start_sector: u32, bytes_per_sector: u32, data_clusters: u32) -> Fat32Filesystem:
+        """Create a pre-configured Fat32Filesystem for read_cluster_chain unit tests.
+
+        Sets geometry fields directly; caller supplies a mock BlockDevice to
+        read_cluster_chain.  Not for production use.
+        """
+        Fat32Filesystem(
+            device_id:           0u64,
+            bpb_parsed:          true,
+            cluster_size:        bytes_per_sector,
+            fat_start_sector:    fat_start_sector,
+            data_start_sector:   fat_start_sector + 8u32,
+            root_cluster:        2u32,
+            sectors_per_cluster: 1u32,
+            bytes_per_sector:    bytes_per_sector,
+            data_clusters:       data_clusters,
+            root_dir_data:       []
+        )
