@@ -116,8 +116,8 @@ Related active host-side blocker:
   `doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`.
 - `doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md`
   now records the smaller current-source native blocker beneath that hosted
-  helper path: helper return values after built-in `println` come back as `3`
-  instead of the later value.
+  helper path as historical and closed: helper return values after built-in
+  `println` no longer come back as `3`.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records the newer evidence split: the checked-in `bin/release/simple` binary
   is stale for this lane, while current-source rebuilt `release` and `debug`

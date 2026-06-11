@@ -1,6 +1,6 @@
-# Native Helper Print Return Blocker
+# Native Helper Print Return Regression
 
-> This SSpec pins the current lower native blocker beneath the hosted `multicore_green` fairness lane. A plain helper that calls `println("ok")` and then returns a later value still returns `3` on current-source native.
+> This SSpec keeps regression coverage for the lower native helper-return bug that used to sit beneath the hosted `multicore_green` fairness lane. A plain helper that calls `println("ok")` and then returns a later value must now stay on the native path and return the real value.
 
 <!-- sdn-diagram:id=native_helper_print_return_blocker_spec.arch -->
 <details class="sdn-source">
@@ -32,17 +32,17 @@ native_helper_print_return_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Helper Print Return Blocker
+# Native Helper Print Return Regression
 
-This SSpec pins the current lower native blocker beneath the hosted `multicore_green` fairness lane. A plain helper that calls `println("ok")` and then returns a later value still returns `3` on current-source native.
+This SSpec keeps regression coverage for the lower native helper-return bug that used to sit beneath the hosted `multicore_green` fairness lane. A plain helper that calls `println("ok")` and then returns a later value must now stay on the native path and return the real value.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #native-helper-print-return-blocker |
+| Feature IDs | #native-helper-print-return-regression |
 | Category | Runtime / Native / Seed |
-| Status | Blocked |
+| Status | Regression |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,9 +53,10 @@ This SSpec pins the current lower native blocker beneath the hosted `multicore_g
 
 ## Overview
 
-This SSpec pins the current lower native blocker beneath the hosted
-`multicore_green` fairness lane. A plain helper that calls `println("ok")` and
-then returns a later value still returns `3` on current-source native.
+This SSpec keeps regression coverage for the lower native helper-return bug
+that used to sit beneath the hosted `multicore_green` fairness lane. A plain
+helper that calls `println("ok")` and then returns a later value must now stay
+on the native path and return the real value.
 
 ## Requirements
 
@@ -81,26 +82,26 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/native_h
 
 ## Scenarios
 
-### native helper print return blocker
+### native helper print return regression
 
-#### keeps the lower native helper-return bug explicit
+#### keeps helper println returns on the native path
 
 - Write the reduced helper-print probe source
    - Expected: write_code equals `0`
 - The reduced probe still type-checks under the fresh debug compiler
    - Expected: check_code equals `0`
-- Hosted native compile succeeds before the lower runtime mismatch
+- Hosted native compile succeeds
    - Expected: compile_code equals `0`
-- The native probe still returns the wrong post-print helper value
+- The native probe now prints inside the helper and returns the real value
    - Expected: native_code equals `0`
-- The tracker records the same narrowed helper-return blocker
+- The tracker records the lower helper-return bug as closed
    - Expected: blocker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -113,23 +114,24 @@ val (check_out, check_code) = shell(SIMPLE_BIN + " check " + SOURCE_PATH)
 expect(check_code).to_equal(0)
 expect(check_out).to_contain("All checks passed")
 
-step("Hosted native compile succeeds before the lower runtime mismatch")
+step("Hosted native compile succeeds")
 val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
 expect(compile_code).to_equal(0)
 expect(compile_out).to_contain("Compiled")
 
-step("The native probe still returns the wrong post-print helper value")
+step("The native probe now prints inside the helper and returns the real value")
 val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/native_helper_print_return.out 2>&1; code=$?; cat /tmp/native_helper_print_return.out; echo EXIT=$code'")
 expect(native_code).to_equal(0)
 expect(native_out).to_contain("before")
-expect(native_out).to_contain("after=3")
-expect(native_out).to_contain("EXIT=175")
+expect(native_out).to_contain("ok")
+expect(native_out).to_contain("after=7")
+expect(native_out).to_contain("EXIT=0")
 
-step("The tracker records the same narrowed helper-return blocker")
+step("The tracker records the lower helper-return bug as closed")
 val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md")
 expect(blocker_code).to_equal(0)
-expect(blocker).to_contain("Status: open")
-expect(blocker).to_contain("calls `println(\"ok\")`")
+expect(blocker).to_contain("Status: closed")
+expect(blocker).to_contain("static-string `println(...)` helpers stay on the native path")
 expect(blocker).to_contain("after=3")
 ```
 

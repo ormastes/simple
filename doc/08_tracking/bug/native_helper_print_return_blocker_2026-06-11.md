@@ -1,7 +1,7 @@
 # Native Helper Print Return Blocker
 
 Date: 2026-06-11
-Status: open
+Status: closed
 Owner: runtime/native seed lane
 
 ## Summary
@@ -16,7 +16,8 @@ A plain helper function that:
 - calls `println("ok")`,
 - then returns the later value,
 
-still returns `3` on current-source native instead of the intended value.
+used to fall back to `InterpCall` on current-source native and come back as the
+tagged `nil` value `3` instead of the intended result.
 
 That means the remaining failure is a Rust seed native codegen/runtime bug
 around helper return values after built-in I/O calls, not a Pure Simple API
@@ -33,7 +34,7 @@ fn run_one() -> i64:
     value
 ```
 
-Observed current-source native output:
+Historical failing native output:
 
 ```text
 before
@@ -48,7 +49,7 @@ ok
 after=7
 ```
 
-The same wrong `after=3` result also reproduces for:
+That same wrong `after=3` result also reproduced for:
 
 - helper return of a function argument after `println`
 - helper return of a struct field after `println`
@@ -63,8 +64,13 @@ current explanation is simpler:
 - helper-local post-I/O return values are broken on native
 - hosted `multicore_green` helper repros trip the same lower seed bug
 
-So the next real fix lane is helper return correctness after built-in I/O, then
-the hosted fairness experiment should be rerun above that.
+That seed bug is now fixed by narrowing the compilability fallback:
+
+- static-string `println(...)` helpers stay on the native path
+- helper return values after built-in `println` are correct again
+
+The hosted fairness experiment must still be rerun above that fix. The current
+remaining lower hosted blocker is again the helper handle-array return path.
 
 ## Executable Evidence
 

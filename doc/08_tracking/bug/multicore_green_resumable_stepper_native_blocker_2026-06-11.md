@@ -23,8 +23,10 @@ and is now closed.
 The older worker callback-registry blocker beneath this path is now closed.
 The current better lower blocker beneath this path is tracked separately in
 `doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`.
-The newer smaller seed blocker beneath both of those is now tracked in
-`doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md`.
+The newer smaller seed blocker that briefly sat beneath both of those is now
+tracked historically in
+`doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md` and is
+closed.
 The earlier lower pool-plus-struct-send blocker in
 `doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md`
 is already closed. Historical loop-return tracking remains in
@@ -55,10 +57,8 @@ worker-pool blocker is:
   fixed and moved out of the critical path
 - the earlier loop/search helper-return path is now green
 - the lower function-valued local or parameter array path is now closed beneath it
-- the helper handle-array iteration plus returned result-array path is still a
-  valid hosted symptom
-- the smaller current lower seed boundary beneath that hosted symptom is helper
-  return corruption after built-in `println`
+- the helper handle-array iteration plus returned result-array path is again
+  the current lower hosted symptom beneath it
 
 ## Why This Matters
 

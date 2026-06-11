@@ -20,7 +20,8 @@ boundary is a helper that:
 
 That helper still crashes on current-source native with `EXIT=139`.
 
-That hosted helper symptom now sits above the smaller generic seed blocker in
+The smaller generic helper post-`println` seed blocker that briefly sat beneath
+this path is now closed in
 `doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md`.
 
 ## Current Minimal Probe
@@ -70,8 +71,8 @@ crash” or “channels crash”.
 
 The older worker-callback registry blocker is now closed. The higher
 resumable-stepper blocker remains open above this narrower helper
-handle-array-plus-return boundary. The newer lower helper-print-return blocker
-now sits beneath this hosted symptom.
+handle-array-plus-return boundary. The temporary lower helper-print-return
+blocker is also now closed beneath it.
 
 ## Executable Evidence
 

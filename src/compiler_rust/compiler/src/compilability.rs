@@ -484,16 +484,20 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
 
         // F-strings need string interpolation
         Expr::FString { parts, .. } => {
+            let mut has_dynamic_part = false;
             for part in parts {
                 match part {
                     simple_parser::ast::FStringPart::Expr(e)
                     | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
+                        has_dynamic_part = true;
                         analyze_expr(e, reasons);
                     }
                     _ => {}
                 }
             }
-            add_reason(reasons, FallbackReason::StringOps);
+            if has_dynamic_part {
+                add_reason(reasons, FallbackReason::StringOps);
+            }
         }
 
         // i18n strings - need runtime locale lookup
@@ -857,6 +861,23 @@ fn helper(id: i64) -> i64:
         assert!(
             status.is_compilable(),
             "channel helper method should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_helper_print_then_return_compilable() {
+        let results = parse_and_analyze(
+            r#"fn run_one() -> i64:
+    val value = 7
+    println("ok")
+    value
+"#,
+        );
+        let status = results.get("run_one").unwrap();
+        assert!(
+            status.is_compilable(),
+            "helper print/return should compile natively, got {:?}",
             status.reasons()
         );
     }
