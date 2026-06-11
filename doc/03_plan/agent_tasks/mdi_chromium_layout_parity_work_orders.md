@@ -199,10 +199,14 @@ Prove and harden the requested GUI stack:
   the real CLI body and exits nonzero on blocked/divergent runs. The focused
   fixture-18 pixel baseline attempt now reaches the fixture, and source A uses
   the maintained Electron live-bitmap capture plus ARGB-JSON-to-PPM conversion
-  path and reports `ok pixels=76800`. The remaining pixel-baseline blocker is
-  post-capture harness completion: both normal and `--skip-simple` fixture-18
-  runs hang after source-A success before producing committed baseline rows,
-  while the full source-B path also does not complete the Simple capture.
+  path and reports `ok pixels=76800`. The source-A baseline writer now copies
+  the maintained renderer PPM directly instead of re-encoding through the slow
+  interpreter text PPM fallback, so
+  `--only=18_flex_grow_weights --update-baseline --skip-simple` writes
+  `test/09_baselines/html_compat/18_flex_grow_weights/chrome.ppm` and exits 0.
+  The remaining pixel-baseline blocker is source B: the non-skip fixture-18 run
+  fails closed with exit 2 because the Simple browser-engine child capture
+  times out after 1000 ms before writing `simple.ppm`.
   Tracked in
   `doc/08_tracking/bug/html_compat_flex_pixel_baselines_missing_2026-06-11.md`.
 - Famous-site corpus div geometry evidence (2026-06-11):

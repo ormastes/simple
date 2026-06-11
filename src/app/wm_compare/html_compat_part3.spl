@@ -173,6 +173,12 @@ fn write_report(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
     dir_create_all(baseline_dir(fixture.id))
     file_write_text(report_sdn_path(fixture.id), body)
 
+fn _copy_ppm_capture(src: text, dst: text) -> bool:
+    val bytes: [u8] = rt_file_read_bytes(src) ?? []
+    if bytes.len() == 0:
+        return false
+    rt_file_write_bytes(dst, bytes)
+
 # ============================================================================
 # Run-One Driver
 # ============================================================================
@@ -200,8 +206,17 @@ fn run_fixture(fixture: Fixture, opts: HtmlCompatOpts) -> PairResult:
         print "[html_compat]     ok  pixels={chrome.pixels.len()}"
         if opts.update_baseline:
             dir_create_all(baseline_dir(fixture.id))
-            _write_ppm_local(chrome.pixels, chrome.width, chrome.height, chrome_ppm_path(fixture.id))
-            print "[html_compat]     wrote {chrome_ppm_path(fixture.id)}"
+            if _copy_ppm_capture(chrome_capture_temp_ppm_path(), chrome_ppm_path(fixture.id)):
+                print "[html_compat]     wrote {chrome_ppm_path(fixture.id)}"
+            else:
+                print "[html_compat]     fail: could not copy Chromium PPM baseline"
+                val failed_chrome = capture_error(
+                    "electron", opts.width, opts.height,
+                    "could not copy Chromium PPM baseline for {fixture.id} from renderer output")
+                val skipped_simple = capture_error(
+                    "simple_browser_engine", opts.width, opts.height,
+                    "skipped after Chromium baseline write failure")
+                return compare_pair(fixture, failed_chrome, skipped_simple, opts.width, opts.height)
     else:
         print "[html_compat]     fail: {chrome.error}"
 
@@ -215,8 +230,13 @@ fn run_fixture(fixture: Fixture, opts: HtmlCompatOpts) -> PairResult:
         if simple.success:
             print "[html_compat]     ok  pixels={simple.pixels.len()}"
             dir_create_all(baseline_dir(fixture.id))
-            _write_ppm_local(simple.pixels, simple.width, simple.height, simple_ppm_path(fixture.id))
-            print "[html_compat]     wrote {simple_ppm_path(fixture.id)}"
+            if _copy_ppm_capture(_simple_capture_output_path(fixture.id), simple_ppm_path(fixture.id)):
+                print "[html_compat]     wrote {simple_ppm_path(fixture.id)}"
+            else:
+                print "[html_compat]     fail: could not copy Simple PPM baseline"
+                simple = capture_error(
+                    "simple_browser_engine", opts.width, opts.height,
+                    "could not copy Simple PPM baseline for {fixture.id} from renderer output")
         else:
             print "[html_compat]     fail: {simple.error}"
 
@@ -277,6 +297,11 @@ pub fn html_compat_cli_main() -> i64:
         val pair = run_fixture(fixture, opts)
 
         if opts.update_baseline and opts.skip_simple:
+            if not pair.chrome_ok:
+                if first_divergent == "":
+                    first_divergent = fixture.id
+                    blocked = true
+                break
             continue
 
         if not pair.accepted:
