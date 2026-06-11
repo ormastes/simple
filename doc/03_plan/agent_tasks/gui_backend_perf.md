@@ -5,13 +5,18 @@ Updated: 2026-06-11
 
 ## Completed (already pushed)
 
-- pending this slice -- font offload backend selection: added
+- `2dc841a399` -- font offload backend selection: added
   `engine2d_font_offload_backend_order()` and
   `engine2d_backend_lane_preferred_font_offload_candidate(...)` so vector and
   bitmap font offload use a stable processing-lane order: Metal, CUDA, ROCm/HIP,
   Qualcomm, Vulkan, DirectX, OpenCL, OpenGL, Intel, WebGPU, CPU SIMD, software,
   then CPU. Evidence: `backend_lane_spec.spl` now covers alias handling and
   native GPU lanes before Vulkan.
+- this commit -- preferred font offload evidence wrappers: added vector and
+  bitmap evidence helpers that apply the Engine2D font offload order to probed
+  backend candidates before building typed evidence. Evidence:
+  `vector_font_offload_spec.spl` and `bitmap_font_offload_spec.spl` cover ROCm
+  alias selection before Vulkan and explicit CPU fallback behavior.
 - `275a221f5d` -- production GUI web parity render path: replaced O(n^2)
   distinct-color scan with dictionary membership, reused deterministic parity
   reports, skipped Metal fallback rerender/compare on software hosts, and added
@@ -29,8 +34,8 @@ Updated: 2026-06-11
    - Add evidence artifacts for the latest startup/render behavior in the same shape as existing perf evidence.
    - Update plan/spec references to point to the new evidence.
 2. Provide GPU/font offload proof
-   - Demonstrate measured proof of GPU/font offload path behavior or explicit typed unavailability.
-   - Ensure evidence includes the decision path and fallback behavior.
+   - Demonstrate measured proof of real GPU/font offload path behavior or explicit typed unavailability.
+   - Ensure evidence includes device submit/readback behavior after the preferred-backend decision path.
 3. Execute focused pure Simple GUI text/layout optimization pass
    - Target isolated hot-path opportunities in text layout, line width handling, and browser text path.
    - Keep changes small and attributable with before/after measurements.

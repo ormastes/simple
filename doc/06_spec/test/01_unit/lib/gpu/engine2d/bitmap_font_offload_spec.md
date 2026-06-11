@@ -27,7 +27,7 @@ bitmap_font_offload_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,6 +106,28 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 
 </details>
 
+#### uses the Engine2D font offload order before producing bitmap evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = bitmap_font_preferred_offload_evidence(["vulkan", "amd-hip", "cpu"], 64, 32, true, true, 4096)
+val fallback = bitmap_font_preferred_offload_evidence(["unknown"], 64, 32, true, true, 4096)
+
+expect(evidence.backend_name).to_equal("rocm")
+expect(evidence.generated.backend_name).to_equal("rocm")
+expect(evidence.generated_ready).to_equal(true)
+expect(evidence.gpu_glyph_raster_plan_ready).to_equal(true)
+expect(fallback.backend_name).to_equal("cpu")
+expect(fallback.status_code).to_equal("cpu-glyph-baseline")
+```
+
+</details>
+
 #### derives bitmap glyph raster readback checksum from the glyph mask
 
 <details>
@@ -171,8 +193,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

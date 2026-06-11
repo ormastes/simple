@@ -27,7 +27,7 @@ vector_font_offload_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -167,6 +167,45 @@ expect(evidence.reason).to_equal("production-gpu-dispatch-not-wired")
 
 </details>
 
+#### uses the Engine2D font offload order before producing vector evidence
+
+- accel
+- accel
+   - Expected: evidence.backend_name equals `rocm`
+   - Expected: evidence.generated.backend_name equals `rocm`
+   - Expected: evidence.generated_ready is true
+   - Expected: fallback.backend_name equals `cpu`
+   - Expected: fallback.generated_ready is true
+   - Expected: fallback.status_code equals `cpu-fallback`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = vector_font_preferred_offload_evidence(
+    ["vulkan", "amd-hip", "cpu"],
+    48, 24, true, true, 4096,
+    accel(1, 0, 0, 1, 0, 0, "preferred-vector-font-offload-cpu-glyph")
+)
+val fallback = vector_font_preferred_offload_evidence(
+    ["unknown"], 48, 24, true, true, 4096,
+    accel(1, 0, 0, 1, 0, 0, "no-known-vector-font-backend")
+)
+
+expect(evidence.backend_name).to_equal("rocm")
+expect(evidence.generated.backend_name).to_equal("rocm")
+expect(evidence.generated_ready).to_equal(true)
+expect(fallback.backend_name).to_equal("cpu")
+expect(fallback.generated_ready).to_equal(true)
+expect(fallback.status_code).to_equal("cpu-fallback")
+```
+
+</details>
+
 #### marks vector font glyph readback ready only when returned pixels match checksum
 
 - accel
@@ -260,8 +299,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
