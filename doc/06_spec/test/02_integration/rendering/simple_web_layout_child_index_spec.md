@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -69,6 +69,23 @@ Reproduction: this block contains the complete executable scenario source.
 val html = _flat_rows(80)
 val pixels = simple_web_layout_render_html_software_pixels(html, 160, 120)
 expect(pixels.len()).to_equal(19200)
+```
+
+</details>
+
+#### keeps whitespace-only text segments out of block layout
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body>\n  <div id=\"first\" style=\"height:10px\">first</div>\n  \n  <div id=\"second\" style=\"height:10px\">second</div>\n</body></html>"
+val first_y = simple_web_layout_debug_layout_by_id(html, 200, 200, "first", "y").to_i32()
+val second_y = simple_web_layout_debug_layout_by_id(html, 200, 200, "second", "y").to_i32()
+expect(second_y - first_y).to_equal(10)
 ```
 
 </details>
@@ -337,8 +354,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

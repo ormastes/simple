@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Simple Web Layout Child Index Specification](test/02_integration/rendering/simple_web_layout_child_index_spec.md) | Auto-generated | N/A | 13 | 0% | 0 lines |
+| [Simple Web Layout Child Index Specification](test/02_integration/rendering/simple_web_layout_child_index_spec.md) | Auto-generated | N/A | 14 | 0% | 0 lines |
 

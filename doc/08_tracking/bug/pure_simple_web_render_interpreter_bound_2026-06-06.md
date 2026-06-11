@@ -1195,3 +1195,24 @@ Verification:
   opportunities. The renderer static count rises because the one-time
   parse-time normalization loop is explicit; style matching avoids repeated
   trimming of the same class tokens.
+
+## 2026-06-11 Text segment trim reuse
+
+HTML parsing trimmed each non-tag text segment once to decide whether it should
+emit a `#text` node, then trimmed the same segment again to populate
+`text_trimmed`.
+
+The parser now stores the trimmed segment in a local value and reuses it for
+both the emptiness check and the emitted node. Whitespace-only text segments
+still do not create layout-affecting text nodes.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `14 passed, 0 failed`
+- `bin/simple spipe-docgen test/02_integration/rendering/simple_web_layout_child_index_spec.spl --output doc/06_spec`
+  regenerated the mirrored manual.
+- Docker optimizer scans: renderer `754` and focused spec `4` remaining static
+  opportunities.

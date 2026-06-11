@@ -773,3 +773,11 @@ dev-done
   spec 4 remaining static opportunities; the renderer count rises because the
   one-time parse loop is explicit, while style matching avoids repeated class
   token trim work.
+- impl: Cached text-segment trim results during HTML parse. Non-tag text
+  segments now trim once, use that value for the non-empty check, and store the
+  same value in `text_trimmed` when a text node is emitted.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` now passes 14/14, including a
+  whitespace-only text segment block-layout oracle. Generated manual refreshed
+  under `doc/06_spec`. Docker optimizer scans completed: renderer 754 and
+  focused spec 4 remaining static opportunities.
