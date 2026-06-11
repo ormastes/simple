@@ -97,3 +97,27 @@ headers-not-body (string-level assertion on worker serialization if testable).
 | A4 | concurrent/green_thread.spl + green scheduler + spec | E6 |
 | A5 | nogc_async_mut/http_server (types, worker, phases) + specs | E7 |
 | Fable | review, commit/push per batch with sync cycle, fix-forward | all |
+
+## FINAL STATUS — 2026-06-11 (all 7 fixed and pushed)
+
+| Esc | Commit | Verification |
+|-----|--------|--------------|
+| E1 AOP real Around proceed | 4f1b29dad9 | aop_around_proceed_spec 5/5 |
+| E2 after(target-executed) marker | 4f1b29dad9 | aop_denial_visibility_spec 7/7 |
+| E3 transitive capability revoke (+syscall 49) | cd745b3c21 | capability_revoke_depth_spec 9/9, ipc_grants 21/21, Lean T3 transitive zero-sorry |
+| E4 delegation depth (default 2, deny at 0) | cd745b3c21 | same spec; Lean T1 reproved with depth guard |
+| E5 pager WAL-before-data gate | 39fe524041 | pager_wal_gate_spec 13/13, dbfs_engine_pager 8/8, Lean T4 pager-level zero-sorry |
+| E6 cooperative green_spawn deferral (B6) | fbaea14ff4 | green_spawn_deferred_spec 5/5 + 5 existing green specs green incl. upstream yield-gap |
+| E7 PhaseResult headers + CRLF guard | 8eb08c54f3 | phase_result_headers_spec 16/16 |
+
+Notes recorded during verification:
+- Lint SPIPE006/007 steer specs toward bare `expect()` / `expect_not()`; bare
+  `expect(cond)` is still a hollow no-op (verified 2026-06-11) while
+  `expect_not`/`assert_true` are honest — specs here use `assert_true`.
+- New pre-existing bug recorded (not E5's): reserved keyword `gen` as field
+  name in dbfs checkpoint structs — doc/08_tracking/bug/
+  dbfs_checkpoint_gen_reserved_keyword_2026-06-11.md.
+- E6 death-reason fields are plumbing: pure Simple has no try/catch, so
+  per-task error capture activates only once a runtime catch hook exists.
+- E4 syscall 49 gate is stricter than the plan minimum (SystemPrivilege
+  required for transitive revoke) — deny-by-default kept.
