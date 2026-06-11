@@ -157,6 +157,10 @@ Updated: 2026-06-11
   `_not_selector_rejects_first_block` now finds the closing `)` in the original
   HTML buffer before extracting selector options, avoiding a post-marker tail
   allocation in the heuristic selector path.
+- this commit -- style rule brace tail allocation removal:
+  `_last_rule_hex_color` now finds `{` and `}` in the original HTML buffer
+  after a selector match instead of allocating post-selector and post-brace
+  tails before parsing the rule body.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
