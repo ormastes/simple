@@ -34,6 +34,16 @@ Current hosted multicore-green evidence does not yet prove:
 - long-running CPU work is preempted or yield-forced with a host-side contract
 - host fairness semantics comparable to Go's scheduler under sustained loop load
 
+Current hosted fairness/preemption gap coverage now includes:
+
+- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
+  keeps the remaining host monopolization gap explicit: with hosted
+  parallelism pinned to `1`, a tight CPU task still keeps a later quick task
+  unfinished through the first short observation window on both source-run and
+  standalone native paths
+- this is the current executable proof that hosted multicore-green still lacks
+  Go-like preemption or an equivalent enforced yield contract
+
 Current hosted blocking-compensation evidence now includes:
 
 - `test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl`

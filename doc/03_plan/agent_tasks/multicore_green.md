@@ -192,6 +192,7 @@ host runtime lane.
 Primary paths:
 
 - `doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md`
+- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
 - `test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl`
 - `doc/01_research/lib/threading/go_vs_simple_threads.md`
 - `doc/04_architecture/runtime/multicore_green.md`
@@ -200,12 +201,14 @@ Primary paths:
 Deliverables:
 
 - dedicated tracking for the remaining hosted multicore-green parity gap;
-- executable proof that hosted blocking compensation stays fixed while
-  fairness/preemption remains open until stronger evidence lands;
+- executable proof that hosted blocking compensation stays fixed, hosted
+  bounded parallelism stays fixed, and a one-worker tight loop still keeps the
+  fairness/preemption gap explicit until stronger evidence lands;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:
 
+- `bin/release/simple test test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl --mode=interpreter --clean`
 - `bin/release/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean`
 - `bin/release/simple test test/03_system/feature/usage/multicore_green_tracking_spec.spl --mode=interpreter --clean`
 - `bin/release/simple lint doc/08_tracking/feature/feature_db.sdn`
