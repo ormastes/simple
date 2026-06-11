@@ -8,6 +8,7 @@ use crate::value::Value;
 use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
+use simple_runtime::value::sffi::equality::{rt_native_eq, rt_native_neq};
 use simple_runtime::value::sffi::value_ops::{
     rt_value_int, rt_value_float, rt_value_bool, rt_value_nil, rt_value_as_int, rt_value_as_float, rt_value_as_bool,
     rt_value_truthy, rt_value_is_nil, rt_value_is_int, rt_value_is_float, rt_value_is_bool, rt_value_is_heap,
@@ -225,6 +226,32 @@ pub fn rt_value_is_heap_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let rv = RuntimeValue::from_raw(raw as u64);
     Ok(Value::Bool(rt_value_is_heap(rv)))
+}
+
+/// RuntimeValue-aware equality for native/raw i64 carriers.
+pub fn rt_native_eq_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic_with_context(
+            "rt_native_eq expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ));
+    }
+    let left = args[0].as_int()?;
+    let right = args[1].as_int()?;
+    Ok(Value::Int(rt_native_eq(left, right)))
+}
+
+/// RuntimeValue-aware inequality for native/raw i64 carriers.
+pub fn rt_native_neq_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic_with_context(
+            "rt_native_neq expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        ));
+    }
+    let left = args[0].as_int()?;
+    let right = args[1].as_int()?;
+    Ok(Value::Int(rt_native_neq(left, right)))
 }
 
 /// Get type tag from RuntimeValue

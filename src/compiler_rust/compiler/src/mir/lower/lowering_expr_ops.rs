@@ -42,6 +42,39 @@ impl<'a> MirLowerer<'a> {
             let left_reg = self.lower_expr(left)?;
             let right_reg = self.lower_expr(right)?;
 
+            // Equality involving ANY needs runtime dispatch because native/source
+            // paths can carry mixed boxed/raw RuntimeValue-like representations
+            // across extern boundaries (for example channel receive).
+            if matches!(op, BinOp::Eq | BinOp::Is | BinOp::NotEq)
+                && (left.ty == TypeId::ANY || right.ty == TypeId::ANY)
+            {
+                let boxed_left = if left.ty == TypeId::ANY && right.ty != TypeId::ANY {
+                    left_reg
+                } else {
+                    self.box_arg_for_any_param(left_reg, left)?
+                };
+                let boxed_right = if right.ty == TypeId::ANY && left.ty != TypeId::ANY {
+                    right_reg
+                } else {
+                    self.box_arg_for_any_param(right_reg, right)?
+                };
+                let target = match op {
+                    BinOp::Eq | BinOp::Is => "rt_native_eq",
+                    BinOp::NotEq => "rt_native_neq",
+                    _ => unreachable!(),
+                };
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::CallTarget::from_name(target),
+                        args: vec![boxed_left, boxed_right],
+                    });
+                    dest
+                });
+            }
+
             // When both operands are ANY-typed (untyped fn params), dispatch
             // to rt_any_add which does a runtime tag check: string operands
             // go through rt_string_concat, integers use arithmetic addition.

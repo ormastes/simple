@@ -534,6 +534,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_channel_recv", concurrency::rt_channel_recv);
     insert_simple!("rt_channel_send", concurrency::rt_channel_send);
     insert_simple!("rt_channel_try_recv", concurrency::rt_channel_try_recv);
+    insert_simple!("rt_native_eq", sffi_value::rt_native_eq_fn);
+    insert_simple!("rt_native_neq", sffi_value::rt_native_neq_fn);
     insert_simple!("rt_cli_exit", cli::rt_cli_exit);
     insert_simple!("rt_cli_file_exists", cli::rt_cli_file_exists);
     insert_simple!("rt_cli_get_args", cli::rt_cli_get_args);
