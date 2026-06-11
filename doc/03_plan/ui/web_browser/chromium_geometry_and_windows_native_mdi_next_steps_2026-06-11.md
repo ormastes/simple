@@ -252,6 +252,9 @@ Smallest next implementation step:
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
     changing geometry comparison semantics
+  - `html_compat_spec.spl` now guards the wrapper/capture source against
+    geometry acceptance through `argb_json`, pixelmatch, resize/scale/blur,
+    canvas, threshold, or image-smoothing shortcuts
 - Live `24_flex_wrap_reverse_basic` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused geometry spec itself is now stable again in the default runner:

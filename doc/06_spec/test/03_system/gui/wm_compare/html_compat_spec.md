@@ -28,7 +28,7 @@ html_compat_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -464,6 +464,54 @@ expect(report).to_contain("| `24_flex_wrap_reverse_basic` | pass | 0 |")
 
 </details>
 
+#### keeps Chrome geometry manifest evidence on exact structural comparison
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrapper = rt_file_read_text("scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs")
+val capture = rt_file_read_text("tools/chrome-live-bitmap/capture_html_argb.js")
+val report = rt_file_read_text("doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md")
+expect(wrapper).to_contain("25_flex_justify_space_between")
+expect(wrapper).to_contain("CHROME_CAPTURE_GEOMETRY_OUTPUT")
+expect(wrapper).to_contain("HTML_COMPAT_GEOMETRY_JSON=\"$geometry_json\"")
+expect(wrapper).to_contain("src/app/wm_compare/html_compat_geometry_probe_cli.spl")
+expect(wrapper).to_contain("\"$fixture\" \"$geometry_json\" \"$structural_sdn\" \"$WIDTH\" \"$HEIGHT\"")
+expect(wrapper).to_contain("blur_or_tolerance_used=false")
+expect(report).to_contain("- fixtures: 22")
+expect(report).to_contain("- pass count: 22")
+expect(report).to_contain("- fail count: 0")
+expect(report).to_contain("- blur/tolerance used: false")
+expect(report).to_contain("It does not use blur, downscaling, pixel tolerance, copied Chromium")
+expect(capture).to_contain("--force-device-scale-factor=1")
+expect(capture).to_contain("deviceScaleFactor: 1")
+expect(capture).to_contain("blur_or_tolerance_used: false")
+expect(_index_or_missing(wrapper, "HTML_COMPAT_GEOMETRY_JSON=\"$argb_json\"")).to_equal(-1)
+expect(_index_or_missing(wrapper, "\"$fixture\" \"$argb_json\"")).to_equal(-1)
+expect(_index_or_missing(wrapper, "mismatch_count -le")).to_equal(-1)
+expect(_index_or_missing(wrapper, "mismatch_count <=")).to_equal(-1)
+expect(_index_or_missing(wrapper, "pixelmatch")).to_equal(-1)
+expect(_index_or_missing(wrapper, "perceptual")).to_equal(-1)
+expect(_index_or_missing(wrapper, " -resize ")).to_equal(-1)
+expect(_index_or_missing(wrapper, " -scale ")).to_equal(-1)
+expect(_index_or_missing(wrapper, " -blur ")).to_equal(-1)
+expect(_index_or_missing(wrapper, " -filter ")).to_equal(-1)
+expect(_index_or_missing(capture, "require(\"sharp\")")).to_equal(-1)
+expect(_index_or_missing(capture, "require(\"canvas\")")).to_equal(-1)
+expect(_index_or_missing(capture, "OffscreenCanvas")).to_equal(-1)
+expect(_index_or_missing(capture, "createElement(\"canvas\")")).to_equal(-1)
+expect(_index_or_missing(capture, "pixelmatch")).to_equal(-1)
+expect(_index_or_missing(capture, "threshold")).to_equal(-1)
+expect(_index_or_missing(capture, "imageSmoothingEnabled")).to_equal(-1)
+expect(_index_or_missing(capture, "drawImage(")).to_equal(-1)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -483,8 +531,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

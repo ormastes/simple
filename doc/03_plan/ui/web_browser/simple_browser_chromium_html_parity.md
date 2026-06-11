@@ -315,6 +315,10 @@ Open gaps tied to the active browser objective:
     `chrome_html_compat_geometry_manifest_evidence_2026-06-11.md` reports
     `22` fixtures, `22` passes, `0` failures, and
     `blur_or_tolerance_used=false`
+  - `html_compat_spec.spl` now includes a source-level no-cheat guard for the
+    Chrome geometry manifest wrapper and capture tool, requiring geometry JSON
+    to feed the structural probe and rejecting resize/scale/blur/filter,
+    pixelmatch, canvas, threshold, or image-smoothing shortcuts
   - the fixture has real `chrome.ppm` captured via the existing Electron
     `--update-baseline --skip-simple` path, and the follow-up Simple comparison
     reports `RESULT: EXACT match`, `different_pixels=0`; no blur, tolerance,
