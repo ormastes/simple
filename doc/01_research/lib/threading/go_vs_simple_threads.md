@@ -121,5 +121,6 @@ single-carrier logical queue surface.
 
 The remaining gap versus Go is not naming or basic task submission anymore. It
 is completing and proving the deeper scheduler properties consistently across
-the host runtime and SimpleOS lanes: blocking integration, fairness/preemption,
-and final hardware handoff evidence.
+the host runtime and SimpleOS lanes: blocking integration and
+fairness/preemption. The SimpleOS final AP ring/user hardware handoff evidence
+itself is now closed by the opt-in live QEMU marker-triplet gate.
