@@ -13,7 +13,9 @@ Simple APIs are now:
 
 - `thread_spawn`: explicit OS thread
 - `cooperative_green_spawn` / `cooperative_green_spawn_value`: cooperative
-  current-carrier queue
+  current-carrier queue (`cooperative_green_spawn` is the primary function-task
+  surface; `cooperative_green_spawn_value` is the precomputed-result helper and
+  the current compiled profile-row workaround)
 - `multicore_green_spawn`: bounded runtime-pool M:N candidate
 - `task_spawn`: lower-level pool-backed task API
 

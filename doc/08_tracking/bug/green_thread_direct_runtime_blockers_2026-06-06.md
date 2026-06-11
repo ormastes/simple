@@ -75,6 +75,13 @@ Function-valued globals and global function-valued arrays are also covered by
 direct `simple run` checks in that script. SMF function-valued
 global/global-array storage now has matching regression coverage.
 
+2026-06-11 follow-up: a different compiled cooperative-green boundary is still
+open. A minimal workload that stores multiple `GreenThreadHandle` values
+returned from `cooperative_green_spawn(worker)` runs in the interpreter but
+currently segfaults in both SMF and native execution (`exit=139`). Focused
+blocker coverage now lives in
+`test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl`.
+
 The cross-language harness now reports Simple OS-thread and Simple cooperative
 green rows separately. A 20-worker OS-thread fanout smoke compiles and runs
 through unrolled `thread_spawn` fork-join handles. `thread_spawn_with_args`
@@ -101,6 +108,10 @@ SMF function-valued global/global-array regression evidence is now covered by
 `test/03_system/feature/usage/cooperative_green_smf_function_global_regression_spec.spl`,
 which keeps both minimal SMF fixtures compiling and requires their pass markers
 after the SMF `__module_init` execution fix.
+Compiled cooperative-green handle-array blocker evidence is now covered by
+`test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl`,
+which keeps the current SMF/native `cooperative_green_spawn(worker)` crash
+explicit while the profile lane stays on `cooperative_green_spawn_value`.
 Cooperative-green queue rows are still not M:N CPU-parallel evidence; keep them
 classified separately from native and SMF `multicore_green_spawn` evidence.
 
@@ -130,4 +141,6 @@ Switch or add a perf harness green row for delayed `green_spawn(fn)` closure
 execution timing. Keep
 `test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
 passing so the fixed callback and direct-run function-global paths do not
-regress.
+regress, and close the compiled `GreenThreadHandle` array crash before the
+profile harness switches its compiled cooperative-green rows from
+`cooperative_green_spawn_value` to `cooperative_green_spawn`.

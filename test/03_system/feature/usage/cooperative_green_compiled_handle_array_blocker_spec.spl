@@ -1,0 +1,102 @@
+"""
+# Cooperative Green Compiled Handle-Array Blocker
+
+**Feature IDs:** #green-cooperative-compiled-handle-array
+**Category:** Runtime / Native / SMF / Concurrency
+**Status:** Known Blocker
+
+## Overview
+
+This SSpec keeps the remaining compiled cooperative-green function-spawn crash
+explicit. A minimal workload that stores multiple `GreenThreadHandle` values
+returned from `cooperative_green_spawn(worker)` runs in the interpreter, but
+currently crashes in both SMF and native execution.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/multicore_green.md
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/multicore_green.md
+
+## Research
+
+**Research:** doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md
+
+## Syntax
+
+```sh
+./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl --mode=interpreter --clean
+```
+"""
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val BUILD_DIR: text = "build/test/cooperative_green_compiled_handle_array_blocker"
+val SOURCE_PATH: text = BUILD_DIR + "/handle_array.spl"
+val SMF_PATH: text = BUILD_DIR + "/handle_array.smf"
+val NATIVE_PATH: text = BUILD_DIR + "/handle_array_native"
+val SIMPLE_BIN: text = "./src/compiler_rust/target/debug/simple"
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+fn fixture_source() -> text:
+    [
+        "use std.concurrent.cooperative_green.{cooperative_green_spawn, cooperative_green_run_all, GreenThreadHandle}\n",
+        "extern fn rt_exit(code: i32)\n",
+        "fn worker() -> i64:\n",
+        "    var x = 1\n",
+        "    for i in 0..100000:\n",
+        "        x = (x * 1103515245 + 12345) % 2147483648\n",
+        "    x\n",
+        "fn expected_total() -> i64:\n",
+        "    worker() + worker()\n",
+        "fn main():\n",
+        "    var handles: [GreenThreadHandle] = []\n",
+        "    handles.push(cooperative_green_spawn(worker))\n",
+        "    handles.push(cooperative_green_spawn(worker))\n",
+        "    cooperative_green_run_all()\n",
+        "    val total = handles[0].join() + handles[1].join()\n",
+        "    if total != expected_total():\n",
+        "        rt_exit(74)\n",
+        "    print(\"cooperative_green_handle_array_pass=true\")\n"
+    ].join("")
+
+describe "cooperative green compiled handle-array blocker":
+    it "keeps the compiled cooperative_green_spawn handle-array crash explicit":
+        step("Write the minimal compiled cooperative-green handle-array fixture")
+        val (mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
+        expect(mkdir_out.len()).to_be_greater_than(-1)
+        expect(mkdir_code).to_equal(0)
+        expect(rt_file_write_text(SOURCE_PATH, fixture_source())).to_equal(true)
+
+        step("Compile the fixture to SMF")
+        val (smf_compile_out, smf_compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " -o " + SMF_PATH)
+        expect(smf_compile_out).to_contain("Compiled")
+        expect(smf_compile_code).to_equal(0)
+
+        step("Compile the fixture to native")
+        val (native_compile_out, native_compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+        expect(native_compile_out).to_contain("Compiled")
+        expect(native_compile_code).to_equal(0)
+
+        step("Run the fixture in the interpreter as the control")
+        val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
+        expect(interp_out).to_contain("cooperative_green_handle_array_pass=true")
+        expect(interp_code).to_equal(0)
+
+        step("Keep the current SMF crash explicit")
+        val (smf_out, smf_code) = shell("timeout 20s " + SIMPLE_BIN + " " + SMF_PATH)
+        expect(smf_out.contains("cooperative_green_handle_array_pass=true")).to_be(false)
+        expect(smf_code).to_be_greater_than(0)
+
+        step("Keep the current native crash explicit")
+        val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
+        expect(native_out.contains("cooperative_green_handle_array_pass=true")).to_be(false)
+        expect(native_code).to_be_greater_than(0)
