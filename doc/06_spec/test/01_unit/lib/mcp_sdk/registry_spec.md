@@ -1,0 +1,411 @@
+# Registry Specification
+
+> <details>
+
+<!-- sdn-diagram:id=registry_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=registry_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+registry_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=registry_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Registry Specification
+
+## Scenarios
+
+### lazy ToolRegistry
+
+#### (a) register 3 tools — schemas are NOT built yet
+
+- registry reset
+- fn
+- fn
+- fn
+- fn
+- fn
+- fn
+   - Expected: cnt equals `3`
+   - Expected: built equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+registry_reset()
+
+registry_register(
+    "tool_a",
+    "Tool A description",
+    fn() -> text: "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}",
+    fn(args: text) -> text: "result_a"
+)
+registry_register(
+    "tool_b",
+    "Tool B description",
+    fn() -> text: "{\"type\":\"object\",\"properties\":{\"y\":{\"type\":\"number\"}}}",
+    fn(args: text) -> text: "result_b"
+)
+registry_register(
+    "tool_c",
+    "Tool C description",
+    fn() -> text: "{\"type\":\"object\",\"properties\":{}}",
+    fn(args: text) -> text: "result_c"
+)
+
+val cnt = registry_count()
+expect(cnt).to_equal(3)
+
+val built = registry_schemas_built()
+expect(built).to_equal(0)
+```
+
+</details>
+
+#### (b) call() dispatches without building schemas
+
+- registry reset
+- fn
+- fn
+   - Expected: result equals `echo_result`
+   - Expected: built equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+registry_reset()
+
+registry_register(
+    "echo_tool",
+    "Echo tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "echo_result"
+)
+
+val result = registry_call("echo_tool", "{}")
+expect(result).to_equal("echo_result")
+
+val built = registry_schemas_built()
+expect(built).to_equal(0)
+```
+
+</details>
+
+#### (b) call() with args passes args to handler
+
+- registry reset
+- fn
+- fn
+   - Expected: result equals `hello:world`
+   - Expected: built equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+registry_reset()
+
+registry_register(
+    "greet",
+    "Greeting tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "hello:" + args
+)
+
+val result = registry_call("greet", "world")
+expect(result).to_equal("hello:world")
+
+val built = registry_schemas_built()
+expect(built).to_equal(0)
+```
+
+</details>
+
+#### (b) call() unknown tool returns error string
+
+- registry reset
+   - Expected: starts_with_error is true
+   - Expected: built equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+registry_reset()
+
+val result = registry_call("no_such_tool", "{}")
+val starts_with_error = result.starts_with("error:")
+expect(starts_with_error).to_equal(true)
+
+val built = registry_schemas_built()
+expect(built).to_equal(0)
+```
+
+</details>
+
+#### (c) first list_json builds exactly 3 schemas
+
+- registry reset
+- fn
+- fn
+- fn
+- fn
+- fn
+- fn
+   - Expected: pre_built equals `0`
+   - Expected: post_built equals `3`
+   - Expected: has_alpha is true
+   - Expected: has_beta is true
+   - Expected: has_gamma is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 37 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+registry_reset()
+
+registry_register(
+    "alpha",
+    "Alpha tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "alpha_ok"
+)
+registry_register(
+    "beta",
+    "Beta tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "beta_ok"
+)
+registry_register(
+    "gamma",
+    "Gamma tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "gamma_ok"
+)
+
+val pre_built = registry_schemas_built()
+expect(pre_built).to_equal(0)
+
+val resp = registry_list_json("1", "")
+
+val post_built = registry_schemas_built()
+expect(post_built).to_equal(3)
+
+val has_alpha = resp.contains("alpha")
+expect(has_alpha).to_equal(true)
+
+val has_beta = resp.contains("beta")
+expect(has_beta).to_equal(true)
+
+val has_gamma = resp.contains("gamma")
+expect(has_gamma).to_equal(true)
+```
+
+</details>
+
+#### (d) second list_json does NOT rebuild schemas (memoised)
+
+- registry reset
+- fn
+- fn
+- fn
+- fn
+- fn
+- fn
+   - Expected: after_first equals `3`
+   - Expected: after_second equals `3`
+   - Expected: same_content is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+registry_reset()
+
+registry_register(
+    "p",
+    "P tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "p_ok"
+)
+registry_register(
+    "q",
+    "Q tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "q_ok"
+)
+registry_register(
+    "r",
+    "R tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "r_ok"
+)
+
+val first_resp = registry_list_json("1", "")
+val after_first = registry_schemas_built()
+expect(after_first).to_equal(3)
+
+val second_resp = registry_list_json("2", "")
+val after_second = registry_schemas_built()
+expect(after_second).to_equal(3)
+
+val same_content = first_resp.contains("\"p\"")
+expect(same_content).to_equal(true)
+```
+
+</details>
+
+#### (e) pagination: cursor advances offset
+
+- registry reset
+- "Tool " + tool idx to string
+- fn
+- fn
+   - Expected: has_cursor is true
+   - Expected: has_t50 is true
+   - Expected: no_more_cursor is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+registry_reset()
+
+var tool_idx = 0
+while tool_idx < 60:
+    val tname = "t" + tool_idx.to_string()
+    registry_register(
+        tname,
+        "Tool " + tool_idx.to_string(),
+        fn() -> text: "{\"type\":\"object\"}",
+        fn(args: text) -> text: "ok"
+    )
+    tool_idx = tool_idx + 1
+
+val page1 = registry_list_json("1", "")
+val has_cursor = page1.contains("nextCursor")
+expect(has_cursor).to_equal(true)
+
+val page2 = registry_list_json("2", "offset:50")
+val has_t50 = page2.contains("\"t50\"")
+expect(has_t50).to_equal(true)
+
+val no_more_cursor = page2.contains("nextCursor")
+expect(no_more_cursor).to_equal(false)
+```
+
+</details>
+
+#### (e) pagination: no cursor when all tools fit on one page
+
+- registry reset
+- fn
+- fn
+   - Expected: no_cursor is false
+   - Expected: has_solo is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+registry_reset()
+
+registry_register(
+    "solo",
+    "Solo tool",
+    fn() -> text: "{\"type\":\"object\"}",
+    fn(args: text) -> text: "solo_result"
+)
+
+val resp = registry_list_json("1", "")
+val no_cursor = resp.contains("nextCursor")
+expect(no_cursor).to_equal(false)
+
+val has_solo = resp.contains("solo")
+expect(has_solo).to_equal(true)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/mcp_sdk/registry_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- lazy ToolRegistry
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 8 |
+| Active scenarios | 8 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
