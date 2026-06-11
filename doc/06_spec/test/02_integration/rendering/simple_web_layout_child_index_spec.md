@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -86,6 +86,26 @@ val html = "<html><body>\n  <div id=\"first\" style=\"height:10px\">first</div>\
 val first_y = simple_web_layout_debug_layout_by_id(html, 200, 200, "first", "y").to_i32()
 val second_y = simple_web_layout_debug_layout_by_id(html, 200, 200, "second", "y").to_i32()
 expect(second_y - first_y).to_equal(10)
+```
+
+</details>
+
+#### keeps spaced numeric style parsing stable without parse trim
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><div id=\"box\" style=\"width:  24px; height:  11px; margin:  3px\">box</div></body></html>"
+val width = simple_web_layout_debug_style_by_id(html, "box", "parse_width").to_i32()
+val height = simple_web_layout_debug_style_by_id(html, "box", "parse_height").to_i32()
+val margin = simple_web_layout_debug_style_by_id(html, "box", "parse_margin").to_i32()
+expect(width).to_equal(24)
+expect(height).to_equal(11)
+expect(margin).to_equal(3)
 ```
 
 </details>
@@ -354,8 +374,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

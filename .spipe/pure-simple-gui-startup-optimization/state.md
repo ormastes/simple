@@ -781,3 +781,12 @@ dev-done
   whitespace-only text segment block-layout oracle. Generated manual refreshed
   under `doc/06_spec`. Docker optimizer scans completed: renderer 754 and
   focused spec 4 remaining static opportunities.
+- impl: Removed the redundant `trim()` allocation from `parse_int(...)`. The
+  digit scanner already skips leading non-digits and stops after the first
+  digit run, so CSS values from declaration parsing keep the same behavior
+  without an extra string allocation.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` now passes 15/15, including spaced
+  numeric style parsing for width, height, and margin. Generated manual
+  refreshed under `doc/06_spec`. Docker optimizer scans completed: renderer
+  754 and focused spec 4 remaining static opportunities.

@@ -1216,3 +1216,25 @@ Verification:
   regenerated the mirrored manual.
 - Docker optimizer scans: renderer `754` and focused spec `4` remaining static
   opportunities.
+
+## 2026-06-11 Numeric parser trim removal
+
+`parse_int(...)` trimmed its input before scanning for digits, but the scanner
+already skipped leading non-digits and stopped after the first digit run. CSS
+values from declaration parsing are already value-trimmed, and values with
+units such as `24px` rely on that digit-run behavior.
+
+The helper now scans the original input directly, avoiding the extra trim
+allocation on every numeric CSS parse while preserving spaced values and unit
+suffixes.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `15 passed, 0 failed`
+- `bin/simple spipe-docgen test/02_integration/rendering/simple_web_layout_child_index_spec.spl --output doc/06_spec`
+  regenerated the mirrored manual.
+- Docker optimizer scans: renderer `754` and focused spec `4` remaining static
+  opportunities.
