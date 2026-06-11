@@ -201,6 +201,10 @@ Updated: 2026-06-11
 - this commit -- CSS rgb token concatenation removal:
   `_css_rgb_color` now parses numeric RGB channels directly from the HTML buffer
   instead of building token strings with per-character concatenation.
+- this commit -- font evidence candidate coverage: the production GUI font
+  offload evidence wrapper now seeds platform-appropriate candidates in the same
+  native-GPU-before-Vulkan order used by `engine2d_font_offload_backend_order`,
+  including canonical `rocm` plus the `amd-hip` alias for HIP hosts.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
