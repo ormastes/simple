@@ -403,6 +403,37 @@ impl Lowerer {
                 // Register trait with vtable slot information for static polymorphism
                 self.register_trait(t)?;
             }
+            Node::Actor(a) => {
+                // Register actor as a class type (actors are classes with message-passing semantics)
+                let class_def = ast::ClassDef {
+                    span: a.span,
+                    name: a.name.clone(),
+                    generic_params: vec![],
+                    where_clause: vec![],
+                    fields: a.fields.clone(),
+                    methods: a.methods.clone(),
+                    parent: None,
+                    visibility: a.visibility,
+                    effects: vec![],
+                    attributes: vec![],
+                    doc_comment: None,
+                    is_generic_template: false,
+                    specialization_of: None,
+                    type_bindings: std::collections::HashMap::new(),
+                    invariant: None,
+                    macro_invocations: vec![],
+                    mixins: vec![],
+                };
+                let actor_type_id = self.register_class(&class_def)?;
+                self.globals.insert(a.name.clone(), actor_type_id);
+                self.local_globals.insert(a.name.clone());
+                for method in &a.methods {
+                    let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                    let qualified = format!("{}.{}", a.name, method.name);
+                    self.globals.insert(qualified.clone(), ret_ty);
+                    self.local_globals.insert(qualified);
+                }
+            }
             Node::Extern(e) => {
                 // Register extern function in globals so it can be called
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
@@ -949,6 +980,20 @@ impl Lowerer {
                         },
                     );
                 }
+                Node::Actor(a) => {
+                    // Register placeholder for actor (uses Struct internally, like class)
+                    self.module.types.register_named(
+                        a.name.clone(),
+                        HirType::Struct {
+                            name: a.name.clone(),
+                            fields: vec![],
+                            has_snapshot: false,
+                            generic_params: vec![],
+                            is_generic_template: false,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
                 _ => {}
             }
         }
@@ -1000,15 +1045,15 @@ impl Lowerer {
                 | Node::Enum(_)
                 | Node::Mixin(_)
                 | Node::TypeAlias(_)
-                | Node::Trait(_) => {}
+                | Node::Trait(_)
+                | Node::Actor(_) => {}
                 Node::Bitfield(bf) => {
                     let bitfield_type_id = self.register_bitfield(bf)?;
                     self.globals.insert(bf.name.clone(), bitfield_type_id);
                     self.local_globals.insert(bf.name.clone());
                 }
                 // Other node types
-                Node::Actor(_)
-                | Node::Impl(_)
+                Node::Impl(_)
                 | Node::Extern(_)
                 | Node::ExternClass(_)
                 | Node::Macro(_)
@@ -1092,6 +1137,13 @@ impl Lowerer {
                         self.method_return_types.insert(qualified, ret_ty);
                     }
                 }
+                Node::Actor(a) => {
+                    for method in &a.methods {
+                        let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                        let qualified = format!("{}.{}", a.name, method.name);
+                        self.method_return_types.insert(qualified, ret_ty);
+                    }
+                }
                 Node::Impl(impl_block) => {
                     let type_name = match &impl_block.target_type {
                         simple_parser::ast::Type::Simple(name) => Some(name.clone()),
@@ -1155,6 +1207,13 @@ impl Lowerer {
                 Node::Enum(e) => {
                     for method in &e.methods {
                         let hir_func = self.lower_function(method, Some(&e.name))?;
+                        self.module.functions.push(hir_func);
+                    }
+                }
+                Node::Actor(a) => {
+                    // Lower actor methods (actors are lowered like classes)
+                    for method in &a.methods {
+                        let hir_func = self.lower_function(method, Some(&a.name))?;
                         self.module.functions.push(hir_func);
                     }
                 }
@@ -1344,6 +1403,19 @@ impl Lowerer {
                         },
                     );
                 }
+                Node::Actor(a) => {
+                    self.module.types.register_named(
+                        a.name.clone(),
+                        HirType::Struct {
+                            name: a.name.clone(),
+                            fields: vec![],
+                            has_snapshot: false,
+                            generic_params: vec![],
+                            is_generic_template: false,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
                 _ => {}
             }
         }
@@ -1416,6 +1488,13 @@ impl Lowerer {
                 Node::Enum(e) => {
                     for method in &e.methods {
                         let hir_func = self.lower_function(method, Some(&e.name))?;
+                        self.module.functions.push(hir_func);
+                    }
+                }
+                Node::Actor(a) => {
+                    // Lower actor methods (actors are lowered like classes)
+                    for method in &a.methods {
+                        let hir_func = self.lower_function(method, Some(&a.name))?;
                         self.module.functions.push(hir_func);
                     }
                 }

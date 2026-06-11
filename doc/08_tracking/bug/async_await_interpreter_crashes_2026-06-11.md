@@ -1,6 +1,6 @@
 # Async/Await Interpreter Crashes - 2026-06-11
 
-Status: partially-fixed (2026-06-11) — B1/B2(await) VERIFIED FIXED; B3(generator/actor scope) + B5(Promise/FutureValue) remain OPEN (Rust-seed only); B4(spawn SIGABRT) VERIFIED FIXED via E6; B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
+Status: partially-fixed (2026-06-11) — B1/B2(await) VERIFIED FIXED; B3(generator runtime) OPEN; B3b(actor HIR scope) FIXED IN SEED — pending redeploy; B4(spawn SIGABRT) VERIFIED FIXED via E6; B5(Promise/FutureValue) OPEN; B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
 
 **Fixed 2026-06-11 (commit 861e29bc99):** the SIGSEGV had already become silent
 corruption (`await f()` always yielded 3 = NIL bit pattern in JIT mode; a
@@ -22,8 +22,9 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 (5/5 passing).
 
 **Still open (all Rust-seed-rooted — do NOT fix in .spl):**
-- B3: yield/generator + actor desugar HIR scope visibility (see below).
+- B3: generator/yield runtime interpreter crash (exit 132 SIGABRT) — HIR lowering is correct, crash is in interpreter execution of yield. Separate from B3b.
 - B5: Promise-vs-FutureValue deep representation reconcile.
+- ~~B3b: actor desugar class not visible in HIR scope~~ → **FIXED IN SEED (S6 batch, pending redeploy):** `Node::Actor` registered in Pass 0 + `register_declarations_from_node` via `register_class`. 5 regression tests green (`hir::lower::tests::async_desugar_tests`). Binary verified: `actor Counter: val count: i64` + no-ctor usage exits 0 cleanly.
 - ~~B6: HIR hardcodes I64 for await result type~~ → **FIXED IN SEED (S5 batch, pending redeploy):** `ty: TypeId::I64` replaced with `ty: operand_ty` (the inner expression's type). Rust tests: `test_await_expr_type_propagates_operand_type` + `test_await_expr_string_type_propagates` both green.
 
 ## Per-Item Triage Table (2026-06-11 audit)
@@ -32,8 +33,8 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 |---|------|----------|--------|--------|
 | B1 | SIGSEGV `await f()` → NIL (exit 139) | (a) Fixed | VERIFIED FIXED | commit 861e29bc99; spec 3/3 green |
 | B2 | `await f()` yields 3/NIL in JIT/interpreter | (a) Fixed | VERIFIED FIXED | same commit; eager-async identity |
-| B3 | `yield` / generator class not visible in HIR scope | (c) Rust-seed | OPEN | root-cause note below |
-| B3b | `actor` desugar class not visible in HIR scope | (c) Rust-seed | OPEN | root-cause note below |
+| B3 | `yield` / generator runtime interpreter crash (SIGABRT) | (c) Rust-seed | OPEN | HIR lowering is correct; crash in interpreter executor |
+| B3b | `actor` desugar class not visible in HIR scope | (c) Rust-seed | FIXED IN SEED — pending redeploy | S6: `Node::Actor` in Pass 0 + register_class; 5 tests green |
 | B4 | `spawn fn()` closure SIGABRTs (exit 132) at cleanup | (a) Fixed | VERIFIED FIXED | E6 in green_thread_direct_runtime_blockers_2026-06-06.md |
 | B5 | Promise vs FutureValue unreconciled in MIR executor | (c) Rust-seed | OPEN | root-cause note below |
 | B6 | HIR hardcodes `TypeId::I64` for await result type | (c) Rust-seed | FIXED IN SEED — pending redeploy | S5 batch: `ty: operand_ty`; tests green |
@@ -49,41 +50,59 @@ producing a value or a typed error. Found during the 2026-06-11 async audit
 ## Symptoms (probe programs, interpreter mode)
 
 - `async fn f() -> i64: 42` + `val x = await f()` → SIGSEGV (exit 139). **FIXED.**
-- `yield` in a generator fn → "yield called outside of generator" +
-  "Unknown variable: gen" (desugared class not visible to HIR scope). **OPEN (B3).**
-- `actor` definition → same desugar/HIR scope visibility failure. **OPEN (B3b).**
+- `yield` in a generator fn → runtime SIGABRT (exit 132); HIR lowering itself succeeds. **OPEN (B3 — interpreter-level).**
+- `actor` definition → HIR scope visibility failure (symbol lookup fails for actor as a class). **FIXED IN SEED (B3b, S6 batch, pending redeploy).** Before fix: "symbol lookup fails for Counter as a class". After fix (verified on fresh binary): `actor Counter: val count: i64` exits 0 with no error. Constructor instantiation (`Counter { count: 0 }`) hits a pre-existing field-type-inference limitation that also affects structs; that is a separate unrelated bug.
 - `spawn fn()` runs, but the spawned closure SIGABRTs (exit 132) at cleanup. **FIXED (B4/E6).**
 
 ## Root Cause (diagnosed)
 
-### B3 — Generator/Actor HIR Scope Visibility (Rust-seed)
+### B3 — Generator Runtime Crash (Rust-seed, OPEN)
 
-The pure-Simple desugar pass (`src/compiler/10.frontend/desugar/desugar_async.spl`,
-`desugar_module()`) correctly injects generated enums into `module.enums` and
-generated poll functions into `module.functions`, and converts actors to
-`module.classes`, before returning the desugared `Module`. The failure is in the
-Rust HIR lowering layer: `src/compiler_rust/compiler/src/hir/lower/` builds the
-HIR scope **before** the desugared module symbols are resolved, so generated
-names (state enum type, poll function name, actor class name) are absent from
-the scope when function bodies are lowered.
+HIR lowering of generator functions (`fn gen_counter(): yield 1`) is correct —
+`HirExprKind::Yield` is emitted and the function lowers without error. The crash
+(exit 132, SIGABRT) occurs in the **runtime interpreter** when executing yield
+expressions. HIR-level tests in `hir::lower::tests::async_desugar_tests` confirm
+lowering succeeds.
 
-Minimal repro:
+Minimal repro (after S6 fix):
 ```
-# generator fn
 fn gen_counter():
     yield 1
     yield 2
-# → interpreter: "yield called outside of generator" + "Unknown variable: gen"
-
-actor Counter:
-    val count: i64
-# → interpreter: symbol lookup fails for Counter as a class
+# → binary exits 132 (SIGABRT in interpreter executor during yield execution)
 ```
 
-Fix required: in Rust, re-run scope population after desugar (or run desugar
-before scope construction). File: `src/compiler_rust/compiler/src/hir/lower/mod.rs`
-or the pipeline entry that sequences desugar vs HIR lowering. Authorized Rust
-change only.
+Fix required: in the interpreter execution layer (`src/compiler_rust/compiler/src/interpreter/`),
+handle `HirExprKind::Yield` correctly — set up generator state machine context
+before executing function body so yield doesn't abort. Authorized Rust change only.
+
+### B3b — Actor HIR Scope Visibility (Rust-seed) — FIXED IN SEED (S6, 2026-06-11)
+
+**Fixed (S6 seed batch, 2026-06-11, pending redeploy).**
+
+Root cause: `Node::Actor` was missing from two places in
+`src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs`:
+1. Pass 0 (pre-registration loop): actor name was never registered as a placeholder `HirType::Struct`
+2. `register_declarations_from_node`: `Node::Actor` arm was absent so `register_class` was never called
+
+Both `lower_module` and `lower_module_with_warnings` paths now handle `Node::Actor` in Pass 0
+(empty struct placeholder) and `register_declarations_from_node` (full field registration via
+`register_class` with `fields: a.fields.clone()`). Method return types and function lowering
+also extended for actor methods.
+
+Before fix: `actor Counter: val count: i64` → runtime "symbol lookup fails for Counter as a class".
+After fix (verified on release binary built 2026-06-11 16:30): exits 0, type registered in HIR.
+
+Note: `Counter { count: 0 }` constructor instantiation produces "cannot infer field type" — this is
+a **pre-existing bug** affecting structs equally (not introduced by this fix). Filed separately.
+
+Regression tests added: `src/compiler_rust/compiler/src/hir/lower/tests/async_desugar_tests.rs`
+(5 tests — all green):
+- `test_generator_fn_lowers_without_unknown_variable`
+- `test_gen_variable_name_resolves`
+- `test_actor_type_visible_in_hir_scope`
+- `test_actor_methods_lowered_to_hir`
+- `test_actor_usable_after_declaration`
 
 ### B5 — Promise vs FutureValue Representation (Rust-seed)
 
@@ -135,7 +154,8 @@ in `hir/lower/tests/expression_tests.rs` (both green).
 1. **(DONE)** Guard `rt_future_await` against non-`FutureValue` input → typed error
    (removes the SIGSEGV class).
 2. **(DONE)** Interpreter `Expr::Await` passthrough for non-Future values.
-3. **(OPEN — Rust)** Re-inject desugared declarations into HIR scope before lowering bodies (B3).
+3. **(FIXED IN SEED — B3b, pending redeploy)** Register `Node::Actor` in HIR Pass 0 + `register_declarations_from_node` (S6: `module_pass.rs` +85 lines; 5 regression tests green).
+3b. **(OPEN — Rust)** Fix interpreter executor to handle `HirExprKind::Yield` in generator functions without SIGABRT (B3 — separate from B3b).
 4. **(OPEN — Rust)** Reconcile Promise vs FutureValue in the interpreter dispatch path (B5).
 5. **(FIXED IN SEED — pending redeploy)** Propagate the real operand type for `await` (B6): `ty: TypeId::I64` → `ty: operand_ty` in `hir/lower/expr/mod.rs`. When Future<T> representation is added, this site must extract T instead.
 
