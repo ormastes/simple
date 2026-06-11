@@ -852,3 +852,14 @@ dev-done
   malformed CSS rule admission oracle for the pre-counted rule path. Generated
   manual refreshed under `doc/06_spec`. Docker optimizer scan completed for the
   renderer with 759 remaining static opportunities.
+- impl: Removed the dead fallback glyph charset scan from the text paint inner
+  loops. `glyph_index_for_char_code(...)` directly maps every character in
+  `FONT_CHARSET`, so the thin-scaled and sparse text painters now use the
+  char-code result directly instead of allocating a one-character substring,
+  scanning `FONT_CHARSET`, and trying an uppercase fallback for every unmapped
+  character.
+- verify: Renderer check passes. `simple_web_renderer_spec.spl` passes 52/52,
+  `text_painter_spec.spl` passes 4/4, and
+  `simple_web_layout_child_index_spec.spl` remains 16/16. Docker optimizer scan
+  completed for the renderer with 762 remaining static opportunities after the
+  final rebase.

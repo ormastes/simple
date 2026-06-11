@@ -1378,3 +1378,28 @@ Verification:
 - `bin/simple spipe-docgen test/02_integration/rendering/simple_web_layout_child_index_spec.spl --output doc/06_spec`
   regenerated the mirrored manual.
 - Docker optimizer scan: renderer `759` remaining static opportunities.
+
+## 2026-06-11 Glyph fallback scan removal
+
+The text paint loops already ask `glyph_index_for_char_code(...)` for each
+character. When that returned `-1`, they allocated a one-character substring,
+linearly scanned `FONT_CHARSET`, and then tried an uppercase fallback. The
+direct char-code mapping now covers the full declared `FONT_CHARSET`, including
+lowercase glyphs, so the fallback scan did not add coverage for current glyphs.
+
+The thin-scaled and sparse text painters now use the direct char-code mapping
+only. Unsupported characters still skip drawing, as before when no fallback
+glyph was found.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl --no-cache`:
+  `52 passed, 0 failed`
+- `bin/simple test test/01_unit/browser_engine/text_painter_spec.spl --no-cache`:
+  `4 passed, 0 failed`
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `16 passed, 0 failed`
+- Docker optimizer scan: renderer `762` remaining static opportunities after
+  the final rebase.
