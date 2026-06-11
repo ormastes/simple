@@ -33,7 +33,7 @@ static POOL_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64
 pub extern "C" fn rt_pool_new(capacity: i64) -> i64 {
     let pool = Box::new(ResourcePool::new(capacity as usize));
     let handle = POOL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    POOL_MAP.lock().unwrap().insert(handle, pool);
+    POOL_MAP.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, pool);
     handle
 }
 
@@ -43,17 +43,17 @@ pub extern "C" fn rt_pool_new(capacity: i64) -> i64 {
 pub extern "C" fn rt_pool_acquire(handle: i64) -> RuntimeValue {
     POOL_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .and_then(|pool| pool.available.lock().unwrap().pop_front())
+        .and_then(|pool| pool.available.lock().unwrap_or_else(|e| e.into_inner()).pop_front())
         .unwrap_or(RuntimeValue::NIL)
 }
 
 /// Release a resource back to the pool
 #[no_mangle]
 pub extern "C" fn rt_pool_release(handle: i64, resource: RuntimeValue) {
-    if let Some(pool) = POOL_MAP.lock().unwrap().get(&handle) {
-        let mut available = pool.available.lock().unwrap();
+    if let Some(pool) = POOL_MAP.lock().unwrap_or_else(|e| e.into_inner()).get(&handle) {
+        let mut available = pool.available.lock().unwrap_or_else(|e| e.into_inner());
         if available.len() < pool.capacity {
             available.push_back(resource);
         }
@@ -65,9 +65,9 @@ pub extern "C" fn rt_pool_release(handle: i64, resource: RuntimeValue) {
 pub extern "C" fn rt_pool_available(handle: i64) -> i64 {
     POOL_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .map(|pool| pool.available.lock().unwrap().len() as i64)
+        .map(|pool| pool.available.lock().unwrap_or_else(|e| e.into_inner()).len() as i64)
         .unwrap_or(0)
 }
 
@@ -76,7 +76,7 @@ pub extern "C" fn rt_pool_available(handle: i64) -> i64 {
 pub extern "C" fn rt_pool_capacity(handle: i64) -> i64 {
     POOL_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
         .map(|pool| pool.capacity as i64)
         .unwrap_or(0)
@@ -85,12 +85,12 @@ pub extern "C" fn rt_pool_capacity(handle: i64) -> i64 {
 /// Free resource pool
 #[no_mangle]
 pub extern "C" fn rt_pool_free(handle: i64) {
-    POOL_MAP.lock().unwrap().remove(&handle);
+    POOL_MAP.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
 }
 
 /// Clear all pool handles (for test cleanup)
 pub fn clear_pool_registry() {
-    POOL_MAP.lock().unwrap().clear();
+    POOL_MAP.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 #[cfg(test)]

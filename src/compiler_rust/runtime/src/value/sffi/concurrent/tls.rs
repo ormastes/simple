@@ -30,15 +30,15 @@ static TLS_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64:
 pub extern "C" fn rt_tls_new() -> i64 {
     let tls = Box::new(ThreadLocalStorage::new());
     let handle = TLS_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    TLS_MAP.lock().unwrap().insert(handle, tls);
+    TLS_MAP.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, tls);
     handle
 }
 
 /// Set thread-local value
 #[no_mangle]
 pub extern "C" fn rt_tls_set(handle: i64, key: u64, value: RuntimeValue) {
-    if let Some(tls) = TLS_MAP.lock().unwrap().get(&handle) {
-        tls.data.lock().unwrap().insert(key, value);
+    if let Some(tls) = TLS_MAP.lock().unwrap_or_else(|e| e.into_inner()).get(&handle) {
+        tls.data.lock().unwrap_or_else(|e| e.into_inner()).insert(key, value);
     }
 }
 
@@ -47,9 +47,9 @@ pub extern "C" fn rt_tls_set(handle: i64, key: u64, value: RuntimeValue) {
 pub extern "C" fn rt_tls_get(handle: i64, key: u64) -> RuntimeValue {
     TLS_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .and_then(|tls| tls.data.lock().unwrap().get(&key).copied())
+        .and_then(|tls| tls.data.lock().unwrap_or_else(|e| e.into_inner()).get(&key).copied())
         .unwrap_or(RuntimeValue::NIL)
 }
 
@@ -58,29 +58,29 @@ pub extern "C" fn rt_tls_get(handle: i64, key: u64) -> RuntimeValue {
 pub extern "C" fn rt_tls_remove(handle: i64, key: u64) -> RuntimeValue {
     TLS_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .and_then(|tls| tls.data.lock().unwrap().remove(&key))
+        .and_then(|tls| tls.data.lock().unwrap_or_else(|e| e.into_inner()).remove(&key))
         .unwrap_or(RuntimeValue::NIL)
 }
 
 /// Clear all thread-local values
 #[no_mangle]
 pub extern "C" fn rt_tls_clear(handle: i64) {
-    if let Some(tls) = TLS_MAP.lock().unwrap().get(&handle) {
-        tls.data.lock().unwrap().clear();
+    if let Some(tls) = TLS_MAP.lock().unwrap_or_else(|e| e.into_inner()).get(&handle) {
+        tls.data.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
 /// Free thread-local storage
 #[no_mangle]
 pub extern "C" fn rt_tls_free(handle: i64) {
-    TLS_MAP.lock().unwrap().remove(&handle);
+    TLS_MAP.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
 }
 
 /// Clear all TLS handles (for test cleanup)
 pub fn clear_tls_registry() {
-    TLS_MAP.lock().unwrap().clear();
+    TLS_MAP.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 #[cfg(test)]

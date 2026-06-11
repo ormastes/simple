@@ -30,15 +30,15 @@ static CONCURRENT_MAP_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic:
 pub extern "C" fn rt_concurrent_map_new() -> i64 {
     let map = Box::new(ConcurrentMap::new());
     let handle = CONCURRENT_MAP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    CONCURRENT_MAP_MAP.lock().unwrap().insert(handle, map);
+    CONCURRENT_MAP_MAP.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, map);
     handle
 }
 
 /// Insert key-value pair into concurrent map
 #[no_mangle]
 pub extern "C" fn rt_concurrent_map_insert(handle: i64, key: i64, value: RuntimeValue) {
-    if let Some(map) = CONCURRENT_MAP_MAP.lock().unwrap().get(&handle) {
-        map.data.lock().unwrap().insert(key, value);
+    if let Some(map) = CONCURRENT_MAP_MAP.lock().unwrap_or_else(|e| e.into_inner()).get(&handle) {
+        map.data.lock().unwrap_or_else(|e| e.into_inner()).insert(key, value);
     }
 }
 
@@ -47,9 +47,9 @@ pub extern "C" fn rt_concurrent_map_insert(handle: i64, key: i64, value: Runtime
 pub extern "C" fn rt_concurrent_map_get(handle: i64, key: i64) -> RuntimeValue {
     CONCURRENT_MAP_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .and_then(|map| map.data.lock().unwrap().get(&key).copied())
+        .and_then(|map| map.data.lock().unwrap_or_else(|e| e.into_inner()).get(&key).copied())
         .unwrap_or(RuntimeValue::NIL)
 }
 
@@ -58,9 +58,9 @@ pub extern "C" fn rt_concurrent_map_get(handle: i64, key: i64) -> RuntimeValue {
 pub extern "C" fn rt_concurrent_map_remove(handle: i64, key: i64) -> RuntimeValue {
     CONCURRENT_MAP_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .and_then(|map| map.data.lock().unwrap().remove(&key))
+        .and_then(|map| map.data.lock().unwrap_or_else(|e| e.into_inner()).remove(&key))
         .unwrap_or(RuntimeValue::NIL)
 }
 
@@ -69,9 +69,9 @@ pub extern "C" fn rt_concurrent_map_remove(handle: i64, key: i64) -> RuntimeValu
 pub extern "C" fn rt_concurrent_map_contains(handle: i64, key: i64) -> bool {
     CONCURRENT_MAP_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .map(|map| map.data.lock().unwrap().contains_key(&key))
+        .map(|map| map.data.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&key))
         .unwrap_or(false)
 }
 
@@ -80,29 +80,29 @@ pub extern "C" fn rt_concurrent_map_contains(handle: i64, key: i64) -> bool {
 pub extern "C" fn rt_concurrent_map_len(handle: i64) -> i64 {
     CONCURRENT_MAP_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .map(|map| map.data.lock().unwrap().len() as i64)
+        .map(|map| map.data.lock().unwrap_or_else(|e| e.into_inner()).len() as i64)
         .unwrap_or(0)
 }
 
 /// Clear concurrent map
 #[no_mangle]
 pub extern "C" fn rt_concurrent_map_clear(handle: i64) {
-    if let Some(map) = CONCURRENT_MAP_MAP.lock().unwrap().get(&handle) {
-        map.data.lock().unwrap().clear();
+    if let Some(map) = CONCURRENT_MAP_MAP.lock().unwrap_or_else(|e| e.into_inner()).get(&handle) {
+        map.data.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
 /// Free concurrent map
 #[no_mangle]
 pub extern "C" fn rt_concurrent_map_free(handle: i64) {
-    CONCURRENT_MAP_MAP.lock().unwrap().remove(&handle);
+    CONCURRENT_MAP_MAP.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
 }
 
 /// Clear all concurrent map handles (for test cleanup)
 pub fn clear_concurrent_map_registry() {
-    CONCURRENT_MAP_MAP.lock().unwrap().clear();
+    CONCURRENT_MAP_MAP.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 #[cfg(test)]

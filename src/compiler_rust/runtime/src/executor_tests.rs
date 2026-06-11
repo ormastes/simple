@@ -110,6 +110,49 @@ fn test_promise_reject() {
 }
 
 // ========================================================================
+// Panic-boundary tests (W2-1)
+// ========================================================================
+
+#[test]
+fn test_worker_survives_panicking_task() {
+    // A task that panics must not kill the worker; a subsequent task must complete.
+    let executor = FutureExecutor::new(AsyncMode::Threaded);
+    executor.set_worker_count(1);
+    executor.start();
+
+    // Submit a panicking task with a unique sentinel string.
+    executor.submit(|| {
+        panic!("W2-1-sentinel-panic-7f3a2b");
+    });
+
+    // Give the worker time to process the panic.
+    thread::sleep(Duration::from_millis(100));
+
+    // The panic message must have been recorded.
+    let recorded = take_last_task_panic();
+    assert!(
+        recorded.as_deref().unwrap_or("").contains("W2-1-sentinel-panic-7f3a2b"),
+        "expected sentinel in last-panic slot, got: {:?}",
+        recorded
+    );
+
+    // Worker must still be alive: submit a normal task and verify it runs.
+    let counter = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let counter_clone = counter.clone();
+    executor.submit(move || {
+        counter_clone.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    while counter.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "worker did not survive panicking task");
+
+    executor.shutdown();
+}
+
+// ========================================================================
 // Isolated Thread tests
 // ========================================================================
 

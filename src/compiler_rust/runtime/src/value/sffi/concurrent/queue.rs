@@ -31,15 +31,15 @@ static CONCURRENT_QUEUE_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomi
 pub extern "C" fn rt_concurrent_queue_new() -> i64 {
     let queue = Box::new(ConcurrentQueue::new());
     let handle = CONCURRENT_QUEUE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    CONCURRENT_QUEUE_MAP.lock().unwrap().insert(handle, queue);
+    CONCURRENT_QUEUE_MAP.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, queue);
     handle
 }
 
 /// Push value to back of concurrent queue
 #[no_mangle]
 pub extern "C" fn rt_concurrent_queue_push(handle: i64, value: RuntimeValue) {
-    if let Some(queue) = CONCURRENT_QUEUE_MAP.lock().unwrap().get(&handle) {
-        queue.data.lock().unwrap().push_back(value);
+    if let Some(queue) = CONCURRENT_QUEUE_MAP.lock().unwrap_or_else(|e| e.into_inner()).get(&handle) {
+        queue.data.lock().unwrap_or_else(|e| e.into_inner()).push_back(value);
     }
 }
 
@@ -48,9 +48,9 @@ pub extern "C" fn rt_concurrent_queue_push(handle: i64, value: RuntimeValue) {
 pub extern "C" fn rt_concurrent_queue_pop(handle: i64) -> RuntimeValue {
     CONCURRENT_QUEUE_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .and_then(|queue| queue.data.lock().unwrap().pop_front())
+        .and_then(|queue| queue.data.lock().unwrap_or_else(|e| e.into_inner()).pop_front())
         .unwrap_or(RuntimeValue::NIL)
 }
 
@@ -59,9 +59,9 @@ pub extern "C" fn rt_concurrent_queue_pop(handle: i64) -> RuntimeValue {
 pub extern "C" fn rt_concurrent_queue_is_empty(handle: i64) -> bool {
     CONCURRENT_QUEUE_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .map(|queue| queue.data.lock().unwrap().is_empty())
+        .map(|queue| queue.data.lock().unwrap_or_else(|e| e.into_inner()).is_empty())
         .unwrap_or(true)
 }
 
@@ -70,21 +70,21 @@ pub extern "C" fn rt_concurrent_queue_is_empty(handle: i64) -> bool {
 pub extern "C" fn rt_concurrent_queue_len(handle: i64) -> i64 {
     CONCURRENT_QUEUE_MAP
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get(&handle)
-        .map(|queue| queue.data.lock().unwrap().len() as i64)
+        .map(|queue| queue.data.lock().unwrap_or_else(|e| e.into_inner()).len() as i64)
         .unwrap_or(0)
 }
 
 /// Free concurrent queue
 #[no_mangle]
 pub extern "C" fn rt_concurrent_queue_free(handle: i64) {
-    CONCURRENT_QUEUE_MAP.lock().unwrap().remove(&handle);
+    CONCURRENT_QUEUE_MAP.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
 }
 
 /// Clear all concurrent queue handles (for test cleanup)
 pub fn clear_concurrent_queue_registry() {
-    CONCURRENT_QUEUE_MAP.lock().unwrap().clear();
+    CONCURRENT_QUEUE_MAP.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 #[cfg(test)]

@@ -25,10 +25,14 @@
 
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+/// Last panic message recorded by a worker task. Poison-safe: uses unwrap_or_else on access.
+static LAST_TASK_PANIC: Mutex<Option<String>> = Mutex::new(None);
 
 /// Execution mode for futures
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -274,11 +278,11 @@ impl FutureExecutor {
                 .spawn(move || {
                     loop {
                         let (lock, cvar) = &*queue;
-                        let mut tasks = lock.lock().unwrap();
+                        let mut tasks = lock.lock().unwrap_or_else(|e| e.into_inner());
 
                         // Wait for a task or shutdown
                         while tasks.is_empty() && !shutdown.load(Ordering::SeqCst) {
-                            tasks = cvar.wait(tasks).unwrap();
+                            tasks = cvar.wait(tasks).unwrap_or_else(|e| e.into_inner());
                         }
 
                         if shutdown.load(Ordering::SeqCst) && tasks.is_empty() {
@@ -286,8 +290,20 @@ impl FutureExecutor {
                         }
 
                         if let Some(task) = tasks.pop_front() {
+                            let task_id = task.id;
                             drop(tasks); // Release lock before executing
-                            task.execute();
+                            let result = panic::catch_unwind(AssertUnwindSafe(|| task.execute()));
+                            if let Err(panic_info) = result {
+                                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                                    s.to_string()
+                                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                                    s.clone()
+                                } else {
+                                    "<unknown panic payload>".to_string()
+                                };
+                                eprintln!("[simple-executor] task {} panicked: {}", task_id, msg);
+                                *LAST_TASK_PANIC.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg);
+                            }
                         }
                     }
                 })
@@ -340,7 +356,19 @@ impl FutureExecutor {
         };
 
         if let Some(task) = task {
-            task.execute();
+            let task_id = task.id;
+            let result = panic::catch_unwind(AssertUnwindSafe(|| task.execute()));
+            if let Err(panic_info) = result {
+                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "<unknown panic payload>".to_string()
+                };
+                eprintln!("[simple-executor] task {} panicked: {}", task_id, msg);
+                *LAST_TASK_PANIC.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg);
+            }
             true
         } else {
             false
@@ -378,9 +406,18 @@ impl FutureExecutor {
         cvar.notify_all();
 
         // Join all workers
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         for handle in workers.drain(..) {
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "<unknown>".to_string()
+                };
+                eprintln!("[simple-executor] worker thread panicked at shutdown: {}", msg);
+            }
         }
     }
 }
@@ -389,6 +426,12 @@ impl Drop for FutureExecutor {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Return and clear the last panic message recorded by a worker task, if any.
+/// Poison-safe: if the lock is poisoned (due to a panic while storing), recovers the inner value.
+pub fn take_last_task_panic() -> Option<String> {
+    LAST_TASK_PANIC.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 // Global executor instance
