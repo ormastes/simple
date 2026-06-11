@@ -17,12 +17,13 @@ That design type-checks and compiles to a hosted native binary, but the hosted
 native binary still segfaults before returning the first completion. The
 earlier helper-returned function-value blocker that sat below this path is now
 closed. The direct helper-side `Channel.id()` native fallback is also closed.
-The current lower blocker beneath this path was previously tracked separately in
-`doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md`.
-That lower pool-plus-struct-send blocker is now closed, so the worker-pool
-stepper path is again the active native blocker. Historical loop-return tracking remains in
-`doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`.
-That earlier loop-return blocker is also closed.
+The current lower blocker beneath this path is now tracked separately in
+`doc/08_tracking/bug/native_function_value_array_literal_blocker_2026-06-11.md`.
+The earlier lower pool-plus-struct-send blocker in
+`doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md`
+is already closed. Historical loop-return tracking remains in
+`doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`,
+and that earlier loop-return blocker is also closed.
 
 ## Minimal Boundary
 
@@ -39,16 +40,15 @@ Segmentation fault (core dumped)
 EXIT=139
 ```
 
-So this is no longer a vague “fairness is hard” gap. The narrower active
-blocker is:
+So this is no longer a vague “fairness is hard” gap. The narrower remaining
+worker-pool blocker is:
 
 - rebuilt native hosted worker-pool execution for the resumable-stepper probe crashes
 - even when the work item is a single callback-id step with immediate completion
 - that crash remains after the helper-returned function-value regression was
   fixed and moved out of the critical path
 - the earlier loop/search helper-return path is now green
-- the earlier smaller pool-worker struct-send path is now green again, so the
-  remaining crash is back on the stepper path itself
+- the lower plain array-literal function-value path is still open beneath it
 
 ## Why This Matters
 
