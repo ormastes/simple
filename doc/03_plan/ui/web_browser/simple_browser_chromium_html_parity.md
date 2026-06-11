@@ -277,8 +277,14 @@ Open gaps tied to the active browser objective:
     for fixed-width children
   - renderer update: no new renderer change was needed beyond the existing
     column-flex `align-items:flex-end` branch
+- The same live geometry lane now passes for `45_flex_column_align_self_flex_end`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's column-flex `align-self:flex-end`
+    override for one fixed-width child while siblings remain flex-start
+  - renderer update: no new renderer change was needed beyond the existing
+    `flex_item_align` override path
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=41`, `pass_count=41`, `fail_count=0`, and
+    now reports `fixture_count=42`, `pass_count=42`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
