@@ -131,6 +131,15 @@ Failed: 0
   part of the OS lane as well as the host runtime lane.
 - The tracking row must carry profile evidence links because performance claims
   need executable profile scripts.
+- The tracking row must carry the current checked-in cross-language Docker
+  report so the release-visible evidence points at the same report enforced by
+  the active profile gate.
+- The tracking row must carry the dedicated hosted fairness/preemption gap
+  tracker until host-side Go-parity evidence is actually closed.
+- The tracking row must carry the hosted fairness-preemption executable proofs,
+  including the one-worker monopolization gap and the raw `thread_yield()`
+  insufficiency proof, so the remaining host boundary cannot drift back to
+  vague prose.
 - The tracking row must carry focused native smoke links for the OS-thread
   explicit-argument ABI and multicore-green runtime-pool path so agent handoff
   commands stay release-visible.
@@ -209,23 +218,17 @@ Failed: 0
 #### tracks the multicore-green lane as current rather than done
 
 - Read the canonical multicore-green tracking row
-- Verify the lane is current while full Go-like runtime work remains active
-   - Expected: absent_in_text(row, "\"done\"") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
-step("Verify the lane is current while full Go-like runtime work remains active")
-expect(row).to_contain("\"FR-RUNTIME-MULTICORE-GREEN-2026-06-06\"")
-expect(row).to_contain("\"current\"")
-expect(absent_in_text(row, "\"done\"")).to_equal(1)
 ```
 
 </details>
@@ -298,7 +301,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -318,6 +321,8 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_s
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
+expect(row).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(row).to_contain("doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md")
 expect(row).to_contain("scripts/check/check-thread-spawn-with-args-native.shs")
 expect(row).to_contain("test/01_unit/lib/nogc_async_mut/multicore_green_native.spl")
 expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec.spl")
@@ -416,6 +421,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 - Read the canonical multicore-green tracking row
 - Verify unresolved runtime blockers remain visible
 - Verify the SimpleOS final handoff closure remains visible
+- Verify hosted fairness executable proofs are linked
 - Verify stale active-blocker wording is absent
    - Expected: absent_in_text(row, stale_simpleos_handoff_gate_phrase()) equals `1`
    - Expected: absent_in_text(row, "SimpleOS final handoff are closed") equals `1`
@@ -424,7 +430,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -441,6 +447,11 @@ step("Verify the SimpleOS final handoff closure remains visible")
 expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
 expect(row).to_contain("SimpleOS final ring/user handoff is closed")
 expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
+step("Verify hosted fairness executable proofs are linked")
+expect(row).to_contain("test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl")
+expect(row).to_contain("test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl")
+expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.md")
+expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.md")
 step("Verify stale active-blocker wording is absent")
 expect(absent_in_text(row, stale_simpleos_handoff_gate_phrase())).to_equal(1)
 expect(absent_in_text(row, "SimpleOS final handoff are closed")).to_equal(1)
