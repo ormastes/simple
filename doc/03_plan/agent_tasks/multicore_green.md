@@ -5,7 +5,7 @@ Date: 2026-06-06
 ## Current State Snapshot
 
 - Current cross-language Docker evidence is
-  `doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`.
+  `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
 - Large fanout stress currently shows Go ahead of Simple multicore green, while
   both stay ahead of the C pthread-per-task baseline:
   Go `6.533 ms`, Simple multicore green native `9.638 ms`, C pthreads
@@ -64,7 +64,7 @@ Date: 2026-06-06
 - `doc/04_architecture/runtime/multicore_green.md`
 - `doc/05_design/multicore_green.md`
 - `doc/03_plan/sys_test/multicore_green.md`
-- `doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`
+- `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `scripts/check/check-cross-language-perf.shs`
 - `src/lib/nogc_async_mut/concurrent/cooperative_green.spl`
 - `src/lib/nogc_async_mut/concurrent/multicore_green.spl`
@@ -80,7 +80,7 @@ Primary paths:
 - `scripts/check/check-cross-language-perf.shs`
 - `test/05_perf/profile_scripts/profile_report_contract_test.shs`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
-- `doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`
+- `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `doc/06_spec/test/05_perf/stress/multicore_green_cross_language_gate_spec.md`
 
 Deliverables:
@@ -95,7 +95,7 @@ Deliverables:
 
 Acceptance evidence:
 
-- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`
+- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `bin/release/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - report row proving Go beats C pthreads in isolated large fanout stress with
   Go `GOMAXPROCS` pinned to `CPU_WORKERS`.
