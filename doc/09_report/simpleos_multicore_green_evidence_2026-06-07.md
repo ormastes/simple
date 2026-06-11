@@ -16,8 +16,9 @@ The final hardware handoff gap is tracked in
 
 ## Verified Commands
 
-Commands were refreshed from `/tmp/simple-pherallel-sync` after initializing
-the `examples/09_embedded/simple_os` submodule.
+Commands below are the canonical repo-root checks for this lane. The hosted
+SimpleOS feature specs were rerun from `/home/ormastes/dev/pub/simple` on
+2026-06-11.
 
 ```sh
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean
@@ -51,6 +52,23 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qem
 | SimpleOS scheduler green/user handoff compatibility | PASS | 1 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 2 |
 | SimpleOS green-carrier QEMU live lane | PASS | 2 |
+
+## 2026-06-11 Hosted Refresh
+
+The hosted SimpleOS feature lane was rerun from the main workspace after the
+cross-language profile-script hardening update:
+
+- `bin/release/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`
+  -> PASS, 3 assertions in 426ms
+- `bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean`
+  -> PASS, 6 assertions in 3942ms
+- `bin/release/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
+  -> PASS, 4 assertions in 3780ms
+
+This refresh does not add a new live QEMU claim. It confirms that the hosted
+SimpleOS cooperative lane, the hosted multicore-green scheduler lane, and the
+hosted green-channel wake bridge still pass after the host/profile-script
+changes.
 
 ## Current Refresh
 

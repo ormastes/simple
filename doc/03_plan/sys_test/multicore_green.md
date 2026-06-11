@@ -40,9 +40,16 @@
 - The interpreter unit spec can pass its example and then hang in `spipe-docgen`; this is a test-runner/docgen issue, not a failed multicore-green assertion.
 - The value-index warning currently recommends angle-bracket indexing that fails to parse in expression contexts; tracked in `doc/08_tracking/bug/angle_bracket_index_lint_parse_mismatch_2026-06-06.md`.
 
-## Current Sync Status (2026-06-10)
+## Current Sync Status (2026-06-11)
 
-- `main` currently points at `c0a8966f47da` (`docs: refresh multicore green plan state`).
-- The default `jj` workspace working copy is `30f047c4db8b` with additional uncommitted local changes layered on top.
-- The repository is still dirty outside this plan file, so sync work must stay scoped to the plan-status refresh and preserve unrelated edits.
-- This update records the current multicore-green plan state before the requested `jj commit`, `jj git fetch`, `jj rebase -d main@origin`, and push sequence.
+- `main` is now at `fa7f7ab27554` (`fix: harden multicore green docker perf profile`).
+- That sync narrowed the lane to the multicore/perf-profile script, updated the
+  Docker auto-binary selection rule, fixed the generated
+  `fanout_stress_multicore_green.spl` source shape, and refreshed
+  `doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`.
+- The workspace remains dirty outside the multicore-green lane because other
+  sessions are active in this checkout; future sync work must keep those files
+  out of multicore-green commits unless the user explicitly asks for an
+  integration commit.
+- Hosted SimpleOS feature specs were rerun after that push and still pass:
+  cooperative green `3`, multicore green `6`, green-channel wake `4`.
