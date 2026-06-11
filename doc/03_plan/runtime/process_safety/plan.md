@@ -186,8 +186,10 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
          signature-only methods; optional-body fix landed in
          parser_decls_use.spl and verified interpreted). SCOPE
          CONCLUSION from full-tree sweep (1855 src/lib files through
-         stage4 check, 8-way docker): ~330 files still hit lean-parser
-         gaps across 8+ construct classes (`&` operator lexed as Error,
+         stage4 check, 8-way docker; final count): 1843/1855 check
+         runs hit lean-parser errors — every check parses the same
+         prelude import closure, so broken prelude files poison every
+         run; distinct gap classes ≥8 (`&` operator lexed as Error,
          multiline-expression Indent, AOP `on pc{...}` forms, extension
          `fn (self: T)` params, tuple-field access after `.`,
          match-else forms, ...), and `check` parses the whole import
