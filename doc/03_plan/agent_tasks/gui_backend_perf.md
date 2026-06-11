@@ -192,6 +192,9 @@ Updated: 2026-06-11
 - this commit -- declaration background scan allocation removal:
   `_declaration_background_color` now searches the original declaration buffer
   directly for background properties instead of allocating a tail each loop.
+- this commit -- second block color scan allocation removal:
+  `_second_hex_color_after` now has a start-offset variant so render-time second
+  block-color probing no longer slices the HTML buffer at the first block tag.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
