@@ -180,6 +180,9 @@ Updated: 2026-06-11
   `_last_rule_hex_color` and style-block selector detection now find selectors
   and `</style>` directly in the original HTML buffer instead of allocating
   search tails for every rule scan.
+- this commit -- hex marker scan allocation removal:
+  `_second_hex_color_after` and `_last_hex_color_after` now reuse the bounded
+  text scanner instead of allocating post-marker HTML tails before searching.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
