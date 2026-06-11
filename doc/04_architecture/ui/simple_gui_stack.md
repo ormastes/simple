@@ -332,14 +332,16 @@ expose stable primitive operations and backend sessions while hiding
 backend-specific device details from UI and wrapper code. Drawing backends
 handle primitive draw, framebuffer ownership, present, and readback. Processing
 backends handle compute kernels, generated artifacts, filters, and offload.
-Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan,
-DirectX, Metal, or WebGPU, but GUI code sees only the typed Simple 2D and
-plugin contracts.
+Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan, Metal,
+or WebGPU, but GUI code sees only the typed Simple 2D and plugin contracts.
 
 Backend preference has two layers. `backend_full_preference_order()` records the
 stable user-visible order, with explicit native surfaces first:
 `baremetal`, `virtio_gpu`, Metal, CUDA, ROCm/HIP, Qualcomm, Vulkan, DirectX,
-OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU. The automatic
+OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU. DirectX is a
+drawing backend with D3D11 semantics: native d3d11 on Windows, DXVK/vkd3d over
+Vulkan on Linux, with `leaf=dlopen|structured` evidence from the ICD shim
+chain (`src/lib/nogc_async_mut/gpu/vulkan_icd_sffi.spl`). The automatic
 width/height-only probe remains `backend_default_priority_order()` and starts at
 Metal because `baremetal` and `virtio_gpu` require a caller-owned platform or
 VirtIO framebuffer. Diagnostics and reports should use
@@ -424,6 +426,8 @@ dispatch commands and forwards them to the web adapter protocol.
 | WM dispatch | `src/lib/common/ui/wm_runtime_dispatch.spl` | `WmRuntimeDispatchCommand`, `WmRuntimeShellState`, backend-neutral WM command adapter |
 | Engine2D Draw IR | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | `Engine2dDrawIrAdvResult`, first Simple2D-facing Draw IR executor (rect/text, CPU fallback, pixel readback) |
 | Backend lane | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split contract |
+| DirectX drawing backend | `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl` | D3D11 drawing backend; native on Windows, DXVK/vkd3d→Vulkan on Linux, platform probe + leaf evidence |
+| DXVK/vkd3d ICD shims | `src/lib/nogc_async_mut/gpu/vulkan_icd_sffi.spl` (+ `dxvk_d3d9/10/11.spl`, `vkd3d_d3d12.spl`) | D3D→Vulkan dispatch chain with `leaf=dlopen\|structured` evidence; Linux setup via `scripts/setup/setup-directx-linux.shs` |
 | Renderer capability | `src/app/ui.render/capability.spl` | Implementation-free HTML/CSS/TUI renderer capability metadata |
 | TUI widget shim | `src/app/ui.render/widgets.spl` | TUI-only compatibility wrapper that avoids HTML/CSS implementation imports |
 | HTML widgets | `src/app/ui.render/html_widgets.spl` | HTML-capable widget renderer implementation |
