@@ -375,7 +375,7 @@ fn load_combined_html(fixture: Fixture) -> text:
 # ============================================================================
 
 fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
-    """Capture HTML via Electron screenshot.js (Chrome / Chromium).
+    """Capture HTML via the maintained Electron live-bitmap Chromium path.
 
     Inlined version of `capture_electron` that avoids the
     `val (out, err, exit_code) = shell(...)` struct destructure that
@@ -385,6 +385,7 @@ fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
         return capture_error("electron", width, height, "Empty HTML provided")
 
     val html_path = "/tmp/html_compat_input.html"
+    val argb_json_path = "/tmp/html_compat_output_argb.json"
     val ppm_path = "/tmp/html_compat_output.ppm"
 
     val write_ok = file_write_text(html_path, html)
@@ -398,17 +399,22 @@ fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
     if display == "":
         return capture_error(
             "electron", width, height,
-            "missing DISPLAY; use npx playwright screenshot plus tools/electron-shell/png_to_ppm.js to generate headless Chrome PPM baselines outside the Simple runtime")
+            "missing DISPLAY; run under xvfb-run or provide a display for Electron live-bitmap capture")
     else:
-        var cmd = "cd tools/electron-shell && ELECTRON_DISABLE_SANDBOX=1 timeout 60s npx electron --no-sandbox --disable-setuid-sandbox screenshot.js " + html_path + " " + ppm_path + " " + w_str + " " + h_str
+        var cmd = "ELECTRON_CAPTURE_HTML=" + html_path +
+            " ELECTRON_CAPTURE_WIDTH=" + w_str +
+            " ELECTRON_CAPTURE_HEIGHT=" + h_str +
+            " ELECTRON_CAPTURE_OUTPUT=" + argb_json_path +
+            " ELECTRON_DISABLE_SANDBOX=1 timeout 60s npm --prefix tools/electron-shell exec -- electron --no-sandbox --disable-gpu tools/electron-live-bitmap/capture_html_argb.js" +
+            " && node tools/pixel_compare/argb_json_to_ppm.js " + argb_json_path + " " + ppm_path
         val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 60000)
 
         if exit_code == -1:
-            return capture_error("electron", width, height, "Electron screenshot timed out after 60000 ms")
+            return capture_error("electron", width, height, "Electron live-bitmap capture timed out after 60000 ms")
         if exit_code == 124:
-            return capture_error("electron", width, height, "Electron screenshot timed out after shell timeout 60s")
+            return capture_error("electron", width, height, "Electron live-bitmap capture timed out after shell timeout 60s")
         if exit_code != 0:
-            return capture_error("electron", width, height, "Electron screenshot failed: {stderr}")
+            return capture_error("electron", width, height, "Electron live-bitmap capture failed: {stderr}")
 
     val ppm_data: [u8] = rt_file_read_bytes(ppm_path) ?? []
     if ppm_data.len() == 0:

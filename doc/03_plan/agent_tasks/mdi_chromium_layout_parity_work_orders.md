@@ -197,9 +197,13 @@ Prove and harden the requested GUI stack:
   Follow-up now expands the pixel catalog to include fixture IDs 18-24 and fixes
   the documented `src/app/wm_compare/html_compat.spl` wrapper so it dispatches
   the real CLI body and exits nonzero on blocked/divergent runs. The focused
-  fixture-18 pixel baseline attempt now reaches the fixture and fails closed
-  with exit `2`, but remains blocked by the missing legacy Electron screenshot
-  app and a Simple source-B timeout. Tracked in
+  fixture-18 pixel baseline attempt now reaches the fixture, and source A uses
+  the maintained Electron live-bitmap capture plus ARGB-JSON-to-PPM conversion
+  path and reports `ok pixels=76800`. The remaining pixel-baseline blocker is
+  post-capture harness completion: both normal and `--skip-simple` fixture-18
+  runs hang after source-A success before producing committed baseline rows,
+  while the full source-B path also does not complete the Simple capture.
+  Tracked in
   `doc/08_tracking/bug/html_compat_flex_pixel_baselines_missing_2026-06-11.md`.
 - Famous-site corpus div geometry evidence (2026-06-11):
   `test/03_system/gui/wm_compare/structural_layout_report_spec.spl` now checks
