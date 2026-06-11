@@ -624,3 +624,14 @@ dev-done
   hardware readback sample on this host.
 - verify: Optimizer scans completed for this slice. Counts: bitmap-font offload
   14 and bitmap-font offload spec 0 remaining static opportunities.
+- impl: Added deterministic bitmap glyph raster expected-output oracle.
+  `bitmap_glyph_raster_expected_pixels(...)` maps glyph mask bits to
+  color/zero pixels and `bitmap_glyph_raster_checksum(...)` computes the
+  expected checksum used by `bitmap_glyph_raster_readback_evidence(...)`.
+- verify: Focused bitmap-font offload check passes and bitmap-font offload spec
+  now passes 7/7, including closed-failure provenance and invalid dimensions.
+  Generated manual was refreshed under `doc/06_spec`. This removes the magic
+  expected checksum from readback proof but still is not a hardware sample.
+- verify: Optimizer scans completed for this slice in Docker. Counts:
+  bitmap-font offload 26 and bitmap-font offload spec 5 remaining static
+  opportunities.

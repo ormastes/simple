@@ -27,7 +27,7 @@ bitmap_font_offload_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -97,7 +97,7 @@ expect(evidence.glyph_raster_generated.generated_operation).to_equal("bitmap_gly
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -110,6 +110,33 @@ expect(evidence.gpu_glyph_rasterized).to_equal(false)
 expect(evidence.production_ready).to_equal(false)
 expect(evidence.status_code).to_equal("opencl-runtime-or-queue-unavailable")
 expect(evidence.reason).to_equal("runtime-not-ready")
+expect(evidence.generated.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(evidence.generated.reason).to_equal("runtime-not-ready")
+expect(evidence.glyph_raster_generated.typed_status).to_equal("opencl-runtime-or-queue-unavailable")
+expect(evidence.glyph_raster_generated.reason).to_equal("runtime-not-ready")
+```
+
+</details>
+
+#### reports invalid bitmap font dimensions before planning GPU raster
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = bitmap_font_offload_evidence("cuda", 0, 32, true, true, 4096)
+
+expect(evidence.generated_ready).to_equal(false)
+expect(evidence.gpu_copy_upload_ready).to_equal(false)
+expect(evidence.gpu_glyph_raster_plan_ready).to_equal(false)
+expect(evidence.production_ready).to_equal(false)
+expect(evidence.status_code).to_equal("plan-not-ready:invalid-dimensions")
+expect(evidence.reason).to_equal("invalid-dimensions")
+expect(evidence.generated.typed_status).to_equal("plan-not-ready:invalid-dimensions")
+expect(evidence.glyph_raster_generated.typed_status).to_equal("plan-not-ready:invalid-dimensions")
 ```
 
 </details>
@@ -119,18 +146,41 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val matched = bitmap_glyph_raster_readback_evidence("cuda", 8, 4, 4096, 0, 77, true, true, true, 1234, 1234)
+val expected_pixels = bitmap_glyph_raster_expected_pixels([1u32, 0u32, 7u32, 0u32], 2, 2, 0xff112233u32)
+val expected_checksum = bitmap_glyph_raster_checksum(expected_pixels)
+val matched = bitmap_glyph_raster_readback_evidence("cuda", 2, 2, 4096, 0, 77, true, true, true, expected_checksum, expected_checksum)
 
+expect(expected_pixels).to_equal([0xff112233u32, 0u32, 0xff112233u32, 0u32])
+expect(expected_checksum).to_be_greater_than(0)
 expect(matched.gpu_glyph_rasterized).to_equal(true)
 expect(matched.production_ready).to_equal(true)
 expect(matched.execution.device_executed).to_equal(true)
 expect(matched.status_code).to_equal("gpu-glyph-raster-readback-matched")
 expect(matched.reason).to_equal("bitmap-glyph-raster-gpu-readback-matched")
 expect(matched.diagnostic_text()).to_contain("op=bitmap_glyph_raster")
+```
+
+</details>
+
+#### rejects invalid bitmap glyph raster oracle inputs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val bad_dims = bitmap_glyph_raster_expected_pixels([1u32], 0, 1, 0xff112233u32)
+val short_mask = bitmap_glyph_raster_expected_pixels([1u32], 2, 2, 0xff112233u32)
+
+expect(bad_dims.len()).to_equal(0)
+expect(short_mask.len()).to_equal(0)
+expect(bitmap_glyph_raster_checksum([])).to_equal(0)
 ```
 
 </details>
@@ -178,8 +228,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

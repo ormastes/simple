@@ -131,7 +131,10 @@ The Simple web renderer has two code paths:
   plan. The portable compiler emitter and the OpenCL/HIP Engine2D source strings
   now export `simple_2d_bitmap_glyph_raster_u32`; OpenCL binds the packed
   glyph/destination/size/color arguments and HIP preflights the same packed
-  shape before launch. `bitmap_glyph_raster_readback_evidence(...)` is the
+  shape before launch. `bitmap_glyph_raster_expected_pixels(...)` maps the
+  glyph mask to the expected color/zero output and
+  `bitmap_glyph_raster_checksum(...)` derives the expected checksum used by
+  `bitmap_glyph_raster_readback_evidence(...)`. That readback wrapper is the
   production proof gate: it only marks bitmap glyph rasterization ready after
   generated-kernel submit and checksum-matched device readback.
 - **No anti-aliasing**: Binary black/white pixels vs Chrome's subpixel AA.
