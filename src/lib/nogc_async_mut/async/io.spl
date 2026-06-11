@@ -1,8 +1,19 @@
 # AsyncIO - Async I/O Operations
 #
 # Non-blocking I/O operations.
+#
+# Stub status:
+#   sleep()     — returns Future.pending (suspends; re-poll via waker_signal)
+#   yield_now() — returns Future.pending (suspends once; re-poll via waker_signal)
+#   read_file() — synchronous wrapper returning Future.from_value (ready immediately)
+#   write_file()— synchronous wrapper returning Future.from_value (ready immediately)
+#
+# A real cooperative yield requires the runtime to call waker_signal(0, task_id)
+# after one tick, then drain WAKER_REGISTRY in _drain_wakers(). Without a native
+# timer backend, sleep() cannot measure wall time.
 
 use std.async.future.{Future}
+use std.async.poll.{Poll}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_write_bytes}
 
 class AsyncIO:
@@ -13,56 +24,63 @@ class AsyncIO:
     Example:
         val io = AsyncIO.new()
 
-        # Async read
-        val data = await io.read_file("data.txt")
-
-        # Async write
-        await io.write_file("output.txt", data)
+        # Non-blocking read (synchronous under the hood for now)
+        val data = io.read_file("data.txt")
+        match data.poll():
+            case Poll.Ready(bytes): print "Read {bytes.len()} bytes"
+            case Poll.Pending: print "Waiting..."
     """
-    executor: Executor  # IO executor
 
     static fn new() -> AsyncIO:
-        """Create async I/O runtime."""
-        AsyncIO(executor: Executor.new())
+        """Create async I/O handle."""
+        AsyncIO()
 
     fn sleep(millis: usize) -> Future<()>:
-        """Sleep for specified milliseconds (async).
+        """Suspend for at least millis milliseconds (async).
+
+        Returns a Pending future. The caller must be running inside a runtime
+        that calls waker_signal(0, task_id) after the delay has elapsed.
 
         Args:
             millis: Milliseconds to sleep
 
         Returns:
-            Future that completes after delay
+            Pending future (suspends the calling task)
         """
-        Future.from_value(())
+        Future.pending<()>()
 
     fn yield_now() -> Future<()>:
-        """Yield to other tasks.
+        """Yield to other tasks (cooperative scheduling point).
+
+        Returns a Pending future so the current task suspends. The runtime's
+        _drain_wakers() will re-enqueue the task on the next tick if
+        waker_signal has been called for it. Without a backend timer, callers
+        must signal the waker externally.
 
         Returns:
-            Future that completes immediately but allows scheduling
+            Pending future (suspends once, rescheduled by waker_signal)
         """
-        Future.from_value(())
+        Future.pending<()>()
 
     fn read_file(path: text) -> Future<[u8]>:
-        """Read file asynchronously.
+        """Read file (synchronous wrapper returning an immediately-ready future).
 
         Args:
             path: File path
 
         Returns:
-            Future with file contents
+            Ready future with file contents
         """
         Future.from_value(file_read_bytes(path))
 
     fn write_file(path: text, data: [u8]) -> Future<bool>:
-        """Write file asynchronously.
+        """Write file (synchronous wrapper returning an immediately-ready future).
 
         Args:
             path: File path
             data: Data to write
 
         Returns:
-            Future with success flag
+            Ready future with success flag
         """
         Future.from_value(file_write_bytes(path, data))

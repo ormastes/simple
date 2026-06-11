@@ -1,6 +1,6 @@
-# Async Basics Unit Tests
+# async_basics_spec
 
-> 1. check
+> Async Basics Unit Tests
 
 <!-- sdn-diagram:id=async_basics_spec.arch -->
 <details class="sdn-source">
@@ -10,7 +10,7 @@
 @layout dag
 @direction LR
 
-async_basics_spec
+async_basics_spec -> std
 ```
 
 </details>
@@ -32,7 +32,9 @@ async_basics_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Async Basics Unit Tests
+# async_basics_spec
+
+Async Basics Unit Tests
 
 ## At a Glance
 
@@ -45,466 +47,560 @@ async_basics_spec
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+Async Basics Unit Tests
+
+Behavioral tests for Future, Poll, Runtime, gather, race, and AsyncIO.
+Interpreter quirks:
+  - Chained enum method calls fail; always use intermediate vars.
+  - Future.is_ready() chains self.poll().is_ready() internally and fails;
+    use f.poll() -> var -> is_ready() on Poll directly.
+  - return inside it blocks not supported; avoided in all test bodies.
+
 ## Scenarios
 
-### Future Types
+### Poll enum
 
-#### future represents pending value
-
-1. check
-
+#### Poll.Ready carries its value
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "pending"
-check(state == "pending")
+val p: Poll<i64> = Poll.Ready(42)
+val got = p.unwrap()
+expect(got).to_equal(42)
 ```
 
 </details>
 
-#### future can be resolved
+#### Poll.Ready is_ready returns true
 
-1. check
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "resolved"
-check(state == "resolved")
+val p: Poll<i64> = Poll.Ready(7)
+val ready = p.is_ready()
+assert_true(ready)
 ```
 
 </details>
 
-#### future can be rejected
+#### Poll.Pending is_ready returns false
 
-1. check
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "rejected"
-check(state == "rejected")
+val p: Poll<i64> = Poll.Pending
+val ready = p.is_ready()
+assert_false(ready)
 ```
 
 </details>
 
-#### future has value on resolve
+#### Poll.Pending is_pending returns true
 
-1. check
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val value = Some(42)
-check(value.?)
+val p: Poll<i64> = Poll.Pending
+val pending = p.is_pending()
+assert_true(pending)
 ```
 
 </details>
 
-### Promise Types
+#### Poll.Ready is_pending returns false
 
-#### promise is writable future
-
-1. check
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val is_writable = true
-check(is_writable)
+val p: Poll<i64> = Poll.Ready(1)
+val pending = p.is_pending()
+assert_false(pending)
 ```
 
 </details>
 
-#### promise resolves once
+### Future construction
 
-1. check
+#### from_value poll returns Poll.Ready
+
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val resolve_count = 1
-check(resolve_count == 1)
+val f = Future.from_value(42)
+val result = f.poll()
+val is_rdy = result.is_ready()
+assert_true(is_rdy)
 ```
 
 </details>
 
-#### promise reject once
+#### pending poll returns Poll.Pending
 
-1. check
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val reject_count = 1
-check(reject_count == 1)
+val f = Future.pending<i64>()
+val result = f.poll()
+val is_pend = result.is_pending()
+assert_true(is_pend)
 ```
 
 </details>
 
-### Async Task States
-
-#### task created state
-
-1. check
-
+#### from_value poll unwrap returns the value
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "created"
-check(state == "created")
+val f = Future.from_value(123)
+val result = f.poll()
+val value = result.unwrap()
+expect(value).to_equal(123)
 ```
 
 </details>
 
-#### task running state
+#### pending poll unwrap-ready is false
 
-1. check
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "running"
-check(state == "running")
+val f = Future.pending<i64>()
+val result = f.poll()
+val is_rdy = result.is_ready()
+assert_false(is_rdy)
 ```
 
 </details>
 
-#### task completed state
+### Future map
 
-1. check
-
+#### map over ready future transforms value
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "completed"
-check(state == "completed")
+val f = Future.from_value(10)
+val mapped = f.map(\v: v * 2)
+val result = mapped.poll()
+val value = result.unwrap()
+expect(value).to_equal(20)
 ```
 
 </details>
 
-#### task cancelled state
+#### map over pending future poll is pending
 
-1. check
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "cancelled"
-check(state == "cancelled")
+val f = Future.pending<i64>()
+val mapped = f.map(\v: v + 1)
+val result = mapped.poll()
+val is_pend = result.is_pending()
+assert_true(is_pend)
 ```
 
 </details>
 
-#### task failed state
+### Future then
 
-1. check
-
+#### then over ready future chains correctly
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "failed"
-check(state == "failed")
+val f = Future.from_value(5)
+val chained = f.then(\v: Future.from_value(v + 100))
+val result = chained.poll()
+val value = result.unwrap()
+expect(value).to_equal(105)
 ```
 
 </details>
 
-### Channel Types
+#### then over pending future poll is pending
 
-#### unbounded channel
-
-1. check
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val capacity = -1
-check(capacity == -1)
+val f = Future.pending<i64>()
+val chained = f.then(\v: Future.from_value(v))
+val result = chained.poll()
+val is_pend = result.is_pending()
+assert_true(is_pend)
 ```
 
 </details>
 
-#### bounded channel
+### Runtime run_once
 
-1. check
+#### run_once returns false on empty runtime
+
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val capacity = 10
-check(capacity > 0)
+val rt = Runtime.new()
+val still_going = rt.run_once()
+assert_false(still_going)
 ```
 
 </details>
 
-#### channel send
+#### run_once completes a ready task
 
-1. check
+- rt run once
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val sent = true
-check(sent)
+val rt = Runtime.new()
+val task_id = rt.spawn(Future.from_value(()))
+rt.run_once()
+val done = rt.completed.has(task_id)
+assert_true(done)
 ```
 
 </details>
 
-#### channel receive
+#### run_once does not complete a pending task
 
-1. check
+- rt run once
+- assert false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val received = true
-check(received)
+val rt = Runtime.new()
+val task_id = rt.spawn(Future.pending<()>())
+rt.run_once()
+val in_completed = rt.completed.has(task_id)
+assert_false(in_completed)
 ```
 
 </details>
 
-#### channel close
+#### block_on completes for immediately-ready future
 
-1. check
+- rt block on
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val closed = true
-check(closed)
+val rt = Runtime.new()
+rt.block_on(Future.from_value(()))
+# Reaching here without hanging means block_on returned
+assert_true(true)
 ```
 
 </details>
 
-### Actor Model
+### gather combinator
 
-#### actor has mailbox
+#### gather over all-ready futures poll is ready
 
-1. check
+- Future from value
+- Future from value
+- Future from value
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val has_mailbox = true
-check(has_mailbox)
+val futures: [Future<i64>] = [
+    Future.from_value(1),
+    Future.from_value(2),
+    Future.from_value(3)
+]
+val result = gather(futures)
+val polled = result.poll()
+val is_rdy = polled.is_ready()
+assert_true(is_rdy)
 ```
 
 </details>
 
-#### actor processes messages
+#### gather over all-ready futures collects correct count
 
-1. check
+- Future from value
+- Future from value
+   - Expected: values.len() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val processed = 1
-check(processed > 0)
+val futures: [Future<i64>] = [
+    Future.from_value(10),
+    Future.from_value(20)
+]
+val result = gather(futures)
+val polled = result.poll()
+val values = polled.unwrap()
+expect(values.len()).to_equal(2)
 ```
 
 </details>
 
-#### actor state isolation
+#### gather with any pending future poll is pending
 
-1. check
+- Future from value
+- Future pending<i64>
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val isolated = true
-check(isolated)
+val futures: [Future<i64>] = [
+    Future.from_value(1),
+    Future.pending<i64>()
+]
+val result = gather(futures)
+val polled = result.poll()
+val is_pend = polled.is_pending()
+assert_true(is_pend)
 ```
 
 </details>
 
-#### actor supervision
+### race combinator
 
-1. check
+#### race returns first ready future value
+
+- Future from value
+- Future from value
+   - Expected: value equals `42`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val strategy = "restart"
-check(strategy == "restart" or strategy == "stop")
+val futures: [Future<i64>] = [
+    Future.from_value(42),
+    Future.from_value(99)
+]
+val result = race(futures)
+val polled = result.poll()
+val value = polled.unwrap()
+expect(value).to_equal(42)
 ```
 
 </details>
 
-### Generator States
+#### race over all-pending poll is pending
 
-#### generator initial state
-
-1. check
+- Future pending<i64>
+- Future pending<i64>
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "initial"
-check(state == "initial")
+val futures: [Future<i64>] = [
+    Future.pending<i64>(),
+    Future.pending<i64>()
+]
+val result = race(futures)
+val polled = result.poll()
+val is_pend = polled.is_pending()
+assert_true(is_pend)
 ```
 
 </details>
 
-#### generator yielded state
+#### race skips pending and finds ready
 
-1. check
+- Future pending<i64>
+- Future from value
+   - Expected: value equals `7`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "yielded"
-check(state == "yielded")
+val futures: [Future<i64>] = [
+    Future.pending<i64>(),
+    Future.from_value(7)
+]
+val result = race(futures)
+val polled = result.poll()
+val value = polled.unwrap()
+expect(value).to_equal(7)
 ```
 
 </details>
 
-#### generator completed state
+### AsyncIO yield_now and sleep
 
-1. check
+#### yield_now poll is pending
+
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val state = "completed"
-check(state == "completed")
+val io = AsyncIO.new()
+val f = io.yield_now()
+val polled = f.poll()
+val is_pend = polled.is_pending()
+assert_true(is_pend)
 ```
 
 </details>
 
-#### generator yield value
+#### sleep poll is pending
 
-1. check
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val value = Some(42)
-check(value.?)
+val io = AsyncIO.new()
+val f = io.sleep(100)
+val polled = f.poll()
+val is_pend = polled.is_pending()
+assert_true(is_pend)
 ```
 
 </details>
