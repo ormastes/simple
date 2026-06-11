@@ -75,6 +75,11 @@ Updated: 2026-06-11
   counting `policy=track-text-divergence` rows separately as tracked evidence.
   Top-level production parity accepts exact+tracked coverage only when exact
   rows have zero mismatches and tracked rows keep `blur_or_tolerance=false`.
+- this commit -- scaled glyph hot-path dispatch removal: the Simple Web HTML
+  layout renderer no longer calls an always-true sparse-hit helper for every
+  scaled glyph pixel. Scaled glyphs still render solid, preserving the prior
+  visual semantics while removing per-pixel function dispatch from GUI text
+  startup rendering.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
