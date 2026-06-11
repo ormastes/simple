@@ -1,0 +1,251 @@
+#!/bin/sh
+# setup-directx-linux.shs — Idempotent DirectX-on-Linux local-prefix build
+# Builds vkd3d (wine-vkd3d) and dxvk-native from source into build/dx/prefix.
+# No sudo required. Uses pip install --user meson when meson is absent.
+# On build failure records the concrete blocker in the state file and continues.
+#
+# Usage: sh scripts/setup/setup-directx-linux.shs
+# Env overrides:
+#   DX_PREFIX  — destination prefix  (default: <repo_root>/build/dx/prefix)
+#   DX_JOBS    — parallel make jobs  (default: $(nproc))
+#   DX_SKIP_VKD3D   — set non-empty to skip vkd3d build
+#   DX_SKIP_DXVK    — set non-empty to skip dxvk-native build
+
+set -e
+
+# ── Locate repo root ──────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+STATE_FILE="$REPO_ROOT/.spipe/gpu-backend-dx-harden/state.md"
+DX_PREFIX="${DX_PREFIX:-$REPO_ROOT/build/dx/prefix}"
+DX_BUILD="$REPO_ROOT/build/dx/src"
+DX_JOBS="${DX_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+
+mkdir -p "$DX_PREFIX" "$DX_BUILD"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+log_info()    { printf '[dx-setup] %s\n' "$*"; }
+log_ok()      { printf '[dx-setup] OK: %s\n' "$*"; }
+log_blocker() { printf '[dx-setup] BLOCKER: %s\n' "$*"; }
+
+record_blocker() {
+    component="$1"; reason="$2"
+    log_blocker "$component: $reason"
+    # Append blocker entry under ## Blockers section (or append new section)
+    if grep -q "## Blockers" "$STATE_FILE" 2>/dev/null; then
+        # insert after the ## Blockers header line
+        sed -i "/^## Blockers/a - $component: $reason" "$STATE_FILE"
+    else
+        printf '\n## Blockers\n- %s: %s\n' "$component" "$reason" >> "$STATE_FILE"
+    fi
+}
+
+record_component() {
+    component="$1"; status="$2"; detail="$3"
+    log_ok "$component: $status — $detail"
+    if grep -q "## Components" "$STATE_FILE" 2>/dev/null; then
+        sed -i "/^## Components/a - $component: $status ($detail)" "$STATE_FILE"
+    else
+        printf '\n## Components\n- %s: %s (%s)\n' "$component" "$status" "$detail" >> "$STATE_FILE"
+    fi
+}
+
+# ── Check required tools ──────────────────────────────────────────────────────
+check_tool() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        record_blocker "toolchain" "Required tool '$1' not found; cannot build DirectX stack"
+        log_info "Structured-handle fallback remains active."
+        exit 0
+    fi
+}
+
+check_tool gcc
+check_tool g++
+check_tool cmake
+check_tool ninja
+check_tool git
+check_tool pkg-config
+
+# ── Ensure meson is available (pip --user fallback) ───────────────────────────
+ensure_meson() {
+    if command -v meson >/dev/null 2>&1; then
+        log_info "meson already available: $(meson --version)"
+        return 0
+    fi
+    log_info "meson not found; installing via pip install --user meson ..."
+    if ! command -v pip3 >/dev/null 2>&1 && ! command -v pip >/dev/null 2>&1; then
+        record_blocker "meson" "pip/pip3 not available; cannot install meson"
+        return 1
+    fi
+    PIP_CMD="$(command -v pip3 || command -v pip)"
+    "$PIP_CMD" install --user meson --quiet
+    # Add ~/.local/bin to PATH for this session
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v meson >/dev/null 2>&1; then
+        record_blocker "meson" "pip install --user meson succeeded but meson binary not found in ~/.local/bin"
+        return 1
+    fi
+    log_info "meson installed: $(meson --version)"
+    return 0
+}
+
+# ── Check Vulkan loader (required for both builds) ────────────────────────────
+VULKAN_FOUND=false
+for candidate in \
+    /usr/lib/x86_64-linux-gnu/libvulkan.so.1 \
+    /usr/lib/libvulkan.so.1 \
+    /usr/local/lib/libvulkan.so.1; do
+    if [ -f "$candidate" ]; then
+        VULKAN_FOUND=true
+        SYSTEM_LIBVULKAN="$candidate"
+        log_info "Found system libvulkan: $SYSTEM_LIBVULKAN"
+        break
+    fi
+done
+
+if [ "$VULKAN_FOUND" = "false" ]; then
+    SYSTEM_LIBVULKAN=""
+    log_info "No system libvulkan.so.1 found; prefix-only Vulkan lookup will apply."
+fi
+
+record_component "system-libvulkan" "$([ "$VULKAN_FOUND" = "true" ] && echo ready || echo missing)" "$SYSTEM_LIBVULKAN"
+
+# ── Build vkd3d ───────────────────────────────────────────────────────────────
+VKD3D_BUILT=false
+VKD3D_LIB=""
+
+if [ -n "$DX_SKIP_VKD3D" ]; then
+    log_info "Skipping vkd3d (DX_SKIP_VKD3D set)."
+else
+    VKD3D_SENTINEL="$DX_PREFIX/lib/libvkd3d.so"
+    if [ -f "$VKD3D_SENTINEL" ]; then
+        log_ok "vkd3d already built at $VKD3D_SENTINEL"
+        VKD3D_BUILT=true
+        VKD3D_LIB="$VKD3D_SENTINEL"
+    else
+        log_info "Cloning wine/vkd3d ..."
+        VKD3D_SRC="$DX_BUILD/vkd3d"
+        if [ ! -d "$VKD3D_SRC/.git" ]; then
+            git clone --depth=1 https://gitlab.winehq.org/wine/vkd3d.git "$VKD3D_SRC" 2>&1 || {
+                # Try github mirror on failure
+                git clone --depth=1 https://github.com/wine-mirror/wine-vkd3d.git "$VKD3D_SRC" 2>&1 || {
+                    record_blocker "vkd3d-clone" "git clone failed for both winehq and github mirrors; check network"
+                    VKD3D_SRC=""
+                }
+            }
+        fi
+        if [ -n "$VKD3D_SRC" ] && [ -d "$VKD3D_SRC" ]; then
+            log_info "Configuring vkd3d with cmake ..."
+            VKD3D_BUILD_DIR="$DX_BUILD/vkd3d-build"
+            mkdir -p "$VKD3D_BUILD_DIR"
+            # vkd3d ships a CMakeLists.txt since wine-vkd3d; fall back to autotools
+            if [ -f "$VKD3D_SRC/CMakeLists.txt" ]; then
+                cmake -S "$VKD3D_SRC" -B "$VKD3D_BUILD_DIR" \
+                    -DCMAKE_INSTALL_PREFIX="$DX_PREFIX" \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -G Ninja 2>&1 && \
+                ninja -C "$VKD3D_BUILD_DIR" -j"$DX_JOBS" install 2>&1 && {
+                    VKD3D_BUILT=true
+                    VKD3D_LIB="$DX_PREFIX/lib/libvkd3d.so"
+                    log_ok "vkd3d cmake build succeeded."
+                } || {
+                    record_blocker "vkd3d-cmake-build" "cmake/ninja build failed; see build log in $VKD3D_BUILD_DIR"
+                }
+            elif [ -f "$VKD3D_SRC/configure.ac" ]; then
+                log_info "No CMakeLists.txt; trying autotools configure ..."
+                (cd "$VKD3D_SRC" && autoreconf -fi 2>&1) && \
+                (cd "$VKD3D_SRC" && ./configure --prefix="$DX_PREFIX" 2>&1) && \
+                make -C "$VKD3D_SRC" -j"$DX_JOBS" install 2>&1 && {
+                    VKD3D_BUILT=true
+                    VKD3D_LIB="$DX_PREFIX/lib/libvkd3d.so"
+                    log_ok "vkd3d autotools build succeeded."
+                } || {
+                    record_blocker "vkd3d-autotools-build" "autotools build failed; check autoconf/automake presence"
+                }
+            else
+                record_blocker "vkd3d-no-buildsys" "vkd3d source has neither CMakeLists.txt nor configure.ac"
+            fi
+        fi
+    fi
+fi
+
+record_component "vkd3d" "$([ "$VKD3D_BUILT" = "true" ] && echo ready || echo missing)" "$VKD3D_LIB"
+
+# ── Build dxvk-native ─────────────────────────────────────────────────────────
+DXVK_BUILT=false
+DXVK_D3D11_LIB=""
+
+if [ -n "$DX_SKIP_DXVK" ]; then
+    log_info "Skipping dxvk-native (DX_SKIP_DXVK set)."
+else
+    DXVK_SENTINEL="$DX_PREFIX/lib/libdxvk_d3d11.so"
+    if [ -f "$DXVK_SENTINEL" ]; then
+        log_ok "dxvk-native already built at $DXVK_SENTINEL"
+        DXVK_BUILT=true
+        DXVK_D3D11_LIB="$DXVK_SENTINEL"
+    else
+        if ! ensure_meson; then
+            log_info "Skipping dxvk-native build (meson unavailable)."
+        else
+            log_info "Cloning dxvk-native ..."
+            DXVK_SRC="$DX_BUILD/dxvk"
+            if [ ! -d "$DXVK_SRC/.git" ]; then
+                git clone --depth=1 https://github.com/doitsujin/dxvk.git "$DXVK_SRC" 2>&1 || {
+                    record_blocker "dxvk-clone" "git clone of doitsujin/dxvk failed; check network"
+                    DXVK_SRC=""
+                }
+            fi
+            if [ -n "$DXVK_SRC" ] && [ -d "$DXVK_SRC" ]; then
+                DXVK_BUILD_DIR="$DX_BUILD/dxvk-build"
+                log_info "Configuring dxvk-native with meson ..."
+                meson setup "$DXVK_BUILD_DIR" "$DXVK_SRC" \
+                    --prefix="$DX_PREFIX" \
+                    --libdir=lib \
+                    --buildtype=release \
+                    -Denable_tests=false \
+                    -Ddxvk_native=true 2>&1 && \
+                ninja -C "$DXVK_BUILD_DIR" -j"$DX_JOBS" install 2>&1 && {
+                    DXVK_BUILT=true
+                    DXVK_D3D11_LIB="$DX_PREFIX/lib/libdxvk_d3d11.so"
+                    log_ok "dxvk-native build succeeded."
+                } || {
+                    record_blocker "dxvk-meson-build" "meson/ninja build of dxvk-native failed; structured-handle fallback active"
+                }
+            fi
+        fi
+    fi
+fi
+
+record_component "dxvk-native-d3d11" "$([ "$DXVK_BUILT" = "true" ] && echo ready || echo missing)" "$DXVK_D3D11_LIB"
+
+# ── Write sentinel JSON for host_readiness probe ──────────────────────────────
+SENTINEL_JSON="$DX_PREFIX/dx_prefix_readiness.json"
+printf '{\n' > "$SENTINEL_JSON"
+printf '  "prefix": "%s",\n' "$DX_PREFIX" >> "$SENTINEL_JSON"
+printf '  "system_libvulkan": "%s",\n' "$SYSTEM_LIBVULKAN" >> "$SENTINEL_JSON"
+printf '  "vkd3d_lib": "%s",\n' "$VKD3D_LIB" >> "$SENTINEL_JSON"
+printf '  "dxvk_d3d11_lib": "%s",\n' "$DXVK_D3D11_LIB" >> "$SENTINEL_JSON"
+printf '  "vkd3d_ready": %s,\n' "$([ "$VKD3D_BUILT" = "true" ] && echo true || echo false)" >> "$SENTINEL_JSON"
+printf '  "dxvk_ready": %s\n' "$([ "$DXVK_BUILT" = "true" ] && echo true || echo false)" >> "$SENTINEL_JSON"
+printf '}\n' >> "$SENTINEL_JSON"
+
+log_info "Wrote $SENTINEL_JSON"
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+log_info "---"
+log_info "DirectX-on-Linux setup complete."
+log_info "  prefix:              $DX_PREFIX"
+log_info "  system libvulkan:    ${SYSTEM_LIBVULKAN:-none}"
+log_info "  vkd3d built:         $VKD3D_BUILT (lib: $VKD3D_LIB)"
+log_info "  dxvk-native built:   $DXVK_BUILT (lib: $DXVK_D3D11_LIB)"
+log_info ""
+if [ "$VKD3D_BUILT" = "false" ] && [ "$DXVK_BUILT" = "false" ]; then
+    log_info "Neither vkd3d nor dxvk-native was built."
+    if [ "$VULKAN_FOUND" = "true" ]; then
+        log_info "rt_dlopen leaf will target system libvulkan.so.1 ($SYSTEM_LIBVULKAN)."
+        log_info "This satisfies leaf=dlopen evidence for the Vulkan ICD chain."
+    else
+        log_info "Structured-handle fallback (leaf=structured) remains active."
+    fi
+fi
+log_info "---"

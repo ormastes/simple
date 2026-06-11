@@ -302,17 +302,100 @@ impl CrashLogContract:
             " last_ts=" + self.last_crash_timestamp.to_text()
 
 
+class DxPrefixReadiness:
+    prefix_path:           text
+    system_libvulkan_path: text
+    vkd3d_lib_path:        text
+    dxvk_d3d11_lib_path:   text
+    vkd3d_ready:           bool
+    dxvk_ready:            bool
+    leaf:                  text
+
+impl DxPrefixReadiness:
+    static fn create() -> DxPrefixReadiness:
+        DxPrefixReadiness(
+            prefix_path: "",
+            system_libvulkan_path: "",
+            vkd3d_lib_path: "",
+            dxvk_d3d11_lib_path: "",
+            vkd3d_ready: false,
+            dxvk_ready: false,
+            leaf: "structured"
+        )
+
+    static fn from_prefix(prefix: text, syslib: text, vkd3d_lib: text, dxvk_lib: text, vkd3d_ok: bool, dxvk_ok: bool) -> DxPrefixReadiness:
+        val any_lib = dxvk_lib != "" or vkd3d_lib != "" or syslib != ""
+        DxPrefixReadiness(
+            prefix_path: prefix,
+            system_libvulkan_path: syslib,
+            vkd3d_lib_path: vkd3d_lib,
+            dxvk_d3d11_lib_path: dxvk_lib,
+            vkd3d_ready: vkd3d_ok,
+            dxvk_ready: dxvk_ok,
+            leaf: if any_lib: "dlopen" else: "structured"
+        )
+
+    me is_dlopen_available() -> bool:
+        self.leaf == "dlopen"
+
+    me summary() -> text:
+        "dx_prefix=" + self.prefix_path +
+            " syslib=" + self.system_libvulkan_path +
+            " vkd3d=" + self.vkd3d_ready.to_text() +
+            " dxvk=" + self.dxvk_ready.to_text() +
+            " leaf=" + self.leaf
+
+extern fn rt_file_exists(path: text) -> bool
+
+pub fn dx_prefix_probe() -> DxPrefixReadiness:
+    """Probe the local DirectX prefix for build artifacts.
+
+    Uses rt_file_exists (interpreter-safe) to check for prefix libs written
+    by scripts/setup/setup-directx-linux.shs. Returns a structured report
+    with leaf evidence string ('dlopen' or 'structured').
+    """
+    val vkd3d_candidate = "build/dx/prefix/lib/libvkd3d.so"
+    val dxvk_candidate = "build/dx/prefix/lib/libdxvk_d3d11.so"
+    val vkd3d_ok = rt_file_exists(vkd3d_candidate)
+    val dxvk_ok = rt_file_exists(dxvk_candidate)
+    var syslib = ""
+    if syslib == "":
+        if rt_file_exists("/usr/lib/x86_64-linux-gnu/libvulkan.so.1"):
+            syslib = "/usr/lib/x86_64-linux-gnu/libvulkan.so.1"
+    if syslib == "":
+        if rt_file_exists("/usr/lib/libvulkan.so.1"):
+            syslib = "/usr/lib/libvulkan.so.1"
+    if syslib == "":
+        if rt_file_exists("/usr/local/lib/libvulkan.so.1"):
+            syslib = "/usr/local/lib/libvulkan.so.1"
+    val vkd3d_path = if vkd3d_ok: vkd3d_candidate else: ""
+    val dxvk_path = if dxvk_ok: dxvk_candidate else: ""
+    DxPrefixReadiness.from_prefix(
+        "build/dx/prefix",
+        syslib,
+        vkd3d_path,
+        dxvk_path,
+        vkd3d_ok,
+        dxvk_ok
+    )
+
+export DxPrefixReadiness
+export dx_prefix_probe
+
+
 class ProtonPlatformGate:
     host_report: ProtonHostReport
     multilib: MultilibReadiness
     crash_log: CrashLogContract
+    dx_prefix: DxPrefixReadiness
 
 impl ProtonPlatformGate:
     static fn create() -> ProtonPlatformGate:
         ProtonPlatformGate(
             host_report: ProtonHostReport.create(),
             multilib: MultilibReadiness.create(),
-            crash_log: CrashLogContract.create("", 0)
+            crash_log: CrashLogContract.create("", 0),
+            dx_prefix: DxPrefixReadiness.create()
         )
 
     me evaluate() -> text:
@@ -347,4 +430,5 @@ impl ProtonPlatformGate:
             " " + self.host_report.report() +
             " multilib=" + self.multilib.summary() +
             " crash_log=" + self.crash_log.summary() +
+            " dx=" + self.dx_prefix.summary() +
             " blockers=[" + self.blocker_summary() + "]"

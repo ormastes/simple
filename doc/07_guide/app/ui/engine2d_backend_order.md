@@ -8,7 +8,7 @@ adapter, and the Simple Web renderer backend resolver.
 
 The current shared order is:
 
-`metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
+`metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
 
 ## Why This Order
 
@@ -23,19 +23,23 @@ The current shared order is:
    Native mobile/Adreno-oriented delegate path when available.
 5. `vulkan`
    Preferred portable native GPU path after the vendor-native lanes.
-6. `opencl`
+6. `directx`
+   D3D11 drawing backend. Native on Windows; routes through DXVK→Vulkan on
+   Linux when the local prefix (build/dx/prefix) or system Vulkan is present.
+   Explicit-only on Linux in auto-detect (use `backend=directx` to force).
+7. `opencl`
    Portable compute fallback when Vulkan is unavailable.
-7. `opengl`
+8. `opengl`
    Older but still hardware-backed graphics path.
-8. `intel`
+9. `intel`
    Intel-specific runtime lane.
-9. `webgpu`
-   Browser/runtime WebGPU lane.
-10. `software`
+10. `webgpu`
+    Browser/runtime WebGPU lane.
+11. `software`
     Optimized software renderer with the shared framebuffer path.
-11. `cpu_simd`
+12. `cpu_simd`
     Explicit CPU SIMD lane.
-12. `cpu`
+13. `cpu`
     Final fallback. Always available.
 
 ## Rules
@@ -45,11 +49,16 @@ The current shared order is:
   `software` before the shared resolver runs.
 - UI-facing aliases must normalize before probing:
   `hip`, `amd_hip`, `amd-hip`, `amd_rocm`, and `amd-rocm` map to `rocm`;
-  `simd_cpu`, `cpu-simd`, and `simd-cpu` map to `cpu_simd`.
+  `simd_cpu`, `cpu-simd`, and `simd-cpu` map to `cpu_simd`;
+  `d3d11`, `d3d12`, `dx11`, `dx12` map to `directx`.
 - Strict backend requests must report unavailability instead of silently
   pretending a different backend was selected.
 - Baremetal and virtio-gpu remain explicit construction paths, not part of the
   generic auto-detect order.
+- `directx` on Linux requires the local prefix (build/dx/prefix) built via
+  `scripts/setup/setup-directx-linux.shs`, or system libvulkan.so.1. When
+  neither is present the backend falls back to `structured` leaf mode and
+  returns probe status `Failed`; auto-detect then advances to `opencl`.
 
 ## Source of Truth
 
@@ -60,6 +69,14 @@ The current shared implementation lives in:
 - `src/app/ui.browser/backend.spl`
 - `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl`
 - `src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`
+
+DirectX backend implementation:
+
+- `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl` — D3D11 drawing backend
+- `src/lib/nogc_async_mut/gpu/dxvk_d3d11.spl` — DXVK D3D11→Vulkan shim
+- `src/lib/nogc_async_mut/gpu/vulkan_icd_sffi.spl` — Vulkan ICD leaf (dlopen/structured)
+- `scripts/setup/setup-directx-linux.shs` — local prefix build script
+- `doc/07_guide/ui/directx_on_linux_setup.md` — setup guide
 
 If this order changes, update both the implementation and this guide in the
 same change.
