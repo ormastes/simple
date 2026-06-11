@@ -3,6 +3,35 @@
 Date: 2026-06-04
 Status: Active rollout plan
 
+## 2026-06-11 Pure Simple GUI Startup Optimization Split
+
+Current slice: keep GUI behavior and app code stable while reducing pure Simple
+Engine2D text/helper startup cost and preserving generated/manual spec evidence.
+
+Small task ownership:
+
+- Spark: easy documentation and evidence bookkeeping only, including task-plan
+  wording, state-log summaries, and generated/manual spec index checks. Spark
+  must use a disjoint write scope and avoid source/test edits.
+- Codex: hot-path code changes, Spark-output review, and integration decisions
+  for Engine2D text helpers, software fallback behavior, and backend fallback
+  ordering.
+- Verify: focused checks for touched `.spl` files, focused SSpecs, optimizer
+  scans, `doc/06_spec` executable-spec layout guard, and SPipe command wiring.
+
+Independent work packets:
+
+1. Engine2D AA text helper: hoist loop-invariant scale, glyph-width, and row
+   sampling work in `helpers_text.spl`; prove with text helper and software
+   backend specs.
+2. Software fallback text path: keep `backend_software.spl` and shared text
+   helpers aligned so CPU fallback avoids repeated length/tile work.
+3. Evidence refresh: regenerate or update manuals only when an SSpec changes,
+   then record exact focused check/test/optimizer results in lane state.
+4. Follow-up triage: leave remaining optimizer findings as measured follow-up
+   tasks unless they can be fixed without API, rendering, or app behavior
+   changes.
+
 ## Goal
 
 Complete the requested convergence stack:
@@ -463,6 +492,323 @@ on the current Linux/Xvfb host:
    intrinsic inline-width measurement through it, replacing the repeated
    `i + 1 .. nodes.len()` direct-child scans in the contents, flex-wrap,
    flex-row, flex-column, and block-flow branches. New coverage lives in
-   `test/02_integration/rendering/simple_web_layout_child_index_spec.spl`; the
-   focused spec passes 2/2 and the adjacent web Engine2D offload spec passes
-   11/11.
+   `test/02_integration/rendering/simple_web_layout_child_index_spec.spl`.
+8. Spark then reviewed the CSS selector cascade hotspot as an easy read-only
+   task. Codex added a rightmost-selector candidate bucket index for id, class,
+   and tag selectors while keeping the existing full selector matcher as the
+   final authority and merging ordered candidate rule buckets before declaration
+   application. The focused spec now covers child order, sibling-heavy startup
+   rendering, duplicate bucket membership, and cascade-order preservation.
+9. Codex removed another pure-Simple paint startup hotspot by caching each
+   node's effective ancestor clip once per paint call. Background, absolute,
+   z-index, icon/image, and text passes now reuse the cached `ClipRect` instead
+   of walking the parent chain repeatedly. The cache is now lazy: pages without
+   visible overflow clipping use a single framebuffer clip instead of allocating
+   a per-node `ClipRect` array. The focused simple-web layout spec includes an
+   overflow-hidden pixel oracle.
+10. Codex folded widget-panel detection and widget-text detection into one
+    paint pre-pass through `compute_widget_paint_flags(...)`, replacing a
+    separate full-node panel scan and removing the unused `has_widget_ancestor`
+    helper. The same helper now uses a panel-only scan for non-widget paint
+    paths so normal pages do not allocate widget ancestor scratch state. The
+    focused spec includes a widget chrome pixel oracle and passes 5/5.
+11. Codex shared the intrinsic-width memo across recursive layout calls by
+    carrying it through `LayoutResult` and seeding it once at public layout
+    entrypoints. This removes repeated `[-1; nodes.len()]` allocation in nested
+    flex layout while preserving the existing public debug/render entrypoints.
+    The focused spec now includes a nested flex oracle and passes 6/6.
+12. Codex simplified child-index construction to attach children during the
+    same parent-before-child pass that initializes the per-node lists, removing
+    a second full node walk from Simple Web startup. Spark also proved the
+    legacy selector wrappers and local `class_has(...)` helper were
+    reference-dead in this renderer, so Codex removed only those helpers while
+    keeping the live `class_contains(...)` widget-class path intact. The focused
+    spec still passes 6/6.
+13. Codex tightened the active text paint range helpers so off-viewport text
+    rows return before scanning characters and horizontally clipped rows stop
+    once advancing x is beyond the framebuffer/clip. Spark proved the older
+    non-range text wrappers are no longer called by this renderer's active paint
+    path, so Codex removed those wrapper bodies while preserving the glyph
+    helpers used by `fb_text_thin_scaled_clip_range(...)` and
+    `fb_text_sparse_range(...)`. The focused spec still passes 6/6.
+14. Codex made the final text/icon paint pass request `paint_clip_at(...)` only
+    inside branches that actually draw clipped image, icon, or normal text
+    content. This avoids one clip lookup per node on the common no-paint branch.
+    The renderer now keeps only the glyph helpers used by the two active range
+    text paths. The focused spec still passes 6/6.
+15. Codex made `build_text_render_cache(...)` node-aware so it preserves the
+    same one-slot-per-node cache indexing while computing glyph scale, advance,
+    line height, and ink offsets only for `#text` nodes. Element rows now receive
+    zero placeholders because the paint path never consumes their text metrics.
+    The focused spec still passes 6/6.
+16. Codex removed the unused `char_widths` field from `TextRenderCache` and its
+    per-node construction path. The active paint path only reads advances,
+    scales, line heights, and ink offsets, so this removes one dead per-node
+    array without changing layout or paint behavior. The focused spec still
+    passes 6/6.
+17. Codex split the final text paint loop so normal clipped text resolves
+    `paint_clip_at(...)` once per text node before rendering its wrapped lines.
+    Widget sparse text still skips clip lookup, and normal wrapped text reuses
+    the same clip across all line ranges. The focused spec still passes 6/6.
+18. Codex removed the remaining `TextRenderCache` staging pass entirely. Text
+    metrics are now computed directly inside the already-filtered `#text` paint
+    branch, so startup no longer allocates or fills five node-indexed metric
+    arrays before paint. The focused spec still passes 6/6.
+19. Codex skipped repeated class-bucket lookup for duplicate class tokens on a
+    node. The bucket merge already deduplicates rule ids, so this removes
+    redundant `text_key_index(...)` scans without changing cascade order or the
+    final selector matcher. The focused CSS oracle now uses `class="target
+    target"` and still passes 6/6.
+20. Codex added trivial fast paths to `merge_sorted_rule_lists_unique(...)` for
+    zero or one candidate bucket list. The multi-bucket merge is unchanged, but
+    simple nodes can now skip positions-array allocation and the merge loop. The
+    focused spec still passes 6/6.
+21. Current small-part split for the next renderer pass:
+    - Spark was assigned one easy mechanical patch in
+      `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`:
+      hoist stable `.len()` calls in selector/style/layout hot loops where the
+      loop already preserves behavior.
+    - Codex owns coordination docs, focused verification, review of Spark's
+      patch, and any follow-up integration notes.
+    - Deferred parts stay separate: candidate-bucket allocation reduction,
+      additional text paint profiling, backend font-offload design, and any
+      non-mechanical renderer behavior change.
+22. Spark hit its model quota before producing a patch, so Codex completed the
+    same bounded easy task locally. The renderer now caches stable lengths in
+    selector normalization, selector group splitting, bucket key lookup,
+    candidate-list merging, rule bucket construction, grouped selector
+    matching, and style candidate application loops. The patch was reviewed as
+    mechanical-only, the focused spec still passes 6/6, and the renderer
+    optimizer scan now reports 734 remaining opportunities.
+23. Codex continued the same mechanical cleanup across the remaining stable
+    Simple Web renderer loops that affect startup parsing, selector matching,
+    intrinsic/layout traversal, paint passes, clip-cache construction, wrapped
+    text line iteration, and Draw IR export. Mutating builders were left alone.
+    Focused Simple Web layout coverage still passes 6/6, the adjacent
+    Web Engine2D Metal-offload coverage still passes 11/11, and the renderer
+    optimizer scan now reports 692 remaining opportunities.
+24. Codex removed two startup allocation push loops by changing
+    `zero_i32_list(...)` and `neg_one_i32_list(...)` to direct repeated-list
+    initialization. A no-id/no-class CSS candidate fast path was also tested,
+    but reverted because it increased optimizer warnings despite passing
+    behavior specs. The retained patch keeps the focused Simple Web layout spec
+    at 6/6, the adjacent Web Engine2D Metal-offload spec at 11/11, and lowers
+    the renderer optimizer scan to 688 remaining opportunities.
+25. Codex removed the positive z-index paint loop's repeated full-node scan for
+    each distinct positive z layer. The renderer now detects positive z during
+    the existing absolute-position pass, lazily builds a fixed-size sorted index
+    only when needed, and paints that index once in ascending z order with stable
+    document order for equal z values. A new overlapping absolute-position
+    pixel oracle keeps the behavior pinned; the focused Simple Web layout spec
+    now passes 7/7 and the adjacent Web Engine2D Metal-offload spec still
+    passes 11/11. The optimizer scan reports 695 remaining opportunities after
+    this structural change because the index buffer adds bounds-check
+    opportunities, but the previous O(node_count * distinct_positive_z) scan is
+    removed.
+26. Codex moved paint clip lookup for normal backgrounds/borders, non-positive
+    absolute decorations, and positive-z decorations into the draw branches that
+    actually need clipping. Undecorated nodes now skip decoration-pass
+    `paint_clip_at(...)` calls. The focused Simple Web layout spec still passes
+    7/7, the adjacent Web Engine2D Metal-offload spec still passes 11/11, and
+    the renderer optimizer scan remains at 695 remaining opportunities.
+27. Codex confirmed wrap range generation is already limited to `#text` layout
+    nodes, then removed the per-node push loop in `empty_i32_lists(...)` by
+    using repeated empty-list initialization for wrap start/end seeds. The
+    focused Simple Web layout spec still passes 7/7, the adjacent Web Engine2D
+    Metal-offload spec still passes 11/11, the focused spec optimizer scan
+    reports 3 opportunities, and the renderer optimizer scan now reports 692
+    remaining opportunities.
+28. Codex changed the Simple Web child-index builder and overflow clip-cache
+    builder to allocate fixed-size arrays from the known node count and assign
+    by index instead of growing via `push(...)`. This keeps child order and clip
+    inheritance behavior stable while avoiding two startup push-build loops. The
+    focused Simple Web layout spec still passes 7/7, the adjacent Web Engine2D
+    Metal-offload spec still passes 11/11, the focused spec optimizer scan
+    remains at 3 opportunities, and the renderer optimizer scan now reports 690
+    remaining opportunities.
+29. Codex removed the parser close-tag `next_stack` allocation/copy path. A
+    matched close tag now trims the parent stack in place with `pop(...)` down
+    to the matched opening tag, preserving the existing tolerant HTML behavior
+    while avoiding a fresh list allocation on every close tag. The focused
+    Simple Web layout spec still passes 7/7, the adjacent Web Engine2D
+    Metal-offload spec still passes 11/11, and the renderer optimizer scan now
+    reports 687 remaining opportunities.
+30. Codex avoided splitting empty class attributes during HTML parsing. Elements
+    without a `class` attribute now keep the default empty `class_words` list,
+    while non-empty class attributes still use the existing split path. A new
+    selector oracle proves tag rules still apply and absent class selectors do
+    not match unclassed nodes. The focused Simple Web layout spec now passes
+    8/8, the adjacent Web Engine2D Metal-offload spec still passes 11/11, the
+    mirrored manual was regenerated, and the renderer optimizer scan remains at
+    687 remaining opportunities.
+31. Spark was assigned the next easy parser slice: move widget/focus class flag
+    substring scans under the existing non-empty class branch. Spark quota was
+    exhausted before it could produce a patch, so Codex completed and reviewed
+    the same one-file change locally. Unclassed elements now skip all six
+    `class_contains(...)` scans and keep the default false `mk_node` flags. The
+    focused renderer check passes, the Simple Web layout spec still passes 8/8,
+    the adjacent Web Engine2D Metal-offload spec still passes 11/11,
+    `doc/06_spec` executable spec count remains 0, SPipe dev-command wiring
+    reports PASS, whitespace diff is clean, and the renderer optimizer scan
+    remains at 687 opportunities.
+32. Codex removed the flex-wrap layout pass's dynamic `line_heights.push(...)`
+    growth by allocating a line-height buffer bounded by the flex child count
+    and tracking the actual `line_count`. A new focused flex-wrap oracle proves
+    first-line children stay aligned and the wrapped child moves to the next
+    row. The Simple Web layout spec now passes 9/9, the adjacent Web Engine2D
+    Metal-offload spec still passes 11/11, the mirrored manual was regenerated,
+    the focused spec optimizer scan remains at 3 opportunities, `doc/06_spec`
+    executable spec count remains 0, SPipe dev-command wiring reports PASS, and
+    whitespace diff is clean. The renderer optimizer scan reports 688
+    opportunities because the fixed buffer adds static indexed-assignment
+    bounds checks while removing the flex-wrap grow-by-push path.
+33. Codex removed two more known-size startup push builders. Selector group
+    parts now allocate one slot per selector group and assign by group index,
+    and computed styles now allocate one slot per parsed node and assign by
+    node index while preserving parent-before-child inheritance. The focused
+    renderer check passes, the Simple Web layout spec still passes 9/9, the
+    adjacent Web Engine2D Metal-offload spec still passes 11/11, the focused
+    spec optimizer scan remains at 3 opportunities, `doc/06_spec` executable
+    spec count remains 0, SPipe dev-command wiring reports PASS, whitespace
+    diff is clean, and the renderer optimizer scan returns to 687
+    opportunities.
+34. Codex removed the CSS rule candidate-list grow-by-push path by using a
+    fixed buffer sized to fallback plus optional id, tag, and class buckets and
+    merging only the populated prefix. The obsolete append and wrapper merge
+    helpers were removed after reference checks. The focused renderer check
+    passes, the Simple Web layout spec still passes 9/9, the adjacent Web
+    Engine2D Metal-offload spec still passes 11/11, the focused spec optimizer
+    scan remains at 3 opportunities, `doc/06_spec` executable spec count
+    remains 0, SPipe dev-command wiring reports PASS, whitespace diff is clean,
+    and the renderer optimizer scan remains at 687 opportunities while the
+    candidate-list push path is gone.
+35. Codex tightened the executable Engine2D backend-priority helper so its
+    numeric priorities exactly match the documented/default GUI order: Metal,
+    CUDA, ROCm/HIP, Qualcomm, Vulkan, OpenCL, OpenGL, Intel, WebGPU, software,
+    CPU SIMD, CPU. The previous helper tied OpenCL and OpenGL even though the
+    default order list was already correct. The backend-order unit spec now
+    asserts every adjacent priority edge and its mirrored manual was
+    regenerated. Verification: backend-order spec 4/4, adjacent WebGPU unit
+    spec 5/5, adjacent Web Engine2D Metal-offload spec 11/11, helper optimizer
+    scan 50 opportunities, backend-order spec optimizer scan 12 opportunities,
+    `doc/06_spec` executable spec count 0, SPipe dev-command wiring PASS, and
+    whitespace diff clean.
+36. Codex added typed bitmap-font offload evidence to match the existing
+    vector-font evidence surface. `BitmapFontOffloadEvidence` records generated
+    copy readiness, CPU glyph preprocessing, GPU copy/upload readiness, and
+    explicitly reports `gpu_glyph_rasterized = false` until a real GPU bitmap
+    glyph raster path exists. The focused bitmap-font SSpec and mirrored manual
+    prove CUDA generated copy with CPU glyph preprocessing, CPU SIMD baseline,
+    and runtime-unavailable fail-closed states. Verification: bitmap-font
+    offload spec 3/3, vector-font offload spec 4/4, generated-kernel dispatch
+    spec 23/23, bitmap evidence module optimizer scan 7 opportunities, bitmap
+    spec optimizer scan 0 opportunities, `doc/06_spec` executable spec count 0,
+    SPipe dev-command wiring PASS, and whitespace diff clean.
+37. Codex updated the public Engine2D module overview, UI stack architecture,
+    and pixel comparison guide so typed vector-font and bitmap-font evidence are
+    discoverable. The docs now state that bitmap-font evidence means CPU glyph
+    preprocessing plus optional GPU copy/upload, not GPU-side bitmap glyph
+    rasterization. Verification: Engine2D module/bitmap evidence check passes,
+    bitmap-font offload spec remains 3/3, vector-font offload spec remains 4/4,
+    bitmap evidence module optimizer scan remains at 7 opportunities,
+    `doc/06_spec` executable spec count 0, SPipe dev-command wiring PASS, and
+    whitespace diff clean.
+38. Codex optimized OpenCL bitmap-text fallback paths. `OpenClBackend.draw_text`
+    and `draw_text_bg` now route directly to the mirror renderer when device
+    drawing is unavailable, avoiding temporary CPU glyph-buffer construction for
+    a GPU copy/upload path that cannot run. A focused OpenCL text fallback SSpec
+    and mirrored manual cover foreground and background text fallback states.
+    Verification: OpenCL text fallback spec 2/2, helpers text spec 4/4,
+    generated-kernel dispatch spec 23/23, OpenCL backend optimizer scan 74
+    opportunities, OpenCL text fallback spec optimizer scan 0 opportunities,
+    `doc/06_spec` executable spec count 0, SPipe dev-command wiring PASS, and
+    whitespace diff clean. The broader pre-existing
+    `backend_opencl_facade_spec.spl` still reports 4 passed / 2 failed even
+    after removing speculative added assertions, so it is tracked separately
+    from this focused slice.
+39. Codex optimized CUDA bitmap-text fallback paths. `CudaBackend.draw_text` and
+    `draw_text_bg` now route directly to the mirror renderer when the CUDA
+    backend is uninitialized, avoiding temporary CPU glyph-buffer construction
+    for a CUDA upload path that cannot run. A focused CUDA text fallback SSpec
+    and mirrored manual cover foreground and background text fallback states.
+    Verification: CUDA text fallback spec 2/2, helpers text spec 4/4,
+    generated-kernel dispatch spec 23/23, CUDA backend optimizer scan 70
+    opportunities, CUDA extension optimizer scan 7 opportunities, CUDA text
+    fallback spec optimizer scan 0 opportunities. The broader pre-existing
+    `backend_cuda_renderbackend_spec.spl` currently reports 9 passed / 2 failed
+    in this checkout and imports `cuda_2d_ptx_source` through a non-exporting
+    module during `check`, so it is tracked separately from this focused slice.
+40. Codex optimized ROCm/HIP bitmap-text fallback paths. `RocmBackend.draw_text`
+    and `draw_text_bg` now return before constructing text buffers when the
+    ROCm backend is uninitialized, preserving the existing dirty attempted-draw
+    state without staging glyphs for a HIP upload path that cannot run. A
+    focused ROCm text fallback SSpec and mirrored manual cover foreground and
+    background text fallback states. Verification: ROCm text fallback spec 2/2,
+    helpers text spec 4/4, ROCm session contract spec 8/8, ROCm backend
+    optimizer scan 53 opportunities, ROCm text fallback spec optimizer scan 0
+    opportunities. `bin/simple check` passes for the touched ROCm source/spec
+    and adjacent specs with the existing `gc_boundary_crossing` warning on
+    `backend_rocm.spl`'s SFFI import.
+41. Codex optimized Vulkan bitmap-text fallback paths. `VulkanBackend` now
+    returns before foreground text CPU-render/upload work when uninitialized,
+    and `draw_text_bg` returns before constructing a background text buffer when
+    Vulkan cannot upload it. Both paths preserve the dirty attempted-draw state.
+    A focused Vulkan text fallback SSpec and mirrored manual cover foreground
+    and background text fallback states. Verification: Vulkan text fallback spec
+    2/2, helpers text spec 4/4, Vulkan backend optimizer scan 45 opportunities,
+    Vulkan helper optimizer scan 63 opportunities, Vulkan text fallback spec
+    optimizer scan 0 opportunities. `bin/simple check` passes for the touched
+    Vulkan source/spec and adjacent specs with the existing
+    `gc_boundary_crossing` warnings on the Vulkan SFFI imports.
+42. Codex optimized OpenGL bitmap-text fallback paths. `OpenGLBackend.draw_text`
+    and `draw_text_bg` now return before constructing foreground/background text
+    buffers when the OpenGL backend is uninitialized, avoiding CPU glyph work
+    for an upload path with no valid GL context. A focused OpenGL text fallback
+    SSpec and mirrored manual cover foreground and background uninitialized
+    fallback states. Verification: OpenGL text fallback spec 2/2, helpers text
+    spec 4/4, OpenGL backend optimizer scan 22 opportunities, OpenGL text
+    fallback spec optimizer scan 0 opportunities. `bin/simple check` passes for
+    the touched OpenGL source/spec and adjacent helper spec.
+43. Codex optimized Intel oneAPI bitmap-text fallback paths. `IntelBackend`
+    now returns before foreground CPU text render/upload work and background
+    text buffer construction when uninitialized, preserving the dirty
+    attempted-draw state. `draw_text_bg` also seeds its known-size background
+    buffer directly instead of growing it with repeated `push`. A focused Intel
+    text fallback SSpec and mirrored manual cover foreground and background
+    uninitialized fallback states. Verification: Intel text fallback spec 2/2,
+    helpers text spec 4/4, Intel backend optimizer scan 26 opportunities after
+    removing the preallocation warning, Intel helper optimizer scan 34
+    opportunities, Intel text fallback spec optimizer scan 0 opportunities.
+    `bin/simple check` passes for the touched Intel source/spec and adjacent
+    helper spec.
+44. Codex optimized WebGPU pre-init bitmap-text paths. `WebGpuBackend.draw_text`
+    and `draw_text_bg` now return before constructing foreground/background
+    text buffers when the backend has not been initialized or has zero
+    dimensions, while initialized CPU-parity drawing remains unchanged. A
+    focused WebGPU text fallback SSpec and mirrored manual cover pre-init
+    foreground and background text states. Verification: WebGPU text fallback
+    spec 2/2, existing WebGPU behavior spec 5/5, helpers text spec 4/4, WebGPU
+    backend optimizer scan 69 opportunities, WebGPU text fallback spec
+    optimizer scan 0 opportunities. `bin/simple check` passes for the touched
+    WebGPU source/spec and adjacent specs with the existing
+    `gc_boundary_crossing` warning on the WebGPU SFFI import.
+45. Codex optimized the pure Simple software fallback path by hoisting repeated
+    dirty-tile and `draw_text` length checks in `SoftwareBackend`, and by
+    caching the AA text helper buffer length outside the innermost blend loop.
+    Verification: helpers text spec 4/4, software primitive spec 6/6, software
+    SIMD spec 7/7, and `bin/simple check` passes for the touched software/text
+    helper sources and focused specs. Software backend optimizer scan dropped
+    from 90 to 87 opportunities after removing the three `hoist_len_call`
+    warnings; helpers text optimizer scan remains at 37 opportunities, and
+    helpers text spec optimizer scan reports 10 opportunities. The broader
+    pre-existing `draw_text_bg_spec.spl` currently reports 1 passed / 2 failed
+    and is tracked separately from this loop-hoist slice.
+46. Codex resolved the CPU `draw_text_bg` spec failure. Diagnostic probes showed
+    the renderer already preserved outside pixels, changed inside glyph-cell
+    pixels, and produced intermediate AA red coverage; the failure was stale
+    matcher syntax in the spec. Replacing `to_be_true()` with `to_be(true)`
+    keeps the same pixel assertions while using the supported matcher path.
+    Verification: CPU `draw_text_bg` spec 3/3, helpers text spec 4/4, software
+    primitive spec 6/6, and the mirrored manual was regenerated. Optimizer
+    scans report `draw_text_bg_spec.spl` 9 opportunities, software backend 87
+    opportunities, and helpers text 37 opportunities.

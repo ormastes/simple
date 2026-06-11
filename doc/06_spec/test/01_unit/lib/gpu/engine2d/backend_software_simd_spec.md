@@ -1,6 +1,6 @@
 # Backend Software Simd Specification
 
-> 1. var backend = SoftwareBackend create
+> <details>
 
 <!-- sdn-diagram:id=backend_software_simd_spec.arch -->
 <details class="sdn-source">
@@ -42,19 +42,16 @@ backend_software_simd_spec -> std
 
 #### AC-6: clear uses simd_fill_row when available
 
-1. var backend = SoftwareBackend create
-
-2. reset simd hits
-
-3. backend clear
+- var backend = SoftwareBackend create
+- reset simd hits
+- backend clear
    - Expected: pixels[0] equals `0xFFFF0000`
    - Expected: pixels[63] equals `0xFFFF0000`
-
-4. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -75,16 +72,14 @@ if backend.init(64, 64):
 
 #### AC-6: clear produces same result with and without SIMD
 
-1. var backend = SoftwareBackend create
-
-2. backend clear
+- var backend = SoftwareBackend create
+- backend clear
    - Expected: all_green is true
-
-3. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -110,20 +105,16 @@ if backend.init(64, 64):
 
 #### AC-6: blit uses simd_blit_row for row copies
 
-1. var backend = SoftwareBackend create
-
-2. reset simd hits
-
-3. backend clear
-
-4. backend blit image
+- var backend = SoftwareBackend create
+- reset simd hits
+- backend clear
+- backend blit image
    - Expected: pixels[0] equals `0xFFFF0000`
-
-5. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -147,18 +138,15 @@ if backend.init(64, 64):
 
 #### AC-6: draw_rect_filled opaque spans record simd fill hits
 
-1. var backend = SoftwareBackend create
-
-2. reset simd hits
-
-3. backend draw rect filled
+- var backend = SoftwareBackend create
+- reset simd hits
+- backend draw rect filled
    - Expected: pixels[5 * 64 + 4] equals `0xFFFF0000`
-
-4. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -178,19 +166,15 @@ if backend.init(64, 64):
 
 #### AC-6: draw_rect_filled with alpha uses simd_blend_row
 
-1. var backend = SoftwareBackend create
-
-2. reset simd hits
-
-3. backend clear
-
-4. backend draw rect filled
-
-5. backend shutdown
+- var backend = SoftwareBackend create
+- reset simd hits
+- backend clear
+- backend draw rect filled
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -214,18 +198,15 @@ if backend.init(64, 64):
 
 #### AC-6: works correctly when no SIMD available
 
-1. var backend = SoftwareBackend create
-
-2. backend clear
-
-3. backend draw line
+- var backend = SoftwareBackend create
+- backend clear
+- backend draw line
    - Expected: pixels[0] equals `0xFFFFFFFF`
-
-4. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -244,20 +225,16 @@ if backend.init(8, 8):
 
 #### AC-6: tile-based rendering preserved with SIMD
 
-1. var backend = SoftwareBackend create
-
-2. backend clear
-
-3. backend draw rect filled
-
-4. backend present
+- var backend = SoftwareBackend create
+- backend clear
+- backend draw rect filled
+- backend present
    - Expected: pixels[0] equals `0xFFFF0000`
-
-5. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

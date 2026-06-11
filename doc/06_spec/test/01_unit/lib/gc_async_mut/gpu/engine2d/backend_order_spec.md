@@ -106,14 +106,21 @@ expect(backend_canonical_name("simd-cpu")).to_equal("cpu_simd")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(backend_priority("metal")).to_be_less_than(backend_priority("cuda"))
 expect(backend_priority("cuda")).to_be_less_than(backend_priority("rocm"))
 expect(backend_priority("rocm")).to_be_less_than(backend_priority("vulkan"))
+expect(backend_priority("rocm")).to_be_less_than(backend_priority("qualcomm"))
+expect(backend_priority("qualcomm")).to_be_less_than(backend_priority("vulkan"))
+expect(backend_priority("vulkan")).to_be_less_than(backend_priority("opencl"))
+expect(backend_priority("opencl")).to_be_less_than(backend_priority("opengl"))
+expect(backend_priority("opengl")).to_be_less_than(backend_priority("intel"))
+expect(backend_priority("intel")).to_be_less_than(backend_priority("webgpu"))
 expect(backend_priority("vulkan")).to_be_less_than(backend_priority("software"))
+expect(backend_priority("webgpu")).to_be_less_than(backend_priority("software"))
 expect(backend_priority("software")).to_be_less_than(backend_priority("cpu_simd"))
 expect(backend_priority("cpu_simd")).to_be_less_than(backend_priority("cpu"))
 ```

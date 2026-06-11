@@ -1,6 +1,6 @@
 # Backend Software Primitives Specification
 
-> 1. var b = SoftwareBackend create
+> <details>
 
 <!-- sdn-diagram:id=backend_software_primitives_spec.arch -->
 <details class="sdn-source">
@@ -27,7 +27,7 @@ backend_software_primitives_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -40,18 +40,15 @@ backend_software_primitives_spec -> std
 
 #### draw_rect_filled fills its interior
 
-1. var b = SoftwareBackend create
-
-2. b clear
-
-3. b draw rect filled
+- var b = SoftwareBackend create
+- b clear
+- b draw rect filled
    - Expected: p[4 * 32 + 4] equals `0xFFFF0000u32`
-
-4. b shutdown
+- b shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -68,20 +65,48 @@ if b.init(32, 32):
 
 </details>
 
-#### draw_circle_filled writes its center (regression)
+#### draw_rect_filled respects active clip bounds
 
-1. var b = SoftwareBackend create
-
-2. b clear
-
-3. b draw circle filled
-   - Expected: p[16 * 32 + 16] equals `0xFF00FF00u32`
-
-4. b shutdown
+- var b = SoftwareBackend create
+- b clear
+- b set clip
+- b draw rect filled
+   - Expected: p[3 * 32 + 3] equals `0xFFFF0000u32`
+   - Expected: p[5 * 32 + 5] equals `BG`
+- b shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = SoftwareBackend.create()
+if b.init(32, 32):
+    b.clear(BG)
+    b.set_clip(0, 0, 4, 4)
+    b.draw_rect_filled(2, 2, 8, 8, 0xFFFF0000u32)
+    val p = b.read_pixels()
+    expect(p[3 * 32 + 3]).to_equal(0xFFFF0000u32)
+    expect(p[5 * 32 + 5]).to_equal(BG)
+    b.shutdown()
+```
+
+</details>
+
+#### draw_circle_filled writes its center (regression)
+
+- var b = SoftwareBackend create
+- b clear
+- b draw circle filled
+   - Expected: p[16 * 32 + 16] equals `0xFF00FF00u32`
+- b shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -100,18 +125,15 @@ if b.init(32, 32):
 
 #### draw_line writes pixels along the line (regression)
 
-1. var b = SoftwareBackend create
-
-2. b clear
-
-3. b draw line
+- var b = SoftwareBackend create
+- b clear
+- b draw line
    - Expected: p[16 * 32 + 15] equals `0xFF0000FFu32`
-
-4. b shutdown
+- b shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -130,20 +152,17 @@ if b.init(32, 32):
 
 #### draw_gradient_rect shades top-to-bottom (regression)
 
-1. var b = SoftwareBackend create
-
-2. b clear
-
-3. b draw gradient rect
+- var b = SoftwareBackend create
+- b clear
+- b draw gradient rect
    - Expected: top != BG is true
    - Expected: bot != BG is true
    - Expected: top != bot is true
-
-4. b shutdown
+- b shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -166,19 +185,16 @@ if b.init(32, 32):
 
 #### draw_rounded_rect draws edge and rounds the corner (regression)
 
-1. var b = SoftwareBackend create
-
-2. b clear
-
-3. b draw rounded rect
+- var b = SoftwareBackend create
+- b clear
+- b draw rounded rect
    - Expected: p[4 * 32 + 16] equals `0xFFFFFF00u32`
    - Expected: p[4 * 32 + 4] equals `BG`
-
-4. b shutdown
+- b shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -198,19 +214,16 @@ if b.init(32, 32):
 
 #### draw_text writes glyph pixels (regression)
 
-1. var b = SoftwareBackend create
-
-2. b clear
-
-3. b draw text
-
-4. b shutdown
+- var b = SoftwareBackend create
+- b clear
+- b draw text
+- b shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -221,11 +234,108 @@ if b.init(48, 16):
     val p = b.read_pixels()
     var n = 0
     var i = 0
-    while i < p.len():
+    val pixel_count = p.len()
+    while i < pixel_count:
         if p[i] != BG:
             n = n + 1
         i = i + 1
     expect(n).to_be_greater_than(0)
+    b.shutdown()
+```
+
+</details>
+
+#### draw_text clips offscreen spans on the fast path
+
+- var full = SoftwareBackend create
+- var left = SoftwareBackend create
+- var right = SoftwareBackend create
+- full clear
+- left clear
+- right clear
+- full draw text
+- left draw text
+- right draw text
+- full shutdown
+- left shutdown
+- right shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var full = SoftwareBackend.create()
+var left = SoftwareBackend.create()
+var right = SoftwareBackend.create()
+if full.init(48, 16) and left.init(48, 16) and right.init(48, 16):
+    full.clear(BG)
+    left.clear(BG)
+    right.clear(BG)
+    full.draw_text(8, 2, "Hi", 0xFFFFFFFFu32, 8)
+    left.draw_text(-4, 2, "Hi", 0xFFFFFFFFu32, 8)
+    right.draw_text(44, 2, "Hi", 0xFFFFFFFFu32, 8)
+    val full_p = full.read_pixels()
+    val left_p = left.read_pixels()
+    val right_p = right.read_pixels()
+    var full_count = 0
+    var left_count = 0
+    var right_count = 0
+    var i = 0
+    val pixel_count = full_p.len()
+    while i < pixel_count:
+        if full_p[i] != BG:
+            full_count = full_count + 1
+        if left_p[i] != BG:
+            left_count = left_count + 1
+        if right_p[i] != BG:
+            right_count = right_count + 1
+        i = i + 1
+    expect(left_count).to_be_greater_than(0)
+    expect(right_count).to_be_greater_than(0)
+    expect(left_count).to_be_less_than(full_count)
+    expect(right_count).to_be_less_than(full_count)
+    full.shutdown()
+    left.shutdown()
+    right.shutdown()
+```
+
+</details>
+
+#### draw_text respects active clip bounds
+
+- var b = SoftwareBackend create
+- b clear
+- b set clip
+- b draw text
+   - Expected: n equals `0`
+- b shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = SoftwareBackend.create()
+if b.init(48, 16):
+    b.clear(BG)
+    b.set_clip(32, 0, 8, 16)
+    b.draw_text(1, 2, "Hi", 0xFFFFFFFFu32, 8)
+    val p = b.read_pixels()
+    var n = 0
+    var i = 0
+    val pixel_count = p.len()
+    while i < pixel_count:
+        if p[i] != BG:
+            n = n + 1
+        i = i + 1
+    expect(n).to_equal(0)
     b.shutdown()
 ```
 
@@ -250,8 +360,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

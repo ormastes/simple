@@ -1,0 +1,62 @@
+# Engine2D bitmap-font offload evidence.
+#
+# Bitmap text currently rasterizes glyph pixels on CPU, then uses backend image
+# copy/upload lanes where available. This wrapper makes that state explicit so
+# GPU copy evidence is not mistaken for GPU-side glyph rasterization.
+
+use std.gpu.engine2d.generated_kernel_dispatch.{Generated2DOperationProvenance, generated_2d_operation_provenance}
+
+class BitmapFontOffloadEvidence:
+    backend_name: text
+    width: i64
+    height: i64
+    generated: Generated2DOperationProvenance
+    generated_ready: bool
+    cpu_glyph_preprocess_required: bool
+    gpu_copy_upload_ready: bool
+    gpu_glyph_rasterized: bool
+    production_ready: bool
+    status_code: text
+    reason: text
+
+    static fn create(backend: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> BitmapFontOffloadEvidence:
+        val generated = generated_2d_operation_provenance(backend, "bitmap_font", width, height, runtime_ready, module_ready, args_ptr)
+        val copy_ready = generated.ready and generated.cpu_preprocess_required and generated.generated_artifact_required
+        val status = _bitmap_font_offload_status(generated, copy_ready)
+        BitmapFontOffloadEvidence(
+            backend_name: backend,
+            width: width,
+            height: height,
+            generated: generated,
+            generated_ready: generated.ready,
+            cpu_glyph_preprocess_required: generated.cpu_preprocess_required,
+            gpu_copy_upload_ready: copy_ready,
+            gpu_glyph_rasterized: false,
+            production_ready: false,
+            status_code: status,
+            reason: _bitmap_font_offload_reason(generated, copy_ready)
+        )
+
+    fn diagnostic_text() -> text:
+        "BitmapFontOffloadEvidence[backend={self.backend_name} size={self.width}x{self.height} generated_ready={self.generated_ready.to_text()} cpu_glyph_preprocess={self.cpu_glyph_preprocess_required.to_text()} gpu_copy_upload_ready={self.gpu_copy_upload_ready.to_text()} gpu_glyph_rasterized={self.gpu_glyph_rasterized.to_text()} production_ready={self.production_ready.to_text()} status={self.status_code} reason={self.reason} generated={self.generated.diagnostic_text()}]"
+
+fn _bitmap_font_offload_status(generated: Generated2DOperationProvenance, copy_ready: bool) -> text:
+    if not generated.ready:
+        return generated.typed_status
+    if copy_ready:
+        return "gpu-copy-with-cpu-glyph"
+    if generated.ready and generated.cpu_preprocess_required:
+        return "cpu-glyph-baseline"
+    "bitmap-font-copy-not-ready"
+
+fn _bitmap_font_offload_reason(generated: Generated2DOperationProvenance, copy_ready: bool) -> text:
+    if not generated.ready:
+        return generated.reason
+    if copy_ready:
+        return "bitmap-font-glyphs-rasterized-on-cpu-then-uploaded"
+    if generated.ready and generated.cpu_preprocess_required:
+        return "bitmap-font-glyphs-rasterized-on-cpu"
+    "bitmap-font-generated-copy-missing"
+
+fn bitmap_font_offload_evidence(backend: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> BitmapFontOffloadEvidence:
+    BitmapFontOffloadEvidence.create(backend, width, height, runtime_ready, module_ready, args_ptr)

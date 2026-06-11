@@ -809,3 +809,296 @@ Attempted extra smoke:
   exited `-1` with no output. The direct renderer specs above stayed green, so
   this remains a measurement-entrypoint/runtime follow-up rather than evidence
   against the layout child-index change.
+
+## 2026-06-11 CSS cascade candidate optimization
+
+Spark reviewed the pure-Simple CSS selector cascade loop as an easy read-only
+task. The risky part is selector semantics, so the implementation keeps the
+existing full selector matcher as the final authority and only uses buckets to
+reduce the number of candidate rules sent into that matcher.
+
+The renderer now builds a `RuleBuckets` index once per `compute_styles(...)`
+call. Each selector group is bucketed by the rightmost simple selector into id,
+class, tag, or fallback buckets. Per-node style computation gathers only the
+fallback rules plus matching id, tag, and class buckets. The candidate lists
+are already in source order, so the implementation merges those lists and
+deduplicates repeated rule membership instead of flattening then selection
+sorting. Declarations still apply only after
+`selector_matches_node_group_parts(...)` succeeds. This preserves cascade order
+while avoiding both the previous every-rule/every-node selector walk and the
+follow-up O(k^2) candidate sort for common startup pages.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `5 passed, 0 failed`
+- `bin/simple test test/02_integration/rendering/web_engine2d_metal_offload_spec.spl --no-cache`:
+  `11 passed, 0 failed`
+- Optimizer analysis ran on the touched renderer and focused spec. It still
+  reports follow-up opportunities such as bounds-check elimination, len-call
+  hoisting, and collection preallocation.
+
+## 2026-06-11 Paint ancestor-clip cache
+
+The paint path still recomputed the same ancestor clip for a node in multiple
+passes: normal backgrounds/borders, absolute backgrounds/borders, positive
+z-index backgrounds/borders, icon/image chrome, and text rendering. Each
+`ancestor_clip(...)` call walked the parent chain to intersect overflow-hidden
+ancestors, so deep or node-heavy pages paid repeated parent-chain traversal
+during startup rendering.
+
+`paint(...)` now asks `build_ancestor_clip_cache(...)` for a `PaintClipCache`.
+Pages without visible `overflow:hidden` skip per-node clip allocation and reuse
+one framebuffer-sized default clip. Pages with overflow clipping build a per-node
+cache once; because parsed nodes are parent-before-child, each node derives its
+clip from the cached parent clip plus the direct parent's overflow-hidden
+content box. The existing draw calls then use `paint_clip_at(...)`. This
+preserves clipping semantics while removing repeated ancestor walks across paint
+passes and avoiding the clip-array allocation for the common unclipped case.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `5 passed, 0 failed`
+- The focused spec now includes an overflow-hidden pixel oracle: an overflowing
+  child paints inside the clipped container and leaves the outside pixel white.
+
+## 2026-06-11 Widget paint flag pre-pass
+
+After the clip cache, `paint(...)` still did two node-wide scans for widget
+fixtures: `has_nonempty_widget_text_node(...)` walked the tree with widget
+ancestor state, then a separate loop scanned for `has_widget_panel_class`.
+`has_widget_ancestor(...)` was also left as an unused parent-walk helper.
+
+`compute_widget_paint_flags(...)` now computes panel presence and non-empty
+widget text in one pass, using the same parent-before-child widget ancestor
+flagging as the previous text helper. `paint(...)` consumes the resulting
+`WidgetPaintFlags`, and the unused parent-walk helper is removed. When widget
+text is not needed, the helper uses a panel-only scan and skips the
+`[0; nodes.len()]` widget-ancestor scratch allocation entirely.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `5 passed, 0 failed`
+- The focused spec includes a widget-mode chrome oracle that asserts the
+  generated blue border pixel remains `0xff0066cc`.
+
+## 2026-06-11 Nested flex intrinsic-width memo
+
+Nested flex layout still allocated a fresh `[-1; nodes.len()]` intrinsic-width
+memo inside every non-column flex container before measuring child text widths.
+That kept the hot path interpreter-bound on node-heavy flex startup fixtures.
+
+`LayoutResult` now carries the intrinsic-width memo. Public layout entrypoints
+seed it once with `neg_one_i32_list(node_count)`, recursive layout branches pass
+the current memo into children, and then fold each child result's memo back into
+the parent. Intrinsic text width measurement keeps its existing memo semantics
+but reuses the shared array through nested flex recursion.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+- The focused spec includes a nested flex oracle that verifies outer width,
+  nonzero inner width, and stable sibling x-order.
+
+## 2026-06-11 Child-index build and dead selector cleanup
+
+`build_child_index(...)` still paid two full walks over the parsed node arena:
+one to allocate each child-list slot and another to attach each node to its
+parent's child list. Parsed HTML nodes are parent-before-child, so the renderer
+now attaches the current node to its parent during the same pass that creates
+the current node's child-list slot. The guard `parent < children.len()` remains
+in place, preserving behavior if malformed input ever violates that ordering.
+
+Spark also ran a read-only reference scan for legacy selector helpers. The scan
+proved the local `selector_matches(...)`, `selector_group_matches_node(...)`,
+`selector_matches_node(...)`, and `class_has(...)` helpers in
+`simple_web_html_layout_renderer.spl` were unused by repo call sites. Those
+dead helpers are removed; the live `class_contains(...)` widget-class path is
+unchanged.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+- `rg -n "fn class_has\\(|fn selector_matches\\(|fn selector_group_matches_node\\(|fn selector_matches_node\\(" src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  returns no matches.
+
+## 2026-06-11 Text paint range clipping cleanup
+
+The active text paint path renders through `fb_text_thin_scaled_clip_range(...)`
+for normal pages and `fb_text_sparse_range(...)` for widget-mode pages. Before
+this cleanup, both range helpers still scanned every character in a line even
+after the advancing x position was outside the framebuffer or clip, and they
+entered the character loop for rows that were vertically outside the target.
+
+Both active range helpers now return immediately for fully off-viewport text
+rows and stop scanning the current line once `cx` is beyond the framebuffer or
+clip edge. This preserves visible pixels because text advances monotonically to
+the right in these helpers. Spark also proved the older non-range renderer-local
+wrappers (`fb_text(...)`, `fb_text_thin_scaled(...)`,
+`fb_text_thin_scaled_clip(...)`, and `fb_text_sparse(...)`) had no call sites in
+the active renderer path, so those dead wrappers were removed while keeping the
+glyph helpers used by the range functions.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+- `rg -n "fn fb_text\\(|fn fb_text_thin_scaled\\(|fn fb_text_thin_scaled_clip\\(|fn fb_text_sparse\\(|fb_text_thin_scaled_clip_range\\(|fb_text_sparse_range\\(" src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  shows only the two active range helper definitions and their two paint call
+  sites.
+
+## 2026-06-11 Lazy final-pass paint clip lookup
+
+After the text range cleanup, the final text/icon paint pass still called
+`paint_clip_at(clip_cache, i)` for every node before checking whether that node
+would draw image, icon, or text content. Most nodes in startup fixtures do not
+draw in this final pass, so the lookup was repeated on the no-paint branch.
+
+The final pass now asks for the clip only inside the branches that draw clipped
+widget images, icon-image placeholders, or normal text. Widget-mode sparse text
+does not use the clip and no longer pays that lookup. The renderer also removes
+the now-unused unclipped glyph wrappers, leaving only the clipped normal-text
+glyph helper and sparse widget glyph helper used by active range paths.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+
+## 2026-06-11 Text render cache only computes text-node metrics
+
+`build_text_render_cache(...)` previously computed character width, advance,
+glyph scale, line height, and ink offsets for every parsed node, including
+elements that never read those text metrics in `paint(...)`. The cache arrays
+must stay indexed by node id, but non-text rows do not need expensive metric
+derivation.
+
+The builder now accepts `nodes` alongside `styles`, keeps one cache slot per
+style row, and computes real text metrics only when `nodes[i].tag == "#text"`.
+Element rows receive zero placeholders. This preserves the paint path's
+indexing contract while reducing startup work on DOM-heavy pages where most
+nodes are elements.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+
+## 2026-06-11 Remove unused text char-width cache
+
+After making `build_text_render_cache(...)` text-node-aware, `TextRenderCache`
+still carried a `char_widths` array that no active paint path read. Text layout
+width measurement uses the separate `char_w(...)` and intrinsic-width paths, not
+the paint cache field.
+
+`char_widths` is removed from the cache class and builder. The remaining arrays
+match the fields read by `paint(...)`: advances, scales, line heights, and ink
+offsets. This removes one per-node allocation/fill path without changing visible
+rendering or public entrypoints.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+- `rg -n "char_widths|TextRenderCache|text_render\\." src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  shows no `char_widths` references and only the active `text_render` field
+  reads.
+
+## 2026-06-11 Hoist normal text clip lookup per text node
+
+The final text paint pass previously resolved `paint_clip_at(clip_cache, i)`
+inside the wrapped-line loop for normal text. That repeated the same clip lookup
+for each line range of the same text node.
+
+The text branch now splits widget sparse text and normal clipped text. Widget
+text still skips clip lookup. Normal text resolves the clip once per text node
+and reuses it while painting all wrapped line ranges for that node.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+
+## 2026-06-11 Remove text metric staging cache
+
+After the prior cache reductions, `TextRenderCache` still allocated and filled
+five node-indexed arrays before paint, only for `paint(...)` to read each metric
+once per visible text node. That staging pass was no longer buying reuse.
+
+The renderer now computes glyph scale, advance, line height, and ink offsets
+inside the already-filtered `#text` paint branch. This removes the
+`TextRenderCache` class, the `build_text_render_cache(...)` pass, and both
+render-entry cache construction calls while preserving public render entrypoints
+and visible output.
+
+Verification:
+
+- `rg -n "TextRenderCache|build_text_render_cache|text_render" src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  returns no matches.
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+
+## 2026-06-11 Duplicate class bucket lookup skip
+
+The style candidate path collects rule buckets for every class token on a node.
+When HTML contains duplicate class tokens, the same class bucket was looked up
+and appended multiple times, only for `merge_sorted_rule_lists_unique(...)` to
+deduplicate the same rule ids later.
+
+`style_rule_candidates(...)` now skips class bucket lookup when the same trimmed
+class token already appeared earlier on the node. Cascade behavior is unchanged:
+candidate rule ids still merge in source order and
+`selector_matches_node_group_parts(...)` remains the final selector authority.
+The focused CSS oracle now uses `class="target target"` to exercise duplicate
+class membership while preserving the expected cascaded height.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`
+
+## 2026-06-11 Trivial selector candidate merge fast paths
+
+`merge_sorted_rule_lists_unique(...)` previously allocated a positions array and
+entered the k-way merge loop even when a node had zero or one candidate bucket
+list. The one-list case is already sorted and unique by rule insertion order, so
+the merge does not add value.
+
+The helper now returns `[]` for no lists and the original list for one list. The
+multi-list path remains unchanged and still deduplicates repeated rule ids in
+source order.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `6 passed, 0 failed`

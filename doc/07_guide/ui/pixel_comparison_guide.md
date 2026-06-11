@@ -124,6 +124,10 @@ The Simple web renderer has two code paths:
 ## Known Limitations
 
 - **Bitmap font**: 5x7 glyph grid scaled by `glyph_scale(font_size)` cannot match Chrome's vector font rendering. Needs TTF rasterizer integration (stb_truetype available in `src/runtime/stb_truetype.h`).
+- **Font offload evidence**: `vector_font_offload.spl` is the typed evidence
+  path for real GPU-returned vector glyph pixels. `bitmap_font_offload.spl`
+  records the current bitmap-font path as CPU glyph preprocessing plus optional
+  GPU copy/upload; it is not evidence of GPU-side bitmap glyph rasterization.
 - **No anti-aliasing**: Binary black/white pixels vs Chrome's subpixel AA.
 - **Tauri real capture**: No real WebView capture path exists yet. Chromium-via-Electron is the primary reference.
 - **Interpreter binary (v0.4.0)**: Cannot load `gc_async_mut.gpu.*` modules due to `Gpu` keyword parse error. Use native binary `src/compiler_rust/target/release/simple` (v1.0.0-beta).

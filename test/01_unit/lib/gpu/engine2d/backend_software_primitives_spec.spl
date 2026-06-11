@@ -28,6 +28,17 @@ describe "SoftwareBackend primitive rendering":
             expect(p[4 * 32 + 4]).to_equal(0xFFFF0000u32)
             b.shutdown()
 
+    it "draw_rect_filled respects active clip bounds":
+        var b = SoftwareBackend.create()
+        if b.init(32, 32):
+            b.clear(BG)
+            b.set_clip(0, 0, 4, 4)
+            b.draw_rect_filled(2, 2, 8, 8, 0xFFFF0000u32)
+            val p = b.read_pixels()
+            expect(p[3 * 32 + 3]).to_equal(0xFFFF0000u32)
+            expect(p[5 * 32 + 5]).to_equal(BG)
+            b.shutdown()
+
     it "draw_circle_filled writes its center (regression)":
         var b = SoftwareBackend.create()
         if b.init(32, 32):
@@ -77,9 +88,62 @@ describe "SoftwareBackend primitive rendering":
             val p = b.read_pixels()
             var n = 0
             var i = 0
-            while i < p.len():
+            val pixel_count = p.len()
+            while i < pixel_count:
                 if p[i] != BG:
                     n = n + 1
                 i = i + 1
             expect(n).to_be_greater_than(0)
+            b.shutdown()
+
+    it "draw_text clips offscreen spans on the fast path":
+        var full = SoftwareBackend.create()
+        var left = SoftwareBackend.create()
+        var right = SoftwareBackend.create()
+        if full.init(48, 16) and left.init(48, 16) and right.init(48, 16):
+            full.clear(BG)
+            left.clear(BG)
+            right.clear(BG)
+            full.draw_text(8, 2, "Hi", 0xFFFFFFFFu32, 8)
+            left.draw_text(-4, 2, "Hi", 0xFFFFFFFFu32, 8)
+            right.draw_text(44, 2, "Hi", 0xFFFFFFFFu32, 8)
+            val full_p = full.read_pixels()
+            val left_p = left.read_pixels()
+            val right_p = right.read_pixels()
+            var full_count = 0
+            var left_count = 0
+            var right_count = 0
+            var i = 0
+            val pixel_count = full_p.len()
+            while i < pixel_count:
+                if full_p[i] != BG:
+                    full_count = full_count + 1
+                if left_p[i] != BG:
+                    left_count = left_count + 1
+                if right_p[i] != BG:
+                    right_count = right_count + 1
+                i = i + 1
+            expect(left_count).to_be_greater_than(0)
+            expect(right_count).to_be_greater_than(0)
+            expect(left_count).to_be_less_than(full_count)
+            expect(right_count).to_be_less_than(full_count)
+            full.shutdown()
+            left.shutdown()
+            right.shutdown()
+
+    it "draw_text respects active clip bounds":
+        var b = SoftwareBackend.create()
+        if b.init(48, 16):
+            b.clear(BG)
+            b.set_clip(32, 0, 8, 16)
+            b.draw_text(1, 2, "Hi", 0xFFFFFFFFu32, 8)
+            val p = b.read_pixels()
+            var n = 0
+            var i = 0
+            val pixel_count = p.len()
+            while i < pixel_count:
+                if p[i] != BG:
+                    n = n + 1
+                i = i + 1
+            expect(n).to_equal(0)
             b.shutdown()

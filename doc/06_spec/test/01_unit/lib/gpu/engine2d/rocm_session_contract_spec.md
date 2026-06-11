@@ -41,7 +41,7 @@ rocm_session_contract_spec -> std
 #### reports ROCm kind and unavailable without an injected HIP FFI
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -59,7 +59,7 @@ expect(session.is_valid()).to_equal(false)
 #### fails closed when initializing or launching without HIP FFI
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -83,15 +83,14 @@ expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
 
 #### shutdown is safe on an uninitialized session
 
-1. var session = RocmSession create
-
-2. session shutdown
+- var session = RocmSession create
+- session shutdown
    - Expected: session.is_valid() is false
    - Expected: session.ref_count equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -108,7 +107,7 @@ expect(session.ref_count).to_equal(0)
 
 #### reports shared generated 2D runtime provenance without HIP FFI
 
-1. var session = RocmSession create
+- var session = RocmSession create
    - Expected: missing_runtime.ready is false
    - Expected: missing_runtime.typed_status equals `hip-runtime-unavailable`
    - Expected: still_missing_runtime.ready is false
@@ -116,7 +115,7 @@ expect(session.ref_count).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -139,7 +138,7 @@ expect(still_missing_runtime.diagnostic_text()).to_contain("launch=rt_rocm_launc
 
 #### reports typed ROCm session evidence for generated module launch and readback gates
 
-1. var session = RocmSession create
+- var session = RocmSession create
    - Expected: init_ev.success is false
    - Expected: init_ev.status_code equals `missing-ffi`
    - Expected: load_ev.success is false
@@ -152,7 +151,7 @@ expect(still_missing_runtime.diagnostic_text()).to_contain("launch=rt_rocm_launc
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -181,15 +180,14 @@ expect(matched.status_code).to_equal("readback-matched")
 
 #### static HIP FFI exposes runtime-backed init evidence without missing FFI
 
-1. var session = RocmSession create with ffi
+- var session = RocmSession create with ffi
    - Expected: init_ev.reason == "missing-rocm-ffi" is false
    - Expected: init_ev.status_code == "initialized" or init_ev.status_code == "runtime-unavailable" or init_ev.status_code == "device-unavailable" or init_ev.status_code == "init-failed" is true
-
-2. session shutdown
+- session shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -208,7 +206,7 @@ session.shutdown()
 #### exports the HIP nonzero image blit kernel for transparent text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -225,7 +223,7 @@ expect(source).to_contain("if (pixel == 0) return")
 #### exports shared generated HIP kernels with CUDA and OpenCL entry names
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

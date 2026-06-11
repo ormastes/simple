@@ -285,6 +285,13 @@ lane owns generated kernels, filter/layout compute, vector/font offload, and
 SIMD/GPU preparation work. A backend may implement both lanes on one device, but
 that is a `combined` lane plan rather than an implicit assumption. The current
 contract is in `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+Font offload evidence is intentionally split by font class:
+`src/lib/gc_async_mut/gpu/engine2d/vector_font_offload.spl` proves when vector
+glyph pixels have actually returned from a GPU path, while
+`src/lib/gc_async_mut/gpu/engine2d/bitmap_font_offload.spl` records the current
+bitmap-font state as CPU glyph preprocessing plus optional GPU copy/upload. Do
+not treat generated copy/upload evidence as GPU-side bitmap glyph
+rasterization.
 
 ### Event Target Translation
 

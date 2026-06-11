@@ -85,7 +85,7 @@ expect(pixels[outside_idx]).to_equal(GREEN)
 # on the active shared font renderer.
 val inside_idx = 15 * 32 + 0
 val inside = pixels[inside_idx]
-expect(inside != GREEN).to_be_true()
+expect(inside != GREEN).to_be(true)
 
 engine.shutdown()
 ```
@@ -127,7 +127,7 @@ engine.draw_text_bg(0, 0, "A", WHITE, BLACK, 16)
 engine.present()
 
 val pixels = engine.read_pixels()
-expect(_has_intermediate_red(pixels, 32, 0, 0, 16, 16)).to_be_true()
+expect(_has_intermediate_red(pixels, 32, 0, 0, 16, 16)).to_be(true)
 
 engine.shutdown()
 ```

@@ -107,7 +107,6 @@ fn text_render_metrics_to_buf(text_val: text, fg: u32, bg: u32, metrics: TextMet
     val buf_size = text_w * text_h
     var buf: [u32] = [bg; buf_size]
     val text_len = text_val.len()
-    val buf_len = buf.len()
     val scale = metrics.scale
     val advance = metrics.advance
     val gh = metrics.glyph_height_px
@@ -124,16 +123,13 @@ fn text_render_metrics_to_buf(text_val: text, fg: u32, bg: u32, metrics: TextMet
             while col < 5:
                 val bit = (row_data >> (4 - col)) & 1
                 if bit != 0:
+                    val glyph_x = cursor_x + col * scale
                     var sy = 0
                     while sy < scale:
+                        val row_base = (row * scale + sy) * text_w + glyph_x
                         var sx = 0
                         while sx < scale:
-                            val px = cursor_x + col * scale + sx
-                            val py = row * scale + sy
-                            if px >= 0 and py >= 0 and px < text_w and py < text_h:
-                                val idx = py * text_w + px
-                                if idx >= 0 and idx < buf_len:
-                                    buf[idx] = fg
+                            buf[row_base + sx] = fg
                             sx = sx + 1
                         sy = sy + 1
                 col = col + 1
@@ -216,6 +212,9 @@ fn text_aa_blit_buffer(text_val: text, fg: u32, bg: u32, font_size: i32) -> Text
     var buf: [u32] = [bg; text_w * text_h]
     val text_len = text_val.len()
     val scale = metrics.scale
+    val scale_f = _i32_to_f32(scale)
+    val glyph_pixel_width = 5 * scale
+    val glyph_pixel_height = metrics.height
     val gh = metrics.glyph_height_px
     val advance = metrics.advance
     var i: i64 = 0
@@ -225,18 +224,17 @@ fn text_aa_blit_buffer(text_val: text, fg: u32, bg: u32, font_size: i32) -> Text
         val ch = "{code as char}"
         val bitmap = glyph_data(ch)
         var py = 0
-        while py < text_h:
+        while py < glyph_pixel_height:
+            val sample_y = (_i32_to_f32(py) + 0.5) / scale_f - 0.5
             var px = 0
             while px < advance:
-                if px < 5 * scale:
-                    val sample_x = (_i32_to_f32(px) + 0.5) / _i32_to_f32(scale) - 0.5
-                    val sample_y = (_i32_to_f32(py) + 0.5) / _i32_to_f32(scale) - 0.5
+                if px < glyph_pixel_width:
+                    val sample_x = (_i32_to_f32(px) + 0.5) / scale_f - 0.5
                     val coverage = glyph_sample(bitmap, sample_x, sample_y, gh)
                     if coverage > 0:
                         val dst_x = cursor_x + px
                         val idx = py * text_w + dst_x
-                        if idx >= 0 and idx < buf.len():
-                            buf[idx] = blend_text_coverage(fg, bg, coverage * 255 / 1000)
+                        buf[idx] = blend_text_coverage(fg, bg, coverage * 255 / 1000)
                 px = px + 1
             py = py + 1
         cursor_x = cursor_x + advance

@@ -1,0 +1,41 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/bitmap_font_offload.spl 90%
+# @tag: unit, gpu, engine2d, bitmap-font
+
+use std.gpu.engine2d.bitmap_font_offload.{bitmap_font_offload_evidence}
+
+describe "Engine2D bitmap font offload evidence":
+
+    it "marks CUDA bitmap font as GPU copy with CPU glyph preprocessing":
+        val evidence = bitmap_font_offload_evidence("cuda", 64, 32, true, true, 4096)
+
+        expect(evidence.generated_ready).to_equal(true)
+        expect(evidence.cpu_glyph_preprocess_required).to_equal(true)
+        expect(evidence.gpu_copy_upload_ready).to_equal(true)
+        expect(evidence.gpu_glyph_rasterized).to_equal(false)
+        expect(evidence.production_ready).to_equal(false)
+        expect(evidence.status_code).to_equal("gpu-copy-with-cpu-glyph")
+        expect(evidence.reason).to_equal("bitmap-font-glyphs-rasterized-on-cpu-then-uploaded")
+        expect(evidence.generated.generated_operation).to_equal("copy")
+        expect(evidence.diagnostic_text()).to_contain("family=bitmap_font")
+
+    it "keeps CPU SIMD bitmap font evidence as a CPU preprocess baseline":
+        val evidence = bitmap_font_offload_evidence("cpu_simd_x86", 64, 32, false, false, 0)
+
+        expect(evidence.generated_ready).to_equal(true)
+        expect(evidence.cpu_glyph_preprocess_required).to_equal(true)
+        expect(evidence.gpu_copy_upload_ready).to_equal(false)
+        expect(evidence.gpu_glyph_rasterized).to_equal(false)
+        expect(evidence.status_code).to_equal("cpu-glyph-baseline")
+        expect(evidence.reason).to_equal("bitmap-font-glyphs-rasterized-on-cpu")
+        expect(evidence.generated.compute_target).to_equal("cpu_simd")
+        expect(evidence.generated.entry_name).to_equal("RenderBackend.draw_text_or_text_blit")
+
+    it "fails closed when bitmap font generated copy is unavailable":
+        val evidence = bitmap_font_offload_evidence("opencl", 64, 32, false, false, 4096)
+
+        expect(evidence.generated_ready).to_equal(false)
+        expect(evidence.gpu_copy_upload_ready).to_equal(false)
+        expect(evidence.gpu_glyph_rasterized).to_equal(false)
+        expect(evidence.production_ready).to_equal(false)
+        expect(evidence.status_code).to_equal("opencl-runtime-or-queue-unavailable")
+        expect(evidence.reason).to_equal("runtime-not-ready")

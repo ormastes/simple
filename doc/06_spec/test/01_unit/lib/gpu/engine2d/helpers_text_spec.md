@@ -27,7 +27,7 @@ helpers_text_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -62,14 +62,15 @@ expect(payload.pixels.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val payload = text_blit_buffer("I", 0xff111111u32, 0xff222222u32, 7)
 var fg_count = 0
 var idx = 0
-while idx < payload.pixels.len():
+val pixel_count = payload.pixels.len()
+while idx < pixel_count:
     if payload.pixels[idx] == 0xff111111u32:
         fg_count = fg_count + 1
     idx = idx + 1
@@ -88,7 +89,7 @@ expect(fg_count > 0).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -96,7 +97,8 @@ val payload = text_blit_buffer("Hi", 0xff111111u32, 0xff222222u32, 7)
 val direct = text_render_to_buf("Hi", 0xff111111u32, 0xff222222u32, 7)
 var mismatch_count = 0
 var idx = 0
-while idx < payload.pixels.len():
+val pixel_count = payload.pixels.len()
+while idx < pixel_count:
     if payload.pixels[idx] != direct[idx]:
         mismatch_count = mismatch_count + 1
     idx = idx + 1
@@ -107,12 +109,37 @@ expect(mismatch_count).to_equal(0)
 
 </details>
 
+#### keeps anti-aliased text padding rows as background
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val bg = 0xff222222u32
+val payload = text_aa_blit_buffer("A", 0xff111111u32, bg, 16)
+var mismatch_count = 0
+var idx = payload.width * 14
+val pixel_count = payload.pixels.len()
+while idx < pixel_count:
+    if payload.pixels[idx] != bg:
+        mismatch_count = mismatch_count + 1
+    idx = idx + 1
+
+expect(payload.height).to_equal(16)
+expect(mismatch_count).to_equal(0)
+```
+
+</details>
+
 #### uses zero pixels as transparent background for foreground text
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -121,7 +148,8 @@ val opaque = text_blit_buffer("A", 0xff111111u32, 0xff222222u32, 7)
 var differing_count = 0
 var fg_count = 0
 var idx = 0
-while idx < payload.pixels.len():
+val pixel_count = payload.pixels.len()
+while idx < pixel_count:
     if payload.pixels[idx] != opaque.pixels[idx]:
         differing_count = differing_count + 1
     if payload.pixels[idx] == 0xff111111u32:
@@ -156,8 +184,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

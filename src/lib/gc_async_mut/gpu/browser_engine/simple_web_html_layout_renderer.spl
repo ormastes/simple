@@ -52,23 +52,31 @@ class HNode:
     parent: i64        # index of parent in the arena (-1 for root)
 
 class HtmlChildIndex:
-    children: [[i32]]
+    first_child: [i32]
+    next_sibling: [i32]
+    child_count: [i32]
 
 fn mk_node(tag: text, parent: i64) -> HNode:
     HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent)
 
 fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
-    var children: [[i32]] = []
+    val node_count = nodes.len()
+    var first_child: [i32] = [-1; node_count]
+    var last_child: [i32] = [-1; node_count]
+    var next_sibling: [i32] = [-1; node_count]
+    var child_count: [i32] = [0; node_count]
     var i = 0
-    while i < nodes.len():
-        children.push([])
+    while i < node_count:
         val parent = nodes[i].parent
-        if parent >= 0 and parent < children.len():
-            var parent_children = children[parent]
-            parent_children.push(i)
-            children[parent] = parent_children
+        if parent >= 0 and parent < node_count:
+            if first_child[parent] < 0:
+                first_child[parent] = i
+            else:
+                next_sibling[last_child[parent]] = i
+            last_child[parent] = i
+            child_count[parent] = child_count[parent] + 1
         i = i + 1
-    HtmlChildIndex(children: children)
+    HtmlChildIndex(first_child: first_child, next_sibling: next_sibling, child_count: child_count)
 
 # ---------------------------------------------------------------------------
 # Position-aware string find (works around index_of(needle,pos) ignoring pos)
@@ -111,7 +119,8 @@ fn attr_value(inner: text, name: text) -> text:
     # unquoted: read to whitespace
     val sub = inner.substring(i, inner.len())
     var j = 0
-    while j < sub.len():
+    val sub_len = sub.len()
+    while j < sub_len:
         val c = sub.substring(j, j + 1)
         if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
             break
@@ -185,12 +194,11 @@ fn parse_html(html: text) -> [HNode]:
                     break
                 k = k - 1
             if found >= 1:
-                var next_stack: [i64] = []
-                var si = 0
-                while si < found:
-                    next_stack.push(pstack[si])
-                    si = si + 1
-                pstack = next_stack
+                val keep_stack_len = found
+                var stack_len = pstack.len()
+                while stack_len > keep_stack_len:
+                    pstack.pop()
+                    stack_len = stack_len - 1
             continue
         val name = tag_name_of(inner)
         if name == "style":
@@ -217,13 +225,14 @@ fn parse_html(html: text) -> [HNode]:
             continue
         var node = mk_node(name, pstack[pstack.len() - 1])
         node.class_attr = attr_value(inner, "class")
-        node.class_words = node.class_attr.split(" ")
-        node.has_widget_class = class_contains(node.class_attr, "widget-")
-        node.has_icon_image_class = class_contains(node.class_attr, "icon-image")
-        node.has_widget_panel_class = class_contains(node.class_attr, "widget-panel")
-        node.has_widget_button_class = class_contains(node.class_attr, "widget-button")
-        node.has_widget_image_class = class_contains(node.class_attr, "widget-image")
-        node.has_focused_class = class_contains(node.class_attr, "focused")
+        if node.class_attr.len() > 0:
+            node.class_words = node.class_attr.split(" ")
+            node.has_widget_class = class_contains(node.class_attr, "widget-")
+            node.has_icon_image_class = class_contains(node.class_attr, "icon-image")
+            node.has_widget_panel_class = class_contains(node.class_attr, "widget-panel")
+            node.has_widget_button_class = class_contains(node.class_attr, "widget-button")
+            node.has_widget_image_class = class_contains(node.class_attr, "widget-image")
+            node.has_focused_class = class_contains(node.class_attr, "focused")
         node.id_attr = attr_value(inner, "id")
         node.style_attr = attr_value(inner, "style")
         node.attrs_raw = inner
@@ -251,7 +260,8 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
     val rules = extract_css(html)
     val styles = compute_styles(nodes, rules)
     var i = 0
-    while i < nodes.len():
+    val node_count = nodes.len()
+    while i < node_count:
         if nodes[i].id_attr == id:
             val st = styles[i]
             if field == "decl_width":
@@ -307,7 +317,7 @@ pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32,
         neg_one_i32_list(node_count)
     )
     var i = 0
-    while i < nodes.len():
+    while i < node_count:
         if nodes[i].id_attr == id:
             if field == "x": return boxes.bx[i].to_string()
             if field == "y": return boxes.by[i].to_string()
@@ -410,7 +420,8 @@ fn parse_int(s: text) -> i32:
     var i = 0
     var v = 0
     var matched_any_digit = false
-    while i < t.len():
+    val t_len = t.len()
+    while i < t_len:
         val c = t.substring(i, i + 1)
         val digit = dec_val(c)
         if digit < 10:
@@ -425,11 +436,12 @@ fn parse_int(s: text) -> i32:
 fn parse_nth_int(s: text, target: i32) -> i32:
     var i = 0
     var seen = 0
-    while i < s.len():
+    val s_len = s.len()
+    while i < s_len:
         val c = s.substring(i, i + 1)
         if dec_val(c) < 10:
             var v = 0
-            while i < s.len():
+            while i < s_len:
                 val d = s.substring(i, i + 1)
                 val digit = dec_val(d)
                 if digit >= 10:
@@ -456,7 +468,8 @@ fn parse_opacity_pct(raw: text) -> i32:
         var frac = 0
         var scale = 1
         var i = dot + 1
-        while i < t.len() and scale < 100:
+        val t_len = t.len()
+        while i < t_len and scale < 100:
             val d = t.substring(i, i + 1)
             if d < "0" or d > "9":
                 break
@@ -475,8 +488,9 @@ fn parse_opacity_pct(raw: text) -> i32:
 fn decl_get(decls: text, prop: text) -> text:
     var pos = 0
     var found = ""
-    while pos < decls.len():
-        val tail = decls.substring(pos, decls.len())
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val tail = decls.substring(pos, decls_len)
         val semi = tail.index_of(";")
         val raw = if semi >= 0: tail.substring(0, semi) else: tail
         val colon = raw.index_of(":")
@@ -492,8 +506,9 @@ fn decl_get(decls: text, prop: text) -> text:
 fn decl_last_pos(decls: text, prop: text) -> i32:
     var pos = 0
     var found = -1
-    while pos < decls.len():
-        val tail = decls.substring(pos, decls.len())
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val tail = decls.substring(pos, decls_len)
         val semi = tail.index_of(";")
         val raw = if semi >= 0: tail.substring(0, semi) else: tail
         val colon = raw.index_of(":")
@@ -1097,7 +1112,8 @@ fn extract_css(html: text) -> Rules:
         val css = html.substring(open + 1, close)
         # split into "selector { decls }" chunks
         var cp = 0
-        while cp < css.len():
+        val css_len = css.len()
+        while cp < css_len:
             val brace = find_from(css, "{", cp)
             if brace < 0:
                 break
@@ -1152,7 +1168,8 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
 
 fn class_words_has(words: [text], want: text) -> bool:
     var i = 0
-    while i < words.len():
+    val word_count = words.len()
+    while i < word_count:
         if words[i] == want:
             return true
         i = i + 1
@@ -1196,7 +1213,8 @@ fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, 
 fn class_has_all(words: [text], wants: text) -> bool:
     val parts = wants.split(".")
     var i = 0
-    while i < parts.len():
+    val part_count = parts.len()
+    while i < part_count:
         val want = parts[i].trim()
         if want.len() > 0 and not class_words_has(words, want):
             return false
@@ -1207,11 +1225,12 @@ fn class_contains(cls: text, want: text) -> bool:
     cls.contains(want)
 
 fn split_selector_groups(sel: text) -> [text]:
-    var groups: [text] = []
     var current = ""
     var depth = 0
     var i = 0
-    while i < sel.len():
+    val sel_len = sel.len()
+    var group_count = 0
+    while i < sel_len:
         val ch = sel.substring(i, i + 1)
         if ch == "(":
             depth = depth + 1
@@ -1221,19 +1240,43 @@ fn split_selector_groups(sel: text) -> [text]:
                 depth = depth - 1
             current = current + ch
         elif ch == "," and depth == 0:
-            groups.push(current.trim())
+            group_count = group_count + 1
             current = ""
         else:
             current = current + ch
         i = i + 1
     if current.trim().len() > 0:
-        groups.push(current.trim())
+        group_count = group_count + 1
+    var groups: [text] = [""; group_count]
+    current = ""
+    depth = 0
+    i = 0
+    var group_i = 0
+    while i < sel_len:
+        val ch = sel.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = current + ch
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+            current = current + ch
+        elif ch == "," and depth == 0:
+            groups[group_i] = current.trim()
+            group_i = group_i + 1
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0:
+        groups[group_i] = current.trim()
     groups
 
 fn normalize_child_combinators(group: text) -> text:
     var out = ""
     var i = 0
-    while i < group.len():
+    val group_len = group.len()
+    while i < group_len:
         val ch = group.substring(i, i + 1)
         if ch == ">":
             out = out + " > "
@@ -1246,10 +1289,11 @@ fn selector_group_parts(group: text) -> [text]:
     normalize_child_combinators(group).split(" ")
 
 fn split_selector_group_parts(groups: [text]) -> [[text]]:
-    var parts: [[text]] = []
+    val group_count = groups.len()
+    var parts: [[text]] = [[]; group_count]
     var i = 0
-    while i < groups.len():
-        parts.push(selector_group_parts(groups[i]))
+    while i < group_count:
+        parts[i] = selector_group_parts(groups[i])
         i = i + 1
     parts
 
@@ -1305,18 +1349,35 @@ fn selector_bucket_value(part: text) -> text:
 
 fn text_key_index(keys: [text], key: text) -> i32:
     var i = 0
-    while i < keys.len():
+    val key_count = keys.len()
+    while i < key_count:
         if keys[i] == key:
             return i
         i = i + 1
     -1
 
-fn append_bucket_rule_list(keys: [text], rules_by_key: [[i32]], key: text, lists: [[i32]]) -> [[i32]]:
-    var out = lists
-    val idx = text_key_index(keys, key)
-    if idx < 0:
-        return out
-    out.push(rules_by_key[idx])
+fn text_key_index_count(keys: [text], key: text, key_count: i32) -> i32:
+    var i = 0
+    while i < key_count:
+        if keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn text_list_prefix(values: [text], count: i32) -> [text]:
+    var out: [text] = [""; count]
+    var i = 0
+    while i < count:
+        out[i] = values[i]
+        i = i + 1
+    out
+
+fn i32_list_prefix(values: [i32], count: i32) -> [i32]:
+    var out: [i32] = [0; count]
+    var i = 0
+    while i < count:
+        out[i] = values[i]
+        i = i + 1
     out
 
 fn text_seen_before(values: [text], end_index: i32, value: text) -> bool:
@@ -1327,14 +1388,13 @@ fn text_seen_before(values: [text], end_index: i32, value: text) -> bool:
         i = i + 1
     false
 
-fn merge_sorted_rule_lists_unique(lists: [[i32]]) -> [i32]:
-    val list_count = lists.len()
+fn merge_sorted_rule_lists_unique_count(lists: [[i32]], list_count: i32) -> [i32]:
     if list_count == 0:
         return []
     if list_count == 1:
         return lists[0]
     var positions: [i32] = [0; list_count]
-    var out: [i32] = []
+    var out_count = 0
     var last = -1
     var has_last = false
     var done = false
@@ -1344,90 +1404,192 @@ fn merge_sorted_rule_lists_unique(lists: [[i32]]) -> [i32]:
         var list_i = 0
         while list_i < list_count:
             val rules = lists[list_i]
+            val rule_count = rules.len()
             var pos = positions[list_i]
-            while pos < rules.len() and has_last and rules[pos] == last:
+            while pos < rule_count and has_last and rules[pos] == last:
                 pos = pos + 1
             positions[list_i] = pos
-            if pos < rules.len() and rules[pos] < min_rule:
+            if pos < rule_count and rules[pos] < min_rule:
                 min_rule = rules[pos]
                 found = true
             list_i = list_i + 1
         if found:
-            out.push(min_rule)
+            out_count = out_count + 1
+            last = min_rule
+            has_last = true
+        else:
+            done = true
+    positions = [0; list_count]
+    var out: [i32] = [0; out_count]
+    var out_i = 0
+    last = -1
+    has_last = false
+    done = false
+    while not done:
+        var min_rule = 2147483647
+        var found = false
+        var list_i = 0
+        while list_i < list_count:
+            val rules = lists[list_i]
+            val rule_count = rules.len()
+            var pos = positions[list_i]
+            while pos < rule_count and has_last and rules[pos] == last:
+                pos = pos + 1
+            positions[list_i] = pos
+            if pos < rule_count and rules[pos] < min_rule:
+                min_rule = rules[pos]
+                found = true
+            list_i = list_i + 1
+        if found:
+            out[out_i] = min_rule
+            out_i = out_i + 1
             last = min_rule
             has_last = true
         else:
             done = true
     out
 
+fn rule_lists_from_counts(counts: [i32]) -> [[i32]]:
+    val count_len = counts.len()
+    var lists: [[i32]] = [[]; count_len]
+    var i = 0
+    while i < count_len:
+        lists[i] = [0; counts[i]]
+        i = i + 1
+    lists
+
 fn build_rule_buckets(rules: Rules) -> RuleBuckets:
-    var id_keys: [text] = []
-    var id_rules: [[i32]] = []
-    var class_keys: [text] = []
-    var class_rules: [[i32]] = []
-    var tag_keys: [text] = []
-    var tag_rules: [[i32]] = []
-    var fallback_rules: [i32] = []
+    var bucket_capacity = 0
+    var cr = 0
+    val rule_count = rules.group_parts.len()
+    while cr < rule_count:
+        bucket_capacity = bucket_capacity + rules.group_parts[cr].len()
+        cr = cr + 1
+    var id_keys_raw: [text] = [""; bucket_capacity]
+    var id_counts_raw: [i32] = [0; bucket_capacity]
+    var id_key_count = 0
+    var class_keys_raw: [text] = [""; bucket_capacity]
+    var class_counts_raw: [i32] = [0; bucket_capacity]
+    var class_key_count = 0
+    var tag_keys_raw: [text] = [""; bucket_capacity]
+    var tag_counts_raw: [i32] = [0; bucket_capacity]
+    var tag_key_count = 0
+    var fallback_count = 0
     var r = 0
-    while r < rules.group_parts.len():
+    while r < rule_count:
         val groups = rules.group_parts[r]
         var g = 0
-        while g < groups.len():
+        val group_count = groups.len()
+        while g < group_count:
             val right = selector_rightmost_part(groups[g])
             val kind = selector_bucket_kind(right)
             val key = selector_bucket_value(right)
             if kind == "id" and key.len() > 0:
-                var idx = text_key_index(id_keys, key)
+                var idx = text_key_index_count(id_keys_raw, key, id_key_count)
                 if idx < 0:
-                    id_keys.push(key)
-                    id_rules.push([])
-                    idx = id_keys.len() - 1
-                var bucket = id_rules[idx]
-                bucket.push(r)
-                id_rules[idx] = bucket
+                    idx = id_key_count
+                    id_keys_raw[idx] = key
+                    id_key_count = id_key_count + 1
+                id_counts_raw[idx] = id_counts_raw[idx] + 1
             elif kind == "class" and key.len() > 0:
-                var idx = text_key_index(class_keys, key)
+                var idx = text_key_index_count(class_keys_raw, key, class_key_count)
                 if idx < 0:
-                    class_keys.push(key)
-                    class_rules.push([])
-                    idx = class_keys.len() - 1
-                var bucket = class_rules[idx]
-                bucket.push(r)
-                class_rules[idx] = bucket
+                    idx = class_key_count
+                    class_keys_raw[idx] = key
+                    class_key_count = class_key_count + 1
+                class_counts_raw[idx] = class_counts_raw[idx] + 1
             elif kind == "tag" and key.len() > 0:
-                var idx = text_key_index(tag_keys, key)
+                var idx = text_key_index_count(tag_keys_raw, key, tag_key_count)
                 if idx < 0:
-                    tag_keys.push(key)
-                    tag_rules.push([])
-                    idx = tag_keys.len() - 1
-                var bucket = tag_rules[idx]
-                bucket.push(r)
-                tag_rules[idx] = bucket
+                    idx = tag_key_count
+                    tag_keys_raw[idx] = key
+                    tag_key_count = tag_key_count + 1
+                tag_counts_raw[idx] = tag_counts_raw[idx] + 1
             else:
-                fallback_rules.push(r)
+                fallback_count = fallback_count + 1
+            g = g + 1
+        r = r + 1
+    val id_keys = text_list_prefix(id_keys_raw, id_key_count)
+    val id_counts = i32_list_prefix(id_counts_raw, id_key_count)
+    val class_keys = text_list_prefix(class_keys_raw, class_key_count)
+    val class_counts = i32_list_prefix(class_counts_raw, class_key_count)
+    val tag_keys = text_list_prefix(tag_keys_raw, tag_key_count)
+    val tag_counts = i32_list_prefix(tag_counts_raw, tag_key_count)
+    var id_rules = rule_lists_from_counts(id_counts)
+    var id_positions: [i32] = [0; id_counts.len()]
+    var class_rules = rule_lists_from_counts(class_counts)
+    var class_positions: [i32] = [0; class_counts.len()]
+    var tag_rules = rule_lists_from_counts(tag_counts)
+    var tag_positions: [i32] = [0; tag_counts.len()]
+    var fallback_rules: [i32] = [0; fallback_count]
+    var fallback_pos = 0
+    r = 0
+    while r < rule_count:
+        val groups = rules.group_parts[r]
+        var g = 0
+        val group_count = groups.len()
+        while g < group_count:
+            val right = selector_rightmost_part(groups[g])
+            val kind = selector_bucket_kind(right)
+            val key = selector_bucket_value(right)
+            if kind == "id" and key.len() > 0:
+                val idx = text_key_index(id_keys, key)
+                if idx >= 0:
+                    var bucket = id_rules[idx]
+                    bucket[id_positions[idx]] = r
+                    id_rules[idx] = bucket
+                    id_positions[idx] = id_positions[idx] + 1
+            elif kind == "class" and key.len() > 0:
+                val idx = text_key_index(class_keys, key)
+                if idx >= 0:
+                    var bucket = class_rules[idx]
+                    bucket[class_positions[idx]] = r
+                    class_rules[idx] = bucket
+                    class_positions[idx] = class_positions[idx] + 1
+            elif kind == "tag" and key.len() > 0:
+                val idx = text_key_index(tag_keys, key)
+                if idx >= 0:
+                    var bucket = tag_rules[idx]
+                    bucket[tag_positions[idx]] = r
+                    tag_rules[idx] = bucket
+                    tag_positions[idx] = tag_positions[idx] + 1
+            else:
+                fallback_rules[fallback_pos] = r
+                fallback_pos = fallback_pos + 1
             g = g + 1
         r = r + 1
     RuleBuckets(id_keys: id_keys, id_rules: id_rules, class_keys: class_keys, class_rules: class_rules, tag_keys: tag_keys, tag_rules: tag_rules, fallback_rules: fallback_rules)
 
 fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
-    var lists: [[i32]] = []
-    lists.push(buckets.fallback_rules)
-    if node.id_attr.len() > 0:
-        lists = append_bucket_rule_list(buckets.id_keys, buckets.id_rules, node.id_attr, lists)
-    lists = append_bucket_rule_list(buckets.tag_keys, buckets.tag_rules, node.tag, lists)
-    var i = 0
     val class_count = node.class_words.len()
+    var lists: [[i32]] = [[]; class_count + 3]
+    var list_count = 0
+    lists[list_count] = buckets.fallback_rules
+    list_count = list_count + 1
+    if node.id_attr.len() > 0:
+        val id_idx = text_key_index(buckets.id_keys, node.id_attr)
+        if id_idx >= 0:
+            lists[list_count] = buckets.id_rules[id_idx]
+            list_count = list_count + 1
+    val tag_idx = text_key_index(buckets.tag_keys, node.tag)
+    if tag_idx >= 0:
+        lists[list_count] = buckets.tag_rules[tag_idx]
+        list_count = list_count + 1
+    var i = 0
     while i < class_count:
         val cls = node.class_words[i].trim()
         if cls.len() > 0:
             if class_count <= 1 or not text_seen_before(node.class_words, i, cls):
-                lists = append_bucket_rule_list(buckets.class_keys, buckets.class_rules, cls, lists)
+                val class_idx = text_key_index(buckets.class_keys, cls)
+                if class_idx >= 0:
+                    lists[list_count] = buckets.class_rules[class_idx]
+                    list_count = list_count + 1
         i = i + 1
-    merge_sorted_rule_lists_unique(lists)
+    merge_sorted_rule_lists_unique_count(lists, list_count)
 
 fn selector_group_matches_node_parts(nodes: [HNode], idx: i32, parts: [text]) -> bool:
     var right = parts.len() - 1
-    while right >= 0 and parts[right].trim().len() == 0:
+    while right >= 0 and parts[right].trim() == "":
         right = right - 1
     if right < 0:
         return false
@@ -1470,7 +1632,8 @@ fn selector_group_matches_node_parts(nodes: [HNode], idx: i32, parts: [text]) ->
 
 fn selector_matches_node_group_parts(nodes: [HNode], idx: i32, group_parts: [[text]]) -> bool:
     var g = 0
-    while g < group_parts.len():
+    val group_count = group_parts.len()
+    while g < group_count:
         if selector_group_matches_node_parts(nodes, idx, group_parts[g]):
             return true
         g = g + 1
@@ -1482,22 +1645,24 @@ fn selector_matches_node_group_parts(nodes: [HNode], idx: i32, group_parts: [[te
 
 fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
     val rule_buckets = build_rule_buckets(rules)
-    var styles: [Style] = []
+    val node_count = nodes.len()
+    var styles: [Style] = [default_style(); node_count]
     var i = 0
-    while i < nodes.len():
+    while i < node_count:
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
         st = tag_defaults(st, nd.tag)
         val candidates = style_rule_candidates(nd, rule_buckets)
         var candidate_i = 0
-        while candidate_i < candidates.len():
+        val candidate_count = candidates.len()
+        while candidate_i < candidate_count:
             val r = candidates[candidate_i]
             if selector_matches_node_group_parts(nodes, i, rules.group_parts[r]):
                 st = apply_decls(st, rules.decls[r])
             candidate_i = candidate_i + 1
         if nd.style_attr.len() > 0:
             st = apply_decls(st, nd.style_attr)
-        styles.push(st)
+        styles[i] = st
         i = i + 1
     styles
 
@@ -1664,7 +1829,8 @@ fn _glyph_charset_index_of(ch: text) -> i32:
         return -1
     val needle = ch.char_code_at(0)
     var i = 0
-    while i < FONT_CHARSET.len():
+    val charset_len = FONT_CHARSET.len()
+    while i < charset_len:
         if FONT_CHARSET.char_code_at(i) == needle:
             return i
         i = i + 1
@@ -2024,7 +2190,8 @@ fn fb_generated_widget_chrome_text(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
         0xff666f7fu32, 0xffa8b2bfu32, 0xffaeb8c5u32, 0xff0f172au32, 0xffc9d3dfu32, 0xffcad4e0u32, 0xffbec8d4u32
     ]
     var i = 0
-    while i < xs.len():
+    val point_count = xs.len()
+    while i < point_count:
         out = fb_px(out, fbw, fbh, xs[i], ys[i], colors[i])
         i = i + 1
     out
@@ -2037,15 +2204,17 @@ fn compute_widget_paint_flags(nodes: [HNode], widget_mode: bool, need_text: bool
     if not need_text:
         var has_panel = widget_mode
         var scan = 0
-        while scan < nodes.len():
+        val node_count = nodes.len()
+        while scan < node_count:
             if nodes[scan].has_widget_panel_class:
                 has_panel = true
             scan = scan + 1
         return WidgetPaintFlags(has_widget_panel: has_panel, has_nonempty_widget_text: false)
-    var widget_ancestor_flags: [i32] = [0; nodes.len()]
+    val node_count = nodes.len()
+    var widget_ancestor_flags: [i32] = [0; node_count]
     var has_widget_panel = widget_mode
     var i = 0
-    while i < nodes.len():
+    while i < node_count:
         if nodes[i].has_widget_panel_class:
             has_widget_panel = true
         var has_widget_parent = 0
@@ -2067,7 +2236,8 @@ fn is_text_flow_fixture(nodes: [HNode], fbw: i32, fbh: i32) -> bool:
     var has_title = false
     var has_copy = false
     var i = 0
-    while i < nodes.len():
+    val node_count = nodes.len()
+    while i < node_count:
         if nodes[i].tag == "#text":
             val txt = nodes[i].text_trimmed
             if txt == "GUI":
@@ -2238,7 +2408,8 @@ fn fb_text_flow_chrome_overlay(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
         0xff82381fu32, 0xff4e9fe2u32, 0xffffda92u32, 0xff401b51u32, 0xff9fe1ffu32
     ]
     var i = 0
-    while i < text_flow_correction_offsets.len():
+    val correction_count = text_flow_correction_offsets.len()
+    while i < correction_count:
         val idx = text_flow_correction_offsets[i]
         if idx >= 0 and idx < out.len():
             out[idx] = text_flow_correction_colors[i]
@@ -2302,10 +2473,8 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
         return IntrinsicWidthResult(width: widths[i], widths: widths)
     var out_widths = widths
     var width = 0
-    val children = child_index.children[i]
-    var child_pos = 0
-    while child_pos < children.len():
-        val c = children[child_pos]
+    var c = child_index.first_child[i]
+    while c >= 0:
         if nodes[c].tag == "#text":
             val txt = nodes[c].text_trimmed
             if txt.len() > 0:
@@ -2316,7 +2485,7 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
             val child = intrinsic_text_width(nodes, styles, child_index, c, out_widths)
             out_widths = child.widths
             width = width + child.width
-        child_pos = child_pos + 1
+        c = child_index.next_sibling[c]
     out_widths[i] = width
     IntrinsicWidthResult(width: width, widths: out_widths)
 
@@ -2352,46 +2521,37 @@ fn skip_wrap_spaces(txt: text, off: i32) -> i32:
     out
 
 fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
-    var starts: [i32] = []
-    var ends: [i32] = []
-    if txt.len() == 0:
-        starts.push(0)
-        ends.push(0)
-        return LineWrapRanges(starts: starts, ends: ends)
+    val txt_len = txt.len()
+    if txt_len == 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    var line_count = 0
+    var count_off = 0
+    while count_off < txt_len:
+        val endc = wrap_line_end(txt, count_off, cpl)
+        line_count = line_count + 1
+        count_off = skip_wrap_spaces(txt, endc)
+    if line_count <= 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    var starts: [i32] = [0; line_count]
+    var ends: [i32] = [0; line_count]
     var off = 0
-    while off < txt.len():
+    var line = 0
+    while off < txt_len:
         val endc = wrap_line_end(txt, off, cpl)
-        starts.push(off)
-        ends.push(endc)
+        starts[line] = off
+        ends[line] = endc
         off = skip_wrap_spaces(txt, endc)
-    if starts.len() == 0:
-        starts.push(0)
-        ends.push(0)
+        line = line + 1
     LineWrapRanges(starts: starts, ends: ends)
 
 fn zero_i32_list(count: i32) -> [i32]:
-    var out: [i32] = []
-    var i = 0
-    while i < count:
-        out.push(0)
-        i = i + 1
-    out
+    [0; count]
 
 fn neg_one_i32_list(count: i32) -> [i32]:
-    var out: [i32] = []
-    var i = 0
-    while i < count:
-        out.push(-1)
-        i = i + 1
-    out
+    [-1; count]
 
 fn empty_i32_lists(count: i32) -> [[i32]]:
-    var out: [[i32]] = []
-    var i = 0
-    while i < count:
-        out.push([])
-        i = i + 1
-    out
+    [[]; count]
 
 fn absolute_outer_width(node: HNode, st: Style, containing_w: i32) -> i32:
     val border_x = st.border_l + st.border_r
@@ -2440,12 +2600,10 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
     if st.display == "contents":
         out_bw[i] = w
         var cy_contents = y
-        val children_contents = child_index.children[i]
-        var child_pos_contents = 0
+        var c_contents = child_index.first_child[i]
         var child_count_contents = 0
         var prev_margin_b_contents = 0
-        while child_pos_contents < children_contents.len():
-            val c_contents = children_contents[child_pos_contents]
+        while c_contents >= 0:
             val cst = styles[c_contents]
             if child_count_contents > 0:
                 cy_contents = cy_contents + st.gap_px
@@ -2465,7 +2623,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             cy_contents = cy_contents + child.height
             prev_margin_b_contents = cst.margin_b
             child_count_contents = child_count_contents + 1
-            child_pos_contents = child_pos_contents + 1
+            c_contents = child_index.next_sibling[c_contents]
         if child_count_contents > 0:
             cy_contents = cy_contents + prev_margin_b_contents
         val h_contents = cy_contents - y
@@ -2514,22 +2672,23 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
     else:
         0
     if st.display == "flex" and st.flex_direction != "column":
-        val children_for_i = child_index.children[i]
+        val children_for_i_count = child_index.child_count[i]
         if st.flex_wrap != "nowrap":
-            var line_heights: [i32] = []
+            var line_heights: [i32] = [0; children_for_i_count]
+            var line_count = 0
             var total_line_h = 0
             var cx_measure = 0
             var line_h_measure = 0
             var child_count_measure = 0
-            var fm_pos = 0
-            while fm_pos < children_for_i.len():
-                val fm = children_for_i[fm_pos]
+            var fm = child_index.first_child[i]
+            while fm >= 0:
                 val cst = styles[fm]
                 if not cst.position_absolute:
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
                     val item_outer_w = cst.margin_l + base_w_wrap + cst.margin_r
                     if child_count_measure > 0 and cx_measure + st.gap_px + item_outer_w > iw:
-                        line_heights.push(line_h_measure)
+                        line_heights[line_count] = line_h_measure
+                        line_count = line_count + 1
                         total_line_h = total_line_h + line_h_measure
                         cx_measure = 0
                         line_h_measure = 0
@@ -2541,12 +2700,13 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     if used_h > line_h_measure:
                         line_h_measure = used_h
                     child_count_measure = child_count_measure + 1
-                fm_pos = fm_pos + 1
+                fm = child_index.next_sibling[fm]
             if child_count_measure > 0:
-                line_heights.push(line_h_measure)
+                line_heights[line_count] = line_h_measure
+                line_count = line_count + 1
                 total_line_h = total_line_h + line_h_measure
-            if line_heights.len() > 1:
-                total_line_h = total_line_h + st.gap_px * (line_heights.len() - 1)
+            if line_count > 1:
+                total_line_h = total_line_h + st.gap_px * (line_count - 1)
             val explicit_content_h = if st.height_px > 0:
                 if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
             else:
@@ -2557,15 +2717,14 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             val reverse_wrap = st.flex_wrap == "wrap-reverse"
             var cx_wrap = ix
             var cy_wrap = if reverse_wrap:
-                y + st.border_t + st.pad_t + align_content_offset + total_line_h - (if line_heights.len() > 0: line_heights[0] else: 0)
+                y + st.border_t + st.pad_t + align_content_offset + total_line_h - (if line_count > 0: line_heights[0] else: 0)
             else:
                 y + st.border_t + st.pad_t + align_content_offset
             var line_h_wrap = 0
             var line_index_wrap = 0
-            var fc_wrap_pos = 0
+            var fc_wrap = child_index.first_child[i]
             var flex_child_count_wrap = 0
-            while fc_wrap_pos < children_for_i.len():
-                val fc_wrap = children_for_i[fc_wrap_pos]
+            while fc_wrap >= 0:
                 val cst = styles[fc_wrap]
                 if cst.position_absolute:
                     val ax = absolute_child_x(x, st, nodes[fc_wrap], cst, iw)
@@ -2584,13 +2743,13 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     if flex_child_count_wrap > 0 and cx_wrap - ix + st.gap_px + item_outer_w > iw:
                         cx_wrap = ix
                         if reverse_wrap:
-                            cy_wrap = cy_wrap - ((if line_index_wrap + 1 < line_heights.len(): line_heights[line_index_wrap + 1] else: 0) + st.gap_px)
+                            cy_wrap = cy_wrap - ((if line_index_wrap + 1 < line_count: line_heights[line_index_wrap + 1] else: 0) + st.gap_px)
                         else:
                             cy_wrap = cy_wrap + line_h_wrap + st.gap_px
                         line_index_wrap = line_index_wrap + 1
-                        line_h_wrap = if line_index_wrap < line_heights.len(): line_heights[line_index_wrap] else: 0
+                        line_h_wrap = if line_index_wrap < line_count: line_heights[line_index_wrap] else: 0
                         flex_child_count_wrap = 0
-                    if flex_child_count_wrap == 0 and line_index_wrap < line_heights.len():
+                    if flex_child_count_wrap == 0 and line_index_wrap < line_count:
                         line_h_wrap = line_heights[line_index_wrap]
                     if flex_child_count_wrap > 0:
                         cx_wrap = cx_wrap + st.gap_px
@@ -2608,7 +2767,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     out_intrinsic_widths = child.intrinsic_widths
                     cx_wrap = cx_wrap + out_bw[fc_wrap] + cst.margin_r
                     flex_child_count_wrap = flex_child_count_wrap + 1
-                fc_wrap_pos = fc_wrap_pos + 1
+                fc_wrap = child_index.next_sibling[fc_wrap]
             var flex_h_wrap = if st.height_px > 0:
                 if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
             else:
@@ -2625,9 +2784,8 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         var auto_weight = 0
         var shrink_scaled_total = 0
         var nonabs_count = 0
-        var ps_pos = 0
-        while ps_pos < children_for_i.len():
-            val ps = children_for_i[ps_pos]
+        var ps = child_index.first_child[i]
+        while ps >= 0:
             val pcst = styles[ps]
             if not pcst.position_absolute:
                 nonabs_count = nonabs_count + 1
@@ -2655,7 +2813,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                         val grow = if pcst.flex_grow > 0: pcst.flex_grow else: 1
                         auto_weight = auto_weight + grow
                 sum_explicit = sum_explicit + pcst.margin_l + pcst.margin_r
-            ps_pos = ps_pos + 1
+            ps = child_index.next_sibling[ps]
         var gaps_total = 0
         if nonabs_count > 1:
             gaps_total = st.gap_px * (nonabs_count - 1)
@@ -2672,18 +2830,16 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         var shrink_width_assigned = 0
         var max_baseline = 0
         if st.align_items == "baseline":
-            var pb_pos = 0
-            while pb_pos < children_for_i.len():
-                val pb = children_for_i[pb_pos]
+            var pb = child_index.first_child[i]
+            while pb >= 0:
                 val pcst = styles[pb]
                 if not pcst.position_absolute:
                     val baseline = pcst.margin_t + style_baseline_offset(pcst)
                     if baseline > max_baseline:
                         max_baseline = baseline
-                pb_pos = pb_pos + 1
-        var fc_pos = 0
-        while fc_pos < children_for_i.len():
-            val fc = children_for_i[fc_pos]
+                pb = child_index.next_sibling[pb]
+        var fc = child_index.first_child[i]
+        while fc >= 0:
             val cst = styles[fc]
             if cst.position_absolute:
                 val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
@@ -2764,7 +2920,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     max_child_h = used_h
                 cx = cx + out_bw[fc] + cst.margin_r
                 flex_child_count = flex_child_count + 1
-            fc_pos = fc_pos + 1
+            fc = child_index.next_sibling[fc]
         var flex_h = max_child_h + st.pad_t + st.pad_b + border_y
         val explicit_flex_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         if st.height_px > 0:
@@ -2781,11 +2937,9 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: flex_h)
     if st.display == "flex" and st.flex_direction == "column":
         var cy_flex = y + st.border_t + st.pad_t
-        val children_column = child_index.children[i]
-        var flex_c_pos = 0
+        var flex_c = child_index.first_child[i]
         var flex_child_count_col = 0
-        while flex_c_pos < children_column.len():
-            val flex_c = children_column[flex_c_pos]
+        while flex_c >= 0:
             val cst = styles[flex_c]
             if cst.position_absolute:
                 val ax = absolute_child_x(x, st, nodes[flex_c], cst, iw)
@@ -2818,7 +2972,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 out_intrinsic_widths = child.intrinsic_widths
                 cy_flex = cy_flex + child.height + cst.margin_b
                 flex_child_count_col = flex_child_count_col + 1
-            flex_c_pos = flex_c_pos + 1
+            flex_c = child_index.next_sibling[flex_c]
         var flex_h_col = (cy_flex - y) + st.pad_b + st.border_b
         val explicit_flex_h_col = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         if st.height_px > 0:
@@ -2834,12 +2988,10 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         out_bh[i] = flex_h_col
         return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: flex_h_col)
     var cy = y + st.border_t + st.pad_t
-    val children_block = child_index.children[i]
-    var c_pos = 0
     var child_count = 0
     var prev_margin_b = 0
-    while c_pos < children_block.len():
-        val c = children_block[c_pos]
+    var c = child_index.first_child[i]
+    while c >= 0:
         val cst = styles[c]
         if cst.position_absolute:
             val ax = absolute_child_x(x, st, nodes[c], cst, iw)
@@ -2876,7 +3028,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             cy = cy + child.height
             prev_margin_b = cst.margin_b
             child_count = child_count + 1
-        c_pos = c_pos + 1
+        c = child_index.next_sibling[c]
     if child_count > 0:
         cy = cy + prev_margin_b
     var h = (cy - y) + st.pad_b + st.border_b
@@ -2897,7 +3049,8 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
 
 fn has_visible_overflow_clip(styles: [Style]) -> bool:
     var i = 0
-    while i < styles.len():
+    val style_count = styles.len()
+    while i < style_count:
         val st = styles[i]
         if st.overflow_hidden and st.display != "none":
             return true
@@ -2908,9 +3061,10 @@ fn build_ancestor_clip_cache(nodes: [HNode], styles: [Style], bx: [i32], by: [i3
     val default_clip = ClipRect(x0: 0, y0: 0, x1: fbw, y1: fbh)
     if not has_visible_overflow_clip(styles):
         return PaintClipCache(has_node_clips: false, default_clip: default_clip, clips: [])
-    var clips: [ClipRect] = []
+    val node_count = nodes.len()
+    var clips: [ClipRect] = [default_clip; node_count]
     var i = 0
-    while i < nodes.len():
+    while i < node_count:
         var clip = default_clip
         val p = nodes[i].parent
         if p >= 0:
@@ -2922,7 +3076,7 @@ fn build_ancestor_clip_cache(nodes: [HNode], styles: [Style], bx: [i32], by: [i3
                 val cx1 = bx[p] + bw[p] - pst.border_r
                 val cy1 = by[p] + bh[p] - pst.border_b
                 clip = clip_intersect(clip, cx0, cy0, cx1, cy1)
-        clips.push(clip)
+        clips[i] = clip
         i = i + 1
     PaintClipCache(has_node_clips: true, default_clip: default_clip, clips: clips)
 
@@ -2943,16 +3097,16 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     val chrome_widget_text = need_widget_text and widget_flags.has_nonempty_widget_text
     val clip_cache = build_ancestor_clip_cache(nodes, styles, bx, by, bw, bh, fbw, fbh)
     # backgrounds first (document order = back to front)
+    val node_count = nodes.len()
     var i = 0
-    while i < nodes.len():
+    while i < node_count:
         val st = styles[i]
-        val clip = paint_clip_at(clip_cache, i)
         val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
         val skip_widget_node_bg = widget_mode and (nodes[i].has_widget_class or nodes[i].has_icon_image_class)
         if not st.position_absolute and not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
-            out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
+            out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, paint_clip_at(clip_cache, i))
         if not st.position_absolute and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
-            out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
+            out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, paint_clip_at(clip_cache, i))
         if not st.position_absolute and not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_panel_class and by[i] < fbh:
             val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
@@ -2961,17 +3115,17 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         if not st.position_absolute and not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_button_class and by[i] < fbh:
             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
         i = i + 1
+    var has_positive_z = false
     i = 0
-    while i < nodes.len():
+    while i < node_count:
         val st = styles[i]
         if st.position_absolute and st.z_index <= 0:
-            val clip = paint_clip_at(clip_cache, i)
             val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
             val skip_widget_node_bg = widget_mode and (nodes[i].has_widget_class or nodes[i].has_icon_image_class)
             if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
-                out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
+                out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, paint_clip_at(clip_cache, i))
             if not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
-                out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
+                out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, paint_clip_at(clip_cache, i))
             if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_panel_class and by[i] < fbh:
                 val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
                 out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
@@ -2979,43 +3133,48 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                     out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
             if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_button_class and by[i] < fbh:
                 out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
+        elif st.position_absolute and st.z_index > 0:
+            has_positive_z = true
         i = i + 1
-    var current_z = 0
-    var z_guard = 0
-    while z_guard < nodes.len():
-        var next_z = 2147483647
-        var found_positive_z = false
+    if has_positive_z:
+        var positive_z_indices: [i32] = [0; node_count]
+        var positive_z_count = 0
         i = 0
-        while i < nodes.len():
+        while i < node_count:
             val st = styles[i]
-            if st.position_absolute and st.z_index > current_z and st.z_index < next_z:
-                next_z = st.z_index
-                found_positive_z = true
+            if st.position_absolute and st.z_index > 0:
+                var insert_at = positive_z_count
+                var scan = 0
+                while scan < positive_z_count:
+                    val other = positive_z_indices[scan]
+                    if insert_at == positive_z_count and st.z_index < styles[other].z_index:
+                        insert_at = scan
+                    scan = scan + 1
+                var shift = positive_z_count
+                while shift > insert_at:
+                    positive_z_indices[shift] = positive_z_indices[shift - 1]
+                    shift = shift - 1
+                positive_z_indices[insert_at] = i
+                positive_z_count = positive_z_count + 1
             i = i + 1
-        if found_positive_z:
-            i = 0
-            while i < nodes.len():
-                val st = styles[i]
-                if st.position_absolute and st.z_index == next_z:
-                    val clip = paint_clip_at(clip_cache, i)
-                    val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
-                    val skip_widget_node_bg = widget_mode and (nodes[i].has_widget_class or nodes[i].has_icon_image_class)
-                    if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
-                        out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
-                    if not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
-                        out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
-                    if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_panel_class and by[i] < fbh:
-                        val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
-                        out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
-                        if nodes[i].has_focused_class:
-                            out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
-                    if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_button_class and by[i] < fbh:
-                        out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
-                i = i + 1
-            current_z = next_z
-        else:
-            z_guard = nodes.len()
-        z_guard = z_guard + 1
+        var positive_z_pos = 0
+        while positive_z_pos < positive_z_count:
+            i = positive_z_indices[positive_z_pos]
+            val st = styles[i]
+            val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
+            val skip_widget_node_bg = widget_mode and (nodes[i].has_widget_class or nodes[i].has_icon_image_class)
+            if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
+                out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, paint_clip_at(clip_cache, i))
+            if not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
+                out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, paint_clip_at(clip_cache, i))
+            if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_panel_class and by[i] < fbh:
+                val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
+                out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
+                if nodes[i].has_focused_class:
+                    out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
+            if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_button_class and by[i] < fbh:
+                out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
+            positive_z_pos = positive_z_pos + 1
     if widget_mode:
         val widget_button_w = if fbw > 10: fbw - 10 else: fbw
         val widget_button_inner_w = if fbw > 12: fbw - 12 else: widget_button_w
@@ -3034,7 +3193,7 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             out = fb_rect(out, fbw, fbh, fbw - 5, fbh - 1, 4, 1, argb(245, 245, 245))
     # text on top
     i = 0
-    while i < nodes.len():
+    while i < node_count:
         if not widget_mode and styles[i].display != "none" and not styles[i].visibility_hidden and nodes[i].tag == "img" and nodes[i].has_widget_image_class:
             val clip = paint_clip_at(clip_cache, i)
             out = fb_rect_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(37, 99, 235), clip)
@@ -3055,17 +3214,18 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 val lh = style_line_h(st)
                 val node_starts = wrap_cache.starts[i]
                 val node_ends = wrap_cache.ends[i]
+                val line_count = node_starts.len()
                 if not chrome_widget_text:
                     if widget_mode:
                         var line_i = 0
-                        while line_i < node_starts.len() and ly < fbh:
+                        while line_i < line_count and ly < fbh:
                             out = fb_text_sparse_range(out, fbw, fbh, text_x, ly, txt, node_starts[line_i], node_ends[line_i], st.fg)
                             line_i = line_i + 1
                             ly = ly + lh
                     else:
                         val clip = paint_clip_at(clip_cache, i)
                         var line_i = 0
-                        while line_i < node_starts.len() and ly < fbh:
+                        while line_i < line_count and ly < fbh:
                             out = fb_text_thin_scaled_clip_range(out, fbw, fbh, text_x, ly, txt, node_starts[line_i], node_ends[line_i], st.fg, scale, adv, clip)
                             line_i = line_i + 1
                             ly = ly + lh
@@ -3147,14 +3307,30 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
         computed_style
     )
 
+fn _html_draw_ir_visible(styles: [Style], boxes: LayoutResult, i: i32) -> bool:
+    i > 0 and styles[i].display != "none" and boxes.bw[i] > 0 and boxes.bh[i] > 0
+
 fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, width: i32, height: i32) -> [DrawIrCommand]:
-    var commands: [DrawIrCommand] = []
+    var command_count = 0
     var i = 0
-    while i < nodes.len():
-        val node = nodes[i]
-        val st = styles[i]
-        if i > 0 and st.display != "none" and boxes.bw[i] > 0 and boxes.bh[i] > 0:
-            commands = commands.push(_html_draw_ir_command(nodes, styles, boxes, i, width, height))
+    val node_count = nodes.len()
+    while i < node_count:
+        if _html_draw_ir_visible(styles, boxes, i):
+            command_count = command_count + 1
+        i = i + 1
+    if command_count <= 0:
+        return []
+    var first_visible = 0
+    while first_visible < node_count and not _html_draw_ir_visible(styles, boxes, first_visible):
+        first_visible = first_visible + 1
+    val first_command = _html_draw_ir_command(nodes, styles, boxes, first_visible, width, height)
+    var commands: [DrawIrCommand] = [first_command; command_count]
+    var out_i = 0
+    i = first_visible
+    while i < node_count:
+        if _html_draw_ir_visible(styles, boxes, i):
+            commands[out_i] = _html_draw_ir_command(nodes, styles, boxes, i, width, height)
+            out_i = out_i + 1
         i = i + 1
     commands
 
