@@ -1,5 +1,28 @@
 # Remaining Hardening Tasks — Small-Task Replan (2026-06-11)
 
+## Status (updated 2026-06-11 evening)
+
+| Task | Status | Commit |
+|------|--------|--------|
+| S1 std.shell exist-after-create | DONE 9/9 honest | 296862bd69 |
+| S2 FAT32 wave-4c read() | DONE 10/10 new spec | 0a32bd33f6 |
+| S3 Lean recursive stacking tree (T8) | DONE zero-sorry, FINDING-U2 closed | 9b78f086b9 |
+| S4 worker.spl gc_boundary | DONE — whole http_server dir lints 0 | b039f331fb |
+| S5 seed B6 await type + SPIPE006 msg | DONE, seed redeployed to simple_seed | 829bbeb9c1 |
+| S6 seed B3/B3b desugar HIR scope | DONE — B3b FIXED; B3 rediagnosed: interpreter-executor crash, stays open | f1475ba7b7 |
+| S7 async_integration honest fill | in progress (after S8 redeploy; generator tests blocked on B3) | — |
+| S8 seed B5 Promise/FutureValue | in progress | — |
+| S9 FAT32 wave-4d allocator + Lean T7a–c | DONE alloc spec 9/9; open: FINDING-T2-dirent | c773d860f0 |
+| S10 stage4 broader validation | SUPERSEDED — parallel track deployed stage4 15:32 with 11/11 matrix (49e028bb31, d36ad61714); post-deploy S1–S9 verifications all ran through the deployed delegation chain. Remaining lean-parser coverage (1843/1855) is its own parser-completion plan. | — |
+
+New items discovered during execution:
+- seed static-method default params unreachable (bug doc
+  `seed_static_method_default_params_unreachable_2026-06-11.md`) — next seed batch.
+- B3 corrected: generator `yield` lowers fine at HIR; exit-132 is the
+  interpreter executor lacking generator state-machine context (bug doc B3).
+- FINDING-T2-dirent: FAT32 on-disk dirent persistence after write() — tracked
+  in the FAT32 bug doc.
+
 Everything left open after the E1–E7 escalations and the follow-up wave
 (`escalation_fixes_2026-06-11.md` FINAL STATUS), broken into small,
 independently verifiable tasks. Execution: parallel Sonnet agents, disjoint
