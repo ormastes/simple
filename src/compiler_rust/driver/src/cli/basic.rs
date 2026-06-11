@@ -222,6 +222,13 @@ fn should_print_code_result(code: &str) -> bool {
         return true;
     }
     if trimmed.starts_with("print ")
+        || trimmed.starts_with("print(")
+        || trimmed.starts_with("println ")
+        || trimmed.starts_with("println(")
+        || trimmed.starts_with("eprint ")
+        || trimmed.starts_with("eprint(")
+        || trimmed.starts_with("eprintln ")
+        || trimmed.starts_with("eprintln(")
         || trimmed.starts_with("if ")
         || trimmed.starts_with("while ")
         || trimmed.starts_with("for ")
@@ -282,6 +289,20 @@ mod tests {
         assert_eq!(diagnostic.code, None);
         assert_eq!(diagnostic.message, "codegen: backend unavailable");
         assert!(diagnostic.help.is_empty());
+    }
+
+    #[test]
+    fn run_code_does_not_echo_exit_code_for_print_call_form() {
+        // `-c 'print(1+1)'` must print only "2" — echoing the exit code
+        // produced a stray "0" line (stage4 10th-site (c), 2026-06-11).
+        assert!(!should_print_code_result("print(1+1)"));
+        assert!(!should_print_code_result("println(\"x\")"));
+        assert!(!should_print_code_result("eprint(\"x\")"));
+        assert!(!should_print_code_result("eprintln(\"x\")"));
+        assert!(!should_print_code_result("print \"x\""));
+        // Bare expressions still echo their value.
+        assert!(should_print_code_result("1+1"));
+        assert!(should_print_code_result("main = 1+1"));
     }
 
     #[test]

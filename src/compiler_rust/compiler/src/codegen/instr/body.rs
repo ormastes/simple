@@ -277,13 +277,25 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
     types_map
 }
 
+fn type_id_is_signed_integer(ty: TypeId) -> bool {
+    matches!(ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64)
+}
+
 /// Coerce a value to i64 for storage in a Variable declared as i64.
-fn coerce_to_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+fn coerce_to_i64_typed(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    type_hint: Option<TypeId>,
+) -> cranelift_codegen::ir::Value {
     let ty = builder.func.dfg.value_type(val);
     if ty == types::I64 {
         val
     } else if ty.is_int() && ty.bits() < 64 {
-        builder.ins().uextend(types::I64, val)
+        if type_hint.is_some_and(type_id_is_signed_integer) {
+            builder.ins().sextend(types::I64, val)
+        } else {
+            builder.ins().uextend(types::I64, val)
+        }
     } else if ty.is_int() && ty.bits() > 64 {
         builder.ins().ireduce(types::I64, val)
     } else if ty == types::F64 {
@@ -302,9 +314,25 @@ fn coerce_to_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Valu
     }
 }
 
+/// Coerce a value to i64 for storage in a Variable declared as i64.
+fn coerce_to_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+    coerce_to_i64_typed(builder, val, None)
+}
+
 /// Safely def_var with type coercion to i64.
 fn def_var_coerced(builder: &mut FunctionBuilder, var: Variable, val: cranelift_codegen::ir::Value) {
     let coerced = coerce_to_i64(builder, val);
+    builder.def_var(var, coerced);
+}
+
+/// Safely def_var with type-aware coercion to i64.
+fn def_var_coerced_typed(
+    builder: &mut FunctionBuilder,
+    var: Variable,
+    val: cranelift_codegen::ir::Value,
+    type_hint: Option<TypeId>,
+) {
+    let coerced = coerce_to_i64_typed(builder, val, type_hint);
     builder.def_var(var, coerced);
 }
 
@@ -314,12 +342,13 @@ fn sync_vregs_to_vars(
     builder: &mut FunctionBuilder,
     vreg_values: &HashMap<VReg, cranelift_codegen::ir::Value>,
     vreg_vars: &HashMap<VReg, Variable>,
+    vreg_types: &HashMap<VReg, TypeId>,
 ) {
     let mut sorted: Vec<_> = vreg_values.iter().collect();
     sorted.sort_by_key(|(v, _)| v.0);
     for (vreg, &val) in sorted {
         if let Some(&var) = vreg_vars.get(vreg) {
-            def_var_coerced(builder, var, val);
+            def_var_coerced_typed(builder, var, val, vreg_types.get(vreg).copied());
         }
     }
 }
@@ -749,7 +778,7 @@ pub fn compile_function_body<M: Module>(
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 // Sync vreg_values → Variables after yield
-                sync_vregs_to_vars(&mut builder, &vreg_values, &vreg_vars);
+                sync_vregs_to_vars(&mut builder, &vreg_values, &vreg_vars, &vreg_types);
                 returned_via_yield = true;
                 break;
             } else {
@@ -791,10 +820,7 @@ pub fn compile_function_body<M: Module>(
                     if let Some(&val) = vreg_values.get(&dest) {
                         let ty = builder.func.dfg.value_type(val);
                         if ty.is_int() && ty.bits() < 64 {
-                            let signed = matches!(
-                                vreg_types.get(&dest).copied(),
-                                Some(TypeId::I8) | Some(TypeId::I16) | Some(TypeId::I32) | Some(TypeId::I64)
-                            );
+                            let signed = vreg_types.get(&dest).copied().is_some_and(type_id_is_signed_integer);
                             let extended = if signed {
                                 builder.ins().sextend(types::I64, val)
                             } else {
@@ -820,7 +846,7 @@ pub fn compile_function_body<M: Module>(
             continue;
         }
         // Sync all vreg_values to Variables before terminators (for cross-block SSA)
-        sync_vregs_to_vars(&mut builder, &vreg_values, &vreg_vars);
+        sync_vregs_to_vars(&mut builder, &vreg_values, &vreg_vars, &vreg_types);
         match &mir_block.terminator {
             Terminator::Return(val) => {
                 let mut mark_done = false;

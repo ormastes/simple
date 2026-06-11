@@ -213,11 +213,35 @@ pub(crate) fn compile_struct_init<M: Module>(
             // More fields than values - use default 0
             builder.ins().iconst(types::I64, 0)
         };
-        let _cranelift_ty = type_id_to_cranelift(*field_type);
-        builder.ins().store(MemFlags::new(), field_val, ptr, *offset as i32);
+        let storage_val = widen_struct_field_value(builder, field_val, *field_type);
+        builder.ins().store(MemFlags::new(), storage_val, ptr, *offset as i32);
     }
 
     ctx.vreg_values.insert(dest, ptr);
+}
+
+fn widen_struct_field_value(
+    builder: &mut FunctionBuilder,
+    value: cranelift_codegen::ir::Value,
+    field_type: TypeId,
+) -> cranelift_codegen::ir::Value {
+    let actual_ty = builder.func.dfg.value_type(value);
+    if actual_ty == types::I64 || !actual_ty.is_int() {
+        return value;
+    }
+    let storage_ty = type_id_to_cranelift(field_type);
+    let signed = matches!(field_type, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+    if storage_ty.is_int() && actual_ty.bits() < types::I64.bits() {
+        if signed {
+            builder.ins().sextend(types::I64, value)
+        } else {
+            builder.ins().uextend(types::I64, value)
+        }
+    } else if storage_ty.is_int() && actual_ty.bits() > types::I64.bits() {
+        builder.ins().ireduce(types::I64, value)
+    } else {
+        value
+    }
 }
 
 pub(crate) fn compile_method_call_static<M: Module>(
@@ -829,6 +853,37 @@ fn try_compile_builtin_method_call<M: Module>(
             "to_f64" | "to_float" => TypeId::F64,
             _ => return Ok(Some(receiver_val)),
         };
+
+        let to_is_int = matches!(
+            to_ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        );
+        if from_ty == TypeId::STRING && to_is_int {
+            let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_int") {
+                fid
+            } else {
+                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                let fid = ctx
+                    .module
+                    .declare_function("rt_string_to_int", cranelift_module::Linkage::Import, &sig)
+                    .map_err(|e| e.to_string())?;
+                ctx.func_ids.insert("rt_string_to_int".to_string(), fid);
+                fid
+            };
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = adapted_call(builder, func_ref, &[receiver_val]);
+            let parsed = builder.inst_results(call)[0];
+            let converted = match to_ty {
+                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, parsed),
+                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, parsed),
+                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, parsed),
+                TypeId::U64 | TypeId::I64 => parsed,
+                _ => parsed,
+            };
+            return Ok(Some(converted));
+        }
 
         let converted = if from_ty == to_ty {
             receiver_val

@@ -41,7 +41,7 @@ async_host_spec
 #### should define host future states and completion APIs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -62,7 +62,7 @@ expect(src.contains("me fail(err: AsyncError)")).to_equal(true)
 #### should define promise pair completion and failure APIs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -81,7 +81,7 @@ expect(src.contains("fn is_completed() -> bool")).to_equal(true)
 #### should define task handle join cancellation and state APIs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -101,7 +101,7 @@ expect(src.contains("fn is_cancelled() -> bool")).to_equal(true)
 #### should define dynamic join set and unordered future collections
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -122,7 +122,7 @@ expect(unordered_src.contains("fn poll_next(cx: Context) -> Poll<Option<T>>")).t
 #### should define scheduler modes and work stealing queues
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -143,7 +143,7 @@ expect(src.contains("fn wake_task(task_id: usize)")).to_equal(true)
 #### should wire multi threaded runtime through thread safe queues
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -164,7 +164,7 @@ expect(scheduler_src.contains("thread_queues = thread_queues.push(ThreadSafeQueu
 #### should expose waker context and combinator surfaces
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

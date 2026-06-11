@@ -181,8 +181,8 @@ impl<'a> MirLowerer<'a> {
                     _ => None,
                 });
             if let Some((field_index, field_ty)) = field_hit {
-                let is_callable_field = field_ty == TypeId::ANY
-                    || matches!(registry.get(field_ty), Some(HirType::Function { .. }));
+                let is_callable_field =
+                    field_ty == TypeId::ANY || matches!(registry.get(field_ty), Some(HirType::Function { .. }));
                 if is_callable_field {
                     let arg_count = args.len();
                     return self.with_func(|func, current_block| {

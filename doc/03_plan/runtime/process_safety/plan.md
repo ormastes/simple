@@ -109,6 +109,44 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
          `2`; (d) `lint` hangs past 240s (seed completes; last output
          "workspace-root-guard: OK"). `bin/simple` remains the Rust
          seed until these are fixed and the matrix matches.
+         Diagnosis + fixes 2026-06-11 (this session):
+         (a) ROOT CAUSE: native `rt_cli_run_tests`
+             (runtime/src/value/cli_sffi.rs) spawned
+             `current_exe() test ...`; for stage4 that re-enters its own
+             `test` dispatch — the child's main_part2 depth guard
+             (correctly) refused with DEPTH=1 inherited from the parent's
+             env_set. FIX: delegate to `simple_binary_path()` (same
+             resolution as lint/check/fmt) + clean error if it resolves
+             back to current_exe. Verified seed runs specs green with
+             SIMPLE_TEST_DEPTH=1 inherited.
+         (b) ROOT CAUSE (miscompile): MIR `HirStmt::For` /
+             `lower_for_range` binders resolved the loop variable by
+             FIRST name match, but HIR `add_local` appends a fresh slot
+             per same-named binding — `for arg in file_args` after
+             `val arg` stored elements into the stale slot while the
+             body read nil from the new one. check.spl printed
+             "ERROR: file not found: {arg}" as a blank line and counted
+             "1 of 0 file(s)". FIX: thread the HIR-allocated
+             `pattern_local` index through `HirStmt::For` into both MIR
+             binders (name search kept only as legacy fallback).
+             Regression test:
+             mir/lower/tests/basic_lowering.rs
+             test_for_loop_var_binds_newest_shadowed_local. NOTE: the
+             seed AST interpreter has a SEPARATE same-symptom bug
+             (still open) — see
+             doc/08_tracking/bug/for_loop_var_shadows_prior_local_binding_lost_2026-06-11.md.
+         (c) NOT a stage4 bug: the SEED's `-c` echoes the exit code for
+             `print(...)` call form (`should_print_code_result` in
+             driver/src/cli/basic.rs only excluded `print ` with a
+             space); stage4 only relays the child's output. FIX: treat
+             print(/println/eprint/eprintln call forms as non-echoing;
+             unit test added. Needs seed redeploy to take effect.
+         (d) lint hang: stage4 spins at 99% CPU in-process inside
+             `Linter.lint_source` on text.spl (no child, no stdin wait);
+             content-dependent (each half of the file lints fine, the
+             two halves together hang/crash). Expected to be the same
+             for-loop binder miscompile family — re-validate after
+             stage4 rebuild with fix (b).
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).

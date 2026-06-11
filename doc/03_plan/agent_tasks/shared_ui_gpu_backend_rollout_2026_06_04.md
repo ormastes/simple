@@ -218,6 +218,11 @@ Current evidence:
   image blit, alpha blend, and scroll families. Text/font rows explicitly mark
   the CPU glyph-preprocess step while still tying GPU execution to the shared
   generated copy kernel and typed OpenCL unavailable states.
+- 2026-06-11 update: bitmap-font operation aliases are now explicit:
+  `bitmap_font`, `bitmap_glyph`, `font_bitmap`, and `glyph_bitmap` map to the
+  generated copy/upload lane with `cpu_preprocess_required = true`. This keeps
+  bitmap glyph fallback distinct from vector-font GPU glyph return evidence and
+  from ordinary image copy rows.
 - OpenCL sessions now expose `read_buffer_evidence()` so buffer readback
   reports typed `missing-ffi`, `missing-queue`, `missing-buffer`,
   `missing-host-buffer`, `invalid-size`, `readback-failed`, matched checksum,
@@ -422,3 +427,42 @@ on the current Linux/Xvfb host:
 3. `check-production-gui-web-renderer-parity-evidence.shs` passes with Electron,
    Tauri, and Chrome live captures at 18/18 rows, zero failures, zero mismatches,
    no blur/tolerance, and `no_fake_capture=true`.
+
+2026-06-11 small-part split:
+
+1. Spark handled the easy read-only scan for backend-order source locations.
+   Codex reviewed the result and added executable coverage for the canonical
+   order: Metal, CUDA, ROCm/HIP, Qualcomm, Vulkan, OpenCL, OpenGL, Intel,
+   WebGPU, software, CPU SIMD, CPU.
+2. Codex implemented the focused bitmap-font provenance contract and refreshed
+   the generated spec Markdown. This does not claim GPU-side bitmap glyph
+   rasterization; it records the current CPU glyph buffer plus GPU copy/upload
+   state explicitly.
+3. Next easy Spark task: read-only scan for duplicate `draw_text` and
+   `draw_text_bg` CPU bitmap fallback bodies that still bypass
+   `helpers_text.text_blit_buffer(...)`.
+4. Spark completed that scan and recommended `WebGpuBackend.draw_text(...)` as
+   the safest single-backend patch. Codex reviewed the result and centralized
+   WebGPU foreground glyph buffer generation through
+   `helpers_text.text_transparent_blit_buffer(...)`, while preserving
+   foreground-only behavior by skipping zero pixels instead of calling
+   `draw_image(...)`.
+5. Remaining easy follow-ups, one backend at a time: `backend_baremetal.spl`,
+   `backend_intel.spl`, and `backend_virtio_gpu.spl` still have local
+   `draw_text_bg(...)` buffer construction that can likely delegate to
+   `helpers_text.text_blit_buffer(...)` after focused backend tests are added or
+   refreshed.
+6. Spark reviewed the stale `helpers_parity_spec.spl` matcher cleanup as an
+   easy read-only task. Codex applied the reviewed matcher replacement, fixed the
+   shared pixel and glyph buffer helpers to return updated buffers for
+   interpreter-visible pure-Simple tests, and refreshed the generated parity
+   spec doc. The focused parity spec now passes 66/66 assertions.
+7. Spark reviewed the pure-Simple HTML layout child-scan hotspot. Codex added a
+   one-time parent-to-children index in
+   `simple_web_html_layout_renderer.spl` and routed recursive layout plus
+   intrinsic inline-width measurement through it, replacing the repeated
+   `i + 1 .. nodes.len()` direct-child scans in the contents, flex-wrap,
+   flex-row, flex-column, and block-flow branches. New coverage lives in
+   `test/02_integration/rendering/simple_web_layout_child_index_spec.spl`; the
+   focused spec passes 2/2 and the adjacent web Engine2D offload spec passes
+   11/11.

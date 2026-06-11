@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-11 00:30:36*
+*Generated: 2026-06-11 05:06:08*
 
-## test/00_formal_verification/compiler
+## test/01_unit/compiler/semantics/lint
 
-❌ **memory_capabilities_spec.spl** (69ms)
-  - Source: `test/00_formal_verification/compiler/memory_capabilities_spec.spl`
-  - Generated doc: `doc/06_spec/memory_capabilities_spec.md`
+❌ **concurrency_share_nothing_spec.spl** (212ms)
+  - Source: `test/01_unit/compiler/semantics/lint/concurrency_share_nothing_spec.spl`
+  - Generated doc: `doc/06_spec/concurrency_share_nothing_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 4 ✅
-- **Failed:** 2 ❌
-- **Duration:** 76ms
+- **Passed:** 6 ✅
+- **Failed:** 3 ❌
+- **Duration:** 220ms

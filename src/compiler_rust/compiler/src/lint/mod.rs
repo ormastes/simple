@@ -1980,11 +1980,11 @@ class Meter:
         self.active
 "#;
         let diagnostics = check_code(code);
-        let dummy_count = diagnostics
-            .iter()
-            .filter(|d| d.lint == LintName::DummyAccessor)
-            .count();
-        assert_eq!(dummy_count, 3, "expected all trivial accessors to warn: {diagnostics:?}");
+        let dummy_count = diagnostics.iter().filter(|d| d.lint == LintName::DummyAccessor).count();
+        assert_eq!(
+            dummy_count, 3,
+            "expected all trivial accessors to warn: {diagnostics:?}"
+        );
     }
 
     #[test]

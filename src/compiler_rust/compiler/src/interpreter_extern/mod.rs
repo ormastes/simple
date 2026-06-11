@@ -530,10 +530,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_pool_uses_global_fifo_queue",
         concurrency::rt_pool_uses_global_fifo_queue
     );
-    insert_simple!(
-        "rt_pool_uses_work_stealing",
-        concurrency::rt_pool_uses_work_stealing
-    );
+    insert_simple!("rt_pool_uses_work_stealing", concurrency::rt_pool_uses_work_stealing);
     insert_simple!("rt_channel_recv", concurrency::rt_channel_recv);
     insert_simple!("rt_channel_send", concurrency::rt_channel_send);
     insert_simple!("rt_channel_try_recv", concurrency::rt_channel_try_recv);
@@ -1914,7 +1911,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     m.insert(
         "rt_thread_spawn_isolated_with_args",
         (|evaluated, env, functions, classes, enums, impl_methods| {
-            concurrency::rt_thread_spawn_isolated_with_args_context(evaluated, env, functions, classes, enums, impl_methods)
+            concurrency::rt_thread_spawn_isolated_with_args_context(
+                evaluated,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )
         }) as ExternHandler,
     );
     m.insert(

@@ -52,28 +52,28 @@ fn extract_bytes(args: &[Value], index: usize) -> Option<Vec<u8>> {
 
 /// Wrap raw bytes in a `Value::Array(Arc<Vec<Value::Int(byte)>>)` shape
 /// so Simple code sees a genuine `[u8]`.
-    fn bytes_to_value(bytes: &[u8]) -> Value {
-        Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
-    }
+fn bytes_to_value(bytes: &[u8]) -> Value {
+    Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
+}
 
-    fn bytes_to_value_with_first_u8(bytes: &[u8]) -> Value {
-        Value::Array(Arc::new(
-            bytes
-                .iter()
-                .enumerate()
-                .map(|(index, byte)| {
-                    if index == 0 {
-                        Value::UInt {
-                            value: *byte as u64,
-                            width: 8,
-                        }
-                    } else {
-                        Value::Int(*byte as i64)
+fn bytes_to_value_with_first_u8(bytes: &[u8]) -> Value {
+    Value::Array(Arc::new(
+        bytes
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| {
+                if index == 0 {
+                    Value::UInt {
+                        value: *byte as u64,
+                        width: 8,
                     }
-                })
-                .collect(),
-        ))
-    }
+                } else {
+                    Value::Int(*byte as i64)
+                }
+            })
+            .collect(),
+    ))
+}
 
 fn empty_bytes() -> Value {
     Value::Array(Arc::new(Vec::new()))
@@ -84,8 +84,7 @@ fn ed25519_pkcs8_v1_seed(pkcs8: &[u8]) -> Option<&[u8]> {
         return None;
     }
     let header = [
-        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
-        0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
     ];
     if pkcs8.get(..header.len()) != Some(&header) {
         return None;

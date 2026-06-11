@@ -43,6 +43,9 @@ The current shared order is:
 - Requesting `auto` must preserve this order.
 - GUI/browser adapters must not collapse recognized backend names to
   `software` before the shared resolver runs.
+- UI-facing aliases must normalize before probing:
+  `hip`, `amd_hip`, `amd-hip`, `amd_rocm`, and `amd-rocm` map to `rocm`;
+  `simd_cpu`, `cpu-simd`, and `simd-cpu` map to `cpu_simd`.
 - Strict backend requests must report unavailability instead of silently
   pretending a different backend was selected.
 - Baremetal and virtio-gpu remain explicit construction paths, not part of the
@@ -55,6 +58,7 @@ The current shared implementation lives in:
 - `src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl`
 - `src/lib/gc_async_mut/gpu/engine2d/engine.spl`
 - `src/app/ui.browser/backend.spl`
+- `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl`
 - `src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`
 
 If this order changes, update both the implementation and this guide in the

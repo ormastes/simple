@@ -62,7 +62,9 @@ pub enum LowerError {
     UseConstructorNotNew { class_name: String },
 
     /// E1052: Attempted to mutate self in an immutable fn method
-    #[error("cannot modify self in immutable fn method '{func_name}'. Use `me` instead of `fn` to allow self mutation")]
+    #[error(
+        "cannot modify self in immutable fn method '{func_name}'. Use `me` instead of `fn` to allow self mutation"
+    )]
     SelfMutationInImmutableMethod { func_name: String },
 
     /// CTR-032: Impure function call in contract expression

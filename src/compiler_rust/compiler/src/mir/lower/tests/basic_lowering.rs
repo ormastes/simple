@@ -130,3 +130,65 @@ fn test_lower_local_variable() {
         .any(|i| matches!(i, MirInst::LocalAddr { .. })));
     assert!(entry.instructions.iter().any(|i| matches!(i, MirInst::Store { .. })));
 }
+
+#[test]
+fn test_for_loop_var_binds_newest_shadowed_local() {
+    // Regression: stage4 10th-site (b). A `for arg in ...` after an earlier
+    // `val arg = ...` (HIR appends a SECOND local named "arg") must store the
+    // element into the NEWEST "arg" local — the one the body's Local(idx)
+    // reads — not the stale first match. Before the fix the element store
+    // targeted the old slot and the loop body saw nil
+    // ("✗ 1 error(s) found in 1 of 0 file(s)" from check.spl).
+    let src = "fn collide() -> i64:\n    val items = [\"a\", \"b\"]\n    var joined = \"\"\n    if true:\n        val arg = \"stale\"\n        joined = arg\n    for arg in items:\n        joined = joined + arg\n    return joined.len()\n";
+    let mir = compile_to_mir(src).unwrap();
+
+    let func = mir
+        .functions
+        .iter()
+        .find(|f| f.name.contains("collide"))
+        .expect("collide fn");
+    let num_params = func.params.len();
+
+    // There must be (at least) two locals named "arg" — the stale val and
+    // the loop variable appended by HIR lowering.
+    let arg_indices: Vec<usize> = func
+        .locals
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.name == "arg")
+        .map(|(i, _)| num_params + i)
+        .collect();
+    assert!(
+        arg_indices.len() >= 2,
+        "expected duplicate 'arg' locals, got {:?}",
+        arg_indices
+    );
+    let newest_arg = *arg_indices.last().unwrap();
+
+    // Collect every local index that receives a Store (via LocalAddr-derived
+    // addresses) anywhere in the function.
+    let mut stored_locals = std::collections::HashSet::new();
+    for block in &func.blocks {
+        let mut addr_to_local = std::collections::HashMap::new();
+        for inst in &block.instructions {
+            match inst {
+                MirInst::LocalAddr { dest, local_index } => {
+                    addr_to_local.insert(*dest, *local_index);
+                }
+                MirInst::Store { addr, .. } => {
+                    if let Some(local) = addr_to_local.get(addr) {
+                        stored_locals.insert(*local);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        stored_locals.contains(&newest_arg),
+        "for-loop element store must target the newest 'arg' local {} (stored: {:?})",
+        newest_arg,
+        stored_locals
+    );
+}

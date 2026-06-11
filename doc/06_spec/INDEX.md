@@ -5,16 +5,16 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
-- **Stubs Remaining:** 0
-- **Total Lines:** 51
+- **Complete Documentation:** 0 (0%)
+- **Stubs Remaining:** 1
+- **Total Lines:** 0
 - **Warnings:** 1
 
 ---
 
-## Language / Concurrency (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Concurrency API Misuse System Contract](test/03_system/feature/usage/concurrency_api_misuse_spec.md) | Active | N/A | 6 | 40% | 51 lines |
+| [Simple Web Layout Child Index Specification](test/02_integration/rendering/simple_web_layout_child_index_spec.md) | Auto-generated | N/A | 2 | 0% | 0 lines |
 

@@ -658,6 +658,7 @@ impl<'a> ExprTranslator<'a> {
                 }
                 HirStmt::For {
                     pattern,
+                    pattern_local: _,
                     iterable,
                     body,
                     simd_requested: _simd_requested,

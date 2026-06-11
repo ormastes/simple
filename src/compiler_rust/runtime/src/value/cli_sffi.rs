@@ -317,12 +317,28 @@ pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -
     // Extract args array to Vec<String>
     let arg_strings = extract_string_array(args);
 
-    // Call the test runner from simple-driver
-    // Note: This requires linking against simple-driver
-    // For now, we'll exec the binary to avoid circular dependencies
-    use std::process::Command;
+    // Delegate to the Rust seed driver (same resolution as lint/check/fmt).
+    // Spawning current_exe() here is wrong when this runtime is linked into
+    // the self-hosted stage4 CLI: stage4's `test` dispatch calls back into
+    // rt_cli_run_tests, so current_exe() would re-enter the same dispatch
+    // forever — the SIMPLE_TEST_DEPTH guard then aborts the FIRST legitimate
+    // run (stage4 10th-site (a), 2026-06-11).
+    let simple_bin = simple_binary_path();
+    let same_binary = match (std::env::current_exe(), simple_bin.canonicalize()) {
+        (Ok(cur), Ok(resolved)) => cur.canonicalize().map(|c| c == resolved).unwrap_or(false),
+        _ => false,
+    };
+    if same_binary {
+        eprintln!(
+            "error: cannot run tests: the test runner would re-spawn this same binary ({}).\n  \
+             Provide a Rust seed driver via SIMPLE_BOOTSTRAP_DRIVER or keep \
+             src/compiler_rust/target/{{bootstrap,release}}/simple available.",
+            simple_bin.display()
+        );
+        return 1;
+    }
 
-    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    let mut cmd = Command::new(&simple_bin);
     cmd.arg("test");
 
     // Add all arguments

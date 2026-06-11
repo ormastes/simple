@@ -978,6 +978,7 @@ impl<M: Module> CodegenBackend<M> {
         extern_fn_names: &std::collections::HashSet<String>,
         global_init_values: &std::collections::HashMap<String, i64>,
         local_globals: &std::collections::HashSet<String>,
+        runtime_init_globals: &std::collections::HashSet<String>,
     ) -> BackendResult<()> {
         use super::types_util::type_to_cranelift;
         let is_jit_module = std::any::type_name::<M>().contains("JITModule");
@@ -1136,20 +1137,17 @@ impl<M: Module> CodegenBackend<M> {
             } else {
                 // Local global: define with Preemptible linkage.
                 let local_symbol = self.mangle_name(name);
+                let needs_runtime_init = runtime_init_globals.contains(name);
+                let writable = *is_mutable || needs_runtime_init;
                 if trace_global {
                     eprintln!(
-                        "[declare-globals] define data name={} local_symbol={}",
-                        name, local_symbol
+                        "[declare-globals] define data name={} local_symbol={} writable={} runtime_init={}",
+                        name, local_symbol, writable, needs_runtime_init
                     );
                 }
                 let data_id = self
                     .module
-                    .declare_data(
-                        &local_symbol,
-                        cranelift_module::Linkage::Preemptible,
-                        *is_mutable,
-                        false,
-                    )
+                    .declare_data(&local_symbol, cranelift_module::Linkage::Preemptible, writable, false)
                     .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
                 let mut data_desc = cranelift_module::DataDescription::new();
@@ -1390,11 +1388,17 @@ impl<M: Module> CodegenBackend<M> {
         // globals that correspond to function references and initialize their
         // BSS slots with the function address (instead of zero).
         self.declare_functions(&functions, &referenced_names)?;
+        let mut runtime_init_globals = HashSet::new();
+        runtime_init_globals.extend(mir.global_init_strings.keys().cloned());
+        runtime_init_globals.extend(mir.global_init_arrays.keys().cloned());
+        runtime_init_globals.extend(mir.global_init_functions.keys().cloned());
+        runtime_init_globals.extend(mir.global_init_structs.keys().cloned());
         self.declare_globals(
             &mir.globals,
             &mir.extern_fn_names,
             &mir.global_init_values,
             &mir.local_globals,
+            &runtime_init_globals,
         )?;
 
         // Vtable pass: emit one static data object per impl Trait for Struct.
@@ -1440,7 +1444,7 @@ impl<M: Module> CodegenBackend<M> {
                     // If this looks like a "Copy: source vreg not found" error,
                     // auto-dump the failing function's MIR so the cross-block
                     // VReg root cause is visible without requiring an extra env
-                    // var or a seed rebuild with SIMPLE_NO_STUB_FALLBACK.
+                    // var or a seed rebuild.
                     let err_str = format!("{:?}", _e);
                     if err_str.contains("source vreg") {
                         eprintln!(
@@ -1455,11 +1459,17 @@ impl<M: Module> CodegenBackend<M> {
                             }
                             eprintln!("    terminator: {:?}", block.terminator);
                         }
-                    } else {
+                    } else if std::env::var_os("SIMPLE_ALLOW_STUB_FALLBACK").is_some() {
+                        // Escape hatch: allow stub emission but always warn so callers
+                        // can see which functions were silently replaced.
                         eprintln!(
                             "[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?} \
-                             — this function will be replaced by an empty stub. \
-                             Set SIMPLE_NO_STUB_FALLBACK=1 to make this a hard error.",
+                             — replacing with empty stub (SIMPLE_ALLOW_STUB_FALLBACK is set).",
+                            func.name, _e
+                        );
+                    } else {
+                        eprintln!(
+                            "[CODEGEN-STUB-FALLBACK] body compilation failed for '{}': {:?}",
                             func.name, _e
                         );
                     }
@@ -1470,16 +1480,18 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        // Hard-fail mode: opt-in via SIMPLE_NO_STUB_FALLBACK=1.
-        // When set, any function whose body failed to compile aborts the
-        // whole module compilation with a clear error instead of silently
-        // emitting an empty stub. This is the recommended setting when
-        // diagnosing missing-body bugs (e.g., the baremetal me-method
-        // dispatch issue from 2026-04-13).
-        if !failed_functions.is_empty() && std::env::var("SIMPLE_NO_STUB_FALLBACK").is_ok() {
+        // Default: hard-fail when any function body failed to compile.
+        // Unresolved rt_* symbols and other compile errors must not silently
+        // produce an empty stub that exits 0 — that is the B4 silent-miscompile bug.
+        //
+        // Escape hatch: set SIMPLE_ALLOW_STUB_FALLBACK (presence, any value) to
+        // restore the old stub-emission path. A warning is printed per stubbed
+        // function regardless (see the match arm above).
+        if !failed_functions.is_empty() && std::env::var_os("SIMPLE_ALLOW_STUB_FALLBACK").is_none() {
             let names: Vec<&str> = failed_functions.iter().map(|f| f.name.as_str()).collect();
             return Err(BackendError::ModuleError(format!(
-                "SIMPLE_NO_STUB_FALLBACK: {} function body/bodies failed to compile and would have been replaced by empty stubs: [{}]",
+                "codegen: {} function body/bodies failed to compile: [{}]; \
+                 set SIMPLE_ALLOW_STUB_FALLBACK to emit empty stubs instead (unsafe — binary will silently misbehave)",
                 names.len(),
                 names.join(", ")
             )));
@@ -1761,8 +1773,7 @@ impl<M: Module> CodegenBackend<M> {
                 let call_inst = builder.ins().call(new_ref, &[capacity]);
                 let array = builder.inst_results(call_inst)[0];
                 let push_ref = self.module.declare_func_in_func(array_push_id.unwrap(), builder.func);
-                let string_new_ref =
-                    self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
+                let string_new_ref = self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
                 for (idx, string_val) in strings.iter().enumerate() {
                     let bytes = string_val.as_bytes();
                     let data_name = format!(".Linit_arr_str_{:016x}", {
@@ -1782,9 +1793,7 @@ impl<M: Module> CodegenBackend<M> {
                     let data_id = self
                         .module
                         .declare_data(&data_name, cranelift_module::Linkage::Local, false, false)
-                        .map_err(|e| {
-                            BackendError::ModuleError(format!("declare array string data: {e}"))
-                        })?;
+                        .map_err(|e| BackendError::ModuleError(format!("declare array string data: {e}")))?;
                     {
                         let mut data_desc = cranelift_module::DataDescription::new();
                         data_desc.define(bytes.to_vec().into_boxed_slice());
@@ -1924,9 +1933,7 @@ impl<M: Module> CodegenBackend<M> {
                         let data_id = self
                             .module
                             .declare_data(&data_name, cranelift_module::Linkage::Local, false, false)
-                            .map_err(|e| {
-                                BackendError::ModuleError(format!("declare struct string data: {e}"))
-                            })?;
+                            .map_err(|e| BackendError::ModuleError(format!("declare struct string data: {e}")))?;
                         {
                             let mut data_desc = cranelift_module::DataDescription::new();
                             data_desc.define(bytes.to_vec().into_boxed_slice());
@@ -1935,14 +1942,12 @@ impl<M: Module> CodegenBackend<M> {
                         let data_ref = self.module.declare_data_in_func(data_id, builder.func);
                         let str_ptr = builder.ins().global_value(types::I64, data_ref);
                         let str_len = builder.ins().iconst(types::I64, bytes.len() as i64);
-                        let string_new_ref =
-                            self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
+                        let string_new_ref = self.module.declare_func_in_func(string_new_id.unwrap(), builder.func);
                         let call_inst = builder.ins().call(string_new_ref, &[str_ptr, str_len]);
                         builder.inst_results(call_inst)[0]
                     }
                     crate::hir::HirGlobalFieldInit::EmptyArray => {
-                        let new_ref =
-                            self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
+                        let new_ref = self.module.declare_func_in_func(array_new_id.unwrap(), builder.func);
                         let zero_cap = builder.ins().iconst(types::I64, 0);
                         let call_inst = builder.ins().call(new_ref, &[zero_cap]);
                         builder.inst_results(call_inst)[0]
@@ -2129,6 +2134,76 @@ mod tests {
 
         assert!(backend.runtime_funcs.contains_key("rt_alloc"));
         assert!(backend.runtime_funcs.contains_key("rt_interp_call"));
+    }
+
+    // Serialize env-var tests that manipulate SIMPLE_ALLOW_STUB_FALLBACK so
+    // parallel test execution does not race on the env var.
+    fn allow_stub_fallback_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Build a MirFunction whose body contains a Copy from an undefined vreg (vreg 99).
+    /// This is guaranteed to fail during `compile_function` with a "source vreg not found" error.
+    fn failing_function() -> MirFunction {
+        let mut func = MirFunction::new("stub_test_fn".to_string(), TypeId::I64, Visibility::Public);
+        let dest = func.new_vreg();
+        // src is VReg(99) which is never written — compile_function_body will error
+        func.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::Copy { dest, src: VReg(99) });
+        func.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(dest));
+        func
+    }
+
+    #[test]
+    fn stub_fallback_default_is_hard_error() {
+        let _guard = allow_stub_fallback_env_lock().lock().unwrap();
+        // Ensure escape hatch is NOT set
+        let previous = std::env::var_os("SIMPLE_ALLOW_STUB_FALLBACK");
+        std::env::remove_var("SIMPLE_ALLOW_STUB_FALLBACK");
+
+        let mut module = MirModule::new();
+        module.functions.push(failing_function());
+
+        let mut backend = test_backend();
+        let result = backend.compile_all_functions(&module);
+
+        // Restore
+        match previous {
+            Some(val) => std::env::set_var("SIMPLE_ALLOW_STUB_FALLBACK", val),
+            None => {}
+        }
+
+        let err = result.expect_err("default must be a hard compile error when a function body fails");
+        assert!(
+            err.to_string().contains("stub_test_fn"),
+            "error must name the failing function; got: {err}"
+        );
+    }
+
+    #[test]
+    fn stub_fallback_allowed_when_env_var_set() {
+        let _guard = allow_stub_fallback_env_lock().lock().unwrap();
+        let previous = std::env::var_os("SIMPLE_ALLOW_STUB_FALLBACK");
+        std::env::set_var("SIMPLE_ALLOW_STUB_FALLBACK", "1");
+
+        let mut module = MirModule::new();
+        module.functions.push(failing_function());
+
+        let mut backend = test_backend();
+        let result = backend.compile_all_functions(&module);
+
+        // Restore
+        match previous {
+            Some(val) => std::env::set_var("SIMPLE_ALLOW_STUB_FALLBACK", val),
+            None => std::env::remove_var("SIMPLE_ALLOW_STUB_FALLBACK"),
+        }
+
+        // With SIMPLE_ALLOW_STUB_FALLBACK set, the old stub path is taken and
+        // compile_all_functions must succeed (stub replaces the failing body).
+        result.expect("SIMPLE_ALLOW_STUB_FALLBACK must allow stub emission and return Ok");
     }
 
     #[test]

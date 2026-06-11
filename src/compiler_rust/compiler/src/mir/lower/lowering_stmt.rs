@@ -1194,6 +1194,7 @@ impl<'a> MirLowerer<'a> {
 
             HirStmt::For {
                 pattern,
+                pattern_local,
                 iterable,
                 body,
                 simd_requested: _simd_requested,
@@ -1206,6 +1207,7 @@ impl<'a> MirLowerer<'a> {
                         let is_inclusive = name == "rt_range_inclusive";
                         return self.lower_for_range(
                             pattern,
+                            *pattern_local,
                             &range_args[0],
                             &range_args[1],
                             is_inclusive,
@@ -1241,31 +1243,46 @@ impl<'a> MirLowerer<'a> {
                     dest
                 })?;
 
-                // Create a local for the loop variable if it doesn't exist
-                let pattern_local_index = self.with_func(|func, _| {
-                    let num_params = func.params.len();
-                    // First check params
-                    for (i, param) in func.params.iter().enumerate() {
-                        if param.name == *pattern {
-                            return i;
+                // Bind the loop variable. Prefer the exact local index that
+                // HIR lowering allocated for it (`pattern_local`): the body's
+                // `Local(idx)` references that slot, and resolving by NAME is
+                // ambiguous — `add_local` appends a fresh slot for every
+                // same-named `val`/`var`/loop variable, so both an earlier
+                // shadowed binding and a later same-named loop produce
+                // duplicate names. First-name-match stored elements into a
+                // stale slot while the body read nil from the real one
+                // (stage4 10th-site (b): check.spl `for arg in file_args`
+                // after `val arg` in the arg-parse loop → "1 of 0 file(s)").
+                let pattern_local_index = if let Some(idx) = pattern_local {
+                    *idx
+                } else {
+                    // Fallback for HIR producers that don't track the index
+                    // (HIR-level transforms, tests): legacy name search.
+                    self.with_func(|func, _| {
+                        let num_params = func.params.len();
+                        // First check params
+                        for (i, param) in func.params.iter().enumerate() {
+                            if param.name == *pattern {
+                                return i;
+                            }
                         }
-                    }
-                    // Then check locals
-                    for (i, local) in func.locals.iter().enumerate() {
-                        if local.name == *pattern {
-                            return num_params + i;
+                        // Then check locals
+                        for (i, local) in func.locals.iter().enumerate() {
+                            if local.name == *pattern {
+                                return num_params + i;
+                            }
                         }
-                    }
-                    // Not found - create a new local for the loop variable
-                    let index = num_params + func.locals.len();
-                    func.locals.push(crate::mir::function::MirLocal {
-                        name: pattern.clone(),
-                        ty: crate::hir::TypeId::ANY, // Type will be inferred from collection element type
-                        kind: crate::mir::effects::LocalKind::Local,
-                        is_ghost: false,
-                    });
-                    index
-                })?;
+                        // Not found - create a new local for the loop variable
+                        let index = num_params + func.locals.len();
+                        func.locals.push(crate::mir::function::MirLocal {
+                            name: pattern.clone(),
+                            ty: crate::hir::TypeId::ANY, // Type will be inferred from collection element type
+                            kind: crate::mir::effects::LocalKind::Local,
+                            is_ghost: false,
+                        });
+                        index
+                    })?
+                };
 
                 // Get collection length via rt_array_len call
                 let len_reg = self.with_func(|func, current_block| {
@@ -1718,9 +1735,11 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower a for-range loop (e.g., `for i in 0..n`) as a counter-based loop.
     /// This avoids creating a range collection object and uses direct integer comparison.
+    #[allow(clippy::too_many_arguments)] // reason: mirrors HirStmt::For fields; loop-var index must travel with the pattern name
     fn lower_for_range(
         &mut self,
         pattern: &str,
+        pattern_local: Option<usize>,
         start_expr: &crate::hir::HirExpr,
         end_expr: &crate::hir::HirExpr,
         inclusive: bool,
@@ -1736,31 +1755,45 @@ impl<'a> MirLowerer<'a> {
         let start_reg = self.lower_expr(start_expr)?;
         let end_reg = self.lower_expr(end_expr)?;
 
-        // Create or find the loop variable local
-        let pattern_local_index = self.with_func(|func, _| {
-            let num_params = func.params.len();
-            for (i, param) in func.params.iter().enumerate() {
-                if param.name == pattern {
-                    return i;
-                }
-            }
-            for (i, local) in func.locals.iter().enumerate() {
-                if local.name == pattern {
-                    if let Some(local) = func.locals.get_mut(i) {
+        // Bind the loop variable: prefer the exact HIR-allocated local index
+        // (see HirStmt::For binder above — name search is ambiguous with
+        // shadowed or sequential same-named loop variables).
+        let pattern_local_index = if let Some(idx) = pattern_local {
+            self.with_func(|func, _| {
+                let num_params = func.params.len();
+                if idx >= num_params {
+                    if let Some(local) = func.locals.get_mut(idx - num_params) {
                         local.ty = loop_ty;
                     }
-                    return num_params + i;
                 }
-            }
-            let index = num_params + func.locals.len();
-            func.locals.push(crate::mir::function::MirLocal {
-                name: pattern.to_string(),
-                ty: loop_ty,
-                kind: crate::mir::effects::LocalKind::Local,
-                is_ghost: false,
-            });
-            index
-        })?;
+                idx
+            })?
+        } else {
+            self.with_func(|func, _| {
+                let num_params = func.params.len();
+                for (i, param) in func.params.iter().enumerate() {
+                    if param.name == pattern {
+                        return i;
+                    }
+                }
+                for (i, local) in func.locals.iter().enumerate() {
+                    if local.name == pattern {
+                        if let Some(local) = func.locals.get_mut(i) {
+                            local.ty = loop_ty;
+                        }
+                        return num_params + i;
+                    }
+                }
+                let index = num_params + func.locals.len();
+                func.locals.push(crate::mir::function::MirLocal {
+                    name: pattern.to_string(),
+                    ty: loop_ty,
+                    kind: crate::mir::effects::LocalKind::Local,
+                    is_ghost: false,
+                });
+                index
+            })?
+        };
 
         // Store start value to the loop variable
         self.with_func(|func, current_block| {

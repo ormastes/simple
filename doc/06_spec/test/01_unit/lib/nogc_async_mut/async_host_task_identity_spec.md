@@ -54,7 +54,7 @@ expect(current_scheduler_task_key("fallback-task")).to_equal("fallback-task")
 
 #### uses scheduler owned task key while entered
 
-1. exit scheduler task id
+- exit scheduler task id
    - Expected: current_scheduler_task_key("fallback-task") equals `fallback-task`
 
 
@@ -75,7 +75,7 @@ expect(current_scheduler_task_key("fallback-task")).to_equal("fallback-task")
 
 #### prefers scheduler task key in unified identity
 
-1. exit scheduler task id
+- exit scheduler task id
 
 
 <details>
@@ -94,9 +94,9 @@ exit_scheduler_task_id(previous)
 
 #### restores nested scheduler task identity
 
-1. exit scheduler task id
+- exit scheduler task id
    - Expected: current_scheduler_task_key("fallback-task") equals `scheduler-task-7`
-2. exit scheduler task id
+- exit scheduler task id
    - Expected: current_scheduler_task_key("fallback-task") equals `fallback-task`
 
 

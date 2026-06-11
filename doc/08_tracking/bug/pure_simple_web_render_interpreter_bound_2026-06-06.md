@@ -704,3 +704,108 @@ Current interpretation:
   glyph generation or vector-font readback acceleration
 - it does remove duplicate CPU fallback work and gives the remaining font-path
   optimization one shared implementation surface for these backends
+
+## 2026-06-11 Bitmap-font provenance aliases
+
+The generated Engine2D operation provenance now recognizes explicit
+`bitmap_font`, `bitmap_glyph`, `font_bitmap`, and `glyph_bitmap` operation
+families. They map to the generated copy/upload operation with
+`cpu_preprocess_required = true`, matching the current bitmap text reality:
+glyph pixels are still produced on CPU and uploaded/blitted by the backend.
+
+This is not a GPU-side bitmap glyph rasterizer yet. It is a narrow contract so
+measurement and future backend work can distinguish:
+
+- bitmap-font fallback: CPU glyph buffer plus generated copy/upload
+- vector-font offload: production-ready only after GPU glyph pixels are returned
+- normal image copy: generated copy/upload without text CPU preprocessing
+
+## 2026-06-11 WebGPU foreground text consolidation
+
+Spark reviewed the remaining backend-local bitmap text fallback bodies and
+identified `WebGpuBackend.draw_text(...)` as the safest next single-backend
+consolidation target. That path now uses
+`helpers_text.text_transparent_blit_buffer(...)` for glyph buffer generation and
+then writes only nonzero foreground pixels into the WebGPU CPU mirror buffer.
+
+This preserves foreground-only `draw_text` behavior instead of routing through
+`draw_image(...)`, which would overwrite background pixels with transparent
+zeros on this backend.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl`
+  passes with the pre-existing `gc_boundary_crossing` warning on the WebGPU SFFI
+  import.
+- `bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl --no-cache`:
+  `5 passed, 0 failed`
+
+## 2026-06-11 Baremetal text-bg consolidation blocker
+
+Attempted next target: `BaremetalBackend.draw_text_bg(...)`, replacing its local
+bitmap background buffer construction with `helpers_text.text_blit_buffer(...)`.
+The code checked, but the focused host-buffer scenario failed at runtime with
+`semantic: variable self not found` inside the `Engine2DExtended` method path.
+
+The workaround attempts also failed:
+
+- hoisting `self` into a local backend before the helper call
+- avoiding `TextBlitBuffer.is_empty()` method dispatch
+- writing the shared payload directly through `_bm_put(...)` instead of calling
+  `self.draw_image(...)`
+
+The slice was reverted to avoid landing a red backend spec. This leaves
+Baremetal in the remaining duplicated bitmap fallback set until the extension
+method `self` binding/runtime issue is fixed or minimized separately.
+
+## 2026-06-11 Helper parity repair
+
+Spark reviewed the stale matcher cleanup for
+`test/02_integration/rendering/helpers_parity_spec.spl`; Codex applied the
+replacement and split range/string/order checks into typed assertions. The test
+then exposed interpreter-visible buffer mutation gaps in the pure-Simple helper
+API: `mut` parameters are local to the interpreter, so callers need a returned
+buffer when asserting effects.
+
+The shared pixel helpers and bitmap glyph renderers now keep their mutable
+parameter shape and also return the updated buffer. Existing backend call sites
+that ignore the result still check, while pure-Simple tests can assign the
+returned buffer and verify the same pixel effects.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/engine2d/helpers_pixel.spl src/lib/gc_async_mut/gpu/engine2d/glyph.spl test/02_integration/rendering/helpers_parity_spec.spl src/lib/gc_async_mut/gpu/engine2d/backend_virtio_gpu.spl src/lib/gc_async_mut/gpu/engine2d/backend_opengl.spl src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl`
+  passes with the pre-existing GC-boundary warnings in VirtIO/WebGPU.
+- `bin/simple test test/02_integration/rendering/helpers_parity_spec.spl --no-cache`:
+  `66 passed, 0 failed`
+
+## 2026-06-11 Pure-Simple layout child-scan optimization
+
+The pure-Simple HTML layout path previously rediscovered direct children by
+scanning `i + 1 .. nodes.len()` inside each recursive layout call. Flat GUI or
+HTML startup fixtures therefore repeated full arena scans across contents,
+flex-wrap, flex-row, flex-column, and normal block-flow branches.
+
+The renderer now builds `HtmlChildIndex` once after parsing and passes it through
+the recursive layout and intrinsic inline-width calls. Each branch iterates only
+`child_index.children[i]`, preserving document order and public render/debug
+entrypoints while removing the direct child-discovery O(n^2) shape from layout.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `2 passed, 0 failed`
+- `bin/simple test test/02_integration/rendering/web_engine2d_metal_offload_spec.spl --no-cache`:
+  `11 passed, 0 failed`
+- Optimizer analysis ran on the touched renderer and spec. It still reports
+  broad follow-up opportunities such as bounds-check elimination, len-call
+  hoisting, and collection preallocation.
+
+Attempted extra smoke:
+
+- `bin/simple run src/app/wm_compare/backend_measurement_software_export.spl --software-render-backend software --width 160 --height 120 --sample-count 3 --warmup-count 1 --fixture child-index-smoke`
+  exited `-1` with no output. The direct renderer specs above stayed green, so
+  this remains a measurement-entrypoint/runtime follow-up rather than evidence
+  against the layout child-index change.

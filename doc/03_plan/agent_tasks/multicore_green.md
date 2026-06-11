@@ -10,17 +10,13 @@ Date: 2026-06-06
   both stay ahead of the C pthread-per-task baseline:
   Go `6.533 ms`, Simple multicore green native `9.638 ms`, C pthreads
   `63.791 ms`.
-- Fresh isolated 2026-06-11 host/Docker evidence also confirms a separate
-  active OS-thread baseline blocker: standalone native public `thread_spawn`
-  fixtures still return zero-result joins even though the same fixtures pass in
-  the interpreter and SMF loader. Executable evidence now lives in
-  `test/03_system/feature/usage/thread_spawn_native_zero_join_blocker_spec.spl`
-  and `doc/08_tracking/bug/thread_spawn_native_zero_join_2026-06-11.md`.
-- Later 2026-06-11 narrowing work fixed the host-rebuilt native path and the
-  public `thread_spawn_with_args` native smoke, but the isolated Docker profile
-  still reproduces zero-result joins for generated `thread_spawn(\: worker())`
-  rows. The remaining blocker is therefore Docker-specific OS-thread native
-  profile output, not the general host-native thread API.
+- Fresh isolated 2026-06-11 evidence now shows the earlier `thread_spawn`
+  native zero-join blocker is closed end to end: host-native public
+  `thread_spawn`, `thread_spawn_with_args`, and the Docker profile OS-thread
+  rows are all green with the rebuilt runtime plus the explicit Docker binary
+  override fix in `scripts/check/check-cross-language-perf.shs`. Historical
+  tracking remains in
+  `doc/08_tracking/bug/thread_spawn_native_zero_join_2026-06-11.md`.
 - Cooperative-green SMF mutable-global crash evidence is now closed by
   `test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl`
   and the mirrored manual under `doc/06_spec`.

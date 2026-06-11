@@ -107,7 +107,7 @@ expect ref.layer_name == "api"
 
 #### supports chaining may_only_access
 
-1. ref may only access
+- ref may only access
 
 
 <details>
@@ -126,7 +126,7 @@ expect ref.allowed == "domain,infra"
 
 #### supports chaining may_not_access
 
-1. ref may not access
+- ref may not access
 
 
 <details>
@@ -145,7 +145,7 @@ expect ref.forbidden == "api,infra"
 
 #### supports chaining multiple rules
 
-1. ref may only access
+- ref may only access
 
 
 <details>
@@ -182,8 +182,8 @@ expect arch.layer_count == 0
 
 #### defines layers fluently
 
-1. arch define layer
-2. arch define layer
+- arch define layer
+- arch define layer
 
 
 <details>
@@ -203,7 +203,7 @@ expect arch.layer_count == 2
 
 #### finds layer containing a module
 
-1. arch define layer
+- arch define layer
 
 
 <details>
@@ -224,7 +224,7 @@ expect arch.layer_count == 1
 
 #### passes when layer only accesses allowed layers
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -242,7 +242,7 @@ expect result.is_ok() == true
 
 #### fails when layer accesses forbidden layer
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -262,7 +262,7 @@ expect result.is_ok() == false
 
 #### passes when layer does not access forbidden layers
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -280,7 +280,7 @@ expect result.is_ok() == true
 
 #### fails when layer accesses forbidden layer
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -300,7 +300,7 @@ expect result.is_ok() == false
 
 #### passes when forbidden layers do not access target
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -318,7 +318,7 @@ expect result.is_ok() == true
 
 #### fails when forbidden layer accesses target
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -338,7 +338,7 @@ expect result.is_ok() == false
 
 #### passes when no mocks in production code
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -356,7 +356,7 @@ expect result.is_ok() == true
 
 #### fails when mock annotation in production code
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -374,7 +374,7 @@ expect result.is_ok() == false
 
 #### ignores mocks in test code
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -394,7 +394,7 @@ expect result.is_ok() == true
 
 #### passes when layers are accessed in order
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -412,7 +412,7 @@ expect result.is_ok() == true
 
 #### fails when layer is skipped
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -432,7 +432,7 @@ expect result.is_ok() == false
 
 #### is_ok returns true for Pass
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -450,7 +450,7 @@ expect result.is_ok() == true
 
 #### is_ok returns false for Fail
 
-1. expect result is ok
+- expect result is ok
 
 
 <details>
@@ -468,7 +468,7 @@ expect result.is_ok() == false
 
 #### violations returns empty list for Pass
 
-1. expect result has violations
+- expect result has violations
 
 
 <details>
@@ -486,7 +486,7 @@ expect result.has_violations() == false
 
 #### violations returns list for Fail
 
-1. expect result has violations
+- expect result has violations
 
 
 <details>
@@ -524,10 +524,10 @@ expect msg == "api -> domain"
 
 #### validates a typical layered architecture
 
-1. arch define layer
-2. arch define layer
-3. arch define layer
-4. arch define layer
+- arch define layer
+- arch define layer
+- arch define layer
+- arch define layer
 
 
 <details>

@@ -2862,7 +2862,8 @@ pub fn compile_call<M: Module>(
             arg_vals
         };
 
-        let arg_vals = adapt_args_to_signature(builder, runtime_ref, arg_vals);
+        let arg_signed: Vec<Option<bool>> = args.iter().map(|arg| super::core::vreg_is_signed(ctx, *arg)).collect();
+        let arg_vals = adapt_args_to_signature_with_signedness(builder, runtime_ref, arg_vals, Some(&arg_signed));
         let call = adapted_call(builder, runtime_ref, &arg_vals);
         if let Some(d) = dest {
             let results = builder.inst_results(call);
@@ -2911,7 +2912,8 @@ pub fn compile_call<M: Module>(
         }
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
-        let arg_vals = adapt_args_to_signature(builder, callee_ref, arg_vals);
+        let arg_signed: Vec<Option<bool>> = args.iter().map(|arg| super::core::vreg_is_signed(ctx, *arg)).collect();
+        let arg_vals = adapt_args_to_signature_with_signedness(builder, callee_ref, arg_vals, Some(&arg_signed));
         let call = adapted_call(builder, callee_ref, &arg_vals);
         if !is_profiler_function(func_name) {
             emit_profiler_return(ctx, builder)?;

@@ -732,6 +732,7 @@ impl CompilerPipeline {
                 }
                 HirStmt::For {
                     pattern,
+                    pattern_local,
                     iterable,
                     body,
                     simd_requested,
@@ -741,6 +742,7 @@ impl CompilerPipeline {
                     self.rewrite_hir_simd_stmts(types, body, &mut body_len_aliases);
                     let fallback = HirStmt::For {
                         pattern: pattern.clone(),
+                        pattern_local: *pattern_local,
                         iterable: iterable.clone(),
                         body: body.clone(),
                         simd_requested: *simd_requested,

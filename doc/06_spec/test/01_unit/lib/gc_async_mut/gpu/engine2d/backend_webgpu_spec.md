@@ -27,7 +27,7 @@ backend_webgpu_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,7 +43,9 @@ _Exercises the full drawing surface of the backend stub._
 
 #### constructs a stub backend without a WebGPU adapter
 
-1. var backend = WebGpuBackend create
+- var backend = WebGpuBackend create
+   - Expected: backend.initialized == false is true
+   - Expected: backend.gpu_ready == false is true
 
 
 <details>
@@ -54,30 +56,35 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var backend = WebGpuBackend.create()
-expect(backend.initialized == false).to_be_true()
-expect(backend.gpu_ready == false).to_be_true()
+expect(backend.initialized == false).to_equal(true)
+expect(backend.gpu_ready == false).to_equal(true)
 ```
 
 </details>
 
 #### implements the RenderBackend trait end-to-end on a stub
 
-1. var backend = WebGpuBackend create
-2. backend clear
-3. backend draw rect filled
-4. backend draw rect
-5. backend draw line
-6. backend draw circle
-7. backend draw circle filled
-8. backend draw rounded rect
-9. backend draw triangle filled
-10. backend draw gradient rect
-11. backend draw text
-12. backend draw image
-13. backend set clip
-14. backend clear clip
-15. backend present
-16. backend shutdown
+- var backend = WebGpuBackend create
+   - Expected: ok is true
+   - Expected: backend.name() == "webgpu" is true
+   - Expected: backend.width() == 32 is true
+   - Expected: backend.height() == 16 is true
+- backend clear
+- backend draw rect filled
+- backend draw rect
+- backend draw line
+- backend draw circle
+- backend draw circle filled
+- backend draw rounded rect
+- backend draw triangle filled
+- backend draw gradient rect
+- backend draw text
+- backend draw image
+- backend set clip
+- backend clear clip
+- backend present
+   - Expected: pixels.len() == 32 * 16 is true
+- backend shutdown
 
 
 <details>
@@ -89,10 +96,10 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var backend = WebGpuBackend.create()
 val ok = backend.init(32, 16)
-expect(ok).to_be_true()
-expect(backend.name() == "webgpu").to_be_true()
-expect(backend.width() == 32).to_be_true()
-expect(backend.height() == 16).to_be_true()
+expect(ok).to_equal(true)
+expect(backend.name() == "webgpu").to_equal(true)
+expect(backend.width() == 32).to_equal(true)
+expect(backend.height() == 16).to_equal(true)
 
 # Drawing path must work even when no GPU is present - the
 # CPU pixel buffer is the parity floor for M7.
@@ -114,7 +121,7 @@ backend.present()
 # read_pixels must return the drawn frame so compositor
 # consumers keep working on hosts without a GPU adapter.
 val pixels = backend.read_pixels()
-expect(pixels.len() == 32 * 16).to_be_true()
+expect(pixels.len() == 32 * 16).to_equal(true)
 
 backend.shutdown()
 ```
@@ -123,28 +130,90 @@ backend.shutdown()
 
 #### exposes draw_text_bg via Engine2DExtended
 
-1. var backend = WebGpuBackend create
-2. backend clear
-3. backend draw text bg
-4. backend present
-5. backend shutdown
+- var backend = WebGpuBackend create
+   - Expected: ok is true
+- backend clear
+- backend draw text bg
+   - Expected: pixels[0] equals `expected.pixels[0]`
+   - Expected: pixels[1] equals `expected.pixels[1]`
+   - Expected: pixels[32] equals `expected.pixels[expected.width]`
+   - Expected: pixels[33] equals `expected.pixels[expected.width + 1]`
+- backend present
+- backend shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var backend = WebGpuBackend.create()
 val ok = backend.init(32, 16)
-expect(ok).to_be_true()
+expect(ok).to_equal(true)
 backend.clear(0xFF000000u32)
 backend.draw_text_bg(0, 0, "A", 0xFFFFFFFFu32, 0xFF202020u32, 7)
+val pixels = backend.read_pixels()
+val expected = text_blit_buffer("A", 0xFFFFFFFFu32, 0xFF202020u32, 7)
+expect(pixels[0]).to_equal(expected.pixels[0])
+expect(pixels[1]).to_equal(expected.pixels[1])
+expect(pixels[32]).to_equal(expected.pixels[expected.width])
+expect(pixels[33]).to_equal(expected.pixels[expected.width + 1])
 backend.present()
 backend.shutdown()
-expect(true).to_be_true()
+```
+
+</details>
+
+#### routes foreground draw_text through shared transparent text semantics
+
+- var backend = WebGpuBackend create
+   - Expected: ok is true
+- backend clear
+- backend draw text
+   - Expected: fg_count > 0 is true
+   - Expected: bg_count > 0 is true
+   - Expected: transparent_count > 0 is true
+- backend shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var backend = WebGpuBackend.create()
+val ok = backend.init(8, 8)
+expect(ok).to_equal(true)
+val bg = 0xFF303030u32
+backend.clear(bg)
+
+backend.draw_text(0, 0, "I", 0xFFFFFFFFu32, 7)
+val pixels = backend.read_pixels()
+val expected = text_render_to_buf("I", 0xFFFFFFFFu32, 0u32, 7)
+var fg_count = 0
+var bg_count = 0
+var transparent_count = 0
+var idx = 0
+while idx < pixels.len():
+    if pixels[idx] == 0xFFFFFFFFu32:
+        fg_count = fg_count + 1
+    if pixels[idx] == bg:
+        bg_count = bg_count + 1
+    idx = idx + 1
+idx = 0
+while idx < expected.len():
+    if expected[idx] == 0u32:
+        transparent_count = transparent_count + 1
+    idx = idx + 1
+
+expect(fg_count > 0).to_equal(true)
+expect(bg_count > 0).to_equal(true)
+expect(transparent_count > 0).to_equal(true)
+backend.shutdown()
 ```
 
 </details>
@@ -164,7 +233,7 @@ Reproduction: this block contains the complete executable scenario source.
 # no WebGPU runtime. We only check that the call returns
 # (either true or false) - hermetic CI lacks an adapter.
 val _available = webgpu_available()
-expect(true).to_be_true()
+expect(true).to_equal(true)
 ```
 
 </details>
@@ -188,8 +257,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

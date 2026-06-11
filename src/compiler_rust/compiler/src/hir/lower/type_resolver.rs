@@ -642,7 +642,10 @@ impl Lowerer {
                     }
                     let mut best: Option<(usize, TypeId, usize)> = None;
                     for (_, search_ty) in self.module.types.iter() {
-                        if let HirType::Struct { fields: search_fields, .. } = search_ty {
+                        if let HirType::Struct {
+                            fields: search_fields, ..
+                        } = search_ty
+                        {
                             for (idx, (field_name, field_ty)) in search_fields.iter().enumerate() {
                                 if field_name == field {
                                     let count = search_fields.len();

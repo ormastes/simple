@@ -1,6 +1,6 @@
 # Thread Spawn Native Zero-Join Blocker
 
-Status: Narrowed
+Status: Closed
 
 ## Summary
 
@@ -12,11 +12,10 @@ surface now works again for:
 - native `thread_spawn_with_args(...)` smoke
 - host-native `thread_spawn(\: worker())` profile worker repro
 
-The remaining live failure is now the Docker-compiled OS-thread profile row:
-the same generated `thread_spawn(\: worker())` and fanout shapes still produce
-zero-result joins when compiled inside the isolated cross-language profile
-container, even when that container is pointed at the freshly rebuilt compiler
-binary.
+The remaining Docker/profile failure from earlier in the day is closed. The
+native runtime fix restored host-side `thread_spawn`, and the profile harness
+was then corrected to honor explicit
+`PROFILE_DOCKER_SIMPLE_BINARY=...` overrides inside the Docker container.
 
 ## Reproduction
 
@@ -59,9 +58,10 @@ Fresh rebuilt host evidence on 2026-06-11 using
   - `thread_spawn_with_args(10, 32, add_pair)` -> `direct_result=42`
   - `thread_spawn_with_args(7, 11, \seed, iters: ...)` -> lambda result matches expected
 
-## Profile Impact
+## Historical Profile Impact
 
-This is the current reason the fresh host/Docker profile rows still report:
+Before the harness fix, this was the reason the fresh host/Docker profile rows
+still reported:
 
 - `Simple (native)` worker row -> `fail`
 - `Simple (native)` fanout row -> `fail`
@@ -77,43 +77,21 @@ The generated host-side native profile binaries reproduce:
 - `build/cross_lang_perf_refresh_current/fanout_simple_native`
   -> `checksum_mismatch total=0 expected=1868141281000`
 
-## Likely Boundary
+## Closure
 
 `thread_spawn_with_args` still has its own focused native smoke and remains a
-different path. The active failure here is narrower:
+different path, but the broad `thread_spawn` native blocker is now closed.
 
-- direct public `thread_spawn`
-- top-level zero-arg worker function
-- standalone native artifact
-- joined results come back as zero
-
-Fresh isolated profile evidence on 2026-06-11 with the rebuilt compiler path:
+Fresh isolated profile evidence on 2026-06-11 with the rebuilt compiler path
+after the Docker override fix:
 
 - `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 
-That report still records:
+That report now records positive OS-thread rows:
 
-- `Simple (native)` worker row -> `fail`
-- `Simple (native)` fanout row -> `fail`
+- `Simple (native)` worker row -> `109.410 ms`
+- `Simple (native)` fanout row -> `72.261 ms`
 
-and the generated Docker-built binaries still reproduce:
-
-- `build/cross_lang_perf_thread_fix_fresh/parallel_simple_native`
-  -> `checksum_mismatch total=0 expected=7220643300`
-- `build/cross_lang_perf_thread_fix_fresh/fanout_simple_native`
-  -> `checksum_mismatch total=0 expected=1868141281000`
-
-The remaining problem is therefore narrower than the original host/runtime bug:
-
-- host-native rebuilt compiler path is fixed
-- Docker-compiled OS-thread profile binaries still fail
-- the profile report parser is not the issue
-
-## Next Fix Target
-
-Next target:
-
-- isolate why Docker-compiled `thread_spawn(\: worker())` binaries still zero
-  their joins when the same fresh compiler produces correct host-native output
-- once Docker OS-thread rows go green, refresh the checked-in contract report
-  and convert the stale native blocker evidence into regression coverage
+The Docker-generated binaries now execute successfully with the intended fresh
+compiler binary, so the remaining gap in this lane is no longer a `thread_spawn`
+correctness issue.

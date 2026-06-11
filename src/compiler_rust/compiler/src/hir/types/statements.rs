@@ -34,6 +34,12 @@ pub enum HirStmt {
     For {
         /// Pattern binding for the loop variable
         pattern: String,
+        /// Local index of the loop variable as allocated during HIR lowering.
+        /// The body's `HirExprKind::Local(idx)` references this exact slot;
+        /// binding by name in later stages is ambiguous because `add_local`
+        /// appends a fresh slot for every same-named `val`/`var`/loop var
+        /// (shadowing + sequential same-named loops both create duplicates).
+        pattern_local: Option<usize>,
         /// The iterator expression
         iterable: HirExpr,
         /// Loop body

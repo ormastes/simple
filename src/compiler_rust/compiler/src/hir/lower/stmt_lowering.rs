@@ -461,6 +461,7 @@ impl Lowerer {
                     let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
                     Ok(vec![HirStmt::For {
                         pattern: temp_name,
+                        pattern_local: Some(temp_idx),
                         iterable,
                         body: new_body,
                         simd_requested: for_stmt.simd_requested,
@@ -471,12 +472,13 @@ impl Lowerer {
                     let pattern = Self::extract_pattern_name(&for_stmt.pattern).unwrap_or_else(|| "item".to_string());
 
                     // Add the loop variable to the context BEFORE lowering the body
-                    ctx.add_local(pattern.clone(), element_ty, Mutability::Immutable);
+                    let pattern_idx = ctx.add_local(pattern.clone(), element_ty, Mutability::Immutable);
 
                     let body = self.lower_block(&for_stmt.body, ctx)?;
                     let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
                     Ok(vec![HirStmt::For {
                         pattern,
+                        pattern_local: Some(pattern_idx),
                         iterable,
                         body,
                         simd_requested: for_stmt.simd_requested,

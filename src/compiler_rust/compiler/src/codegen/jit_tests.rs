@@ -114,3 +114,75 @@ fn test_jit_println_capture() {
         captured
     );
 }
+
+#[test]
+fn test_jit_module_init_writes_heap_initialized_val_global() {
+    let source = r#"
+val DRAW_IR_BACKEND_CPU = "cpu"
+
+fn fb_put(mut fb: [u32], fbw: i64, fbh: i64, x: i64, y: i64, color: u32):
+    if x < 0 or y < 0 or x >= fbw or y >= fbh:
+        return
+    fb[y * fbw + x] = color
+
+fn main() -> i64:
+    return 1
+"#;
+    let jit = jit_compile(source).unwrap();
+    let result = unsafe { jit.call_i64_void("main").unwrap() };
+    assert_eq!(result, 1);
+}
+
+#[test]
+fn test_jit_i32_return_controls_loop_condition() {
+    let source = r#"
+fn as_i32(v: i64) -> i32:
+    return v.to_i32()
+
+fn should_skip() -> i64:
+    val sample_count = as_i32(0)
+    var i: i64 = 0
+    while i < sample_count:
+        return 99
+    return 0
+"#;
+    let jit = jit_compile(source).unwrap();
+    let result = unsafe { jit.call_i64_void("should_skip").unwrap() };
+    assert_eq!(result, 0);
+}
+
+#[test]
+fn test_jit_text_to_i32_parses_string_before_narrowing() {
+    let source = r#"
+fn parsed_zero_skips_loop() -> i64:
+    val sample_count = "0".to_i32()
+    var i: i64 = 0
+    while i < sample_count:
+        return 99
+    return sample_count.to_i64()
+"#;
+    let jit = jit_compile(source).unwrap();
+    let result = unsafe { jit.call_i64_void("parsed_zero_skips_loop").unwrap() };
+    assert_eq!(result, 0);
+}
+
+#[test]
+fn test_jit_i32_struct_fields_do_not_retain_stale_upper_bits() {
+    let source = r#"
+struct CountSample:
+    warmup_count: i32
+    sample_count: i32
+
+fn as_i32(v: i64) -> i32:
+    return v.to_i32()
+
+fn read_sample_count() -> i64:
+    val sample = CountSample(warmup_count: as_i32(0), sample_count: as_i32(0))
+    if sample.sample_count == 0:
+        return 0
+    return 99
+"#;
+    let jit = jit_compile(source).unwrap();
+    let result = unsafe { jit.call_i64_void("read_sample_count").unwrap() };
+    assert_eq!(result, 0);
+}

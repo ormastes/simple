@@ -47,7 +47,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_point_in_bounds(5, 5, 10, 10)).to_be_true()
+expect(clip_point_in_bounds(5, 5, 10, 10)).to_be(true)
 ```
 
 </details>
@@ -61,7 +61,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_point_in_bounds(0, 0, 10, 10)).to_be_true()
+expect(clip_point_in_bounds(0, 0, 10, 10)).to_be(true)
 ```
 
 </details>
@@ -75,7 +75,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_point_in_bounds(10, 5, 10, 10)).to_be_false()
+expect(clip_point_in_bounds(10, 5, 10, 10)).to_be(false)
 ```
 
 </details>
@@ -89,7 +89,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_point_in_bounds(5, 10, 10, 10)).to_be_false()
+expect(clip_point_in_bounds(5, 10, 10, 10)).to_be(false)
 ```
 
 </details>
@@ -103,7 +103,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_point_in_bounds(-1, 5, 10, 10)).to_be_false()
+expect(clip_point_in_bounds(-1, 5, 10, 10)).to_be(false)
 ```
 
 </details>
@@ -117,7 +117,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_point_in_rect(6, 6, 5, 5, 5, 5)).to_be_true()
+expect(clip_point_in_rect(6, 6, 5, 5, 5, 5)).to_be(true)
 ```
 
 </details>
@@ -131,7 +131,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_point_in_rect(3, 3, 5, 5, 5, 5)).to_be_false()
+expect(clip_point_in_rect(3, 3, 5, 5, 5, 5)).to_be(false)
 ```
 
 </details>
@@ -145,7 +145,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_pixel_allowed(3, 3, 10, 10, false, 0, 0, 10, 10)).to_be_true()
+expect(clip_pixel_allowed(3, 3, 10, 10, false, 0, 0, 10, 10)).to_be(true)
 ```
 
 </details>
@@ -159,7 +159,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_pixel_allowed(6, 6, 10, 10, true, 5, 5, 5, 5)).to_be_true()
+expect(clip_pixel_allowed(6, 6, 10, 10, true, 5, 5, 5, 5)).to_be(true)
 ```
 
 </details>
@@ -173,7 +173,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_pixel_allowed(3, 3, 10, 10, true, 5, 5, 5, 5)).to_be_false()
+expect(clip_pixel_allowed(3, 3, 10, 10, true, 5, 5, 5, 5)).to_be(false)
 ```
 
 </details>
@@ -187,7 +187,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_pixel_allowed(-1, 5, 10, 10, false, 0, 0, 10, 10)).to_be_false()
+expect(clip_pixel_allowed(-1, 5, 10, 10, false, 0, 0, 10, 10)).to_be(false)
 ```
 
 </details>
@@ -217,7 +217,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val w = rect_intersect_w(0, 5, 10, 5)
-expect(w <= 0).to_be_true()
+expect(w).to_be_less_than(1)
 ```
 
 </details>
@@ -246,7 +246,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_rect_to_viewport(1, 1, 5, 5, 10, 10)).to_be_true()
+expect(clip_rect_to_viewport(1, 1, 5, 5, 10, 10)).to_be(true)
 ```
 
 </details>
@@ -260,7 +260,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_rect_to_viewport(15, 0, 5, 5, 10, 10)).to_be_false()
+expect(clip_rect_to_viewport(15, 0, 5, 5, 10, 10)).to_be(false)
 ```
 
 </details>
@@ -274,7 +274,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(clip_rect_to_viewport(0, -10, 5, 5, 10, 10)).to_be_false()
+expect(clip_rect_to_viewport(0, -10, 5, 5, 10, 10)).to_be(false)
 ```
 
 </details>
@@ -305,7 +305,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var empty_mask: [u8] = []
-expect(mask_blocks_at(empty_mask, 10, 5, 5)).to_be_false()
+expect(mask_blocks_at(empty_mask, 10, 5, 5)).to_be(false)
 ```
 
 </details>
@@ -320,7 +320,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var mask: [u8] = [1u8, 0u8, 1u8]
-expect(mask_blocks_at(mask, 3, 1, 0)).to_be_true()
+expect(mask_blocks_at(mask, 3, 1, 0)).to_be(true)
 ```
 
 </details>
@@ -335,7 +335,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var mask: [u8] = [1u8, 0u8, 1u8]
-expect(mask_blocks_at(mask, 3, 0, 0)).to_be_false()
+expect(mask_blocks_at(mask, 3, 0, 0)).to_be(false)
 ```
 
 </details>
@@ -350,7 +350,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var mask: [u8] = [0u8]
-expect(mask_blocks_at(mask, 1, 5, 5)).to_be_false()
+expect(mask_blocks_at(mask, 1, 5, 5)).to_be(false)
 ```
 
 </details>
@@ -390,7 +390,7 @@ expect(got).to_equal(0xAABBCCDDu32)
 
 #### buf_set_pixel: writes in-bounds pixel
 
-1. buf set pixel
+- buf = buf set pixel
    - Expected: buf[2] equals `0xDEADBEEFu32`
 
 
@@ -402,7 +402,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var buf: [u32] = [0u32, 0u32, 0u32, 0u32]
-buf_set_pixel(buf, 2, 0, 4, 1, 0xDEADBEEFu32)
+buf = buf_set_pixel(buf, 2, 0, 4, 1, 0xDEADBEEFu32)
 expect(buf[2]).to_equal(0xDEADBEEFu32)
 ```
 
@@ -410,7 +410,7 @@ expect(buf[2]).to_equal(0xDEADBEEFu32)
 
 #### buf_set_pixel: out-of-bounds write is ignored
 
-1. buf set pixel
+- buf = buf set pixel
    - Expected: buf[0] equals `0u32`
 
 
@@ -422,7 +422,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var buf: [u32] = [0u32]
-buf_set_pixel(buf, 5, 5, 1, 1, 0xFFFFFFFFu32)
+buf = buf_set_pixel(buf, 5, 5, 1, 1, 0xFFFFFFFFu32)
 expect(buf[0]).to_equal(0u32)
 ```
 
@@ -430,8 +430,8 @@ expect(buf[0]).to_equal(0u32)
 
 #### buf_set_pixel_blend: opaque src replaces dst
 
-1. var buf: [u32] = [rgb
-2. buf set pixel blend
+- var buf: [u32] = [rgb
+- buf = buf set pixel blend
    - Expected: color_r(buf[0]) equals `255`
 
 
@@ -444,7 +444,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var buf: [u32] = [rgb(0, 0, 0)]
 val src = rgb(255, 0, 0)
-buf_set_pixel_blend(buf, 0, 0, 1, 1, src)
+buf = buf_set_pixel_blend(buf, 0, 0, 1, 1, src)
 expect(color_r(buf[0])).to_equal(255)
 ```
 
@@ -452,8 +452,8 @@ expect(color_r(buf[0])).to_equal(255)
 
 #### buf_set_pixel_blend: transparent src leaves dst unchanged
 
-1. var buf: [u32] = [rgb
-2. buf set pixel blend
+- var buf: [u32] = [rgb
+- buf = buf set pixel blend
    - Expected: color_g(buf[0]) equals `255`
 
 
@@ -466,7 +466,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var buf: [u32] = [rgb(0, 255, 0)]
 val src = rgba(255, 0, 0, 0)
-buf_set_pixel_blend(buf, 0, 0, 1, 1, src)
+buf = buf_set_pixel_blend(buf, 0, 0, 1, 1, src)
 expect(color_g(buf[0])).to_equal(255)
 ```
 
@@ -509,14 +509,15 @@ expect(alpha_premultiply(c)).to_equal(0u32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c = rgba(200, 200, 200, 128)
 val pm = alpha_premultiply(c)
 val r = color_r(pm)
-expect(r >= 98 and r <= 102).to_be_true()
+expect(r).to_be_greater_than(97)
+expect(r).to_be_less_than(103)
 ```
 
 </details>
@@ -747,15 +748,15 @@ while bi < buf.len():
     if buf[bi] != bg:
         all_bg = false
     bi = bi + 1
-expect(all_bg).to_be_true()
+expect(all_bg).to_be(true)
 ```
 
 </details>
 
 #### text_render_to_buf: parity with inline draw_text_bg pattern
 
-1. inline buf push
-2. render text to buffer
+- inline buf push
+- inline buf = render text to buffer
    - Expected: helper_buf.len() equals `inline_buf.len()`
 
 
@@ -786,7 +787,7 @@ var fill_i = 0
 while fill_i < text_w * text_h:
     inline_buf.push(bg)
     fill_i = fill_i + 1
-render_text_to_buffer(inline_buf, text_w, text_h, 0, 0, text_val, fg, font_size)
+inline_buf = render_text_to_buffer(inline_buf, text_w, text_h, 0, 0, text_val, fg, font_size)
 val helper_buf = text_render_to_buf(text_val, fg, bg, font_size)
 expect(helper_buf.len()).to_equal(inline_buf.len())
 var match_ok = true
@@ -795,7 +796,7 @@ while ci < inline_buf.len():
     if inline_buf[ci] != helper_buf[ci]:
         match_ok = false
     ci = ci + 1
-expect(match_ok).to_be_true()
+expect(match_ok).to_be(true)
 ```
 
 </details>
@@ -857,7 +858,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val n = backend_display_name("unknown_xyz")
-expect(n.starts_with("Unknown")).to_be_true()
+expect(n).to_start_with("Unknown")
 ```
 
 </details>
@@ -904,8 +905,8 @@ Reproduction: this block contains the complete executable scenario source.
 val v = backend_priority("vulkan")
 val s = backend_priority("software")
 val c = backend_priority("cpu")
-expect(v < s).to_be_true()
-expect(s < c).to_be_true()
+expect(v).to_be_less_than(s)
+expect(s).to_be_less_than(c)
 ```
 
 </details>
@@ -938,7 +939,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_is_hardware("cuda")).to_be_true()
+expect(backend_is_hardware("cuda")).to_be(true)
 ```
 
 </details>
@@ -952,7 +953,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_is_hardware("cpu")).to_be_false()
+expect(backend_is_hardware("cpu")).to_be(false)
 ```
 
 </details>
@@ -966,7 +967,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_is_hardware("software")).to_be_false()
+expect(backend_is_hardware("software")).to_be(false)
 ```
 
 </details>
@@ -980,7 +981,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_requires_gpu("cuda")).to_be_true()
+expect(backend_requires_gpu("cuda")).to_be(true)
 ```
 
 </details>
@@ -994,7 +995,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_requires_gpu("vulkan")).to_be_false()
+expect(backend_requires_gpu("vulkan")).to_be(false)
 ```
 
 </details>
@@ -1008,7 +1009,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_requires_gpu("cpu")).to_be_false()
+expect(backend_requires_gpu("cpu")).to_be(false)
 ```
 
 </details>
@@ -1030,7 +1031,7 @@ while ni < 10:
     if desc.len() == 0:
         all_ok = false
     ni = ni + 1
-expect(all_ok).to_be_true()
+expect(all_ok).to_be(true)
 ```
 
 </details>

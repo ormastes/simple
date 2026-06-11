@@ -27,7 +27,7 @@ helpers_text_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,30 @@ expect(fg_count > 0).to_equal(true)
 
 </details>
 
+#### keeps text_blit_buffer pixels identical to text_render_to_buf
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val payload = text_blit_buffer("Hi", 0xff111111u32, 0xff222222u32, 7)
+val direct = text_render_to_buf("Hi", 0xff111111u32, 0xff222222u32, 7)
+var mismatch_count = 0
+var idx = 0
+while idx < payload.pixels.len():
+    if payload.pixels[idx] != direct[idx]:
+        mismatch_count = mismatch_count + 1
+    idx = idx + 1
+
+expect(payload.pixels.len()).to_equal(direct.len())
+expect(mismatch_count).to_equal(0)
+```
+
+</details>
+
 #### uses zero pixels as transparent background for foreground text
 
 <details>
@@ -132,8 +156,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

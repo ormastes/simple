@@ -21,6 +21,48 @@ fall back to the tree-walk interpreter because Cranelift JIT lowering fails on:
 Tree-walk rasterization runs at hundreds-to-low-thousands px/sec, capping live
 demos to 320x240 (~90s render). JIT would enable 640x480+ in seconds.
 
+## Current State: 2026-06-11 GUI Renderer Fast-Path Fixed
+
+The pure Simple HTML/GUI renderer fast lane has progressed past the original
+framebuffer mutability, module-init, and narrow integer/string-parse codegen
+blockers. Compiled benchmark evidence is now trustworthy for the narrow
+software exporter smoke:
+
+- `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl` now carries the needed
+  `mut` capability on row/span/scroll framebuffer helpers.
+- Renderer-local `fb_put` / `fb_clear` are `mut` again in
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`.
+- The minimized trigger is an imported module that imports `common.ui.draw_ir`
+  and defines a private `mut [u32]` indexed-assignment helper; `bin/simple check`
+  passes and `SIMPLE_EXECUTION_MODE=interpret bin/simple run ...` passes.
+- Fixed module-init root cause: Cranelift data slots for heap-initialized
+  immutable globals are now declared writable when `generate_module_init(...)`
+  writes them.
+- Added a JIT regression for a heap-initialized global plus private
+  `mut [u32]` helper:
+  `codegen::jit::tests::test_jit_module_init_writes_heap_initialized_val_global`.
+- Fixed narrow signed integer VReg sync so signed `i32` values crossing
+  Cranelift block/variable boundaries are sign-extended instead of always
+  zero-extended.
+- Fixed `text.to_i32()` in the JIT path so CLI strings parse via
+  `rt_string_to_int` before narrowing, rather than narrowing the text pointer.
+- Added regressions:
+  `test_jit_i32_return_controls_loop_condition`,
+  `test_jit_i32_struct_fields_do_not_retain_stale_upper_bits`, and
+  `test_jit_text_to_i32_parses_string_before_narrowing`.
+- Evidence from the patched release driver:
+  `--warmup-count 0 --sample-count 0` exits cleanly with
+  `warmup_count: 0 sample_count: 0`;
+  `--warmup-count 0 --sample-count 1` emits `valid: true`,
+  `checksum: "sum32:1027061180046"`, and
+  `pixel_proof: "nonzero_pixels:3072"` at 64x48.
+
+Next patch direction:
+
+1. Refresh the larger GUI benchmark samples with the compiled exporter.
+2. Keep font/text rendering optimization separate from this codegen correctness
+   lane.
+
 ## Prerequisites and Blockers
 
 1. **Cranelift backend infrastructure** -- exists at

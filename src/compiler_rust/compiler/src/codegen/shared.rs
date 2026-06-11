@@ -356,7 +356,10 @@ mod tests {
         assert!(meta.is_lambda);
         assert_eq!(meta.lambda_capture_local_indices, vec![2, 3]);
         let local_names: Vec<_> = outlined.locals.iter().map(|local| local.name.as_str()).collect();
-        assert_eq!(local_names, vec!["seed_local", "$lambda_capture_0", "$lambda_capture_1"]);
+        assert_eq!(
+            local_names,
+            vec!["seed_local", "$lambda_capture_0", "$lambda_capture_1"]
+        );
 
         let local_indices: Vec<_> = outlined
             .block(body_block)

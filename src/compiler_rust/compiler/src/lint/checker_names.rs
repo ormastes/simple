@@ -74,15 +74,18 @@ impl LintChecker {
                         info.method.name, info.suffix
                     ),
                     Some(
-                        "remove the wrapper and use field forwarding directly, or add the missing behavior"
-                            .to_string(),
+                        "remove the wrapper and use field forwarding directly, or add the missing behavior".to_string(),
                     ),
                 );
             }
         }
     }
 
-    fn check_similar_parent_method_names<'a>(&mut self, class_def: &'a ClassDef, classes: &HashMap<&str, &'a ClassDef>) {
+    fn check_similar_parent_method_names<'a>(
+        &mut self,
+        class_def: &'a ClassDef,
+        classes: &HashMap<&str, &'a ClassDef>,
+    ) {
         let inherited = inherited_method_names(class_def, classes);
         if inherited.is_empty() {
             return;
@@ -104,7 +107,10 @@ impl LintChecker {
                             "method '{}' is similar to inherited method '{}' and may be a misspelled override",
                             method.name, parent_name
                         ),
-                        Some("rename to the inherited method name or add @name_checked if this is intentional".to_string()),
+                        Some(
+                            "rename to the inherited method name or add @name_checked if this is intentional"
+                                .to_string(),
+                        ),
                     );
                     break;
                 }
@@ -165,7 +171,11 @@ fn block_is_self_field(block: &Block, field: &str) -> bool {
 }
 
 fn block_is_self_field_assignment(block: &Block, field: &str, method: &FunctionDef) -> bool {
-    let value_param = method.params.iter().find(|param| param.name != "self").map(|param| param.name.as_str());
+    let value_param = method
+        .params
+        .iter()
+        .find(|param| param.name != "self")
+        .map(|param| param.name.as_str());
     let Some(value_param) = value_param else {
         return false;
     };
@@ -241,11 +251,7 @@ fn bounded_damerau_levenshtein(a: &str, b: &str, limit: usize) -> usize {
         for j in 1..=b_len {
             let cost = usize::from(a_chars[i - 1] != b_chars[j - 1]);
             let mut best = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
-            if i > 1
-                && j > 1
-                && a_chars[i - 1] == b_chars[j - 2]
-                && a_chars[i - 2] == b_chars[j - 1]
-            {
+            if i > 1 && j > 1 && a_chars[i - 1] == b_chars[j - 2] && a_chars[i - 2] == b_chars[j - 1] {
                 best = best.min(prev_prev[j - 2] + 1);
             }
             curr[j] = best;

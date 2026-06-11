@@ -233,8 +233,7 @@ pub fn rt_thread_spawn_isolated_with_args_context(
 ) -> Result<Value, CompileError> {
     if args.len() != 3 {
         return Err(CompileError::Runtime(
-            "rt_thread_spawn_isolated_with_args expects 3 arguments (closure, data1, data2)"
-                .to_string(),
+            "rt_thread_spawn_isolated_with_args expects 3 arguments (closure, data1, data2)".to_string(),
         ));
     }
 
@@ -243,8 +242,7 @@ pub fn rt_thread_spawn_isolated_with_args_context(
         Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
         _ => {
             return Err(CompileError::Runtime(
-                "rt_thread_spawn_isolated_with_args expects first argument to be a closure"
-                    .to_string(),
+                "rt_thread_spawn_isolated_with_args expects first argument to be a closure".to_string(),
             ))
         }
     };

@@ -6,9 +6,9 @@ use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
     HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock,
-    HirGlobalArrayInit, HirGlobalFieldInit, HirGlobalStructInit, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock, HirMockDecl, HirModule, HirSandboxItem,
-    HirSandboxPolicy, HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirType, HirUiPolicy, HirUiPolicyItem,
-    TypeId,
+    HirGlobalArrayInit, HirGlobalFieldInit, HirGlobalStructInit, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock,
+    HirMockDecl, HirModule, HirSandboxItem, HirSandboxPolicy, HirSecurityGate, HirSecurityItem, HirSecurityPolicy,
+    HirType, HirUiPolicy, HirUiPolicyItem, TypeId,
 };
 
 fn try_const_eval(expr: &Expr) -> Option<i64> {
@@ -126,14 +126,22 @@ fn record_const_array_init(
     if let Some(values) = expr.and_then(try_const_array_eval) {
         map.insert(
             name.to_string(),
-            HirGlobalArrayInit { element_type, values, string_values: None },
+            HirGlobalArrayInit {
+                element_type,
+                values,
+                string_values: None,
+            },
         );
     } else if let Some(strings) = expr.and_then(try_const_string_array_eval) {
         // `var slot: [text] = ["..."]` — string-literal elements need runtime
         // rt_string_new allocation; module init pushes them via string_values.
         map.insert(
             name.to_string(),
-            HirGlobalArrayInit { element_type, values: Vec::new(), string_values: Some(strings) },
+            HirGlobalArrayInit {
+                element_type,
+                values: Vec::new(),
+                string_values: Some(strings),
+            },
         );
     }
 }
@@ -176,7 +184,12 @@ fn record_struct_literal_init(
     };
     // Field order/offsets come from the declared struct type so named-arg
     // reordering in the literal cannot scramble the layout.
-    let Some(crate::hir::types::HirType::Struct { name: ty_name, fields: ty_fields, .. }) = types.get(ty) else {
+    let Some(crate::hir::types::HirType::Struct {
+        name: ty_name,
+        fields: ty_fields,
+        ..
+    }) = types.get(ty)
+    else {
         return;
     };
     if ty_name != lit_name {
@@ -453,13 +466,7 @@ impl Lowerer {
                     &self.module.types,
                     Some(&s.value),
                 );
-                record_struct_literal_init(
-                    &mut self.global_init_structs,
-                    &s.name,
-                    ty,
-                    &self.module.types,
-                    &s.value,
-                );
+                record_struct_literal_init(&mut self.global_init_structs, &s.name, ty, &self.module.types, &s.value);
             }
             Node::Const(c) => {
                 // Register constant
@@ -502,13 +509,7 @@ impl Lowerer {
                     &self.module.types,
                     Some(&c.value),
                 );
-                record_struct_literal_init(
-                    &mut self.global_init_structs,
-                    &c.name,
-                    ty,
-                    &self.module.types,
-                    &c.value,
-                );
+                record_struct_literal_init(&mut self.global_init_structs, &c.name, ty, &self.module.types, &c.value);
             }
             Node::Let(l) => {
                 // Register module-level variable (var at module scope = global)
@@ -562,13 +563,7 @@ impl Lowerer {
                         l.value.as_ref(),
                     );
                     if let Some(value) = l.value.as_ref() {
-                        record_struct_literal_init(
-                            &mut self.global_init_structs,
-                            &n,
-                            ty,
-                            &self.module.types,
-                            value,
-                        );
+                        record_struct_literal_init(&mut self.global_init_structs, &n, ty, &self.module.types, value);
                     }
                 }
             }

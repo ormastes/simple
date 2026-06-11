@@ -41,7 +41,7 @@ generated_kernel_dispatch_spec -> std
 #### maps CUDA to PTX generated 2D kernels
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -64,7 +64,7 @@ expect(dispatch.module_artifact_name()).to_equal("simple_2d_optimization.ptx")
 #### maps ROCm through the HIP/HSACO generated kernel path
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -87,7 +87,7 @@ expect(dispatch.required_entries()).to_contain("simple_2d_scroll_u32")
 #### maps OpenCL and Metal to their binary artifact formats
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -109,7 +109,7 @@ expect(metal.kernel_entry(GENERATED_2D_SCROLL)).to_equal("simple_2d_scroll_u32")
 #### rejects unsupported dispatch backends without fallback
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -129,7 +129,7 @@ expect(dispatch.module_artifact_name()).to_equal("")
 #### exposes generated dispatch as Engine2D optimization provider metadata
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -151,7 +151,7 @@ expect(provider.active).to_equal(true)
 #### builds CUDA runtime launch plans for generated 2D kernels
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -174,7 +174,7 @@ expect(plan.args_layout).to_equal("dst,width,height,color_u32")
 #### uses backend-specific launch APIs for HIP, OpenCL, and Metal
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -198,7 +198,7 @@ expect(metal.args_layout).to_equal("src,dst,width,height,delta_y")
 #### fails generated launch plans closed for unsupported backends and dimensions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -223,7 +223,7 @@ expect(rect.launch_api).to_equal("none")
 #### binds CUDA and ROCm launch plans to prepared runtime execution calls
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -245,7 +245,7 @@ expect(rocm.call_shape()).to_equal("hip_launch_api")
 #### binds OpenCL and Metal launch plans to queue or encoder execution calls
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -267,7 +267,7 @@ expect(metal.call_shape()).to_equal("metal_compute_api")
 #### builds OpenCL launch evidence shapes for every generated 2D operation
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -292,7 +292,7 @@ expect(scroll.call_shape()).to_equal("opencl_ndrange_api")
 #### rejects generated execution requests with missing runtime handles
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -315,7 +315,7 @@ expect(bad_plan.reason).to_equal("backend-inactive")
 #### shares generated session launch preflight for CUDA HIP and OpenCL sessions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -344,7 +344,7 @@ expect(cuda_bad_dims.reason).to_equal("invalid-dimensions")
 #### records shared generated session runtime provenance for CUDA HIP and OpenCL
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -373,18 +373,20 @@ expect(opencl_unavailable.diagnostic_text()).to_contain("artifact=simple_2d_opti
 
 </details>
 
-#### compares CPU SIMD CUDA and OpenCL provenance for vector font and image blit operations
+#### compares CPU SIMD CUDA and OpenCL provenance for bitmap font vector font and image blit operations
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val cpu_vector = generated_2d_operation_provenance("cpu_simd_x86", "vector", 64, 32, false, false, 0)
+val cpu_bitmap_font = generated_2d_operation_provenance("cpu_simd_x86", "bitmap_font", 64, 32, false, false, 0)
 val cpu_vector_font = generated_2d_operation_provenance("cpu_simd_x86", "vector_font", 64, 32, false, false, 0)
 val cuda_text = generated_2d_operation_provenance("cuda", "text_blit", 64, 32, true, true, 2048)
+val cuda_bitmap_font = generated_2d_operation_provenance("cuda", "bitmap_glyph", 64, 32, true, true, 2048)
 val cuda_vector_font = generated_2d_operation_provenance("cuda", "vector_font", 64, 32, true, true, 2048)
 val opencl_image = generated_2d_operation_provenance("opencl", "image_blit", 64, 32, false, false, 2048)
 val opencl_glyph = generated_2d_operation_provenance("opencl", "glyph_raster", 64, 32, true, true, 2048)
@@ -395,6 +397,10 @@ expect(cpu_vector.compute_target).to_equal("cpu_simd")
 expect(cpu_vector.generated_artifact_required).to_equal(false)
 expect(cpu_vector.generated_operation).to_equal(GENERATED_2D_FILL)
 expect(cpu_vector.typed_status).to_equal("cpu-simd-baseline-ready")
+expect(cpu_bitmap_font.ready).to_equal(true)
+expect(cpu_bitmap_font.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cpu_bitmap_font.cpu_preprocess_required).to_equal(true)
+expect(cpu_bitmap_font.entry_name).to_equal("RenderBackend.draw_text_or_text_blit")
 expect(cpu_vector_font.ready).to_equal(true)
 expect(cpu_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cpu_vector_font.cpu_preprocess_required).to_equal(true)
@@ -403,6 +409,10 @@ expect(cuda_text.ready).to_equal(true)
 expect(cuda_text.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cuda_text.cpu_preprocess_required).to_equal(true)
 expect(cuda_text.artifact_name).to_equal("simple_2d_optimization.ptx")
+expect(cuda_bitmap_font.ready).to_equal(true)
+expect(cuda_bitmap_font.generated_operation).to_equal(GENERATED_2D_COPY)
+expect(cuda_bitmap_font.cpu_preprocess_required).to_equal(true)
+expect(cuda_bitmap_font.diagnostic_text()).to_contain("family=bitmap_glyph")
 expect(cuda_vector_font.ready).to_equal(true)
 expect(cuda_vector_font.generated_operation).to_equal(GENERATED_2D_COPY)
 expect(cuda_vector_font.cpu_preprocess_required).to_equal(true)
@@ -425,7 +435,7 @@ expect(scalar_alpha.generated_operation).to_equal(GENERATED_2D_ALPHA)
 #### fails operation provenance closed for unsupported families and invalid dimensions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -446,7 +456,7 @@ expect(invalid.reason).to_equal("invalid-dimensions")
 #### requires generated artifacts to load before building runtime execution requests
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -471,7 +481,7 @@ expect(metal_request.call_shape()).to_equal("metal_compute_api")
 #### validates shared generated 2D module artifacts before loading
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -497,7 +507,7 @@ expect(blocked.reason).to_equal("artifact-not-verified")
 #### keeps OpenCL generated modules fail-closed without runtime and readback evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -524,7 +534,7 @@ expect(evidence.status_code).to_equal("not-submitted")
 #### fails generated artifact loads closed for bad artifacts runtime or handles
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -553,7 +563,7 @@ expect(request.reason).to_equal("artifact-not-verified")
 #### records generated kernel submit status without pretending runtime availability
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -585,7 +595,7 @@ expect(not_ready.reason).to_equal("missing-args-pointer")
 #### requires readback checksum evidence before claiming device execution
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -611,7 +621,7 @@ expect(verified.summary()).to_contain("executed=true")
 #### does not claim execution when submit failed or expected checksum is invalid
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
