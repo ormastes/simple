@@ -10,6 +10,7 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_handle_compile(args: [text]) -> i64
 extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
@@ -118,6 +119,57 @@ pub fn _cli_driver_binary() -> text:
         if same.exit_code == 0:
             return ""
     candidate
+
+pub fn _cli_frontend_delegate_binary() -> text:
+    # Loop guard: if we ARE the delegate child, return "" to avoid re-delegating.
+    val loop_flag = rt_env_get("SIMPLE_FRONTEND_DELEGATED") ?? ""
+    if loop_flag == "1":
+        return ""
+
+    # Env override: explicit delegate path.
+    val override = rt_env_get("SIMPLE_FRONTEND_DELEGATE") ?? ""
+    if override != "":
+        if _cli_file_exists_impl(override):
+            if not _cli_is_windows_platform():
+                val pid = rt_getpid()
+                val same = _cli_shell("test /proc/{pid}/exe -ef '{override}'")
+                if same.exit_code != 0:
+                    return override
+            else:
+                return override
+        return ""
+
+    # Fall back to _cli_driver_binary() — already self-exec-guarded.
+    val driver = _cli_driver_binary()
+    if driver != "":
+        return driver
+
+    # Sibling seed: look for simple_seed next to our own executable.
+    if not _cli_is_windows_platform():
+        val pid = rt_getpid()
+        val exe_result = _cli_shell("readlink -f /proc/{pid}/exe")
+        val exe_path = exe_result.stdout.trim()
+        if exe_path != "":
+            val dir_result = _cli_shell("dirname '{exe_path}'")
+            val dir = dir_result.stdout.trim()
+            if dir != "":
+                val seed_candidate = "{dir}/simple_seed"
+                if _cli_file_exists_impl(seed_candidate):
+                    val same = _cli_shell("test /proc/{pid}/exe -ef '{seed_candidate}'")
+                    if same.exit_code != 0:
+                        return seed_candidate
+
+    ""
+
+pub fn _cli_run_frontend_delegate(delegate: text, args: [text]) -> i64:
+    # Set loop guard so the delegate child does not re-delegate.
+    rt_env_set("SIMPLE_FRONTEND_DELEGATED", "1")
+    val result = _cli_process_run(delegate, args)
+    if result.0 != "":
+        print_raw(result.0)
+    if result.1 != "":
+        _cli_eprint(result.1)
+    result.2
 
 # ============================================================================
 # CLI Core Functions
