@@ -823,3 +823,12 @@ dev-done
   candidate: replace parse-time `class_attr.split(" ")` plus per-token trim
   with a single-pass tokenizer while preserving ASCII-space-only split
   semantics and repeated-space behavior.
+- impl: Replaced `split_class_words_trimmed(...)` parse-time `split(" ")` with
+  explicit ASCII-space scanning. The helper preserves the old token count,
+  leading/trailing/repeated-space slots, and per-token trim behavior while
+  avoiding the intermediate raw split array.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` remains 15/15, including the spaced
+  duplicate class-token oracle. Docker optimizer scan completed for the
+  renderer with 756 remaining static opportunities; the count rises because
+  the former split intrinsic is now explicit scan loops.

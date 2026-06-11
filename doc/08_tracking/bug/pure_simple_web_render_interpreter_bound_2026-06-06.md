@@ -1257,6 +1257,24 @@ Verification:
   `15 passed, 0 failed`
 - Docker optimizer scan: renderer `754` remaining static opportunities.
 
+## 2026-06-11 Compound class selector suffix trim removal
+
+Compound class selector matching split suffixes such as `.target.marker` and
+then trimmed every suffix during each selector match. Selector parts are already
+trimmed during preprocessing, so those suffixes do not need another trim in the
+hot node/ancestor match path.
+
+`class_has_all(...)` now reuses the split suffixes directly. Existing compound
+class and spaced selector oracles continue to cover the behavior.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `15 passed, 0 failed`
+- Docker optimizer scan: renderer `754` remaining static opportunities.
+
 ## 2026-06-11 Selector bucket base reuse
 
 Rule bucket construction classified each rightmost selector by calling
@@ -1277,20 +1295,17 @@ Verification:
   `15 passed, 0 failed`
 - Docker optimizer scan: renderer `754` remaining static opportunities.
 
-Spark follow-up candidate: `split_class_words_trimmed(...)` still does
-parse-time `class_attr.split(" ")` plus a per-token trim. A single-pass tokenizer
-can remove that intermediate array if it preserves ASCII-space-only split
-semantics and repeated-space behavior.
+## 2026-06-11 Class-token split array removal
 
-## 2026-06-11 Compound class selector suffix trim removal
+`split_class_words_trimmed(...)` split each class attribute into an intermediate
+array with `class_attr.split(" ")`, then allocated the final `class_words` array
+and trimmed every token into it. That made class parsing carry two token arrays
+for each classed node.
 
-Compound class selector matching split suffixes such as `.target.marker` and
-then trimmed every suffix during each selector match. Selector parts are already
-trimmed during preprocessing, so those suffixes do not need another trim in the
-hot node/ancestor match path.
-
-`class_has_all(...)` now reuses the split suffixes directly. Existing compound
-class and spaced selector oracles continue to cover the behavior.
+The helper now scans for ASCII spaces directly, preserves the old split token
+count for leading/trailing/repeated spaces, and keeps per-token trim behavior.
+This removes the intermediate raw split array without broadening class splitting
+to tabs or newlines.
 
 Verification:
 
@@ -1298,7 +1313,8 @@ Verification:
   passes.
 - `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
   `15 passed, 0 failed`
-- Docker optimizer scan: renderer `754` remaining static opportunities.
+- Docker optimizer scan: renderer `756` remaining static opportunities; the
+  count rises because the former split intrinsic is now explicit scan loops.
 
 ## 2026-06-11 Selector bucket base trim removal
 
