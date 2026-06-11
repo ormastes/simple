@@ -18,7 +18,8 @@ use app.watch.runner.{WatchConfig, watch_config_default, watch_loop}
 use app.test_daemon.types.{TestResult}
 use compiler.driver.watcher.watcher_types.{watcher_config_default, WatcherConfig}
 use app.startup.launch_metadata.{startup_normalize_program_args}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
+use std.io_runtime.{env_get, dir_create_all}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -26,6 +27,7 @@ extern fn rt_platform_name() -> text
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
 
 fn _find_simple_binary() -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
@@ -71,13 +73,24 @@ fn cli_run_code(code: text, gc_log: bool, gc_off: bool) -> i64:
 
     # Self-exec guard fallback (driver IS this binary): interpret in-process
     # via a staged temp file instead of spawning ourselves recursively.
+    # Stage under a user-owned dir, never world-writable /tmp (a predictable
+    # /tmp name is a symlink-overwrite vector); randomize with pid+micros.
     val pid = rt_getpid()
-    val tmp_path = "/tmp/simple_run_code_{pid}.spl"
+    val micros = rt_time_now_unix_micros()
+    var stage_dir = env_get("XDG_RUNTIME_DIR")
+    if stage_dir == "":
+        val home = env_get("HOME")
+        if home != "":
+            stage_dir = "{home}/.cache/simple"
+        else:
+            stage_dir = "/tmp/simple_stage_{pid}"
+    dir_create_all(stage_dir)
+    val tmp_path = "{stage_dir}/run_code_{pid}_{micros}.spl"
     if not file_write(tmp_path, code):
         _cli_eprint("error: failed to stage -c snippet at {tmp_path}")
         return 1
     val result = interpret_file(tmp_path)
-    _cli_shell("rm -f '{tmp_path}'")
+    file_delete(tmp_path)
     match result:
         case CompileResult.Success(_): 0
         case _:
