@@ -175,3 +175,26 @@ STATUS: FAIL (5 failures must be fixed before release)
 - Audit request handlers for repeated scans, repeated rereads, and per-request subprocesses in hot paths
 - Verify cache invalidation exists for writes that affect cached or indexed data
 - Require startup and representative request perf evidence for performance-sensitive tooling changes
+
+### Security fail-closed regression checks (web / AOP / capability)
+
+Treat any of these as **FAIL** when reviewing web-app / AOP / capability changes:
+
+- **Fail-open advice/auth**: security advice or auth/deny handlers that return
+  `void` (or `()`), so the weaver's `is_err()` denial gate can never fire. Security
+  advice must return `Result<(), text>`.
+- **Forgeable CSRF**: CSRF validating or minting tokens under an empty `secret_key`
+  (must deny). Token compare must use `std.common.crypto.constant_time_compare`,
+  not `==` and not a per-module copy.
+- **CORS cache leak / reflection bypass**: reflecting a concrete Origin without
+  `Vary: Origin`, or `*` + `Allow-Credentials: true`, or accepting `null` Origin.
+- **Header injection**: response header values not checked for CRLF.
+- **Rate-limit XFF spoof**: keying on `X-Forwarded-For` without a `trusted_proxies`
+  gate (must default to direct `peer_addr`).
+- **Capability fail-open**: parsers/lookups returning a wildcard/`full()` grant on
+  malformed/unknown input, or uninitialized subjects defaulting to all-rights.
+- **Weak crypto randomness**: tokens/session-IDs/salts/keys drawn from the LCG
+  (`std.random` / `random_pure` / `rt_random_next`) instead of the CSPRNG
+  (`random_hex`/`random_bytes` → `rt_random_hex`, OsRng/`/dev/urandom`).
+- Confirm a header-setting phase result can actually emit headers (not stuff them
+  into the response **body**) before crediting a header-based control as effective.

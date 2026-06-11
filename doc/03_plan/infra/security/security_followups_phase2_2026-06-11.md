@@ -147,6 +147,58 @@ always key on `peer_addr`. Default behavior unchanged (empty list ⇒ peer_addr)
 
 Item 2 design authored by orchestrator (Opus); no code edit.
 
+## Fable final review — outcome (2026-06-11)
+
+Verdict: APPROVE-WITH-FIXES. Findings and dispositions:
+
+- **csrf.spl — APPROVED.** Fail-closed sits correctly after exempt checks; empty
+  header/cookie rejected before any compare, so `""`-token double-submit cannot
+  match; canonical-import resolves; no signature regressions.
+- **rate_limit.spl — APPROVED.** Default `[]` ⇒ XFF never read, byte-identical
+  spoof-safe behavior; right-to-left walk correct; no constructor break.
+  Fix-forwarded: docstring usage example now includes `trusted_proxies: []`.
+- **cors.spl (async, PhaseResult) — INERT, see new ESCALATE 10.** `Vary: Origin`
+  was added correctly *but* `PhaseResult.Respond(i64, text, text)` is
+  `(status, reason, BODY)` — `worker.spl:640` binds the third field as body, so
+  the entire cors_handler header block (incl. `Access-Control-Allow-Origin`) is
+  emitted as response **body**, never as headers. My change is harmless and
+  correct-for-when-fixed, but the async cors path cannot emit headers at all
+  until `PhaseResult` carries them. **Arch — escalated.**
+- **Effective fix landed instead:** the real wire path for these tiers is
+  `add_cors_headers` (tuple with a real header list) in
+  `nogc_sync_mut/http_server/middleware.spl` and `gc_async_mut/.../middleware.spl`
+  — both reflected Origin with no Vary. **Fix-forwarded:** both now add
+  `Vary: Origin` when `origin != "*"`.
+- **csrf_spec phantom — follow-up.** `test/01_unit/lib/http_server/csrf_spec.spl`
+  imports `validate_csrf_token`/`is_csrf_exempt_method`/`default_csrf_config` and
+  calls zero-arg `generate_csrf_token()` — none exist in src (compile-mode
+  false-green). Needs a rewrite against the real API incl. empty-secret cases.
+  Not shipped blind (cannot verify-green in the current mid-refactor build);
+  tracked below.
+
+### New ESCALATE 10 — `PhaseResult` cannot carry response headers (ARCH)
+The async `http_server` `Respond(status, reason, body)` variant has no header
+slot, so `cors_handler`/any phase that needs to *set* response headers silently
+emits them into the body. Fix options for user decision:
+- **A (recommended):** extend to `Respond(i64, text, [(text,text)], text)` =
+  `(status, reason, headers, body)`; update `worker.spl:640` and all `Respond`
+  constructors. Mechanical but touches the response ABI.
+- **B:** add a `RespondWithHeaders(...)` variant, leave `Respond` as-is.
+- **C:** route CORS through a header-injection + `Continue` path instead of
+  short-circuiting with `Respond`.
+This is broader than CORS (affects every header-setting phase). **Needs go/no-go.**
+
+### Item 2 design — Fable revisions (incorporate before any implementation)
+Option A direction is sound; three gaps to close in the design before coding:
+1. `Result<Any, text>` — there is **no `Any` type** in `src/lib`; specify the
+   erasure mechanism explicitly (boxed runtime `Value` / text-encoded payload).
+2. `proceed: exactly_once` cannot be enforced with a closure-captured counter
+   (nested closures are read-only — `.claude/rules/language.md`); use an
+   object-field counter mutated via a `me`-method.
+3. fn-typed struct fields in **export** position hit the known E0002 inline-export
+   bug — declare with statement-form exports, not `export struct ... handler: fn...`.
+The proceed-thunk's read-only capture of `func` is fine.
+
 ## Doc / guide / spipe-skill update
 - `doc/07_guide/infra/webapp_security.md` — Vary:Origin, empty-secret fail-close,
   XFF trusted-proxy, canonical constant-time.
