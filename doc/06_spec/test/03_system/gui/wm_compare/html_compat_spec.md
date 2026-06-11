@@ -46,12 +46,12 @@ html_compat_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val catalog = build_catalog()
-expect(catalog.len()).to_equal(16)
+expect(catalog.len()).to_equal(23)
 expect(_catalog_has("00_text_only")).to_equal(true)
 expect(_catalog_has("01_inline_text")).to_equal(true)
 expect(_catalog_has("02_block_boxes")).to_equal(true)
@@ -68,6 +68,13 @@ expect(_catalog_has("14_border")).to_equal(true)
 expect(_catalog_has("15_background")).to_equal(true)
 expect(_catalog_has("16_flex_row")).to_equal(true)
 expect(_catalog_has("17_flex_col")).to_equal(true)
+expect(_catalog_has("18_flex_grow_weights")).to_equal(true)
+expect(_catalog_has("19_flex_shrink_weights")).to_equal(true)
+expect(_catalog_has("20_flex_basis_override")).to_equal(true)
+expect(_catalog_has("21_flex_wrap_basic")).to_equal(true)
+expect(_catalog_has("22_flex_align_items_baseline")).to_equal(true)
+expect(_catalog_has("23_flex_wrap_align_content_center")).to_equal(true)
+expect(_catalog_has("24_flex_wrap_reverse_basic")).to_equal(true)
 ```
 
 </details>

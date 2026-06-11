@@ -193,8 +193,13 @@ Prove and harden the requested GUI stack:
   geometry capture. Report:
   `doc/09_report/electron_html_compat_geometry_evidence_18_flex_grow_weights_2026-06-11.md`;
   result `report_status=layout_match`, `mismatch_count=0`. The older pixel
-  baseline tree still has no checked-in directories for flex fixtures 18-24;
-  tracked separately in
+  baseline tree still has no checked-in directories for flex fixtures 18-24.
+  Follow-up now expands the pixel catalog to include fixture IDs 18-24 and fixes
+  the documented `src/app/wm_compare/html_compat.spl` wrapper so it dispatches
+  the real CLI body and exits nonzero on blocked/divergent runs. The focused
+  fixture-18 pixel baseline attempt now reaches the fixture and fails closed
+  with exit `2`, but remains blocked by the missing legacy Electron screenshot
+  app and a Simple source-B timeout. Tracked in
   `doc/08_tracking/bug/html_compat_flex_pixel_baselines_missing_2026-06-11.md`.
 - Famous-site corpus div geometry evidence (2026-06-11):
   `test/03_system/gui/wm_compare/structural_layout_report_spec.spl` now checks
