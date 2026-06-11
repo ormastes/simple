@@ -108,6 +108,9 @@ Updated: 2026-06-11
 - this commit -- Engine2D fixture scan reuse: the heuristic renderer now reuses
   precomputed fixture-marker booleans for fixture dispatch and wm/simple mark
   painting instead of rescanning HTML for each branch.
+- this commit -- style-block marker scan reuse: `_style_rule_block_color` now
+  uses one `<style` index lookup for both branch selection and substring
+  extraction instead of scanning once with `contains` and again with `index_of`.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
