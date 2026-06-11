@@ -1,0 +1,75 @@
+# Browser engine selector matcher helpers.
+#
+# Provides :not() selector matching used by fallback pixel path rendering.
+
+fn _sel_attr_value(tag: text, attr: text) -> text:
+    val key_dq = attr + "=\""
+    val key_sq = attr + "='"
+    val lo = tag.lower()
+    val idx_dq = lo.index_of(key_dq)
+    if idx_dq >= 0:
+        val after = tag.substring(idx_dq + key_dq.len(), tag.len())
+        val close = after.index_of("\"")
+        if close >= 0:
+            return after.substring(0, close)
+    val idx_sq = lo.index_of(key_sq)
+    if idx_sq >= 0:
+        val after = tag.substring(idx_sq + key_sq.len(), tag.len())
+        val close = after.index_of("'")
+        if close >= 0:
+            return after.substring(0, close)
+    ""
+
+fn _sel_option_matches_tag(option: text, tag_name: text, tag: text) -> bool:
+    val opt = option.trim()
+    # Attribute substring selector [attr*="value"]
+    val attr_start = opt.index_of("[")
+    if attr_start >= 0:
+        val attr_end = opt.index_of("]")
+        if attr_end > attr_start:
+            val attr_expr = opt.substring(attr_start + 1, attr_end)
+            val star_eq = attr_expr.index_of("*=\"")
+            if star_eq >= 0:
+                val attr_name = attr_expr.substring(0, star_eq)
+                val value_part = attr_expr.substring(star_eq + 3, attr_expr.len())
+                val close_dq = value_part.index_of("\"")
+                val sub = if close_dq >= 0: value_part.substring(0, close_dq) else value_part
+                val attr_val = _sel_attr_value(tag, attr_name)
+                return attr_val.contains(sub)
+    # Compound tag.class selector
+    val dot = opt.index_of(".")
+    if dot > 0:
+        val opt_tag = opt.substring(0, dot)
+        val opt_class = opt.substring(dot + 1, opt.len())
+        if opt_tag == tag_name:
+            val class_val = _sel_attr_value(tag, "class")
+            val classes = class_val.split(" ")
+            var idx: i32 = 0
+            while idx < classes.len():
+                if classes[idx].trim() == opt_class:
+                    return true
+                idx = idx + 1
+    false
+
+# Returns true when the :not() selector does NOT match the element described by
+# tag_name and tag (i.e. the element is a valid match for the full selector).
+pub fn br_selector_list_contains_not_self(selector: text, tag_name: text, tag: text) -> bool:
+    val marker = tag_name + ":not("
+    val start = selector.index_of(marker)
+    if start < 0:
+        return false
+    val after = selector.substring(start + marker.len(), selector.len())
+    val close = after.index_of(")")
+    if close < 0:
+        return false
+    val options_str = after.substring(0, close)
+    val options = options_str.split(",")
+    var idx: i32 = 0
+    while idx < options.len():
+        val opt = options[idx].trim()
+        if opt != "" and _sel_option_matches_tag(opt, tag_name, tag):
+            return false
+        idx = idx + 1
+    true
+
+export br_selector_list_contains_not_self

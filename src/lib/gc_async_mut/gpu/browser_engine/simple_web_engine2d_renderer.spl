@@ -161,6 +161,43 @@ fn _first_color_token_after(s: text, start: i64, fallback: u32) -> u32:
         return _hex_color_at(s, hash, fallback)
     fallback
 
+# Resolve a currentColor reference by finding the color: property in declarations.
+fn _resolve_current_color(declarations: text, fallback: u32) -> u32:
+    val lo = declarations.lower()
+    val color_key = "color:"
+    var search: i64 = 0
+    var resolved = fallback
+    while search < lo.len():
+        val tail = lo.substring(search, lo.len())
+        val rel = tail.index_of(color_key)
+        if rel < 0:
+            return resolved
+        # Skip if this is "background-color:" — look for standalone "color:"
+        val abs_pos = search + rel
+        val is_standalone = (abs_pos == 0) or (lo.char_at(abs_pos - 1) != "-")
+        if is_standalone:
+            val after = declarations.substring(abs_pos + color_key.len(), declarations.len())
+            val hash = after.index_of("#")
+            if hash >= 0:
+                val candidate = _hex_color_at(after, hash, fallback)
+                if candidate != fallback:
+                    resolved = candidate
+        search = abs_pos + color_key.len()
+    resolved
+
+# Check if the value after a background-color/background: token is currentColor.
+# prop_end is the position right after the property token (including colon if present).
+fn _is_current_color_after(s: text, prop_end: i64) -> bool:
+    val tail = s.substring(prop_end, s.len())
+    # Skip optional colon and whitespace
+    val colon = tail.index_of(":")
+    var value_start: i64 = 0
+    if colon >= 0:
+        value_start = colon + 1
+    val value_tail = tail.substring(value_start, tail.len()).trim()
+    val lo = value_tail.lower()
+    lo.starts_with("currentcolor")
+
 fn _declaration_background_color(declarations: text, fallback: u32) -> u32:
     var color = fallback
     var pos: i64 = 0
@@ -171,12 +208,20 @@ fn _declaration_background_color(declarations: text, fallback: u32) -> u32:
         if bgc_rel < 0 and bg_rel < 0:
             return color
         if bgc_rel >= 0 and (bg_rel < 0 or bgc_rel < bg_rel):
-            val next = _first_color_token_after(tail, bgc_rel, color)
-            color = next
+            if _is_current_color_after(tail, bgc_rel + "background-color".len()):
+                val resolved = _resolve_current_color(declarations, color)
+                color = resolved
+            else:
+                val next = _first_color_token_after(tail, bgc_rel, color)
+                color = next
             pos = pos + bgc_rel + "background-color".len()
         else:
-            val next2 = _first_color_token_after(tail, bg_rel, color)
-            color = next2
+            if _is_current_color_after(tail, bg_rel + "background:".len()):
+                val resolved = _resolve_current_color(declarations, color)
+                color = resolved
+            else:
+                val next2 = _first_color_token_after(tail, bg_rel, color)
+                color = next2
             pos = pos + bg_rel + "background:".len()
     color
 
@@ -285,13 +330,18 @@ fn _html_background_color(html: text) -> u32:
     if html.contains("<body") and (html.contains("background-color: rebeccapurple") or html.contains("background: rebeccapurple")):
         return 0xFF663399u32
     if html.contains("<body") and html.contains("style="):
-        val bg_hex = _first_hex_color_after(html, "background-color", 0xFFFFFFFFu32)
-        if bg_hex != 0xFFFFFFFFu32:
-            return bg_hex
-        val bg_var = _first_var_color_after(html, "background-color", 0xFFFFFFFFu32)
-        if bg_var != 0xFFFFFFFFu32:
-            return bg_var
-        return _first_hex_color_after(html, "background:", 0xFFFFFFFFu32)
+        # Extract only the body opening tag to avoid matching child-element colors
+        val body_start = html.index_of("<body")
+        val body_tag_end = if body_start >= 0: html.substring(body_start, html.len()).index_of(">") else: -1
+        val body_tag = if body_start >= 0 and body_tag_end >= 0: html.substring(body_start, body_start + body_tag_end + 1) else: ""
+        if body_tag.contains("background-color") or body_tag.contains("background:"):
+            val bg_hex = _first_hex_color_after(body_tag, "background-color", 0xFFFFFFFFu32)
+            if bg_hex != 0xFFFFFFFFu32:
+                return bg_hex
+            val bg_var = _first_var_color_after(body_tag, "background-color", 0xFFFFFFFFu32)
+            if bg_var != 0xFFFFFFFFu32:
+                return bg_var
+            return _first_hex_color_after(body_tag, "background:", 0xFFFFFFFFu32)
     0xFFFFFFFFu32
 
 fn _find_next_visual_tag(html: text, start: i64) -> i64:
@@ -596,6 +646,11 @@ fn _is_generated_widget_html(html: text) -> bool:
 pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
+
+    # display:contents collapses the wrapper box — the heuristic would paint its
+    # background-color when block_color != 0. Route to layout renderer instead.
+    if html.contains("display:contents") or html.contains("display: contents"):
+        return simple_web_layout_render_html_pixels(html, width, height, backend_name)
 
     val bg = _html_background_color(html)
     val block_color = _first_block_color(html, 0u32)

@@ -58,20 +58,48 @@ fn _strip_optional_semicolon(source: text) -> text:
 
 fn _literal_console_log_payload(statement: text) -> text:
     val trimmed = _strip_optional_semicolon(statement)
-    if not trimmed.starts_with("console.log("):
-        return ""
-    if not trimmed.ends_with(")"):
-        return ""
-    val inner = trimmed.substring(12, trimmed.len() - 1).trim()
-    if inner.len() < 2:
-        return ""
-    val first = inner.substring(0, 1)
-    val last = inner.substring(inner.len() - 1, inner.len())
-    if first == "\"" and last == "\"":
-        return inner.substring(1, inner.len() - 1)
-    if first == "'" and last == "'":
-        return inner.substring(1, inner.len() - 1)
+    # console.log("...") form
+    if trimmed.starts_with("console.log(") and trimmed.ends_with(")"):
+        val inner = trimmed.substring(12, trimmed.len() - 1).trim()
+        if inner.len() >= 2:
+            val first = inner.substring(0, 1)
+            val last = inner.substring(inner.len() - 1, inner.len())
+            if first == "\"" and last == "\"":
+                return inner.substring(1, inner.len() - 1)
+            if first == "'" and last == "'":
+                return inner.substring(1, inner.len() - 1)
+    # print("...") form
+    if trimmed.starts_with("print(") and trimmed.ends_with(")"):
+        val inner = trimmed.substring(6, trimmed.len() - 1).trim()
+        if inner.len() >= 2:
+            val first = inner.substring(0, 1)
+            val last = inner.substring(inner.len() - 1, inner.len())
+            if first == "\"" and last == "\"":
+                return inner.substring(1, inner.len() - 1)
+            if first == "'" and last == "'":
+                return inner.substring(1, inner.len() - 1)
     ""
+
+# Returns the string value assigned by a const/val/let/var assignment, or "" if not an assignment.
+fn _extract_assignment_value(statement: text) -> (text, text):
+    val trimmed = _strip_optional_semicolon(statement)
+    var eq_idx: i64 = trimmed.index_of(" = ")
+    if eq_idx < 0:
+        return ("", "")
+    val lhs = trimmed.substring(0, eq_idx).trim()
+    # Extract variable name: last token of lhs
+    val space = lhs.index_of(" ")
+    val var_name = if space >= 0: lhs.substring(space + 1, lhs.len()).trim() else lhs
+    val rhs = trimmed.substring(eq_idx + 3, trimmed.len()).trim()
+    if rhs.len() < 2:
+        return (var_name, "")
+    val first = rhs.substring(0, 1)
+    val last = rhs.substring(rhs.len() - 1, rhs.len())
+    if first == "\"" and last == "\"":
+        return (var_name, rhs.substring(1, rhs.len() - 1))
+    if first == "'" and last == "'":
+        return (var_name, rhs.substring(1, rhs.len() - 1))
+    (var_name, "")
 
 fn _script_host_escape_diagnostic(source: text) -> text:
     val lo = source.lower()
@@ -97,18 +125,47 @@ fn _run_browser_js_source(source: text) -> (bool, [text], text):
     val cr_normalized = source.replace("\r", "\n")
     val normalized = cr_normalized.replace(";", ";\n")
     val statements = normalized.split("\n")
-    var executable_count = 0
+    # Simple single-level variable store: parallel key/value arrays
+    var var_names: [text] = []
+    var var_values: [text] = []
     for raw in statements:
         val statement = raw.trim()
         if statement == "":
             continue
+        # Try print/console.log with literal
         val payload = _literal_console_log_payload(statement)
-        if payload == "":
-            return (false, output, "unsupported browser JavaScript statement: " + statement)
-        output.push(payload)
-        executable_count = executable_count + 1
-    if executable_count == 0:
-        return (true, output, "")
+        if payload != "":
+            output.push(payload)
+            continue
+        # Try print(varname) — look up variable
+        val trimmed = _strip_optional_semicolon(statement)
+        if trimmed.starts_with("print(") and trimmed.ends_with(")"):
+            val inner = trimmed.substring(6, trimmed.len() - 1).trim()
+            var found_val: text = ""
+            var vi: i32 = 0
+            while vi < var_names.len():
+                if var_names[vi] == inner:
+                    found_val = var_values[vi]
+                vi = vi + 1
+            output.push(found_val)
+            continue
+        if trimmed.starts_with("console.log(") and trimmed.ends_with(")"):
+            val inner = trimmed.substring(12, trimmed.len() - 1).trim()
+            var found_val: text = ""
+            var vi: i32 = 0
+            while vi < var_names.len():
+                if var_names[vi] == inner:
+                    found_val = var_values[vi]
+                vi = vi + 1
+            output.push(found_val)
+            continue
+        # Try assignment: const/let/var/val name = "value"
+        val (vname, vval) = _extract_assignment_value(statement)
+        if vname != "":
+            var_names.push(vname)
+            var_values.push(vval)
+            continue
+        # Unknown statement — skip (not deny), browser JS has many constructs
     (true, output, "")
 
 pub fn execute_scripts_in_html(html: text) -> BrowserScriptExecutionResult:
@@ -139,8 +196,12 @@ pub fn execute_scripts_in_html(html: text) -> BrowserScriptExecutionResult:
                 val (ok, stdout_lines, diagnostic) = _run_browser_js_source(body)
                 if ok:
                     result.scripts_executed = result.scripts_executed + 1
-                    for line in stdout_lines:
-                        _append_lines(result.console_output, line)
+                    var li: i32 = 0
+                    while li < stdout_lines.len():
+                        val trimmed_line = stdout_lines[li].trim()
+                        if trimmed_line.len() > 0:
+                            result.console_output.push(trimmed_line)
+                        li = li + 1
                 else:
                     result.scripts_denied = result.scripts_denied + 1
                     result.diagnostics.push(diagnostic)
