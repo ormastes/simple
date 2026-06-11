@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Helpers Availability Specification](test/01_unit/lib/gpu/engine2d/helpers_availability_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
+| [Vector Font Offload Specification](test/01_unit/lib/gpu/engine2d/vector_font_offload_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
 

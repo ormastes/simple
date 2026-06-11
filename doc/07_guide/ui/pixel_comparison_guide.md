@@ -125,7 +125,11 @@ The Simple web renderer has two code paths:
 
 - **Bitmap font**: 5x7 glyph grid scaled by `glyph_scale(font_size)` cannot match Chrome's vector font rendering. Needs TTF rasterizer integration (stb_truetype available in `src/runtime/stb_truetype.h`).
 - **Font offload evidence**: `vector_font_offload.spl` is the typed evidence
-  path for real GPU-returned vector glyph pixels. `bitmap_font_offload.spl`
+  path for real GPU-returned vector glyph pixels. Use
+  `vector_font_glyph_readback_evidence(...)` for device samples: it derives the
+  expected checksum from returned glyph alpha pixels and only marks vector font
+  readback production-ready when GPU-returned glyph counters are present and
+  checksum-matched device readback succeeds. `bitmap_font_offload.spl`
   records the current bitmap-font path as CPU glyph preprocessing plus optional
   GPU copy/upload, plus the typed `bitmap_glyph_raster` generated-kernel launch
   plan. The portable compiler emitter and the CUDA/OpenCL/HIP Engine2D paths

@@ -645,6 +645,18 @@ dev-done
   readback-verified GPU glyph pixels.
 - verify: Optimizer scans completed for this slice in Docker. Counts: CUDA
   session 23 and CUDA session contract spec 0 remaining static opportunities.
+- impl: Added checksum-gated vector font glyph readback evidence.
+  `vector_font_glyph_readback_evidence(...)` now derives the expected checksum
+  from returned vector glyph alpha pixels and requires both GPU-returned glyph
+  counters and checksum-matched device readback before marking vector font
+  readback production-ready.
+- verify: Focused vector-font offload check passes and vector-font offload spec
+  now passes 6/6. Generated manual refreshed under `doc/06_spec`. This creates
+  a stronger proof wrapper for future device samples but does not provide a
+  hardware readback sample on this host.
+- verify: Optimizer scans completed for this slice in Docker. Counts:
+  vector-font offload 20 and vector-font offload spec 2 remaining static
+  opportunities.
 - impl: Added explicit-native Engine2D preference helpers.
   `backend_explicit_native_priority_order()` and
   `backend_full_preference_order()` now put `baremetal` and `virtio_gpu` ahead

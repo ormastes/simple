@@ -27,7 +27,7 @@ vector_font_offload_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -167,6 +167,80 @@ expect(evidence.reason).to_equal("production-gpu-dispatch-not-wired")
 
 </details>
 
+#### marks vector font glyph readback ready only when returned pixels match checksum
+
+- accel
+   - Expected: evidence.execution.expected_checksum equals `checksum`
+   - Expected: evidence.execution.actual_checksum equals `checksum`
+   - Expected: evidence.gpu_glyph_returned is true
+   - Expected: evidence.gpu_glyph_readback_matched is true
+   - Expected: evidence.production_ready is true
+   - Expected: evidence.status_code equals `vector-font-glyph-readback-matched`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val pixels = [0u8, 24u8, 255u8, 6u8]
+val checksum = vector_font_glyph_pixels_checksum(pixels)
+val evidence = vector_font_glyph_readback_evidence(
+    "cuda", 4, 1, 4096, 7, 11, true, true, true,
+    accel(1, 1, 0, 0, 1, 4, "cuda-vector-font-glyph-pixels-returned"),
+    pixels, checksum
+)
+
+expect(checksum).to_be_greater_than(0)
+expect(evidence.execution.expected_checksum).to_equal(checksum)
+expect(evidence.execution.actual_checksum).to_equal(checksum)
+expect(evidence.gpu_glyph_returned).to_equal(true)
+expect(evidence.gpu_glyph_readback_matched).to_equal(true)
+expect(evidence.production_ready).to_equal(true)
+expect(evidence.status_code).to_equal("vector-font-glyph-readback-matched")
+expect(evidence.diagnostic_text()).to_contain("gpu_glyph_readback_matched=true")
+```
+
+</details>
+
+#### keeps vector font glyph readback incomplete without GPU returned glyph evidence
+
+- accel
+   - Expected: evidence.execution.device_executed is true
+   - Expected: evidence.gpu_glyph_returned is false
+   - Expected: evidence.gpu_glyph_readback_matched is false
+   - Expected: evidence.production_ready is false
+   - Expected: evidence.status_code equals `vector-font-glyph-return-missing`
+   - Expected: evidence.reason equals `vector-font-gpu-glyph-return-missing`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val pixels = [0u8, 24u8, 255u8, 6u8]
+val checksum = vector_font_glyph_pixels_checksum(pixels)
+val evidence = vector_font_glyph_readback_evidence(
+    "cuda", 4, 1, 4096, 7, 11, true, true, true,
+    accel(1, 1, 0, 0, 0, 0, "cuda-vector-font-glyph-pixels-missing"),
+    pixels, checksum
+)
+
+expect(evidence.execution.device_executed).to_equal(true)
+expect(evidence.gpu_glyph_returned).to_equal(false)
+expect(evidence.gpu_glyph_readback_matched).to_equal(false)
+expect(evidence.production_ready).to_equal(false)
+expect(evidence.status_code).to_equal("vector-font-glyph-return-missing")
+expect(evidence.reason).to_equal("vector-font-gpu-glyph-return-missing")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -186,8 +260,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
