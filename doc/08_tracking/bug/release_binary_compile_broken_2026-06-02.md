@@ -1,6 +1,6 @@
 ---
 id: release_binary_compile_broken_2026-06-02
-status: OPEN
+status: RESOLVED-BY-REDEPLOY (2026-06-11) — bin/simple now runs the rebuilt Rust seed; compile works (print "hello" -> .smf OK), \x hex escapes decode, stdin extern present. Working SELF-HOSTED deploy remains tracked by the bootstrap-deploy effort (stage4 chain fixed 2026-06-11, deploy pending broader validation)
 severity: critical
 discovered: 2026-06-02
 discovered_by: MCP source fallback investigation

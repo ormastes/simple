@@ -198,3 +198,33 @@ Treat any of these as **FAIL** when reviewing web-app / AOP / capability changes
   (`random_hex`/`random_bytes` → `rt_random_hex`, OsRng/`/dev/urandom`).
 - Confirm a header-setting phase result can actually emit headers (not stuff them
   into the response **body**) before crediting a header-based control as effective.
+
+### Crash-containment regression checks (threads / async / actors / AOP / channels)
+
+Treat any of these as **FAIL** when reviewing runtime/concurrency/AOP changes
+(contract established 2026-06-11, guide: `doc/07_guide/runtime/crash_debugging.md`):
+
+- **Bare panic boundary**: task/actor/advice execution sites calling user code
+  without `catch_unwind` (Rust) or without recording a death reason — one task's
+  failure must never kill sibling tasks, the worker, or the process.
+- **Swallowed failure**: `let _ = handle.join()`, `Err(_) => return 0/NIL`, or
+  discarded `DispatchResult` with no recorded reason. Every catch must leave a
+  queryable record (`rt_actor_death_reason`, `take_last_task_panic`,
+  `last_death_reason`, `aop_last_denial`, `rt_aop_last_error`).
+- **Poisonable global lock**: `.lock().unwrap()` on a global registry mutex
+  (use `.unwrap_or_else(|e| e.into_inner())` — one panic must not cascade).
+- **Silent drop channel APIs**: new send/recv paths that silently drop on
+  closed/full instead of signaling (`try_send`/closed-flag pattern); parked
+  waiters that nothing can ever wake (close must drain).
+- **NIL-as-error leak**: returning `RuntimeValue::NIL` (bit pattern prints as 3)
+  for invalid input on a value-returning extern — either be the identity
+  (already-resolved semantics) or record + report the error.
+- **Unconditional diagnostic overhead**: new per-call tracing/backtrace capture
+  not gated behind a `SIMPLE_*` env flag (presence = on, default OFF). Always-on
+  recording is acceptable only on failure paths.
+- **Fix without pin**: any bug fix shipped without a regression spec that fails
+  on the pre-fix behavior (no skip(), no weakened asserts, verified green via
+  `bin/simple test`/`run`).
+- **Lean drift**: changes to weaver/scheduler/channel/boundary semantics without
+  rechecking the matching `src/verification/*` model
+  (`scripts/check/check-lean-proofs.shs` must stay green, zero sorry).
