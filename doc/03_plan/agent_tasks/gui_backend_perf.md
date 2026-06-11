@@ -142,6 +142,9 @@ Updated: 2026-06-11
   `_css_rgb_color` now finds the RGB opening and closing parentheses directly
   in the original HTML buffer before extracting the inner component list,
   avoiding two temporary tail substrings in CSS RGB parsing.
+- this commit -- CSS variable close-scan allocation removal:
+  `_first_var_color_after` now finds the closing `)` in the existing post-marker
+  scan buffer instead of allocating an additional post-`var(` tail substring.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
