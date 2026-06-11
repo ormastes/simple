@@ -130,6 +130,15 @@ Hosted runtime-pool path:
   `rt_pool_worker_main` pops one task and runs `task->entry(task->closure_ptr)`
   to completion before it returns to queue selection, so a tight CPU loop does
   not become requeueable just because it calls `thread_yield()`.
+- The current hosted blocking-compensation hook is narrower:
+  `src/compiler_rust/runtime/src/executor.rs` only brackets
+  `rt_thread_sleep(...)` with `rt_pool_worker_block_begin/end`, so it covers
+  real blocking sleep rather than general CPU-loop fairness.
+- If hosted fairness changes in the future, the narrow compiler seam already
+  exists in `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`, where
+  `HirStmt::While`, `HirStmt::Loop`, and `HirStmt::For` lower into the current
+  native/SMF loop form. That is the natural insertion point for a safepoint or
+  compiler-yield contract.
 
 Cooperative path:
 

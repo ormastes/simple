@@ -184,3 +184,10 @@ Repository guards:
   each popped closure to return before selecting another queued task, so raw
   `thread_yield()` inside that closure is not enough to provide Go-like
   fairness on the host lane.
+- Concrete implementation seams for that remaining work are now known:
+  `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` owns the current
+  `HirStmt::While` / `HirStmt::Loop` / `HirStmt::For` lowering path for native
+  and SMF loops, while `src/compiler_rust/compiler/src/interpreter_control.rs`
+  owns the source-run `exec_while` / `exec_loop` / `exec_for` path. Any real
+  host-side fairness contract has to patch one of those loop paths or make the
+  runtime pool itself resumable.

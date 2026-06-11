@@ -212,6 +212,10 @@ Deliverables:
   mechanism: runtime-pool workers execute one popped closure to return before
   selecting another queued task, so fairness work must target resumable task
   slices or safepoints rather than only thread primitives;
+- updated architecture/design/tracker text that pins the concrete next seams:
+  `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` loop lowering,
+  `src/compiler_rust/compiler/src/interpreter_control.rs` loop execution, and
+  `src/compiler_rust/runtime/src/executor.rs` blocking markers;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:

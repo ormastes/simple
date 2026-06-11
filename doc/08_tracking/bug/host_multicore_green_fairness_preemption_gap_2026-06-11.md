@@ -53,11 +53,26 @@ Current hosted runtime mechanism behind that gap is now explicit:
 - `src/runtime/runtime_pool.c` runs each accepted task through
   `rt_pool_worker_main -> task->entry(task->closure_ptr)` and does not return
   to `rt_pool_pop_task(...)` until that closure returns
+- the current host compensation hook in
+  `src/compiler_rust/runtime/src/executor.rs` only marks real blocking sleep
+  through `rt_thread_sleep -> rt_pool_worker_block_begin/end`; it does not make
+  CPU loops resumable
 - so the hosted pool has work stealing and bounded worker ownership, but not
   resumable task slices on the host lane
 - this means host fairness cannot come from plain OS-thread yield alone; it
   needs compiler-inserted safepoints, runtime-managed preemption, or a model
   that breaks long work into requeueable slices
+
+Current compiler insertion seam is also explicit:
+
+- interpreter loops are centralized in
+  `src/compiler_rust/compiler/src/interpreter_control.rs` through
+  `exec_while`, `exec_loop`, and `exec_for`
+- native/SMF loop lowering is centralized in
+  `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` through the
+  `HirStmt::While`, `HirStmt::Loop`, and `HirStmt::For` lowering branches
+- that MIR lowering layer is the narrowest existing place to insert a future
+  host safepoint or compiler-yield call without inventing a second loop model
 
 Current hosted fairness/preemption gap coverage now includes:
 
@@ -116,6 +131,9 @@ This gap can close only when the hosted multicore-green lane has executable
 evidence for:
 
 - fairness/preemption or an equivalent enforced host-side yield contract
+- and the mechanism must be tied to one of the concrete seams above: runtime
+  worker preemption, compiler-inserted loop safepoints, or resumable task
+  slicing in the hosted pool
 
 That evidence must be tied into the canonical multicore-green feature tracking
 and must not rely on SimpleOS-only scheduler proofs.
