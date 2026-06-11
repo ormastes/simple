@@ -140,6 +140,10 @@ Open gaps tied to the active browser objective:
     `line-height`, `font-family`, `font-weight`, and `color`) in the structural
     box report. This records the browser text stack behind the remaining
     fixture-22 pixel blocker without treating font rasterization as solved.
+    The same evidence now also records subpixel client rects (`rect_left`,
+    `rect_top`, `rect_width`, and `rect_height`) alongside rounded integer
+    geometry, exposing Chromium's exact box boundaries for follow-up layout
+    parity work without changing the integer geometry comparison gate.
 - The same live geometry lane now passes for `23_flex_wrap_align_content_center`:
   - result: `layout_match`, `mismatch_count=0`
   - focused fix: parse `align-content: center`, keep explicit multi-line flex

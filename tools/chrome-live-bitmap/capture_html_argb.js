@@ -340,6 +340,7 @@ function geometryExpression() {
     (() => {
       const nodes = Array.from(document.querySelectorAll("[data-geom-label]"));
       const px = value => Math.round(Number.parseFloat(String(value || "0"))) || 0;
+      const rectPx = value => Number(value).toFixed(3);
       return {
         producer: "chrome-headless-geometry",
         viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -355,6 +356,10 @@ function geometryExpression() {
             y: Math.round(rect.top),
             width: Math.round(rect.width),
             height: Math.round(rect.height),
+            rectLeft: rectPx(rect.left),
+            rectTop: rectPx(rect.top),
+            rectWidth: rectPx(rect.width),
+            rectHeight: rectPx(rect.height),
             paddingLeft: px(style.paddingLeft),
             paddingTop: px(style.paddingTop),
             paddingRight: px(style.paddingRight),

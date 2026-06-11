@@ -72,6 +72,11 @@ interpreter text-P3 fallback, and the harness resolves `SIMPLE_BINARY` /
   stack visible in checked structural evidence while preserving the honest
   status: exact pixel parity is still blocked by glyph rasterization and
   antialiasing, not by box geometry.
+- The same geometry evidence now records subpixel client rect fields
+  (`rect_left`, `rect_top`, `rect_width`, and `rect_height`) in addition to the
+  rounded integer geometry used for the current layout comparison. This exposes
+  Chromium's exact fixture-22 box boundaries for future parity work without
+  accepting the unresolved text raster row.
 - Existing structural pass:
   `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
   records `pass_count=21`, `fail_count=0`, and `blur_or_tolerance_used=false`.
