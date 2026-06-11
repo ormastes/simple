@@ -28,7 +28,7 @@ electron_geometry_compare_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -56,6 +56,28 @@ expect(boxes[0].x).to_equal(8)
 expect(boxes[0].width).to_equal(120)
 expect(boxes[1].label).to_equal("footer")
 expect(boxes[1].y).to_equal(68)
+```
+
+</details>
+
+#### converts Chrome live geometry JSON using the same structural schema
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"box\",\"tag\":\"div\",\"x\":7,\"y\":9,\"width\":33,\"height\":17,\"text\":\"Hello\"}]}"
+val boxes = electron_geometry_json_to_boxes(geometry_json)
+expect(boxes.len()).to_equal(1)
+expect(boxes[0].label).to_equal("box")
+expect(boxes[0].x).to_equal(7)
+expect(boxes[0].y).to_equal(9)
+expect(boxes[0].width).to_equal(33)
+expect(boxes[0].height).to_equal(17)
+expect(boxes[0].text).to_equal("Hello")
 ```
 
 </details>
@@ -131,8 +153,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

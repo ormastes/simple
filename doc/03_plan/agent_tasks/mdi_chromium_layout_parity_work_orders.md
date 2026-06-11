@@ -75,9 +75,14 @@ Prove and harden the requested GUI stack:
   - `src/app/wm_compare/electron_geometry_compare.spl` parses that geometry
     into `StructuralLayoutBox` for structured comparison.
   - `tools/chrome-live-bitmap/capture_html_argb.js` captures real Chrome ARGB
-    screenshots but does not yet export DOM geometry.
+    screenshots and now exports matching `chrome-headless-geometry` DOM
+    geometry when `CHROME_CAPTURE_GEOMETRY_OUTPUT` is set.
   - `test/03_system/gui/wm_compare/famous_site_corpus_spec.spl` validates
     stored Chrome metrics for corpus fixtures, including text rect/line data.
+- Live sanity evidence (2026-06-11): Chrome headless geometry capture for
+  `test/fixtures/html_compat/02_block_boxes.html` produced 6 labeled items and
+  `src/app/wm_compare/html_compat_geometry_probe_cli.spl` reported
+  `layout_match` with `mismatch_count=0` against Simple structural boxes.
 
 ## Agent A: MDI Render And Event Evidence
 
@@ -143,8 +148,9 @@ Small tasks:
 
 1. Document the current real Chromium access paths: Chrome ARGB screenshot,
    Electron DOM rects, computed styles, and corpus metrics.
-2. Extend the Chrome live bitmap runner to emit per-element DOM geometry for
-   `[data-geom-label]` nodes, matching Electron's geometry schema.
+2. DONE (2026-06-11): extend the Chrome live bitmap runner to emit per-element
+   DOM geometry for `[data-geom-label]` nodes, matching Electron's geometry
+   schema.
 3. Add or extend a runner that emits per-element Chromium DOM geometry for the
    same manifest rows used by Simple layout.
 4. Compare element `x`, `y`, `width`, `height`, border, padding, and background
