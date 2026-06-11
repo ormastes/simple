@@ -36,17 +36,17 @@ use compiler.core.ast_expr.{
     EXPR_DICT_LIT, EXPR_TUPLE, EXPR_SLICE, EXPR_NULL_COALESCE,
     EXPR_OPTIONAL_CHAIN, EXPR_CAST, EXPR_INTERPOLATED_STRING,
     EXPR_RANGE, EXPR_SPREAD, EXPR_LIST_COMP, EXPR_DICT_COMP,
-    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts
+    expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_stmts
 }
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
     STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_MATCH,
     STMT_COMPOUND_ASSIGN,
-    stmt_tag, stmt_expr, stmt_name, stmt_body
+    stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body
 }
 use compiler.core.ast.{
     DECL_FN, DECL_EXTERN_FN, DECL_VAL, DECL_VAR,
-    decl_tag, decl_name, decl_param_names, decl_body_stmts
+    decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body
 }
 
 # ============================================================================
@@ -82,18 +82,18 @@ fn check_concurrency_share_nothing(decl_indices: [i64]) -> [ShareNothingFinding]
     # Collect module-level var declarations (mutable statics)
     var module_vars: {text: bool} = {}
     for idx in decl_indices:
-        val tag = decl_tag[idx]
+        val tag = decl_get_tag(idx)
         if tag == DECL_VAR:
-            module_vars[decl_name[idx]] = true
+            module_vars[decl_get_name(idx)] = true
 
     # Check each function for share-nothing violations
     for idx in decl_indices:
-        val tag = decl_tag[idx]
+        val tag = decl_get_tag(idx)
         if tag != DECL_FN:
             continue
 
-        val params = decl_param_names[idx]
-        val body = decl_body_stmts[idx]
+        val params = decl_get_param_names(idx)
+        val body = decl_get_body(idx)
 
         if body.len() == 0:
             continue
@@ -119,14 +119,14 @@ fn collect_local_var_decls_sn(stmts: [i64], vars: {text: bool}):
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val name = stmt_name[s]
+            val name = stmt_get_name(s)
             if name != "":
                 vars[name] = true
 
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            collect_local_var_decls_sn(stmt_body[s], vars)
+            collect_local_var_decls_sn(stmt_get_body(s), vars)
 
 # ============================================================================
 # Statement Walker
@@ -143,17 +143,17 @@ fn check_stmts_for_share_nothing(
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 val fs = check_expr_for_share_nothing(e, outer_vars, module_vars)
                 for f in fs:
                     findings.push(f)
 
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            val nested = check_stmts_for_share_nothing(stmt_body[s], outer_vars, module_vars)
+            val nested = check_stmts_for_share_nothing(stmt_get_body(s), outer_vars, module_vars)
             for f in nested:
                 findings.push(f)
 
@@ -170,21 +170,21 @@ fn check_expr_for_share_nothing(
     if e < 0:
         return findings
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     if tag == EXPR_CALL:
-        val callee_expr = expr_left[e]
+        val callee_expr = expr_get_left(e)
         val callee_name = _resolve_callee_name(callee_expr)
         if _is_share_nothing_callee(callee_name):
-            val args = expr_args[e]
+            val args = expr_get_args(e)
             if args.len() > 0:
                 val first_arg = args[0]
-                if first_arg >= 0 and expr_tag[first_arg] == EXPR_LAMBDA:
+                if first_arg >= 0 and expr_get_tag(first_arg) == EXPR_LAMBDA:
                     val fs = check_lambda_share_nothing(first_arg, callee_name, outer_vars, module_vars)
                     for f in fs:
                         findings.push(f)
             # Recurse into remaining args (in case of nested spawn calls)
-            val args2 = expr_args[e]
+            val args2 = expr_get_args(e)
             var ai = 1
             while ai < args2.len():
                 val a = args2[ai]
@@ -196,32 +196,32 @@ fn check_expr_for_share_nothing(
             return findings
 
     # Recurse into sub-expressions for non-spawn calls
-    val left = expr_left[e]
+    val left = expr_get_left(e)
     if left >= 0:
         val fs = check_expr_for_share_nothing(left, outer_vars, module_vars)
         for f in fs:
             findings.push(f)
 
-    val right = expr_right[e]
+    val right = expr_get_right(e)
     if right >= 0:
         val fs = check_expr_for_share_nothing(right, outer_vars, module_vars)
         for f in fs:
             findings.push(f)
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         if arg >= 0:
             val fs = check_expr_for_share_nothing(arg, outer_vars, module_vars)
             for f in fs:
                 findings.push(f)
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if child_stmt >= 0:
-            val child_e = stmt_expr[child_stmt]
+            val child_e = stmt_get_expr(child_stmt)
             if child_e >= 0:
                 val fs = check_expr_for_share_nothing(child_e, outer_vars, module_vars)
                 for f in fs:
                     findings.push(f)
-            val child_body = stmt_body[child_stmt]
+            val child_body = stmt_get_body(child_stmt)
             val nested = check_stmts_for_share_nothing(child_body, outer_vars, module_vars)
             for f in nested:
                 findings.push(f)
@@ -243,11 +243,11 @@ fn check_lambda_share_nothing(
 
     # Collect lambda's own params and locals — these are NOT violations
     var lambda_locals: {text: bool} = {}
-    val lambda_body_stmts = expr_stmts[lambda_expr]
+    val lambda_body_stmts = expr_get_stmts(lambda_expr)
     collect_local_var_decls_sn(lambda_body_stmts, lambda_locals)
 
     # Also collect lambda params from extra field (param list)
-    # expr_extra encodes the parameter list for EXPR_LAMBDA
+    # expr_get_extra encodes the parameter list for EXPR_LAMBDA
     # We walk body statements to gather VAR_DECL / VAL_DECL defined inside
 
     # Check body stmts for violations
@@ -256,7 +256,7 @@ fn check_lambda_share_nothing(
         findings.push(f)
 
     # Also check the body expression (right child)
-    val body_expr = expr_right[lambda_expr]
+    val body_expr = expr_get_right(lambda_expr)
     if body_expr >= 0:
         val ef = check_lambda_expr(body_expr, callee_name, outer_vars, module_vars, lambda_locals)
         for f in ef:
@@ -276,11 +276,11 @@ fn check_lambda_stmts(
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         # Violation kind 2: write to captured var from outer scope
         if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
-            val nm = stmt_name[s]
+            val nm = stmt_get_name(s)
             if nm != "":
                 if outer_vars.has(nm) and not lambda_locals.has(nm) and not module_vars.has(nm):
                     findings.push(ShareNothingFinding(
@@ -293,14 +293,14 @@ fn check_lambda_stmts(
                     ))
 
         if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 val ef = check_lambda_expr(e, callee_name, outer_vars, module_vars, lambda_locals)
                 for f in ef:
                     findings.push(f)
 
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            val nested = check_lambda_stmts(stmt_body[s], callee_name, outer_vars, module_vars, lambda_locals)
+            val nested = check_lambda_stmts(stmt_get_body(s), callee_name, outer_vars, module_vars, lambda_locals)
             for f in nested:
                 findings.push(f)
 
@@ -317,11 +317,11 @@ fn check_lambda_expr(
     if e < 0:
         return findings
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     # Violation kind 1: read of module-level var
     if tag == EXPR_IDENT:
-        val nm = expr_s_val[e]
+        val nm = expr_get_str(e)
         if nm != "" and module_vars.has(nm) and not lambda_locals.has(nm):
             findings.push(ShareNothingFinding(
                 code: "E-PAR-006",
@@ -335,9 +335,9 @@ fn check_lambda_expr(
 
     # Violation kind 2: assignment expression targeting captured var
     if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
-        val target = expr_left[e]
-        if target >= 0 and expr_tag[target] == EXPR_IDENT:
-            val nm = expr_s_val[target]
+        val target = expr_get_left(e)
+        if target >= 0 and expr_get_tag(target) == EXPR_IDENT:
+            val nm = expr_get_str(target)
             if nm != "" and outer_vars.has(nm) and not lambda_locals.has(nm) and not module_vars.has(nm):
                 findings.push(ShareNothingFinding(
                     code: "E-PAR-006",
@@ -349,32 +349,32 @@ fn check_lambda_expr(
                 ))
 
     # Recurse
-    val left = expr_left[e]
+    val left = expr_get_left(e)
     if left >= 0:
         val fs = check_lambda_expr(left, callee_name, outer_vars, module_vars, lambda_locals)
         for f in fs:
             findings.push(f)
 
-    val right = expr_right[e]
+    val right = expr_get_right(e)
     if right >= 0:
         val fs = check_lambda_expr(right, callee_name, outer_vars, module_vars, lambda_locals)
         for f in fs:
             findings.push(f)
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         if arg >= 0:
             val fs = check_lambda_expr(arg, callee_name, outer_vars, module_vars, lambda_locals)
             for f in fs:
                 findings.push(f)
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if child_stmt >= 0:
-            val child_e = stmt_expr[child_stmt]
+            val child_e = stmt_get_expr(child_stmt)
             if child_e >= 0:
                 val fs = check_lambda_expr(child_e, callee_name, outer_vars, module_vars, lambda_locals)
                 for f in fs:
                     findings.push(f)
-            val child_body = stmt_body[child_stmt]
+            val child_body = stmt_get_body(child_stmt)
             val nested = check_lambda_stmts(child_body, callee_name, outer_vars, module_vars, lambda_locals)
             for f in nested:
                 findings.push(f)
@@ -392,14 +392,14 @@ fn _resolve_callee_name(e: i64) -> text:
     """Extract the simple name of a callee expression (EXPR_IDENT or qualified)."""
     if e < 0:
         return ""
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
     if tag == EXPR_IDENT:
-        return expr_s_val[e]
+        return expr_get_str(e)
     # For qualified paths like module.fn, take the right-most ident
     if tag == EXPR_FIELD_ACCESS:
-        val field = expr_right[e]
-        if field >= 0 and expr_tag[field] == EXPR_IDENT:
-            return expr_s_val[field]
+        val field = expr_get_right(e)
+        if field >= 0 and expr_get_tag(field) == EXPR_IDENT:
+            return expr_get_str(field)
     ""
 
 # ============================================================================

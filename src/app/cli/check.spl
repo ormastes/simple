@@ -14,8 +14,13 @@
 
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult}
+use compiler.core.parser.{parse_module, parser_has_errors}
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.semantics.lint.concurrency_api_misuse.{check_concurrency_api_misuse}
+use compiler.semantics.lint.concurrency_share_nothing.{check_concurrency_share_nothing}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.file_discovery.{find_spl_files}
+use app.cli.query_rich_common.{query_file_read_rich}
 use app.build.repo_hygiene_gate.{run_repo_hygiene_gate}
 
 class CheckLogOptions:
@@ -152,6 +157,24 @@ fn _collect_spl_files(path: text) -> [text]:
 # Run the compiler front-end on one file in check-only mode (parse + resolve +
 # type-check, no codegen). Returns the number of errors found (0 == clean). On
 # error, prints diagnostics unless JSON output is requested.
+fn _concurrency_lint_errors(path: text, source: text) -> [text]:
+    """Run the E-PAR concurrency lints (E-PAR-001..006) on one source file."""
+    var msgs: [text] = []
+    val misuse = check_concurrency_api_misuse(source, path)
+    for finding in misuse:
+        msgs.push(finding.fmt())
+    # E-PAR-006 walks the AST arena; parse this file into the global arena first.
+    # NOTE: the self-hosted parser cannot yet parse lambda call arguments, so
+    # E-PAR-006 stays inert here until that gap closes — see
+    # doc/08_tracking/bug/selfhosted_parser_lambda_gap_2026-06-11.md
+    ast_reset()
+    parse_module(source, path)
+    if not parser_has_errors():
+        val share = check_concurrency_share_nothing(module_get_decls())
+        for sn_finding in share:
+            msgs.push(sn_finding.fmt())
+    msgs
+
 fn _check_path(path: text, as_json: bool) -> i64:
     if not file_exists(path):
         if not as_json:
@@ -166,16 +189,21 @@ fn _check_path(path: text, as_json: bool) -> i64:
     val result = compiler_driver_run_compile(driver)
     val errors = result.get_errors()
 
-    if errors.len() == 0 and result.is_success():
+    val source = query_file_read_rich(path) ?? ""
+    val lint_errors = _concurrency_lint_errors(path, source)
+
+    if errors.len() == 0 and lint_errors.len() == 0 and result.is_success():
         return 0
 
     if not as_json:
-        if errors.len() > 0:
-            for err in errors:
-                print "{path}: {err}"
-        else:
+        for err in errors:
+            print "{path}: {err}"
+        for lint_err in lint_errors:
+            print "{path}: {lint_err}"
+        if errors.len() == 0 and lint_errors.len() == 0:
             print "{path}: check failed"
-    if errors.len() > 0: errors.len() else: 1
+    val total = errors.len() + lint_errors.len()
+    if total > 0: total else: 1
 
 fn run_check(args: [text]) -> i64:
     val log_opts = parse_log_options(args)
