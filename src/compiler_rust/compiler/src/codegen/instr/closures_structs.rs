@@ -300,6 +300,23 @@ pub(crate) fn compile_method_call_static<M: Module>(
             return Ok(());
         }
     }
+    // Bare `.len()` gets the same treatment as bare `.has(...)`: it is
+    // overwhelmingly the builtin Array/String/Dict length idiom on a receiver
+    // whose static type was lost (e.g. a for-loop binder). Name-suffix binding
+    // would dispatch it to whatever unique `Type_dot_len` method happens to be
+    // linked in — e.g. std ListIter.len in the stage4 CLI closure, which
+    // segfaulted `stage4 lint <any file>` from check_short_grammar_refactor's
+    // `line.len()` (2026-06-11). rt_len tag-dispatches safely at runtime;
+    // receivers with a known static type emit a qualified "Type.len" and never
+    // take this path.
+    if (lookup_name == "len" || lookup_name == "length") && args.is_empty() {
+        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "len", args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result);
+            }
+            return Ok(());
+        }
+    }
     let receiver_ty = ctx.vreg_types.get(&receiver).copied();
     let allow_qualified_builtin = matches!(
         receiver_ty,
@@ -409,6 +426,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
             // name-based binding for bare `has`; the builtin fallback lowers
             // it to rt_contains, which tag-dispatches safely at runtime.
             if !lookup_name.contains('.') && method_part == "has" {
+                return None;
+            }
+            // Same policy for bare `len`/`length` (see the rt_len routing
+            // above): never bind by name-suffix to an arbitrary linked
+            // `Type_dot_len`.
+            if !lookup_name.contains('.') && (method_part == "len" || method_part == "length") {
                 return None;
             }
 

@@ -301,6 +301,47 @@ impl CoreLexer:
         val start_col: i64 = self.col
         self.cur_start = self.pos
         val quote: text = self.advance()
+
+        # Triple-quoted string: """ or ''' — content may span newlines.
+        # Mirrors lex_scan_string in lexer_scanners.spl; without this branch
+        # docstrings lex as `""` + unterminated string (parse errors on every
+        # module with a multi-line docstring).
+        val tq1: text = self.peek()
+        val tq2: text = self.peek_next()
+        val is_tq1: bool = tq1 == quote
+        val is_tq2: bool = tq2 == quote
+        if is_tq1 and is_tq2:
+            self.advance()
+            self.advance()
+            val seg_start: i64 = self.pos
+            for i in 0..1000000:
+                if self.at_end():
+                    break
+                val c0: text = self.peek()
+                val c1: text = self.peek_next()
+                val c2: text = self.peek_at(2)
+                val close01: bool = c0 == quote and c1 == quote
+                val close_all: bool = close01 and c2 == quote
+                if close_all:
+                    break
+                self.advance()
+            val content: text = self.source[seg_start:self.pos]
+            if not self.at_end():
+                self.advance()
+                self.advance()
+                self.advance()
+            # We are mid-line right after the closing quotes; clear any stale
+            # line-start flag set by newlines consumed inside the string.
+            self.at_line_start = false
+            self.make_token(3, content, start_line, start_col)
+            self.cur_text = content
+            val nul3 = char_from_code(0)
+            if content.contains(nul3):
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "")
+            else:
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", content)
+            return
+
         var parts: [text] = []
         var done: bool = false
 
