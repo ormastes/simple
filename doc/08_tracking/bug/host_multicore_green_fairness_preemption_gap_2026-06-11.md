@@ -46,11 +46,11 @@ coverage:
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
   is the narrowed blocker record for that path
 - `test/03_system/feature/usage/native_function_value_param_array_regression_spec.spl`
-  now records the lower current-source native blocker beneath that path: a
-  function-valued local or parameter stored into an array already degrades on
-  native even though source-run still passes
+  now records that the lower current-source native blocker beneath that path is
+  closed: a function-valued local or parameter stored into an array is green
+  again on current-source native
 - `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
-  is the narrowed blocker record for that lower path
+  is the historical blocker record for that lower path and now marks it closed
 
 Current hosted blocking-compensation evidence now includes:
 
@@ -67,6 +67,14 @@ Current hosted parallelism-boundary evidence also includes:
 - `test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.spl`
   now regression-covers the bounded-parallelism fix: with requested hosted
   parallelism `2`, the fresh hosted runtime stays at `2` under CPU saturation
+- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
+  keeps the one-worker fairness gap explicit: with hosted parallelism pinned
+  to `1`, a tight CPU loop can still keep a later quick task unfinished during
+  the first short observation window
+- `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl`
+  keeps the deeper host-side point explicit: raw `thread_yield()` inside that
+  one-worker task is still not enough to make queued work progress during the
+  same early window
 
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
@@ -95,10 +103,9 @@ Related active host-side blocker:
 - `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`
   now records the closed helper-return regression that used to sit below the
   stepper path.
-- `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md` now records the lower param-array path as closed
-  now records the better lower current-source native blocker underneath the
-  worker pool stepper path: function-valued locals or parameters stored into
-  arrays still degrade before the later indirect call.
+- `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
+  now records the lower param-array path as closed, so it is no longer the
+  active blocker underneath the worker-pool stepper path.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records the newer evidence split: the checked-in `bin/release/simple` binary
   is stale for this lane, while current-source rebuilt `release` and `debug`

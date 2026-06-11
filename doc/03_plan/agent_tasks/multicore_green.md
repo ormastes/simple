@@ -34,12 +34,13 @@ Date: 2026-06-06
   hardware proof.
 - Current source-built hosted-native fairness evidence is stricter than the
   checked-in `bin/release/simple` binary for this lane: the helper-return
-  function-value probes, helper-side `Channel.id()` native path, and the
-  smaller pool-worker struct-send path are now fixed on rebuilt debug
-  binaries. The current lower native boundary under the remaining stepper lane
-  is now function-valued local or parameter array storage such as
-  `val callbacks = [step_fn]`, while the resumable-stepper native probe still
-  crashes. The
+  function-value probes, helper-side `Channel.id()` native path, the smaller
+  pool-worker struct-send path, and the function-valued local or parameter
+  array path such as `val callbacks = [step_fn]` are now fixed on rebuilt
+  debug binaries. The remaining lower current-source native boundary beneath
+  the fairness lane is no longer that array-storage shape; the active hosted
+  native blocker is the resumable-stepper probe itself, which still crashes.
+  The
   checked-in release binary remains tracked as stale evidence in
   `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 

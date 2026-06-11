@@ -49,14 +49,16 @@
   can send a plain struct payload through a channel and the standalone native
   artifact returns `value=7`, `EXIT=0`.
 - `test/03_system/feature/usage/native_function_value_param_array_regression_spec.spl`
-  proves the lower hosted-native function-valued local or parameter array
-  degradation that sits beneath the current resumable-stepper lane.
+  keeps the former lower hosted-native function-valued local or parameter
+  array degradation closed as regression coverage beneath the current
+  resumable-stepper lane.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records that the checked-in `bin/release/simple` binary has drifted from the
   current-source rebuilt `release` and `debug` compilers for the
   resumable-stepper native probe. The helper-return probes are now fixed on the
-  rebuilt debug path, so rebuilt current-source artifacts remain the stronger
-  evidence until the checked-in release binary is refreshed to match current
+  rebuilt debug path, and the lower param-array regression is now fixed there
+  as well, so rebuilt current-source artifacts remain the stronger evidence
+  until the checked-in release binary is refreshed to match current
   source/runtime/compiler behavior.
 - `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
   keeps the earlier standalone-native lower blocker closed: returning a

@@ -104,7 +104,7 @@ bin/release/simple test test/03_system/feature/usage/multicore_green_host_parity
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -133,6 +133,7 @@ expect(bug).to_contain("SimpleOS has scheduler-facing")
 expect(bug).to_contain("multicore_green_blocking_compensation_gap_spec.spl")
 expect(bug).to_contain("blocking compensation now has executable hosted coverage")
 expect(bug).to_contain("bounded parallelism now has executable hosted regression coverage")
+expect(bug).to_contain("multicore_green_thread_yield_gap_spec.spl")
 expect(bug).to_contain("multicore_green_fairness_preemption_gap_spec.spl")
 ```
 
@@ -148,7 +149,7 @@ expect(bug).to_contain("multicore_green_fairness_preemption_gap_spec.spl")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -163,6 +164,7 @@ expect(bug).to_contain("two sleeping tasks still allow a third quick task")
 expect(bug).to_contain("bounded parallelism")
 expect(bug).to_contain("parallelism pinned to `1`")
 expect(bug).to_contain("quick task")
+expect(bug).to_contain("thread_yield()")
 
 step("Verify the architecture still treats future fairness as open host work")
 expect(architecture).to_contain("before claiming tight-loop")
