@@ -349,14 +349,18 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::CollectionOps);
         }
 
-        // Collection literals need heap allocation
+        // Array literals lower through MIR ArrayLit and the native runtime
+        // already supports heap-allocated arrays. Keep walking nested elements
+        // for genuinely unsupported constructs, but do not force hybrid
+        // fallback just because an array literal appears.
         Expr::Array(items) => {
             for item in items {
                 analyze_expr(item, reasons);
             }
-            add_reason(reasons, FallbackReason::CollectionLiteral);
         }
 
+        // Tuple / Vec / Dict literals still keep their broader fallback marker
+        // until they have the same end-to-end native contract as plain arrays.
         Expr::Tuple(items) => {
             for item in items {
                 analyze_expr(item, reasons);

@@ -151,6 +151,34 @@ fn test_lower_function_identifier_in_array_keeps_function_value_type() {
 }
 
 #[test]
+fn test_lower_function_param_array_keeps_function_value_type() {
+    let module = parse_and_lower(
+        "fn run_one(step_fn: fn() -> i64) -> i64:\n    val callbacks = [step_fn]\n    val thunk = callbacks[0]\n    val value = thunk()\n    return value\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "run_one").expect("run_one fn");
+    let callbacks_ty = func.locals[0].ty;
+    let Some(HirType::Array { element, .. }) = module.types.get(callbacks_ty) else {
+        panic!("expected array-typed local for callbacks, got {:?}", module.types.get(callbacks_ty));
+    };
+    let Some(HirType::Function { ret, .. }) = module.types.get(*element) else {
+        panic!(
+            "expected function-valued array element for callbacks, got {:?}",
+            module.types.get(*element)
+        );
+    };
+    assert_eq!(*ret, TypeId::I64);
+
+    let thunk_ty = func.locals[1].ty;
+    let Some(HirType::Function { ret, .. }) = module.types.get(thunk_ty) else {
+        panic!("expected function-typed local for indexed param function, got {:?}", module.types.get(thunk_ty));
+    };
+    assert_eq!(*ret, TypeId::I64);
+    assert_eq!(func.locals[2].ty, TypeId::I64, "calling the indexed param function should produce its return type");
+}
+
+#[test]
 fn test_lower_if_expression() {
     let module = parse_and_lower("fn test(x: i64) -> i64:\n    let y = if x > 0: 1 else: 0\n    return y\n").unwrap();
 

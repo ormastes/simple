@@ -45,7 +45,7 @@ coverage:
     completion
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
   is the narrowed blocker record for that path
-- `test/03_system/feature/usage/native_function_value_param_array_blocker_spec.spl`
+- `test/03_system/feature/usage/native_function_value_param_array_regression_spec.spl`
   now records the lower current-source native blocker beneath that path: a
   function-valued local or parameter stored into an array already degrades on
   native even though source-run still passes
@@ -95,7 +95,7 @@ Related active host-side blocker:
 - `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`
   now records the closed helper-return regression that used to sit below the
   stepper path.
-- `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
+- `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md` now records the lower param-array path as closed
   now records the better lower current-source native blocker underneath the
   worker pool stepper path: function-valued locals or parameters stored into
   arrays still degrade before the later indirect call.

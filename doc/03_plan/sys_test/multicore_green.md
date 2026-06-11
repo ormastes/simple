@@ -48,7 +48,7 @@
   now keeps the earlier smaller hosted-native blocker closed: a pool worker
   can send a plain struct payload through a channel and the standalone native
   artifact returns `value=7`, `EXIT=0`.
-- `test/03_system/feature/usage/native_function_value_param_array_blocker_spec.spl`
+- `test/03_system/feature/usage/native_function_value_param_array_regression_spec.spl`
   proves the lower hosted-native function-valued local or parameter array
   degradation that sits beneath the current resumable-stepper lane.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`

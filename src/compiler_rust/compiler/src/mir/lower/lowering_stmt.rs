@@ -1678,6 +1678,7 @@ impl<'a> MirLowerer<'a> {
     pub(super) fn emit_function_drops(&mut self) -> MirLowerResult<()> {
         // First, collect information about which locals need dropping
         let locals_to_drop: Vec<(usize, crate::hir::TypeId)> = self.with_func(|func, _| {
+            let local_base = func.params.len();
             func.locals
                 .iter()
                 .enumerate()
@@ -1691,7 +1692,7 @@ impl<'a> MirLowerer<'a> {
                     if local.kind.is_parameter() {
                         return None;
                     }
-                    Some((idx, local.ty))
+                    Some((local_base + idx, local.ty))
                 })
                 .collect()
         })?;

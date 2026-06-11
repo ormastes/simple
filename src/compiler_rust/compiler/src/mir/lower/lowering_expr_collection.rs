@@ -174,6 +174,89 @@ impl<'a> MirLowerer<'a> {
             return Ok(array_reg);
         }
 
+        let has_function_elements = elements.iter().any(|elem| {
+            self.type_registry
+                .and_then(|tr| tr.get(elem.ty))
+                .is_some_and(|ty| matches!(ty, HirType::Function { .. }))
+        });
+
+        if has_function_elements {
+            let capacity = elements.len() as i64;
+            let capacity_reg = self.with_func(|func, current_block| {
+                let reg = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstInt {
+                    dest: reg,
+                    value: capacity,
+                });
+                reg
+            })?;
+            let array_reg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name("rt_array_new"),
+                    args: vec![capacity_reg],
+                });
+                dest
+            })?;
+            for elem in elements {
+                let reg = self.lower_expr(elem)?;
+                let needs_int_boxing = matches!(
+                    elem.ty,
+                    TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                );
+                let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
+                let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
+                let pushed = if needs_bool_boxing {
+                    self.with_func(|func, current_block| {
+                        let boxed = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(boxed),
+                            target: CallTarget::from_name("rt_value_bool"),
+                            args: vec![reg],
+                        });
+                        boxed
+                    })?
+                } else if needs_float_boxing {
+                    self.with_func(|func, current_block| {
+                        let boxed = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::BoxFloat {
+                            dest: boxed,
+                            value: reg,
+                        });
+                        boxed
+                    })?
+                } else if needs_int_boxing {
+                    self.with_func(|func, current_block| {
+                        let boxed = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::BoxInt {
+                            dest: boxed,
+                            value: reg,
+                        });
+                        boxed
+                    })?
+                } else {
+                    reg
+                };
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_array_push"),
+                        args: vec![array_reg, pushed],
+                    });
+                    dest
+                })?;
+            }
+            return Ok(array_reg);
+        }
+
         let mut elem_regs = Vec::new();
         for elem in elements {
             let reg = self.lower_expr(elem)?;
