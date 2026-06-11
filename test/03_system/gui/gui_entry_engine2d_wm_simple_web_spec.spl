@@ -22,6 +22,9 @@ render-ready marker, and captures the visible QEMU framebuffer.
   1024x768 PPM with more than 100000 non-black pixels and exact sampled colors
   for the red MMIO probe, browser header, web body bands, top command lane, and
   taskbar/background surface.
+- QMP injects a deterministic host mouse drag and a second `pmemsave` proves
+  the live framebuffer changed after the input sequence, so the scenario cannot
+  pass from a static MDI screenshot alone.
 - A failed serial marker, failed QMP capture, blank framebuffer, or stale MDI
   surface count fails the scenario explicitly.
 
@@ -110,6 +113,12 @@ fn _serial_log(run_id: text) -> text:
 fn _capture_ppm(cwd: text, run_id: text) -> text:
     cwd + "/" + _run_dir(run_id) + "/capture.ppm"
 
+fn _capture_before_ppm(cwd: text, run_id: text) -> text:
+    cwd + "/" + _run_dir(run_id) + "/capture-before-drag.ppm"
+
+fn _capture_after_ppm(cwd: text, run_id: text) -> text:
+    cwd + "/" + _run_dir(run_id) + "/capture-after-drag.ppm"
+
 fn _capture_hold_target(target: OsTarget) -> OsTarget:
     OsTarget(
         arch: target.arch,
@@ -170,6 +179,36 @@ fn _capture_and_assert_web_ppm_retry(qmp_socket: text, output_path: text, max_at
         attempt = attempt + 1
     false
 
+fn _qmp_drag_and_assert_framebuffer_delta(qmp_socket: text, before_path: text, after_path: text) -> bool:
+    val script = "import hashlib,json,os,socket,sys,time;" +
+        "sock,before,after=sys.argv[1],sys.argv[2],sys.argv[3];" +
+        "before_raw=before+'.raw';after_raw=after+'.raw';" +
+        "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();" +
+        "def q(obj):\n f.write(json.dumps(obj).encode()+b'\\n');f.flush();return f.readline()\n" +
+        "def hmp(cmd):\n return q(dict(execute='human-monitor-command',arguments=dict([('command-line',cmd)])))\n" +
+        "def pmem(raw,ppm):\n hmp('pmemsave 0xfd000000 3145728 \"'+raw+'\"');ok=any((time.sleep(0.1) or (os.path.exists(raw) and os.path.getsize(raw)>=3145728)) for _ in range(100));mem=open(raw,'rb').read() if ok else b'';pix=bytearray();[pix.extend([mem[i+2],mem[i+1],mem[i]]) for i in range(0,1024*768*4,4)] if ok else None;open(ppm,'wb').write((b'P6\\n1024 768\\n255\\n'+bytes(pix)) if ok else b'');return mem\n" +
+        "q(dict(execute='qmp_capabilities'));" +
+        "mem0=pmem(before_raw,before);" +
+        "hmp('mouse_move 360 190');time.sleep(0.05);" +
+        "hmp('mouse_button 1');time.sleep(0.08);" +
+        "hmp('mouse_move 160 80');time.sleep(0.08);" +
+        "hmp('mouse_move 160 80');time.sleep(0.08);" +
+        "hmp('mouse_button 0');time.sleep(0.35);" +
+        "mem1=pmem(after_raw,after);" +
+        "diff=sum(1 for a,b in zip(mem0,mem1) if a!=b) if len(mem0)==3145728 and len(mem1)==3145728 else 0;" +
+        "sha0=hashlib.sha256(mem0).hexdigest() if mem0 else '';" +
+        "sha1=hashlib.sha256(mem1).hexdigest() if mem1 else '';" +
+        "print('qmp_drag_input before_raw_bytes=%d after_raw_bytes=%d framebuffer_changed_bytes=%d before_sha256=%s after_sha256=%s before_ppm=%s after_ppm=%s' % (len(mem0),len(mem1),diff,sha0,sha1,before,after));" +
+        "sys.exit(0 if len(mem0)==3145728 and len(mem1)==3145728 and diff>2048 and sha0!=sha1 else 5)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, before_path, after_path], 25000)
+    if result[0] != "":
+        print "[gui_entry_engine2d_wm_simple_web_spec] qmp drag {result[0]}"
+    if result[1] != "":
+        print "[gui_entry_engine2d_wm_simple_web_spec] qmp drag stderr: {result[1]}"
+    result[2] == 0 and file_exists(before_path) and file_exists(after_path) and result[0].contains("qmp_drag_input") and result[0].contains("framebuffer_changed_bytes=")
+
 fn _print_guest_diagnostics(prefix: text, serial: text, stderr: text):
     print "{prefix} serial_len={serial.len()} stderr_len={stderr.len()}"
     if serial != "":
@@ -195,10 +234,14 @@ describe "WM Simple Web Engine2D BGA QEMU check":
         val serial_log = _serial_log(run_id)
         val cwd = rt_get_cwd()
         val capture_ppm = _capture_ppm(cwd, run_id)
+        val before_drag_ppm = _capture_before_ppm(cwd, run_id)
+        val after_drag_ppm = _capture_after_ppm(cwd, run_id)
 
         dir_create_all(artifact_dir)
         val _deleted_qmp_socket = rt_file_delete(qmp_socket)
         val _deleted_capture_ppm = rt_file_delete(capture_ppm)
+        val _deleted_before_drag_ppm = rt_file_delete(before_drag_ppm)
+        val _deleted_after_drag_ppm = rt_file_delete(after_drag_ppm)
 
         match spawn_guest_with_qmp(capture_target, qmp_socket, serial_log):
             Ok(handle):
@@ -226,8 +269,17 @@ describe "WM Simple Web Engine2D BGA QEMU check":
                         stop_guest(handle)
                         expect(_pass_fail(captured)).to_equal("pass")
                     else:
-                        stop_guest(handle)
-                        expect(_pass_fail(file_exists(capture_ppm))).to_equal("pass")
+                        val drag_delta = _qmp_drag_and_assert_framebuffer_delta(qmp_socket, before_drag_ppm, after_drag_ppm)
+                        if not drag_delta:
+                            print "[gui_entry_engine2d_wm_simple_web_spec] QMP drag replay did not change the framebuffer"
+                            _print_guest_diagnostics("[gui_entry_engine2d_wm_simple_web_spec]", serial, read_qemu_stderr_log(handle))
+                            stop_guest(handle)
+                            expect(_pass_fail(drag_delta)).to_equal("pass")
+                        else:
+                            stop_guest(handle)
+                            expect(_pass_fail(file_exists(capture_ppm))).to_equal("pass")
+                            expect(_pass_fail(file_exists(before_drag_ppm))).to_equal("pass")
+                            expect(_pass_fail(file_exists(after_drag_ppm))).to_equal("pass")
             Err(err):
                 print "[gui_entry_engine2d_wm_simple_web_spec] failed to spawn guest: {err}"
                 expect(err).to_equal("")

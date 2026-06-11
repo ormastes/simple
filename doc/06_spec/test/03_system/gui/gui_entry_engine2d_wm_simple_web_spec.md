@@ -68,6 +68,9 @@ render-ready marker, and captures the visible QEMU framebuffer.
   1024x768 PPM with more than 100000 non-black pixels and exact sampled colors
   for the red MMIO probe, browser header, web body bands, top command lane, and
   taskbar/background surface.
+- QMP injects a deterministic host mouse drag and a second `pmemsave` proves
+  the live framebuffer changed after the input sequence, so the scenario cannot
+  pass from a static MDI screenshot alone.
 - A failed serial marker, failed QMP capture, blank framebuffer, or stale MDI
   surface count fails the scenario explicitly.
 
@@ -122,24 +125,29 @@ canonical shared-MDI surface setup regressed before the bitmap gate.
 
 #### builds, boots, reaches render markers, and captures Simple Web pixels
 
-1. dir create all
-2. Ok
-3.  print guest diagnostics
-4. stop guest
+- dir create all
+- Ok
+-  print guest diagnostics
+- stop guest
    - Expected: _pass_fail(saw_probe and saw_wm and saw_engine and saw_web and saw_mdi and saw_top and saw_taskbar and saw_html and saw_ready) equals `pass`
-5.  print guest diagnostics
-6. stop guest
+-  print guest diagnostics
+- stop guest
    - Expected: _pass_fail(captured) equals `pass`
-7. stop guest
+-  print guest diagnostics
+- stop guest
+   - Expected: _pass_fail(drag_delta) equals `pass`
+- stop guest
    - Expected: _pass_fail(file_exists(capture_ppm)) equals `pass`
-8. Err
+   - Expected: _pass_fail(file_exists(before_drag_ppm)) equals `pass`
+   - Expected: _pass_fail(file_exists(after_drag_ppm)) equals `pass`
+- Err
    - Expected: err equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -159,10 +167,14 @@ val qmp_socket = _qmp_socket(run_id)
 val serial_log = _serial_log(run_id)
 val cwd = rt_get_cwd()
 val capture_ppm = _capture_ppm(cwd, run_id)
+val before_drag_ppm = _capture_before_ppm(cwd, run_id)
+val after_drag_ppm = _capture_after_ppm(cwd, run_id)
 
 dir_create_all(artifact_dir)
 val _deleted_qmp_socket = rt_file_delete(qmp_socket)
 val _deleted_capture_ppm = rt_file_delete(capture_ppm)
+val _deleted_before_drag_ppm = rt_file_delete(before_drag_ppm)
+val _deleted_after_drag_ppm = rt_file_delete(after_drag_ppm)
 
 match spawn_guest_with_qmp(capture_target, qmp_socket, serial_log):
     Ok(handle):
@@ -190,8 +202,17 @@ match spawn_guest_with_qmp(capture_target, qmp_socket, serial_log):
                 stop_guest(handle)
                 expect(_pass_fail(captured)).to_equal("pass")
             else:
-                stop_guest(handle)
-                expect(_pass_fail(file_exists(capture_ppm))).to_equal("pass")
+                val drag_delta = _qmp_drag_and_assert_framebuffer_delta(qmp_socket, before_drag_ppm, after_drag_ppm)
+                if not drag_delta:
+                    print "[gui_entry_engine2d_wm_simple_web_spec] QMP drag replay did not change the framebuffer"
+                    _print_guest_diagnostics("[gui_entry_engine2d_wm_simple_web_spec]", serial, read_qemu_stderr_log(handle))
+                    stop_guest(handle)
+                    expect(_pass_fail(drag_delta)).to_equal("pass")
+                else:
+                    stop_guest(handle)
+                    expect(_pass_fail(file_exists(capture_ppm))).to_equal("pass")
+                    expect(_pass_fail(file_exists(before_drag_ppm))).to_equal("pass")
+                    expect(_pass_fail(file_exists(after_drag_ppm))).to_equal("pass")
     Err(err):
         print "[gui_entry_engine2d_wm_simple_web_spec] failed to spawn guest: {err}"
         expect(err).to_equal("")

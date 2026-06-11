@@ -28,8 +28,8 @@ Prove and harden the requested GUI stack:
 
 ## Current Evidence Snapshot
 
-- `origin/main` at `aea77a1f7f9b` includes the latest renderer parity state
-  update.
+- `origin/main` at `c42574e65381` includes the latest pushed live browser event
+  and computed-style evidence.
 - Generated-GUI Electron matrix is exact at `80x64`, `96x72`, `128x96`, and
   `160x120`.
 - Electron layout manifest has 18 rows: 16 exact, 2 tracked text divergences,
@@ -60,6 +60,17 @@ Prove and harden the requested GUI stack:
   min-width/height/background/cursor. This is not a substitute for the remaining
   SimpleOS QEMU framebuffer click/drag proof or the separate Linux-native host
   backend semantic event+style proof.
+- `test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` now contains a
+  fail-closed QMP drag-delta gate: it captures the BGA framebuffer with
+  `pmemsave`, injects deterministic HMP `mouse_move`/`mouse_button` events, then
+  requires a second framebuffer capture to differ by real bytes before passing.
+  This is a gate, not completed proof yet: the focused SSpec runner currently
+  fails before listing the scenario for both the modified file and the
+  origin-baseline copy, so live QEMU click/drag proof remains blocked on the
+  runner/import path or a standalone QMP wrapper.
+  Residual risk: the current gate checks a global framebuffer delta rather than
+  a drag-region-specific movement signature, so later work should tighten it
+  after the runner path executes reliably.
 - Windows and macOS live evidence is host-gated today:
   `test/03_system/gui/windows_native_mdi_evidence_spec.spl` reports
   `requires-windows` off Windows, and
@@ -237,5 +248,10 @@ Exit gate:
 
 - Full Chrome text pixel parity is not achieved. The known blocker is generic
   browser-font metric, baseline, shaping, and antialiasing parity.
+- SimpleOS QEMU framebuffer click/drag proof is not achieved yet. The new
+  drag-delta assertion is fail-closed, but the current focused runner exits
+  before executing the scenario (`total_listed=0` on both modified and baseline
+  copies), so the next work item is to fix that route or add an equivalent
+  standalone QMP evidence wrapper.
 - macOS and Windows live platform evidence is not proven from this Linux host;
   host-specific rows must not be promoted without real capture artifacts.
