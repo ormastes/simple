@@ -1,8 +1,12 @@
 use nogc_async_mut.process_set.types.{ProcessSetError}
-use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_delete, file_exists, rt_file_rename}
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms, rt_sleep_ms}
 use std.nogc_sync_mut.runtime.process_identity.{process_id}
+
+# Module-level monotonic sequence counter for collision-free message IDs.
+# Combined with process_id(), guarantees uniqueness within a process lifetime.
+var _ipc_seq: i64 = 0
 
 struct IpcMessage:
     id: text
@@ -61,6 +65,23 @@ fn _ipc_serialize_reply(reply: IpcReply) -> text:
 fn _ipc_get_timestamp() -> i64:
     current_time_ms()
 
+# Write content atomically via write-to-temp + rename so readers never see partial content.
+fn _ipc_atomic_write(path: text, content: text) -> bool:
+    val tmp_path = "{path}.tmp"
+    val ok = file_write(tmp_path, content)
+    if not ok:
+        return false
+    rt_file_rename(tmp_path, path)
+
+# Claim a message file atomically by renaming it to a .claimed file before reading.
+# Returns the claimed path, or "" if the file is already claimed or missing.
+fn _ipc_claim_file(path: text) -> text:
+    val claimed_path = "{path}.claimed"
+    val ok = rt_file_rename(path, claimed_path)
+    if not ok:
+        return ""
+    claimed_path
+
 fn _ipc_mkdir(dir: text):
     process_run("mkdir", ["-p", dir])
 
@@ -94,7 +115,7 @@ class FileQueueTransport:
         _ipc_mkdir(inbox_dir)
         val path = "{inbox_dir}/{msg.id}.msg"
         val content = _ipc_serialize_message(msg)
-        val ok = file_write(path, content)
+        val ok = _ipc_atomic_write(path, content)
         if not ok:
             return Err(ProcessSetError.IpcError(message: "failed to write message to {path}"))
         Ok(())
@@ -107,11 +128,17 @@ class FileQueueTransport:
             if not fname.ends_with(".msg"):
                 continue
             val path = "{inbox_dir}/{fname}"
-            val content = file_read_text(path)
+            # Atomic claim: rename to .claimed before reading.
+            # If rename fails the file was already claimed by another reader.
+            val claimed = _ipc_claim_file(path)
+            if claimed == "":
+                continue
+            val content = file_read_text(claimed)
             if content == "" or content == nil:
+                file_delete(claimed)
                 continue
             val msg = _ipc_parse_message(content)
-            file_delete(path)
+            file_delete(claimed)
             messages.push(msg)
         messages
 
@@ -129,7 +156,7 @@ class FileQueueTransport:
             error: ""
         )
         val content = _ipc_serialize_reply(r)
-        val ok = file_write(path, content)
+        val ok = _ipc_atomic_write(path, content)
         if not ok:
             return Err(ProcessSetError.IpcError(message: "failed to write reply to {path}"))
         Ok(())
@@ -144,13 +171,20 @@ class FileQueueTransport:
                 if not fname.ends_with(".msg"):
                     continue
                 val path = "{replies_dir}/{fname}"
-                val content = file_read_text(path)
+                # Atomic claim before reading to prevent double-consume.
+                val claimed = _ipc_claim_file(path)
+                if claimed == "":
+                    continue
+                val content = file_read_text(claimed)
                 if content == "" or content == nil:
+                    file_delete(claimed)
                     continue
                 val reply = _ipc_parse_reply(content)
                 if reply.in_reply_to == msg_id:
-                    file_delete(path)
+                    file_delete(claimed)
                     return Ok(reply)
+                # Not our reply — unclaim by renaming back
+                rt_file_rename(claimed, path)
             rt_sleep_ms(poll_ms)
             elapsed = elapsed + poll_ms
         Err(ProcessSetError.IpcError(message: "timeout waiting for reply to {msg_id}"))
@@ -170,8 +204,9 @@ class FileQueueTransport:
 fn ipc_new_message(source: text, target: text, method: text, payload: text) -> IpcMessage:
     val pid = process_id()
     val ts = _ipc_get_timestamp()
+    _ipc_seq = _ipc_seq + 1
     IpcMessage(
-        id: "{pid}_{ts}",
+        id: "{pid}_{_ipc_seq}",
         source: source,
         target: target,
         method: method,
@@ -183,8 +218,9 @@ fn ipc_new_message(source: text, target: text, method: text, payload: text) -> I
 fn ipc_new_request(source: text, target: text, method: text, payload: text, reply_to: text) -> IpcMessage:
     val pid = process_id()
     val ts = _ipc_get_timestamp()
+    _ipc_seq = _ipc_seq + 1
     IpcMessage(
-        id: "{pid}_{ts}",
+        id: "{pid}_{_ipc_seq}",
         source: source,
         target: target,
         method: method,
