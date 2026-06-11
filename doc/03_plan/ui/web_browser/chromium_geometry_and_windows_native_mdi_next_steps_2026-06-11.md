@@ -15,6 +15,10 @@ Scope:
   lane (`scripts/check/check-windows-native-mdi-evidence.shs`,
   `test/03_system/gui/windows_native_mdi_evidence_spec.spl`,
   `src/os/hosted/hosted_win32_mdi_probe.spl`) but is still host-gated.
+  The proof file now also requires `titlebar_css_present=true`, so the Win32
+  hosted MDI lane checks the titlebar widget CSS contract in addition to the
+  titlebar button, body button, text input, drag, focus, minimize, and restore
+  fields.
 - macOS live-window evidence is still host-gated (`check-macos-gui-live-window-evidence.shs`),
   and this Linux host can only prove the explicit `requires-macos` skip lane.
 - Current checked-in Chromium parity lane is still the older
@@ -43,6 +47,9 @@ Missing today:
   this Linux host still only verifies skip behavior (`requires-windows`).
 - MDI/titlebar-specific live evidence is still being developed in a separate
   lane.
+- The Win32 proof contract now includes `titlebar_css_present=true`. This is a
+  source/probe contract check until the wrapper is run on a Windows host and
+  captures live screenshot evidence.
 
 Smallest next implementation step:
 

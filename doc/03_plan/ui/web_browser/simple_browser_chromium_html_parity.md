@@ -286,6 +286,15 @@ Open gaps tied to the active browser objective:
     in both lanes, while Linux still reports only
     `macos_gui_live_window_evidence_status=skip` and
     `reason=requires-macos` for the live macOS window/capture evidence
+- Windows native MDI evidence now requires the same titlebar CSS source
+  contract in its host-gated proof file:
+  - `src/os/hosted/hosted_win32_mdi_probe.spl` emits
+    `titlebar_css_present=true` when the terminal MDI HTML contains the shared
+    flex titlebar widget container CSS and the custom titlebar widget color CSS
+  - `scripts/check/check-windows-native-mdi-evidence.shs` and
+    `windows_native_mdi_evidence_spec.spl` fail the Windows pass lane if that
+    field is missing; on Linux this still only proves the explicit
+    `requires-windows` skip path
 - Flex main-axis distribution now has a Chromium-captured fixture:
   - added `25_flex_justify_space_between` to the HTML compatibility catalog
     and structural geometry probe

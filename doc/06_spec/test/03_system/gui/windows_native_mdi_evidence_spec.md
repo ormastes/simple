@@ -46,7 +46,7 @@ windows_native_mdi_evidence_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -80,6 +80,7 @@ if host_os == "windows":
     expect(proof).to_contain("titlebar_widget_markup_present=true")
     expect(proof).to_contain("body_button_markup_present=true")
     expect(proof).to_contain("body_input_markup_present=true")
+    expect(proof).to_contain("titlebar_css_present=true")
     expect(proof).to_contain("minimized_after_restore=0")
 else:
     expect(code).to_equal(0)
