@@ -52,11 +52,20 @@ interpreter text-P3 fallback, and the harness resolves `SIMPLE_BINARY` /
   21, 23, and 24; `cmp` returns 0 for each Chrome/Simple PPM pair.
 - Fixture 22 blocked attempt:
   `--only=22_flex_align_items_baseline --update-baseline
-  --simple-timeout-ms=1000` writes both PPMs but reports
-  `different_pixels=507`, `match_pct_10000=9933`, and
-  `max_channel_diff=250`. The diff bounding box is `(15,21)-(49,48)`, matching
-  the `A`/`B` text glyph area in the fixture. The failure is not accepted with
-  blur, tolerance, downscaling, or copied browser pixels.
+  --simple-timeout-ms=1000` writes both PPMs but still fails exact comparison.
+  After aligning Simple's inherited default text color with Chromium black, the
+  mismatch improves from `different_pixels=507` to `different_pixels=475`,
+  with `match_pct_10000=9938` and `max_channel_diff=255`. The diff bounding
+  box remains `(15,21)-(49,48)`, matching the `A`/`B` text glyph area in the
+  fixture. The failure is not accepted with blur, tolerance, downscaling, or
+  copied browser pixels.
+- Fixture 22 geometry is not the blocker. Existing Electron geometry evidence
+  reports `layout_match` for the labeled boxes: `baseline_shell`
+  `x=16 y=16 w=220 h=32`, `baseline_big` `x=16 y=16 w=23 h=32`, and
+  `baseline_small` `x=39 y=30 w=11 h=16`. A focused Chromium style probe shows
+  Times New Roman text with `font-size/line-height` of `32px/32px` for `A` and
+  `16px/16px` for `B`, so the remaining delta belongs to glyph/text
+  compositing rather than flex baseline box layout.
 - Existing structural pass:
   `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
   records `pass_count=21`, `fail_count=0`, and `blur_or_tolerance_used=false`.
@@ -69,6 +78,6 @@ interpreter text-P3 fallback, and the harness resolves `SIMPLE_BINARY` /
 Structural layout parity for all seven flex rows remains stronger than the
 older pixel baseline manifest, and six of seven rows now also have exact pixel
 evidence. The remaining pixel blocker is fixture 22's browser font metrics,
-glyph rasterization, default text color, and antialiasing gap. Big ways forward:
-implement a browser-like font metric/raster/compositing path in Simple, or
-route text paint through a real font stack before requiring exact text pixels.
+glyph rasterization, and antialiasing gap. Big ways forward: implement a
+browser-like font metric/raster/compositing path in Simple, or route text paint
+through a real font stack before requiring exact text pixels.

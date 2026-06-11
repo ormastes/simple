@@ -210,10 +210,12 @@ Prove and harden the requested GUI stack:
   `simple.ppm`, records `RESULT: EXACT match`, and the Chrome/Simple PPMs are
   byte-identical. The same real capture path now records exact, byte-identical
   Chrome/Simple PPM rows for fixtures 19, 20, 21, 23, and 24. Fixture 22 remains
-  blocked honestly: it writes both PPMs but differs by 507 pixels inside the
-  text glyph bounding box, so exact text pixel parity still requires a real
-  browser-like font metric/raster/antialiasing path rather than tolerance or
-  copied browser pixels.
+  blocked honestly: it writes both PPMs but, after the renderer default text
+  color was aligned with Chromium black, still differs by 475 pixels inside the
+  text glyph bounding box. Chromium geometry/style evidence shows matching flex
+  boxes and Times New Roman text at 32px/32px plus 16px/16px, so exact text
+  pixel parity still requires a real browser-like font metric/raster/
+  antialiasing path rather than tolerance or copied browser pixels.
   Tracked in
   `doc/08_tracking/bug/html_compat_flex_pixel_baselines_missing_2026-06-11.md`.
 - Famous-site corpus div geometry evidence (2026-06-11):

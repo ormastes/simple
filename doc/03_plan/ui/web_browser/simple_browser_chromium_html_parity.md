@@ -54,8 +54,9 @@ Open gaps tied to the active browser objective:
   live Chromium capture plus the Simple software layout renderer and compare
   byte-identical. Fixture `22_flex_align_items_baseline` writes both PPMs but
   remains uncommitted as an accepted row because the text glyph area differs by
-  507 pixels; exact completion requires browser-like font metrics, raster, and
-  antialiasing rather than tolerance or copied browser pixels.
+  475 pixels after aligning the default text color with Chromium black; exact
+  completion requires browser-like font metrics, raster, and antialiasing
+  rather than tolerance or copied browser pixels.
 - Existing `05_text_input` bitmap baseline is still non-accepted evidence in
   `test/09_baselines/html_compat/05_text_input/report.sdn`, so input visual
   parity remains incomplete.
