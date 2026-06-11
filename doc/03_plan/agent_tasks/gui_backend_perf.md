@@ -169,6 +169,10 @@ Updated: 2026-06-11
   `_style_block_has_class_or_id_selector` now finds the `<style...>` tag close
   directly in the original HTML buffer instead of allocating a post-style-start
   tail only to locate `>`.
+- this commit -- attribute value quote-scan allocation removal:
+  `_attr_value` now finds single- and double-quote terminators directly in the
+  tag string instead of allocating an attribute-value tail before returning the
+  same value slice.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
