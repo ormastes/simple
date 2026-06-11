@@ -209,6 +209,10 @@ Updated: 2026-06-11
   `_style_block_has_class_or_id_selector` now scans selector ranges in the
   original HTML buffer instead of slicing each style block and selector while
   deciding whether generic HTML must use the real layout renderer.
+- this commit -- layout parser tail-copy removal: the real Pure Simple HTML
+  layout renderer now searches from an offset directly in the original text
+  buffer instead of allocating a tail substring before every parser `find_from`
+  call.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
