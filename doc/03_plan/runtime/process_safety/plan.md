@@ -201,12 +201,30 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
          measure self-hosted frontend LANGUAGE COVERAGE, not a fixable
          crash chain: sites 1–12 were real crashes/miscompiles and are
          fixed; what remains is a parser-completion project (weeks).
-         Deploy stays blocked under the 8/8 gate; bin/simple remains
-         the Rust seed. Options: (a) track lean-parser completion as
-         its own plan and keep the seed deployed; (b) interim: have
-         stage4 check/lint delegate to simple_binary_path() like
-         `test` does, making the matrix pass by delegation — decision
-         deferred to the user.
+         User decision 2026-06-11: option (b) — deploy with interim
+         delegation; parser completion tracked as its own plan
+         (doc/03_plan/compiler/self_hosted_frontend/parser_completion.md).
+      10. [x] DEPLOYED 2026-06-11 15:32 — bin/simple is the self-hosted
+         stage4 binary (16.3 MB); the Rust seed sits beside it as
+         simple_seed (177 MB) and receives all delegated work.
+         Delegation (commits d375a2644d + d36ad61714): check/lint via
+         _cli_frontend_delegate_binary; -c/file/test via
+         _cli_driver_binary, which now resolves the simple_seed
+         sibling (absolute path, -ef self-guarded, any cwd) before the
+         bin/simple candidate. First deploy attempt exposed that the
+         8-item matrix only validated delegation paths that existed
+         pre-swap — post-deploy, -c/file silently no-op'd (in-process
+         lean frontend); reverted within ~10 min, fixed, and the
+         matrix gained postdeploy_dash_c/postdeploy_file/
+         postdeploy_check simulation items (staged simple+simple_seed
+         pair run from a cwd without bin/simple). Matrix run 6b:
+         11/11 green. Host smoke: -c prints 2, file prints, zero
+         respawns (non-self-matching pgrep), delegated check green,
+         --version green. Revert recipe: cp simple_seed over simple
+         (backup also at simple.bak-2026-06-11-predeploy-seed).
+         Residual risk: stage4 CLI paths that run in-process without
+         a driver call may still misbehave until parser completion —
+         report and route through delegation if found.
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).
