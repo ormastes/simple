@@ -85,6 +85,11 @@ Updated: 2026-06-11
   rebuilding it through repeated single-element appends. This removes a
   quadratic copy pattern from flex stretch layout while preserving the returned
   style values.
+- this commit -- Engine2D selector verification unblock: the heuristic
+  Engine2D renderer now uses a token-exact local class matcher for the
+  `:has(> .badge)` fast path instead of calling a missing `class_has` helper.
+  This restores the focused Engine2D renderer spec as usable regression
+  coverage for later startup/render optimizations.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
