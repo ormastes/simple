@@ -25,6 +25,10 @@ Usage:
 fn backend_canonical_name(name: text) -> text:
     """Normalize backend aliases to the canonical Engine2D backend key."""
     val normalized = name.trim().lower()
+    if normalized == "native" or normalized == "platform_native" or normalized == "platform-native":
+        return "baremetal"
+    if normalized == "virtio" or normalized == "virtio-gpu" or normalized == "virtio gpu":
+        return "virtio_gpu"
     if normalized == "hip" or normalized == "amd_hip" or normalized == "amd-hip":
         return "rocm"
     if normalized == "amd_rocm" or normalized == "amd-rocm":
@@ -40,6 +44,10 @@ fn backend_display_name(name: text) -> text:
     to the strings shown in diagnostics and probe output.
     """
     val canonical = backend_canonical_name(name)
+    if canonical == "baremetal":
+        return "Platform Native Framebuffer"
+    if canonical == "virtio_gpu":
+        return "VirtIO GPU Framebuffer"
     if canonical == "cuda":
         return "NVIDIA CUDA"
     if canonical == "rocm":
@@ -73,6 +81,10 @@ fn backend_priority(name: text) -> i32:
     platform native first, then CUDA/HIP, then portable GPU APIs, then CPU.
     """
     val canonical = backend_canonical_name(name)
+    if canonical == "baremetal":
+        return -2
+    if canonical == "virtio_gpu":
+        return -1
     if canonical == "metal":
         return 0
     if canonical == "cuda":
@@ -108,13 +120,27 @@ fn backend_default_priority_order() -> [text]:
     """
     ["metal", "cuda", "rocm", "qualcomm", "vulkan", "opencl", "opengl", "intel", "webgpu", "software", "cpu_simd", "cpu"]
 
+fn backend_explicit_native_priority_order() -> [text]:
+    """Explicit platform-native backends that require a preinitialized surface.
+
+    These are preferred when a caller already owns the platform framebuffer, but
+    they are not included in automatic probing because they cannot be created
+    from only width/height.
+    """
+    ["baremetal", "virtio_gpu"]
+
+fn backend_full_preference_order() -> [text]:
+    """Full preference order including explicit-native and auto-probed backends."""
+    ["baremetal", "virtio_gpu", "metal", "cuda", "rocm", "qualcomm", "vulkan", "opencl", "opengl", "intel", "webgpu", "software", "cpu_simd", "cpu"]
+
 fn backend_preference_summary() -> text:
     """Stable one-line summary for docs, diagnostics, and profile reports."""
-    "metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu"
+    "explicit native (baremetal/virtio_gpu) > metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu"
 
 fn backend_is_hardware(name: text) -> bool:
     """Return true if the backend uses dedicated GPU hardware."""
     val canonical = backend_canonical_name(name)
+    canonical == "baremetal" or canonical == "virtio_gpu" or
     canonical == "cuda" or canonical == "rocm" or canonical == "metal" or
     canonical == "qualcomm" or canonical == "vulkan" or canonical == "opencl" or
     canonical == "opengl" or canonical == "intel" or canonical == "webgpu"
@@ -131,6 +157,10 @@ fn backend_requires_gpu(name: text) -> bool:
 fn feature_gate_description(name: text) -> text:
     """Return a one-line description of what hardware/driver is required."""
     val canonical = backend_canonical_name(name)
+    if canonical == "baremetal":
+        return "Requires caller-owned platform framebuffer or SimpleOS surface"
+    if canonical == "virtio_gpu":
+        return "Requires caller-owned VirtIO GPU framebuffer"
     if canonical == "cuda":
         return "Requires NVIDIA GPU with CUDA driver >= 11.0"
     if canonical == "rocm":
@@ -160,6 +190,10 @@ fn feature_gate_description(name: text) -> text:
 fn backend_unavailable_reason(name: text) -> text:
     """Return a suggested diagnosis message when a backend fails to init."""
     val canonical = backend_canonical_name(name)
+    if canonical == "baremetal":
+        return "Create through create_with_baremetal_backend or platform-native host surface"
+    if canonical == "virtio_gpu":
+        return "Create through create_with_virtio_gpu_backend with a preinitialized VirtIO GPU surface"
     if canonical == "cuda":
         return "Check NVIDIA driver installation and CUDA toolkit version"
     if canonical == "rocm":

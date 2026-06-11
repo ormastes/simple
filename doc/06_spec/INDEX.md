@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Bitmap Font Offload Specification](test/01_unit/lib/gpu/engine2d/bitmap_font_offload_spec.md) | Auto-generated | N/A | 5 | 0% | 0 lines |
+| [Helpers Availability Specification](test/01_unit/lib/gpu/engine2d/helpers_availability_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
 

@@ -85,6 +85,10 @@ Host input
 - Simple2D hook: `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` accepts
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
 - Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+- Engine2D backend preference: `backend_full_preference_order()` puts explicit
+  native surfaces (`baremetal`, `virtio_gpu`) before Metal/CUDA/ROCm, while the
+  automatic probe order starts at Metal because native surfaces need a
+  preinitialized framebuffer.
 - WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts
   `SharedWmDispatchResult` to stable `WmRuntimeDispatchCommand` for host shells.
 - Web WM bridge: `src/app/ui.web/wm_runtime_bridge.spl` consumes dispatch

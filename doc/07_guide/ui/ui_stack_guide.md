@@ -301,6 +301,14 @@ Rust-seed change**:
 After any GUI / engine2d / web-render change, sanity-check these three on-screen
 apps (on macOS the pure-Simple drawing lane = Engine2D CPU/NEON + Metal):
 
+Engine2D exposes two backend-order helpers. `backend_full_preference_order()`
+is the documented preference order: explicit platform-native surfaces
+(`baremetal`, `virtio_gpu`) first, then Metal, CUDA, ROCm/HIP, Qualcomm,
+Vulkan, OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU.
+`backend_default_priority_order()` is the automatic probe order and starts at
+Metal because baremetal and VirtIO GPU paths require a preinitialized host or
+platform framebuffer.
+
 | Lane | App | Renders |
 |------|-----|---------|
 | 2D | `engine2d_cpu_simd_gui.spl` (CPU) / `engine2d_metal_gui.spl` (Metal) | text, rect, circle, line, gradient, rounded-rect |

@@ -645,6 +645,20 @@ dev-done
   readback-verified GPU glyph pixels.
 - verify: Optimizer scans completed for this slice in Docker. Counts: CUDA
   session 23 and CUDA session contract spec 0 remaining static opportunities.
+- impl: Added explicit-native Engine2D preference helpers.
+  `backend_explicit_native_priority_order()` and
+  `backend_full_preference_order()` now put `baremetal` and `virtio_gpu` ahead
+  of auto-probed GPU backends, while `backend_default_priority_order()` remains
+  Metal-first for width/height-only startup probing. Native aliases normalize to
+  those explicit backend names and diagnostics now describe the required
+  caller-owned framebuffer surfaces.
+- verify: Focused helper availability check passes and the new helper
+  availability spec passes 3/3. Generated manual refreshed under
+  `doc/06_spec`. This documents preference order and diagnostics only; it is
+  not hardware readback evidence for GPU-rendered glyph pixels.
+- verify: Optimizer scans completed for this slice in Docker. Counts:
+  helpers availability 64, Engine2D engine 34, and helpers availability spec 6
+  remaining static opportunities.
 - impl: Added mask-derived bitmap glyph raster readback evidence.
   `bitmap_glyph_raster_mask_readback_evidence(...)` derives expected pixels and
   checksum from the glyph mask/color before comparing a device readback
