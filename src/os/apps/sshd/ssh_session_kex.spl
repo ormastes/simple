@@ -13,7 +13,7 @@ use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey}
 use os.kernel.log.klog_api.{log_info}
 use os.kernel.net.rt_net_socket_facade.{rt_net_last_ssh_plain_payload_len, rt_net_last_ssh_plain_payload_slice}
-use os.crypto.dual_backend.{dual_backend_choose_bytes, dual_backend_default_config, dual_backend_run_bytes}
+use os.crypto.dual_backend.{DualBackendMode, dual_backend_choose_bytes, dual_backend_default_config, dual_backend_run_bytes}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_sign_live_pure_only, ed25519_sign_live_runtime_only, ed25519_verify}
 use os.crypto.curve25519.{x25519, x25519_base}
 extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
@@ -634,33 +634,32 @@ impl SshSession:
                 serial_println("[sshd-session] host ed25519 seed={_bytes_to_hex(stable_seed)}")
                 serial_println("[sshd-session] host ed25519 pub={_bytes_to_hex(stable_pub)}")
             serial_println("[sshd-session] host ed25519 sign pure start")
-            val sig_raw =
-                if using_live_openssh_profile:
-                    if dual_backend_default_config().mode == 2:
-                        ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
-                    else:
-                        (
-                            serial_println("[sshd-session] ed25519 alpha runtime start")
-                            val runtime_sig = ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
-                            serial_println("[sshd-session] ed25519 alpha runtime done len={runtime_sig.len()}")
-                            serial_println("[sshd-session] ed25519 alpha pure start")
-                            val pure_sig = ed25519_sign_live_pure_only(stable_seed, stable_pub, stable_hash)
-                            serial_println("[sshd-session] ed25519 alpha pure done len={pure_sig.len()}")
-                            dual_backend_choose_bytes(
-                                "ed25519",
-                                "sign_live",
-                                dual_backend_default_config(),
-                                [
-                                    "seed_len=" + stable_seed.len().to_text(),
-                                    "pub_len=" + stable_pub.len().to_text(),
-                                    "msg_len=" + stable_hash.len().to_text()
-                                ],
-                                runtime_sig,
-                                pure_sig
-                            )
-                        )
+            var sig_raw: [u8] = []
+            if using_live_openssh_profile:
+                val dual_config = dual_backend_default_config()
+                if dual_config.mode == DualBackendMode.Normal:
+                    sig_raw = ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
                 else:
-                    ed25519_sign(stable_seed, stable_pub, stable_hash)
+                    serial_println("[sshd-session] ed25519 alpha runtime start")
+                    val runtime_sig = ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
+                    serial_println("[sshd-session] ed25519 alpha runtime done len={runtime_sig.len()}")
+                    serial_println("[sshd-session] ed25519 alpha pure start")
+                    val pure_sig = ed25519_sign_live_pure_only(stable_seed, stable_pub, stable_hash)
+                    serial_println("[sshd-session] ed25519 alpha pure done len={pure_sig.len()}")
+                    sig_raw = dual_backend_choose_bytes(
+                        "ed25519",
+                        "sign_live",
+                        dual_config,
+                        [
+                            "seed_len=" + stable_seed.len().to_text(),
+                            "pub_len=" + stable_pub.len().to_text(),
+                            "msg_len=" + stable_hash.len().to_text()
+                        ],
+                        runtime_sig,
+                        pure_sig
+                    )
+            else:
+                sig_raw = ed25519_sign(stable_seed, stable_pub, stable_hash)
             serial_println("[sshd-session] host ed25519 sign pure len={sig_raw.len()}")
             if sig_raw.len() != 64:
                 log_info("[app.sshd] " + "[sshd-session] host key signing err")
