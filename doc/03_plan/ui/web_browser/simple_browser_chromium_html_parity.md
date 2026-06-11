@@ -298,3 +298,17 @@ Open gaps tied to the active browser objective:
     `--update-baseline --skip-simple` path, and the follow-up Simple comparison
     reports `RESULT: EXACT match`, `different_pixels=0`; no blur, tolerance,
     copied Simple pixels, or resolution adjustment was used
+- Native focused geometry evidence is still blocked before it can prove
+  end-to-end native parity:
+  - `html_compat_geometry_probe_native_full_smoke.spl` now checks both
+    `06_card_panel` and `24_flex_wrap_reverse_basic`
+  - interpreter mode for that smoke reports `fixture=06_card_panel count=3`,
+    `fixture=24_flex_wrap_reverse_basic count=4`, and `status=pass`
+  - native compilation no longer fails first on the local iterable loops in the
+    focused renderer/probe/Draw IR closure; the `parse_html()` close-tag stack
+    path also avoids `pstack.pop()` by copying the kept stack prefix
+  - native now stops on `error: codegen: undefined symbol: str.substring`
+  - current blocker is tracked in
+    `doc/08_tracking/bug/html_compat_native_text_method_lowering_blocker_2026-06-11.md`;
+    do not describe this lane as a proved `06_card_panel` layout zero-box
+    mismatch until native text-method lowering is fixed and the smoke executes

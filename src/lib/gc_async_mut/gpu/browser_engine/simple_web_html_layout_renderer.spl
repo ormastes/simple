@@ -82,13 +82,26 @@ fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
 # Position-aware string find (works around index_of(needle,pos) ignoring pos)
 # ---------------------------------------------------------------------------
 
+fn text_index_of(haystack: text, needle: text) -> i32:
+    if needle.len() == 0:
+        return 0
+    if haystack.len() < needle.len():
+        return -1
+    var i = 0
+    val limit = haystack.len() - needle.len()
+    while i <= limit:
+        if haystack.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
 fn find_from(s: text, needle: text, pos: i32) -> i32:
     if pos <= 0:
-        return s.index_of(needle)
+        return text_index_of(s, needle)
     if pos >= s.len():
         return -1
     val sub = s.substring(pos, s.len())
-    val rel = sub.index_of(needle)
+    val rel = text_index_of(sub, needle)
     if rel < 0:
         return -1
     pos + rel
@@ -103,7 +116,7 @@ fn is_void(tag: text) -> bool:
 fn attr_value(inner: text, name: text) -> text:
     # find name= and read the quoted value; simple, tolerant
     val key = name + "="
-    val kpos = inner.index_of(key)
+    val kpos = text_index_of(inner, key)
     if kpos < 0:
         return ""
     var i = kpos + key.len()
@@ -112,7 +125,7 @@ fn attr_value(inner: text, name: text) -> text:
     val q = inner.substring(i, i + 1)
     if q == "\"" or q == "'":
         val sub = inner.substring(i + 1, inner.len())
-        val end = sub.index_of(q)
+        val end = text_index_of(sub, q)
         if end < 0:
             return ""
         return sub.substring(0, end)
@@ -277,10 +290,12 @@ fn parse_html(html: text) -> [HNode]:
                 k = k - 1
             if found >= 1:
                 val keep_stack_len = found
-                var stack_len = pstack.len()
-                while stack_len > keep_stack_len:
-                    pstack.pop()
-                    stack_len = stack_len - 1
+                var next_stack: [i64] = [0; keep_stack_len]
+                var stack_i = 0
+                while stack_i < keep_stack_len:
+                    next_stack[stack_i] = pstack[stack_i]
+                    stack_i = stack_i + 1
+                pstack = next_stack
             continue
         val name = tag_name_of(inner)
         if name == "style":
@@ -328,7 +343,9 @@ fn parse_html(html: text) -> [HNode]:
 
 pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> text:
     val nodes = parse_html(html)
-    for node in nodes:
+    var i = 0
+    while i < nodes.len():
+        val node = nodes[i]
         if node.id_attr == id:
             if attr == "style":
                 return node.style_attr
@@ -337,6 +354,7 @@ pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> t
             if attr == "id":
                 return node.id_attr
             return attr_value(node.attrs_raw, attr)
+        i = i + 1
     ""
 
 pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) -> text:
@@ -472,8 +490,8 @@ fn parse_color(raw: text) -> u32:
             return argb(r, g, b)
         return 0u32
     if s.substring(0, 3) == "rgb":
-        val lp = s.index_of("(")
-        val rp = s.index_of(")")
+        val lp = text_index_of(s, "(")
+        val rp = text_index_of(s, ")")
         if lp >= 0 and rp > lp:
             val inside = s.substring(lp + 1, rp)
             val parts = inside.split(",")
@@ -486,15 +504,15 @@ fn parse_color_any(raw: text) -> u32:
     if direct != 0u32:
         return direct
     val lower = raw.lower()
-    val rgb = lower.index_of("rgb")
+    val rgb = text_index_of(lower, "rgb")
     if rgb >= 0:
         val rtail = raw.substring(rgb, raw.len())
-        val rp = rtail.index_of(")")
+        val rp = text_index_of(rtail, ")")
         if rp >= 0:
             val cv = parse_color(rtail.substring(0, rp + 1))
             if cv != 0u32:
                 return cv
-    val hash = raw.index_of("#")
+    val hash = text_index_of(raw, "#")
     if hash >= 0:
         return parse_color(raw.substring(hash, raw.len()))
     0u32
@@ -546,7 +564,7 @@ fn parse_opacity_pct(raw: text) -> i32:
         return 0
     if t == "1":
         return 100
-    val dot = t.index_of(".")
+    val dot = text_index_of(t, ".")
     if dot >= 0:
         var frac = 0
         var scale = 1
@@ -574,9 +592,9 @@ fn decl_get(decls: text, prop: text) -> text:
     val decls_len = decls.len()
     while pos < decls_len:
         val tail = decls.substring(pos, decls_len)
-        val semi = tail.index_of(";")
+        val semi = text_index_of(tail, ";")
         val raw = if semi >= 0: tail.substring(0, semi) else: tail
-        val colon = raw.index_of(":")
+        val colon = text_index_of(raw, ":")
         if colon >= 0:
             val name = raw.substring(0, colon).trim().lower()
             if name == prop:
@@ -592,9 +610,9 @@ fn decl_last_pos(decls: text, prop: text) -> i32:
     val decls_len = decls.len()
     while pos < decls_len:
         val tail = decls.substring(pos, decls_len)
-        val semi = tail.index_of(";")
+        val semi = text_index_of(tail, ";")
         val raw = if semi >= 0: tail.substring(0, semi) else: tail
-        val colon = raw.index_of(":")
+        val colon = text_index_of(raw, ":")
         if colon >= 0:
             val name = raw.substring(0, colon).trim().lower()
             if name == prop:
@@ -1266,19 +1284,19 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
     val raw = expr.trim()
     if raw.len() == 0:
         return false
-    val prefix_op = raw.index_of("^=")
+    val prefix_op = text_index_of(raw, "^=")
     if prefix_op >= 0:
         val name = raw.substring(0, prefix_op).trim()
         val want = unquote_css_attr_value(raw.substring(prefix_op + 2, raw.len()))
         val actual = attr_value(attrs, name)
         return actual.len() > 0 and actual.starts_with(want)
-    val suffix_op = raw.index_of("$=")
+    val suffix_op = text_index_of(raw, "$=")
     if suffix_op >= 0:
         val name = raw.substring(0, suffix_op).trim()
         val want = unquote_css_attr_value(raw.substring(suffix_op + 2, raw.len()))
         val actual = attr_value(attrs, name)
         return actual.len() > 0 and actual.ends_with(want)
-    val exact_op = raw.index_of("=")
+    val exact_op = text_index_of(raw, "=")
     if exact_op >= 0:
         val name = raw.substring(0, exact_op).trim()
         val want = unquote_css_attr_value(raw.substring(exact_op + 1, raw.len()))
@@ -1302,7 +1320,7 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
         return class_has_all(class_words, want)
     if base.substring(0, 1) == "#":
         return id == base.substring(1, base.len())
-    val dot = base.index_of(".")
+    val dot = text_index_of(base, ".")
     if dot >= 0:
         val t = base.substring(0, dot)
         val want = base.substring(dot + 1, base.len())
@@ -1315,12 +1333,12 @@ fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, 
         return false
     # strip pseudo (:hover, :nth-child(..))
     var base = sel
-    val colon = base.index_of(":")
+    val colon = text_index_of(base, ":")
     if colon >= 0:
         base = base.substring(0, colon)
-    val attr_start = base.index_of("[")
+    val attr_start = text_index_of(base, "[")
     if attr_start >= 0:
-        val attr_end = base.index_of("]")
+        val attr_end = text_index_of(base, "]")
         if attr_end < attr_start:
             return false
         val node_base = base.substring(0, attr_start).trim()
@@ -1433,10 +1451,10 @@ fn selector_rightmost_part(parts: [text]) -> text:
 
 fn selector_bucket_base(part: text) -> text:
     var base = part
-    val colon = base.index_of(":")
+    val colon = text_index_of(base, ":")
     if colon >= 0:
         base = base.substring(0, colon)
-    val attr_start = base.index_of("[")
+    val attr_start = text_index_of(base, "[")
     if attr_start >= 0:
         base = base.substring(0, attr_start).trim()
     base
@@ -1452,7 +1470,7 @@ fn selector_bucket_kind_from_base(base: text) -> text:
         return "id"
     if base.substring(0, 1) == ".":
         return "class"
-    if base.index_of(".") >= 0:
+    if text_index_of(base, ".") >= 0:
         return "class"
     "tag"
 
@@ -1465,14 +1483,14 @@ fn selector_bucket_value_from_base(base: text) -> text:
         return ""
     if base.substring(0, 1) == "#" or base.substring(0, 1) == ".":
         val raw = base.substring(1, base.len())
-        val dot = raw.index_of(".")
+        val dot = text_index_of(raw, ".")
         if dot >= 0:
             return raw.substring(0, dot)
         return raw
-    val dot = base.index_of(".")
+    val dot = text_index_of(base, ".")
     if dot >= 0:
         val raw = base.substring(dot + 1, base.len())
-        val next_dot = raw.index_of(".")
+        val next_dot = text_index_of(raw, ".")
         if next_dot >= 0:
             return raw.substring(0, next_dot)
         return raw
