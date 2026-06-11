@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Opencl Session Contract Specification](test/01_unit/lib/gpu/engine2d/opencl_session_contract_spec.md) | Auto-generated | N/A | 9 | 0% | 0 lines |
+| [Rocm Session Contract Specification](test/01_unit/lib/gpu/engine2d/rocm_session_contract_spec.md) | Auto-generated | N/A | 9 | 0% | 0 lines |
 

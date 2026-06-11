@@ -27,7 +27,7 @@ rocm_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -61,7 +61,7 @@ expect(session.is_valid()).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -77,6 +77,7 @@ expect(session.fill_kernel(64, 64, 4096)).to_equal(1)
 expect(session.copy_kernel(64, 64, 4096)).to_equal(1)
 expect(session.alpha_blend_kernel(64, 64, 4096)).to_equal(1)
 expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
+expect(session.bitmap_glyph_raster_kernel(64, 64, 4096)).to_equal(1)
 ```
 
 </details>
@@ -178,6 +179,54 @@ expect(matched.status_code).to_equal("readback-matched")
 
 </details>
 
+#### preflights generated bitmap glyph raster packed args before HIP launch
+
+- var session = RocmSession create with ffi
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+   - Expected: provenance.operation equals `GENERATED_2D_BITMAP_GLYPH_RASTER`
+   - Expected: provenance.launch_api equals `rt_rocm_launch_kernel`
+   - Expected: provenance.entry_name equals `simple_2d_bitmap_glyph_raster_u32`
+   - Expected: session.bitmap_glyph_raster_kernel(9, 4, args) equals `1`
+- rt free
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = RocmSession.create_with_ffi(RocmFfi.create_static())
+session.is_initialized = true
+session.module_cache = 11
+val args = rt_alloc(56)
+rt_ptr_write_i64(args, 0, 1111)
+rt_ptr_write_i64(args, 8, 2222)
+rt_ptr_write_i64(args, 16, 8)
+rt_ptr_write_i64(args, 24, 4)
+rt_ptr_write_i64(args, 32, 2)
+rt_ptr_write_i64(args, 40, 12)
+rt_ptr_write_i64(args, 48, 0xffaabbcc as i64)
+val provenance = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, args)
+
+expect(provenance.operation).to_equal(GENERATED_2D_BITMAP_GLYPH_RASTER)
+expect(provenance.launch_api).to_equal("rt_rocm_launch_kernel")
+expect(provenance.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+expect(provenance.diagnostic_text()).to_contain("op=bitmap_glyph_raster")
+expect(session.bitmap_glyph_raster_kernel(9, 4, args)).to_equal(1)
+
+rt_free(args, 56)
+```
+
+</details>
+
 #### static HIP FFI exposes runtime-backed init evidence without missing FFI
 
 - var session = RocmSession create with ffi
@@ -259,8 +308,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

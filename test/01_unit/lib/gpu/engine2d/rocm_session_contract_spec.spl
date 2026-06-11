@@ -3,10 +3,14 @@
 
 use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
-use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_ALPHA, GENERATED_2D_FILL}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_ALPHA, GENERATED_2D_BITMAP_GLYPH_RASTER, GENERATED_2D_FILL}
 use std.gc_async_mut.gpu.engine2d.rocm_session.{RocmSession}
 use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source, rocm_2d_generated_source}
 use std.gpu.engine2d.sffi_rocm.{RocmFfi}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 
 describe "RocmSession compute contract":
 
@@ -30,6 +34,7 @@ describe "RocmSession compute contract":
         expect(session.copy_kernel(64, 64, 4096)).to_equal(1)
         expect(session.alpha_blend_kernel(64, 64, 4096)).to_equal(1)
         expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
+        expect(session.bitmap_glyph_raster_kernel(64, 64, 4096)).to_equal(1)
 
     it "shutdown is safe on an uninitialized session":
         var session = RocmSession.create()
@@ -69,6 +74,28 @@ describe "RocmSession compute contract":
         expect(read_ev.status_code).to_equal("missing-ffi")
         expect(matched.success).to_equal(true)
         expect(matched.status_code).to_equal("readback-matched")
+
+    it "preflights generated bitmap glyph raster packed args before HIP launch":
+        var session = RocmSession.create_with_ffi(RocmFfi.create_static())
+        session.is_initialized = true
+        session.module_cache = 11
+        val args = rt_alloc(56)
+        rt_ptr_write_i64(args, 0, 1111)
+        rt_ptr_write_i64(args, 8, 2222)
+        rt_ptr_write_i64(args, 16, 8)
+        rt_ptr_write_i64(args, 24, 4)
+        rt_ptr_write_i64(args, 32, 2)
+        rt_ptr_write_i64(args, 40, 12)
+        rt_ptr_write_i64(args, 48, 0xffaabbcc as i64)
+        val provenance = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, args)
+
+        expect(provenance.operation).to_equal(GENERATED_2D_BITMAP_GLYPH_RASTER)
+        expect(provenance.launch_api).to_equal("rt_rocm_launch_kernel")
+        expect(provenance.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+        expect(provenance.diagnostic_text()).to_contain("op=bitmap_glyph_raster")
+        expect(session.bitmap_glyph_raster_kernel(9, 4, args)).to_equal(1)
+
+        rt_free(args, 56)
 
     it "static HIP FFI exposes runtime-backed init evidence without missing FFI":
         var session = RocmSession.create_with_ffi(RocmFfi.create_static())

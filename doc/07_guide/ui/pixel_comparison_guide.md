@@ -129,10 +129,10 @@ The Simple web renderer has two code paths:
   records the current bitmap-font path as CPU glyph preprocessing plus optional
   GPU copy/upload, plus the typed `bitmap_glyph_raster` generated-kernel launch
   plan. The portable compiler emitter and the OpenCL/HIP Engine2D source strings
-  now export `simple_2d_bitmap_glyph_raster_u32`, and the OpenCL session binds
-  its packed glyph/destination/size/color arguments. Treat that raster path as
-  incomplete until device execution and readback prove GPU-side bitmap glyph
-  pixels.
+  now export `simple_2d_bitmap_glyph_raster_u32`; OpenCL binds the packed
+  glyph/destination/size/color arguments and HIP preflights the same packed
+  shape before launch. Treat that raster path as incomplete until device
+  execution and readback prove GPU-side bitmap glyph pixels.
 - **No anti-aliasing**: Binary black/white pixels vs Chrome's subpixel AA.
 - **Tauri real capture**: No real WebView capture path exists yet. Chromium-via-Electron is the primary reference.
 - **Interpreter binary (v0.4.0)**: Cannot load `gc_async_mut.gpu.*` modules due to `Gpu` keyword parse error. Use native binary `src/compiler_rust/target/release/simple` (v1.0.0-beta).

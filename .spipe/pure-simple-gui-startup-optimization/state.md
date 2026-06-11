@@ -601,3 +601,14 @@ dev-done
 - verify: Optimizer scans completed for this slice. Counts: generated kernel
   dispatch 105, OpenCL session 152, generated dispatch spec 0, and OpenCL
   session contract spec 0 remaining static opportunities.
+- impl: Added HIP/ROCm generated bitmap glyph raster launch preflight.
+  `RocmSession.launch_generated_2d(...)` now validates the same packed
+  glyph-bits, destination, width, height, glyph count, and font size fields
+  before HIP kernel lookup/submission for `bitmap_glyph_raster`, and exposes a
+  matching `bitmap_glyph_raster_kernel(...)` convenience route.
+- verify: Focused ROCm session check passes and ROCm session contract spec now
+  passes 9/9. Generated manual was refreshed under `doc/06_spec`. This proves
+  HIP launch preflight and fail-closed validation, not readback-verified GPU
+  glyph pixels.
+- verify: Optimizer scans completed for this slice. Counts: ROCm session 38
+  and ROCm session contract spec 2 remaining static opportunities.

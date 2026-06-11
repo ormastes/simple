@@ -292,9 +292,10 @@ glyph pixels have actually returned from a GPU path, while
 bitmap-font state as CPU glyph preprocessing plus optional GPU copy/upload and
 the `bitmap_glyph_raster` generated-kernel launch plan. The portable compiler
 emitter and the OpenCL/HIP Engine2D source strings export
-`simple_2d_bitmap_glyph_raster_u32`, and the OpenCL session binds its packed
-glyph/destination/size/color arguments. Do not treat generated copy/upload,
-source export, launch binding, or raster-plan evidence as GPU-side bitmap glyph
+`simple_2d_bitmap_glyph_raster_u32`; OpenCL binds the packed
+glyph/destination/size/color arguments and HIP preflights the same packed shape
+before launch. Do not treat generated copy/upload, source export, launch
+binding, preflight, or raster-plan evidence as GPU-side bitmap glyph
 rasterization until device execution and readback prove the glyph pixels came
 from the GPU.
 
