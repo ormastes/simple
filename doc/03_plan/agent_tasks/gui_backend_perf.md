@@ -119,6 +119,10 @@ Updated: 2026-06-11
   painter now caches margin, width, and height marker booleans once before
   choosing block geometry, avoiding repeated HTML scans while preserving the
   existing geometry priority order.
+- this commit -- hex color tail allocation removal: `_first_hex_color_after`
+  and `_second_hex_color_after` now locate `#` directly in the original HTML
+  from the known offset, avoiding temporary tail substring allocation before
+  parsing the same color.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
