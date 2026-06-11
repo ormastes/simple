@@ -149,6 +149,10 @@ Updated: 2026-06-11
   `_is_current_color_after` now finds the optional colon in the original
   declaration buffer and trims the value slice directly, avoiding an
   intermediate post-property tail allocation.
+- this commit -- currentColor hash tail allocation removal:
+  `_resolve_current_color` now locates `#` directly in the original declaration
+  buffer after a standalone `color:` token instead of allocating a post-token
+  tail before parsing the hex color.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
