@@ -113,6 +113,13 @@ dependencies must miss the interpreter/incremental cache and any SMF/JIT cache
 that could otherwise reuse stale code. Add focused specs near the cache owner
 instead of relying only on broad loader suites.
 
+For MCP/runtime-forwarding or startup-latency work, refresh both the lane state
+file and `doc/07_guide/app/mcp/startup_performance.md` before handoff. Keep the
+guide aligned with the current wrapper contract (native-first, probe-stamped,
+no silent source fallback in production), the direct-`rt_*` guard policy, the
+interface-cache/source-mtime contract, and the latest local smoke numbers from
+`scripts/check/check-mcp-native-smoke.shs`.
+
 Do not write boolean-wrapper assertions in new SPipe specs:
 `expect(a == b).to_equal(true)`, `expect(a != b).to_equal(false)`, and similar
 forms are quality-gate failures. Assert concrete values directly, or use

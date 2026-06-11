@@ -1,27 +1,33 @@
 # MCP / Tool-Server Startup Performance Guide
 
-Date: 2026-06-10. Measurements taken on linux x86_64 at commit `b2b4cff6e4`.
+Date: 2026-06-11. Latest re-verification taken on linux x86_64 in the shared
+repo worktree after the rt-forward/interface-cache MCP fixes were pushed on
+2026-06-10.
 
 ## Why this guide
 
-`bin/simple_mcp_server` answered a framed `initialize` + `tools/list`
-handshake in **2722 ms** while `bin/simple_lsp_mcp_server` did it in **51 ms**.
-Both are native servers behind the same wrapper pattern. The gap is not the
-language or the runtime — it is *how much work happens before the first
-response* and *how many times that work happens*.
+`bin/simple_mcp_server` now answers a framed `initialize` + `tools/list`
+handshake in **1366 ms** while `bin/simple_lsp_mcp_server` does it in **50 ms**
+on the current local deploy. Both are native servers behind the same wrapper
+pattern. The remaining gap is not the language or the runtime — it is *how
+much work happens before the first response* and *how many times that work
+happens*.
 
-## Measured breakdown (2026-06-10)
+## Measured breakdown (2026-06-11)
 
 | Path | Handshake time | Note |
 |------|---------------|------|
-| `build/bootstrap/mcp-package/simple_mcp_server` (direct) | 1361 ms | chosen candidate, 151 tools, 38 KB tools/list |
+| `build/bootstrap/mcp-package/simple_mcp_server` (direct) | about 1360 ms | chosen candidate, 151 tools, 38 KB tools/list |
 | `bin/release/<triple>/simple_mcp_server` (direct) | 5 ms | stale: fails probe (missing wm-text tools) |
-| `bin/simple_mcp_server` (wrapper) | 2722 ms | = probe handshake (1361) + real exec (1361) |
+| `bin/simple_mcp_server` (wrapper, cold stale-stamp re-probe) | about 2720 ms | = probe handshake + real exec |
+| `bin/simple_mcp_server` (wrapper, warm cached stamp) | 1366 ms | current steady-state local deploy |
 
-The wrapper **probes the native candidate with a full handshake on every
-start** (`mcp_probe_native`), then execs the same binary again. Cold startup
-is paid twice. That is the single largest cost today, ahead of anything the
-library layering can save.
+The wrapper used to probe the native candidate with a full handshake on every
+start. The rt-forward/interface-cache startup fix changed that to a
+**probe-stamp cache keyed by binary path + mtime + size + wrapper version**.
+Cold stale-stamp starts still pay the double cost once; warm starts now skip
+the extra handshake. That remains the single biggest wrapper-level win, ahead
+of anything library layering can save.
 
 ## The startup-reduction ladder (apply in this order)
 
@@ -30,8 +36,9 @@ library layering can save.
    gives cold-start, size, deps, RSS. Time the binary *directly* and through
    the wrapper — if the two differ ~2×, the wrapper is re-doing work.
 2. **Don't start twice.** Probe/health-check results must be cached, keyed by
-   binary path + mtime + size (a stamp file under `.simple/cache/`). Re-probe
-   only when the binary changes. Expected win here: ~50% of wrapper startup.
+   binary path + mtime + size plus wrapper version (a stamp file under
+   `.simple/cache/`). Re-probe only when the binary or wrapper contract
+   changes. Expected win here: about 50% of wrapper startup on warm runs.
 3. **Execute compiled artifacts, not raw source.** Production wrappers exec
    cached native/SMF artifacts (`.claude/rules/code-style.md` rule). The
    native-vs-interpreted gap is 10–100×. Fail closed: if no valid artifact,
@@ -43,6 +50,10 @@ library layering can save.
 5. **Load interfaces, not bodies.** The SHB interface cache with source-mtime
    validity (landed via rt-forward-interface-cache-mcp-startup) lets imports
    resolve from cached interfaces and defer full module bodies until called.
+   The executable regression for this is now
+   `test/01_unit/compiler/interpreter/module_loader_lazy_spec.spl`, backed by
+   `test/01_unit/compiler/cache/shb_mtime_spec.spl` and
+   `test/02_integration/watcher/watcher_shb_integration_spec.spl`.
 6. **Shrink the import graph (lib layering).** Importing one helper must not
    drag in a subsystem. The core / thin-host / full split
    (`doc/03_plan/lib/host_io_layering/plan.md`) keeps app entrypoints on
@@ -81,9 +92,18 @@ dead `dap_bridge` re-import removed.
 Result: loaded modules 61 → 49, module-load time 130 ms → 72 ms.
 Interpreter handshake: ~0.52 s (was ~0.55 s).
 
-Remaining handshake cost is Rust-seed process startup. Next attacks:
-- native deploy (blocked on BUG-5/6/7)
-- lazy parsing (W2-A, in progress)
+Remaining handshake cost is mostly native process startup plus MCP app import
+and tool-table work. Current local evidence from
+`scripts/check/check-mcp-native-smoke.shs`:
+
+- `mcp_startup_ms=1366`
+- `lsp_mcp_startup_ms=50`
+- `mcp_second_start_ok=true`
+- `mcp_stale_stamp_reprobe_ok=true`
+- `rt_forward_cache_valid=true`
+
+That is the baseline to preserve when touching `src/app/mcp`,
+`src/app/simple_lsp_mcp`, `src/compiler/**`, or `src/lib/**`.
 
 **Diagnosis knobs:**
 
