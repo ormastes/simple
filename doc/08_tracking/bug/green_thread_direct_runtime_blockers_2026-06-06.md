@@ -82,6 +82,18 @@ currently segfaults in both SMF and native execution (`exit=139`). Focused
 blocker coverage now lives in
 `test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl`.
 
+2026-06-11 root-cause narrowing: the compiled cooperative lane is not only a
+"handle array" issue. A smaller value-only repro that imports
+`cooperative_green_spawn_value(...)` also fails after AOT compilation. The SMF
+runner logs:
+
+- `function \`green_spawn_value\` not found`
+
+before crashing. That shows the current AOT fallback path does not carry
+imported stdlib interpreter definitions for the cooperative helper module. The
+new focused blocker coverage lives in
+`test/03_system/feature/usage/cooperative_green_imported_fallback_blocker_spec.spl`.
+
 The cross-language harness now reports Simple OS-thread and Simple cooperative
 green rows separately. A 20-worker OS-thread fanout smoke compiles and runs
 through unrolled `thread_spawn` fork-join handles. `thread_spawn_with_args`
@@ -112,6 +124,10 @@ Compiled cooperative-green handle-array blocker evidence is now covered by
 `test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl`,
 which keeps the current SMF/native `cooperative_green_spawn(worker)` crash
 explicit while the profile lane stays on `cooperative_green_spawn_value`.
+Imported cooperative helper fallback blocker evidence is now covered by
+`test/03_system/feature/usage/cooperative_green_imported_fallback_blocker_spec.spl`,
+which keeps the narrower `cooperative_green_spawn_value(...)` AOT import/fallback
+miss explicit.
 Cooperative-green queue rows are still not M:N CPU-parallel evidence; keep them
 classified separately from native and SMF `multicore_green_spawn` evidence.
 
@@ -141,6 +157,6 @@ Switch or add a perf harness green row for delayed `green_spawn(fn)` closure
 execution timing. Keep
 `test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
 passing so the fixed callback and direct-run function-global paths do not
-regress, and close the compiled `GreenThreadHandle` array crash before the
-profile harness switches its compiled cooperative-green rows from
+regress, close the imported cooperative helper AOT fallback miss, and then
+close the compiled `GreenThreadHandle` array crash before the profile harness switches its compiled cooperative-green rows from
 `cooperative_green_spawn_value` to `cooperative_green_spawn`.
