@@ -28,7 +28,7 @@ structural_layout_report_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -257,9 +257,27 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val report = build_site_corpus_div_geometry_summary(6, 160, 120)
 expect(report).to_contain("famous_site_corpus_div_geometry_summary")
-expect(report).to_contain("summary: (selected: 6 matched: 6 mismatched: 0 missing_metrics: 0")
+expect(report).to_contain("summary: (offset: 0 selected: 6 matched: 6 mismatched: 0 missing_metrics: 0")
 expect(report).to_contain("sample id: \"site_0_google\" status: \"layout_match\"")
 expect(report).to_contain("sample id: \"site_5_tiktok\" status: \"layout_match\"")
+```
+
+</details>
+
+#### summarizes exact div geometry for the next six famous-site corpus rows
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = build_site_corpus_div_geometry_summary_range(6, 6, 160, 120)
+expect(report).to_contain("famous_site_corpus_div_geometry_summary")
+expect(report).to_contain("summary: (offset: 6 selected: 6 matched: 6 mismatched: 0 missing_metrics: 0")
+expect(report).to_contain("sample id: \"site_6_wikipedia\" status: \"layout_match\"")
+expect(report).to_contain("sample id: \"site_11_microsoft\" status: \"layout_match\"")
 ```
 
 </details>
@@ -283,8 +301,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
