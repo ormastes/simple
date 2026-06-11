@@ -18,6 +18,8 @@ native binary still segfaults before returning the first completion. The
 earlier helper-returned function-value blocker that sat below this path is now
 closed. The current lower blocker beneath this path is now tracked separately in
 `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`.
+That lower loop-return blocker is now also closed, so the remaining active
+native failure is back on the resumable-stepper path itself.
 
 ## Minimal Boundary
 
@@ -34,14 +36,15 @@ Segmentation fault (core dumped)
 EXIT=139
 ```
 
-So this is no longer a vague “fairness is hard” gap. The narrower blocker is:
+So this is no longer a vague “fairness is hard” gap. The narrower active
+blocker is:
 
 - rebuilt native hosted worker-pool execution for the resumable-stepper probe crashes
 - even when the work item is a single callback-id step with immediate completion
 - that crash remains after the helper-returned function-value regression was
   fixed and moved out of the critical path
-- the remaining lower standalone-native blocker now appears to be returning a
-  function value from inside a loop/search branch before the worker-pool layer
+- the earlier loop/search helper-return path is now green, so the next fault
+  sits at or above the worker-pool resumable-stepper execution boundary
 
 ## Why This Matters
 

@@ -550,10 +550,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::CollectionOps);
         }
 
-        // Path expressions (enum variants)
-        Expr::Path(_) => {
-            add_reason(reasons, FallbackReason::NotYetImplemented("path".into()));
-        }
+        // Path expressions now lower through HIR/MIR and should not force
+        // blanket interpreter fallback on their own.
+        Expr::Path(_) => {}
 
         // Spread operator
         Expr::Spread(inner) => {
@@ -990,6 +989,30 @@ fn get0() -> fn() -> i64:
         assert!(
             status.is_compilable(),
             "function-value array helper should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_function_value_loop_return_helper_compilable() {
+        let results = parse_and_analyze(
+            r#"var IDS: [i64] = []
+var FUNCS: [fn() -> i64] = []
+
+fn worker() -> i64:
+    7
+
+fn get_func(id: i64) -> fn() -> i64:
+    for i in 0..IDS.len():
+        if IDS[i] == id:
+            return FUNCS[i]
+    worker
+"#,
+        );
+        let status = results.get("get_func").unwrap();
+        assert!(
+            status.is_compilable(),
+            "loop-return function-value helper should compile natively, got {:?}",
             status.reasons()
         );
     }
