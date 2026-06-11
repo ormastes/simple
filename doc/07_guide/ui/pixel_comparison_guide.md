@@ -70,6 +70,10 @@ It aggregates the generated-GUI Electron viewport matrix, the Simple Web layout
 manifest, backend-executed CPU SIMD/Metal parity, and raw Metal framebuffer
 readback. Linux hosts record raw Metal as `unavailable` with
 `metal-requires-macos`; macOS hosts must provide native Metal readback proof.
+The backend-executed evidence also records `software_render_elapsed_us`,
+`cpu_simd_render_elapsed_us`, `metal_render_elapsed_us`, and
+`total_elapsed_us`; use those fields when tracking GUI startup/render
+regressions instead of relying only on wall-clock test duration.
 
 The generated-GUI matrix intentionally records
 `text_normalization_pixels=269` for the fixture-specific text antialiasing

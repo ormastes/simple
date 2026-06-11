@@ -28,6 +28,12 @@ Updated: 2026-06-11
   a scoped fast path for the production parity common.ui widget fixture. Evidence:
   `production_gui_web_renderer_parity_hardening_spec.spl` improved from a 120s
   timeout to 8 passing examples in 6.6s.
+- this commit -- production GUI render timing evidence: `ProductionGuiWebParityReport`
+  and `BackendExecutedGuiSceneReport` now carry per-backend render elapsed
+  microseconds plus total elapsed time. Evidence:
+  `production_gui_web_renderer_parity_hardening_spec.spl` asserts timing fields,
+  and `check-production-gui-web-backend-executed-evidence.shs` writes the timing
+  values into backend evidence reports.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
@@ -36,8 +42,9 @@ Updated: 2026-06-11
 ## Current remaining work
 
 1. Collect and record additional startup/render evidence (timing + throughput + parity)
-   - Add evidence artifacts for the latest startup/render behavior in the same shape as existing perf evidence.
-   - Update plan/spec references to point to the new evidence.
+   - Run and archive the full production GUI web renderer parity evidence wrapper with
+     the new timing fields.
+   - Add throughput/budget thresholds after enough host-stable samples exist.
 2. Provide GPU/font offload proof
    - Demonstrate measured proof of real GPU/font offload path behavior or explicit typed unavailability.
    - Ensure device submit/readback evidence uses preferred glyph readback wrappers after

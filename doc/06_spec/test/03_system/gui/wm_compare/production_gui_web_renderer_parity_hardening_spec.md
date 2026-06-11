@@ -68,7 +68,7 @@ expect(html.contains("data-font-corpus=\"known-site-fonts\"")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -77,6 +77,11 @@ expect(report.has_widget_html).to_equal(true)
 expect(report.has_legacy_fixture_marker).to_equal(false)
 expect(report.software_pixel_count).to_equal(96 * 72)
 expect(report.distinct_software_colors).to_be_greater_than(3)
+expect(report.html_build_elapsed_us).to_be_greater_than(0)
+expect(report.software_render_elapsed_us).to_be_greater_than(0)
+expect(report.cpu_simd_render_elapsed_us).to_be_greater_than(0)
+expect(report.metal_render_elapsed_us).to_be_greater_than(0)
+expect(report.total_elapsed_us).to_be_greater_than(0)
 ```
 
 </details>
@@ -131,7 +136,7 @@ expect(report.exact_backend_parity).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -145,6 +150,10 @@ expect(report.cpu_simd_max_channel_diff).to_equal(0)
 expect(report.cpu_simd_total_hits).to_be_greater_than(0)
 expect(report.cpu_simd_fill_hits).to_be_greater_than(0)
 expect(report.tolerance_used).to_equal(false)
+expect(report.software_render_elapsed_us).to_be_greater_than(0)
+expect(report.cpu_simd_render_elapsed_us).to_be_greater_than(0)
+expect(report.metal_render_elapsed_us).to_be_greater_than(0)
+expect(report.total_elapsed_us).to_be_greater_than(0)
 ```
 
 </details>
