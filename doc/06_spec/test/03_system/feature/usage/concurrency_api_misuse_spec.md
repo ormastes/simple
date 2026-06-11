@@ -27,7 +27,7 @@ concurrency_api_misuse_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,7 +80,7 @@ reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 Run the misuse gate:
 
 ```sh
-./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean
+bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples
@@ -104,7 +104,7 @@ Run the misuse gate:
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `16`
+   - Expected: fixture_count() equals `19`
 
 
 <details>
@@ -115,7 +115,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(16)
+expect(fixture_count()).to_equal(19)
 ```
 
 </details>
@@ -255,12 +255,39 @@ expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "
 
 </details>
 
+#### rejects shared mutable state in green-process closures
+
+- Reject green_spawn closures that read module-level mutable variables
+- expect compile error
+- Reject cooperative_green_spawn closures that mutate captured variables
+- expect compile error
+- Reject multicore_green_spawn closures that read module-level mutable variables
+- expect compile error
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Reject green_spawn closures that read module-level mutable variables")
+expect_compile_error("green_spawn_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_total'")
+step("Reject cooperative_green_spawn closures that mutate captured variables")
+expect_compile_error("cooperative_green_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'local_count'")
+step("Reject multicore_green_spawn closures that read module-level mutable variables")
+expect_compile_error("multicore_green_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_sum'")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -158,6 +158,15 @@ for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
 | Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism}` / `MulticoreGreenHandle.used_runtime_pool()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done`; profile rows require runtime-pool acceptance and treat inline fallback as non-M:N. Set parallelism before the first spawn for a Go `GOMAXPROCS`-like hosted pool limit; live pools can grow but do not claim shrink/preemption behavior yet. |
 | Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Lower-level pool-backed task API. Native path uses `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` when linked; current cross-language M:N profile rows use `multicore_green_spawn` so profile evidence stays tied to `used_runtime_pool()`. |
 | Send values between concurrent work | `std.concurrent.channel.{channel_new, channel_from_id}` | `src/lib/nogc_sync_mut/concurrent/channel.spl` | Runtime MPMC channel surface |
+| Cancel async work cooperatively | `std.async.cancellation.{CancellationToken}` | `src/lib/nogc_async_mut/async/cancellation.spl` | Token registry with child-token propagation; poll `is_cancelled()` inside tasks |
+| Mutual exclusion / limits in async code | `std.async.sync.{AsyncMutex, AsyncSemaphore}` | `src/lib/nogc_async_mut/async/sync.spl` | Non-blocking acquire/release for single-carrier async; not OS-thread-safe |
+| Async delays / deadlines | `std.async.timer.{TimerFuture}` | `src/lib/nogc_async_mut/async/timer.spl` | Polls against `current_time_ms`; pair with the poll-once `timeout` combinator |
+
+Green tasks are **share-nothing** (enforced by `simple check` as `E-PAR-006`): a
+`green_spawn`, `cooperative_green_spawn`, or `multicore_green_spawn` closure must
+not read module-level mutable `var`s or write captured `var`s. Pass inputs as
+locals captured by value and communicate via return values or
+`green_channel`. `thread_spawn` is exempt — OS threads may share through Mutex.
 
 ### Green Thread Example
 

@@ -238,6 +238,11 @@ Keep concurrency surfaces separate. Importing `thread_spawn` from
 `E-PAR-003`. Passing non-closures to `thread_spawn`, `green_spawn`,
 `cooperative_green_spawn`, or `multicore_green_spawn`, or passing text to
 `multicore_green_set_parallelism`, is rejected with `E-PAR-004`.
+Green tasks are share-nothing: a `green_spawn`, `cooperative_green_spawn`, or
+`multicore_green_spawn` closure must not read module-level mutable `var`s or
+write captured `var`s — rejected with `E-PAR-006`. Pass values in as locals or
+return results from the closure. `thread_spawn` is exempt (OS threads may
+share via Mutex).
 
 ## Reserved Keywords
 
