@@ -53,6 +53,15 @@ static int g_pool_configured_worker_count = 0;
 static int g_pool_next_worker = 0;
 static int g_pool_busy_workers = 0;
 static int g_pool_pending_tasks = 0;
+static int g_pool_blocked_workers = 0;
+
+#ifdef RT_POOL_WINDOWS
+__declspec(thread) static int g_pool_worker_tls = 0;
+__declspec(thread) static int g_pool_worker_blocked_tls = 0;
+#else
+static __thread int g_pool_worker_tls = 0;
+static __thread int g_pool_worker_blocked_tls = 0;
+#endif
 
 #ifdef RT_POOL_PTHREAD
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -192,6 +201,8 @@ static void* rt_pool_worker_main(void* raw) {
     RtPoolWorkerArg* arg = (RtPoolWorkerArg*)raw;
     int worker_id = arg != NULL ? arg->worker_id : 0;
     free(arg);
+    g_pool_worker_tls = 1;
+    g_pool_worker_blocked_tls = 0;
     for (;;) {
         RtPoolTask* task = rt_pool_pop_task(worker_id);
         rt_pool_complete_task(task, task->entry(task->closure_ptr));
@@ -274,13 +285,53 @@ static int rt_pool_start(void) {
 #endif
 }
 
+static void rt_pool_mark_worker_blocked(void) {
+#ifdef RT_POOL_PTHREAD
+    if (!g_pool_worker_tls || g_pool_worker_blocked_tls) return;
+    pthread_mutex_lock(&g_pool_lock);
+    g_pool_blocked_workers++;
+    pthread_mutex_unlock(&g_pool_lock);
+    g_pool_worker_blocked_tls = 1;
+#else
+    if (!g_pool_worker_tls || g_pool_worker_blocked_tls) return;
+    EnterCriticalSection(&g_pool_lock);
+    g_pool_blocked_workers++;
+    LeaveCriticalSection(&g_pool_lock);
+    g_pool_worker_blocked_tls = 1;
+#endif
+}
+
+static void rt_pool_mark_worker_unblocked(void) {
+#ifdef RT_POOL_PTHREAD
+    if (!g_pool_worker_tls || !g_pool_worker_blocked_tls) return;
+    pthread_mutex_lock(&g_pool_lock);
+    if (g_pool_blocked_workers > 0) g_pool_blocked_workers--;
+    pthread_mutex_unlock(&g_pool_lock);
+    g_pool_worker_blocked_tls = 0;
+#else
+    if (!g_pool_worker_tls || !g_pool_worker_blocked_tls) return;
+    EnterCriticalSection(&g_pool_lock);
+    if (g_pool_blocked_workers > 0) g_pool_blocked_workers--;
+    LeaveCriticalSection(&g_pool_lock);
+    g_pool_worker_blocked_tls = 0;
+#endif
+}
+
+void rt_pool_worker_block_begin(void) {
+    rt_pool_mark_worker_blocked();
+}
+
+void rt_pool_worker_block_end(void) {
+    rt_pool_mark_worker_unblocked();
+}
+
 static int rt_pool_maybe_spawn_compensation_worker(void) {
 #ifdef RT_POOL_PTHREAD
     pthread_mutex_lock(&g_pool_lock);
     int should_spawn =
         g_pool_started &&
         g_pool_pending_tasks > 0 &&
-        g_pool_busy_workers >= g_pool_worker_count &&
+        g_pool_blocked_workers > 0 &&
         g_pool_worker_count < RT_POOL_MAX_WORKERS;
     int worker_id = g_pool_worker_count;
     pthread_mutex_unlock(&g_pool_lock);
@@ -301,7 +352,7 @@ static int rt_pool_maybe_spawn_compensation_worker(void) {
     int should_spawn =
         g_pool_started &&
         g_pool_pending_tasks > 0 &&
-        g_pool_busy_workers >= g_pool_worker_count &&
+        g_pool_blocked_workers > 0 &&
         g_pool_worker_count < RT_POOL_MAX_WORKERS;
     int worker_id = g_pool_worker_count;
     LeaveCriticalSection(&g_pool_lock);

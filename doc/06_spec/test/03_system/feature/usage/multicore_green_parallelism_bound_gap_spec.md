@@ -1,6 +1,6 @@
-# Multicore Green Parallelism Bound Gap
+# Multicore Green Parallelism Bound Regression
 
-> This SSpec pins the remaining hosted multicore-green `GOMAXPROCS`-style bound gap. After the compensation-worker fix, blocked work can progress, but the hosted runtime still grows pool width beyond the requested parallelism under pure CPU saturation.
+> This SSpec keeps hosted multicore-green `GOMAXPROCS`-style bound behavior under regression coverage. After the blocking-aware compensation fix, blocked work can still progress, but pure CPU saturation must keep pool width at the requested parallelism.
 
 <!-- sdn-diagram:id=multicore_green_parallelism_bound_gap_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ multicore_green_parallelism_bound_gap_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Multicore Green Parallelism Bound Gap
+# Multicore Green Parallelism Bound Regression
 
-This SSpec pins the remaining hosted multicore-green `GOMAXPROCS`-style bound gap. After the compensation-worker fix, blocked work can progress, but the hosted runtime still grows pool width beyond the requested parallelism under pure CPU saturation.
+This SSpec keeps hosted multicore-green `GOMAXPROCS`-style bound behavior under regression coverage. After the blocking-aware compensation fix, blocked work can still progress, but pure CPU saturation must keep pool width at the requested parallelism.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the remaining hosted multicore-green `GOMAXPROCS`-style bound ga
 |-------|-------|
 | Feature IDs | #multicore-green-parallelism-bound-gap |
 | Category | Runtime / Hosted / Multicore Green |
-| Status | Blocked |
+| Status | Regression Coverage |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,10 +53,10 @@ This SSpec pins the remaining hosted multicore-green `GOMAXPROCS`-style bound ga
 
 ## Overview
 
-This SSpec pins the remaining hosted multicore-green `GOMAXPROCS`-style bound
-gap. After the compensation-worker fix, blocked work can progress, but the
-hosted runtime still grows pool width beyond the requested parallelism under
-pure CPU saturation.
+This SSpec keeps hosted multicore-green `GOMAXPROCS`-style bound behavior under
+regression coverage. After the blocking-aware compensation fix, blocked work
+can still progress, but pure CPU saturation must keep pool width at the
+requested parallelism.
 
 ## Requirements
 
@@ -82,9 +82,9 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ## Scenarios
 
-### multicore green parallelism bound gap
+### multicore green parallelism bound regression
 
-#### keeps the hosted oversubscription gap explicit across source-run and native artifacts
+#### keeps hosted CPU saturation bounded across source-run and native artifacts
 
 - Prepare the native output directory for the checked-in parallelism-bound fixture
    - Expected: mkdir_code equals `0`
@@ -99,7 +99,7 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -116,14 +116,16 @@ expect(native_compile_code).to_equal(0)
 step("Run the fixture through the hosted source path")
 val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
 expect(interp_out).to_contain("parallelism_before=2")
-expect(interp_out).to_contain("parallelism_after_submit=3")
+expect(interp_out).to_contain("parallelism_after_submit=2")
+expect(interp_out).to_contain("parallelism_after_join=2")
 expect(interp_out).to_contain("total=10")
 expect(interp_code).to_equal(0)
 
 step("Run the fixture through the hosted standalone native path")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
 expect(native_out).to_contain("parallelism_before=2")
-expect(native_out).to_contain("parallelism_after_submit=3")
+expect(native_out).to_contain("parallelism_after_submit=2")
+expect(native_out).to_contain("parallelism_after_join=2")
 expect(native_out).to_contain("total=10")
 expect(native_code).to_equal(0)
 ```

@@ -31,6 +31,11 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+unsafe extern "C" {
+    fn rt_pool_worker_block_begin();
+    fn rt_pool_worker_block_end();
+}
+
 /// Last panic message recorded by a worker task. Poison-safe: uses unwrap_or_else on access.
 static LAST_TASK_PANIC: Mutex<Option<String>> = Mutex::new(None);
 
@@ -903,7 +908,9 @@ pub extern "C" fn spl_thread_cpu_count() -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_thread_sleep(millis: i64) {
     if millis > 0 {
+        unsafe { rt_pool_worker_block_begin() };
         thread::sleep(Duration::from_millis(millis as u64));
+        unsafe { rt_pool_worker_block_end() };
     }
 }
 
