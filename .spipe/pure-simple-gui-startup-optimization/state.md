@@ -811,3 +811,15 @@ dev-done
 - verify: Focused renderer check passes and
   `simple_web_layout_child_index_spec.spl` remains 15/15. Docker optimizer scan
   completed for the renderer with 754 remaining static opportunities.
+- impl: Reused selector bucket base extraction during rule bucket construction.
+  `build_rule_buckets(...)` now computes `selector_bucket_base(...)` once per
+  rightmost selector and feeds base-aware kind/value helpers, avoiding duplicate
+  pseudo/attribute scans and substring work in both bucket counting and fill
+  passes.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` remains 15/15. Docker optimizer scan
+  completed for the renderer with 754 remaining static opportunities.
+- next: Spark identified `split_class_words_trimmed(...)` as the next bounded
+  candidate: replace parse-time `class_attr.split(" ")` plus per-token trim
+  with a single-pass tokenizer while preserving ASCII-space-only split
+  semantics and repeated-space behavior.

@@ -1257,6 +1257,31 @@ Verification:
   `15 passed, 0 failed`
 - Docker optimizer scan: renderer `754` remaining static opportunities.
 
+## 2026-06-11 Selector bucket base reuse
+
+Rule bucket construction classified each rightmost selector by calling
+`selector_bucket_kind(...)` and `selector_bucket_value(...)`. Both helpers
+derived the same selector bucket base, so counting and fill passes each repeated
+pseudo/attribute scans and substring work for the same selector group.
+
+`build_rule_buckets(...)` now computes `selector_bucket_base(...)` once per
+rightmost selector and feeds base-aware kind/value helpers. The original
+part-based helpers remain available and delegate through the same base-aware
+logic.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `15 passed, 0 failed`
+- Docker optimizer scan: renderer `754` remaining static opportunities.
+
+Spark follow-up candidate: `split_class_words_trimmed(...)` still does
+parse-time `class_attr.split(" ")` plus a per-token trim. A single-pass tokenizer
+can remove that intermediate array if it preserves ASCII-space-only split
+semantics and repeated-space behavior.
+
 ## 2026-06-11 Compound class selector suffix trim removal
 
 Compound class selector matching split suffixes such as `.target.marker` and
