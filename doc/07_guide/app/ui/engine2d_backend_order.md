@@ -65,6 +65,7 @@ The current shared order is:
 The current shared implementation lives in:
 
 - `src/lib/gc_async_mut/gpu/engine2d/helpers_availability.spl`
+- `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`
 - `src/lib/gc_async_mut/gpu/engine2d/engine.spl`
 - `src/app/ui.browser/backend.spl`
 - `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl`
@@ -77,6 +78,11 @@ DirectX backend implementation:
 - `src/lib/nogc_async_mut/gpu/vulkan_icd_sffi.spl` — Vulkan ICD leaf (dlopen/structured)
 - `scripts/setup/setup-directx-linux.shs` — local prefix build script
 - `doc/07_guide/ui/directx_on_linux_setup.md` — setup guide
+
+`helpers_availability.spl` owns canonical names and the actual order.
+`backend_lane.spl` exposes lane-safe helpers for drawing/processing planners so
+startup and render reports can choose from already-known candidate backends
+without re-probing devices on redraw paths.
 
 If this order changes, update both the implementation and this guide in the
 same change.

@@ -27,7 +27,7 @@ backend_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,7 +41,7 @@ backend_lane_spec -> std
 #### keeps drawing backends responsible for framebuffer visible rendering
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -62,7 +62,7 @@ expect(engine2d_backend_lane_summary(lane)).to_contain("framebuffer=true")
 #### keeps processing backends responsible for compute and offload
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -84,7 +84,7 @@ expect(engine2d_operation_lane("filter")).to_equal(ENGINE2D_BACKEND_LANE_PROCESS
 #### allows an explicit combined backend without hiding the split
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -104,7 +104,7 @@ expect(engine2d_operation_lane("layout_compute")).to_equal(ENGINE2D_BACKEND_LANE
 #### builds a split plan with CPU fallback when processing is not specified
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -123,6 +123,47 @@ expect(fallback.drawing_backend.backend_name).to_equal("cpu")
 expect(fallback.processing_backend.backend_name).to_equal("cpu")
 expect(fallback.split_required).to_equal(false)
 expect(fallback.fallback_reason).to_contain("processing backend not specified")
+```
+
+</details>
+
+#### exposes the shared native first backend order through the lane contract
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val drawing_order = engine2d_backend_lane_drawing_preference_order()
+val full_order = engine2d_backend_lane_full_preference_order()
+
+expect(drawing_order[0]).to_equal("metal")
+expect(drawing_order[1]).to_equal("cuda")
+expect(drawing_order[2]).to_equal("rocm")
+expect(drawing_order[4]).to_equal("vulkan")
+expect(full_order[0]).to_equal("baremetal")
+expect(full_order[1]).to_equal("virtio_gpu")
+expect(full_order[2]).to_equal("metal")
+expect(engine2d_backend_lane_preference_summary()).to_contain("metal > cuda > rocm/hip")
+```
+
+</details>
+
+#### selects the preferred available candidate without probing per frame
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(engine2d_backend_lane_preferred_candidate(["vulkan", "cpu", "cuda"], false)).to_equal("cuda")
+expect(engine2d_backend_lane_preferred_candidate(["virtio-gpu", "metal"], true)).to_equal("virtio_gpu")
+expect(engine2d_backend_lane_preferred_candidate(["amd-hip", "cpu"], false)).to_equal("rocm")
+expect(engine2d_backend_lane_preferred_candidate(["unknown"], false)).to_equal("")
 ```
 
 </details>
@@ -146,8 +187,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
