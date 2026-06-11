@@ -1,5 +1,7 @@
 # Browser Color Parsing Commonization Blocked
 
+Status: Resolved (2026-05-19)
+
 **Date:** 2026-05-10
 **Component:** browser_engine/dom.spl, common/color/
 **Severity:** Low (tech debt)

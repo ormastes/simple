@@ -1,5 +1,7 @@
 # JIT Hotspot Verification Process Storm — 2026-05-29
 
+Status: Closed. Root-cause fix applied to `src/app/cli/main_part2.spl` (2026-05-29):
+
 ## Status
 
 Closed. Root-cause fix applied to `src/app/cli/main_part2.spl` (2026-05-29):

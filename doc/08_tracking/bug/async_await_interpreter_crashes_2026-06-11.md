@@ -1,5 +1,7 @@
 # Async/Await Interpreter Crashes - 2026-06-11
 
+Status: open (triaged 2026-06-11)
+
 ## Summary
 
 End-to-end `async fn` + `await` crashes the Rust-seed interpreter instead of

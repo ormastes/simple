@@ -1,5 +1,7 @@
 # Bug: String method calls return -1 in core-c-bootstrap native builds
 
+Status: - RESOLVED — deployed seed reverified 2026-05-29
+
 - **ID:** native_string_method_returns_neg1_core_c_bootstrap
 - **Severity:** P1 (blocks native string ops) — *needs confirmation of scope*
 - **Date:** 2026-05-29

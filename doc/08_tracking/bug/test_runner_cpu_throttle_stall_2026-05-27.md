@@ -1,5 +1,7 @@
 # Bug: Test runner CPU throttle dropped to 1 thread, effectively stalling full suite
 
+Status: **RESOLVED** — fixed in `src/compiler_rust/driver/src/cli/test_runner/parallel.rs`.
+
 **Date:** 2026-05-27
 **Severity:** Medium
 **Component:** src/compiler_rust/driver/src/cli/test_runner/parallel.rs

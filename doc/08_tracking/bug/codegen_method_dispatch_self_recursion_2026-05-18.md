@@ -1,5 +1,7 @@
 # BUG: Codegen method-dispatch self-recursion
 
+Status: RESOLVED (2026-05-19; verified 2026-05-29)
+
 **Date:** 2026-05-18
 **Severity:** High (silent stack overflow at runtime)
 **Status:** RESOLVED (2026-05-19; verified 2026-05-29)

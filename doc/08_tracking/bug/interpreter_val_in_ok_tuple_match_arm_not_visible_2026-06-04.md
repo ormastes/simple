@@ -1,5 +1,7 @@
 # Bug: `val` declared inside an `Ok((a, b))` tuple-match arm is not visible later in the same arm
 
+Status: Open (worked around)
+
 **Date:** 2026-06-04
 **Area:** Interpreter, pattern-match arm scoping (SPipe `it` blocks)
 **Status:** Open (worked around)

@@ -1,5 +1,7 @@
 # Bug: Fat32Core create_file writes wrong bytes for filenames
 
+Status: **RESOLVED** — the original three bugs are fixed in both `nogc_async_mut` and
+
 **Date:** 2026-05-27
 **Severity:** high
 **Component:** src/lib/nogc_sync_mut/fs_driver/fat32_dir_ops.spl

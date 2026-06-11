@@ -1,5 +1,7 @@
 # SPipe Docgen Blocked By Flat AST Bridge Parse Error
 
+Status: open (triaged 2026-06-11)
+
 ## Date
 2026-06-01
 

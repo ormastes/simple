@@ -1,5 +1,7 @@
 # Bug — Interpreter `array.push(u8_literal)` writes 0 instead of value
 
+Status: FIXED 2026-05-10 -- verified by interpreter repro (push(0x2du8) correctly stores 45)
+
 **Filed:** 2026-05-02 (Wave 13 closeout, W13-E TLS 1.3 PSK connect-flow integration)
 **Status:** FIXED 2026-05-10 -- verified by interpreter repro (push(0x2du8) correctly stores 45)
 **Severity:** High — silently corrupts byte arrays under interpreter mode; affects any code path that uses `[u8]` literals via `.push(0x..u8)` or `.push(v)` where `v: u8`.

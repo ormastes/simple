@@ -1,5 +1,7 @@
 # BUG: text.len() returns garbage value in native LLVM codegen
 
+Status: FIXED (2026-05-29)
+
 **Date:** 2026-05-28
 **Status:** FIXED (2026-05-29)
 **Severity:** High (all native-compiled code using text.len() affected)

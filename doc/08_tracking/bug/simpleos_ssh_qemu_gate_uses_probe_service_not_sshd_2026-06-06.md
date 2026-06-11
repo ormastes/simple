@@ -1,5 +1,7 @@
 # SimpleOS SSH QEMU Gate Production SSHD Live Proof
 
+Status: Open — production daemon is wired, live OpenSSH proof still fails before KEX completes.
+
 Date: 2026-06-06
 
 ## Status

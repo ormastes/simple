@@ -1,5 +1,7 @@
 # Bug: Native List Indexing with Loop Variables
 
+Status: Open
+
 **Date:** 2026-06-05
 **Severity:** High
 **Component:** compiler/codegen (Cranelift native)

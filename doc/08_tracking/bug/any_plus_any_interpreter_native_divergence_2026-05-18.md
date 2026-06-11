@@ -1,5 +1,7 @@
 # BUG: ANY+ANY semantic divergence between interpreter and native codegen
 
+Status: RESOLVED (reverified 2026-05-29)
+
 **Date:** 2026-05-18
 **Status:** RESOLVED (reverified 2026-05-29)
 **Severity:** Low (no known user-facing breakage)

@@ -1,5 +1,7 @@
 # Optimize Native CLI Stub Segfault (2026-05-27)
 
+Status: RESOLVED (2026-05-27)
+
 ## Status
 
 RESOLVED (2026-05-27)

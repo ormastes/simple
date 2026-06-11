@@ -1,5 +1,7 @@
 # FAT32 4K Overwrite C Baseline Gap — 2026-05-28
 
+Status: Closed with external VFAT evidence blocker — direct-C write gap fixed in the
+
 ## Status
 
 Closed with external VFAT evidence blocker — direct-C write gap fixed in the

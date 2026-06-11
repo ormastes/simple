@@ -1,6 +1,7 @@
 # Green Thread Direct Runtime Blockers
 
 Date: 2026-06-06
+Status: likely-fixed (triaged 2026-06-11, multiple items fixed 2026-06-08/09 per body)
 
 ## Summary
 

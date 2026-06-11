@@ -1,5 +1,7 @@
 # Bug: pure_simple web render O(n²) — two distinct causes (one fixed)
 
+Status: likely-fixed (triaged 2026-06-11, Path A and Path B both fixed per title/body)
+
 **Date:** 2026-06-06  **Area:** `src/lib/gc_async_mut/gpu/browser_engine` (web render lane)
 **Symptom:** the `pure_simple` web-render backend appears to "hang" at larger
 resolutions. It is **not a crash and not a deadlock** — two independent O(n²) (in
@@ -123,15 +125,26 @@ software present/readback cycle.
 - The exporter can still emit normalized output for the zero-sample smoke:
   `--warmup-count 0 --sample-count 0` returns a valid SDN record shape, but
   with `valid: false` and zero frame samples as expected.
-- Real interpreted render calls are currently blocked again:
-  `backend_measurement_software_export.spl --software-render-backend software`
-  and `--software-render-backend cpu` both fail at runtime with
-  `error: semantic: type mismatch: cannot convert enum to int`.
-- Replacing the nested `[[ ]; nodes.len()]` layout scratch initialization with
-  explicit builders did not clear that runtime failure.
-- Current conclusion: the remaining blocker is now inside the interpreted
-  `simple_web_layout_render_html_software_pixels(...)` path itself, not the
-  measurement exporter or the generic backend resolver/import graph.
+- 2026-06-11 compiled JIT refresh: the patched release driver now reports the
+  zero-sample smoke with correct parsed counts:
+  `warmup_count: 0 sample_count: 0`.
+- 2026-06-11 compiled one-sample smoke:
+  `--warmup-count 0 --sample-count 1` returns `valid: true`,
+  `checksum: "sum32:1027061180046"`, and
+  `pixel_proof: "nonzero_pixels:3072"` at 64x48.
+- The Docker isolation runtime still fails direct `run` of the renderer entry
+  with `error: semantic: type mismatch: cannot convert enum to int`.
+- Host interpreter execution is still healthy when forced through the env var
+  path:
+  `SIMPLE_EXECUTION_MODE=interpret bin/simple run ...` completes parse, style,
+  layout, Draw IR, and paint for a direct renderer probe.
+- Important nuance: host `bin/simple run --interpret ...` still crashes for the
+  same renderer import where `SIMPLE_EXECUTION_MODE=interpret` succeeds. That
+  is a CLI/runtime mode-selection bug, not a renderer-semantic failure.
+- Current conclusion: the remaining direct-run isolation problems are split
+  across runtime surfaces. The renderer itself still executes through the host
+  interpreter path; the Docker `run` semantic failure and host `--interpret`
+  crash are separate runtime issues.
 
 2026-06-11 compiled-path measurement refresh:
 
@@ -157,23 +170,52 @@ software present/readback cycle.
     capability to the row/span/scroll helpers that mutate framebuffer-like
     buffers
   - `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`:
-    added `mut` to `fb_put` and `fb_clear`
-- After those fixes, `simple check` still passes for the touched files, but
-  `bin/simple run src/app/wm_compare/backend_measurement_software_export.spl`
-  now exits with code `-1` and no diagnostic text, even for the zero-sample
-  case. That means the compiled/JIT path gets farther than the earlier W1006
-  fallback, but currently crashes before returning measurement output.
+    temporary `mut` on `fb_put` / `fb_clear` was tested, but it is now reverted
+    because it triggers a compiled-path crash
+- The compiled-path crash is now isolated more precisely:
+  importing the renderer module alone through a tiny `loaded=1` probe causes
+  default `bin/simple run` to segfault when `fb_put` / `fb_clear` carry `mut`
+  capability, even if the probe never calls the renderer.
+- Reverting only those two `mut` annotations removes the crash immediately and
+  restores the earlier behavior:
+  - default `bin/simple run` no longer segfaults
+  - the runtime reports W1006 fallback on `fb_put`
+  - direct renderer probes complete under fallback/interpreter execution
+- Further narrowing:
+  - a tiny imported scratch module with:
+    - one small class
+    - one constructor-like helper
+    - one exported `mut fb_put(mut fb: [u32], ...)`
+    - one exported non-render helper used by a probe
+    does **not** crash under default `bin/simple run`
+  - so the compiled-path failure is not a generic
+    `imported-module + class + mut [u32] helper` issue
+  - a smaller scratch module that imports `common.ui.draw_ir` and defines a
+    private `mut fb_put(mut fb: [u32], ...)` with indexed assignment is enough
+    to reproduce the default compiled-run segfault
+  - the same scratch module passes when run with
+    `SIMPLE_EXECUTION_MODE=interpret`, so the failure is in the compiled/JIT
+    execution lane, not Simple semantics
+- Refreshed host measurements after reverting the crashing `mut` annotations:
+  - `software`: `p50_frame_us = 1177740`
+  - `cpu`: `p50_frame_us = 1277987`
+  - `cpu_simd`: `p50_frame_us = 1201497`
+  - checksum stayed `sum32:328819896062200`
+  - pixel proof stayed `nonzero_pixels:76800`
 
 Current conclusion:
 
-- Fresh performance evidence exists again, but only from the pre-crash state
-  before the latest mut-capability cleanup completed.
+- Fresh performance evidence exists again on the canonical host path.
 - A concrete reason the pure Simple GUI path is slow has now been proven:
   the supposed compiled/JIT benchmark lane was falling back to the interpreter
   because framebuffer mutation helpers lacked `mut` capability.
-- The next blocker is no longer the exporter and no longer W1006 itself; it is
-  the new compiled-path crash introduced or uncovered after clearing those
-  lowering errors.
+- A second concrete blocker is now also proven:
+  the current compiled/JIT path crashes on the renderer module when `fb_put` /
+  `fb_clear` are marked `mut`, so the fast path cannot yet be enabled there
+  without a compiler/runtime fix.
+- The next highest-value fix is no longer in the benchmark exporter. It is the
+  compiler/runtime bug that turns those renderer-local `mut` helpers into a
+  segfault instead of either valid compiled code or a normal lowering failure.
 
 ## 2026-06-06 Current Profile Evidence
 
@@ -202,14 +244,18 @@ This confirms the generated CUDA fill lane is fast and measurable, while the
 pure Simple web software lane is still dominated by interpreted text/layout
 work.
 
-Open JIT blocker: running the narrow software render-loop command still prints
-`[INFO] JIT compilation failed, falling back to interpreter: HIR lowering error:
-Unknown type: any`. A behavior-preserving local rename in
-`simple_web_html_layout_renderer.parse_int` avoided a reserved-looking local
-named `any`, but the fallback remains. A targeted source search found no
-remaining `: any` type annotations in the immediate render path, so the next
-pass should inspect the JIT lowerer/import graph and the higher-layer
-`gc_async_mut` warnings emitted by this command.
+Resolved JIT blocker update, 2026-06-11: the earlier module-init segfault from
+renderer-local `mut fb_put` / `mut fb_clear` is fixed in the Rust compiler lane
+by declaring runtime-initialized globals writable during Cranelift module init.
+The renderer helpers are `mut` again and the focused renderer unit spec still
+passes through the patched release driver.
+
+The narrow software render-loop command is now valid compiled benchmark
+evidence for the 64x48 smoke. The final root cause was split across two JIT
+paths: signed narrow VRegs were being zero-extended during full block sync, and
+`text.to_i32()` narrowed the text pointer instead of parsing through
+`rt_string_to_int`. Focused regressions now cover `i32` return/control-flow,
+`i32` struct slots, and `text.to_i32()` parsing with stub fallback disabled.
 
 ## 2026-06-11 Renderer hotspot note
 
@@ -329,6 +375,18 @@ Additional accepted reduction in the text/layout lane:
 - widget-chrome text detection, text-flow fixture detection, intrinsic text
   width, text layout height, and text paint now reuse that cached trimmed text
   instead of re-running `trim()` across the same text node in each pass
+
+Attempted but rejected O(n^2) layout reduction:
+
+- tried replacing repeated full-node child discovery in recursive layout with a
+  prebuilt `children: [[i32]]` index
+- the focused renderer unit spec still passed, but the benchmark fixture
+  checksum drifted and the broader backend-parity spec stayed red on this
+  branch baseline
+- that makes the current worktree insufficient to prove the child-index rewrite
+  is behavior-preserving, so the code change was reverted in the same turn
+- the underlying hotspot is still real: recursive layout currently rediscovers
+  direct children by scanning the flat node arena in multiple passes
 
 Additional accepted reduction in text paint:
 

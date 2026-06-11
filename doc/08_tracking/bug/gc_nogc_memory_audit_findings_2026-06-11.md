@@ -1,5 +1,7 @@
 # BUG (tracking): gc/nogc memory audit — consolidated open findings (2026-06-11)
 
+Status: OPEN (tracking list; items close individually)
+
 **Date:** 2026-06-11
 **Status:** OPEN (tracking list; items close individually)
 **Severity:** Mixed (High → Low)

@@ -1,5 +1,7 @@
 # std.async Runtime Native Backend Gaps - 2026-06-11
 
+Status: open (triaged 2026-06-11)
+
 ## Summary
 
 The pure-Simple `std.async` layer was repaired on 2026-06-11 (waker drain,

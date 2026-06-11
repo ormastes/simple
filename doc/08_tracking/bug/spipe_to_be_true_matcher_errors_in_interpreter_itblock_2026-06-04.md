@@ -1,5 +1,7 @@
 # Bug: `to_be_true()` / `to_be_false()` matchers error inside interpreter `it` blocks
 
+Status: Open (worked around)
+
 **Date:** 2026-06-04
 **Area:** SPipe runtime, built-in matchers (`std.spec`)
 **Status:** Open (worked around)

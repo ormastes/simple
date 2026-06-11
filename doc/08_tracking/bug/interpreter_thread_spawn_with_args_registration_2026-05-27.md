@@ -1,5 +1,7 @@
 # Bug: semantic thread_spawn_with_args wrapper bypassed interpreter registration
 
+Status: RESOLVED 2026-05-27
+
 **Date:** 2026-05-27
 **Status:** RESOLVED 2026-05-27
 **Severity:** Medium

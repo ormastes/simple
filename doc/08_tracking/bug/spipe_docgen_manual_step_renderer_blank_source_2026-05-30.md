@@ -1,5 +1,7 @@
 # Bug: spipe-docgen manual-step renderer can blank expanded scenario source
 
+Status: Fixed
+
 **Date:** 2026-05-30
 **Area:** `spipe-docgen`, scenario manual rendering
 **Status:** Fixed

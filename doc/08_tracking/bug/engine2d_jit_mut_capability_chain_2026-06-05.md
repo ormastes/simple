@@ -1,5 +1,7 @@
 # Engine2D/web GUI apps fall back to interpreter: W1006 `mut`-capability JIT-blocker chain
 
+Status: OPEN — `mut` fixes REVERTED (they unmasked a latent JIT panic; see below).
+
 **Status:** OPEN — `mut` fixes REVERTED (they unmasked a latent JIT panic; see below).
 The real fix is driver-side (prefer interpreter for winit/graphics sources).
 

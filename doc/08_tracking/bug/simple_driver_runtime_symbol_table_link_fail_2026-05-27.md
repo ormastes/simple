@@ -1,5 +1,7 @@
 # simple-driver Runtime Symbol Table Link Failure
 
+Status: Verified resolved 2026-05-29. The `cargo build -q -p simple-driver --bin simple` build
+
 Date: 2026-05-27
 
 ## Summary

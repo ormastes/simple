@@ -1,5 +1,7 @@
 # SPipe interpreter tuple-map result matcher/binding regression
 
+Status: Fixed 2026-05-29. All repro cases pass in interpreter mode.
+
 Date: 2026-05-27
 
 ## Symptom

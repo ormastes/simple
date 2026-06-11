@@ -1,5 +1,7 @@
 # Bug: GPU Pipeline Missing Arms (GAME-RENDER-002)
 
+Status: RESOLVED — all GPU pipeline arms implemented.
+
 **Status:** RESOLVED — all GPU pipeline arms implemented.
 **Date:** 2026-04-25
 **Partial fix:** 2026-04-25 (software-pipeline outlined shapes)

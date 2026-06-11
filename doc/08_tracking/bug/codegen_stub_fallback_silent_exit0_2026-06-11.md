@@ -1,5 +1,7 @@
 # BUG: [CODEGEN-STUB-FALLBACK] silently replaces functions with empty stubs and exits 0
 
+Status: OPEN
+
 **Date:** 2026-06-11
 **Status:** OPEN
 **Severity:** High (silent miscompile)

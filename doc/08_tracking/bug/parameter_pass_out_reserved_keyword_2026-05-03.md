@@ -1,5 +1,7 @@
 # Function parameters named `pass` or `out` silently misbehave
 
+Status: FIXED (two-stage).
+
 **Status:** FIXED (two-stage).
 - Stage 1 (W29-G): `is_reserved_parameter_name` check added to all param parse paths; `"out"` mistakenly included.
 - Stage 2 (W5-wave): Removed `"out"` from `is_reserved_parameter_name` — `out` is a context-dependent contract keyword, not a true reserved identifier. 12 existing `.spl` files legitimately use `out` as an output-buffer parameter name (e.g., `fn f(out: [u8])`). Ambiguity is positional: in a parameter list `out` binds as a name; at statement position it is the contract clause keyword.

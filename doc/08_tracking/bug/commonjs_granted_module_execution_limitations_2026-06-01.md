@@ -1,5 +1,7 @@
 # CommonJS Granted Module Execution Limitations
 
+Status: open (triaged 2026-06-11)
+
 Date: 2026-06-01
 
 ## Summary

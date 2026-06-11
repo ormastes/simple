@@ -1,5 +1,7 @@
 # BUG: array push loop inside fn main + len() dumps core (native AND interpreter)
 
+Status: OPEN
+
 **Date:** 2026-06-11
 **Status:** OPEN
 **Severity:** High (memory-safety crash, both execution modes)

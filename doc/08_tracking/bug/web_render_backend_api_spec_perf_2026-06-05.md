@@ -1,5 +1,7 @@
 # PERF BUG: Web render backend API spec exceeds runner perf threshold
 
+Status: open (triaged 2026-06-11)
+
 Observed during focused verification for the shared GUI web renderer parity
 work.
 

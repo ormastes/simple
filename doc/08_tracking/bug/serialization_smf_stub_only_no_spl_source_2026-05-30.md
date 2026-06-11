@@ -1,5 +1,7 @@
 # BUG: std.common.serialization module has no .spl source — interpreter cannot load it
 
+Status: Resolved 2026-05-30
+
 **Date:** 2026-05-30
 **Status:** Resolved 2026-05-30
 **Severity:** Medium (blocks all interpreter-mode tests that import `std.common.serialization`)

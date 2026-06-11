@@ -1,5 +1,7 @@
 # Bug: data_structures_spec remaining 2 failures after Some/None/Ok/Err fix
 
+Status: Resolved 2026-05-30 — Failure 1 fixed by interpreter enum fix; Failure 2 fixed by correcting test ex
+
 **Date:** 2026-05-30
 **Severity:** Medium
 **Affected modes:** Interpreter

@@ -1,5 +1,7 @@
 # Bug: sstack/spipe Naming Inconsistency
 
+Status: RESOLVED 2026-05-27 — names kept distinct with explicit roles
+
 **Date:** 2026-05-15
 **Severity:** Low (cosmetic/tooling)
 **Status:** RESOLVED 2026-05-27 — names kept distinct with explicit roles

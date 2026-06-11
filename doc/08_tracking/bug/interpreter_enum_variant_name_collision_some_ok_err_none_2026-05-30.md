@@ -1,5 +1,7 @@
 # Bug: Parser hardcodes Some/None/Ok/Err as Option/Result variant names
 
+Status: FIXED in interpreter_patterns.rs — see fix note below
+
 **Date:** 2026-05-30
 **Severity:** High — user-defined enums with variants named Some, None, Ok, or Err fail to match in interpreter mode
 **Affected modes:** Interpreter only (compiled mode not verified)

@@ -1,5 +1,7 @@
 # Bug: Native Any Parameter Forwarding Corrupts Pointer
 
+Status: Open (workaround applied)
+
 **Date:** 2026-06-05
 **Severity:** High
 **Component:** compiler/codegen (Cranelift native)

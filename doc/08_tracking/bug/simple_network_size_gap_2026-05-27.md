@@ -1,5 +1,7 @@
 # Simple Network Size Gap
 
+Status: Verified 2026-05-29 by running `sh scripts/check/check-startup-size-performance-audit.shs` on Linux 
+
 Date: 2026-05-27
 
 ## Summary

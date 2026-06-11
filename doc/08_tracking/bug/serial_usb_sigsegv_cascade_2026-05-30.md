@@ -1,5 +1,7 @@
 # Bug: serial_open SIGSEGV cascade on USB disconnect kills tmux session
 
+Status: Open (Phase 2 landed: runtime crash handler)
+
 **Date:** 2026-05-30
 **Severity:** Critical
 **Status:** Open (Phase 2 landed: runtime crash handler)

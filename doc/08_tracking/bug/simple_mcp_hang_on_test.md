@@ -1,5 +1,7 @@
 # Bug: simple-mcp hangs on simple_test tool call
 
+Status: **RESOLVED** (2026-05-29) — Fixed in `src/app/mcp/cli_passthrough.spl` by
+
 **Date:** 2026-05-27
 **Severity:** medium
 **Component:** simple-mcp server

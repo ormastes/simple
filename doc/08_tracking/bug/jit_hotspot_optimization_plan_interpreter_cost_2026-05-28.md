@@ -1,5 +1,7 @@
 # JIT hotspot optimization plan interpreter cost
 
+Status: Fixed.
+
 ## Status
 
 Fixed.

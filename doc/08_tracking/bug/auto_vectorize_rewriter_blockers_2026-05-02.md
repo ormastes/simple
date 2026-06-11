@@ -1,5 +1,7 @@
 # Bug: Auto-Vectorize MIR Rewriter — Prerequisite Analysis Infrastructure Missing
 
+Status: RESOLVED 2026-05-29 — Defects A+B+C fixed; cross-module spread root cause found and repaired — see §
+
 **Date:** 2026-05-02
 **Wave:** L3 (MIR rewriter)
 **Status:** RESOLVED 2026-05-29 — Defects A+B+C fixed; cross-module spread root cause found and repaired — see §7 below. Independently verified 2026-05-29: 64/64 spec tests pass in interpreter mode (see §8).

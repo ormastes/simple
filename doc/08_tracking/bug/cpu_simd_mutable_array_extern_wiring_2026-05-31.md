@@ -1,5 +1,7 @@
 # CPU SIMD mutable array extern wiring
 
+Status: Open.
+
 Date: 2026-05-31
 
 ## Status

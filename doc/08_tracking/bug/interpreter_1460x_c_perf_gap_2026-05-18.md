@@ -1,5 +1,7 @@
 # PERF BUG: Interpreter 1460x slower than C on recursive workloads
 
+Status: RESOLVED 2026-05-27 -- non-regression / expected tree-walking interpreter cost
+
 **Date:** 2026-05-18
 **Status:** RESOLVED 2026-05-27 -- non-regression / expected tree-walking interpreter cost
 **Severity:** Medium (interpreter-only; native Cranelift is 1.6x C)

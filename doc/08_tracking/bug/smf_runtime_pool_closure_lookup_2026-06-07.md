@@ -1,5 +1,7 @@
 # SMF Runtime-Pool Closure Lookup Blocker
 
+Status: Closed
+
 **Status:** Closed
 
 ## Summary

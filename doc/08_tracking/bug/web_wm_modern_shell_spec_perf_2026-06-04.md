@@ -1,5 +1,7 @@
 # PERF BUG: Web WM modern shell spec exceeds runner perf threshold
 
+Status: open (triaged 2026-06-11)
+
 Observed during focused verification of the Simple Web WM quality/modern shell
 contract.
 

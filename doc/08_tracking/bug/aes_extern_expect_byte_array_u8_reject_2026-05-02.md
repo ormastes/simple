@@ -1,5 +1,7 @@
 # Bug — `rt_aes{128,256}_encrypt_block_pure expects an array of integers` under interpreter mode
 
+Status: FIXED — `expect_byte_array` in simd.rs already handles `Value::UInt { width: 8 }` which covers u8 el
+
 **Filed:** 2026-05-02 (W17-B AES-XTS KAT integration)
 **Status (2026-05-10):** FIXED — `expect_byte_array` in simd.rs already handles `Value::UInt { width: 8 }` which covers u8 elements. The `Value::U8` variant never existed; the actual issue was misdiagnosed. Fixed by verifying the UInt arm covers all byte-width values.
 **Severity:** High — blocks every pure-Simple AES KAT assertion under interpreter mode (XTS, GCM, CMAC, CCM all affected).

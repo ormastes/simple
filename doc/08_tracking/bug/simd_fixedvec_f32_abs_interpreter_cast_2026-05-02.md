@@ -1,5 +1,7 @@
 # Bug: FixedVec<f32>.abs() — "cannot cast i64 to T" in interpreter mode
 
+Status: RESOLVED — 2026-05-19
+
 **Date:** 2026-05-02
 **Status:** RESOLVED — 2026-05-19
 **Resolution:** Fixed via `val zero = v - v` (self-subtraction produces typed zero, no `i64` cast).

@@ -1,5 +1,7 @@
 # Engine Facade Specs: API Drift in std.common.engine Types
 
+Status: PARTIAL FIX — Bug 1 (Vec3.forward) and Bug 3 (KeyCode.code, MouseButtonId.code) fixed 2026-05-30; Bu
+
 **Status:** PARTIAL FIX — Bug 1 (Vec3.forward) and Bug 3 (KeyCode.code, MouseButtonId.code) fixed 2026-05-30; Bug 2 (RawHandle refactor) remains OPEN
 **Severity:** Moderate — import resolution fixed; spec logic fails due to API drift in common types
 **Affected specs:**

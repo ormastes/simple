@@ -1,5 +1,7 @@
 # Docker Cross-Language Profile Native Link Blocker
 
+Status: Partially fixed. Release-wrapper profile runs now pass in Docker, but the debug
+
 ## Status
 
 Partially fixed. Release-wrapper profile runs now pass in Docker, but the debug

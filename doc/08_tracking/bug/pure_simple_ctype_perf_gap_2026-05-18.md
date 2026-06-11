@@ -1,5 +1,7 @@
 # Perf Bug: Pure Simple ctype 0.07x–0.46x C (Cranelift, no inlining)
 
+Status: Open / pure-Simple path exhausted — partially mitigated 2026-05-29;
+
 **Date:** 2026-05-18
 **Status:** Open / pure-Simple path exhausted — partially mitigated 2026-05-29;
 benchmark harness repaired, ctype call nesting flattened, MIR inlining handles

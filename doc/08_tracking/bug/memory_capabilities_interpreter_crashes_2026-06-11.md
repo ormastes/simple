@@ -1,5 +1,7 @@
 # BUG: memory_capabilities_spec failures — enum-field method call crash + match-on-dict.get SIGSEGV + RefEnv.consume copy loss
 
+Status: OPEN
+
 **Date:** 2026-06-11
 **Status:** OPEN
 **Severity:** High (two interpreter crashes + one silent wrong-result)

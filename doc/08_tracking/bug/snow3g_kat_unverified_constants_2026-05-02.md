@@ -1,5 +1,7 @@
 # SNOW 3G KAT: Wrong Keystream — Unverified Constants (MUL_alpha, DIV_alpha, S_Q)
 
+Status: FIXED 2026-05-19 — All tables verified correct against 3GPP spec and OAI reference (MUL_alpha, DIV_a
+
 **Status:** FIXED 2026-05-19 — All tables verified correct against 3GPP spec and OAI reference (MUL_alpha, DIV_alpha, S_Q, S_R all match). KAT expected values corrected: z[0]=0x410ab3b9, z[1]=0xc764a037, UIA2 MAC=0x10ab3b9c. Prior "FIXED 2026-05-09" status was incorrect — tables were correct but KAT expected values were never validated against a spec-compliant simulation.
 **Severity:** Blocking — SNOW 3G keystream KAT fails; UEA2/UIA2 also wrong.
 **Affected file:** `src/os/crypto/snow3g.spl`

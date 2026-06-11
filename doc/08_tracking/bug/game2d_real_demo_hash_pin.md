@@ -1,5 +1,7 @@
 # Bug: Real Demo Golden Hash Not Pinned
 
+Status: RESOLVED 2026-04-26. Golden spec passes 11/11 in interpreter mode
+
 **Status:** RESOLVED 2026-04-26. Golden spec passes 11/11 in interpreter mode
 with pinned FNV-1a hash `0x253edd45a462bc15` (4x4 representative framebuffer).
 **Resolved by:** bug-sweep-2026-04-26 phase 5

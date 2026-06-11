@@ -1,5 +1,7 @@
 # Parser: 64-bit hex literals lose precision (silent truncation)
 
+Status: RESOLVED (already fixed). The lexer at `src/compiler_rust/parser/src/lexer/numbers.rs:57-64`
+
 **Status:** RESOLVED (already fixed). The lexer at `src/compiler_rust/parser/src/lexer/numbers.rs:57-64`
 already special-cases `NumericSuffix::U64` with `u64::from_str_radix`, preserving the full 64-bit
 pattern. Regression spec added at `test/01_unit/compiler/u64_hex_literal_precision_spec.spl`.

@@ -1,5 +1,7 @@
 # SHA-384 produces wrong output — KAT 2/6 fail on FIPS 180-4 vectors
 
+Status: FIXED 2026-05-02 (W16-B-FIX). Root cause was an interpreter bug
+
 **Status:** FIXED 2026-05-02 (W16-B-FIX). Root cause was an interpreter bug
 in u64 right-shift on fn parameters, NOT in the SHA-384 algorithm itself.
 See `doc/08_tracking/bug/u64_right_shift_fn_param_arithmetic_2026-05-02.md`

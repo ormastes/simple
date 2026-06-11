@@ -1,5 +1,7 @@
 # Simple-Core Pure-Simple Archive Builder Blocker
 
+Status: **Status: RESOLVED** (live-verified 2026-05-29)
+
 ## Problem Statement
 
 `doc/03_plan/default_native_runtime_shift_phase2_plan.md` requires a

@@ -1,5 +1,7 @@
 # SimpleOS RISC-V FPGA Port — Bug Tracking
 
+Status: open (triaged 2026-06-11, tracker doc — mix of open/fixed per ## Open Bugs and ## Fixed Bugs sections)
+
 Purpose: Track bugs found during SimpleOS porting and real-hardware verification on RISC-V FPGA targets (Kria K26 and DE10-Nano). Bugs are filed here during phase 7-verify.
 
 Bug ID format: `BUG-RISCV-FPGA-NNN` (three-digit sequential)

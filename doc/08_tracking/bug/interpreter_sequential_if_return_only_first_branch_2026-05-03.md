@@ -1,5 +1,7 @@
 # Interpreter: sequential `if X: return Y` only first branch fires
 
+Status: RESOLVED (2026-05-03). No longer reproducible in current binary.
+
 **Status:** RESOLVED (2026-05-03). No longer reproducible in current binary.
 Regression spec added: `test/01_unit/compiler/sequential_if_return_spec.spl` (8/8 PASS).
 **Path:** `bug` track. Interpreter.

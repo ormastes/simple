@@ -1,5 +1,7 @@
 # Bug: Parser rejects `mut fn` method syntax
 
+Status: RESOLVED 2026-05-27 -- by design; use `me method(...)`
+
 **Date:** 2026-05-27
 **Status:** RESOLVED 2026-05-27 -- by design; use `me method(...)`
 **Severity:** Low

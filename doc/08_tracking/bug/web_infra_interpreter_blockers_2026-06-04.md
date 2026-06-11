@@ -1,5 +1,7 @@
 # Web Infra Interpreter Blockers — 2026-06-04
 
+Status: likely-fixed (triaged 2026-06-11, evidence: Fixed This Session section in body)
+
 Discovered while running `examples/06_io/webapp/main.spl` and building the
 restaurant webapp infra test vehicle.
 

@@ -1,5 +1,7 @@
 # Bug: Native codegen string equality broken
 
+Status: RESOLVED — Bug A and Bug B verified fixed 2026-05-29.
+
 **Date:** 2026-05-27
 **Severity:** Critical (blocks bootstrap)
 **Status (string-equality bugs):** RESOLVED — Bug A and Bug B verified fixed 2026-05-29.

@@ -1,5 +1,7 @@
 # Simple Web Layout Corpus Perf
 
+Status: Open
+
 Date: 2026-05-31
 
 ## Status

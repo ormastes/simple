@@ -1,5 +1,7 @@
 # Mutations Lost When `self` / `self.field` Is Passed to a Free Function
 
+Status: Fixed in pure Simple interpreter path
+
 **Date:** 2026-05-29
 **Component:** compiler value/reference semantics (method receiver passing)
 **Severity:** High (silent data loss; breaks helper-function refactors)

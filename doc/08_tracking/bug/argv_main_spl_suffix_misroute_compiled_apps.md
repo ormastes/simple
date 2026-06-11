@@ -1,7 +1,7 @@
 # Bug: `ends_with("main.spl")` argv-skip misroutes user files in compiled apps
 
 Date: 2026-06-11
-Status: open (cli fixed; ~14 latent copies remain)
+Status: fixed (2026-06-11, B7 sweep — all 22 latent sites replaced with precise per-app predicates matching only the app's own entry script path; see sweep notes below)
 Severity: medium (silent wrong behavior — program never runs, exit 0)
 
 ## Symptom
@@ -44,6 +44,39 @@ wrong there.
 Inverse case: `src/compiler/10.frontend/core/interpreter/cli_eval.spl:153`
 only skips the interpreted script path when it happens to be named
 `*main.spl` — wrong for scripts with other names.
+
+## B7 sweep (2026-06-11)
+
+All latent copies fixed with precise per-app predicates:
+- `src/compiler/10.frontend/core/interpreter/cli_eval.spl:153`
+- `src/compiler/90.tools/duplicate_check/main.spl:27` (bare fallback removed)
+- `src/app/repl/main.spl:124`
+- `src/app/tooling/main.spl:236`
+- `src/app/check/main.spl`
+- `src/app/context/main.spl`
+- `src/app/test_runner_new/test_runner_config.spl:20`
+- `src/app/jj/main.spl`
+- `src/app/linker_gen/main.spl`
+- `src/app/cli_debug/main.spl`
+- `src/app/itf/main.spl`
+- `src/app/js/main.spl`
+- `src/app/jupyter_kernel/main.spl`
+- `src/app/pkg/main.spl`
+- `src/app/serial_mcp/main.spl`
+- `src/app/sim/main.spl`
+- `src/app/simple_lsp_mcp/main.spl`
+- `src/app/snpm/main.spl`
+- `src/app/task_daemon/main.spl`
+- `src/app/qemu/main.spl`
+- `src/app/simple_portal/main.spl`
+- `src/app/simple_process_manager/main.spl`
+- `src/app/sj/main.spl`
+- `src/app/sj_daemon/main.spl`
+- `src/app/spipe_process_harness/main.spl`
+- `src/app/office/mod.spl`
+- `src/lib/nogc_sync_mut/test_runner/test_runner_config.spl`
+
+Flat_ast_bridge and driver_source_loading use `bootstrap_main.spl` suffix checks which remain correct (they match only bootstrap_main.spl specifically, not bare main.spl).
 
 ## Principled fix (proposed)
 

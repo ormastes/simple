@@ -1,5 +1,7 @@
 # Pure-Simple web layout: remaining primitive-flex limitation (content sizing)
 
+Status: OPEN (minor, low priority) — major flex/text bugs fixed 2026-06-06; one
+
 **Status:** OPEN (minor, low priority) — major flex/text bugs fixed 2026-06-06; one
 content-sizing gap remains.
 **Affected:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`

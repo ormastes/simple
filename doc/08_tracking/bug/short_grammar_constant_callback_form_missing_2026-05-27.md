@@ -1,5 +1,7 @@
 # Constant callbacks use wildcard lambda short grammar
 
+Status: Status: RESOLVED (verified 2026-05-29)
+
 Date: 2026-05-27
 
 ## Symptom

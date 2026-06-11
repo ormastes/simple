@@ -1,5 +1,7 @@
 # C Runtime Exclusion Analysis
 
+Status: Open — audit still tracks removable C runtime candidates and blocked removals.
+
 **Date:** 2026-05-18
 **Last audited:** 2026-05-30 (follow-up pass — hosted_cocoa/hosted_win32 classified as stale unbuilt C duplicates; active hosted ABI resolves through Rust stubs/real-gated crate)
 **Status:** Open — audit still tracks removable C runtime candidates and blocked removals.

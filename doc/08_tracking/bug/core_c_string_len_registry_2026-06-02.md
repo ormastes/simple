@@ -1,5 +1,7 @@
 # core-c `.len()` returns garbage — rt_string_len registry check rejects compiler literals (2026-06-02)
 
+Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+
 ## Summary
 
 On the macOS ARM64 **core-c** native lane, `text.len()` returns garbage for

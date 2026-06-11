@@ -1,5 +1,7 @@
 # macOS interpreter-driven winit window never displays - 2026-05-28
 
+Status: Open. Discovered 2026-05-28 while verifying the pure-Simple web renderer + Engine2D
+
 ## Summary
 
 On macOS, a GUI program run by the interpreter (`SIMPLE_GUI=1`, gui-feature driver)

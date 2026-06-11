@@ -1,5 +1,7 @@
 # Bug — `src/os/crypto/streebog.spl` produces wrong output for all Streebog KAT vectors
 
+Status: FIXED 2026-05-08
+
 **Status:** FIXED 2026-05-08
 
 **Filed:** 2026-05-03

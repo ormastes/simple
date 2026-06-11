@@ -1,5 +1,7 @@
 # Bug: Game2D Engine2D compute adapter needs a capsule boundary design
 
+Status: open (triaged 2026-06-11)
+
 ## Date
 
 2026-05-31

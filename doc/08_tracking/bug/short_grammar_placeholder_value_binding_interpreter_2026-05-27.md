@@ -1,5 +1,7 @@
 # Short Grammar Placeholder Value Binding Fails in Interpreter Specs
 
+Status: STALE 2026-05-29 — placeholder value binding works; mock_phase3_spec failure is pre-existing me-rece
+
 **Date:** 2026-05-27
 **Status:** STALE 2026-05-29 — placeholder value binding works; mock_phase3_spec failure is pre-existing me-receiver interpreter limitation, unrelated to placeholder grammar
 **Area:** short grammar, interpreter, refactoring

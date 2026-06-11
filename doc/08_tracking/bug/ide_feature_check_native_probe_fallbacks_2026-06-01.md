@@ -1,5 +1,7 @@
 # IDE feature check native probe fallbacks
 
+Status: Resolved for IDE feature-check completion; runtime/content follow-up remains optional.
+
 ## Status
 Resolved for IDE feature-check completion; runtime/content follow-up remains optional.
 

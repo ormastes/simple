@@ -1,5 +1,7 @@
 # MCP redeploy smoke failures - 2026-06-01
 
+Status: open (triaged 2026-06-11)
+
 ## Summary
 
 After syncing `main` to GitHub and rebuilding/deploying the macOS ARM64

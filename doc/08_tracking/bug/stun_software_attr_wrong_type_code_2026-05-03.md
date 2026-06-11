@@ -1,5 +1,7 @@
 # Bug — `STUN_ATTR_SOFTWARE` constant uses wrong type code (0x802b vs RFC 0x8022)
 
+Status: FIXED 2026-05-29
+
 **Status:** FIXED 2026-05-29
 
 **Filed:** 2026-05-03 (W29-L STUN KAT spec, RFC 5769 §2 vector work)

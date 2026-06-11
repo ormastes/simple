@@ -1,5 +1,7 @@
 # Bug: spipe_matchers FatArrow parse regression blocks EAX + OCB3 spec runs
 
+Status: FIXED 2026-05-10 — verified: OCB3 spec passes (all tests pass, 10s).
+
 **Date:** 2026-05-02  
 **Severity:** Medium (blocks KAT verification in interpreter mode)  
 **Affects:** `test/01_unit/os/crypto/eax_kat_spec.spl`, `test/01_unit/os/crypto/ocb3_kat_spec.spl`

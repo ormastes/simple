@@ -1,6 +1,7 @@
 # Bug: IDE render example falls back from JIT on static-method self diagnostic
 
 Date: 2026-05-30
+Status: open (triaged 2026-06-11, JIT proof still open per body)
 
 ## Observation
 

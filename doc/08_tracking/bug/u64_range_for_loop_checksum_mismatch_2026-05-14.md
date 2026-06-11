@@ -1,5 +1,7 @@
 # U64 Range For-Loop Checksum Mismatch - 2026-05-14
 
+Status: **Status: RESOLVED** (checksum correctness). Performance parity remains open.
+
 ## Status
 
 **Status: RESOLVED** (checksum correctness). Performance parity remains open.

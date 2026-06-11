@@ -1,5 +1,7 @@
 # RISC-V64 arch unit specs fail in interpreter mode
 
+Status: open (triaged 2026-06-11)
+
 Date: 2026-06-06
 
 ## Summary

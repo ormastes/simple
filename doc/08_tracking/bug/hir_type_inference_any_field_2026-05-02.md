@@ -1,5 +1,7 @@
 # Bug: HIR type-inference emits `Cannot infer field type: struct 'ANY' field '<X>'` (134 errors block bootstrap stage 4)
 
+Status: RESOLVED — all 7 residual files now compile cleanly with 0 `Cannot infer field type` and 0 `Failed t
+
 **Date:** 2026-05-02
 **Status:** RESOLVED — all 7 residual files now compile cleanly with 0 `Cannot infer field type` and 0 `Failed to load imported types` errors (verified 2026-05-20 via `bin/simple compile` on each of the 7 files). Fix commits f489fcffb2 (SMF type reader for import_loader + non-fatal re-exports, 2026-05-18) and 982744b5c2 (cross-module struct field collision fix, 2026-05-18) are confirmed effective. Regression spec `test/01_unit/compiler/hir/hir_stage4_field_inference_spec.spl` passes 12/12 under `bin/simple run`.
 **Severity:** P1 (deploy blocker) — RESOLVED.

@@ -1,5 +1,7 @@
 # JIT text-return extern segfault
 
+Status: **Resolved — 2026-05-29.**
+
 ## Status
 
 **Resolved — 2026-05-29.**

@@ -1,5 +1,7 @@
 # Ed25519 Verify Rejects SSH Exchange-Hash Signatures
 
+Status: Resolved 2026-06-06
+
 **Filed:** 2026-06-06
 **Status:** Resolved 2026-06-06
 **Area:** `src/os/crypto/ed25519.spl`, SSH host-key tests

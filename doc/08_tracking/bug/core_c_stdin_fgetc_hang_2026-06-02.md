@@ -1,5 +1,7 @@
 # core-c MCP stdin hang — C runtime stdin_read_char uses fgetc (2026-06-02) — FIXED (worked around)
 
+Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+
 ## Summary
 
 On the macOS ARM64 **core-c** native lane, the MCP/LSP/serial stdio servers

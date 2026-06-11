@@ -1,5 +1,7 @@
 # Bug: Interpreter rejects `self.field = value` in methods
 
+Status: **RESOLVED** — root cause identified as incorrect method keyword (`fn` instead
+
 **Date:** 2026-05-27
 **Severity:** Medium
 **Component:** Interpreter (ref_interpreter)

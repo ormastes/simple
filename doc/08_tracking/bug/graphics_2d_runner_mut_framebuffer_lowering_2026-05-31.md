@@ -1,5 +1,7 @@
 # Bug: graphics_2d full runner could not JIT/native lower framebuffer mutation
 
+Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+
 ## Date
 
 2026-05-31

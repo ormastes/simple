@@ -1,5 +1,7 @@
 # Native Pool Loop Closure Capture Fanout Mismatch
 
+Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+
 ## Summary
 
 Generated multicore-green fanout workloads that submit escaped runtime-pool

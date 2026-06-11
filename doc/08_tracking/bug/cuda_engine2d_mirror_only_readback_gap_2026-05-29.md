@@ -1,5 +1,7 @@
 # CUDA Engine2D Mirror-Only Readback Gap - 2026-05-29
 
+Status: Resolved for the documented core primitives. `draw_line`, `draw_circle`,
+
 ## Status
 
 Resolved for the documented core primitives. `draw_line`, `draw_circle`,

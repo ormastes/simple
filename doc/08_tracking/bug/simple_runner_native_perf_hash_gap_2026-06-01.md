@@ -1,5 +1,7 @@
 # Bug: simple_runner native-build perf/hash gap on macOS
 
+Status: Open
+
 ## Status
 
 Open

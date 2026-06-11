@@ -1,5 +1,7 @@
 # Native Static Server Env-I64 Loop Bound Crash
 
+Status: **Closed** — mitigation landed 2026-05-13, root cause filed as a parsing-ergonomics follow-up.
+
 Date: 2026-05-13
 
 ## Status

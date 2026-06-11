@@ -1,5 +1,7 @@
 # Bug: Tiger Hash Implementation Never Landed (W20-F Precondition Missing)
 
+Status: RESOLVED 2026-05-09. Implementation and KAT spec both exist and pass
+
 **Status:** RESOLVED 2026-05-09. Implementation and KAT spec both exist and pass
 5/5 vectors in interpreter mode.
 **md5:** `2e1edeefdc14195e8aa991d7d3df725e` (`src/os/crypto/tiger.spl`)

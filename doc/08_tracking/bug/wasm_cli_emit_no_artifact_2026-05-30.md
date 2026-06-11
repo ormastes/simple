@@ -1,5 +1,7 @@
 # Bug: `simple compile/build --target=wasm32*` emits no artifact
 
+Status: likely-fixed (triaged 2026-06-11, evidence: fix implemented + GUI WASM unblocked per body)
+
 **Date:** 2026-05-30
 **Area:** compiler / CLI / wasm backend
 **Severity:** blocker (for browser/webview Simple→WASM)

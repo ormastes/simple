@@ -1,5 +1,7 @@
 # Bug: macro `intro let` variable bindings evaluate to nil; `intro fn` works
 
+Status: Resolved 2026-05-30
+
 **Date:** 2026-05-30
 **Severity:** Medium (6 macro validation tests remain failing; fn-intro path is unaffected)
 **Affects:** `test/03_system/feature/usage/macro_validation_spec.spl`

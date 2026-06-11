@@ -1,5 +1,7 @@
 # Workspace Root Guard Verifier Toolchain Blockers
 
+Status: Both runtime crashes are gone. `bin/simple lint` and `bin/simple fmt` run
+
 ## Status: RESOLVED (2026-05-29)
 
 Both runtime crashes are gone. `bin/simple lint` and `bin/simple fmt` run

@@ -1,5 +1,7 @@
 # native_struct_closure_capture_hang
 
+Status: open
+
 **Status:** open
 **Severity:** medium
 **Date:** 2026-06-05

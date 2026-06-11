@@ -1,5 +1,7 @@
 # IDE Feature Check Interpreter Entrypoint Crash
 
+Status: Resolved in the current worktree after adding focused IDE capability adapters for sheets, DB admin, 
+
 ## Date
 2026-06-01
 

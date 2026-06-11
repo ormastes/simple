@@ -1,5 +1,7 @@
 # BrowserSession Uint8Array nested-view slice copied-buffer gap
 
+Status: Fixed in the BrowserSession Uint8Array nested-view slice copied-buffer
+
 Date: 2026-06-04
 
 ## Status

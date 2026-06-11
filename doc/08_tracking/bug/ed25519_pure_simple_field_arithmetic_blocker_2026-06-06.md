@@ -1,5 +1,7 @@
 # Ed25519 Pure Simple Field Arithmetic Blocker (2026-06-06)
 
+Status: Resolved for the pure Simple Ed25519 path. Rust/SFFI seed/runtime signing can be checked after this 
+
 ## Status
 
 Resolved for the pure Simple Ed25519 path. Rust/SFFI seed/runtime signing can be checked after this fix, but the root blocker was in pure Simple field arithmetic.

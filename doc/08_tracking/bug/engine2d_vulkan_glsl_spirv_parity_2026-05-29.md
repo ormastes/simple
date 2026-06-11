@@ -1,5 +1,7 @@
 # Engine2D Vulkan GLSL/SPIR-V Parity Closure
 
+Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+
 Date: 2026-05-29
 
 ## Summary

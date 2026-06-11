@@ -1,5 +1,7 @@
 # Bug: MIR missing MaskFromCmp, MaskedAdd/Mul/Fma, PredicatedAdd/Mul/Fma opcodes
 
+Status: CLOSED — Option B fully implemented: opcodes (2026-05-09), fusion pass (244 lines), and 10 unit test
+
 **Date:** 2026-05-02
 **Status:** CLOSED — Option B fully implemented: opcodes (2026-05-09), fusion pass (244 lines), and 10 unit tests all landed.
 **Component:** `src/compiler/50.mir/mir_instructions.spl`, `src/compiler/60.mir_opt/mir_opt/predicate_promote.spl`

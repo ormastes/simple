@@ -1,5 +1,7 @@
 # ZUC-128 KAT: Persistent Wrong Keystream (27bede74 expected, 6b8f9a89 got)
 
+Status: FIXED 2026-05-02 — S-boxes corrected + u32 arithmetic-shift workarounds (21809848fd). All 8 KAT pass
+
 **Status:** FIXED 2026-05-02 — S-boxes corrected + u32 arithmetic-shift workarounds (21809848fd). All 8 KAT pass.
 **Severity:** Blocking — ZUC-128 keystream KAT fails; EEA3/EIA3 also wrong.
 **Affected file:** `src/os/crypto/zuc.spl`

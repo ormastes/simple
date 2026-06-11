@@ -1,5 +1,7 @@
 # Ed25519 Live Baremetal Self-Test Fails Or Remains Unproven In SSHD QEMU Lane
 
+Status: Open.
+
 Date: 2026-06-06
 
 ## Status

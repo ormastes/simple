@@ -1,5 +1,7 @@
 # Bug: JIT (`bin/simple run`) route blockers for the editor
 
+Status: - partial (item 3 fixed; item 1 diagnostic tooling added; item 2 deferred)
+
 - **ID:** editor_jit_run_route_blockers
 - **Severity:** P2
 - **Date:** 2026-05-28

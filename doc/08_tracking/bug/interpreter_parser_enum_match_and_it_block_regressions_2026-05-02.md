@@ -1,5 +1,7 @@
 # Bug: Named-Field Enum Match Patterns + Two it-Block Parser Issues
 
+Status: FIXED — Bug 1 (named-field enum match) fixed 2026-05-10 in parser_patterns.rs; Bug 3 (bitwise-AND in
+
 **Date:** 2026-05-02
 **Severity:** High (blocks writing idiomatic encoding/decoding modules and spec tests)
 **Affected modes:** Interpreter (all three bugs); compiled mode not verified

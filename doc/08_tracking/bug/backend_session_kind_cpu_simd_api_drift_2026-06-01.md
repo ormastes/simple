@@ -1,6 +1,7 @@
 # Bug: BackendSessionKind CPU SIMD API Drift
 
 Date: 2026-06-01
+Status: open (triaged 2026-06-11)
 
 ## Summary
 

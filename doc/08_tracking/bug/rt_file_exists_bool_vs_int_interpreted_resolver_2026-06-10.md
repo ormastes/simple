@@ -2,7 +2,7 @@
 
 Date: 2026-06-10
 
-Status: Open
+Status: fixed (2026-06-11, B5 hardening sweep — declared extern return type changed from i64→bool, all == 1 comparisons removed; regression spec: test/01_unit/compiler/interpreter/module_resolver_file_exists_spec.spl)
 
 ## Summary
 

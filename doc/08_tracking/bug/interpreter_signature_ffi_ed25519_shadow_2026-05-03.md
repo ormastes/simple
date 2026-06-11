@@ -1,5 +1,7 @@
 # Interpreter: signature_ffi.ed25519_sign shadows os.crypto.ed25519.ed25519_sign (arity conflict)
 
+Status: FIXED 2026-05-19 — renamed `signature_sffi.ed25519_sign` → `ed25519_sign_pkcs8`; updated all callers
+
 **Filed:** 2026-05-03  
 **Discovered during:** COSE RFC 9052 KAT spec fix (cose_rfc9052_kat_spec.spl)
 **Status:** FIXED 2026-05-19 — renamed `signature_sffi.ed25519_sign` → `ed25519_sign_pkcs8`; updated all callers.

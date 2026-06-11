@@ -1,5 +1,7 @@
 # Zstd HUF decoder strict `remaining != 0` invariant — incompatible with mixed-length encoder
 
+Status: RESOLVED (W14-A, 2026-05-02) — see Resolution section below. Original framing falsified by W13-B; en
+
 **Status:** RESOLVED (W14-A, 2026-05-02) — see Resolution section below. Original framing falsified by W13-B; encoder-side root cause fixed.
 **Severity:** blocks RFC-8478 compliant Zstd Huffman literal encoder from round-tripping through the existing pure-Simple decoder.
 **Path:** `bug` track. Decoder-side fix; W9-C encoder primitives are dead-on-shelf until this lands.

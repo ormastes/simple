@@ -1,5 +1,7 @@
 # DBFS Device Remount Namespace Persistence Gap
 
+Status: Implemented for the current `DbFsDriver.open_on_device` path.
+
 Date: 2026-06-06
 
 ## Status

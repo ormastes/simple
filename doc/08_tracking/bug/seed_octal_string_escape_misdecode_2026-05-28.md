@@ -1,5 +1,7 @@
 # Bug: Seed compiler mis-decodes octal string escapes
 
+Status: - FIXED — verified 2026-05-29: `"033[2J"` lexes to `0x1b 5b 32 4a` in the deployed binary; both Rus
+
 - **ID:** seed_octal_string_escape_misdecode
 - **Severity:** P2
 - **Date:** 2026-05-28

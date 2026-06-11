@@ -1,4 +1,6 @@
 # Bug / Audit: SIMD Extern Stub Survey — simd.spl
+
+Status: RESOLVED 2026-05-27 — the current public `simd.spl` extern surface
 # 2026-05-02  (Wave L / L5)
 # **Updated 2026-05-27 (resolution)** — public `simd.spl` externs are interpreter-wired; no fully stubbed public SIMD externs remain.
 

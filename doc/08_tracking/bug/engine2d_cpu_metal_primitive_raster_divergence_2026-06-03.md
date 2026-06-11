@@ -1,5 +1,7 @@
 # BUG: engine2d CPU↔Metal primitive rasterization diverges (line/circle/rounded_rect)
 
+Status: resolved (2026-06-05)
+
 - id: engine2d-cpu-metal-primitive-raster-divergence
 - date: 2026-06-03
 - area: rendering / engine2d

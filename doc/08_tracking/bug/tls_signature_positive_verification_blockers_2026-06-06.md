@@ -1,5 +1,7 @@
 # TLS Signature Positive Verification Blockers
 
+Status: Open
+
 **Filed:** 2026-06-06
 **Status:** Open
 **Area:** `src/os/tls13/`, `std.nogc_sync_mut.io.signature_sffi`, OS crypto system specs

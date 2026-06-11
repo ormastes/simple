@@ -1,5 +1,7 @@
 # BUG: Module-level val constants are zero in baremetal LLVM targets
 
+Status: FIXED (verified: val→.rodata, const-folded arithmetic, seed rebuilt 2026-05-20)
+
 **Date:** 2026-05-20
 **Status:** FIXED (verified: val→.rodata, const-folded arithmetic, seed rebuilt 2026-05-20)
 **Severity:** High (all baremetal kernels affected)

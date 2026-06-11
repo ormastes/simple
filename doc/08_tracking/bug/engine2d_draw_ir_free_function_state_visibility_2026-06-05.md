@@ -1,5 +1,7 @@
 # BUG: Engine2D Draw IR executor cannot rely on caller-visible free-function mutation
 
+Status: open
+
 - id: engine2d-draw-ir-free-function-state-visibility
 - date: 2026-06-05
 - area: rendering / engine2d / draw-ir
