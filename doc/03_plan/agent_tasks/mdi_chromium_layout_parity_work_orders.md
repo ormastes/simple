@@ -80,10 +80,15 @@ Prove and harden the requested GUI stack:
   drag-region deltas. The first 2026-06-11 local run was intentionally failing:
   launcher status was `pass`, all marker state fields were true, but
   `changed_bytes=0`, so host-QMP mouse input was not yet wired into the guest WM
-  event path. A stricter rerun now refuses the target earlier with
-  `qemu_wm_drag_delta_reason=wm-simple-web-source-missing` because
-  `examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl` is absent
-  and only a stale `build/os/simpleos_wm_simple_web_check_32.elf` remains.
+  event path. A stricter rerun refused the target earlier with
+  `qemu_wm_drag_delta_reason=wm-simple-web-source-missing`. Historical
+  `gui_entry_engine2d.spl` and `wm_input_test_entry.spl` entries type-check in
+  the isolated repair lane, but they were not committed to the superproject
+  because current `origin/main` records `examples/09_embedded/simple_os` as a
+  gitlink. The source target is still not rebuildable: the configured
+  example-local `linker.ld` is absent, the current kernel linker exposes
+  unresolved freestanding symbols, and the focused launcher exits `139` before
+  structured QMP fields are emitted.
   Bugs:
   `doc/08_tracking/bug/simpleos_wm_qmp_source_target_missing_2026-06-11.md` and
   `doc/08_tracking/bug/simpleos_wm_host_qmp_mouse_input_no_framebuffer_delta_2026-06-11.md`.
@@ -270,9 +275,10 @@ Exit gate:
   copies), so the next work item is to fix that route or add an equivalent
   standalone QMP evidence wrapper.
 - The standalone QMP evidence wrapper now rejects stale WM evidence before QEMU
-  launch with `qemu_wm_drag_delta_reason=wm-simple-web-source-missing`. The next
-  implementation task is to restore or replace the rebuildable
-  `gui_entry_engine2d.spl` target, then re-run the wrapper and address real host
-  pointer delivery if the framebuffer still reports no drag delta.
+  launch. Historical WM entry sources type-check again, but source rebuild still
+  fails because the linker script/runtime binding set is incomplete and the
+  focused launcher exits `139`; the next implementation task is to restore the
+  full rebuildable target, then re-run the wrapper and address real host pointer
+  delivery if the framebuffer still reports no drag delta.
 - macOS and Windows live platform evidence is not proven from this Linux host;
   host-specific rows must not be promoted without real capture artifacts.

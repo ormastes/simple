@@ -1,11 +1,11 @@
 # SimpleOS WM QMP Drag Delta Evidence
 
 - status: unavailable
-- reason: wm-simple-web-source-missing
-- launcher status: unavailable
-- launcher reason: wm-simple-web-source-missing
-- launcher target: wm-simple-web
-- launcher entry: examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl
+- reason: wm-qmp-launch-failed
+- launcher status: 
+- launcher reason: 
+- launcher target: 
+- launcher entry: 
 - qmp socket: -
 - marker state: -
 - changed bytes: 0
@@ -17,6 +17,20 @@
 - after ppm: build/simpleos_wm_qmp_drag_delta_evidence/after-drag.ppm (0 bytes)
 - serial log: - (0 bytes)
 - stderr log: - (0 bytes)
+
+Follow-up on 2026-06-11:
+
+- Restored historical `gui_entry_engine2d.spl` and `wm_input_test_entry.spl`
+  entries type-check with the current compiler inside the isolated repair
+  worktree. They were not committed to the superproject because current
+  `origin/main` records `examples/09_embedded/simple_os` as a gitlink.
+- The focused launcher still exits `139` before structured launcher fields are
+  emitted; `launch.out` contains only `Segmentation fault (core dumped)`.
+- Direct source rebuild is still not available. The target metadata names
+  `examples/09_embedded/simple_os/arch/x86_64/linker.ld`, which is absent. Using
+  the current `src/os/kernel/arch/x86_64/linker.ld` instead reaches the linker
+  but fails on unresolved freestanding runtime symbols including
+  `rt_string_new`, `rt_port_outb`, `serial_println`, and `rt_mmio_read_u32`.
 
 This wrapper launches the exact WM + Simple Web + Engine2D target in a
 separate QEMU process, captures the BGA framebuffer with QMP

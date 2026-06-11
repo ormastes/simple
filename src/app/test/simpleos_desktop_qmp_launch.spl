@@ -52,7 +52,7 @@ fn _wm_simple_web_qmp_capture_target() -> OsTarget:
     OsTarget(
         arch: base.arch,
         entry: base.entry,
-        linker_script: base.linker_script,
+        linker_script: _absolute_repo_path(base.linker_script),
         target_triple: base.target_triple,
         output: base.output,
         qemu_system: base.qemu_system,
@@ -66,6 +66,17 @@ fn _wm_simple_web_qmp_capture_target() -> OsTarget:
 
 fn _timeout_ms() -> i64:
     (rt_env_get("SIMPLEOS_DESKTOP_QMP_LAUNCH_TIMEOUT_MS") ?? "90000").parse_i64() ?? 90000
+
+fn _absolute_repo_path(path: text) -> text:
+    if path.starts_with("/"):
+        return path
+    val pwd = rt_process_run_timeout("pwd", [], 2000)
+    if pwd[2] != 0:
+        return path
+    val cwd = pwd[0].trim()
+    if cwd == "":
+        return path
+    "{cwd}/{path}"
 
 fn _bool_text(value: bool) -> text:
     if value: "true" else: "false"
@@ -120,6 +131,10 @@ fn _target_with_qmp(target: OsTarget, qmp_socket: text) -> OsTarget:
 fn _qemu_available(qemu_system: text) -> bool:
     val qemu_check = rt_process_run_timeout("which", [qemu_system], 5000)
     qemu_check[2] == 0
+
+fn _source_newer_than_output(source_path: text, output_path: text) -> bool:
+    val newer = rt_process_run_timeout("sh", ["-c", "test \"$1\" -nt \"$2\"", "sh", source_path, output_path], 2000)
+    newer[2] == 0
 
 fn can_run_target(target: OsTarget) -> bool:
     if not _qemu_available(target.qemu_system):
@@ -300,6 +315,13 @@ fn main() -> i64:
         print "simpleos_desktop_qmp_target={target_name}"
         print "simpleos_desktop_qmp_entry={build_target.entry}"
         return 1
+    if target_name == "wm-simple-web" and (not rt_file_exists(build_target.output) or _source_newer_than_output(build_target.entry, build_target.output)):
+        if not build_os(build_target):
+            print "simpleos_desktop_qmp_status=unavailable"
+            print "simpleos_desktop_qmp_reason=wm-simple-web-build-failed"
+            print "simpleos_desktop_qmp_target={target_name}"
+            print "simpleos_desktop_qmp_entry={build_target.entry}"
+            return 1
     if not rt_file_exists(build_target.output) and not build_os(build_target):
         print "simpleos_desktop_qmp_status=unavailable"
         print "simpleos_desktop_qmp_reason=desktop-build-failed"
