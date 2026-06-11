@@ -119,6 +119,79 @@ class WindowEntry:
     static fn create(window_id: i64, z_order: i64) -> WindowEntry:
         WindowEntry(window_id: window_id, z_order: z_order)
 
+# Maximum next_z value before z_order renormalisation is triggered.
+# 1_000_000_000 is well below i64 max (~9.2e18) yet far beyond any realistic
+# raise/lower rate (even 1 million operations per second would take ~1000 s to
+# hit this), so renorm is rare and the guard is purely a safety net.
+val RENORM_THRESHOLD = 1000000000
+
+# Renormalise window z_order values when next_z grows too large.
+# Compacts all z_orders to 0..n-1 preserving strict relative order and resets
+# next_z = n.  Uses a stable selection-sort rank assignment so relative order
+# is identical after renorm.
+fn _renorm_windows(windows: List<WindowEntry>, n: i64) -> List<WindowEntry>:
+    # Build a sorted index array (stable insertion sort by z_order).
+    # ranked_ids[k] = window_id of the k-th window in ascending z_order.
+    var sorted_ids = List<i64>()
+    var i = 0
+    while i < n:
+        val w = windows.get(i)
+        if val we = w:
+            sorted_ids.push(we.window_id)
+        i = i + 1
+    # Insertion sort sorted_ids by the corresponding z_order in windows.
+    var si = 1
+    while si < sorted_ids.len():
+        var sj = si
+        while sj > 0:
+            val ida = sorted_ids.get(sj - 1)
+            val idb = sorted_ids.get(sj)
+            var za = 0
+            var zb = 0
+            if val ia = ida:
+                var k = 0
+                while k < n:
+                    val wk = windows.get(k)
+                    if val wke = wk:
+                        if wke.window_id == ia:
+                            za = wke.z_order
+                    k = k + 1
+            if val ib = idb:
+                var k = 0
+                while k < n:
+                    val wk = windows.get(k)
+                    if val wke = wk:
+                        if wke.window_id == ib:
+                            zb = wke.z_order
+                    k = k + 1
+            if za > zb:
+                val tmp = sorted_ids.get(sj - 1)
+                val tmp2 = sorted_ids.get(sj)
+                if val ta = tmp:
+                    if val tb = tmp2:
+                        sorted_ids.set(sj - 1, tb)
+                        sorted_ids.set(sj, ta)
+            sj = sj - 1
+        si = si + 1
+    # Assign new z_orders: sorted_ids[rank] gets z_order = rank.
+    var result = List<WindowEntry>()
+    var wi = 0
+    while wi < n:
+        val w = windows.get(wi)
+        if val we = w:
+            # Find rank of this window in sorted_ids.
+            var rank = 0
+            var ri = 0
+            while ri < sorted_ids.len():
+                val sid = sorted_ids.get(ri)
+                if val s = sid:
+                    if s == we.window_id:
+                        rank = ri
+                ri = ri + 1
+            result.push(WindowEntry.create(we.window_id, rank))
+        wi = wi + 1
+    result
+
 class WindowStack:
     windows: List<WindowEntry>
     next_z: i64
@@ -134,6 +207,11 @@ class WindowStack:
         val entry = WindowEntry.create(window_id, self.next_z)
         self.next_z = self.next_z + 1
         self.windows.push(entry)
+        # Renormalise if next_z has grown too large.
+        if self.next_z >= RENORM_THRESHOLD:
+            val n = self.windows.len()
+            self.windows = _renorm_windows(self.windows, n)
+            self.next_z = n
 
     # Remove a window from the stack.
     me remove(window_id: i64):
@@ -144,11 +222,18 @@ class WindowStack:
         self.windows = result
 
     # Raise a window to the top (highest z_order).
+    # If next_z reaches RENORM_THRESHOLD after the raise, all z_orders are
+    # compacted to 0..n-1 (preserving relative order) and next_z is reset to n.
     me raise_window(window_id: i64):
         for w in self.windows:
             if w.window_id == window_id:
                 w.z_order = self.next_z
                 self.next_z = self.next_z + 1
+        # Renormalise if next_z has grown too large.
+        if self.next_z >= RENORM_THRESHOLD:
+            val n = self.windows.len()
+            self.windows = _renorm_windows(self.windows, n)
+            self.next_z = n
 
     # Lower a window to the bottom (z_order below all others).
     me lower_window(window_id: i64):

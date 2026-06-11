@@ -129,12 +129,52 @@ def WindowStack.add (ws : WindowStack) (wid : Int) : WindowStack :=
 def WindowStack.remove (ws : WindowStack) (wid : Int) : WindowStack :=
   { ws with windows := ws.windows.filter (fun w => w.window_id ≠ wid) }
 
-/-- Raise a window to the top (assigns next_z and increments counter). -/
+-- ============================================================
+-- § 3b  Renormalisation — FINDING-U1 fix
+-- ============================================================
+
+/-- Renormalisation threshold: next_z values reaching this bound trigger a
+    compaction.  1_000_000_000 is well below i64 max but far beyond realistic
+    operation counts — mirrors RENORM_THRESHOLD in stacking.spl. -/
+def renormThreshold : Int := 1000000000
+
+/-- Rank-assignment helper.
+    Given a window entry `e` and the sorted list (ascending z_order), return
+    the index (0-based) of `e`'s window_id in that list. -/
+def rankOf (wid : Int) : List WindowEntry → Nat
+  | []      => 0
+  | h :: t  => if h.window_id == wid then 0 else 1 + rankOf wid t
+
+/-- Sort a list of WindowEntry ascending by z_order (insertion sort). -/
+def insertSortedW (e : WindowEntry) : List WindowEntry → List WindowEntry
+  | []      => [e]
+  | h :: t  => if e.z_order ≤ h.z_order then e :: h :: t
+               else h :: insertSortedW e t
+
+def sortWindowEntries (ws : List WindowEntry) : List WindowEntry :=
+  ws.foldl (fun acc w => insertSortedW w acc) []
+
+/-- Renormalise a WindowStack: compact all z_orders to 0..n-1 preserving
+    strict relative order and reset next_z = n.
+    Mirrors `_renorm_windows` in stacking.spl. -/
+def WindowStack.renorm (ws : WindowStack) : WindowStack :=
+  let sorted := sortWindowEntries ws.windows
+  let new_windows := ws.windows.map (fun w =>
+    { w with z_order := Int.ofNat (rankOf w.window_id sorted) })
+  { windows := new_windows, next_z := Int.ofNat ws.windows.length }
+
+/-- Raise a window to the top (assigns next_z and increments counter).
+    After raising, if next_z ≥ RENORM_THRESHOLD, renormalise. -/
 def WindowStack.raiseWindow (ws : WindowStack) (wid : Int) : WindowStack :=
   let nz := ws.next_z
-  { windows := ws.windows.map (fun w =>
-      if w.window_id == wid then { w with z_order := nz } else w)
-  , next_z := nz + 1 }
+  let ws1 : WindowStack :=
+    { windows := ws.windows.map (fun w =>
+        if w.window_id == wid then { w with z_order := nz } else w)
+    , next_z := nz + 1 }
+  if ws1.next_z ≥ renormThreshold then
+    WindowStack.renorm ws1
+  else
+    ws1
 
 /-- Insertion-sort helper: insert one entry into an already-sorted list (ascending). -/
 def insertSorted (e : WindowEntry) : List WindowEntry → List WindowEntry
