@@ -291,9 +291,9 @@ emit `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
 An attempted PMM/VMM bootstrap inside the minimal `green_carrier_probe_entry`
 stopped before PMM returned. The built ELF showed `_kernel_end` near
 `0x0ecef000`, so the earlier small reserved-end guess was invalid for this
-entry. The remaining blocker is now specifically a safe direct-boot
-memory-bootstrap or minimal user page-table allocator for the probe, not the
-scheduler green dispatch or syscall-shim bridge readiness.
+entry. At that intermediate point, the remaining blocker was specifically a
+safe direct-boot memory-bootstrap or minimal user page-table allocator for the
+probe, not the scheduler green dispatch or syscall-shim bridge readiness.
 
 The default live probe was left readiness-only: it must continue to pass the
 current AP, scheduler, user-handoff-readiness, user-entry-bridge, and
