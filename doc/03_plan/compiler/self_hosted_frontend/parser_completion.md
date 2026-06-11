@@ -122,13 +122,22 @@ Known follow-up: `|`/`&`/`^` sit at multiplication level, diverging from the
 
 ---
 
-### M2 — G4: `@attr(...)` annotations before AOP pointcut dispatch (fixes ~61 files)
+### M2 — G4: `@attr(...)` annotations before AOP pointcut dispatch (fixes ~61 files) — DONE 2026-06-11
 
-Poisons prelude — `@allow(...)` at line 1:7 dispatches to AOP `pc{...}` parser.  
-**File:** `src/compiler/10.frontend/core/parser_decls.spl` (or `parser_decls_part1.spl`)  
-When `@` is seen at top-level, parse annotation name+args and attach as attribute before reaching AOP path.  
-**Test:** `"@allow(star_import)\nval x = 1"` → 0 errors.  
-**Docker:** `bin/simple check src/lib/common/bcrypt/key_derivation.spl`
+Landed in `03a0aaaeda` (local line) / grafted to origin. Dispatch site was
+`core/parser_decls_part2.spl:313` (`elif par_kind_get() == 171:` in
+`parse_module_body()`). Two root causes:
+1. The decorator-name capture only accepted ident (kind 6); `allow` lexes as
+   keyword kind 218, so the name stayed empty, `(star_import)` was left
+   unconsumed, and the loop re-dispatched `allow` to `parse_arch_rule_decl` →
+   AOP pointcut error at 1:7. Fixed: accept non-newline keyword kinds as
+   annotation names.
+2. Unknown decorators (not gpu/simd/packed/derive) had no else branch. Fixed:
+   consume-and-continue so the following declaration parses normally.
+
+Verified: `@allow(star_import)\nval x = 1`, `@allow(unused)` before fn, stacked
+`@inline\n@allow(unused)` all parse with `parser_has_errors()=false`; control
+errors correctly; lazy_outline_equivalence 16/16.
 
 ---
 
