@@ -1,7 +1,7 @@
 # Famous-Site Corpus Div Geometry Unbounded Summary Segfault
 
 Date: 2026-06-11
-Status: open
+Status: resolved-current-runtime
 
 ## Summary
 
@@ -41,9 +41,45 @@ runs `site_corpus_div_geometry_summary_cli.spl` in separate bounded chunks.
 The current executable spec covers offsets `0` and `6` as a fast regression
 check.
 
-## Required Fix
+## Current Status
 
-Investigate whether repeated `simple_web_layout_render_html_draw_ir` calls,
-large string report concatenation, interpreter fallback, or module/runtime state
-causes the crash. Full-corpus geometry evidence should not be promoted until a
-single robust aggregation path or per-row artifact runner is available.
+Follow-up verification on 2026-06-11 shows the current runtime no longer
+reproduces the single-process aggregate crash in this checkout:
+
+```sh
+SIMPLE_LIB=src /home/ormastes/dev/pub/simple/bin/simple \
+  run src/app/wm_compare/site_corpus_div_geometry_summary_cli.spl \
+  0 0 160 120 /tmp/full_div_geometry_limit0.sdn 132
+```
+
+Observed result:
+
+```text
+status=pass
+offset=0
+limit=0
+expected=132
+viewport_width=160
+viewport_height=120
+report_path=/tmp/full_div_geometry_limit0.sdn
+```
+
+The executable regression spec now covers the same all-row API:
+
+```sh
+SIMPLE_LIB=src /home/ormastes/dev/pub/simple/bin/simple \
+  test test/03_system/gui/wm_compare/structural_layout_report_spec.spl \
+  --mode=interpreter --clean --format json
+```
+
+Observed result: `11` passed, `0` failed.
+
+No blur, downscaling, pixel tolerance, copied Chromium pixels, or text
+antialiasing normalization is involved; the check compares stored Chromium DOM
+metrics against Pure Simple Draw IR geometry.
+
+## Remaining Guard
+
+Keep the chunked wrapper as a fallback and release diagnostic, but do not treat
+chunking as required when the full single-process `limit=0` regression spec and
+CLI smoke are green.

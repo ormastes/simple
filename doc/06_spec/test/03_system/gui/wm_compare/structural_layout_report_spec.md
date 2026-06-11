@@ -28,7 +28,7 @@ structural_layout_report_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -282,6 +282,24 @@ expect(report).to_contain("sample id: \"site_11_microsoft\" status: \"layout_mat
 
 </details>
 
+#### summarizes exact div geometry for the full famous-site corpus in one process
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = build_site_corpus_div_geometry_summary(0, 160, 120)
+expect(report).to_contain("famous_site_corpus_div_geometry_summary")
+expect(report).to_contain("summary: (offset: 0 selected: 132 matched: 132 mismatched: 0 missing_metrics: 0")
+expect(report).to_contain("sample id: \"site_0_google\" status: \"layout_match\"")
+expect(report).to_contain("sample id: \"site_131_epic_games\" status: \"layout_match\"")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -301,8 +319,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

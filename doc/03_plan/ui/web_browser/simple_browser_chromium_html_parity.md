@@ -262,3 +262,15 @@ Open gaps tied to the active browser objective:
     verifies titlebar drag/maximize routing, title command routing, titlebar
     text input traffic, body input events, traffic-button computed styles, and
     `blur_or_tolerance_used=false`
+- Full famous-site div-geometry evidence is no longer chunk-only in the current
+  runtime:
+  - `site_corpus_div_geometry_summary_cli.spl 0 0 160 120 ... 132` passes in a
+    single Simple process with `selected=132`, `matched=132`, `mismatched=0`,
+    and `missing_metrics=0`
+  - `structural_layout_report_spec.spl` now includes a regression scenario for
+    `build_site_corpus_div_geometry_summary(0, 160, 120)`, covering the
+    all-row aggregate API that previously had a segfault tracker
+  - the chunked wrapper remains a fallback diagnostic, but
+    `doc/09_report/famous_site_corpus_div_geometry_full_2026-06-11.md` is the
+    current single-command evidence; it uses no blur, tolerance, downscaling,
+    copied Chromium pixels, or text antialiasing normalization
