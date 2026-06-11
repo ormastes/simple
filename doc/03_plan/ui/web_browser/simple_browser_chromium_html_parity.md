@@ -294,6 +294,15 @@ Open gaps tied to the active browser objective:
   - `src/app/ui_shared_mdi/titlebar_contract_probe.spl` emits source-contract
     fields for the shared MDI titlebar button, body button, text input, and
     custom titlebar CSS
+  - the macOS capture wrapper now converts the captured window PNG to BMP and
+    emits rendered titlebar widget CSS pixel counts:
+    `macos_gui_live_window_evidence_titlebar_css_pixels`,
+    `macos_gui_live_window_evidence_titlebar_widget_fill_pixels`,
+    `macos_gui_live_window_evidence_titlebar_widget_accent_pixels`, and
+    `macos_gui_live_window_evidence_titlebar_widget_text_pixels`
+  - on a real macOS pass, the wrapper fails if the titlebar widget fill,
+    accent, or text CSS colors are missing from the capture; on Linux these
+    fields stay zero and the lane remains an explicit `requires-macos` skip
   - `macos_gui_live_window_evidence_spec.spl` checks those MDI contract fields
     in both lanes, while Linux still reports only
     `macos_gui_live_window_evidence_status=skip` and

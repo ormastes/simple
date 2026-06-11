@@ -29,6 +29,9 @@ Scope:
   proof to exact rendered compositor pixels instead of only source markup.
 - macOS live-window evidence is still host-gated (`check-macos-gui-live-window-evidence.shs`),
   and this Linux host can only prove the explicit `requires-macos` skip lane.
+  The macOS pass contract now includes rendered titlebar widget CSS pixel
+  counts from the captured BMP (`titlebar_css_pixels`, widget fill, accent,
+  and text counts) and fails on macOS if the fill/accent/text colors are absent.
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
