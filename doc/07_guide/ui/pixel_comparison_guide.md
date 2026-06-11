@@ -74,6 +74,9 @@ The backend-executed evidence also records `software_render_elapsed_us`,
 `cpu_simd_render_elapsed_us`, `metal_render_elapsed_us`, and
 `total_elapsed_us`; use those fields when tracking GUI startup/render
 regressions instead of relying only on wall-clock test duration.
+It also records `timing_budget_us`, `timing_budget_status`, and
+`timing_budget_reason`; the current focused budgets are 250000 us for the
+backend-executed reduced scene and 1000000 us for generated widget rendering.
 
 The generated-GUI matrix intentionally records
 `text_normalization_pixels=269` for the fixture-specific text antialiasing
