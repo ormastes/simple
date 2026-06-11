@@ -33,14 +33,14 @@ fi
 PROFILE_DOCKER_SIMPLE_BINARY="${PROFILE_DOCKER_SIMPLE_BINARY:-}"
 
 if [ -z "${SIMPLE_BINARY:-}" ]; then
-    if [ "$PROFILE_DOCKER_INSIDE" = "1" ] && [ -x "src/compiler_rust/target/debug/simple" ]; then
-        SIMPLE_BINARY="src/compiler_rust/target/debug/simple"
-    elif [ -x "bin/simple" ]; then
+    if [ -x "bin/simple" ]; then
         SIMPLE_BINARY="bin/simple"
     elif [ -x "bin/release/simple" ]; then
         SIMPLE_BINARY="bin/release/simple"
     elif [ -x "bin/release/x86_64-unknown-linux-gnu/simple" ]; then
         SIMPLE_BINARY="bin/release/x86_64-unknown-linux-gnu/simple"
+    elif [ "$PROFILE_DOCKER_INSIDE" = "1" ] && [ -x "src/compiler_rust/target/debug/simple" ]; then
+        SIMPLE_BINARY="src/compiler_rust/target/debug/simple"
     else
         SIMPLE_BINARY="bin/simple"
     fi
@@ -583,58 +583,58 @@ write_simple_fanout_multicore_green() {
 }
 
 write_simple_fanout_stress_multicore_green() {
-    {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, MulticoreGreenHandle}'
-        echo 'extern fn rt_exit(code: i32)'
-        echo 'extern fn rt_pool_join(handle: i64) -> i64'
-        echo ''
-        echo 'fn work() -> i64:'
-        echo '    var x = 1'
-        echo "    for i in 0..${FANOUT_STRESS_ITERS}:"
-        echo '        x = (x * 1103515245 + 12345) % 2147483648'
-        echo '    x'
-        echo ''
-        echo 'fn spawn_work() -> MulticoreGreenHandle:'
-        echo '    multicore_green_spawn(\: work())'
-        echo ''
-        echo 'fn expected_total() -> i64:'
-        echo '    var total: i64 = 0'
-        echo "    for task in 0..${FANOUT_STRESS_WORKERS}:"
-        echo '        total = total + work()'
-        echo '    total'
-        echo ''
-        echo 'fn main():'
-        echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
-        echo '    println("multicore_green_parallelism = {requested_parallelism}/{multicore_green_parallelism()}")'
-        echo '    if multicore_green_uses_global_fifo_queue():'
-        echo '        println("multicore_green_queue_model = global_fifo")'
-        echo '        rt_exit(75)'
-        echo '        return'
-        echo '    if !multicore_green_uses_work_stealing():'
-        echo '        println("multicore_green_queue_model = scheduler_owned")'
-        echo '        rt_exit(76)'
-        echo '        return'
-        echo '    println("multicore_green_queue_model = work_stealing")'
-        echo '    var native_handles: [i64] = []'
-        echo "    for task in 0..${FANOUT_STRESS_WORKERS}:"
-        echo '        var handle = spawn_work()'
-        echo '        if handle.used_runtime_pool():'
-        echo '            native_handles.push(handle.native_handle)'
-        echo '            handle.native_handle = 0'
-        echo '    var pool_used: i64 = 0'
-        echo '    var total: i64 = 0'
-        echo '    for index in 0..native_handles.len():'
-        echo '        pool_used = pool_used + 1'
-        echo '        total = total + rt_pool_join(native_handles[index])'
-        echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_STRESS_WORKERS}\")"
-        echo "    if pool_used != ${FANOUT_STRESS_WORKERS}:"
-        echo '        rt_exit(73)'
-        echo '    val expected = expected_total()'
-        echo '    if total != expected:'
-        echo '        println("checksum_mismatch total={total} expected={expected}")'
-        echo '        rt_exit(74)'
-        echo '    println("total = {total}")'
-    } >"$BUILD_DIR/fanout_stress_multicore_green.spl"
+    cat >"$BUILD_DIR/fanout_stress_multicore_green.spl" <<EOF
+use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, MulticoreGreenHandle}
+extern fn rt_exit(code: i32)
+extern fn rt_pool_join(handle: i64) -> i64
+
+fn work() -> i64:
+    var x = 1
+    for i in 0..${FANOUT_STRESS_ITERS}:
+        x = (x * 1103515245 + 12345) % 2147483648
+    x
+
+fn spawn_work() -> MulticoreGreenHandle:
+    multicore_green_spawn(\: work())
+
+fn expected_total() -> i64:
+    var total: i64 = 0
+    for task in 0..${FANOUT_STRESS_WORKERS}:
+        total = total + work()
+    total
+
+fn main():
+    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})
+    println("multicore_green_parallelism = {requested_parallelism}/{multicore_green_parallelism()}")
+    if multicore_green_uses_global_fifo_queue():
+        println("multicore_green_queue_model = global_fifo")
+        rt_exit(75)
+        return
+    if !multicore_green_uses_work_stealing():
+        println("multicore_green_queue_model = scheduler_owned")
+        rt_exit(76)
+        return
+    println("multicore_green_queue_model = work_stealing")
+    var native_handles: [i64] = []
+    for task in 0..${FANOUT_STRESS_WORKERS}:
+        var handle = spawn_work()
+        if handle.used_runtime_pool():
+            native_handles.push(handle.native_handle)
+            handle.native_handle = 0
+    var pool_used: i64 = 0
+    var total: i64 = 0
+    for index in 0..native_handles.len():
+        pool_used = pool_used + 1
+        total = total + rt_pool_join(native_handles[index])
+    println("multicore_green_pool_used = {pool_used}/${FANOUT_STRESS_WORKERS}")
+    if pool_used != ${FANOUT_STRESS_WORKERS}:
+        rt_exit(73)
+    val expected = expected_total()
+    if total != expected:
+        println("checksum_mismatch total={total} expected={expected}")
+        rt_exit(74)
+    println("total = {total}")
+EOF
 }
 
 write_c_hello() {
@@ -1294,7 +1294,7 @@ cat >"$REPORT_PATH" <<EOF
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
-- Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs. Build \`simple-cross-language-perf:latest\` with \`docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker\` for contract-gated C/Go comparison evidence. Unless \`PROFILE_DOCKER_SIMPLE_BINARY\` is explicitly set, the container run auto-selects \`src/compiler_rust/target/debug/simple\` when present so the fixed native linker path is used. The fixed linker-order blocker for Simple native rows is recorded in \`doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md\`.
+- Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs. Build \`simple-cross-language-perf:latest\` with \`docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker\` for contract-gated C/Go comparison evidence. Unless \`PROFILE_DOCKER_SIMPLE_BINARY\` is explicitly set, the container run prefers the release wrapper (\`bin/simple\` / \`bin/release/simple\`) and only falls back to \`src/compiler_rust/target/debug/simple\` when the release path is unavailable. The current debug binary still hits the Docker-native linker regression tracked in \`doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md\`, so auto mode must not prefer it.
 - Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
 - Go commands inherit \`GOMAXPROCS=$GOMAXPROCS\`, defaulting to \`CPU_WORKERS\`, so Go goroutine rows and Simple multicore-green rows use the same scheduler-width limit unless the caller explicitly overrides it.
 - Warm throughput is measured in-process where the runtime can print \`warm_ms\`; interpreter and SMF rows use outer-process timing and are labeled that way.
