@@ -195,6 +195,9 @@ Updated: 2026-06-11
 - this commit -- second block color scan allocation removal:
   `_second_hex_color_after` now has a start-offset variant so render-time second
   block-color probing no longer slices the HTML buffer at the first block tag.
+- this commit -- currentColor value normalization allocation removal:
+  `_is_current_color_after` now skips whitespace and compares `currentColor`
+  in-place instead of allocating, trimming, and lowercasing a value tail.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
