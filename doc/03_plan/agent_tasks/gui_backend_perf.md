@@ -111,6 +111,10 @@ Updated: 2026-06-11
 - this commit -- style-block marker scan reuse: `_style_rule_block_color` now
   uses one `<style` index lookup for both branch selection and substring
   extraction instead of scanning once with `contains` and again with `index_of`.
+- this commit -- split-pane fixture marker reuse: the Engine2D split-pane status
+  list scene now participates in the shared fixture-marker booleans for
+  recognition, solid-fill exclusion, and dispatch, with focused exact-pixel unit
+  coverage for the branch.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

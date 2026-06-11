@@ -27,7 +27,7 @@ simple_web_engine2d_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -254,6 +254,30 @@ expect(pixels[68 + 58 * 96]).to_equal(0xFF7C3AEDu32)
 
 </details>
 
+#### renders split pane status list fixture with exact status colors
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body class='simple-web-engine2d-split-pane-status-list'><main>split pane status list</main></body></html>"
+val pixels = simple_web_engine2d_render_html_pixels(html, 96, 64, "software")
+expect(pixels.len()).to_equal(96 * 64)
+expect(pixels[0]).to_equal(0xFF1F2937u32)
+expect(pixels[3 + 8 * 96]).to_equal(0xFFEF4444u32)
+expect(pixels[3 + 22 * 96]).to_equal(0xFF22C55Eu32)
+expect(pixels[3 + 36 * 96]).to_equal(0xFF3B82F6u32)
+expect(pixels[12]).to_equal(0xFF334155u32)
+expect(pixels[58 + 18 * 96]).to_equal(0xFF22C55Eu32)
+expect(pixels[58 + 30 * 96]).to_equal(0xFFF59E0Bu32)
+expect(pixels[58 + 42 * 96]).to_equal(0xFF3B82F6u32)
+```
+
+</details>
+
 #### matches direct child :has selector for first block
 
 <details>
@@ -289,8 +313,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
