@@ -96,6 +96,11 @@ which requires `wrapper_smf_pool_pass=true`; the historical blocker remains in
 
 SMF mutable-global regression evidence is now covered by
 `test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl`.
+The still-open SMF function-valued global/global-array crash path is now pinned
+by
+`test/03_system/feature/usage/cooperative_green_smf_function_global_blocker_spec.spl`,
+which keeps both minimal SMF fixtures compiling and requires their current
+runtime crash path to stay explicit until the loader/codegen fix lands.
 Cooperative-green queue rows are still not M:N CPU-parallel evidence; keep them
 classified separately from native and SMF `multicore_green_spawn` evidence.
 
@@ -105,6 +110,19 @@ Temporary local repro files were created under `build/tmp/` while investigating:
 
 - `global_array_append_smoke.spl`
 - `global_usize_smoke.spl`
+
+## Current Open Repro
+
+Verified again on 2026-06-11 with
+`src/compiler_rust/target/debug/simple compile ... -o fixture.smf` followed by
+`src/compiler_rust/target/debug/simple fixture.smf`:
+
+- function-valued global slot SMF fixture -> compile succeeds, runtime exits
+  `139`
+- global function-valued array SMF fixture -> compile succeeds, runtime exits
+  `139`
+
+The focused blocker spec above keeps that current crash boundary executable.
 
 ## Required Fix
 
