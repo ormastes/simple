@@ -54,8 +54,12 @@ Prove and harden the requested GUI stack:
   `src/app/ui.web/wm.js`, opens an MDI window through the Electron IPC path,
   simulates titlebar drag, traffic-light maximize, title-command Enter, body
   text input, and body pointer down/up, then asserts the emitted `window_cmd`
-  and `input_event` frames. This is not a substitute for the remaining SimpleOS
-  QEMU framebuffer click/drag proof.
+  and `input_event` frames. The same live Chromium pass now also checks
+  `getComputedStyle` evidence for title text, three traffic-light buttons,
+  titlebar height/display/cursor/background, and title-command input
+  min-width/height/background/cursor. This is not a substitute for the remaining
+  SimpleOS QEMU framebuffer click/drag proof or the separate Linux-native host
+  backend semantic event+style proof.
 - Windows and macOS live evidence is host-gated today:
   `test/03_system/gui/windows_native_mdi_evidence_spec.spl` reports
   `requires-windows` off Windows, and

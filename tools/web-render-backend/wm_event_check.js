@@ -26,8 +26,15 @@ function makeHtml(root) {
     #wm-desktop { position: relative; width: 800px; height: 560px; }
     #wm-taskbar { position: absolute; left: 0; top: 560px; width: 800px; height: 40px; }
     .wm-window { position: absolute; border: 1px solid #334155; background: #fff; }
-    .wm-titlebar { height: 32px; display: flex; align-items: center; gap: 6px; background: #e5e7eb; }
-    .wm-traffic-lights button { width: 18px; height: 18px; }
+    .wm-titlebar { height: 34px; display: flex; align-items: center; gap: 6px; background: rgb(229, 231, 235); cursor: grab; }
+    .wm-titlebar-icon { width: 18px; height: 18px; display: inline-grid; place-items: center; border-radius: 999px; background: rgb(37, 99, 235); color: rgb(255, 255, 255); }
+    .wm-title { min-width: 0; color: rgb(17, 24, 39); font-size: 12px; font-weight: 700; }
+    .wm-title-input { min-width: 142px; width: 158px; height: 24px; color: rgb(17, 24, 39); background: rgb(241, 245, 249); border: 1px solid rgb(148, 163, 184); cursor: text; }
+    .wm-title-context { color: rgb(71, 85, 105); font-size: 11px; }
+    .wm-traffic-lights button { width: 18px; height: 18px; border-radius: 999px; border: 0; }
+    .wm-btn-close { background: rgb(239, 68, 68); }
+    .wm-btn-minimize { background: rgb(234, 179, 8); }
+    .wm-btn-maximize { background: rgb(34, 197, 94); }
     .wm-body { padding: 8px; }
   </style>
 </head>
@@ -136,6 +143,36 @@ async function main() {
     }
 
     const titlebar = eventTarget('.wm-titlebar');
+    const title = eventTarget('.wm-title');
+    const titleInput = eventTarget('.wm-title-input');
+    const closeButton = eventTarget('.wm-btn-close');
+    const minimizeButton = eventTarget('.wm-btn-minimize');
+    const maximizeButton = eventTarget('.wm-btn-maximize');
+    const titlebarStyle = getComputedStyle(titlebar);
+    const titleStyle = getComputedStyle(title);
+    const titleInputStyle = getComputedStyle(titleInput);
+    const closeStyle = getComputedStyle(closeButton);
+    const minimizeStyle = getComputedStyle(minimizeButton);
+    const maximizeStyle = getComputedStyle(maximizeButton);
+    out.title_text = title.textContent;
+    out.title_context_text = eventTarget('.wm-title-context').textContent;
+    out.traffic_button_count = document.querySelectorAll('.wm-traffic-lights button').length;
+    out.title_input_tag = titleInput.tagName.toLowerCase();
+    out.titlebar_height = titlebarStyle.height;
+    out.titlebar_display = titlebarStyle.display;
+    out.titlebar_cursor = titlebarStyle.cursor;
+    out.titlebar_background = titlebarStyle.backgroundColor;
+    out.title_color = titleStyle.color;
+    out.title_font_weight = titleStyle.fontWeight;
+    out.title_input_min_width = titleInputStyle.minWidth;
+    out.title_input_width = titleInputStyle.width;
+    out.title_input_width_px = Number.parseFloat(titleInputStyle.width);
+    out.title_input_height = titleInputStyle.height;
+    out.title_input_cursor = titleInputStyle.cursor;
+    out.title_input_background = titleInputStyle.backgroundColor;
+    out.close_button_background = closeStyle.backgroundColor;
+    out.minimize_button_background = minimizeStyle.backgroundColor;
+    out.maximize_button_background = maximizeStyle.backgroundColor;
     const beforeRect = eventTarget('.wm-window').getBoundingClientRect();
     dispatch(titlebar, 'mousedown', { clientX: 90, clientY: 72 });
     dispatch(document, 'mousemove', { clientX: 126, clientY: 98 });
@@ -143,12 +180,10 @@ async function main() {
     const expectedMoveX = Math.round(beforeRect.x + 36);
     const expectedMoveY = Math.round(beforeRect.y + 26);
 
-    const titleInput = eventTarget('.wm-title-input');
     titleInput.value = '/tmp/project';
     titleInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' }));
 
-    const maxButton = eventTarget('.wm-traffic-lights .wm-btn-maximize');
-    maxButton.click();
+    maximizeButton.click();
 
     const bodyInput = eventTarget('#field');
     bodyInput.value = 'Hello Simple';
@@ -184,6 +219,24 @@ async function main() {
       out.move_payload.source === 'native_event' &&
       out.move_payload.x === expectedMoveX &&
       out.move_payload.y === expectedMoveY &&
+      out.title_text === 'Terminal' &&
+      out.title_context_text === 'terminal' &&
+      out.traffic_button_count === 3 &&
+      out.title_input_tag === 'input' &&
+      out.titlebar_height === '34px' &&
+      out.titlebar_display === 'flex' &&
+      out.titlebar_cursor === 'grab' &&
+      out.titlebar_background === 'rgb(229, 231, 235)' &&
+      out.title_color === 'rgb(17, 24, 39)' &&
+      Number(out.title_font_weight) >= 700 &&
+      out.title_input_min_width === '142px' &&
+      out.title_input_width_px >= 142 &&
+      out.title_input_height === '24px' &&
+      out.title_input_cursor === 'text' &&
+      out.title_input_background === 'rgb(241, 245, 249)' &&
+      out.close_button_background === 'rgb(239, 68, 68)' &&
+      out.minimize_button_background === 'rgb(234, 179, 8)' &&
+      out.maximize_button_background === 'rgb(34, 197, 94)' &&
       out.title_payload.command_text === '/tmp/project' &&
       out.text_payload.event.text === 'Hello Simple';
     return out;
