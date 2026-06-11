@@ -58,6 +58,17 @@ See doc/03_plan/ui/graphics/engine/gpu_backend_parallel_agent_plan_2026-06-11.md
 - 2026-06-11: Agent C batch 2 in progress: backend_directx.spl,
   backend_directx_spec.spl, mod.spl registration, engine2d_backend_order.md
   updated (directx inserted after vulkan), setup guide written.
+- 2026-06-11: Agent A batch 1 committed (7136032): backend_cuda.spl —
+  feature_gate renamed "cuda_device" → "cuda-device-unavailable" (AC-1
+  structured evidence); probe_cuda_processing() added. backend_rocm.spl —
+  probe_rocm() added with "hip-toolchain-missing" gate (AC-2); BackendProbeResult
+  import added; _engine2d_hip_source import moved to top.
+- 2026-06-11: Agent A batch 2 committed (6d5830e): backend_cuda_processing_spec.spl
+  (7/7 pass) + backend_rocm_processing_spec.spl (7/7 pass) — interpreter mode,
+  concrete-value asserts, no skip(), no hollow expects. AC-1 and AC-2 CLOSED.
+- 2026-06-11: Agent A bug doc updated in 86c62fb (conflict-resolve merged it):
+  cuda_engine2d_mirror_only_readback_gap_2026-05-29.md — Processing-Lane Probe
+  Hardening section added.
 
 ## Shared Edits Requested
 - helpers_availability.spl: add "directx" to the auto-detect probe list
@@ -65,3 +76,12 @@ See doc/03_plan/ui/graphics/engine/gpu_backend_parallel_agent_plan_2026-06-11.md
   DirectXBackend.init() when vulkan probe fails. Agent C owns mod.spl only;
   helpers_availability.spl is shared — orchestrator should apply this after
   all lanes land.
+- Conflict-cleanup (Agent A): commit 86c62fb360 (conflict-resolve by another
+  agent) dropped the following spec files from test/01_unit/lib/gc_async_mut/gpu/engine2d/
+  — they are present in .jjconflict-side-1/ and should be restored:
+  backend_directx_spec.spl, backend_lane_spec.spl, backend_order_spec.spl,
+  backend_vulkan_drawing_spec.spl, backend_vulkan_processing_spec.spl,
+  backend_webgpu_spec.spl, baremetal_constructor_spec.spl, draw_ir_adv_spec.spl,
+  draw_text_bg_spec.spl, graphics_backend_acceleration_spec.spl.
+  backend_cuda_renderbackend_spec.spl was already restored at HEAD (86c62fb).
+  These belong to other agents' scopes but need orchestrator or owner restoration.

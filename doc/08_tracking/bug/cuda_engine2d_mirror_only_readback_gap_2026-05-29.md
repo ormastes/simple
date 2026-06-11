@@ -60,3 +60,24 @@ Verification:
   - Result: 8 passed, 0 failed.
 - `SIMPLE_LIB=src bin/simple test test/02_integration/rendering/cuda_strict_spec.spl --mode=interpreter --clean`
   - Result: 25 passed, 0 failed.
+
+## Processing-Lane Probe Hardening (2026-06-11)
+
+Closed the processing-lane probe gap (AC-1). Changes:
+
+- `probe_cuda_2d()`: `feature_gate` renamed from `"cuda_device"` to `"cuda-device-unavailable"`
+  when `cuda_device_count() < 1`, so callers have a structured evidence string rather
+  than a generic identifier.
+- `probe_cuda_processing()` added as an explicit processing-lane entry point that
+  delegates to `probe_cuda_2d()` — mirrors the ROCm `probe_rocm()` pattern.
+
+Verified on this host (no NVIDIA GPU, nvcc 13.0 present):
+
+- `bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_processing_spec.spl`
+  - Result: 7 passed, 0 failed (interpreter mode).
+- `bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl --clean`
+  - Result: 9 passed, 2 failed (2 failures are pre-existing, unrelated to probe changes).
+
+The 2 pre-existing failures in the renderbackend spec were present before this
+change and are not caused by it (confirmed by reverting and re-running). They
+should be investigated separately.

@@ -11,6 +11,7 @@
 #   use std.gpu.engine2d.backend_rocm.{RocmBackend}
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer, text_transparent_blit_buffer}
@@ -39,6 +40,69 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_rocm.{
     rocm_engine2d_upload_pixels, rocm_engine2d_download_pixels,
     rocm_engine2d_upload_host_buf
 }
+use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source}
+
+# ============================================================================
+# ROCm/HIP Probe
+#
+# probe_rocm() returns a typed BackendProbeResult. On this Linux host hipcc is
+# absent so the dynamic path (amdhip64) is unavailable and the result carries
+# feature_gate = "hip-toolchain-missing". Callers must assert this evidence
+# string rather than treating absence as a silent pass.
+# ============================================================================
+
+fn _rocm_probe_unavailable(gate: text, message: text) -> BackendProbeResult:
+    var result = BackendProbeResult.unavailable("rocm", message)
+    result.api_name = "rocm"
+    result.feature_gate = gate
+    result.shader_format = "hsaco"
+    result.has_compute = false
+    result.has_graphics = false
+    result.has_present = false
+    result
+
+fn _rocm_probe_failed(gate: text, message: text) -> BackendProbeResult:
+    var result = BackendProbeResult.failed("rocm", message)
+    result.api_name = "rocm"
+    result.feature_gate = gate
+    result.shader_format = "hsaco"
+    result.has_compute = false
+    result.has_graphics = false
+    result.has_present = false
+    result
+
+fn _rocm_probe_ready(device_name: text) -> BackendProbeResult:
+    var result = BackendProbeResult.success("rocm", "ROCm/HIP runtime ready")
+    result.api_name = "rocm"
+    result.feature_gate = "rocm-device-ready"
+    result.shader_format = "hsaco"
+    result.device_name = device_name
+    result.has_compute = true
+    result.has_graphics = true
+    result.has_present = true
+    result
+
+fn probe_rocm() -> BackendProbeResult:
+    # Step 1: check if the HIP toolchain / runtime library is loadable.
+    # On hosts without AMD GPU drivers or hipcc the rt_rocm_is_available()
+    # extern will return false. We report "hip-toolchain-missing" as a
+    # structured evidence gate so specs can assert this exact string.
+    if not rt_rocm_is_available():
+        return _rocm_probe_unavailable("hip-toolchain-missing", "ROCm/HIP runtime library unavailable — hipcc and amdhip64 not found on this host")
+    # Step 2: attempt runtime init
+    val init_ok = rt_rocm_init()
+    if not init_ok:
+        return _rocm_probe_failed("rocm-init-failed", "ROCm runtime init failed")
+    # Step 3: check device count
+    val dev_count = rt_rocm_device_count()
+    if dev_count < 1:
+        return _rocm_probe_unavailable("rocm-device-unavailable", "ROCm init succeeded but no AMD GPU device found")
+    # Step 4: try to compile the kernel module from HIP source as a self-test
+    val module = rt_rocm_compile_hsaco(_engine2d_hip_source())
+    if module == 0:
+        return _rocm_probe_failed("rocm-kernel-gap", "ROCm device present but HIP kernel compilation failed (hip-toolchain-missing or driver mismatch)")
+    rt_rocm_unload_module(module)
+    _rocm_probe_ready("amd-gpu")
 
 # ============================================================================
 # ROCm Backend
@@ -556,9 +620,6 @@ fn _gpu_draw_text_fallback(backend: RocmBackend, x: i32, y: i32, text_val: text,
     # Re-upload entire framebuffer (simpler; for production, upload only the dirty rect)
     val fb_size = _i64(backend.w) * _i64(backend.h) * 4
     _upload_host_to_device(backend.d_framebuffer, backend.host_buf, fb_size)
-
-
-use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source}
 
 # Conversion Helpers
 # ============================================================================
