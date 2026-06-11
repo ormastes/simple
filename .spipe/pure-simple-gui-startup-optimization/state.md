@@ -655,6 +655,14 @@ dev-done
   anti-aliased advance gaps remain background. Generated manual refreshed under
   `doc/06_spec`. Optimizer scans completed in Docker: helpers text 37 and
   helpers-text spec 13 remaining static opportunities.
+- impl: Hoisted additional Engine2D text fallback arithmetic. The bitmap text
+  buffer path now computes the scaled glyph-row base once per source row/column
+  bit and adds the scaled-row offset, and the anti-aliased path reuses a
+  precomputed sample-x start plus inverse-scale multiplication for sample-y.
+- verify: Focused helpers-text check still passes and helpers-text spec remains
+  6/6. Docker optimizer scans completed for the final slice: helpers text 37
+  and helpers-text spec 13 remaining static opportunities; the static count did
+  not change, but the edit removes repeated arithmetic from hot inner loops.
 - impl: Added checksum-gated vector font glyph readback evidence.
   `vector_font_glyph_readback_evidence(...)` now derives the expected checksum
   from returned vector glyph alpha pixels and requires both GPU-returned glyph
