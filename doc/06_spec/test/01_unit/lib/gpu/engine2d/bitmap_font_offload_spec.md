@@ -111,16 +111,18 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val expected_pixels = bitmap_glyph_raster_expected_pixels([1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32)
 val expected_checksum = bitmap_glyph_raster_checksum(expected_pixels)
+val direct_checksum = bitmap_glyph_raster_mask_checksum([1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32)
 val evidence = bitmap_glyph_raster_mask_readback_evidence("cuda", [1u32, 0u32, 3u32, 0u32], 2, 2, 0xff224466u32, 4096, 7, 11, true, true, true, expected_checksum)
 
 expect(expected_pixels).to_equal([0xff224466u32, 0u32, 0xff224466u32, 0u32])
 expect(expected_checksum).to_be_greater_than(0)
+expect(direct_checksum).to_equal(expected_checksum)
 expect(evidence.execution.expected_checksum).to_equal(expected_checksum)
 expect(evidence.execution.actual_checksum).to_equal(expected_checksum)
 expect(evidence.gpu_glyph_rasterized).to_equal(true)
@@ -135,12 +137,13 @@ expect(evidence.status_code).to_equal("gpu-glyph-raster-readback-matched")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val evidence = bitmap_glyph_raster_mask_readback_evidence("cuda", [1u32], 2, 2, 0xff224466u32, 4096, 7, 11, true, true, true, 999)
 
+expect(bitmap_glyph_raster_mask_checksum([1u32], 2, 2, 0xff224466u32)).to_equal(0)
 expect(evidence.execution.expected_checksum).to_equal(0)
 expect(evidence.gpu_glyph_rasterized).to_equal(false)
 expect(evidence.production_ready).to_equal(false)

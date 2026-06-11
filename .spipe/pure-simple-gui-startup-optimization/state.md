@@ -657,6 +657,16 @@ dev-done
 - verify: Optimizer scans completed for this slice in Docker. Counts:
   bitmap-font offload 27 and bitmap-font offload spec 4 remaining static
   opportunities.
+- impl: Removed an avoidable allocation from bitmap glyph readback proof.
+  `bitmap_glyph_raster_mask_checksum(...)` computes the expected checksum
+  directly from glyph mask bits and color, and
+  `bitmap_glyph_raster_mask_readback_evidence(...)` now uses it instead of
+  allocating expected pixels first.
+- verify: Focused bitmap-font offload check passes and bitmap-font offload spec
+  remains 5/5. Generated manual was refreshed under `doc/06_spec`.
+- verify: Optimizer scans completed for this slice in Docker. Counts:
+  bitmap-font offload 31 and bitmap-font offload spec 6 remaining static
+  opportunities.
 - impl: Added CUDA session readback evidence classification.
   `CudaSession.readback_evidence(...)` now uses the shared
   `gpu_session_readback_status(...)` classifier for readback unavailable,
