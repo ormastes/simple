@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -125,6 +125,26 @@ val html = "<html><head><style>" +
     "</style></head><body><div id=\"target\" class=\"target target\">row</div></body></html>"
 val height = simple_web_layout_debug_style_by_id(html, "target", "height")
 expect(height).to_equal("13")
+```
+
+</details>
+
+#### keeps malformed CSS rule admission stable with pre-counted rules
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>" +
+    ".target{height:21px}.broken{height:99px" +
+    "</style></head><body><div id=\"target\" class=\"target\">row</div><div id=\"broken\" class=\"broken\">row</div></body></html>"
+val target_height = simple_web_layout_debug_style_by_id(html, "target", "height")
+val broken_height = simple_web_layout_debug_style_by_id(html, "broken", "height")
+expect(target_height).to_equal("21")
+expect(broken_height).to_equal("0")
 ```
 
 </details>
@@ -374,8 +394,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

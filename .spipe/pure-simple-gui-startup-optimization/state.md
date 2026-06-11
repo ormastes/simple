@@ -841,3 +841,14 @@ dev-done
   `simple_web_layout_child_index_spec.spl` remains 15/15. Docker optimizer scan
   completed for the renderer with 759 remaining static opportunities; the count
   rises because the former push intrinsic is now an explicit pre-count scan.
+- impl: Replaced `extract_css(...)` rule-array growth with exact-size CSS rule
+  arrays. `count_css_rules(...)` mirrors the style-block guard, brace parsing,
+  malformed-CSS breaks, and non-empty selector admission. The `Rules` capsule
+  now stores only `group_parts` and `decls`; unused raw selector/group fields
+  were removed after reference checks showed cascade only reads preprocessed
+  group parts and declarations.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` now passes 16/16, including a
+  malformed CSS rule admission oracle for the pre-counted rule path. Generated
+  manual refreshed under `doc/06_spec`. Docker optimizer scan completed for the
+  renderer with 759 remaining static opportunities.
