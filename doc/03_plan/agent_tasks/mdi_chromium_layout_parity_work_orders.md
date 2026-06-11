@@ -164,6 +164,14 @@ Prove and harden the requested GUI stack:
   `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`;
   result `status=pass`, `pass_count=21`, `fail_count=0`,
   `blur_or_tolerance_used=false`.
+- Famous-site corpus div geometry evidence (2026-06-11):
+  `test/03_system/gui/wm_compare/structural_layout_report_spec.spl` now checks
+  `build_site_corpus_div_geometry_report` for `site_0_google` against stored
+  Chrome metrics. The report compares one generated div's border-box
+  `x=8`, `y=8`, `width=120`, `height=40`, background
+  `rgb(37, 99, 235)`, and fixture text against Simple Draw IR and passes with
+  `mismatch_count=0`. This is intentionally a narrow corpus smoke, not full
+  famous-site corpus geometry coverage and not text raster parity.
 
 ## Agent A: MDI Render And Event Evidence
 
@@ -242,6 +250,10 @@ Small tasks:
    `html_compat` manifest rows. Remaining work is broader than this manifest:
    extend equivalent exact geometry/style evidence to larger famous-site corpus
    rows and unresolved browser text/font raster behavior.
+5. DONE (2026-06-11): add a focused famous-site corpus structural-box smoke for
+   the generated `site_0_google` div using stored Chrome metrics and Simple
+   Draw IR. Remaining work is to emit and compare per-row corpus geometry
+   artifacts for the wider corpus instead of one deterministic smoke row.
 
 Exit gate:
 

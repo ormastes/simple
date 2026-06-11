@@ -28,7 +28,7 @@ structural_layout_report_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -132,8 +132,8 @@ expect(cells_sdn).to_contain("row: 1 col: 0 x: 0 y: 16")
 
 #### exports GUI layout boxes with stable node labels
 
-1. structural layout box
-2. structural layout box
+- structural layout box
+- structural layout box
 
 
 <details>
@@ -158,10 +158,10 @@ expect(sdn).to_contain("x: 0 y: 24 width: 320 height: 200")
 
 #### compares GUI layout box geometry before pixel comparison
 
-1. structural layout box
-2. structural layout box
-3. structural layout box
-4. structural layout box
+- structural layout box
+- structural layout box
+- structural layout box
+- structural layout box
    - Expected: report.status equals `layout_mismatch`
    - Expected: report.mismatch_count equals `1`
    - Expected: report.source_a_count equals `2`
@@ -223,6 +223,29 @@ expect(report).to_contain("source_b: \"simple_layout\"")
 
 </details>
 
+#### compares famous-site corpus div geometry against Chrome metrics
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sample = build_famous_site_sample_corpus()[0]
+val metrics = rt_file_read_text(famous_site_sample_chrome_metrics_path(sample.id))
+val report = build_site_corpus_div_geometry_report(sample, metrics, 160, 120)
+expect(report).to_contain("structural_box_layout_report")
+expect(report).to_contain("status: \"layout_match\"")
+expect(report).to_contain("source_a: \"chrome_metrics_div\"")
+expect(report).to_contain("source_b: \"simple_renderer_div\"")
+expect(report).to_contain("width: 120")
+expect(report).to_contain("height: 40")
+expect(report).to_contain("background_color: \"rgb(37, 99, 235)\"")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -242,8 +265,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

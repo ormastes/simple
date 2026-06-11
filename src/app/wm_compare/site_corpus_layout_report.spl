@@ -6,10 +6,16 @@ use app.wm_compare.site_corpus.{
     famous_site_sample_chrome_metrics_path}
 use app.wm_compare.structural_layout_report.{
     structural_layout_compare,
-    structural_layout_report_sdn}
+    structural_layout_report_sdn,
+    structural_box_layout_compare,
+    structural_box_layout_report_sdn,
+    StructuralLayoutBox,
+    structural_layout_style_box}
 use std.gc_async_mut.gpu.browser_engine.text_painter.{
     br_famous_site_corpus_layout_lines,
     br_famous_site_corpus_layout_line_widths_sdn}
+use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -118,6 +124,115 @@ fn _chrome_text_lines(metrics: text) -> [text]:
         lines.push(line)
         pos = value_start + end_rel + 1
     lines
+
+fn _text_after_marker(source: text, marker: text) -> text:
+    val idx = source.index_of(marker)
+    if idx == -1:
+        return ""
+    val rest = source.substring(idx + marker.len())
+    val end = rest.index_of("\"")
+    if end == -1:
+        return ""
+    rest.substring(0, end)
+
+fn _i32_after_marker(source: text, marker: text) -> i32:
+    val idx = source.index_of(marker)
+    if idx == -1:
+        return 0
+    val rest = source.substring(idx + marker.len())
+    var end = 0
+    while end < rest.len():
+        val c = rest.char_at(end)
+        if not ((c >= "0" and c <= "9") or c == "-"):
+            break
+        end = end + 1
+    if end == 0:
+        return 0
+    (rest.substring(0, end).to_i64() ?? 0) as i32
+
+fn _metrics_div_section(metrics: text) -> text:
+    val div_marker = "\"div\""
+    val start = metrics.index_of(div_marker)
+    if start == -1:
+        return ""
+    val tail = metrics.substring(start)
+    val text_rects = tail.index_of("\"textClientRects\"")
+    if text_rects == -1:
+        return tail
+    tail.substring(0, text_rects)
+
+fn _argb_css_rgb(raw: text) -> text:
+    if raw == "" or raw == "0":
+        return ""
+    val value = raw.to_i64() ?? 0
+    val r = ((value / 65536) % 256) as i32
+    val g = ((value / 256) % 256) as i32
+    val b = (value % 256) as i32
+    "rgb(" + r.to_string() + ", " + g.to_string() + ", " + b.to_string() + ")"
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _style_i32(command: DrawIrCommand, key: text) -> i32:
+    val value = _style_value(command, key)
+    if value == "":
+        return 0
+    (value.to_i64() ?? 0) as i32
+
+fn _command_tag(command: DrawIrCommand) -> text:
+    _style_value(command, "tag")
+
+fn _site_sample_fixture_text(sample: SiteSample) -> text:
+    sample.name + " " + sample.category + " deterministic compatibility fixture"
+
+pub fn site_corpus_chrome_div_box(metrics: text) -> StructuralLayoutBox:
+    val div = _metrics_div_section(metrics)
+    structural_layout_style_box(
+        "div",
+        _i32_after_marker(div, "\"x\": "),
+        _i32_after_marker(div, "\"y\": "),
+        _i32_after_marker(div, "\"width\": "),
+        _i32_after_marker(div, "\"height\": "),
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        _text_after_marker(div, "\"backgroundColor\": \""),
+        _text_after_marker(div, "\"text\": \"")
+    )
+
+pub fn site_corpus_simple_div_box(sample: SiteSample, viewport_width: i32, viewport_height: i32) -> StructuralLayoutBox:
+    val composition = simple_web_layout_render_html_draw_ir(sample.html, viewport_width, viewport_height)
+    if composition.batches.len() == 0:
+        return structural_layout_style_box("div", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", "")
+    for command in composition.batches[0].commands:
+        if _command_tag(command) == "div":
+            return structural_layout_style_box(
+                "div", command.x, command.y, command.width, command.height,
+                _style_i32(command, "padding-left"),
+                _style_i32(command, "padding-top"),
+                _style_i32(command, "padding-right"),
+                _style_i32(command, "padding-bottom"),
+                _style_i32(command, "border-left-width"),
+                _style_i32(command, "border-top-width"),
+                _style_i32(command, "border-right-width"),
+                _style_i32(command, "border-bottom-width"),
+                _argb_css_rgb(_style_value(command, "background-color")),
+                _site_sample_fixture_text(sample)
+            )
+    structural_layout_style_box("div", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", "")
+
+pub fn build_site_corpus_div_geometry_report(sample: SiteSample, metrics: text, viewport_width: i32, viewport_height: i32) -> text:
+    val chrome_box = site_corpus_chrome_div_box(metrics)
+    val simple_box = site_corpus_simple_div_box(sample, viewport_width, viewport_height)
+    val report = structural_box_layout_compare(
+        "chrome_metrics_div", "simple_renderer_div",
+        viewport_width, viewport_height,
+        [chrome_box], [simple_box],
+        "chrome_metrics_sidecar", famous_site_sample_chrome_metrics_path(sample.id)
+    )
+    structural_box_layout_report_sdn(report, [chrome_box], [simple_box])
 
 fn _chrome_canvas_widths_sdn(metrics: text) -> text:
     val marker = "\"canvasTextMetrics\""
