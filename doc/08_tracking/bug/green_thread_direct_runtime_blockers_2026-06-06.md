@@ -134,6 +134,15 @@ native `cooperative_green_spawn_value(...)` execution.
 Cooperative-green queue rows are still not M:N CPU-parallel evidence; keep them
 classified separately from native and SMF `multicore_green_spawn` evidence.
 
+Separate from those runtime-path fixes, the SSpec runner still has an active
+green/cooperative assertion mismatch:
+
+- direct `simple run` probes pass
+- equivalent `simple test` probes fail
+
+That runner boundary is tracked separately in
+`doc/08_tracking/bug/green_thread_spec_runner_mismatch_2026-06-11.md`.
+
 ## Reproduction
 
 Temporary local repro files were created under `build/tmp/` while investigating:

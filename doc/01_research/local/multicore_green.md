@@ -38,6 +38,13 @@
 - `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl` verifies the SimpleOS feature-lane cooperative green contract on the current carrier.
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl` verifies hosted SimpleOS multicore-green contracts across SMP IPI, carrier dispatch, scheduler-owned green execution state, and topology growth.
 - `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl` verifies hosted SimpleOS green-channel wake integration from pure channel send-unpark output through carrier enqueue, dispatch, and scheduler-owned execution-state update.
+- 2026-06-11 follow-up: the direct green/cooperative runtime path now passes its
+  focused `simple run` probes, but the SSpec runner currently still fails even
+  a minimal one-`it` `green_spawn_value(23)` assertion shape. That active
+  blocker is tracked in
+  `doc/08_tracking/bug/green_thread_spec_runner_mismatch_2026-06-11.md`, and
+  it means hosted SimpleOS cooperative/multicore feature specs cannot be
+  treated as current green evidence until the runner mismatch is fixed.
 - `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` verifies the opt-in live SimpleOS/QEMU lane. The forced run on 2026-06-06 used `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 --clean`, built the x86_64 guest probe, observed `[smp] AP reached 64-bit entry`, and observed `[green-carrier-qemu] PASS=true` after CPU1 fixed-slot green dispatch.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl` verifies fanout/fanin checksum parity between Simple OS threads, cooperative green, and multicore green while keeping runtime-pool evidence separate from inline fallback.
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` verifies the checked-in Docker contract report numerically: Simple OS-thread and multicore-green native rows must remain within bounded ratios of Go goroutine and C pthread rows, Go must beat one-pthread-per-task C in the isolated large-fanout stress row with `GOMAXPROCS` pinned to `CPU_WORKERS`, and cooperative green must stay classified as current-carrier, non-M:N work.
