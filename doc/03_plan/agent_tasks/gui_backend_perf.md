@@ -60,6 +60,10 @@ Updated: 2026-06-11
   preferred vector and bitmap font offload/readback wrappers together and emit
   explicit typed unavailable rows when the host has no device submit/readback
   proof.
+- this commit -- top-level font evidence propagation: the canonical production
+  GUI web renderer parity wrapper now runs the font offload/readback wrapper and
+  promotes typed vector and bitmap font evidence under
+  `production_gui_web_renderer_parity_font_offload_*` fields.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
@@ -75,6 +79,9 @@ Updated: 2026-06-11
    - Demonstrate measured proof of real vector/bitmap GPU font offload and readback path behavior or explicit typed unavailability.
    - Use `scripts/check/check-production-gui-font-offload-evidence.shs` as the
      canonical evidence wrapper for current host captures.
+   - Use `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`
+     for archived production GUI parity captures; it promotes the font evidence
+     into its top-level report.
    - Ensure device submit/readback evidence uses preferred glyph readback wrappers after
      candidate ordering.
    - For every relevant wrapper execution, capture `status_code` plus `reason`:

@@ -100,6 +100,10 @@ report. Missing hardware, runtime, queue, submit, or readback capability must
 remain explicit: examples include `cuda-runtime-unavailable`,
 `opencl-runtime-or-queue-unavailable`, `vector-font-glyph-not-submitted`,
 `vector-font-glyph-return-missing`, and `gpu-glyph-raster-not-submitted`.
+The canonical production GUI renderer parity wrapper also runs this font gate
+and promotes its typed rows under
+`production_gui_web_renderer_parity_font_offload_*`, including vector and bitmap
+backend, offload status, readback status, reason, and production-ready fields.
 
 The generated-GUI matrix intentionally records
 `text_normalization_pixels=269` for the fixture-specific text antialiasing

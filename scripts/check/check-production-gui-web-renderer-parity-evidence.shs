@@ -216,6 +216,79 @@ run_backend() {
     [ "$code" -eq 0 ] && [ "$status" = "pass" ] && [ "$exact" = "true" ] && [ "$cpu_diff" = "0" ] && [ "$metal_diff" = "0" ] && { [ "$metal_frame" = "true" ] || [ "$metal_resolved" != "metal" ]; } && [ "$tolerance" = "false" ]
 }
 
+run_font_offload() {
+    case_dir="$BUILD_ROOT/font_offload"
+    mkdir -p "$case_dir"
+    set +e
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh scripts/check/check-production-gui-font-offload-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    env_file="$case_dir/evidence.env"
+    status=""
+    reason=""
+    vector_backend=""
+    vector_status=""
+    vector_reason=""
+    vector_readback_status=""
+    vector_readback_reason=""
+    vector_ready=""
+    vector_expected_checksum=""
+    vector_actual_checksum=""
+    bitmap_backend=""
+    bitmap_status=""
+    bitmap_reason=""
+    bitmap_readback_status=""
+    bitmap_readback_reason=""
+    bitmap_ready=""
+    bitmap_expected_checksum=""
+    bitmap_actual_checksum=""
+    if [ -s "$env_file" ]; then
+        status="$(field_of production_gui_font_offload_status "$env_file")"
+        reason="$(field_of production_gui_font_offload_reason "$env_file")"
+        vector_backend="$(field_of production_gui_font_offload_vector_backend "$env_file")"
+        vector_status="$(field_of production_gui_font_offload_vector_status "$env_file")"
+        vector_reason="$(field_of production_gui_font_offload_vector_reason "$env_file")"
+        vector_readback_status="$(field_of production_gui_font_offload_vector_readback_status "$env_file")"
+        vector_readback_reason="$(field_of production_gui_font_offload_vector_readback_reason "$env_file")"
+        vector_ready="$(field_of production_gui_font_offload_vector_production_ready "$env_file")"
+        vector_expected_checksum="$(field_of production_gui_font_offload_vector_expected_checksum "$env_file")"
+        vector_actual_checksum="$(field_of production_gui_font_offload_vector_actual_checksum "$env_file")"
+        bitmap_backend="$(field_of production_gui_font_offload_bitmap_backend "$env_file")"
+        bitmap_status="$(field_of production_gui_font_offload_bitmap_status "$env_file")"
+        bitmap_reason="$(field_of production_gui_font_offload_bitmap_reason "$env_file")"
+        bitmap_readback_status="$(field_of production_gui_font_offload_bitmap_readback_status "$env_file")"
+        bitmap_readback_reason="$(field_of production_gui_font_offload_bitmap_readback_reason "$env_file")"
+        bitmap_ready="$(field_of production_gui_font_offload_bitmap_production_ready "$env_file")"
+        bitmap_expected_checksum="$(field_of production_gui_font_offload_bitmap_expected_checksum "$env_file")"
+        bitmap_actual_checksum="$(field_of production_gui_font_offload_bitmap_actual_checksum "$env_file")"
+    fi
+    {
+        echo "production_gui_web_renderer_parity_font_offload_exit_code=$code"
+        echo "production_gui_web_renderer_parity_font_offload_status=$status"
+        echo "production_gui_web_renderer_parity_font_offload_reason=$reason"
+        echo "production_gui_web_renderer_parity_font_offload_vector_backend=$vector_backend"
+        echo "production_gui_web_renderer_parity_font_offload_vector_status=$vector_status"
+        echo "production_gui_web_renderer_parity_font_offload_vector_reason=$vector_reason"
+        echo "production_gui_web_renderer_parity_font_offload_vector_readback_status=$vector_readback_status"
+        echo "production_gui_web_renderer_parity_font_offload_vector_readback_reason=$vector_readback_reason"
+        echo "production_gui_web_renderer_parity_font_offload_vector_production_ready=$vector_ready"
+        echo "production_gui_web_renderer_parity_font_offload_vector_expected_checksum=$vector_expected_checksum"
+        echo "production_gui_web_renderer_parity_font_offload_vector_actual_checksum=$vector_actual_checksum"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_backend=$bitmap_backend"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_status=$bitmap_status"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_reason=$bitmap_reason"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_readback_status=$bitmap_readback_status"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_readback_reason=$bitmap_readback_reason"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_production_ready=$bitmap_ready"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_expected_checksum=$bitmap_expected_checksum"
+        echo "production_gui_web_renderer_parity_font_offload_bitmap_actual_checksum=$bitmap_actual_checksum"
+        echo "production_gui_web_renderer_parity_font_offload_report=$case_dir/report.md"
+    } >>"$BUILD_ROOT/evidence.env"
+    append_prefixed_env "font_" "$env_file"
+    [ "$code" -eq 0 ] && { [ "$status" = "pass" ] || [ "$status" = "unavailable" ]; }
+}
+
 run_metal_readback() {
     case_dir="$BUILD_ROOT/metal_readback"
     mkdir -p "$case_dir"
@@ -277,6 +350,12 @@ if [ "$status" = "pass" ]; then
     }
 fi
 if [ "$status" = "pass" ]; then
+    run_font_offload || {
+        status=fail
+        reason=font-offload-evidence-failed
+    }
+fi
+if [ "$status" = "pass" ]; then
     run_metal_readback || {
         status=fail
         reason=metal-framebuffer-readback-failed
@@ -302,6 +381,9 @@ mv "$BUILD_ROOT/evidence.final.env" "$BUILD_ROOT/evidence.env"
     echo "- backend sample count: $(field_of production_gui_web_renderer_parity_backend_sample_count "$BUILD_ROOT/evidence.env")"
     echo "- backend total elapsed us min/avg/max: $(field_of production_gui_web_renderer_parity_backend_total_elapsed_us_min "$BUILD_ROOT/evidence.env") / $(field_of production_gui_web_renderer_parity_backend_total_elapsed_us_avg "$BUILD_ROOT/evidence.env") / $(field_of production_gui_web_renderer_parity_backend_total_elapsed_us_max "$BUILD_ROOT/evidence.env")"
     echo "- backend total pixels/s min/avg/max: $(field_of production_gui_web_renderer_parity_backend_total_pixels_per_second_min "$BUILD_ROOT/evidence.env") / $(field_of production_gui_web_renderer_parity_backend_total_pixels_per_second_avg "$BUILD_ROOT/evidence.env") / $(field_of production_gui_web_renderer_parity_backend_total_pixels_per_second_max "$BUILD_ROOT/evidence.env")"
+    echo "- font offload/readback: $(field_of production_gui_web_renderer_parity_font_offload_status "$BUILD_ROOT/evidence.env")"
+    echo "- vector font readback: $(field_of production_gui_web_renderer_parity_font_offload_vector_readback_status "$BUILD_ROOT/evidence.env")"
+    echo "- bitmap font readback: $(field_of production_gui_web_renderer_parity_font_offload_bitmap_readback_status "$BUILD_ROOT/evidence.env")"
     echo "- raw Metal framebuffer readback: $(field_of production_gui_web_renderer_parity_metal_readback_status "$BUILD_ROOT/evidence.env")"
     echo "- blur/tolerance used: false"
     echo
