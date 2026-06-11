@@ -135,6 +135,10 @@ software-rasterized text, and the two cases use `policy=track-text-divergence` i
 gate (`check-electron-simple-web-layout-manifest-evidence.shs`) classifies them as
 **tracked** (known-divergent), not exact or fail — so the gate passes as
 **16 exact + 2 tracked + 0 fail**.
+The Tauri/Chrome surface manifest follows the same policy: exact text-free rows
+must remain bit-exact, while `policy=track-text-divergence` rows are counted in
+separate `*_tracked_count` / `*_tracked_mismatch_count` fields and still require
+`blur_or_tolerance=false`.
 
 Rule of thumb: layout/box/geometry must be bit-exact (`policy=exact`); per-pixel
 **text antialiasing cannot bit-match a browser font rasterizer** with a 5×7 bitmap

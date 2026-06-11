@@ -70,6 +70,11 @@ Updated: 2026-06-11
   `chrome-live-capture-timeout`, and cleans up spawned Chrome children on
   signal/exit so full parity evidence cannot hang indefinitely in the surface
   manifest.
+- this commit -- surface manifest tracked-text policy: the Tauri/Chrome surface
+  manifest now preserves exact-pixel requirements for text-free rows while
+  counting `policy=track-text-divergence` rows separately as tracked evidence.
+  Top-level production parity accepts exact+tracked coverage only when exact
+  rows have zero mismatches and tracked rows keep `blur_or_tolerance=false`.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
@@ -85,6 +90,9 @@ Updated: 2026-06-11
      Tauri/Chrome surface manifest still fails with live-surface divergence
      (`tauri`: 16/18 pass, 216 mismatches; `chrome`: 14/18 pass, 1785 mismatches
      in the latest local run) and one bounded Chrome timeout row.
+   - Re-run the surface manifest after the tracked-text policy change; any
+     remaining failures should now represent exact-row divergence or a bounded
+     host capture timeout, not the two known text-raster tracking rows.
    - Add broader throughput thresholds after enough host-stable samples exist.
 2. Provide GPU/font offload proof
    - Demonstrate measured proof of real vector/bitmap GPU font offload and readback path behavior or explicit typed unavailability.
