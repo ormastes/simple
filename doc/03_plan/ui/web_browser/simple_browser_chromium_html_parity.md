@@ -311,6 +311,10 @@ Open gaps tied to the active browser objective:
     and end alignment when flex-grow/shrink are not consuming the line space
   - live Electron geometry evidence for fixture 25 reports `layout_match` with
     `mismatch_count=0`
+  - live Chrome headless geometry manifest evidence now includes fixture 25:
+    `chrome_html_compat_geometry_manifest_evidence_2026-06-11.md` reports
+    `22` fixtures, `22` passes, `0` failures, and
+    `blur_or_tolerance_used=false`
   - the fixture has real `chrome.ppm` captured via the existing Electron
     `--update-baseline --skip-simple` path, and the follow-up Simple comparison
     reports `RESULT: EXACT match`, `different_pixels=0`; no blur, tolerance,

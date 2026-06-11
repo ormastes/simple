@@ -241,6 +241,17 @@ Smallest next implementation step:
   - precompute wrapped line heights and total multi-line content height
   - center the block of wrapped lines inside the explicit cross size for the
     focused `align-content:center` case
+- Chrome headless manifest evidence now includes
+  `25_flex_justify_space_between`:
+  - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+    covers fixtures `02` through `25` in its default manifest, excluding only
+    the older text-only starter fixtures
+  - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
+    reports `22` fixtures, `22` passes, `0` failures, and
+    `blur_or_tolerance_used=false`
+  - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
+    Chrome DevTools page target after launch, avoiding a startup race without
+    changing geometry comparison semantics
 - Live `24_flex_wrap_reverse_basic` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused geometry spec itself is now stable again in the default runner:

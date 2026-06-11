@@ -335,6 +335,28 @@ async function cdpSend(conn, id, method, params) {
   }
 }
 
+async function fetchPageTarget(endpoint, timeoutMs) {
+  const listUrl = endpoint.replace(/^ws:/, "http:").replace(/\/devtools\/browser\/.*$/, "/json");
+  const deadline = Date.now() + timeoutMs;
+  let lastPages = [];
+  while (Date.now() < deadline) {
+    try {
+      const pages = await (await fetch(listUrl)).json();
+      if (Array.isArray(pages)) {
+        lastPages = pages;
+        const page = pages.find(item => item.type === "page" && item.webSocketDebuggerUrl) ||
+          pages.find(item => item.webSocketDebuggerUrl);
+        if (page && page.webSocketDebuggerUrl) return page;
+      }
+    } catch (_err) {
+      // Chrome can expose the browser endpoint before the target list is ready.
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const types = lastPages.map(item => item.type || "unknown").join(",");
+  throw new Error(types ? `chrome-page-target-missing:${types}` : "chrome-page-target-missing");
+}
+
 function geometryExpression() {
   return `
     (() => {
@@ -422,10 +444,7 @@ async function captureViaDevTools(fileUrl) {
   });
   let conn;
   try {
-    const listUrl = endpoint.replace(/^ws:/, "http:").replace(/\/devtools\/browser\/.*$/, "/json");
-    const pages = await (await fetch(listUrl)).json();
-    const page = pages.find(item => item.type === "page") || pages[0];
-    if (!page || !page.webSocketDebuggerUrl) throw new Error("chrome-page-target-missing");
+    const page = await fetchPageTarget(endpoint, timeoutMs);
     conn = await connectWebSocket(page.webSocketDebuggerUrl);
     let id = 1;
     await cdpSend(conn, id++, "Page.enable");
