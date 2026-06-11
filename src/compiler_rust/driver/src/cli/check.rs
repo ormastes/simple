@@ -2510,6 +2510,64 @@ mod tests {
     }
 
     #[test]
+    fn test_check_rejects_shared_mutable_state_in_green_closures() {
+        for (source, symbol, var_name) in [
+            (
+                "use std.concurrent.green_thread.{green_spawn}\nvar shared_total = 0\nfn main():\n    val handle = green_spawn(\\: shared_total + 1)",
+                "green_spawn",
+                "shared_total",
+            ),
+            (
+                "use std.concurrent.cooperative_green.{cooperative_green_spawn}\nvar shared_count = 0\nfn main():\n    val handle = cooperative_green_spawn(\\: shared_count + 1)",
+                "cooperative_green_spawn",
+                "shared_count",
+            ),
+            (
+                "use std.concurrent.multicore_green.{multicore_green_spawn}\nvar shared_sum = 0\nfn main():\n    val handle = multicore_green_spawn(\\: shared_sum + 1)",
+                "multicore_green_spawn",
+                "shared_sum",
+            ),
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(file, "{source}").unwrap();
+
+            let result = check_file(file.path(), &[], false);
+            assert_eq!(result.status, CheckStatus::Error, "{source}");
+            assert!(
+                result.errors.iter().any(|error| {
+                    error.code.as_deref() == Some("E-PAR-006")
+                        && error.message.contains(symbol)
+                        && error.message.contains(var_name)
+                }),
+                "{source}: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_allows_share_nothing_green_closures() {
+        for source in [
+            // Value-only closure stays accepted.
+            "use std.concurrent.green_thread.{green_spawn}\nfn main():\n    val handle = green_spawn(\\: 1)",
+            // Immutable module-level val is not shared mutable state.
+            "use std.concurrent.multicore_green.{multicore_green_spawn}\nval base_value = 10\nfn main():\n    val handle = multicore_green_spawn(\\: base_value + 1)",
+            // OS threads may share through locks; thread_spawn stays exempt from E-PAR-006.
+            "use std.concurrent.thread.{thread_spawn}\nvar shared_total = 0\nfn main():\n    val handle = thread_spawn(\\: shared_total + 1)",
+        ] {
+            let mut file = NamedTempFile::new().unwrap();
+            writeln!(file, "{source}").unwrap();
+
+            let result = check_file(file.path(), &[], false);
+            assert!(
+                result.errors.iter().all(|error| error.code.as_deref() != Some("E-PAR-006")),
+                "{source}: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
     fn test_check_rejects_numbered_seed_thread_aliases() {
         for (alias, replacement) in [
             ("spawn_isolated2", "spawn_isolated_with_args"),
