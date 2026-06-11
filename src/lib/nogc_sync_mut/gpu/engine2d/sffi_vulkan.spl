@@ -24,6 +24,7 @@ extern fn rt_vulkan_shutdown() -> bool
 extern fn rt_vulkan_is_available() -> bool
 extern fn rt_vulkan_device_count() -> i64
 extern fn rt_vulkan_select_device(id: i64) -> bool
+extern fn rt_vulkan_device_type(id: i64) -> text
 extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
 extern fn rt_vulkan_free_buffer(handle: i64) -> bool
 extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
@@ -393,3 +394,34 @@ fn vulkan_sffi_wait_idle() -> bool:
 
 fn vulkan_sffi_last_error() -> text:
     rt_vulkan_get_last_error()
+
+# ============================================================================
+# Headless device probe (lavapipe / CpuOnly selection)
+# ============================================================================
+#
+# vulkan_sffi_find_headless_device() searches the enumerated Vulkan device list
+# for a CpuOnly (software ICD) device.  The lavapipe ICD
+# (/usr/share/vulkan/icd.d/lvp_icd.json) enumerates as type "cpu".
+#
+# Returns the device id (>=0) on success, -1 when no CpuOnly device is found.
+# The caller must call vulkan_sffi_init() and verify vulkan_sffi_is_available()
+# before calling this function.
+
+fn vulkan_sffi_find_headless_device() -> i64:
+    val count = rt_vulkan_device_count()
+    var i: i64 = 0
+    var found: i64 = -1
+    while i < count:
+        val dt = rt_vulkan_device_type(i)
+        if dt == "cpu" or dt == "CpuOnly":
+            found = i
+        i = i + 1
+    found
+
+fn vulkan_sffi_select_headless() -> bool:
+    """Select the first CpuOnly (lavapipe) device.  Returns false when none found."""
+    val dev = vulkan_sffi_find_headless_device()
+    if dev < 0:
+        false
+    else:
+        rt_vulkan_select_device(dev)

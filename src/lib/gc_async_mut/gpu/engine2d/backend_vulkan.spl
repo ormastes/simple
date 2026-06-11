@@ -52,7 +52,8 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_read_buffer_bytes,
     vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
     vulkan_sffi_create_compute_pipeline, vulkan_sffi_destroy_pipeline,
-    vulkan_sffi_wait_idle, vulkan_sffi_last_error
+    vulkan_sffi_wait_idle, vulkan_sffi_last_error,
+    vulkan_sffi_find_headless_device, vulkan_sffi_select_headless
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 
@@ -72,6 +73,72 @@ fn vulkan_available() -> bool:
 # ============================================================================
 
 val VK_PUSH_CONSTANT_SIZE: i64 = 64
+
+# ============================================================================
+# Structured error classification
+# ============================================================================
+#
+# VulkanErrorKind classifies the failure category returned in last_error so
+# callers can react appropriately without string-parsing.
+#
+# Usage:
+#   val kind = vulkan_classify_error(backend.last_error)
+#   if kind == VulkanErrorKind.DeviceLost: ...
+
+enum VulkanErrorKind:
+    """Classification of Vulkan runtime errors."""
+    # Vulkan device was lost (VK_ERROR_DEVICE_LOST or similar).
+    DeviceLost
+    # A required Vulkan extension was not available on the selected device.
+    MissingExtension
+    # SPIR-V or GLSL shader compilation failed at pipeline creation time.
+    ShaderCompile
+    # The Vulkan runtime is not present or not initialised on this host.
+    NotAvailable
+    # No Vulkan device enumerated (or selection of a specific device failed).
+    NoDevice
+    # Catch-all for other runtime errors not classified above.
+    Other
+    # Not an error (last_error is empty).
+    None
+
+fn _err_is_device_lost(err: text) -> bool:
+    err.contains("device lost") or err.contains("DEVICE_LOST")
+
+fn _err_is_missing_ext(err: text) -> bool:
+    err.contains("extension") or err.contains("Extension")
+
+fn _err_is_shader_compile(err: text) -> bool:
+    val has_shader = err.contains("shader") or err.contains("SPIR-V")
+    val has_compile = err.contains("compile") or err.contains("pipeline")
+    has_shader or has_compile
+
+fn _err_is_not_available(err: text) -> bool:
+    err.contains("unavailable") or err.contains("rt_vulkan_init")
+
+fn _err_is_no_device(err: text) -> bool:
+    err.contains("no Vulkan devices") or err.contains("select_device")
+
+fn vulkan_classify_error(err: text) -> VulkanErrorKind:
+    """Classify a Vulkan error string into a VulkanErrorKind variant.
+
+    Uses substring matching against known error prefixes emitted by the
+    Simple Vulkan SFFI layer.  Returns VulkanErrorKind.None when err is "".
+    """
+    if err == "":
+        VulkanErrorKind.None
+    elif _err_is_device_lost(err):
+        VulkanErrorKind.DeviceLost
+    elif _err_is_missing_ext(err):
+        VulkanErrorKind.MissingExtension
+    elif _err_is_shader_compile(err):
+        VulkanErrorKind.ShaderCompile
+    elif _err_is_not_available(err):
+        VulkanErrorKind.NotAvailable
+    elif _err_is_no_device(err):
+        VulkanErrorKind.NoDevice
+    else:
+        VulkanErrorKind.Other
 
 # ============================================================================
 # Vulkan Backend
@@ -393,6 +460,8 @@ impl RenderBackend for VulkanBackend:
         self.initialized = false
 
     me clear(color: u32):
+        if not self.initialized:
+            return
         val total = _i64(self.w) * _i64(self.h)
         val workgroups = (total + 255) / 256
         val pc = _pack_clear_pc(color, self.w, self.h)
@@ -400,6 +469,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if not self.initialized:
+            return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
@@ -407,6 +478,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if not self.initialized:
+            return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
@@ -414,6 +487,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        if not self.initialized:
+            return
         var dx = x2 - x1
         var dy = y2 - y1
         if dx < 0:
@@ -431,6 +506,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        if not self.initialized:
+            return
         val bw = 2 * r + 1
         val bh = 2 * r + 1
         val gx = (_i64(bw) + 15) / 16
@@ -440,6 +517,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        if not self.initialized:
+            return
         val bw = 2 * r + 1
         val bh = 2 * r + 1
         val gx = (_i64(bw) + 15) / 16
@@ -449,6 +528,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        if not self.initialized:
+            return
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         val pc = _pack_rounded_rect_pc(x, y, w, h, radius, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
@@ -456,6 +537,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        if not self.initialized:
+            return
         # Compute bounding box of triangle
         var min_x = x1
         if x2 < min_x: min_x = x2
@@ -479,6 +562,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        if not self.initialized:
+            return
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         val pc = _pack_gradient_pc(x, y, w, h, top_color, bottom_color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
@@ -493,6 +578,8 @@ impl RenderBackend for VulkanBackend:
         self.dirty = true
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if not self.initialized:
+            return
         # Upload pixel data to a temporary Vulkan storage buffer, then
         # dispatch a blit compute shader to copy it into the framebuffer
         val pixel_count = _i64(w) * _i64(h)
@@ -536,6 +623,8 @@ impl RenderBackend for VulkanBackend:
 
     me present():
         # Copy GPU storage buffer to host memory
+        if not self.initialized:
+            return
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
