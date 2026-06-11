@@ -125,12 +125,17 @@ Prove and harden the requested GUI stack:
   order, and hit rect.
 - Current repo access paths:
   - `tools/electron-live-bitmap/capture_html_argb.js` already extracts
-    `[data-geom-label]` DOM geometry through Electron/Chromium.
+    `[data-geom-label]` DOM geometry through Electron/Chromium, including
+    border-box `x`/`y`/`width`/`height`, computed padding, computed border
+    widths, background color, and normalized text.
   - `src/app/wm_compare/electron_geometry_compare.spl` parses that geometry
-    into `StructuralLayoutBox` for structured comparison.
+    into `StructuralLayoutBox` for structured comparison. The structural box
+    comparison now treats padding, border, and background differences as exact
+    layout mismatches rather than pixel-only metadata.
   - `tools/chrome-live-bitmap/capture_html_argb.js` captures real Chrome ARGB
     screenshots and now exports matching `chrome-headless-geometry` DOM
-    geometry when `CHROME_CAPTURE_GEOMETRY_OUTPUT` is set.
+    geometry with the same style-box schema when
+    `CHROME_CAPTURE_GEOMETRY_OUTPUT` is set.
   - `scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs` records
     the Chrome geometry artifact beside the ARGB proof and fails closed if a
     successful Chrome capture does not write it.
@@ -140,6 +145,17 @@ Prove and harden the requested GUI stack:
   `test/fixtures/html_compat/02_block_boxes.html` produced 6 labeled items and
   `src/app/wm_compare/html_compat_geometry_probe_cli.spl` reported
   `layout_match` with `mismatch_count=0` against Simple structural boxes.
+- Schema evidence (2026-06-11):
+  `test/03_system/gui/wm_compare/electron_geometry_compare_spec.spl` proves the
+  shared Chrome/Electron geometry parser preserves padding, border, and
+  background fields, and that exact comparison fails closed on a border-width
+  mismatch without blur, tolerance, downscaling, or text-antialiasing work.
+- Live Chrome schema smoke (2026-06-11):
+  `doc/09_report/chrome_geometry_style_box_schema_evidence_2026-06-11.md`
+  records a real Chrome headless capture for
+  `test/fixtures/html_compat/07_scrollable_list.html`; it wrote
+  `chrome-headless-geometry` with computed padding and background fields and
+  kept `blur_or_tolerance_used=false`.
 
 ## Agent A: MDI Render And Event Evidence
 
@@ -205,13 +221,15 @@ Small tasks:
 
 1. Document the current real Chromium access paths: Chrome ARGB screenshot,
    Electron DOM rects, computed styles, and corpus metrics.
-2. DONE (2026-06-11): extend the Chrome live bitmap runner to emit per-element
-   DOM geometry for `[data-geom-label]` nodes, matching Electron's geometry
-   schema.
+2. DONE (2026-06-11): extend the Chrome and Electron live bitmap runners to
+   emit per-element DOM geometry for `[data-geom-label]` nodes, including
+   border-box rects, padding, border widths, background, and text.
 3. Add or extend a runner that emits per-element Chromium DOM geometry for the
    same manifest rows used by Simple layout.
-4. Compare element `x`, `y`, `width`, `height`, border, padding, and background
-   without text antialiasing in the first pass.
+4. PARTIAL (2026-06-11): compare element `x`, `y`, `width`, `height`, border,
+   padding, and background without text antialiasing in the parser/report
+   schema. Remaining work is to run that expanded schema across the full
+   non-text manifest rows and publish per-element deltas.
 
 Exit gate:
 

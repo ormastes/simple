@@ -411,11 +411,13 @@ async function collectGeometry(win) {
   return win.webContents.executeJavaScript(`
     (() => {
       const nodes = Array.from(document.querySelectorAll("[data-geom-label]"));
+      const px = value => Math.round(Number.parseFloat(String(value || "0"))) || 0;
       return {
         producer: "electron-chromium-geometry",
         viewport: { width: window.innerWidth, height: window.innerHeight },
         items: nodes.map((el, index) => {
           const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
           const text = String(el.textContent || "").replace(/\\s+/g, " ").trim();
           return {
             index,
@@ -425,6 +427,15 @@ async function collectGeometry(win) {
             y: Math.round(rect.top),
             width: Math.round(rect.width),
             height: Math.round(rect.height),
+            paddingLeft: px(style.paddingLeft),
+            paddingTop: px(style.paddingTop),
+            paddingRight: px(style.paddingRight),
+            paddingBottom: px(style.paddingBottom),
+            borderLeft: px(style.borderLeftWidth),
+            borderTop: px(style.borderTopWidth),
+            borderRight: px(style.borderRightWidth),
+            borderBottom: px(style.borderBottomWidth),
+            backgroundColor: style.backgroundColor,
             text
           };
         })

@@ -28,7 +28,7 @@ electron_geometry_compare_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,15 +41,27 @@ electron_geometry_compare_spec -> app
 
 #### converts Electron geometry JSON into structural layout boxes
 
+- Parse Electron Chromium geometry JSON
+- Check exact labeled border-box geometry
+   - Expected: boxes.len() equals `2`
+   - Expected: boxes[0].label equals `header`
+   - Expected: boxes[0].x equals `8`
+   - Expected: boxes[0].width equals `120`
+   - Expected: boxes[1].label equals `footer`
+   - Expected: boxes[1].y equals `68`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Parse Electron Chromium geometry JSON")
 val geometry_json = "{\"producer\":\"electron-chromium-geometry\",\"viewport\":{\"width\":320,\"height\":240},\"items\":[{\"label\":\"header\",\"tag\":\"div\",\"x\":8,\"y\":8,\"width\":120,\"height\":20,\"text\":\"\"},{\"label\":\"footer\",\"tag\":\"div\",\"x\":8,\"y\":68,\"width\":120,\"height\":20,\"text\":\"\"}]}"
 val boxes = electron_geometry_json_to_boxes(geometry_json)
+step("Check exact labeled border-box geometry")
 expect(boxes.len()).to_equal(2)
 expect(boxes[0].label).to_equal("header")
 expect(boxes[0].x).to_equal(8)
@@ -62,21 +74,52 @@ expect(boxes[1].y).to_equal(68)
 
 #### converts Chrome live geometry JSON using the same structural schema
 
+- Parse Chrome headless geometry with computed style box fields
+- Check exact border-box, padding, border, background, and text fields
+   - Expected: boxes.len() equals `1`
+   - Expected: boxes[0].label equals `box`
+   - Expected: boxes[0].x equals `7`
+   - Expected: boxes[0].y equals `9`
+   - Expected: boxes[0].width equals `33`
+   - Expected: boxes[0].height equals `17`
+   - Expected: boxes[0].padding_left equals `4`
+   - Expected: boxes[0].padding_top equals `5`
+   - Expected: boxes[0].padding_right equals `6`
+   - Expected: boxes[0].padding_bottom equals `7`
+   - Expected: boxes[0].border_left equals `1`
+   - Expected: boxes[0].border_top equals `2`
+   - Expected: boxes[0].border_right equals `3`
+   - Expected: boxes[0].border_bottom equals `4`
+   - Expected: boxes[0].background_color equals `rgb(10, 20, 30)`
+   - Expected: boxes[0].text equals `Hello`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"box\",\"tag\":\"div\",\"x\":7,\"y\":9,\"width\":33,\"height\":17,\"text\":\"Hello\"}]}"
+step("Parse Chrome headless geometry with computed style box fields")
+val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"box\",\"tag\":\"div\",\"x\":7,\"y\":9,\"width\":33,\"height\":17,\"paddingLeft\":4,\"paddingTop\":5,\"paddingRight\":6,\"paddingBottom\":7,\"borderLeft\":1,\"borderTop\":2,\"borderRight\":3,\"borderBottom\":4,\"backgroundColor\":\"rgb(10, 20, 30)\",\"text\":\"Hello\"}]}"
 val boxes = electron_geometry_json_to_boxes(geometry_json)
+step("Check exact border-box, padding, border, background, and text fields")
 expect(boxes.len()).to_equal(1)
 expect(boxes[0].label).to_equal("box")
 expect(boxes[0].x).to_equal(7)
 expect(boxes[0].y).to_equal(9)
 expect(boxes[0].width).to_equal(33)
 expect(boxes[0].height).to_equal(17)
+expect(boxes[0].padding_left).to_equal(4)
+expect(boxes[0].padding_top).to_equal(5)
+expect(boxes[0].padding_right).to_equal(6)
+expect(boxes[0].padding_bottom).to_equal(7)
+expect(boxes[0].border_left).to_equal(1)
+expect(boxes[0].border_top).to_equal(2)
+expect(boxes[0].border_right).to_equal(3)
+expect(boxes[0].border_bottom).to_equal(4)
+expect(boxes[0].background_color).to_equal("rgb(10, 20, 30)")
 expect(boxes[0].text).to_equal("Hello")
 ```
 
@@ -84,8 +127,10 @@ expect(boxes[0].text).to_equal("Hello")
 
 #### compares Electron geometry JSON against Simple-side boxes
 
+- Build Electron geometry and Simple structural boxes with a y mismatch
 - structural layout box
 - structural layout box
+- Compare exact structural geometry without pixel tolerance
    - Expected: report.status equals `layout_mismatch`
    - Expected: report.mismatch_count equals `1`
 
@@ -93,15 +138,17 @@ expect(boxes[0].text).to_equal("Hello")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Build Electron geometry and Simple structural boxes with a y mismatch")
 val geometry_json = "{\"producer\":\"electron-chromium-geometry\",\"viewport\":{\"width\":320,\"height\":240},\"items\":[{\"label\":\"header\",\"tag\":\"div\",\"x\":8,\"y\":8,\"width\":120,\"height\":20,\"text\":\"\"},{\"label\":\"footer\",\"tag\":\"div\",\"x\":8,\"y\":68,\"width\":120,\"height\":20,\"text\":\"\"}]}"
 val simple_boxes = [
     structural_layout_box("header", 8, 8, 120, 20, ""),
     structural_layout_box("footer", 8, 72, 120, 20, "")
 ]
+step("Compare exact structural geometry without pixel tolerance")
 val report = compare_electron_geometry_json(
     "electron_geometry", "simple_layout",
     320, 240,
@@ -119,16 +166,58 @@ expect(sdn).to_contain("y: 72")
 
 </details>
 
-#### fails closed for malformed geometry JSON
+#### compares Chromium style box fields without pixel tolerance
+
+- Build Chrome geometry with padding, border, and background style fields
+- structural layout style box
+- Fail closed on an exact border-width mismatch
+   - Expected: report.status equals `layout_mismatch`
+   - Expected: report.mismatch_count equals `1`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Build Chrome geometry with padding, border, and background style fields")
+val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"panel\",\"tag\":\"div\",\"x\":4,\"y\":6,\"width\":40,\"height\":20,\"paddingLeft\":8,\"paddingTop\":6,\"paddingRight\":8,\"paddingBottom\":6,\"borderLeft\":2,\"borderTop\":2,\"borderRight\":2,\"borderBottom\":2,\"backgroundColor\":\"rgb(40, 50, 60)\",\"text\":\"\"}]}"
+val simple_boxes = [
+    structural_layout_style_box("panel", 4, 6, 40, 20, 8, 6, 8, 6, 1, 2, 2, 2, "rgb(40, 50, 60)", "")
+]
+step("Fail closed on an exact border-width mismatch")
+val report = compare_electron_geometry_json(
+    "chrome_geometry", "simple_layout",
+    80, 50,
+    geometry_json, simple_boxes,
+    "runtime_evidence selected=chrome-headless-geometry;blur_or_tolerance=false",
+    "build/test/chrome_geometry/panel.json"
+)
+expect(report.status).to_equal("layout_mismatch")
+expect(report.mismatch_count).to_equal(1)
+```
+
+</details>
+
+#### fails closed for malformed geometry JSON
+
+- Parse malformed geometry JSON
+- Confirm malformed geometry produces no structural boxes
+   - Expected: boxes.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Parse malformed geometry JSON")
 val boxes = electron_geometry_json_to_boxes("{\"items\": [}")
+step("Confirm malformed geometry produces no structural boxes")
 expect(boxes.len()).to_equal(0)
 ```
 
@@ -153,8 +242,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
