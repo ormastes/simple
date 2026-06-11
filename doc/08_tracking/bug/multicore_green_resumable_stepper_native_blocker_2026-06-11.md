@@ -13,9 +13,9 @@ scheduler layered over the existing hosted `multicore_green` worker pool:
 - queue items carry only scalar ids and indexes
 - one worker resumes one step at a time and requeues yielded work
 
-That design type-checks and compiles to a hosted native binary, but the binary
-still segfaults before returning the first completion. The narrower root cause
-found afterward is tracked separately in
+That design type-checks and compiles to a hosted native binary, but the debug
+seed native binary still segfaults before returning the first completion. The
+narrower debug-seed root cause found afterward is tracked separately in
 `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`.
 
 ## Minimal Boundary
@@ -35,9 +35,9 @@ EXIT=139
 
 So this is no longer a vague “fairness is hard” gap. The narrower blocker is:
 
-- native hosted worker-pool execution for the resumable-stepper probe crashes
+- debug-seed native hosted worker-pool execution for the resumable-stepper probe crashes
 - even when the work item is a single callback-id step with immediate completion
-- that crash is downstream of the helper-returned function-value native blocker
+- that crash is downstream of the helper-returned function-value debug blocker
   now tracked separately
 
 ## Why This Matters

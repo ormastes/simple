@@ -1,6 +1,6 @@
-# Native Function Value Helper Return Blocker
+# Native Function Value Helper Return Debug Blocker
 
-> This SSpec pins the narrower native callback boundary under the hosted multicore-green resumable-stepper experiment: direct calls through a global function array still work, but returning a function value from a helper and then calling it still segfaults in the hosted native binary.
+> This SSpec pins the current narrower debug-seed callback boundary under the hosted multicore-green resumable-stepper experiment: the checked-in `bin/release/simple` path now handles helper-returned function values, but the fresh debug seed binary still segfaults when a helper returns a function value and the caller invokes it in the standalone native artifact.
 
 <!-- sdn-diagram:id=native_function_value_helper_return_blocker_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ native_function_value_helper_return_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Function Value Helper Return Blocker
+# Native Function Value Helper Return Debug Blocker
 
-This SSpec pins the narrower native callback boundary under the hosted multicore-green resumable-stepper experiment: direct calls through a global function array still work, but returning a function value from a helper and then calling it still segfaults in the hosted native binary.
+This SSpec pins the current narrower debug-seed callback boundary under the hosted multicore-green resumable-stepper experiment: the checked-in `bin/release/simple` path now handles helper-returned function values, but the fresh debug seed binary still segfaults when a helper returns a function value and the caller invokes it in the standalone native artifact.
 
 ## At a Glance
 
@@ -53,10 +53,11 @@ This SSpec pins the narrower native callback boundary under the hosted multicore
 
 ## Overview
 
-This SSpec pins the narrower native callback boundary under the hosted
-multicore-green resumable-stepper experiment: direct calls through a global
-function array still work, but returning a function value from a helper and then
-calling it still segfaults in the hosted native binary.
+This SSpec pins the current narrower debug-seed callback boundary under the
+hosted multicore-green resumable-stepper experiment: the checked-in
+`bin/release/simple` path now handles helper-returned function values, but the
+fresh debug seed binary still segfaults when a helper returns a function value
+and the caller invokes it in the standalone native artifact.
 
 ## Requirements
 
@@ -84,26 +85,29 @@ bin/release/simple test test/03_system/feature/usage/native_function_value_helpe
 
 ### native function value helper return blocker
 
-#### keeps the narrower helper-return crash boundary explicit
+#### keeps the remaining debug-seed helper-return crash boundary explicit
 
 - Write the direct and helper-return native callback probes
    - Expected: mkdir_code equals `0`
    - Expected: rt_file_write_text(DIRECT_SOURCE, direct_probe_source()) is true
    - Expected: rt_file_write_text(HELPER_SOURCE, helper_probe_source()) is true
-- Direct global-array callback native path still works
+- Direct global-array callback still works in the fresh debug native path
    - Expected: direct_compile_code equals `0`
    - Expected: direct_run_code equals `0`
-- Helper-returned function value still crashes in hosted native
+- The checked-in release path now handles helper-returned function values
+   - Expected: release_compile_code equals `0`
+   - Expected: release_run_code equals `0`
+- The fresh debug seed binary still crashes on the helper-return native path
    - Expected: helper_compile_code equals `0`
    - Expected: helper_run_code equals `0`
-- The tracker records the same helper-return blocker
+- The tracker records the same debug-seed helper-return blocker
    - Expected: blocker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -113,29 +117,38 @@ expect(mkdir_code).to_equal(0)
 expect(rt_file_write_text(DIRECT_SOURCE, direct_probe_source())).to_equal(true)
 expect(rt_file_write_text(HELPER_SOURCE, helper_probe_source())).to_equal(true)
 
-step("Direct global-array callback native path still works")
-val (direct_compile_out, direct_compile_code) = shell(SIMPLE_BIN + " compile " + DIRECT_SOURCE + " --native -o " + DIRECT_NATIVE)
+step("Direct global-array callback still works in the fresh debug native path")
+val (direct_compile_out, direct_compile_code) = shell(DEBUG_SIMPLE_BIN + " compile " + DIRECT_SOURCE + " --native -o " + DIRECT_NATIVE_DEBUG)
 expect(direct_compile_code).to_equal(0)
 expect(direct_compile_out).to_contain("Compiled")
-val (direct_run_out, direct_run_code) = shell("sh -c '" + DIRECT_NATIVE + " >/tmp/native_fn_direct.out 2>&1; code=$?; cat /tmp/native_fn_direct.out; echo EXIT=$code'")
+val (direct_run_out, direct_run_code) = shell("sh -c '" + DIRECT_NATIVE_DEBUG + " >/tmp/native_fn_direct.out 2>&1; code=$?; cat /tmp/native_fn_direct.out; echo EXIT=$code'")
 expect(direct_run_code).to_equal(0)
 expect(direct_run_out).to_contain("got=<value:0x7>")
 expect(direct_run_out).to_contain("EXIT=0")
 
-step("Helper-returned function value still crashes in hosted native")
-val (helper_compile_out, helper_compile_code) = shell(SIMPLE_BIN + " compile " + HELPER_SOURCE + " --native -o " + HELPER_NATIVE)
+step("The checked-in release path now handles helper-returned function values")
+val (release_compile_out, release_compile_code) = shell(RELEASE_SIMPLE_BIN + " compile " + HELPER_SOURCE + " --native -o " + HELPER_NATIVE_RELEASE)
+expect(release_compile_code).to_equal(0)
+expect(release_compile_out).to_contain("Compiled")
+val (release_run_out, release_run_code) = shell("sh -c '" + HELPER_NATIVE_RELEASE + " >/tmp/native_fn_helper_release.out 2>&1; code=$?; cat /tmp/native_fn_helper_release.out; echo EXIT=$code'")
+expect(release_run_code).to_equal(0)
+expect(release_run_out).to_contain("via_helper=7")
+expect(release_run_out).to_contain("EXIT=0")
+
+step("The fresh debug seed binary still crashes on the helper-return native path")
+val (helper_compile_out, helper_compile_code) = shell(DEBUG_SIMPLE_BIN + " compile " + HELPER_SOURCE + " --native -o " + HELPER_NATIVE_DEBUG)
 expect(helper_compile_code).to_equal(0)
 expect(helper_compile_out).to_contain("Compiled")
-val (helper_run_out, helper_run_code) = shell("sh -c '" + HELPER_NATIVE + " >/tmp/native_fn_helper.out 2>&1; code=$?; cat /tmp/native_fn_helper.out; echo EXIT=$code'")
+val (helper_run_out, helper_run_code) = shell("sh -c '" + HELPER_NATIVE_DEBUG + " >/tmp/native_fn_helper.out 2>&1; code=$?; cat /tmp/native_fn_helper.out; echo EXIT=$code'")
 expect(helper_run_code).to_equal(0)
 expect(helper_run_out).to_contain("EXIT=139")
 
-step("The tracker records the same helper-return blocker")
+step("The tracker records the same debug-seed helper-return blocker")
 val (blocker_out, blocker_code) = shell("cat doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md")
 expect(blocker_code).to_equal(0)
 expect(blocker_out).to_contain("Status: open")
-expect(blocker_out).to_contain("Direct global-array callback native path still works")
-expect(blocker_out).to_contain("Returning the function value from a helper still segfaults")
+expect(blocker_out).to_contain("checked-in release path now handles helper-returned function values")
+expect(blocker_out).to_contain("fresh debug seed binary still segfaults")
 expect(blocker_out).to_contain("EXIT=139")
 ```
 
