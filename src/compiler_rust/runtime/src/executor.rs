@@ -717,8 +717,9 @@ pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue)
                 func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
             }
             NativeCallable::DirectFunction { entry, raw_worker_args } => {
-                let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
-                func(native_worker_arg(copied_data, raw_worker_args))
+                let func: extern "C" fn(u64, RuntimeValue) -> RuntimeValue =
+                    unsafe { std::mem::transmute(entry) };
+                func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
             }
         })
         .expect("Failed to spawn isolated thread");
@@ -1028,8 +1029,9 @@ pub extern "C" fn rt_thread_spawn_limited(
                     func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
                 }
                 NativeCallable::DirectFunction { entry, raw_worker_args } => {
-                    let func: extern "C" fn(RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(entry) };
-                    func(native_worker_arg(copied_data, raw_worker_args))
+                    let func: extern "C" fn(u64, RuntimeValue) -> RuntimeValue =
+                        unsafe { std::mem::transmute(entry) };
+                    func(closure_ptr, native_worker_arg(copied_data, raw_worker_args))
                 }
             }
         })

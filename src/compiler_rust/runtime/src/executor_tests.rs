@@ -160,6 +160,10 @@ fn native_closure_record(func: *const ()) -> Box<usize> {
     Box::new(func as usize)
 }
 
+fn native_direct_function_record(func: *const ()) -> Box<[usize; 2]> {
+    Box::new([func as usize, NATIVE_DIRECT_FUNCTION_RECORD_MARKER])
+}
+
 extern "C" fn double_value(_closure: u64, v: RuntimeValue) -> RuntimeValue {
     let n = v.as_int();
     RuntimeValue::from_int(n * 2)
@@ -197,6 +201,47 @@ fn test_isolated_thread_spawn_with_args_and_join() {
 
     assert!(handle != 0);
 
+    let result = rt_thread_join(handle);
+    assert!(result.is_int());
+    assert_eq!(result.as_int(), 42);
+
+    rt_thread_free(handle);
+}
+
+#[test]
+fn test_isolated_thread_spawn_and_join_direct_function_record() {
+    extern "C" fn direct_worker(_closure: u64, v: RuntimeValue) -> RuntimeValue {
+        RuntimeValue::from_int(v.as_int() + 1)
+    }
+
+    let closure = native_direct_function_record(direct_worker as *const ());
+    let handle = rt_thread_spawn_isolated(
+        (&*closure) as *const [usize; 2] as *const usize as u64,
+        RuntimeValue::from_int(41),
+    );
+
+    assert!(handle != 0);
+    let result = rt_thread_join(handle);
+    assert!(result.is_int());
+    assert_eq!(result.as_int(), 42);
+
+    rt_thread_free(handle);
+}
+
+#[test]
+fn test_isolated_thread_spawn_with_args_and_join_direct_function_record() {
+    extern "C" fn direct_add(_closure: u64, left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+        RuntimeValue::from_int(left.as_int() + right.as_int())
+    }
+
+    let closure = native_direct_function_record(direct_add as *const ());
+    let handle = rt_thread_spawn_isolated_with_args(
+        (&*closure) as *const [usize; 2] as *const usize as u64,
+        RuntimeValue::from_int(10),
+        RuntimeValue::from_int(32),
+    );
+
+    assert!(handle != 0);
     let result = rt_thread_join(handle);
     assert!(result.is_int());
     assert_eq!(result.as_int(), 42);

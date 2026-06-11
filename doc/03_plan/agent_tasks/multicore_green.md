@@ -16,6 +16,11 @@ Date: 2026-06-06
   the interpreter and SMF loader. Executable evidence now lives in
   `test/03_system/feature/usage/thread_spawn_native_zero_join_blocker_spec.spl`
   and `doc/08_tracking/bug/thread_spawn_native_zero_join_2026-06-11.md`.
+- Later 2026-06-11 narrowing work fixed the host-rebuilt native path and the
+  public `thread_spawn_with_args` native smoke, but the isolated Docker profile
+  still reproduces zero-result joins for generated `thread_spawn(\: worker())`
+  rows. The remaining blocker is therefore Docker-specific OS-thread native
+  profile output, not the general host-native thread API.
 - Cooperative-green SMF mutable-global crash evidence is now closed by
   `test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl`
   and the mirrored manual under `doc/06_spec`.

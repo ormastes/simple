@@ -1,15 +1,22 @@
 # Thread Spawn Native Zero-Join Blocker
 
-Status: Open
+Status: Narrowed
 
 ## Summary
 
-The current public `std.concurrent.thread.thread_spawn` fork-join path still
-fails in standalone native artifacts. Minimal top-level worker workloads compile
-successfully, run successfully in the interpreter and SMF loader, but native
-joins return zeroed results and trip the checksum guard.
+The original standalone native `thread_spawn` zero-join bug has been narrowed.
+With a freshly rebuilt runtime/driver binary, the public host-side OS-thread
+surface now works again for:
 
-This is a live host/runtime blocker, not only a stale profile artifact.
+- minimal direct `thread_spawn(worker)` fork-join
+- native `thread_spawn_with_args(...)` smoke
+- host-native `thread_spawn(\: worker())` profile worker repro
+
+The remaining live failure is now the Docker-compiled OS-thread profile row:
+the same generated `thread_spawn(\: worker())` and fanout shapes still produce
+zero-result joins when compiled inside the isolated cross-language profile
+container, even when that container is pointed at the freshly rebuilt compiler
+binary.
 
 ## Reproduction
 
@@ -37,11 +44,20 @@ fn main():
     print("thread_spawn_native_join_pass=true")
 ```
 
-Current observed behavior with `bin/release/simple`:
+Historical checked-in blocker behavior with the stale release wrapper:
 
 - interpreter: prints `thread_spawn_native_join_pass=true`
 - SMF: prints `thread_spawn_native_join_pass=true`
 - standalone native: prints `checksum_mismatch total=0 expected=14` and exits `74`
+
+Fresh rebuilt host evidence on 2026-06-11 using
+`build/cargo-target-thread-fix/debug/simple`:
+
+- `thread_spawn_with_args_native.spl` native smoke -> pass
+- `parallel.spl` host-native OS-thread worker repro -> `total = 7220643300`
+- direct probe:
+  - `thread_spawn_with_args(10, 32, add_pair)` -> `direct_result=42`
+  - `thread_spawn_with_args(7, 11, \seed, iters: ...)` -> lambda result matches expected
 
 ## Profile Impact
 
@@ -50,7 +66,7 @@ This is the current reason the fresh host/Docker profile rows still report:
 - `Simple (native)` worker row -> `fail`
 - `Simple (native)` fanout row -> `fail`
 
-Fresh isolated profile evidence on 2026-06-11:
+Fresh isolated profile evidence on 2026-06-11 with the stale wrapper path:
 
 - `doc/09_report/cross_language_perf_2026-06-11_refresh_current.md`
 
@@ -71,11 +87,33 @@ different path. The active failure here is narrower:
 - standalone native artifact
 - joined results come back as zero
 
-The problem is therefore in the native `thread_spawn` closure/function-value
-execution boundary or result propagation path, not in the profile report parser.
+Fresh isolated profile evidence on 2026-06-11 with the rebuilt compiler path:
+
+- `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+
+That report still records:
+
+- `Simple (native)` worker row -> `fail`
+- `Simple (native)` fanout row -> `fail`
+
+and the generated Docker-built binaries still reproduce:
+
+- `build/cross_lang_perf_thread_fix_fresh/parallel_simple_native`
+  -> `checksum_mismatch total=0 expected=7220643300`
+- `build/cross_lang_perf_thread_fix_fresh/fanout_simple_native`
+  -> `checksum_mismatch total=0 expected=1868141281000`
+
+The remaining problem is therefore narrower than the original host/runtime bug:
+
+- host-native rebuilt compiler path is fixed
+- Docker-compiled OS-thread profile binaries still fail
+- the profile report parser is not the issue
 
 ## Next Fix Target
 
-Fix the standalone native `thread_spawn` path so the minimal two-worker fixture
-above returns `14`, then refresh the cross-language profile evidence and convert
-the blocker spec into regression coverage.
+Next target:
+
+- isolate why Docker-compiled `thread_spawn(\: worker())` binaries still zero
+  their joins when the same fresh compiler produces correct host-native output
+- once Docker OS-thread rows go green, refresh the checked-in contract report
+  and convert the stale native blocker evidence into regression coverage

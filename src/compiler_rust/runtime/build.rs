@@ -67,12 +67,14 @@ fn main() {
         return;
     }
 
+    let defined_symbols = collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex);
+
     generated.push_str("#[allow(clashing_extern_declarations)]\n");
     generated.push_str("mod exported_symbols {\n");
     generated.push_str("    #[allow(clashing_extern_declarations)]\n");
     generated.push_str("    unsafe extern \"C\" {\n");
     for symbol in &symbols {
-        if runtime_defines_symbol(&runtime_src, &runtime_c_dir, symbol, runtime_regex) {
+        if defined_symbols.contains(symbol) {
             if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
                 // Under driver-hooks, native_all owns the real C symbol; skip the unconditional
                 // link-name reference here to avoid an unresolved-symbol error in simple-driver.
@@ -87,7 +89,7 @@ fn main() {
     generated.push_str("}\n\n");
     generated.push_str("pub static RUNTIME_SYMBOL_ENTRIES: &[RuntimeSymbolEntry] = &[\n");
     for symbol in &symbols {
-        if runtime_defines_symbol(&runtime_src, &runtime_c_dir, symbol, runtime_regex) {
+        if defined_symbols.contains(symbol) {
             if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
                 // Omit from the static table; native_all registers the real symbol separately
                 // when it links in (it owns the #[no_mangle] definition).
@@ -138,8 +140,8 @@ fn compile_c_runtime_sources() {
     }
 }
 
-fn runtime_defines_symbol(root: &Path, c_root: &Path, symbol: &str, runtime_regex: bool) -> bool {
-    let needle = format!("fn {symbol}");
+fn collect_defined_runtime_symbols(root: &Path, c_root: &Path, runtime_regex: bool) -> HashSet<String> {
+    let mut exported = HashSet::new();
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(path) = stack.pop() {
@@ -159,17 +161,16 @@ fn runtime_defines_symbol(root: &Path, c_root: &Path, symbol: &str, runtime_rege
                 continue;
             }
             if let Ok(file) = fs::read_to_string(&entry_path) {
-                if rust_file_exports_symbol(&file, &needle, symbol) {
-                    return true;
-                }
+                collect_rust_file_exports(&file, &mut exported);
             }
         }
     }
 
-    c_runtime_defines_symbol(c_root, symbol)
+    collect_c_runtime_exports(c_root, &mut exported);
+    exported
 }
 
-fn c_runtime_defines_symbol(root: &Path, symbol: &str) -> bool {
+fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
     const LINKED_C_SOURCES: &[&str] = &[
         "runtime_memory.c",
         "runtime_time.c",
@@ -181,39 +182,59 @@ fn c_runtime_defines_symbol(root: &Path, symbol: &str) -> bool {
         let Ok(file) = fs::read_to_string(path) else {
             continue;
         };
-        if c_file_exports_symbol(&file, symbol) {
-            return true;
-        }
+        collect_c_file_exports(&file, exported);
     }
-    false
 }
 
-fn rust_file_exports_symbol(file: &str, needle: &str, symbol: &str) -> bool {
+fn collect_rust_file_exports(file: &str, exported: &mut HashSet<String>) {
     let lines: Vec<&str> = file.lines().collect();
     for (idx, line) in lines.iter().enumerate() {
-        if line.contains(&format!("#[export_name = \"{symbol}\"]")) {
-            return true;
+        let trimmed = line.trim();
+        if let Some(symbol) = export_name_symbol(trimmed) {
+            exported.insert(symbol.to_string());
         }
-        if !line.contains(needle) {
+        if !trimmed.contains("fn ") {
             continue;
         }
         let start = idx.saturating_sub(4);
         if lines[start..idx].iter().any(|prev| prev.trim() == "#[no_mangle]") {
-            return true;
+            if let Some(symbol) = rust_function_name(trimmed) {
+                exported.insert(symbol.to_string());
+            }
         }
     }
-    false
 }
 
-fn c_file_exports_symbol(file: &str, symbol: &str) -> bool {
-    let needle = format!("{symbol}(");
-    file.lines().any(|line| {
+fn export_name_symbol(line: &str) -> Option<&str> {
+    let prefix = "#[export_name = \"";
+    let suffix = "\"]";
+    line.strip_prefix(prefix)?.strip_suffix(suffix)
+}
+
+fn rust_function_name(line: &str) -> Option<&str> {
+    let fn_pos = line.find("fn ")?;
+    let after_fn = &line[fn_pos + 3..];
+    let end = after_fn.find('(')?;
+    Some(after_fn[..end].trim())
+}
+
+fn collect_c_file_exports(file: &str, exported: &mut HashSet<String>) {
+    for line in file.lines() {
         let trimmed = line.trim_start();
-        !trimmed.starts_with("static ")
-            && !trimmed.starts_with("//")
-            && trimmed.contains(&needle)
-            && trimmed.ends_with('{')
-    })
+        if trimmed.starts_with("static ") || trimmed.starts_with("//") || !trimmed.ends_with('{') {
+            continue;
+        }
+        let Some(paren) = trimmed.find('(') else {
+            continue;
+        };
+        let head = trimmed[..paren].trim_end();
+        let Some(symbol) = head.split_whitespace().last() else {
+            continue;
+        };
+        if symbol.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+            exported.insert(symbol.to_string());
+        }
+    }
 }
 
 fn runtime_symbol_alias(symbol: &str) -> String {
