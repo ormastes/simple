@@ -138,3 +138,19 @@ All waves executed and verified. Final E-PAR-006 validation (deployed seed binar
 - Note: `strings | grep E-PAR-006` is NOT a valid deploy oracle — Rust merges
   string literals (even E-PAR-001..005 never appear standalone). Verify
   functionally via `simple check` on a fixture.
+
+## Follow-up: port E-PAR-001..005 to pure-Simple lint
+
+E-PAR-006 is now implemented in pure Simple (`src/compiler/35.semantics/lint/concurrency_share_nothing.spl`).
+The remaining E-PAR rules (001–005) covering concurrency API misuse (wrong arity, wrong argument
+kind, wrong surface, etc.) still live only in the Rust seed (`src/compiler_rust/driver/src/cli/check.rs`).
+Each rule should be ported as a separate lint file under `src/compiler/35.semantics/lint/`, following
+the same text-heuristic + AST-walker pattern used for E-PAR-006, and registered in `__init__.spl`.
+
+Note (review): `check_concurrency_share_nothing` is exported from the lint hub but
+not yet invoked by a lint runner — same status as `check_closure_capture`. The
+unit spec follows the existing lint-spec convention (self-contained text-heuristic
+mirror; see `closure_capture_spec.spl` header) because AST-arena lints cannot be
+driven from interpreter-mode specs yet. Real end-to-end E-PAR-006 coverage today
+is the Rust-seed fixtures + `concurrency_api_misuse_spec.spl`; wiring the
+pure-Simple lint into the self-hosted check driver is part of the port above.

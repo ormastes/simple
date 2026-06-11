@@ -1,0 +1,410 @@
+# Concurrency Share-Nothing Closure Lint
+#
+# Detects when green-process spawn calls use closures that share mutable
+# state, violating the share-nothing green-process contract.
+#
+# E-PAR-006: green closure must not share mutable variable  ERROR
+#
+# Green tasks are share-nothing processes: a spawned closure may use its
+# parameters, its own locals, and immutable copies — never mutable variables
+# shared with other tasks.
+#
+# Applies to:
+#   green_spawn, cooperative_green_spawn, multicore_green_spawn
+#
+# EXEMPT:
+#   thread_spawn (OS threads may share via Mutex/RwLock)
+#
+# Violation kinds:
+#   1. Closure READS a module-level `var` (mutable static)
+#      → kind text "module-level mutable variable"
+#   2. Closure WRITES (assigns to) a variable captured from an enclosing
+#      scope (not a lambda param, not a local declared inside the lambda)
+#      → kind text "captured mutable variable write"
+#
+# Module-level `val` constants are fine. Lambda params are fine.
+# Locals declared inside the closure are fine.
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast_expr.{
+    EXPR_IDENT, EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN,
+    EXPR_CALL, EXPR_METHOD_CALL, EXPR_BINARY, EXPR_UNARY,
+    EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_ARRAY_LIT, EXPR_IF,
+    EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK, EXPR_RETURN,
+    EXPR_LAMBDA, EXPR_STRUCT_LIT, EXPR_DO_BLOCK,
+    EXPR_DICT_LIT, EXPR_TUPLE, EXPR_SLICE, EXPR_NULL_COALESCE,
+    EXPR_OPTIONAL_CHAIN, EXPR_CAST, EXPR_INTERPOLATED_STRING,
+    EXPR_RANGE, EXPR_SPREAD, EXPR_LIST_COMP, EXPR_DICT_COMP,
+    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts
+}
+use compiler.frontend.core.ast_stmt.{
+    STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
+    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_MATCH,
+    STMT_COMPOUND_ASSIGN,
+    stmt_tag, stmt_expr, stmt_name, stmt_body
+}
+use compiler.core.ast.{
+    DECL_FN, DECL_EXTERN_FN, DECL_VAL, DECL_VAR,
+    decl_tag, decl_name, decl_param_names, decl_body_stmts
+}
+
+# ============================================================================
+# Finding Struct
+# ============================================================================
+
+struct ShareNothingFinding:
+    code: text
+    severity: text
+    message: text
+    callee: text
+    var_name: text
+    kind: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message}"
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_concurrency_share_nothing(decl_indices: [i64]) -> [ShareNothingFinding]:
+    """Run E-PAR-006 share-nothing lint on module declarations.
+
+    For each function body, finds calls to green_spawn / cooperative_green_spawn /
+    multicore_green_spawn whose first argument is a lambda. Checks the lambda for:
+      1. Reads of module-level var names (kind: module-level mutable variable)
+      2. Writes to variables captured from the enclosing scope (kind: captured mutable variable write)
+    thread_spawn is exempt.
+    """
+    var findings: [ShareNothingFinding] = []
+
+    # Collect module-level var declarations (mutable statics)
+    var module_vars: {text: bool} = {}
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+        if tag == DECL_VAR:
+            module_vars[decl_name[idx]] = true
+
+    # Check each function for share-nothing violations
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+        if tag != DECL_FN:
+            continue
+
+        val params = decl_param_names[idx]
+        val body = decl_body_stmts[idx]
+
+        if body.len() == 0:
+            continue
+
+        # Collect locals of this function (params + var decls)
+        var fn_locals: {text: bool} = {}
+        for p in params:
+            fn_locals[p] = true
+        collect_local_var_decls_sn(body, fn_locals)
+
+        val fs = check_stmts_for_share_nothing(body, fn_locals, module_vars)
+        for f in fs:
+            findings.push(f)
+
+    findings
+
+# ============================================================================
+# Local Variable Collection
+# ============================================================================
+
+fn collect_local_var_decls_sn(stmts: [i64], vars: {text: bool}):
+    """Collect all val/var declaration names from a statement list."""
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val name = stmt_name[s]
+            if name != "":
+                vars[name] = true
+
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
+            collect_local_var_decls_sn(stmt_body[s], vars)
+
+# ============================================================================
+# Statement Walker
+# ============================================================================
+
+fn check_stmts_for_share_nothing(
+    stmts: [i64],
+    outer_vars: {text: bool},
+    module_vars: {text: bool}
+) -> [ShareNothingFinding]:
+    """Walk statements looking for green spawn calls with violating lambdas."""
+    var findings: [ShareNothingFinding] = []
+
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+
+        if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val e = stmt_expr[s]
+            if e >= 0:
+                val fs = check_expr_for_share_nothing(e, outer_vars, module_vars)
+                for f in fs:
+                    findings.push(f)
+
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
+            val nested = check_stmts_for_share_nothing(stmt_body[s], outer_vars, module_vars)
+            for f in nested:
+                findings.push(f)
+
+    findings
+
+fn check_expr_for_share_nothing(
+    e: i64,
+    outer_vars: {text: bool},
+    module_vars: {text: bool}
+) -> [ShareNothingFinding]:
+    """Recursively check expressions. When we find a green spawn call whose
+    first arg is a lambda, analyse the lambda body."""
+    var findings: [ShareNothingFinding] = []
+    if e < 0:
+        return findings
+
+    val tag = expr_tag[e]
+
+    if tag == EXPR_CALL:
+        val callee_expr = expr_left[e]
+        val callee_name = _resolve_callee_name(callee_expr)
+        if _is_share_nothing_callee(callee_name):
+            val args = expr_args[e]
+            if args.len() > 0:
+                val first_arg = args[0]
+                if first_arg >= 0 and expr_tag[first_arg] == EXPR_LAMBDA:
+                    val fs = check_lambda_share_nothing(first_arg, callee_name, outer_vars, module_vars)
+                    for f in fs:
+                        findings.push(f)
+            # Recurse into remaining args (in case of nested spawn calls)
+            val args2 = expr_args[e]
+            var ai = 1
+            while ai < args2.len():
+                val a = args2[ai]
+                if a >= 0:
+                    val fs = check_expr_for_share_nothing(a, outer_vars, module_vars)
+                    for f in fs:
+                        findings.push(f)
+                ai = ai + 1
+            return findings
+
+    # Recurse into sub-expressions for non-spawn calls
+    val left = expr_left[e]
+    if left >= 0:
+        val fs = check_expr_for_share_nothing(left, outer_vars, module_vars)
+        for f in fs:
+            findings.push(f)
+
+    val right = expr_right[e]
+    if right >= 0:
+        val fs = check_expr_for_share_nothing(right, outer_vars, module_vars)
+        for f in fs:
+            findings.push(f)
+
+    for arg in expr_args[e]:
+        if arg >= 0:
+            val fs = check_expr_for_share_nothing(arg, outer_vars, module_vars)
+            for f in fs:
+                findings.push(f)
+
+    for child_stmt in expr_stmts[e]:
+        if child_stmt >= 0:
+            val child_e = stmt_expr[child_stmt]
+            if child_e >= 0:
+                val fs = check_expr_for_share_nothing(child_e, outer_vars, module_vars)
+                for f in fs:
+                    findings.push(f)
+            val child_body = stmt_body[child_stmt]
+            val nested = check_stmts_for_share_nothing(child_body, outer_vars, module_vars)
+            for f in nested:
+                findings.push(f)
+
+    findings
+
+# ============================================================================
+# Lambda Analysis
+# ============================================================================
+
+fn check_lambda_share_nothing(
+    lambda_expr: i64,
+    callee_name: text,
+    outer_vars: {text: bool},
+    module_vars: {text: bool}
+) -> [ShareNothingFinding]:
+    """Check a lambda (first arg to a green spawn) for share-nothing violations."""
+    var findings: [ShareNothingFinding] = []
+
+    # Collect lambda's own params and locals — these are NOT violations
+    var lambda_locals: {text: bool} = {}
+    val lambda_body_stmts = expr_stmts[lambda_expr]
+    collect_local_var_decls_sn(lambda_body_stmts, lambda_locals)
+
+    # Also collect lambda params from extra field (param list)
+    # expr_extra encodes the parameter list for EXPR_LAMBDA
+    # We walk body statements to gather VAR_DECL / VAL_DECL defined inside
+
+    # Check body stmts for violations
+    val body_findings = check_lambda_stmts(lambda_body_stmts, callee_name, outer_vars, module_vars, lambda_locals)
+    for f in body_findings:
+        findings.push(f)
+
+    # Also check the body expression (right child)
+    val body_expr = expr_right[lambda_expr]
+    if body_expr >= 0:
+        val ef = check_lambda_expr(body_expr, callee_name, outer_vars, module_vars, lambda_locals)
+        for f in ef:
+            findings.push(f)
+
+    findings
+
+fn check_lambda_stmts(
+    stmts: [i64],
+    callee_name: text,
+    outer_vars: {text: bool},
+    module_vars: {text: bool},
+    lambda_locals: {text: bool}
+) -> [ShareNothingFinding]:
+    var findings: [ShareNothingFinding] = []
+
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+
+        # Violation kind 2: write to captured var from outer scope
+        if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+            val nm = stmt_name[s]
+            if nm != "":
+                if outer_vars.has(nm) and not lambda_locals.has(nm) and not module_vars.has(nm):
+                    findings.push(ShareNothingFinding(
+                        code: "E-PAR-006",
+                        severity: "ERROR",
+                        message: "{callee_name} closure must not share mutable variable '{nm}' (captured mutable variable write)",
+                        callee: callee_name,
+                        var_name: nm,
+                        kind: "captured mutable variable write"
+                    ))
+
+        if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val e = stmt_expr[s]
+            if e >= 0:
+                val ef = check_lambda_expr(e, callee_name, outer_vars, module_vars, lambda_locals)
+                for f in ef:
+                    findings.push(f)
+
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
+            val nested = check_lambda_stmts(stmt_body[s], callee_name, outer_vars, module_vars, lambda_locals)
+            for f in nested:
+                findings.push(f)
+
+    findings
+
+fn check_lambda_expr(
+    e: i64,
+    callee_name: text,
+    outer_vars: {text: bool},
+    module_vars: {text: bool},
+    lambda_locals: {text: bool}
+) -> [ShareNothingFinding]:
+    var findings: [ShareNothingFinding] = []
+    if e < 0:
+        return findings
+
+    val tag = expr_tag[e]
+
+    # Violation kind 1: read of module-level var
+    if tag == EXPR_IDENT:
+        val nm = expr_s_val[e]
+        if nm != "" and module_vars.has(nm) and not lambda_locals.has(nm):
+            findings.push(ShareNothingFinding(
+                code: "E-PAR-006",
+                severity: "ERROR",
+                message: "{callee_name} closure must not share mutable variable '{nm}' (module-level mutable variable)",
+                callee: callee_name,
+                var_name: nm,
+                kind: "module-level mutable variable"
+            ))
+        return findings
+
+    # Violation kind 2: assignment expression targeting captured var
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
+        val target = expr_left[e]
+        if target >= 0 and expr_tag[target] == EXPR_IDENT:
+            val nm = expr_s_val[target]
+            if nm != "" and outer_vars.has(nm) and not lambda_locals.has(nm) and not module_vars.has(nm):
+                findings.push(ShareNothingFinding(
+                    code: "E-PAR-006",
+                    severity: "ERROR",
+                    message: "{callee_name} closure must not share mutable variable '{nm}' (captured mutable variable write)",
+                    callee: callee_name,
+                    var_name: nm,
+                    kind: "captured mutable variable write"
+                ))
+
+    # Recurse
+    val left = expr_left[e]
+    if left >= 0:
+        val fs = check_lambda_expr(left, callee_name, outer_vars, module_vars, lambda_locals)
+        for f in fs:
+            findings.push(f)
+
+    val right = expr_right[e]
+    if right >= 0:
+        val fs = check_lambda_expr(right, callee_name, outer_vars, module_vars, lambda_locals)
+        for f in fs:
+            findings.push(f)
+
+    for arg in expr_args[e]:
+        if arg >= 0:
+            val fs = check_lambda_expr(arg, callee_name, outer_vars, module_vars, lambda_locals)
+            for f in fs:
+                findings.push(f)
+
+    for child_stmt in expr_stmts[e]:
+        if child_stmt >= 0:
+            val child_e = stmt_expr[child_stmt]
+            if child_e >= 0:
+                val fs = check_lambda_expr(child_e, callee_name, outer_vars, module_vars, lambda_locals)
+                for f in fs:
+                    findings.push(f)
+            val child_body = stmt_body[child_stmt]
+            val nested = check_lambda_stmts(child_body, callee_name, outer_vars, module_vars, lambda_locals)
+            for f in nested:
+                findings.push(f)
+
+    findings
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _is_share_nothing_callee(name: text) -> bool:
+    name == "green_spawn" or name == "cooperative_green_spawn" or name == "multicore_green_spawn"
+
+fn _resolve_callee_name(e: i64) -> text:
+    """Extract the simple name of a callee expression (EXPR_IDENT or qualified)."""
+    if e < 0:
+        return ""
+    val tag = expr_tag[e]
+    if tag == EXPR_IDENT:
+        return expr_s_val[e]
+    # For qualified paths like module.fn, take the right-most ident
+    if tag == EXPR_FIELD_ACCESS:
+        val field = expr_right[e]
+        if field >= 0 and expr_tag[field] == EXPR_IDENT:
+            return expr_s_val[field]
+    ""
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ShareNothingFinding
+export check_concurrency_share_nothing
