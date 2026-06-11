@@ -81,6 +81,31 @@ See doc/03_plan/ui/graphics/engine/gpu_backend_parallel_agent_plan_2026-06-11.md
   rt_vulkan_init interpreter crash blocks full lavapipe e2e readback.
 - 2026-06-11: Agent D cycles 1-2 PUSHED as 6ff422d645 (9 browser_engine
   rendering-path fixes from committed states d3e0039f1c + 17e907b835).
+- 2026-06-11: Agent D cut off mid cycle-3 by account spend limit. Orchestrator
+  closed out the lane: 89 tmp_test*_spec.spl debris files removed; two stale
+  (pre-origin) renderer files restored from origin/main; residual
+  browser_renderer_spec 76/22 + partial :has(> ) root-cause filed as
+  doc/08_tracking/bug/browser_renderer_spec_sequence_failures_2026-06-11.md
+  (AC-8: failures filed as concrete bug doc per contract).
+- 2026-06-11: stage4 deploy (other lane, 15:32) swapped bin/simple to the
+  self-hosted binary with no seed driver present — `bin/simple test` now
+  blocked host-wide; filed
+  doc/08_tracking/bug/stage4_deploy_no_seed_test_runner_blocked_2026-06-11.md.
+  All gpu-backend-dx-harden verification ran green BEFORE the swap.
+
+## Final AC Status
+- AC-1 CLOSED (b54cea0085) · AC-2 CLOSED (b54cea0085) · AC-3 CLOSED with
+  follow-ups VKSPIRV-001 + rt_vulkan_init crash (6ac82fcc6b)
+- AC-4 PARTIAL: setup script + readiness probe shipped (0bf1773151); prefix
+  build deferred (agent sandbox had no network) — rerun
+  `sh scripts/setup/setup-directx-linux.shs` when online
+- AC-5 CLOSED (0bf1773151 + 24000f979a auto-detect registration)
+- AC-6 CLOSED (18/18 Linux interpreter; Windows side is probe-gated)
+- AC-7 CLOSED for vulkan_icd_sffi leaf evidence (0bf1773151); dxvk/vkd3d
+  shim-level dlopen still routes through the ICD leaf
+- AC-8 met by contract: lanes run, fixes pushed (6ff422d645), residual red
+  filed as bug docs
+- AC-9 CLOSED: 6 pushes to origin/main during session
 
 ## Shared Edits Requested
 - DONE (orchestrator, 2026-06-11): helpers_availability.spl "directx" added
