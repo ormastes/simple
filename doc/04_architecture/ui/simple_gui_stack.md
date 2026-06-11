@@ -345,6 +345,13 @@ VirtIO framebuffer. Diagnostics and reports should use
 `backend_preference_summary()` so guides, tests, and startup evidence describe
 the same order.
 
+Text fallback helpers must keep glyph-pixel loops separate from layout advance
+padding. The buffer is prefilled with background pixels, so anti-aliased glyph
+rendering should touch only the glyph coverage width and leave advance gaps or
+font-size padding rows as background. Specs assert the pixel-count contract,
+bottom padding rows, and advance-gap background to keep this startup hot path
+safe for loop-hoisting and bounds-check work.
+
 ### Startup dynSMF Libraries
 
 The low-dependency lane treats standard library-like capabilities as

@@ -645,6 +645,16 @@ dev-done
   readback-verified GPU glyph pixels.
 - verify: Optimizer scans completed for this slice in Docker. Counts: CUDA
   session 23 and CUDA session contract spec 0 remaining static opportunities.
+- impl: Trimmed the anti-aliased Engine2D text fallback loop to real glyph
+  coverage pixels. `text_aa_blit_buffer(...)` now precomputes the inverse scale
+  and row base, increments `sample_x`, and relies on the prefilled background
+  buffer for advance gaps instead of iterating those padding pixels per glyph
+  row.
+- verify: Focused helpers-text check passes and helpers-text spec now passes
+  6/6, including Spark-suggested pixel-count coverage and a new assertion that
+  anti-aliased advance gaps remain background. Generated manual refreshed under
+  `doc/06_spec`. Optimizer scans completed in Docker: helpers text 37 and
+  helpers-text spec 13 remaining static opportunities.
 - impl: Added checksum-gated vector font glyph readback evidence.
   `vector_font_glyph_readback_evidence(...)` now derives the expected checksum
   from returned vector glyph alpha pixels and requires both GPU-returned glyph

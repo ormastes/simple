@@ -89,6 +89,8 @@ Host input
   native surfaces (`baremetal`, `virtio_gpu`) before Metal/CUDA/ROCm, while the
   automatic probe order starts at Metal because native surfaces need a
   preinitialized framebuffer.
+- Text fallback hot path: AA glyph loops touch only glyph coverage pixels; the
+  prefilled buffer owns advance gaps and font-size padding rows as background.
 - WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts
   `SharedWmDispatchResult` to stable `WmRuntimeDispatchCommand` for host shells.
 - Web WM bridge: `src/app/ui.web/wm_runtime_bridge.spl` consumes dispatch

@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Vector Font Offload Specification](test/01_unit/lib/gpu/engine2d/vector_font_offload_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
+| [Helpers Text Specification](test/01_unit/lib/gpu/engine2d/helpers_text_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
 

@@ -27,7 +27,7 @@ helpers_text_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -114,7 +114,7 @@ expect(mismatch_count).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -129,6 +129,36 @@ while idx < pixel_count:
     idx = idx + 1
 
 expect(payload.height).to_equal(16)
+expect(payload.pixels.len()).to_equal(payload.width * payload.height)
+expect(mismatch_count).to_equal(0)
+```
+
+</details>
+
+#### keeps anti-aliased glyph advance gap as background
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val bg = 0xff222222u32
+val payload = text_aa_blit_buffer("A", 0xff111111u32, bg, 16)
+val glyph_pixel_width = 5 * text_scale(16)
+var mismatch_count = 0
+var row = 0
+while row < payload.height:
+    var x = glyph_pixel_width
+    while x < payload.width:
+        val idx = row * payload.width + x
+        if payload.pixels[idx] != bg:
+            mismatch_count = mismatch_count + 1
+        x = x + 1
+    row = row + 1
+
+expect(glyph_pixel_width).to_be_less_than(payload.width)
 expect(mismatch_count).to_equal(0)
 ```
 
@@ -184,8 +214,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
