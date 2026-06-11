@@ -80,6 +80,11 @@ Related active host-side blocker:
   records the newer callback-id resumable-stepper prototype. That path removes
   function-valued queue items, but a single completed stepper still segfaults
   in hosted native with `EXIT=139`.
+- `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`
+  narrows that further: direct global-array callback calls still work on hosted
+  native, but returning the function value from a helper and then calling it
+  still segfaults. That is now the lower native blocker under the resumable
+  fairness experiment.
 
 ## Current Evidence Boundary
 
