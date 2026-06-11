@@ -47,9 +47,11 @@ Runs the macOS live GUI window evidence wrapper. On macOS this must launch the
 | Generator | `simple spipe-docgen` (Simple) |
 
 Runs the macOS live GUI window evidence wrapper. On macOS this must launch the
-sample through `scripts/macos-gui-run.shs`, detect a real `SimpleGui` window,
-capture its window rectangle, and fingerprint the capture. On non-macOS hosts it
-must skip explicitly so Linux CI cannot claim live macOS window evidence.
+shared MDI sample through `scripts/macos-gui-run.shs`, detect a real `SimpleGui`
+window, capture its window rectangle, and fingerprint the capture. On non-macOS
+hosts it must skip explicitly so Linux CI cannot claim live macOS window
+evidence. Both lanes must prove the shared MDI titlebar button, body button,
+text input, and titlebar CSS source contract.
 
 ## Scenarios
 
@@ -138,7 +140,7 @@ expect(_capture_fields_are_coherent(wrong_positive_ratio, true)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 106 lines folded for reproduction.
+Runnable source: 132 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -157,6 +159,12 @@ if host_os == "macos":
     expect(stdout).to_contain("macos_gui_live_window_evidence_reason=pass")
     expect(stdout).to_contain("macos_gui_live_window_evidence_host_os=macos")
     expect(stdout).to_contain("macos_gui_live_window_evidence_launcher=macos-gui-run")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_sample=src/app/ui_shared_mdi/main.spl")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_window_found=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_window_title=SimpleGui")
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_window_title=")).to_equal("SimpleGui")
@@ -189,7 +197,14 @@ if host_os == "macos":
     expect(report).to_contain("GUI SMF artifact contract status: pass")
     expect(report).to_contain("GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf")
     expect(report).to_contain("GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence")
+    expect(report).to_contain("Shared MDI titlebar contract status: pass")
+    expect(report).to_contain("Shared MDI titlebar sample: src/app/ui_shared_mdi/main.spl")
     expect(report).to_contain("macos_gui_live_window_evidence_status=pass")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_window_rect=")
     expect(report).to_contain("macos_gui_live_window_evidence_capture_cksum=")
     expect(report).to_contain("macos_gui_live_window_evidence_capture_total_pixels=")
@@ -205,6 +220,12 @@ else:
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_host_os=") == "macos").to_equal(false)
     expect(_extract_field(stdout, "macos_gui_live_window_evidence_host_os=") == "").to_equal(false)
     expect(stdout).to_contain("macos_gui_live_window_evidence_launcher=macos-gui-run")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_sample=src/app/ui_shared_mdi/main.spl")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_window_found=false")
     expect(stdout).to_contain("macos_gui_live_window_evidence_window_rect=")
     expect(stdout).to_contain("macos_gui_live_window_evidence_capture_path=")
@@ -241,6 +262,13 @@ else:
     expect(report).to_contain("GUI SMF artifact contract status: pass")
     expect(report).to_contain("GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf")
     expect(report).to_contain("GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence")
+    expect(report).to_contain("Shared MDI titlebar contract status: pass")
+    expect(report).to_contain("Shared MDI titlebar sample: src/app/ui_shared_mdi/main.spl")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_window_rect=")
     expect(report).to_contain("macos_gui_live_window_evidence_capture_width=0")
     expect(report).to_contain("macos_gui_live_window_evidence_capture_height=0")

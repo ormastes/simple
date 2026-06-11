@@ -6,8 +6,11 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/tmp/macos_gui_live_window_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_gui_live_window_evidence_$(date -u +%F).md}"
-SAMPLE_SPL="${MACOS_GUI_LIVE_WINDOW_SAMPLE:-examples/06_io/ui/web_engine2d_gui.spl}"
+SAMPLE_SPL="${MACOS_GUI_LIVE_WINDOW_SAMPLE:-src/app/ui_shared_mdi/main.spl}"
 SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+if [ ! -x "$SIMPLE_BIN" ] && [ -x "bin/simple" ]; then
+    SIMPLE_BIN="bin/simple"
+fi
 CAPTURE_PNG="$BUILD_DIR/simplegui-window.png"
 CAPTURE_BMP="$BUILD_DIR/simplegui-window.bmp"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
@@ -16,11 +19,17 @@ WINDOW_INFO="$BUILD_DIR/window.env"
 TIMEOUT_SECS="${MACOS_GUI_LIVE_WINDOW_TIMEOUT_SECS:-45}"
 SIMPLE_GUI_DYNLIB_ARTIFACT="${SIMPLE_GUI_DYNLIB_ARTIFACT:-build/gui/pure_gui_hot.smf}"
 gui_smf_artifact_contract_out="$BUILD_DIR/gui-smf-artifact-contract.out"
+mdi_titlebar_contract_out="$BUILD_DIR/shared-mdi-titlebar-contract.out"
 gui_smf_artifact_contract_row="GUI_SMF_ARTIFACT_CONTRACT status=missing artifact=$SIMPLE_GUI_DYNLIB_ARTIFACT sha256= size=0 smf_role=-1 arch=0 embedded_dynlib=false symbol=${SIMPLE_GUI_DYNLIB_SYMBOL:-gui_dynlib_hot_probe_tick} qemu_status=not-run qemu_reason=live-qemu-not-executed macos_status=not-run macos_reason=requires-macos-arm64"
 gui_smf_artifact_contract_status=missing
+mdi_titlebar_contract_status=missing
+mdi_titlebar_button_markup_present=false
+mdi_body_button_markup_present=false
+mdi_body_input_markup_present=false
+mdi_titlebar_css_present=false
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$CAPTURE_PNG" "$CAPTURE_BMP" "$EVIDENCE_ENV" "$LAUNCH_LOG" "$WINDOW_INFO" "$REPORT_PATH" "$gui_smf_artifact_contract_out"
+rm -f "$CAPTURE_PNG" "$CAPTURE_BMP" "$EVIDENCE_ENV" "$LAUNCH_LOG" "$WINDOW_INFO" "$REPORT_PATH" "$gui_smf_artifact_contract_out" "$mdi_titlebar_contract_out"
 
 append_env() {
     env_key="$1"
@@ -59,6 +68,8 @@ write_report() {
         echo "- GUI SMF artifact contract status: $gui_smf_artifact_contract_status"
         echo "- GUI SMF artifact contract row: $gui_smf_artifact_contract_row"
         echo "- GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence"
+        echo "- Shared MDI titlebar contract status: $mdi_titlebar_contract_status"
+        echo "- Shared MDI titlebar sample: $SAMPLE_SPL"
         echo
         echo "## Raw Evidence"
         echo
@@ -67,6 +78,11 @@ write_report() {
             echo
             echo "## GUI SMF Artifact Contract Output"
             sed 's/^/- /' "$gui_smf_artifact_contract_out"
+        fi
+        if [ -f "$mdi_titlebar_contract_out" ]; then
+            echo
+            echo "## Shared MDI Titlebar Contract Output"
+            sed 's/^/- /' "$mdi_titlebar_contract_out"
         fi
     } >"$REPORT_PATH"
 }
@@ -93,11 +109,47 @@ mark_gui_smf_macos_pass_if_ready() {
     fi
 }
 
+extract_probe_field() {
+    field_name="$1"
+    sed -n "s/^$field_name=//p" "$mdi_titlebar_contract_out" | tail -n 1
+}
+
+run_mdi_titlebar_contract() {
+    set +e
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run src/app/ui_shared_mdi/titlebar_contract_probe.spl --mode=interpreter --clean >"$mdi_titlebar_contract_out" 2>&1
+    probe_code=$?
+    set -e
+    if [ "$probe_code" -ne 0 ]; then
+        mdi_titlebar_contract_status=fail
+        return
+    fi
+    mdi_titlebar_contract_status="$(extract_probe_field shared_mdi_titlebar_contract_status)"
+    mdi_titlebar_button_markup_present="$(extract_probe_field shared_mdi_titlebar_contract_titlebar_button_markup_present)"
+    mdi_body_button_markup_present="$(extract_probe_field shared_mdi_titlebar_contract_body_button_markup_present)"
+    mdi_body_input_markup_present="$(extract_probe_field shared_mdi_titlebar_contract_body_input_markup_present)"
+    mdi_titlebar_css_present="$(extract_probe_field shared_mdi_titlebar_contract_titlebar_css_present)"
+    if [ -z "$mdi_titlebar_contract_status" ]; then mdi_titlebar_contract_status=fail; fi
+    if [ -z "$mdi_titlebar_button_markup_present" ]; then mdi_titlebar_button_markup_present=false; fi
+    if [ -z "$mdi_body_button_markup_present" ]; then mdi_body_button_markup_present=false; fi
+    if [ -z "$mdi_body_input_markup_present" ]; then mdi_body_input_markup_present=false; fi
+    if [ -z "$mdi_titlebar_css_present" ]; then mdi_titlebar_css_present=false; fi
+}
+
+append_mdi_titlebar_contract_env() {
+    append_env "macos_gui_live_window_evidence_sample" "$SAMPLE_SPL"
+    append_env "macos_gui_live_window_evidence_mdi_titlebar_contract_status" "$mdi_titlebar_contract_status"
+    append_env "macos_gui_live_window_evidence_mdi_titlebar_button_markup_present" "$mdi_titlebar_button_markup_present"
+    append_env "macos_gui_live_window_evidence_mdi_body_button_markup_present" "$mdi_body_button_markup_present"
+    append_env "macos_gui_live_window_evidence_mdi_body_input_markup_present" "$mdi_body_input_markup_present"
+    append_env "macos_gui_live_window_evidence_mdi_titlebar_css_present" "$mdi_titlebar_css_present"
+}
+
 emit_skip() {
     append_env "macos_gui_live_window_evidence_status" "skip"
     append_env "macos_gui_live_window_evidence_reason" "requires-macos"
     append_env "macos_gui_live_window_evidence_host_os" "$(host_os_name)"
     append_env "macos_gui_live_window_evidence_launcher" "macos-gui-run"
+    append_mdi_titlebar_contract_env
     append_env "macos_gui_live_window_evidence_window_found" "false"
     append_env "macos_gui_live_window_evidence_window_title" ""
     append_env "macos_gui_live_window_evidence_window_rect" ""
@@ -124,6 +176,7 @@ emit_fail() {
     append_env "macos_gui_live_window_evidence_reason" "$fail_reason"
     append_env "macos_gui_live_window_evidence_host_os" "$(host_os_name)"
     append_env "macos_gui_live_window_evidence_launcher" "macos-gui-run"
+    append_mdi_titlebar_contract_env
     append_env "macos_gui_live_window_evidence_window_found" "false"
     append_env "macos_gui_live_window_evidence_window_title" ""
     append_env "macos_gui_live_window_evidence_window_rect" ""
@@ -151,6 +204,11 @@ cleanup_macos_app() {
 }
 
 run_gui_smf_artifact_contract
+run_mdi_titlebar_contract
+
+if [ "$mdi_titlebar_contract_status" != "pass" ]; then
+    emit_fail "mdi-titlebar-contract-failed"
+fi
 
 if [ "$(uname -s)" != "Darwin" ]; then
     emit_skip
@@ -233,6 +291,7 @@ append_env "macos_gui_live_window_evidence_status" "pass"
 append_env "macos_gui_live_window_evidence_reason" "pass"
 append_env "macos_gui_live_window_evidence_host_os" "macos"
 append_env "macos_gui_live_window_evidence_launcher" "macos-gui-run"
+append_mdi_titlebar_contract_env
 append_env "macos_gui_live_window_evidence_window_found" "true"
 append_env "macos_gui_live_window_evidence_window_title" "SimpleGui"
 append_env "macos_gui_live_window_evidence_window_rect" "$window_rect"

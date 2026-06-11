@@ -11,9 +11,12 @@ Scope:
 
 - Linux Electron MDI evidence is live and passing through
   `scripts/check/check-electron-mdi-evidence.shs`.
-- macOS live-window wrapper exists, but this Linux host can only prove the
-  explicit `requires-macos` skip lane.
-- Windows-native MDI/titlebar evidence is still missing.
+- Windows-native MDI/titlebar evidence now has a dedicated wrapper/spec/probe
+  lane (`scripts/check/check-windows-native-mdi-evidence.shs`,
+  `test/03_system/gui/windows_native_mdi_evidence_spec.spl`,
+  `src/os/hosted/hosted_win32_mdi_probe.spl`) but is still host-gated.
+- macOS live-window evidence is still host-gated (`check-macos-gui-live-window-evidence.shs`),
+  and this Linux host can only prove the explicit `requires-macos` skip lane.
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`.
@@ -36,17 +39,18 @@ Reusable repo pieces:
 
 Missing today:
 
-- No Windows-only check wrapper that launches a real Win32-hosted MDI sample.
-- No Windows-native screenshot verifier for titlebar/button/input/CSS/event
-  proof.
-- No Windows CI lane that runs GUI evidence instead of skipping it.
+- The Windows-native wrapper/probe lane now exists but remains host-gated, so
+  this Linux host still only verifies skip behavior (`requires-windows`).
+- MDI/titlebar-specific live evidence is still being developed in a separate
+  lane.
 
 Smallest next implementation step:
 
-1. Add a Windows-only evidence wrapper that launches a hosted Win32 MDI sample.
-2. Use `std.play.wm` to enumerate/focus the window and capture a screenshot.
-3. Reuse the current screenshot-proof style, but add Windows-native assertions:
-   window found, title text visible, nonblank capture, expected MDI regions.
+1. Keep the existing host-gated Windows-native lane and wire its outputs into
+   release evidence plumbing.
+2. On Linux, continue to verify the explicit non-Windows/skip lane.
+3. Finish the MDI/titlebar-specific live evidence in its separate lane while
+   preserving this Chromium geometry lane focus.
 
 ## Chromium Geometry Extraction Path
 

@@ -274,3 +274,15 @@ Open gaps tied to the active browser objective:
     `doc/09_report/famous_site_corpus_div_geometry_full_2026-06-11.md` is the
     current single-command evidence; it uses no blur, tolerance, downscaling,
     copied Chromium pixels, or text antialiasing normalization
+- macOS MDI live-window evidence is now MDI-specific while remaining honestly
+  host-gated:
+  - `scripts/check/check-macos-gui-live-window-evidence.shs` launches
+    `src/app/ui_shared_mdi/main.spl` by default instead of the generic GUI
+    sample
+  - `src/app/ui_shared_mdi/titlebar_contract_probe.spl` emits source-contract
+    fields for the shared MDI titlebar button, body button, text input, and
+    custom titlebar CSS
+  - `macos_gui_live_window_evidence_spec.spl` checks those MDI contract fields
+    in both lanes, while Linux still reports only
+    `macos_gui_live_window_evidence_status=skip` and
+    `reason=requires-macos` for the live macOS window/capture evidence
