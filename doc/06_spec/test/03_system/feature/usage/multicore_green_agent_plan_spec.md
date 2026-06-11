@@ -107,6 +107,9 @@ Failed: 0
 - The agent plan must keep a lane for multicore green runtime-pool evidence.
 - The multicore runtime-pool lane owns `used_runtime_pool()` evidence before
   any Simple row can be described as Go-like M:N CPU parallelism.
+- The agent plan must keep a lane for host fairness and blocking work.
+- The host fairness lane owns the dedicated hosted parity-gap tracker until
+  host-side blocking integration and fairness/preemption are actually closed.
 - The agent plan must keep a lane for SimpleOS green carrier evidence.
 - The SimpleOS lane owns hosted scheduler specs, opt-in QEMU AP evidence, and
   the separately gated final AP ring/user handoff proof.
@@ -177,7 +180,7 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -188,6 +191,7 @@ expect(plan).to_contain("## Go Profile Evidence Agent")
 expect(plan).to_contain("## Simple OS-Thread Baseline Agent")
 expect(plan).to_contain("## Cooperative Green Semantics Agent")
 expect(plan).to_contain("## Multicore Green Runtime-Pool Agent")
+expect(plan).to_contain("## Host Fairness And Blocking Agent")
 expect(plan).to_contain("## SimpleOS Green Carrier Agent")
 step("Reject opaque lettered agent headings")
 expect(absent_in_text(plan, "## Agent A:")).to_equal(1)
@@ -208,7 +212,7 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -221,6 +225,7 @@ expect(plan).to_contain("cross-language report with separate rows")
 expect(plan).to_contain("focused native smoke coverage for `thread_spawn_with_args`")
 expect(plan).to_contain("current-carrier queue semantics")
 expect(plan).to_contain("handle evidence methods remain stable")
+expect(plan).to_contain("dedicated tracking for the remaining hosted multicore-green parity gap")
 expect(plan).to_contain("live QEMU proof for AP startup plus scheduler-visible CPU1 green dispatch")
 ```
 
@@ -236,7 +241,7 @@ expect(plan).to_contain("live QEMU proof for AP startup plus scheduler-visible C
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -246,11 +251,13 @@ step("Verify merge sequencing references the descriptive lane names")
 expect(plan).to_contain("Go Profile Evidence Agent owns profile/report contract changes")
 expect(plan).to_contain("Simple OS-Thread Baseline Agent fixes or tracks OS-thread API blockers")
 expect(plan).to_contain("Cooperative Green Semantics Agent and Multicore Green Runtime-Pool Agent can")
+expect(plan).to_contain("Host Fairness And Blocking Agent keeps the remaining host-side Go-parity")
 expect(plan).to_contain("SimpleOS Green Carrier Agent consumes stable host/library contracts")
 step("Verify conflict rules reference the descriptive lane names")
 expect(plan).to_contain("Go Profile Evidence Agent owns the report shape")
 expect(plan).to_contain("Simple OS-Thread Baseline Agent must update")
 expect(plan).to_contain("Multicore Green Runtime-Pool Agent")
+expect(plan).to_contain("Host Fairness And Blocking Agent")
 expect(plan).to_contain("SimpleOS Green Carrier")
 ```
 

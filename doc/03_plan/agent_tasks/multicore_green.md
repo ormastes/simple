@@ -183,6 +183,33 @@ Acceptance evidence:
 - `bin/release/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
 - cross-language report contains `used_runtime_pool()` evidence text.
 
+## Host Fairness And Blocking Agent
+
+Goal: keep the remaining host-side Go-parity gap explicit and move it toward
+real closure rather than letting SimpleOS-only scheduler evidence overclaim the
+host runtime lane.
+
+Primary paths:
+
+- `doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md`
+- `test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl`
+- `doc/01_research/lib/threading/go_vs_simple_threads.md`
+- `doc/04_architecture/runtime/multicore_green.md`
+- `doc/05_design/multicore_green.md`
+
+Deliverables:
+
+- dedicated tracking for the remaining hosted multicore-green parity gap;
+- executable proof that host-side blocking integration and fairness/preemption
+  are still open until stronger evidence lands;
+- updated research and architecture text when that boundary changes.
+
+Acceptance evidence:
+
+- `bin/release/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean`
+- `bin/release/simple test test/03_system/feature/usage/multicore_green_tracking_spec.spl --mode=interpreter --clean`
+- `bin/release/simple lint doc/08_tracking/feature/feature_db.sdn`
+
 ## SimpleOS Green Carrier Agent
 
 Goal: keep SimpleOS support aligned with the host/library API split while
@@ -227,9 +254,11 @@ Acceptance evidence:
 3. Cooperative Green Semantics Agent and Multicore Green Runtime-Pool Agent can
    run in parallel because cooperative green and multicore green must stay
    semantically distinct.
-4. SimpleOS Green Carrier Agent consumes stable host/library contracts into
+4. Host Fairness And Blocking Agent keeps the remaining host-side Go-parity
+   gap explicit while stronger runtime evidence is still missing.
+5. SimpleOS Green Carrier Agent consumes stable host/library contracts into
    SimpleOS and QEMU proof.
-5. Generated manuals and `doc/09_report` are refreshed after executable specs
+6. Generated manuals and `doc/09_report` are refreshed after executable specs
    and profile scripts change.
 
 ## Conflict Rules
@@ -242,6 +271,9 @@ Acceptance evidence:
 - If a change claims Go-like M:N behavior, Multicore Green Runtime-Pool Agent
   must provide `used_runtime_pool()` evidence and Go Profile Evidence Agent must
   gate the row numerically.
+- If a change claims hosted fairness/preemption parity with Go, Host Fairness
+  And Blocking Agent must update the dedicated host-gap tracker and executable
+  parity-gap spec before the lane can be described as closed.
 - If a SimpleOS QEMU probe uses a fixed-slot helper, SimpleOS Green Carrier
   Agent must state exactly what is proven and what remains future hardware
   handoff work.
