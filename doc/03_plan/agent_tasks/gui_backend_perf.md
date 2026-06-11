@@ -145,6 +145,10 @@ Updated: 2026-06-11
 - this commit -- CSS variable close-scan allocation removal:
   `_first_var_color_after` now finds the closing `)` in the existing post-marker
   scan buffer instead of allocating an additional post-`var(` tail substring.
+- this commit -- currentColor value tail allocation removal:
+  `_is_current_color_after` now finds the optional colon in the original
+  declaration buffer and trims the value slice directly, avoiding an
+  intermediate post-property tail allocation.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
