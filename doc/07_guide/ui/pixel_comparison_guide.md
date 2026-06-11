@@ -84,6 +84,9 @@ The backend-executed wrapper records three samples by default and emits
 `total_elapsed_us_min/avg/max` plus `total_pixels_per_second_min/avg/max`; use
 those aggregate fields for regression triage before comparing individual sample
 rows.
+The canonical production wrapper promotes the same values under
+`production_gui_web_renderer_parity_backend_*`, so archived full-wrapper reports
+can be compared without opening the nested backend evidence file.
 
 The generated-GUI matrix intentionally records
 `text_normalization_pixels=269` for the fixture-specific text antialiasing
