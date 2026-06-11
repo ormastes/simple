@@ -138,6 +138,10 @@ Updated: 2026-06-11
 - this commit -- custom property color tail allocation removal:
   `_custom_property_color` now locates `#` directly in the original HTML after
   the property marker instead of allocating a post-marker tail before parsing.
+- this commit -- RGB parenthesis tail allocation removal:
+  `_css_rgb_color` now finds the RGB opening and closing parentheses directly
+  in the original HTML buffer before extracting the inner component list,
+  avoiding two temporary tail substrings in CSS RGB parsing.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
