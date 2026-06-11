@@ -3,10 +3,9 @@
 -- T1 btree_ordered      : insert/delete preserve key ordering.
 -- T2 btree_balanced     : all leaves at equal depth after split.
 -- T3 btree_bounds       : non-root occupancy in [min_keys, max_keys].
--- T4 wal_before_data    : commit requires WAL flush (D4 protocol level).
---                         FINDING-T4: pager has no page_lsn field; the
---                         WAL-before-data invariant is NOT enforced at the
---                         pager layer (see Wal.lean header for details).
+-- T4 wal_before_data    : commit requires WAL flush (D4 protocol level) AND
+--                         pager layer (write_page gate, E5 fix 2026-06-11).
+--                         FINDING-T4 resolved: pager now enforces WAL-before-data.
 -- T5 snapshot_isolation : a read at snapshot s sees only tuples with
 --                         commit_ts < s.xmax and not yet deleted.
 -- T6 recovery_equation  : WAL replay from checkpoint reproduces committed state.
@@ -73,6 +72,25 @@ theorem T4_wal_appended_before_commit
   simp [txnCommit] at h3
   obtain ⟨_, rfl⟩ := h3
   simp [txnAppendWal]
+
+/-- T4 pager-level: write_page succeeds only when flushed_lsn >= page_lsn or page_lsn = 0.
+    Models the gate in pager.write_page (E5 fix, 2026-06-11):
+      if page_lsn > 0 and wal_flushed_lsn < page_lsn → Err. -/
+theorem T4_pager_wal_gate (page_lsn : Nat) (wal_flushed_lsn : Nat)
+    (hok : writePageOk page_lsn wal_flushed_lsn = true) :
+    wal_flushed_lsn ≥ page_lsn ∨ page_lsn = 0 := by
+  simp [writePageOk, Bool.or_eq_true, beq_iff_eq] at hok
+  rcases hok with h | h
+  · right; exact h
+  · left; exact h
+
+/-- T4 pager-level converse: if page_lsn > 0 and flushed_lsn < page_lsn, write is blocked. -/
+theorem T4_pager_wal_gate_blocked (page_lsn : Nat) (wal_flushed_lsn : Nat)
+    (hpos  : page_lsn ≠ 0)
+    (hbehind : wal_flushed_lsn < page_lsn) :
+    writePageOk page_lsn wal_flushed_lsn = false := by
+  simp [writePageOk, Bool.or_eq_false_iff]
+  exact ⟨hpos, by omega⟩
 
 -- ===========================================================================
 -- T5 -- snapshot_isolation

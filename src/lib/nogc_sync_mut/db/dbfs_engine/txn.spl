@@ -142,27 +142,35 @@ struct DbfsTxn:
     Tracks step order via module-level observer store. Data and metadata
     are buffered in-process; WAL append and flush are the only disk
     operations.
+
+    page_lsn: LSN assigned to this transaction's mutation (set after WAL append).
+    wal_flushed_lsn: highest LSN durably flushed (set after WAL flush).
+    Use these to call write_page(id, data, page_lsn, wal_flushed_lsn) safely.
     """
-    txn_id:        TxnId
-    status:        u8
-    data_written:  text
-    meta_written:  bool
-    wal_appended:  bool
-    wal_flushed:   bool
-    root_published: bool
-    flush_count:   i64
+    txn_id:          TxnId
+    status:          u8
+    data_written:    text
+    meta_written:    bool
+    wal_appended:    bool
+    wal_flushed:     bool
+    root_published:  bool
+    flush_count:     i64
+    page_lsn:        i64
+    wal_flushed_lsn: i64
 
     static fn new(txn_id: TxnId) -> DbfsTxn:
         val real_tid = TxnId(value: _alloc_txn_id())
         DbfsTxn(
-            txn_id:         real_tid,
-            status:         TXN_STATUS_ACTIVE,
-            data_written:   "",
-            meta_written:   false,
-            wal_appended:   false,
-            wal_flushed:    false,
-            root_published: false,
-            flush_count:    0
+            txn_id:          real_tid,
+            status:          TXN_STATUS_ACTIVE,
+            data_written:    "",
+            meta_written:    false,
+            wal_appended:    false,
+            wal_flushed:     false,
+            root_published:  false,
+            flush_count:     0,
+            page_lsn:        0,
+            wal_flushed_lsn: 0
         )
 
     me fn observe_steps() -> TxnStepOrder:
@@ -193,6 +201,13 @@ struct DbfsTxn:
         self.wal_appended = true
         Ok(())
 
+    me fn append_wal_with_lsn(lsn: i64) -> Result<(), text>:
+        """Append WAL record and record the mutation LSN for this page write."""
+        _record_step(self.txn_id.value, TxnStep.WalAppend)
+        self.wal_appended = true
+        self.page_lsn = lsn
+        Ok(())
+
     # --- Step 4: WAL flush (DURABLE_GROUP_COMMIT — only fsync) ---
 
     me fn flush_wal() -> Result<(), text>:
@@ -200,6 +215,15 @@ struct DbfsTxn:
         _record_step(self.txn_id.value, TxnStep.WalFlush)
         _record_step(self.txn_id.value, TxnStep.Flush)
         self.wal_flushed = true
+        self.flush_count = self.flush_count + 1
+        Ok(())
+
+    me fn flush_wal_with_lsn(flushed: i64) -> Result<(), text>:
+        """Flush WAL and record the highest durably flushed LSN."""
+        _record_step(self.txn_id.value, TxnStep.WalFlush)
+        _record_step(self.txn_id.value, TxnStep.Flush)
+        self.wal_flushed = true
+        self.wal_flushed_lsn = flushed
         self.flush_count = self.flush_count + 1
         Ok(())
 

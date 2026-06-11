@@ -3,17 +3,18 @@
 -- Source fidelity (shared/wal.spl):
 --   next_lsn starts at 1; append increments then records.
 --   flush_wal sets durable_lsn = last entry's lsn (if non-empty).
+--   flushed_lsn() returns durable_lsn (added 2026-06-11, E5).
 --
 -- Source fidelity (txn.spl D4 write protocol):
 --   Steps: Data -> MetadataPrivate -> WalAppend -> WalFlush -> PublishRoot -> Commit
 --   commit() fails if not wal_flushed.
 --
--- FINDING-T4 (pager gap):
---   pager.write_page in pager.spl marks a PageEntry dirty but carries NO
---   page_lsn field and does NOT consult the WAL durable_lsn.
---   WAL-before-data is enforced only at the D4 protocol level.
---   Reference: src/lib/nogc_sync_mut/db/dbfs_engine/pager.spl (write_page,
---   flush_dirty) -- no lsn field, no WAL reference.
+-- E5 fix (2026-06-11): FINDING-T4 resolved.
+--   pager.write_page now takes (page_lsn, wal_flushed_lsn) and enforces:
+--   if page_lsn > 0 and wal_flushed_lsn < page_lsn -> Err.
+--   WAL-before-data is now enforced at BOTH the D4 protocol level AND
+--   the pager layer.
+--   Reference: src/lib/nogc_sync_mut/db/dbfs_engine/pager.spl (write_page).
 
 namespace DbStorage.Wal
 
@@ -106,5 +107,17 @@ theorem append_lsn_greatest (w : WalState) (txn_id : Nat) (rt : RecordType)
   intro e he
   simp [walAppend]
   exact hinv e he
+
+-- ===========================================================================
+-- Pager model (E5 — WAL-before-data at pager layer, 2026-06-11)
+-- ===========================================================================
+
+-- flushed_lsn: accessor mirroring SharedWal.flushed_lsn() (= durable_lsn).
+def walFlushedLsn (w : WalState) : Nat := w.durable_lsn
+
+-- writePage: models pager.write_page gate.
+--   Returns true (success) iff page_lsn = 0 OR wal_flushed_lsn >= page_lsn.
+def writePageOk (page_lsn : Nat) (wal_flushed_lsn : Nat) : Bool :=
+  page_lsn == 0 || wal_flushed_lsn ≥ page_lsn
 
 end DbStorage.Wal

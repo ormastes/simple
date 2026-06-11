@@ -48,9 +48,10 @@ struct PageData:
 
 struct PageEntry:
     """Internal pager slot."""
-    page_id: PageId
-    data:    PageData
-    dirty:   bool
+    page_id:  PageId
+    data:     PageData
+    dirty:    bool
+    page_lsn: i64
 
 struct DbfsPager:
     """Single-cache pager with fixed capacity.
@@ -84,9 +85,10 @@ struct DbfsPager:
             self.next_page_id = self.next_page_id + 1
             val zero = PageData.zeroed()
             val entry = PageEntry(
-                page_id: pid,
-                data:    zero,
-                dirty:   false
+                page_id:  pid,
+                data:     zero,
+                dirty:    false,
+                page_lsn: 0
             )
             self.entries.push(entry)
             return Ok(pid)
@@ -101,9 +103,10 @@ struct DbfsPager:
                 self.next_page_id = self.next_page_id + 1
                 val zero = PageData.zeroed()
                 val new_entry = PageEntry(
-                    page_id: pid,
-                    data:    zero,
-                    dirty:   false
+                    page_id:  pid,
+                    data:     zero,
+                    dirty:    false,
+                    page_lsn: 0
                 )
                 self.entries.remove(idx)
                 self.entries.push(new_entry)
@@ -115,13 +118,21 @@ struct DbfsPager:
 
     # --- I/O ---
 
-    me fn write_page(id: PageId, data: PageData) -> Result<(), text>:
-        """Write page data into the pager; marks page dirty."""
+    me fn write_page(id: PageId, data: PageData, page_lsn: i64, wal_flushed_lsn: i64) -> Result<(), text>:
+        """Write page data into the pager; marks page dirty.
+
+        page_lsn: LSN of the last mutation to this page (0 = skip WAL gate).
+        wal_flushed_lsn: highest LSN durably flushed by the WAL.
+        Gate: if page_lsn > 0 and wal_flushed_lsn < page_lsn, returns Err
+        (WAL-before-data: WAL must be flushed before dirty page can be written).
+        """
+        if page_lsn > 0 and wal_flushed_lsn < page_lsn:
+            return Err("pager: WAL not flushed for page_lsn; flush WAL before writing page")
         var i: i32 = 0
         while i < self.entries.len() as i32:
             val slot = self.entries[i]
             if slot.page_id.id == id.id:
-                val new_entry = PageEntry(page_id: slot.page_id, data: data, dirty: true)
+                val new_entry = PageEntry(page_id: slot.page_id, data: data, dirty: true, page_lsn: page_lsn)
                 self.entries.remove(i)
                 self.entries.push(new_entry)
                 return Ok(())
@@ -152,7 +163,7 @@ struct DbfsPager:
         var new_entries: [PageEntry] = []
         for slot in self.entries:
             if slot.dirty:
-                val clean = PageEntry(page_id: slot.page_id, data: slot.data, dirty: false)
+                val clean = PageEntry(page_id: slot.page_id, data: slot.data, dirty: false, page_lsn: slot.page_lsn)
                 new_entries.push(clean)
                 count = count + 1
                 # Write to disk backing
@@ -160,12 +171,12 @@ struct DbfsPager:
                 var replaced: bool = false
                 for de in _pager_disk_pages:
                     if de.page_id.id == slot.page_id.id:
-                        disk_new.push(PageEntry(page_id: slot.page_id, data: slot.data, dirty: false))
+                        disk_new.push(PageEntry(page_id: slot.page_id, data: slot.data, dirty: false, page_lsn: slot.page_lsn))
                         replaced = true
                     else:
                         disk_new.push(de)
                 if not replaced:
-                    disk_new.push(PageEntry(page_id: slot.page_id, data: slot.data, dirty: false))
+                    disk_new.push(PageEntry(page_id: slot.page_id, data: slot.data, dirty: false, page_lsn: slot.page_lsn))
                 _pager_disk_pages = disk_new
             else:
                 new_entries.push(slot)
@@ -185,11 +196,13 @@ struct DbfsPager:
         var new_entries: [PageEntry] = []
         var found: bool = false
         var flushed_data: PageData = PageData(bytes: [])
+        var flushed_lsn_val: i64 = 0
         for slot in self.entries:
             if slot.page_id.id == id.id:
-                val clean = PageEntry(page_id: slot.page_id, data: slot.data, dirty: false)
+                val clean = PageEntry(page_id: slot.page_id, data: slot.data, dirty: false, page_lsn: slot.page_lsn)
                 new_entries.push(clean)
                 flushed_data = slot.data
+                flushed_lsn_val = slot.page_lsn
                 found = true
             else:
                 new_entries.push(slot)
@@ -200,12 +213,12 @@ struct DbfsPager:
             var replaced: bool = false
             for de in _pager_disk_pages:
                 if de.page_id.id == id.id:
-                    disk_new.push(PageEntry(page_id: id, data: flushed_data, dirty: false))
+                    disk_new.push(PageEntry(page_id: id, data: flushed_data, dirty: false, page_lsn: flushed_lsn_val))
                     replaced = true
                 else:
                     disk_new.push(de)
             if not replaced:
-                disk_new.push(PageEntry(page_id: id, data: flushed_data, dirty: false))
+                disk_new.push(PageEntry(page_id: id, data: flushed_data, dirty: false, page_lsn: flushed_lsn_val))
             _pager_disk_pages = disk_new
             Ok(())
         else:

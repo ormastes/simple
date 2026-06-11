@@ -79,8 +79,8 @@ expect(id1 == id2).to_equal(false)
 
 #### write_page then read_page round-trips data
 
-1. data set byte
-2. p write page
+- data set byte
+- p write page
    - Expected: got.byte_at(0) equals `0xAB`
 
 
@@ -95,7 +95,7 @@ val p = DbfsPager.new(capacity: 16)
 val id = p.alloc_page().unwrap()
 val data = PageData.zeroed()
 data.set_byte(0, 0xAB)
-p.write_page(id, data).unwrap()
+p.write_page(id, data, 0, 0).unwrap()
 val got = p.read_page(id).unwrap()
 expect(got.byte_at(0)).to_equal(0xAB)
 ```
@@ -121,7 +121,7 @@ _Dirty/clean state transitions._
 
 #### newly written page is dirty
 
-1. p write page
+- p write page
    - Expected: p.is_dirty(id) is true
 
 
@@ -134,7 +134,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val p = DbfsPager.new(capacity: 16)
 val id = p.alloc_page().unwrap()
-p.write_page(id, PageData.zeroed()).unwrap()
+p.write_page(id, PageData.zeroed(), 0, 0).unwrap()
 expect(p.is_dirty(id)).to_equal(true)
 ```
 
@@ -142,8 +142,8 @@ expect(p.is_dirty(id)).to_equal(true)
 
 #### page is clean after flush
 
-1. p write page
-2. p flush page
+- p write page
+- p flush page
    - Expected: p.is_dirty(id) is false
 
 
@@ -156,7 +156,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val p = DbfsPager.new(capacity: 16)
 val id = p.alloc_page().unwrap()
-p.write_page(id, PageData.zeroed()).unwrap()
+p.write_page(id, PageData.zeroed(), 0, 0).unwrap()
 p.flush_page(id).unwrap()
 expect(p.is_dirty(id)).to_equal(false)
 ```
@@ -165,7 +165,7 @@ expect(p.is_dirty(id)).to_equal(false)
 
 #### unflushed pages appear in dirty_pages list
 
-1. p write page
+- p write page
    - Expected: dirty contains `id`
 
 
@@ -178,7 +178,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val p = DbfsPager.new(capacity: 16)
 val id = p.alloc_page().unwrap()
-p.write_page(id, PageData.zeroed()).unwrap()
+p.write_page(id, PageData.zeroed(), 0, 0).unwrap()
 val dirty = p.dirty_pages()
 expect(dirty.contains(id)).to_equal(true)
 ```
@@ -190,11 +190,11 @@ _LRU eviction does not corrupt content._
 
 #### evicted and re-read page returns correct data
 
-1. data set byte
-2. p write page
-3. p flush page
-4. p write page
-5. p flush page
+- data set byte
+- p write page
+- p flush page
+- p write page
+- p flush page
    - Expected: got.byte_at(0) equals `0x42`
 
 
@@ -209,13 +209,13 @@ val p = DbfsPager.new(capacity: 4)
 val id = p.alloc_page().unwrap()
 val data = PageData.zeroed()
 data.set_byte(0, 0x42)
-p.write_page(id, data).unwrap()
+p.write_page(id, data, 0, 0).unwrap()
 p.flush_page(id).unwrap()
 # Fill cache to force eviction of our page
 var i: i64 = 0
 while i < 8:
     val tmp = p.alloc_page().unwrap()
-    p.write_page(tmp, PageData.zeroed()).unwrap()
+    p.write_page(tmp, PageData.zeroed(), 0, 0).unwrap()
     p.flush_page(tmp).unwrap()
     i = i + 1
 val got = p.read_page(id).unwrap()
