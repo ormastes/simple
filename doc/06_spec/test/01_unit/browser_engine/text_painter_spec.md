@@ -78,7 +78,7 @@ expect(widths).to_contain("(line text: \"Google search\" width: 105)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -93,6 +93,7 @@ expect(runs[1].line).to_equal("deterministic")
 expect(runs[1].y).to_equal(26)
 val sdn = br_famous_site_corpus_layout_paint_runs_sdn(html, 16, 120, 8, 8, 18)
 expect(sdn).to_contain("count: 4")
+expect(sdn).to_contain("(run text: \"Google search\" x: 8 y: 8 width: 105)")
 expect(sdn).to_contain("(run text: \"compatibility\" x: 8 y: 44")
 ```
 

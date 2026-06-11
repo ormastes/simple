@@ -3,7 +3,8 @@ fn _strip_tags(html: text) -> text:
     var result: [text] = []
     var in_tag = false
     var i = 0
-    while i < html.len():
+    val html_len = html.len()
+    while i < html_len:
         val ch = html.char_at(i)
         if ch == '<':
             in_tag = true
@@ -20,7 +21,8 @@ fn _normalize_whitespace(s: text) -> text:
     var result: [text] = []
     var prev_space = true   # start true to trim leading
     var i = 0
-    while i < s.len():
+    val s_len = s.len()
+    while i < s_len:
         val ch = s.char_at(i)
         val is_ws = ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r'
         if is_ws:
@@ -42,6 +44,10 @@ pub class BrowserTextPaintRun:
     x: i32
     y: i32
     width: i32
+
+class BrowserTextLayoutLine:
+    line: text
+    width: i64
 
 fn _scale_width(base_px: i64, font_size: i64, width_percent: i64) -> i64:
     val scaled = base_px * font_size * width_percent
@@ -123,23 +129,11 @@ fn _estimate_word_width_px(value: text, font_size: i64, width_percent: i64) -> i
         return _scale_width(77, font_size, width_percent)
     var width = 0
     var i = 0
-    while i < value.len():
+    val value_len = value.len()
+    while i < value_len:
         width = width + _estimate_char_width_base(value.substring(i, i + 1))
         i = i + 1
     _scale_width(width, font_size, width_percent)
-
-fn _estimate_text_width_px(value: text, font_size: i64, width_percent: i64) -> i64:
-    val words = value.split(" ")
-    var width = 0
-    var i = 0
-    while i < words.len():
-        val word = words[i]
-        if word.len() > 0:
-            if width > 0:
-                width = width + _estimate_char_width_px(" ", font_size, width_percent)
-            width = width + _estimate_word_width_px(word, font_size, width_percent)
-        i = i + 1
-    width
 
 fn _wrap_text(text_content: text, font_size: i64, layout_width: i32, width_percent: i64) -> [text]:
     """Wrap text_content into lines no wider than layout_width pixels.
@@ -148,15 +142,27 @@ fn _wrap_text(text_content: text, font_size: i64, layout_width: i32, width_perce
     advances so the famous-site corpus diagnostics track Chrome line breaks
     instead of treating a 120px div as 120 character columns.
     """
-    val words = text_content.split(" ")
+    val wrapped = _wrap_text_with_widths(text_content, font_size, layout_width, width_percent)
     var lines: [text] = []
+    var i = 0
+    val line_count = wrapped.len()
+    while i < line_count:
+        lines.push(wrapped[i].line)
+        i = i + 1
+    lines
+
+fn _wrap_text_with_widths(text_content: text, font_size: i64, layout_width: i32, width_percent: i64) -> [BrowserTextLayoutLine]:
+    """Wrap text and retain each line width from the greedy wrap pass."""
+    val words = text_content.split(" ")
+    var lines: [BrowserTextLayoutLine] = []
     var current: [text] = []
     var current_width = 0
     val max_px = layout_width.to_i64()
     val space_width = _estimate_char_width_px(" ", font_size, width_percent)
 
     var i = 0
-    while i < words.len():
+    val word_count = words.len()
+    while i < word_count:
         val word = words[i]
         if word.len() == 0:
             i = i + 1
@@ -168,15 +174,22 @@ fn _wrap_text(text_content: text, font_size: i64, layout_width: i32, width_perce
             current_width = current_width + sep_width + word_width
         else:
             if current.len() > 0:
-                lines.push(current.join(" "))
+                lines.push(BrowserTextLayoutLine(line: current.join(" "), width: current_width))
             current = [word]
             current_width = word_width
         i = i + 1
 
     if current.len() > 0:
-        lines.push(current.join(" "))
+        lines.push(BrowserTextLayoutLine(line: current.join(" "), width: current_width))
 
     lines
+
+fn _famous_site_corpus_layout_lines_with_widths(html: text, font_size: i64, layout_width: i32) -> [BrowserTextLayoutLine]:
+    val raw = _strip_tags(html)
+    val normalized = _normalize_whitespace(raw)
+    if normalized.len() == 0:
+        return []
+    _wrap_text_with_widths(normalized, font_size, layout_width, _font_width_percent_from_html(html))
 
 pub fn br_famous_site_corpus_layout_lines(html: text, font_size: i64, layout_width: i32) -> [text]:
     """Extract visible text from HTML and return wrapped lines.
@@ -197,14 +210,13 @@ pub fn br_famous_site_corpus_layout_line_widths_sdn(html: text, font_size: i64, 
     Each entry records the visible text of a wrapped line and its estimated
     pixel width for comparison with Chrome's layout metrics JSON.
     """
-    val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
-    val width_percent = _font_width_percent_from_html(html)
+    val lines = _famous_site_corpus_layout_lines_with_widths(html, font_size, layout_width)
     var entries: [text] = []
     var i = 0
-    while i < lines.len():
+    val line_count = lines.len()
+    while i < line_count:
         val line = lines[i]
-        val width_px = _estimate_text_width_px(line, font_size, width_percent)
-        entries.push("    (line text: \"{line}\" width: {width_px})")
+        entries.push("    (line text: \"{line.line}\" width: {line.width})")
         i = i + 1
     "(text_lines count: {lines.len()}\n" + entries.join("\n") + "\n)"
 
@@ -215,18 +227,17 @@ pub fn br_famous_site_corpus_layout_paint_runs(html: text, font_size: i64, layou
     Chrome metrics diagnostics so production paint can consume it without
     duplicating font-stack calibration in renderer code.
     """
-    val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
-    val width_percent = _font_width_percent_from_html(html)
+    val lines = _famous_site_corpus_layout_lines_with_widths(html, font_size, layout_width)
     var runs: [BrowserTextPaintRun] = []
     var i = 0
-    while i < lines.len():
+    val line_count = lines.len()
+    while i < line_count:
         val line = lines[i]
-        val width_px = _estimate_text_width_px(line, font_size, width_percent).to_i32()
         runs.push(BrowserTextPaintRun(
-            line: line,
+            line: line.line,
             x: origin_x,
             y: origin_y + i * line_height,
-            width: width_px
+            width: line.width.to_i32()
         ))
         i = i + 1
     runs
@@ -235,7 +246,8 @@ pub fn br_famous_site_corpus_layout_paint_runs_sdn(html: text, font_size: i64, l
     val runs = br_famous_site_corpus_layout_paint_runs(html, font_size, layout_width, origin_x, origin_y, line_height)
     var entries: [text] = []
     var i = 0
-    while i < runs.len():
+    val run_count = runs.len()
+    while i < run_count:
         val run = runs[i]
         entries.push("    (run text: \"{run.line}\" x: {run.x} y: {run.y} width: {run.width})")
         i = i + 1
@@ -245,7 +257,8 @@ pub fn br_famous_site_corpus_layout_lines_sdn(html: text, font_size: i64, layout
     val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
     var entries: [text] = []
     var i = 0
-    while i < lines.len():
+    val line_count = lines.len()
+    while i < line_count:
         val line = lines[i]
         entries.push("    (line text: \"{line}\")")
         i = i + 1
