@@ -122,9 +122,9 @@ stopped the live final-handoff QEMU gate before boot.
 
 With SimpleOS submodule commit `f8d3554`, the opt-in live gate builds and boots
 the two-CPU guest. The scheduler-owned AP carrier proof still passes, including
-`SCHED_HANDOFF_PASS=true`; the final lane remains open because the guest serial
-does not yet print `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
-`USER_SYSCALL_PASS=true`.
+`SCHED_HANDOFF_PASS=true`; at that 2026-06-07 point the final lane was still
+open because the guest serial did not yet print `HW_HANDOFF_PASS=true`,
+`USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`.
 
 ## 2026-06-07 Final Marker Root Cause
 
@@ -157,9 +157,10 @@ separate Docker process. The IPC send syscall consumes the first waiting
 receiver and calls the explicit CPU-aware scheduler unblock path, so the
 waiter-consumption handoff no longer blocks the final AP/user proof.
 
-This does not close the live SimpleOS hardware handoff blocker. The final QEMU
-gate still must emit `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
-`USER_SYSCALL_PASS=true` from a real AP ring/user payload path.
+At that 2026-06-08 prerequisite stage this still did not close the live
+SimpleOS hardware handoff blocker. The final QEMU gate still had to emit
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
+from a real AP ring/user payload path.
 
 ## 2026-06-08 EnterUserBlocking Validation Boundary
 

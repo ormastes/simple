@@ -308,9 +308,9 @@ through CPU1's green-carrier lane, and revalidates the handoff immediately
 before the enter bridge.
 
 This advances the blocker past the legacy `cr3=1` final-path prerequisite. It
-still does not prove final ring/user entry or user syscall return: the live
-serial trace does not yet contain `HW_HANDOFF_PASS=true`,
-`USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`.
+still did not prove final ring/user entry or user syscall return at that
+intermediate stage: the live serial trace did not yet contain
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`.
 
 Verification refresh:
 
