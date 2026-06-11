@@ -1,7 +1,7 @@
 # @cover src/compiler/70.backend/backend/gpu_portable_compute.spl 90%
 # @tag: unit, compiler, gpu, codegen, cuda, hip, opencl, metal
 
-use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, portable_compute_compile_plan, portable_compute_compiled_artifact_evidence, portable_compute_toolchain_invocation, portable_compute_compile_result, emit_portable_2d_copy_u32_kernel, emit_portable_2d_alpha_u32_kernel, emit_portable_2d_scroll_u32_kernel, emit_portable_2d_optimization_kernels, emit_portable_2d_optimization_module, portable_compute_2d_optimization_compile_plan, portable_compute_backend_targets_from_order, portable_compute_2d_optimization_backend_plan, portable_compute_backend_target_diagnostic, portable_compute_operation_metadata, emit_portable_compute_smoke_matrix}
+use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_u32_fill_kernel, emit_portable_u32_add_kernel, portable_compute_compile_plan, portable_compute_compiled_artifact_evidence, portable_compute_toolchain_invocation, portable_compute_compile_result, emit_portable_2d_copy_u32_kernel, emit_portable_2d_alpha_u32_kernel, emit_portable_2d_scroll_u32_kernel, emit_portable_2d_bitmap_glyph_raster_u32_kernel, emit_portable_2d_optimization_kernels, emit_portable_2d_optimization_module, portable_compute_2d_optimization_compile_plan, portable_compute_backend_targets_from_order, portable_compute_2d_optimization_backend_plan, portable_compute_backend_target_diagnostic, portable_compute_operation_metadata, emit_portable_compute_smoke_matrix}
 
 describe "portable GPU compute emitter":
 
@@ -144,10 +144,11 @@ describe "portable GPU compute emitter":
         expect(failed_artifact.ready).to_equal(false)
         expect(failed_artifact.status).to_equal("artifact-magic-mismatch")
 
-    it "emits portable 2D optimization kernels for copy alpha and scroll":
+    it "emits portable 2D optimization kernels for copy alpha scroll and bitmap glyph raster":
         val copy = emit_portable_2d_copy_u32_kernel(PortableComputeTarget.OpenCl)
         val alpha = emit_portable_2d_alpha_u32_kernel(PortableComputeTarget.Cuda)
         val scroll = emit_portable_2d_scroll_u32_kernel(PortableComputeTarget.Metal)
+        val glyph = emit_portable_2d_bitmap_glyph_raster_u32_kernel(PortableComputeTarget.OpenCl)
 
         expect(copy.entry_name).to_equal("simple_2d_copy_u32")
         expect(copy.source).to_contain("dst[i] = src[i];")
@@ -157,6 +158,8 @@ describe "portable GPU compute emitter":
         expect(scroll.entry_name).to_equal("simple_2d_scroll_u32")
         expect(scroll.source).to_contain("int sy = int(y) - delta_y;")
         expect(scroll.source).to_contain("dst[i] = 0u;")
+        expect(glyph.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+        expect(glyph.source).to_contain("mask == 0u ? 0u : color")
 
     it "groups Simple-authored 2D optimization kernels per compute target":
         val cuda = emit_portable_2d_optimization_kernels(PortableComputeTarget.Cuda)
@@ -164,8 +167,9 @@ describe "portable GPU compute emitter":
         val opencl = emit_portable_2d_optimization_kernels(PortableComputeTarget.OpenCl)
         val metal = emit_portable_2d_optimization_kernels(PortableComputeTarget.Metal)
 
-        expect(cuda.len()).to_equal(4)
+        expect(cuda.len()).to_equal(5)
         expect(hip[2].entry_name).to_equal("simple_2d_alpha_u32")
+        expect(opencl[4].entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
         expect(opencl[3].binary_format).to_equal("spirv")
         expect(metal[1].source).to_contain("[[buffer(1)]]")
 
@@ -182,34 +186,41 @@ describe "portable GPU compute emitter":
         expect(cuda.source).to_contain("simple_2d_copy_u32")
         expect(cuda.source).to_contain("simple_2d_alpha_u32")
         expect(cuda.source).to_contain("simple_2d_scroll_u32")
+        expect(cuda.source).to_contain("simple_2d_bitmap_glyph_raster_u32")
         expect(opencl.source).to_contain("__kernel void simple_2d_copy_u32")
+        expect(opencl.source).to_contain("__kernel void simple_2d_bitmap_glyph_raster_u32")
         expect(metal_plan.required_symbols).to_contain("simple_2d_scroll_u32")
+        expect(metal_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
         expect(metal_plan.artifact_path_suffix).to_equal("simple_2d_optimization.metallib")
         expect(cuda_plan.required_symbols).to_contain("simple_2d_fill_u32")
         expect(cuda_plan.required_symbols).to_contain("simple_2d_copy_u32")
         expect(cuda_plan.required_symbols).to_contain("simple_2d_alpha_u32")
         expect(cuda_plan.required_symbols).to_contain("simple_2d_scroll_u32")
+        expect(cuda_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
         expect(hip_plan.required_symbols).to_contain("simple_2d_fill_u32")
         expect(hip_plan.required_symbols).to_contain("simple_2d_copy_u32")
         expect(hip_plan.required_symbols).to_contain("simple_2d_alpha_u32")
         expect(hip_plan.required_symbols).to_contain("simple_2d_scroll_u32")
+        expect(hip_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
         expect(opencl_plan.required_symbols).to_contain("simple_2d_fill_u32")
         expect(opencl_plan.required_symbols).to_contain("simple_2d_copy_u32")
         expect(opencl_plan.required_symbols).to_contain("simple_2d_alpha_u32")
         expect(opencl_plan.required_symbols).to_contain("simple_2d_scroll_u32")
+        expect(opencl_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
         expect(metal_plan.required_symbols).to_contain("simple_2d_fill_u32")
         expect(metal_plan.required_symbols).to_contain("simple_2d_copy_u32")
         expect(metal_plan.required_symbols).to_contain("simple_2d_alpha_u32")
+        expect(metal_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
 
     it "requires every generated 2D entry before accepting a module binary":
         val plan = portable_compute_2d_optimization_compile_plan(PortableComputeTarget.Cuda, "simple_2d_optimization")
-        val valid = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
-        val missing_scroll = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32", 4486)
+        val valid = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32 .entry simple_2d_bitmap_glyph_raster_u32", 4486)
+        val missing_scroll = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
 
         expect(valid.artifact_valid).to_equal(true)
         expect(valid.reason).to_equal("pass")
         expect(missing_scroll.artifact_valid).to_equal(false)
-        expect(missing_scroll.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u32")
+        expect(missing_scroll.reason).to_equal("missing-entry-symbol:simple_2d_bitmap_glyph_raster_u32")
 
     it "builds a smoke matrix for CUDA HIP OpenCL and Metal":
         val matrix = emit_portable_compute_smoke_matrix()
@@ -219,6 +230,7 @@ describe "portable GPU compute emitter":
         expect(matrix[2].target_name()).to_equal("opencl")
         expect(matrix[3].target_name()).to_equal("metal")
         expect(matrix[0].source).to_contain("simple_2d_scroll_u32")
+        expect(matrix[0].source).to_contain("simple_2d_bitmap_glyph_raster_u32")
 
     it "resolves tagged backend order into one portable target request":
         val cuda_opencl = portable_compute_backend_targets_from_order("cuda,opencl")

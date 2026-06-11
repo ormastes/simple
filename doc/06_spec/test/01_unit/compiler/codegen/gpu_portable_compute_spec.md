@@ -41,7 +41,7 @@ gpu_portable_compute_spec -> compiler
 #### emits CUDA fill source with PTX artifact label
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect(artifact.source).to_contain("dst[i] = value;")
 #### emits HIP fill source with HSACO artifact label
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -78,7 +78,7 @@ expect(artifact.source).to_contain("blockIdx.x * blockDim.x + threadIdx.x")
 #### emits OpenCL C fill source with SPIR-V artifact label
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -97,7 +97,7 @@ expect(artifact.source).to_contain("get_global_id(0)")
 #### emits Metal fill source with metallib artifact label
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -116,7 +116,7 @@ expect(artifact.source).to_contain("uint gid [[thread_position_in_grid]]")
 #### emits one add kernel shape across all compute targets
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -137,7 +137,7 @@ expect(metal.source).to_contain("out[i] = a[i] + b[i];")
 #### builds target compile plans for source to binary artifacts
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -166,7 +166,7 @@ expect(metal_plan.source_format).to_equal("metal-shading-language")
 #### validates generated binary artifacts by target magic and exported entry
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -194,7 +194,7 @@ expect(metal.summary()).to_contain("valid=true")
 #### fails generated binary evidence closed for missing bytes magic or symbol
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -218,7 +218,7 @@ expect(missing_symbol.reason).to_equal("missing-entry-symbol")
 #### builds deterministic toolchain invocations for target binary generation
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -248,7 +248,7 @@ expect(metal.summary()).to_contain("ready=true")
 #### fails toolchain invocations closed when required tools or paths are missing
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -272,7 +272,7 @@ expect(missing_output.reason).to_equal("missing-output-path")
 #### records toolchain compile results without accepting failed or invalid artifacts
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -298,18 +298,19 @@ expect(failed_artifact.status).to_equal("artifact-magic-mismatch")
 
 </details>
 
-#### emits portable 2D optimization kernels for copy alpha and scroll
+#### emits portable 2D optimization kernels for copy alpha scroll and bitmap glyph raster
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val copy = emit_portable_2d_copy_u32_kernel(PortableComputeTarget.OpenCl)
 val alpha = emit_portable_2d_alpha_u32_kernel(PortableComputeTarget.Cuda)
 val scroll = emit_portable_2d_scroll_u32_kernel(PortableComputeTarget.Metal)
+val glyph = emit_portable_2d_bitmap_glyph_raster_u32_kernel(PortableComputeTarget.OpenCl)
 
 expect(copy.entry_name).to_equal("simple_2d_copy_u32")
 expect(copy.source).to_contain("dst[i] = src[i];")
@@ -319,6 +320,8 @@ expect(alpha.source).to_contain("0xff000000u")
 expect(scroll.entry_name).to_equal("simple_2d_scroll_u32")
 expect(scroll.source).to_contain("int sy = int(y) - delta_y;")
 expect(scroll.source).to_contain("dst[i] = 0u;")
+expect(glyph.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+expect(glyph.source).to_contain("mask == 0u ? 0u : color")
 ```
 
 </details>
@@ -326,9 +329,9 @@ expect(scroll.source).to_contain("dst[i] = 0u;")
 #### groups Simple-authored 2D optimization kernels per compute target
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -337,8 +340,9 @@ val hip = emit_portable_2d_optimization_kernels(PortableComputeTarget.Hip)
 val opencl = emit_portable_2d_optimization_kernels(PortableComputeTarget.OpenCl)
 val metal = emit_portable_2d_optimization_kernels(PortableComputeTarget.Metal)
 
-expect(cuda.len()).to_equal(4)
+expect(cuda.len()).to_equal(5)
 expect(hip[2].entry_name).to_equal("simple_2d_alpha_u32")
+expect(opencl[4].entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
 expect(opencl[3].binary_format).to_equal("spirv")
 expect(metal[1].source).to_contain("[[buffer(1)]]")
 ```
@@ -348,9 +352,9 @@ expect(metal[1].source).to_contain("[[buffer(1)]]")
 #### builds one generated 2D optimization module per target with all required entries
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -366,24 +370,31 @@ expect(cuda.source).to_contain("simple_2d_fill_u32")
 expect(cuda.source).to_contain("simple_2d_copy_u32")
 expect(cuda.source).to_contain("simple_2d_alpha_u32")
 expect(cuda.source).to_contain("simple_2d_scroll_u32")
+expect(cuda.source).to_contain("simple_2d_bitmap_glyph_raster_u32")
 expect(opencl.source).to_contain("__kernel void simple_2d_copy_u32")
+expect(opencl.source).to_contain("__kernel void simple_2d_bitmap_glyph_raster_u32")
 expect(metal_plan.required_symbols).to_contain("simple_2d_scroll_u32")
+expect(metal_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
 expect(metal_plan.artifact_path_suffix).to_equal("simple_2d_optimization.metallib")
 expect(cuda_plan.required_symbols).to_contain("simple_2d_fill_u32")
 expect(cuda_plan.required_symbols).to_contain("simple_2d_copy_u32")
 expect(cuda_plan.required_symbols).to_contain("simple_2d_alpha_u32")
 expect(cuda_plan.required_symbols).to_contain("simple_2d_scroll_u32")
+expect(cuda_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
 expect(hip_plan.required_symbols).to_contain("simple_2d_fill_u32")
 expect(hip_plan.required_symbols).to_contain("simple_2d_copy_u32")
 expect(hip_plan.required_symbols).to_contain("simple_2d_alpha_u32")
 expect(hip_plan.required_symbols).to_contain("simple_2d_scroll_u32")
+expect(hip_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
 expect(opencl_plan.required_symbols).to_contain("simple_2d_fill_u32")
 expect(opencl_plan.required_symbols).to_contain("simple_2d_copy_u32")
 expect(opencl_plan.required_symbols).to_contain("simple_2d_alpha_u32")
 expect(opencl_plan.required_symbols).to_contain("simple_2d_scroll_u32")
+expect(opencl_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
 expect(metal_plan.required_symbols).to_contain("simple_2d_fill_u32")
 expect(metal_plan.required_symbols).to_contain("simple_2d_copy_u32")
 expect(metal_plan.required_symbols).to_contain("simple_2d_alpha_u32")
+expect(metal_plan.required_symbols).to_contain("simple_2d_bitmap_glyph_raster_u32")
 ```
 
 </details>
@@ -391,20 +402,20 @@ expect(metal_plan.required_symbols).to_contain("simple_2d_alpha_u32")
 #### requires every generated 2D entry before accepting a module binary
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val plan = portable_compute_2d_optimization_compile_plan(PortableComputeTarget.Cuda, "simple_2d_optimization")
-val valid = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
-val missing_scroll = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32", 4486)
+val valid = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32 .entry simple_2d_bitmap_glyph_raster_u32", 4486)
+val missing_scroll = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
 
 expect(valid.artifact_valid).to_equal(true)
 expect(valid.reason).to_equal("pass")
 expect(missing_scroll.artifact_valid).to_equal(false)
-expect(missing_scroll.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u32")
+expect(missing_scroll.reason).to_equal("missing-entry-symbol:simple_2d_bitmap_glyph_raster_u32")
 ```
 
 </details>
@@ -415,9 +426,9 @@ expect(missing_scroll.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u3
 #### builds a smoke matrix for CUDA HIP OpenCL and Metal
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -428,6 +439,7 @@ expect(matrix[1].target_name()).to_equal("hip")
 expect(matrix[2].target_name()).to_equal("opencl")
 expect(matrix[3].target_name()).to_equal("metal")
 expect(matrix[0].source).to_contain("simple_2d_scroll_u32")
+expect(matrix[0].source).to_contain("simple_2d_bitmap_glyph_raster_u32")
 ```
 
 </details>
@@ -438,7 +450,7 @@ expect(matrix[0].source).to_contain("simple_2d_scroll_u32")
 #### resolves tagged backend order into one portable target request
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -464,7 +476,7 @@ expect(auto_all.target_names()).to_equal("cuda,hip,opencl,metal")
 #### reports explicit backend target diagnostics for accepted and closed targets
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -492,7 +504,7 @@ expect(vulkan.summary()).to_contain("accepted=false")
 #### reports unsupported portable compute backend names without dropping selected targets
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -512,7 +524,7 @@ expect(request.diagnostic).to_contain("unsupported portable compute backend")
 #### builds generated 2D optimization artifacts and compile plans from one tagged backend request
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -538,7 +550,7 @@ expect(plan.summary()).to_contain("artifacts=2")
 #### keeps backend artifact plans closed when a tagged request includes unsupported compute backends
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -558,7 +570,7 @@ expect(plan.diagnostic).to_contain("vulkan")
 #### builds tagged operation metadata for CUDA and OpenCL generated offload requests
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -585,7 +597,7 @@ expect(plan.summary()).to_contain("rows=2")
 #### expands kernel auto operation metadata across CUDA HIP OpenCL and Metal
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -608,7 +620,7 @@ expect(plan.rows[3].status).to_equal("metadata-ready")
 #### keeps operation metadata closed for Vulkan SPIR-V and unsupported operation families
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

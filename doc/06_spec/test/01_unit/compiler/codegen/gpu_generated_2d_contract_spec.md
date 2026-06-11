@@ -41,14 +41,14 @@ gpu_generated_2d_contract_spec -> compiler
 #### normalizes CUDA HIP OpenCL and Metal generated artifacts into one contract shape
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val plain_exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
-val spirv_exported = "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\""
+val plain_exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32"
+val spirv_exported = "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\" OpEntryPoint GLCompute %simple_2d_bitmap_glyph_raster_u32 \"simple_2d_bitmap_glyph_raster_u32\""
 val cuda = cuda_generated_2d_compile_contract("simple_2d_optimization", ".version 8.0", plain_exported, 4096)
 val hip = hip_generated_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", plain_exported, 4096)
 val opencl = opencl_generated_2d_compile_contract("simple_2d_optimization", "SPIR-V 1.5", spirv_exported, 4096)
@@ -83,14 +83,14 @@ expect(metal.summary()).to_contain("backend=metal")
 #### keeps backend-specific artifact magic diagnostics in the shared contract
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val plain_exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
-val spirv_exported = "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\""
+val plain_exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32"
+val spirv_exported = "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\" OpEntryPoint GLCompute %simple_2d_bitmap_glyph_raster_u32 \"simple_2d_bitmap_glyph_raster_u32\""
 val bad_cuda = cuda_generated_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", plain_exported, 4096)
 val bad_hip = hip_generated_2d_compile_contract("simple_2d_optimization", ".version 8.0", plain_exported, 4096)
 val bad_opencl = opencl_generated_2d_compile_contract("simple_2d_optimization", ".version 8.0", spirv_exported, 4096)

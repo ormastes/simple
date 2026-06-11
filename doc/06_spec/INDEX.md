@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Bitmap Font Offload Specification](test/01_unit/lib/gpu/engine2d/bitmap_font_offload_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
+| [Rocm Session Contract Specification](test/01_unit/lib/gpu/engine2d/rocm_session_contract_spec.md) | Auto-generated | N/A | 8 | 0% | 0 lines |
 

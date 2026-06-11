@@ -225,7 +225,7 @@ expect(source).to_contain("if (pixel == 0) return")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -235,6 +235,7 @@ expect(source).to_contain("simple_2d_fill_u32")
 expect(source).to_contain("simple_2d_copy_u32")
 expect(source).to_contain("simple_2d_alpha_u32")
 expect(source).to_contain("simple_2d_scroll_u32")
+expect(source).to_contain("simple_2d_bitmap_glyph_raster_u32")
 ```
 
 </details>

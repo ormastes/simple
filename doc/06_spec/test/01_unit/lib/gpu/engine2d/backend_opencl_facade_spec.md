@@ -41,9 +41,9 @@ backend_opencl_facade_spec -> std
 #### ships generated OpenCL 2D source with the shared kernel entries
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -53,6 +53,7 @@ expect(source).to_contain("__kernel void simple_2d_fill_u32")
 expect(source).to_contain("__kernel void simple_2d_copy_u32")
 expect(source).to_contain("__kernel void simple_2d_alpha_u32")
 expect(source).to_contain("__kernel void simple_2d_scroll_u32")
+expect(source).to_contain("__kernel void simple_2d_bitmap_glyph_raster_u32")
 expect(source).to_contain("__kernel void simple_2d_rect_filled_u32")
 expect(source).to_contain("__kernel void simple_2d_rect_outline_u32")
 expect(source).to_contain("__kernel void simple_2d_line_u32")
@@ -69,7 +70,7 @@ expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
 
 #### fails closed or initializes through the OpenCL render facade without CPU fallback
 
-1. var backend = OpenClBackend create
+- var backend = OpenClBackend create
    - Expected: backend.name() equals `opencl`
    - Expected: backend.last_probe.requested_name equals `opencl`
    - Expected: backend.last_probe.selected_name equals `opencl`
@@ -79,52 +80,43 @@ expect(source).to_contain("__kernel void simple_2d_blit_nonzero_u32")
    - Expected: backend.last_probe.strict_failure_without_fallback() is true
    - Expected: backend.last_probe.status equals `BackendStatus.Initialized`
    - Expected: backend.last_probe.feature_gate equals `opencl_2d_render`
-
-2. backend clear
+- backend clear
    - Expected: cleared.len() equals `16`
    - Expected: cleared[0] equals `0xff112233u32`
    - Expected: cleared[15] equals `0xff112233u32`
-
-3. backend draw rect filled
+- backend draw rect filled
    - Expected: filled[0] equals `0xff112233u32`
    - Expected: filled[5] equals `0xff445566u32`
    - Expected: filled[6] equals `0xff445566u32`
    - Expected: filled[9] equals `0xff445566u32`
    - Expected: filled[10] equals `0xff445566u32`
    - Expected: filled[15] equals `0xff112233u32`
-
-4. backend draw line
+- backend draw line
    - Expected: lined[0] equals `0xff778899u32`
    - Expected: lined[5] equals `0xff778899u32`
    - Expected: lined[10] equals `0xff778899u32`
    - Expected: lined[15] equals `0xff778899u32`
-
-5. backend draw gradient rect
+- backend draw gradient rect
    - Expected: gradient[0] equals `0xffff0000u32`
    - Expected: gradient[15] equals `0xff0000ffu32`
-
-6. backend draw circle
+- backend draw circle
    - Expected: circle[5] equals `0xffabcdefu32`
-
-7. backend draw circle filled
+- backend draw circle filled
    - Expected: filled_circle[10] equals `0xff135724u32`
-
-8. backend draw rounded rect
+- backend draw rounded rect
    - Expected: rounded[5] equals `0xff2468acu32`
    - Expected: rounded[10] equals `0xff2468acu32`
-
-9. backend draw triangle filled
+- backend draw triangle filled
    - Expected: triangle[0] equals `0xff55aa11u32`
    - Expected: triangle[1] equals `0xff55aa11u32`
    - Expected: triangle[4] equals `0xff55aa11u32`
    - Expected: backend.last_probe.status equals `BackendStatus.Unavailable`
    - Expected: backend.last_probe.has_graphics is false
-
-10. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -191,32 +183,25 @@ backend.shutdown()
 
 #### marks OpenCL device pixels stale after mirror-only primitive fallbacks
 
-1. var backend = OpenClBackend create
+- var backend = OpenClBackend create
    - Expected: backend.mirror.init(8, 8) is true
-
-2. backend draw line
+- backend draw line
    - Expected: backend.device_current is false
-
-3. backend draw circle
+- backend draw circle
    - Expected: backend.device_current is false
-
-4. backend draw circle filled
+- backend draw circle filled
    - Expected: backend.device_current is false
-
-5. backend draw rounded rect
+- backend draw rounded rect
    - Expected: backend.device_current is false
-
-6. backend draw triangle filled
+- backend draw triangle filled
    - Expected: backend.device_current is false
-
-7. backend draw gradient rect
+- backend draw gradient rect
    - Expected: backend.device_current is false
-
-8. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -256,55 +241,34 @@ backend.shutdown()
 
 #### shares the CUDA HIP advanced facade methods through emulator logic
 
-1. var backend = OpenClBackend create
+- var backend = OpenClBackend create
    - Expected: backend.mirror.init(16, 16) is true
-
-2. backend clear
-
-3. backend draw ellipse
-
-4. backend draw ellipse filled
-
-5. backend draw arc
-
-6. backend draw bezier
-
-7. backend draw polygon filled
-
-8. backend draw polyline
-
-9. backend draw rect thick
-
-10. backend draw circle thick
-
-11. backend draw rounded rect outline
-
-12. backend draw gradient rect h
-
-13. backend draw radial gradient
-
-14. backend draw rect blend
-
-15. backend draw image blend
-
-16. backend draw image scaled
-
-17. backend draw triangle outline
-
-18. backend draw blur rect
-
-19. backend draw shadow rect
-
-20. backend draw image transform
-
-21. backend draw rect blend mode
+- backend clear
+- backend draw ellipse
+- backend draw ellipse filled
+- backend draw arc
+- backend draw bezier
+- backend draw polygon filled
+- backend draw polyline
+- backend draw rect thick
+- backend draw circle thick
+- backend draw rounded rect outline
+- backend draw gradient rect h
+- backend draw radial gradient
+- backend draw rect blend
+- backend draw image blend
+- backend draw image scaled
+- backend draw triangle outline
+- backend draw blur rect
+- backend draw shadow rect
+- backend draw image transform
+- backend draw rect blend mode
    - Expected: pixels.len() equals `256`
-
-22. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -345,21 +309,18 @@ backend.shutdown()
 
 #### blocks OpenCL device draws while software clip state is active
 
-1. var backend = OpenClBackend create
+- var backend = OpenClBackend create
    - Expected: backend.mirror.init(8, 8) is true
    - Expected: backend._can_use_device_draw() is true
-
-2. backend set clip
+- backend set clip
    - Expected: backend._can_use_device_draw() is false
-
-3. backend clear clip
+- backend clear clip
    - Expected: backend._can_use_device_draw() is true
-
-4. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -383,14 +344,14 @@ backend.shutdown()
 
 #### routes Engine2D opencl probing through the render backend facade
 
-1. engine shutdown
+- engine shutdown
    - Expected: false is true
    - Expected: probe.status equals `BackendStatus.Unavailable`
    - Expected: gate_is_known is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

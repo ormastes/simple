@@ -41,7 +41,7 @@ hip_backend_contract_spec -> compiler
 #### names the HIP backend and supports HSACO artifact targets only
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -61,13 +61,13 @@ expect(backend.output_kind() == CodegenOutputKind.GpuCode).to_equal(true)
 #### builds generated Engine2D HIP C++ to HSACO artifact evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
+val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32"
 val contract = hip_backend_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", exported, 4096)
 
 expect(contract.ready).to_equal(true)
@@ -85,13 +85,13 @@ expect(contract.summary()).to_contain("ready=true")
 #### exposes one shared generated Engine2D contract for CUDA and HIP
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32"
+val exported = "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32"
 val cuda = cuda_generated_2d_compile_contract("simple_2d_optimization", ".version 8.0", exported, 4096)
 val hip = hip_generated_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", exported, 4096)
 val bad_cuda = cuda_generated_2d_compile_contract("simple_2d_optimization", "ELF AMDGCN HSACO", exported, 4096)
@@ -117,7 +117,7 @@ expect(bad_cuda.diagnostic).to_contain("CUDA artifact rejected")
 #### rejects incomplete HIP generated artifact evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -136,7 +136,7 @@ expect(contract.diagnostic).to_contain("HIP artifact rejected")
 #### keeps generic MIR lowering honest until the HIP MIR emitter lands
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

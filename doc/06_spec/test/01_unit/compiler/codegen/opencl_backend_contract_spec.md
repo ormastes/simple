@@ -41,7 +41,7 @@ opencl_backend_contract_spec -> compiler
 #### names the OpenCL backend and supports OpenCL artifact targets only
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -61,13 +61,13 @@ expect(backend.output_kind() == CodegenOutputKind.GpuCode).to_equal(true)
 #### builds generated Engine2D OpenCL C to SPIR-V artifact evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val exported = "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\""
+val exported = "OpEntryPoint GLCompute %simple_2d_fill_u32 \"simple_2d_fill_u32\" OpEntryPoint GLCompute %simple_2d_copy_u32 \"simple_2d_copy_u32\" OpEntryPoint GLCompute %simple_2d_alpha_u32 \"simple_2d_alpha_u32\" OpEntryPoint GLCompute %simple_2d_scroll_u32 \"simple_2d_scroll_u32\" OpEntryPoint GLCompute %simple_2d_bitmap_glyph_raster_u32 \"simple_2d_bitmap_glyph_raster_u32\""
 val contract = opencl_backend_2d_compile_contract("simple_2d_optimization", "SPIR-V 1.5", exported, 4096)
 
 expect(contract.ready).to_equal(true)
@@ -85,7 +85,7 @@ expect(contract.summary()).to_contain("ready=true")
 #### rejects incomplete OpenCL generated artifact evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -104,7 +104,7 @@ expect(contract.diagnostic).to_contain("OpenCL artifact rejected")
 #### plans MIR kernels using OpenCL target metadata
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -130,7 +130,7 @@ expect(plan.diagnostic).to_contain("cuda_kernel")
 #### emits OpenCL C source for accepted MIR GPU kernel subset
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -151,7 +151,7 @@ expect(source).to_contain("return;")
 #### compiles tagged OpenCL kernels through the shared Codegen factory interface
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -176,7 +176,7 @@ expect(output.text_output).to_contain("get_global_id(0)")
 #### emits OpenCL C load store and pointer arithmetic for memory kernels
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -201,7 +201,7 @@ expect(source).to_contain("*v6 = v9;")
 #### emits OpenCL C checked arithmetic as GPU arithmetic
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -220,7 +220,7 @@ expect(source).to_contain("return;")
 #### emits OpenCL C casts and bitcasts distinctly
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -240,7 +240,7 @@ expect(source).to_contain("return;")
 #### emits OpenCL C direct named device calls
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -262,7 +262,7 @@ expect(source).to_contain("return;")
 #### rejects unsupported MIR instead of emitting invalid OpenCL comments
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -280,7 +280,7 @@ expect(result.unwrap_err().message).to_contain("OpenCL")
 #### emits OpenCL C array aggregates and field access
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -301,7 +301,7 @@ expect(source).to_contain("return;")
 #### emits OpenCL C private allocation for per-work-item locals
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -322,7 +322,7 @@ expect(source).to_contain("return;")
 #### maps Simple SIMD vector types to OpenCL C vector types
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -340,7 +340,7 @@ expect(OpenClBackend.opencl_type(vec8i_type(), false)).to_equal("int8")
 #### emits OpenCL C SIMD vector arithmetic and f32x4 reductions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -365,7 +365,7 @@ expect(source).to_contain("return;")
 #### emits OpenCL C generic MirSimd vector operations
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -395,7 +395,7 @@ expect(source).to_contain("return;")
 #### emits OpenCL C labels gotos and conditional branches
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -419,7 +419,7 @@ expect(source).to_contain("return;")
 #### emits OpenCL C switch terminators with case and default gotos
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -441,7 +441,7 @@ expect(source).to_contain("goto")
 #### emits OpenCL C atomics fences and local memory for GPU kernels
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

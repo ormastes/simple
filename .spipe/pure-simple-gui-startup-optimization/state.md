@@ -570,3 +570,19 @@ dev-done
   manuals were refreshed under `doc/06_spec`. This moves bitmap-font offload
   beyond copy/upload provenance without pretending that readback-verified
   GPU-side glyph rasterization exists yet.
+- impl: Added generated bitmap glyph raster source/export contracts to the
+  portable compute emitter and Engine2D OpenCL/HIP source strings. The compiler
+  required-symbol gate now rejects generated 2D artifacts that omit
+  `simple_2d_bitmap_glyph_raster_u32`, and bitmap glyph operations no longer
+  report CPU preprocessing as required at the operation-metadata layer.
+- verify: Focused checks pass for the compiler emitter, OpenCL/HIP backend
+  source strings, and updated contract specs. Specs pass: portable compute
+  24/24, generated 2D contract 2/2, HIP contract 5/5, OpenCL contract 19/19,
+  and ROCm session contract 8/8. `backend_opencl_facade_spec.spl` still has the
+  same host-dependent pre-existing result as baseline, 4 passed / 2 failed, so
+  it is not used as acceptance evidence for this slice.
+- verify: Optimizer scans completed for all touched `.spl` files. Counts:
+  portable compute 100, OpenCL backend 76, ROCm kernel source 21, portable
+  compute spec 43, generated 2D contract spec 0, HIP contract spec 0, OpenCL
+  contract spec 90, OpenCL facade spec 29, and ROCm session contract spec 2
+  remaining static opportunities.
