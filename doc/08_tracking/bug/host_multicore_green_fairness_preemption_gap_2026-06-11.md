@@ -81,6 +81,9 @@ Related active host-side blocker:
   now records the smaller hosted-native blocker beneath that stepper path:
   a direct native array of a by-value struct already returns `result=3`
   with `EXIT=77` even without worker-pool fairness logic.
+  The older helper-side array-literal hybrid fallback above that boundary is
+  closed on current-source seed builds, so the remaining lower blocker is the
+  native struct-array runtime path itself.
 - `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`
   now records the closed standalone-native blocker that used to sit underneath
   that stepper path: returning a function value from inside a loop/search

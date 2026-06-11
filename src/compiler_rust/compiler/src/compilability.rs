@@ -352,7 +352,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // Array literals lower through MIR ArrayLit and the native runtime
         // already supports heap-allocated arrays. Keep walking nested elements
         // for genuinely unsupported constructs, but do not force hybrid
-        // fallback just because an array literal appears.
+        // fallback just because a helper constructs an array literal.
         Expr::Array(items) => {
             for item in items {
                 analyze_expr(item, reasons);
@@ -823,11 +823,14 @@ mod tests {
     }
 
     #[test]
-    fn test_function_with_array_not_compilable() {
+    fn test_function_with_array_compilable() {
         let results = parse_and_analyze("fn make_array():\n    return [1, 2, 3]\n");
         let status = results.get("make_array").unwrap();
-        assert!(!status.is_compilable());
-        assert!(status.reasons().contains(&FallbackReason::CollectionLiteral));
+        assert!(
+            status.is_compilable(),
+            "array literal helper should compile natively, got {:?}",
+            status.reasons()
+        );
     }
 
     #[test]
@@ -1063,6 +1066,26 @@ fn get_func(id: i64) -> fn() -> i64:
         assert!(
             status.is_compilable(),
             "loop-return function-value helper should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_struct_array_helper_field_return_compilable() {
+        let results = parse_and_analyze(
+            r#"class Boxed:
+    value: i64
+
+fn run_one() -> i64:
+    val items = [Boxed(value: 7)]
+    val item = items[0]
+    item.value
+"#,
+        );
+        let status = results.get("run_one").unwrap();
+        assert!(
+            status.is_compilable(),
+            "struct-array helper should compile natively, got {:?}",
             status.reasons()
         );
     }

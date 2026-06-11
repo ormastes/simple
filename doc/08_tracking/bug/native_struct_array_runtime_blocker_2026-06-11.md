@@ -18,6 +18,12 @@ by-value struct already misbehaves on current-source seed/native:
 So the live seed/runtime bug is now pinned as native struct-array element
 storage or retrieval for by-value structs.
 
+The stale helper-side hybrid fallback that used to sit above this boundary is
+now closed: helper bodies that construct array literals are allowed to stay on
+the native path again. The remaining failure is the lower native runtime
+behavior for by-value struct arrays themselves, not a blanket helper
+classification problem.
+
 ## Minimal Boundary
 
 Current reduced probe:
