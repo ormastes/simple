@@ -173,6 +173,9 @@ Updated: 2026-06-11
   `_attr_value` now finds single- and double-quote terminators directly in the
   tag string instead of allocating an attribute-value tail before returning the
   same value slice.
+- this commit -- visual-tag scan allocation removal:
+  `_find_next_visual_tag` and direct-child close checks now use a bounded
+  multi-character scanner instead of allocating HTML tails before `index_of`.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
