@@ -43,7 +43,7 @@ wm_runtime_bridge_spec -> common
 #### maps host pointer hits on taskbar pins to launcher commands
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect(command.handled).to_equal(true)
 #### maps host pointer hits on running taskbar entries to focus commands
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -77,7 +77,7 @@ expect(command.app_id).to_equal("demo.app")
 #### maps host pointer hits on titlebars and command lane icons
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -102,7 +102,7 @@ expect(icon_wire).to_contain("target=right_icon_1")
 #### keeps non-left or non-down host pointer events ignored
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -121,7 +121,7 @@ expect(command.handled).to_equal(false)
 #### applies host event-loop pointer steps to shared shell state
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

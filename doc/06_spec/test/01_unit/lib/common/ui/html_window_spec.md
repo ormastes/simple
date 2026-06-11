@@ -42,7 +42,7 @@ html_window_spec -> common
 #### wraps body HTML with reusable base CSS
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -62,7 +62,7 @@ expect(html).to_contain(".extra{color:red}")
 #### renders title bar widgets with reusable CSS hooks
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -83,7 +83,7 @@ expect(html).to_contain(".simple-titlebar-widget{color:lime}")
 #### builds picture markup from embedded data URIs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -103,7 +103,7 @@ expect(pic).to_contain("alt=\"Logo\"")
 #### escapes text, titles, and picture attributes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -125,7 +125,7 @@ expect(html_titlebar_button("ok", "A < B")).to_contain("A &lt; B")
 #### exposes CSS blocks for backend-neutral base rendering
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -141,7 +141,7 @@ expect(block).to_equal("<style>.demo{color:red}</style>")
 #### builds WindowInfo using shared HTML content
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -161,7 +161,7 @@ expect(info.width).to_equal(300)
 #### builds WindowInfo with title bar widgets
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

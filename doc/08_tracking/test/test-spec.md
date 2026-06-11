@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-06 07:43:25*
+*Generated: 2026-06-11 00:30:36*
 
-## test/02_integration/os/apps/sshd
+## test/00_formal_verification/compiler
 
-❌ **sshd_production_packet_transcript_spec.spl** (9238ms)
-  - Source: `test/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.spl`
-  - Generated doc: `doc/06_spec/sshd_production_packet_transcript_spec.md`
+❌ **memory_capabilities_spec.spl** (69ms)
+  - Source: `test/00_formal_verification/compiler/memory_capabilities_spec.spl`
+  - Generated doc: `doc/06_spec/memory_capabilities_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 0 ✅
-- **Failed:** 1 ❌
-- **Duration:** 9247ms
+- **Passed:** 4 ✅
+- **Failed:** 2 ❌
+- **Duration:** 76ms

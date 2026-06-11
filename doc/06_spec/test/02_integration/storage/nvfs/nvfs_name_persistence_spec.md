@@ -1,6 +1,6 @@
 # Nvfs Name Persistence Specification
 
-> 1. var dev =  make persist device
+> <details>
 
 <!-- sdn-diagram:id=nvfs_name_persistence_spec.arch -->
 <details class="sdn-source">
@@ -41,7 +41,7 @@ nvfs_name_persistence_spec -> os
 
 #### file created on first mount survives remount
 
-1. var dev =  make persist device
+- var dev =  make persist device
    - Expected: res.file_found is true
    - Expected: res.read_ok is true
    - Expected: res.read_n equals `3`
@@ -49,7 +49,7 @@ nvfs_name_persistence_spec -> os
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -67,12 +67,12 @@ expect(res.first_byte).to_equal(0xABu8)
 
 #### multiple files persist across remount
 
-1. var dev =  make persist device
+- var dev =  make persist device
    - Expected: found equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

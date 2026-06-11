@@ -1,6 +1,6 @@
 # Leak Check Specification
 
-> 1. mock registry reset
+> <details>
 
 <!-- sdn-diagram:id=leak_check_spec.arch -->
 <details class="sdn-source">
@@ -40,8 +40,8 @@ leak_check_spec
 
 #### module is tracked after load
 
-1. mock registry reset
-2. mock registry register
+- mock registry reset
+- mock registry register
    - Expected: mock_registry_is_tracked("/lib/module_a.smf") is true
    - Expected: mock_registry_module_count() equals `1`
 
@@ -63,7 +63,7 @@ expect(mock_registry_module_count()).to_equal(1)
 
 #### module is not tracked before load
 
-1. mock registry reset
+- mock registry reset
    - Expected: mock_registry_is_tracked("/lib/not_loaded.smf") is false
 
 
@@ -82,10 +82,10 @@ expect(mock_registry_is_tracked("/lib/not_loaded.smf")).to_equal(false)
 
 #### exec symbols tracked per module
 
-1. mock registry reset
-2. mock registry register
-3. mock registry add exec symbol
-4. mock registry add exec symbol
+- mock registry reset
+- mock registry register
+- mock registry add exec symbol
+- mock registry add exec symbol
    - Expected: mock_exec_mapped_count() equals `2`
 
 
@@ -107,11 +107,11 @@ expect(mock_exec_mapped_count()).to_equal(2)
 
 #### unload frees all exec symbols
 
-1. mock registry reset
-2. mock registry register
-3. mock registry add exec symbol
-4. mock registry add exec symbol
-5. mock registry unload
+- mock registry reset
+- mock registry register
+- mock registry add exec symbol
+- mock registry add exec symbol
+- mock registry unload
    - Expected: mock_exec_mapped_count() equals `0`
    - Expected: mock_exec_was_freed("fn_foo") is true
    - Expected: mock_exec_was_freed("fn_bar") is true
@@ -138,9 +138,9 @@ expect(mock_exec_was_freed("fn_bar")).to_equal(true)
 
 #### unload removes module from registry
 
-1. mock registry reset
-2. mock registry register
-3. mock registry unload
+- mock registry reset
+- mock registry register
+- mock registry unload
    - Expected: mock_registry_is_tracked("/lib/module_a.smf") is false
    - Expected: mock_registry_module_count() equals `0`
 
@@ -163,8 +163,8 @@ expect(mock_registry_module_count()).to_equal(0)
 
 #### unload of unknown module is safe (no crash)
 
-1. mock registry reset
-2. mock registry unload
+- mock registry reset
+- mock registry unload
    - Expected: mock_registry_module_count() equals `0`
 
 
@@ -186,15 +186,15 @@ expect(mock_registry_module_count()).to_equal(0)
 
 #### old symbols freed before new ones registered
 
-1. mock registry reset
-2. mock registry register
-3. mock registry add exec symbol
+- mock registry reset
+- mock registry register
+- mock registry add exec symbol
    - Expected: mock_exec_was_freed("hot_fn") is false
-4. mock registry unload
+- mock registry unload
    - Expected: mock_exec_was_freed("hot_fn") is true
-5. mock exec reset
-6. mock registry register
-7. mock registry add exec symbol
+- mock exec reset
+- mock registry register
+- mock registry add exec symbol
    - Expected: mock_exec_mapped_count() equals `1`
 
 
@@ -224,10 +224,10 @@ expect(mock_exec_mapped_count()).to_equal(1)
 
 #### multiple load/unload cycles clean up correctly
 
-1. mock registry reset
-2. mock registry register
-3. mock registry add exec symbol
-4. mock registry unload
+- mock registry reset
+- mock registry register
+- mock registry add exec symbol
+- mock registry unload
    - Expected: mock_registry_module_count() equals `0`
    - Expected: mock_exec_mapped_count() equals `0`
 
@@ -256,9 +256,9 @@ expect(mock_exec_mapped_count()).to_equal(0)
 
 #### JIT symbol attributed to triggering module
 
-1. mock registry reset
-2. mock registry register
-3. mock registry add jit symbol
+- mock registry reset
+- mock registry register
+- mock registry add jit symbol
    - Expected: origin equals `/lib/caller.smf`
 
 
@@ -280,11 +280,11 @@ expect(origin).to_equal("/lib/caller.smf")
 
 #### JIT symbol freed when originating module unloads
 
-1. mock registry reset
-2. mock registry register
-3. mock registry add exec symbol
-4. mock registry add jit symbol
-5. mock registry unload
+- mock registry reset
+- mock registry register
+- mock registry add exec symbol
+- mock registry add jit symbol
+- mock registry unload
    - Expected: mock_exec_was_freed("Vec$i64_push") is true
 
 
@@ -307,10 +307,10 @@ expect(mock_exec_was_freed("Vec$i64_push")).to_equal(true)
 
 #### JIT origin removed after unload
 
-1. mock registry reset
-2. mock registry register
-3. mock registry add jit symbol
-4. mock registry unload
+- mock registry reset
+- mock registry register
+- mock registry add jit symbol
+- mock registry unload
    - Expected: origin equals ``
 
 
@@ -333,12 +333,12 @@ expect(origin).to_equal("")
 
 #### JIT symbols from different modules tracked independently
 
-1. mock registry reset
-2. mock registry register
-3. mock registry register
-4. mock registry add jit symbol
-5. mock registry add jit symbol
-6. mock registry unload
+- mock registry reset
+- mock registry register
+- mock registry register
+- mock registry add jit symbol
+- mock registry add jit symbol
+- mock registry unload
    - Expected: mock_registry_get_jit_origin("jit_sym_a") equals ``
    - Expected: mock_registry_get_jit_origin("jit_sym_b") equals `/lib/mod_b.smf`
 
@@ -367,8 +367,8 @@ expect(mock_registry_get_jit_origin("jit_sym_b")).to_equal("/lib/mod_b.smf")
 
 #### SMF ref count increases when module accesses it
 
-1. mock smf reset
-2. mock smf inc
+- mock smf reset
+- mock smf inc
    - Expected: mock_smf_get_count("/cache/std.smf") equals `1`
 
 
@@ -388,10 +388,10 @@ expect(mock_smf_get_count("/cache/std.smf")).to_equal(1)
 
 #### SMF not evicted while ref count > 0
 
-1. mock smf reset
-2. mock smf inc
-3. mock smf inc
-4. mock smf dec
+- mock smf reset
+- mock smf inc
+- mock smf inc
+- mock smf dec
    - Expected: mock_smf_was_evicted("/cache/shared.smf") is false
    - Expected: mock_smf_get_count("/cache/shared.smf") equals `1`
 
@@ -415,9 +415,9 @@ expect(mock_smf_get_count("/cache/shared.smf")).to_equal(1)
 
 #### SMF evicted when last module unloads
 
-1. mock smf reset
-2. mock smf inc
-3. mock smf dec
+- mock smf reset
+- mock smf inc
+- mock smf dec
    - Expected: mock_smf_was_evicted("/cache/shared.smf") is true
    - Expected: mock_smf_get_count("/cache/shared.smf") equals `0`
 
@@ -440,15 +440,15 @@ expect(mock_smf_get_count("/cache/shared.smf")).to_equal(0)
 
 #### multiple modules share SMF — eviction only on last unload
 
-1. mock registry reset
-2. mock registry register
-3. mock registry register
-4. mock registry add smf
-5. mock registry add smf
-6. mock registry unload
+- mock registry reset
+- mock registry register
+- mock registry register
+- mock registry add smf
+- mock registry add smf
+- mock registry unload
    - Expected: mock_smf_was_evicted("/cache/shared.smf") is false
    - Expected: mock_smf_get_count("/cache/shared.smf") equals `1`
-7. mock registry unload
+- mock registry unload
    - Expected: mock_smf_was_evicted("/cache/shared.smf") is true
 
 
@@ -479,13 +479,13 @@ expect(mock_smf_was_evicted("/cache/shared.smf")).to_equal(true)
 
 #### teardown frees all modules
 
-1. mock registry reset
-2. mock registry register
-3. mock registry register
-4. mock registry register
-5. mock registry add exec symbol
-6. mock registry add exec symbol
-7. mock registry unload
+- mock registry reset
+- mock registry register
+- mock registry register
+- mock registry register
+- mock registry add exec symbol
+- mock registry add exec symbol
+- mock registry unload
    - Expected: mock_registry_module_count() equals `0`
    - Expected: mock_exec_mapped_count() equals `0`
 
@@ -515,7 +515,7 @@ expect(mock_exec_mapped_count()).to_equal(0)
 
 #### teardown with zero modules is safe
 
-1. mock registry reset
+- mock registry reset
    - Expected: mock_registry_module_count() equals `0`
    - Expected: mock_exec_mapped_count() equals `0`
 
@@ -537,13 +537,13 @@ expect(mock_exec_mapped_count()).to_equal(0)
 
 #### after teardown, re-registration works (REPL restart)
 
-1. mock registry reset
-2. mock registry register
-3. mock registry add exec symbol
-4. mock registry unload
-5. mock exec reset
-6. mock registry register
-7. mock registry add exec symbol
+- mock registry reset
+- mock registry register
+- mock registry add exec symbol
+- mock registry unload
+- mock exec reset
+- mock registry register
+- mock registry add exec symbol
    - Expected: mock_registry_is_tracked("/lib/mod.smf") is true
    - Expected: mock_exec_mapped_count() equals `1`
 

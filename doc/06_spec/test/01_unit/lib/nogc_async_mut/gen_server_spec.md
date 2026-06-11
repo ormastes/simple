@@ -41,7 +41,7 @@ gen_server_spec
 #### defines GenServer required and optional callbacks
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -63,7 +63,7 @@ expect(src).to_contain("fn terminate(reason: text, state: text):")
 #### defines runner lifecycle and call/cast dispatch helpers
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

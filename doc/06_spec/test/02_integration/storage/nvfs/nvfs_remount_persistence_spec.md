@@ -1,6 +1,6 @@
 # Nvfs Remount Persistence Specification
 
-> 1. var dev =  make device
+> <details>
 
 <!-- sdn-diagram:id=nvfs_remount_persistence_spec.arch -->
 <details class="sdn-source">
@@ -41,11 +41,9 @@ nvfs_remount_persistence_spec -> os
 
 #### superblock survives format then re-read
 
-1. var dev =  make device
-
-2. nvfs arena set block device
-
-3. nvfs superblock set device
+- var dev =  make device
+- nvfs arena set block device
+- nvfs superblock set device
    - Expected: fmt_ok is true
    - Expected: probe_ok is true
    - Expected: sb.valid is true
@@ -55,7 +53,7 @@ nvfs_remount_persistence_spec -> os
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -79,9 +77,8 @@ expect(sb.mount_generation == 1u64).to_equal(true)
 
 #### arena data written to NVMe sectors can be read back via raw sector read
 
-1. var dev =  make device
-
-2. nvfs arena set block device
+- var dev =  make device
+- nvfs arena set block device
    - Expected: aid > 0 is true
    - Expected: w equals `8`
    - Expected: raw.len() >= 8 is true
@@ -94,7 +91,7 @@ expect(sb.mount_generation == 1u64).to_equal(true)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -121,11 +118,9 @@ expect(raw[7]).to_equal(0x04)
 
 #### full write-read cycle: format superblock + write arena + read both back
 
-1. var dev =  make device
-
-2. nvfs arena set block device
-
-3. nvfs superblock set device
+- var dev =  make device
+- nvfs arena set block device
+- nvfs superblock set device
    - Expected: fmt_ok is true
    - Expected: aid > 0 is true
    - Expected: w equals `5`
@@ -137,7 +132,7 @@ expect(raw[7]).to_equal(0x04)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -166,9 +161,8 @@ expect(arena_data[4]).to_equal(0x45)
 
 #### multiple arena writes persist across reads
 
-1. var dev =  make device
-
-2. nvfs arena set block device
+- var dev =  make device
+- nvfs arena set block device
    - Expected: aid > 0 is true
    - Expected: w1 equals `3`
    - Expected: w2 equals `2`
@@ -181,7 +175,7 @@ expect(arena_data[4]).to_equal(0x45)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

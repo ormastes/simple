@@ -84,36 +84,25 @@ FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 #### matches OS-thread fanout/fanin checksum _(slow)_
 
-- Prepare deterministic OS-thread fanout inputs
-- Spawn eight OS-thread fanout workers
-- Join OS-thread workers and verify checksum
-   - Expected: got equals `expected`
+- Write and run the OS-thread fanout probe through direct simple run
+   - Expected: stderr equals ``
+   - Expected: stdout.trim() equals ``
+   - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Prepare deterministic OS-thread fanout inputs")
-val iterations = 512
-val expected = fanout_expected(8, iterations)
-
-step("Spawn eight OS-thread fanout workers")
-val h0 = thread_spawn(\: fanout_work(0, iterations))
-val h1 = thread_spawn(\: fanout_work(1, iterations))
-val h2 = thread_spawn(\: fanout_work(2, iterations))
-val h3 = thread_spawn(\: fanout_work(3, iterations))
-val h4 = thread_spawn(\: fanout_work(4, iterations))
-val h5 = thread_spawn(\: fanout_work(5, iterations))
-val h6 = thread_spawn(\: fanout_work(6, iterations))
-val h7 = thread_spawn(\: fanout_work(7, iterations))
-
-step("Join OS-thread workers and verify checksum")
-val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
-expect(got).to_equal(expected)
+step("Write and run the OS-thread fanout probe through direct simple run")
+val probe_path = unique_probe_path("mcg_thread_fanout")
+val (stdout, stderr, code) = run_probe(probe_path, thread_probe_source())
+expect(stderr).to_equal("")
+expect(stdout.trim()).to_equal("")
+expect(code).to_equal(0)
 ```
 
 </details>
@@ -126,41 +115,25 @@ expect(got).to_equal(expected)
 
 #### matches cooperative-green fanout checksum on the current carrier _(slow)_
 
-- Prepare deterministic cooperative-green fanout inputs
-- Queue eight cooperative-green workers on the current carrier
-- Run the cooperative carrier and join all workers
-- Verify cooperative carrier progress and checksum
-   - Expected: got equals `expected`
+- Write and run the cooperative-green fanout probe through direct simple run
+   - Expected: stderr equals ``
+   - Expected: stdout.trim() equals ``
+   - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Prepare deterministic cooperative-green fanout inputs")
-val iterations = 512
-val expected = fanout_expected(8, iterations)
-
-step("Queue eight cooperative-green workers on the current carrier")
-val h0 = cooperative_green_spawn_value(fanout_work(0, iterations))
-val h1 = cooperative_green_spawn_value(fanout_work(1, iterations))
-val h2 = cooperative_green_spawn_value(fanout_work(2, iterations))
-val h3 = cooperative_green_spawn_value(fanout_work(3, iterations))
-val h4 = cooperative_green_spawn_value(fanout_work(4, iterations))
-val h5 = cooperative_green_spawn_value(fanout_work(5, iterations))
-val h6 = cooperative_green_spawn_value(fanout_work(6, iterations))
-val h7 = cooperative_green_spawn_value(fanout_work(7, iterations))
-
-step("Run the cooperative carrier and join all workers")
-val ran = cooperative_green_run_all()
-val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
-
-step("Verify cooperative carrier progress and checksum")
-expect(ran).to_be_greater_than(7)
-expect(got).to_equal(expected)
+step("Write and run the cooperative-green fanout probe through direct simple run")
+val probe_path = unique_probe_path("mcg_coop_fanout")
+val (stdout, stderr, code) = run_probe(probe_path, cooperative_probe_source())
+expect(stderr).to_equal("")
+expect(stdout.trim()).to_equal("")
+expect(code).to_equal(0)
 ```
 
 </details>

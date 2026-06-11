@@ -1,6 +1,6 @@
 # Baseline Memleak Specification
 
-> 1. fn do work
+> <details>
 
 <!-- sdn-diagram:id=baseline_memleak_spec.arch -->
 <details class="sdn-source">
@@ -40,9 +40,9 @@ baseline_memleak_spec
 
 #### performs string operations to generate typical stdout
 
-1. fn do work
-2. out push
-3. print "  Generated {results len
+- fn do work
+- out push
+- print "  Generated {results len
    - Expected: results.len() equals `10`
 
 

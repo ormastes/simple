@@ -217,8 +217,8 @@ else:
     expect(stdout).to_contain("macos_gui_live_window_evidence_non_background_ratio=0.000000")
     expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof")
     expect(stdout).to_contain("macos_gui_live_window_evidence_release_gate_status=not-satisfied")
-    expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=fail")
-    expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=build/gui/pure_gui_hot.smf")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=pass")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_row=GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf")
     expect(stdout).to_contain("qemu_status=not-run")
     expect(stdout).to_contain("macos_status=not-run")
     val smf_row = _extract_field(stdout, "macos_gui_live_window_evidence_gui_smf_artifact_contract_row=")
@@ -238,8 +238,8 @@ else:
     expect(report).to_contain("# macOS GUI Live Window Evidence")
     expect(report).to_contain("macos_gui_live_window_evidence_status=skip")
     expect(report).to_contain("macos_gui_live_window_evidence_reason=requires-macos")
-    expect(report).to_contain("GUI SMF artifact contract status: fail")
-    expect(report).to_contain("GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=fail artifact=build/gui/pure_gui_hot.smf")
+    expect(report).to_contain("GUI SMF artifact contract status: pass")
+    expect(report).to_contain("GUI SMF artifact contract row: GUI_SMF_ARTIFACT_CONTRACT status=pass artifact=build/gui/pure_gui_hot.smf")
     expect(report).to_contain("GUI SMF artifact contract scope: contract-only; does not promote live macOS window evidence")
     expect(report).to_contain("macos_gui_live_window_evidence_window_rect=")
     expect(report).to_contain("macos_gui_live_window_evidence_capture_width=0")
@@ -247,7 +247,7 @@ else:
     expect(report).to_contain("macos_gui_live_window_evidence_capture_total_pixels=0")
     expect(report).to_contain("macos_gui_live_window_evidence_non_background_ratio=0.000000")
     expect(report).to_contain("macos_gui_live_window_evidence_release_gate_status=not-satisfied")
-    expect(report).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=fail")
+    expect(report).to_contain("macos_gui_live_window_evidence_gui_smf_artifact_contract_status=pass")
 ```
 
 </details>

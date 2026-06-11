@@ -1,6 +1,6 @@
 # Vector Font Offload Specification
 
-> 1. accel
+> <details>
 
 <!-- sdn-diagram:id=vector_font_offload_spec.arch -->
 <details class="sdn-source">
@@ -40,7 +40,7 @@ vector_font_offload_spec -> std
 
 #### marks CUDA vector font evidence production ready only after GPU glyph pixels return
 
-1. accel
+- accel
    - Expected: evidence.generated_ready is true
    - Expected: evidence.generated.generated_operation equals `copy`
    - Expected: evidence.cpu_preprocess_required is true
@@ -51,7 +51,7 @@ vector_font_offload_spec -> std
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -76,7 +76,7 @@ expect(evidence.diagnostic_text()).to_contain("family=vector_font")
 
 #### keeps generated-ready OpenCL evidence separate from missing glyph readback
 
-1. accel
+- accel
    - Expected: evidence.generated_ready is true
    - Expected: evidence.gpu_glyph_returned is false
    - Expected: evidence.production_ready is false
@@ -86,7 +86,7 @@ expect(evidence.diagnostic_text()).to_contain("family=vector_font")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -109,7 +109,7 @@ expect(evidence.generated.launch_api).to_equal("clEnqueueNDRangeKernel")
 
 #### fails closed when the generated backend runtime is unavailable
 
-1. accel
+- accel
    - Expected: evidence.generated_ready is false
    - Expected: evidence.production_ready is false
    - Expected: evidence.status_code equals `cuda-runtime-unavailable`
@@ -117,7 +117,7 @@ expect(evidence.generated.launch_api).to_equal("clEnqueueNDRangeKernel")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -138,7 +138,7 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 
 #### reports CPU fallback as an incomplete vector font offload state
 
-1. accel
+- accel
    - Expected: evidence.generated_ready is true
    - Expected: evidence.gpu_glyph_returned is false
    - Expected: evidence.production_ready is false
@@ -147,7 +147,7 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

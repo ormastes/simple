@@ -27,7 +27,7 @@ attach_session_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -58,7 +58,7 @@ expect(mirror.root_id_of() == -1).to_be_true()
 
 #### push_element makes the first node the root
 
-1. var mirror = DevToolsDomMirror new
+- var mirror = DevToolsDomMirror new
 
 
 <details>
@@ -79,7 +79,7 @@ expect(mirror.has_node(html_id)).to_be_true()
 
 #### attach_child records parent/child links in order
 
-1. var mirror = DevToolsDomMirror new
+- var mirror = DevToolsDomMirror new
 
 
 <details>
@@ -105,10 +105,36 @@ expect(root_node.child_count() == 1).to_be_true()
 
 </details>
 
+#### set_bounds stores geometry on the target node
+
+- var mirror = DevToolsDomMirror new
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var mirror = DevToolsDomMirror.new()
+val div = mirror.push_element("div", 0)
+val ok = mirror.set_bounds(div, 12, 34, 56, 78)
+expect(ok).to_be_true()
+val node = mirror.node_at(mirror.find_by_id(div))
+expect(node.has_bounds()).to_be_true()
+expect(node.x == 12).to_be_true()
+expect(node.y == 34).to_be_true()
+expect(node.width == 56).to_be_true()
+expect(node.height == 78).to_be_true()
+```
+
+</details>
+
 #### push_text stores a text-node marker
 
-1. var mirror = DevToolsDomMirror new
-2. mirror push element
+- var mirror = DevToolsDomMirror new
+- mirror push element
 
 
 <details>
@@ -131,11 +157,11 @@ expect(n.is_text()).to_be_true()
 
 #### max_depth reports the deepest depth
 
-1. var mirror = DevToolsDomMirror new
-2. mirror push element
-3. mirror push element
-4. mirror push element
-5. mirror push element
+- var mirror = DevToolsDomMirror new
+- mirror push element
+- mirror push element
+- mirror push element
+- mirror push element
 
 
 <details>
@@ -157,9 +183,9 @@ expect(mirror.max_depth() == 3).to_be_true()
 
 #### flattened_labels returns one label per node
 
-1. var mirror = DevToolsDomMirror new
-2. mirror push element
-3. mirror push element
+- var mirror = DevToolsDomMirror new
+- mirror push element
+- mirror push element
 
 
 <details>
@@ -180,10 +206,10 @@ expect(labels.len() == 2).to_be_true()
 
 #### clear resets the mirror to empty
 
-1. var mirror = DevToolsDomMirror new
-2. mirror push element
-3. mirror push element
-4. mirror clear
+- var mirror = DevToolsDomMirror new
+- mirror push element
+- mirror push element
+- mirror clear
 
 
 <details>
@@ -224,8 +250,8 @@ expect(css.selected_id_of() == -1).to_be_true()
 
 #### set_property lazily creates a block and stores the value
 
-1. var css = DevToolsCssInspector new
-2. css set property
+- var css = DevToolsCssInspector new
+- css set property
 
 
 <details>
@@ -247,10 +273,10 @@ expect(block.value_of("color") == "rgb(255,0,0)").to_be_true()
 
 #### set_property keeps insertion order when updating
 
-1. var css = DevToolsCssInspector new
-2. css set property
-3. css set property
-4. css set property
+- var css = DevToolsCssInspector new
+- css set property
+- css set property
+- css set property
 
 
 <details>
@@ -274,7 +300,7 @@ expect(block.value_of("background") == "blue").to_be_true()
 
 #### select returns false for nodes without a block
 
-1. var css = DevToolsCssInspector new
+- var css = DevToolsCssInspector new
 
 
 <details>
@@ -294,9 +320,9 @@ expect(not css.has_selection()).to_be_true()
 
 #### selected_lines returns the formatted property list
 
-1. var css = DevToolsCssInspector new
-2. css set property
-3. css set property
+- var css = DevToolsCssInspector new
+- css set property
+- css set property
 
 
 <details>
@@ -319,10 +345,10 @@ expect(lines.len() == 2).to_be_true()
 
 #### clear drops blocks and selection
 
-1. var css = DevToolsCssInspector new
-2. css set property
-3. css select
-4. css clear
+- var css = DevToolsCssInspector new
+- css set property
+- css select
+- css clear
 
 
 <details>
@@ -363,7 +389,7 @@ expect(s.snapshot_epoch_of() == 0).to_be_true()
 
 #### attach flips the status to ATTACHED
 
-1. var s = DevToolsAttachSession new
+- var s = DevToolsAttachSession new
 
 
 <details>
@@ -378,14 +404,14 @@ val ok = s.attach(11)
 expect(ok).to_be_true()
 expect(s.is_attached()).to_be_true()
 expect(s.window_id_of() == 11).to_be_true()
-expect(s.status().code() == DEVTOOLS_STATUS_ATTACHED).to_be_true()
+expect(s.status().label() == "attached").to_be_true()
 ```
 
 </details>
 
 #### attach rejects negative window ids
 
-1. var s = DevToolsAttachSession new
+- var s = DevToolsAttachSession new
 
 
 <details>
@@ -405,10 +431,10 @@ expect(s.is_detached()).to_be_true()
 
 #### begin_snapshot + end_snapshot bumps the epoch
 
-1. var s = DevToolsAttachSession new
-2. s attach
-3. s begin snapshot
-4. s push element
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s push element
 
 
 <details>
@@ -432,13 +458,13 @@ expect(s.snapshot_epoch_of() == 1).to_be_true()
 
 #### detach clears the DOM mirror and CSS view
 
-1. var s = DevToolsAttachSession new
-2. s attach
-3. s begin snapshot
-4. s push element
-5. s set style property
-6. s end snapshot
-7. s detach
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s push element
+- s set style property
+- s end snapshot
+- s detach
 
 
 <details>
@@ -464,7 +490,7 @@ expect(s.css().is_empty()).to_be_true()
 
 #### push_element on a detached session returns -1
 
-1. var s = DevToolsAttachSession new
+- var s = DevToolsAttachSession new
 
 
 <details>
@@ -483,7 +509,7 @@ expect(id == -1).to_be_true()
 
 #### begin_snapshot on a detached session returns false
 
-1. var s = DevToolsAttachSession new
+- var s = DevToolsAttachSession new
 
 
 <details>
@@ -504,13 +530,13 @@ expect(not ok).to_be_true()
 
 #### dom_labels exposes one label per pushed node
 
-1. var s = DevToolsAttachSession new
-2. s attach
-3. s begin snapshot
-4. s push element
-5. s push element
-6. s push text
-7. s end snapshot
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s push element
+- s push element
+- s push text
+- s end snapshot
 
 
 <details>
@@ -536,18 +562,19 @@ expect(s.dom_root_id() > 0).to_be_true()
 
 #### set_style_property + select_node feeds the inspector
 
-1. var s = DevToolsAttachSession new
-2. s attach
-3. s begin snapshot
-4. s set style property
-5. s set style property
-6. s end snapshot
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s set node bounds
+- s set style property
+- s set style property
+- s end snapshot
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -555,6 +582,7 @@ var s = DevToolsAttachSession.new()
 s.attach(1)
 s.begin_snapshot()
 val root = s.push_element("div", 0)
+s.set_node_bounds(root, 20, 30, 140, 48)
 s.set_style_property(root, "color", "red")
 s.set_style_property(root, "margin", "2px")
 s.end_snapshot()
@@ -562,17 +590,39 @@ val picked = s.select_node(root)
 expect(picked).to_be_true()
 val lines = s.selected_style_lines()
 expect(lines.len() == 2).to_be_true()
+val node = s.dom().node_at(s.dom().find_by_id(root))
+expect(node.has_bounds()).to_be_true()
+expect(node.width == 140).to_be_true()
+```
+
+</details>
+
+#### set_node_bounds returns false while detached
+
+- var s = DevToolsAttachSession new
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var s = DevToolsAttachSession.new()
+val ok = s.set_node_bounds(1, 0, 0, 10, 10)
+expect(not ok).to_be_true()
 ```
 
 </details>
 
 #### status label reports the current FSM state
 
-1. var s = DevToolsAttachSession new
-2. s attach
-3. s begin snapshot
-4. s push element
-5. s end snapshot
+- var s = DevToolsAttachSession new
+- s attach
+- s begin snapshot
+- s push element
+- s end snapshot
 
 
 <details>
@@ -635,8 +685,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

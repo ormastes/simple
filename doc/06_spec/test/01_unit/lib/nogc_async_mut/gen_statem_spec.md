@@ -41,7 +41,7 @@ gen_statem_spec
 #### defines GenStatem callback constants and required callbacks
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -64,7 +64,7 @@ expect(src).to_contain("CALLBACK_HANDLE_EVENT")
 #### defines runner lifecycle and event transition helper
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

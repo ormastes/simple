@@ -59,7 +59,7 @@ carrier workers.
 #### allows every CPU when affinity mask is zero
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -75,7 +75,7 @@ expect(green_worker_cpu_allowed(0, -1)).to_equal(false)
 #### restricts workers to CPUs present in the affinity mask
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -95,7 +95,7 @@ expect(green_worker_cpu_allowed(cpu1_and_cpu3, 3)).to_equal(true)
 #### chooses the least-loaded allowed CPU
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -112,7 +112,7 @@ expect(placement.reason).to_equal("least_loaded_allowed_cpu")
 #### honors affinity before load when placing a worker
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -131,7 +131,7 @@ expect(placement.cpu).to_equal(2)
 #### uses the waker CPU when affinity allows it and load is close
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -148,7 +148,7 @@ expect(placement.reason).to_equal("wake_affine_waker_cpu")
 #### falls back to home CPU when the waker CPU is overloaded
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -165,7 +165,7 @@ expect(placement.reason).to_equal("home_cpu")
 #### uses the first allowed CPU when home and waker CPUs are disallowed
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -185,7 +185,7 @@ expect(placement.reason).to_equal("first_allowed_cpu")
 #### steals only when remote load crosses the threshold
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -200,7 +200,7 @@ expect(green_worker_should_steal(2, 3, 2)).to_equal(false)
 #### moves one worker from busiest CPU to idlest CPU
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -220,7 +220,7 @@ expect(decision.reason).to_equal("busiest_to_idlest")
 #### does not rebalance below threshold
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -106,6 +106,23 @@
    host the report is `status=skip`, `reason=requires-macos`, with
    `macos_gui_live_window_evidence_release_gate=live-macos-window-visual-proof`
    and `macos_gui_live_window_evidence_release_gate_status=not-satisfied`.
+ - Linux host-side Electron MDI evidence was rerun on 2026-06-11 and still
+   passes with `electron_mdi_json_proof=pass`,
+   `electron_mdi_screenshot=pass`, and
+   `electron_mdi_screenshot_semantic=pass`. This proves the shared MDI lane has
+   live drag, button, input, key-routing, taskbar, and HTML-renderable evidence
+   on Linux/Xvfb/Electron.
+- Windows-native MDI/titlebar evidence now has a dedicated wrapper/spec lane:
+  `scripts/check/check-windows-native-mdi-evidence.shs`,
+  `test/03_system/gui/windows_native_mdi_evidence_spec.spl`, and the native
+  probe entry `src/os/hosted/hosted_win32_mdi_probe.spl`. On non-Windows hosts
+  this lane must skip explicitly with `requires-windows`; it does not fake a
+  pass. The wrapper is designed to prove a real Win32-hosted Simple Web MDI
+  window, screenshot semantic coverage, in-process drag/focus/minimize/restore
+  lifecycle actions, and titlebar button/body button/body input markup
+  presence. Real Windows-host execution evidence is still missing from this
+  Linux host, so native Windows titlebar button/input/CSS/event verification is
+  still not proven yet.
  - Pure GUI release/perf evidence now defines a WM/web/native-runtime-free command
    boundary, SMF/dynlib performance contract, and fail-closed probe row. Current
    Linux-host evidence intentionally reports `pass=false` without a real

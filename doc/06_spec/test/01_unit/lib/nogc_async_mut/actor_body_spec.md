@@ -1,6 +1,6 @@
 # Actor Body Specification
 
-> 1. fn worker
+> <details>
 
 <!-- sdn-diagram:id=actor_body_spec.arch -->
 <details class="sdn-source">
@@ -40,7 +40,7 @@ actor_body_spec
 
 #### spawns actor that returns value
 
-1. fn worker
+- fn worker
 
 
 <details>
@@ -61,8 +61,8 @@ expect pid != nil
 
 #### spawns multiple actors
 
-1. fn worker1
-2. fn worker2
+- fn worker1
+- fn worker2
 
 
 <details>
@@ -91,8 +91,8 @@ expect pid2 != nil
 
 #### sends message to actor
 
-1. fn echo worker
-2. send
+- fn echo worker
+- send
 
 
 <details>

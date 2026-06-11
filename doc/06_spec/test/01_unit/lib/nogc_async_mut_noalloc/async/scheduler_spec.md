@@ -41,7 +41,7 @@ scheduler_spec
 #### defines fixed-slot task state and scheduler construction
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -66,7 +66,7 @@ expect(scheduler).to_contain("static fn new() -> NoallocScheduler:")
 #### defines spawn, completion, cancellation, and query lifecycle
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

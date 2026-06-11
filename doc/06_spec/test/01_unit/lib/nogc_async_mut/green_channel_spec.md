@@ -90,7 +90,7 @@ expect(sent.receiver_task_id).to_equal(41)
 #### parks a receiver task when the channel is empty
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -111,7 +111,7 @@ expect(green_channel_waiting_count(received.channel)).to_equal(1)
 #### send unparks the oldest parked receiver without buffering
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -135,7 +135,7 @@ expect(green_channel_len(sent.channel)).to_equal(0)
 #### receives buffered values in FIFO order without parking
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -159,7 +159,7 @@ expect(green_channel_len(second_recv.channel)).to_equal(0)
 #### reports bounded backpressure without parking the sender
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

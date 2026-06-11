@@ -88,8 +88,8 @@ expect(get_task_reserve(task, "NetRes.pkt_pool")).to_equal(0)
 
 #### passes when demand within capacity
 
-1. make reservation
-2. make reservation
+- make reservation
+- make reservation
    - Expected: result.has_errors is false
    - Expected: result.passed_checks equals `1`
    - Expected: result.total_checks equals `1`
@@ -120,8 +120,8 @@ expect(result.demands[0].total_demand).to_equal(5)
 
 #### passes when demand equals capacity
 
-1. make reservation
-2. make reservation
+- make reservation
+- make reservation
    - Expected: result.has_errors is false
    - Expected: result.demands[0].total_demand equals `8`
    - Expected: result.demands[0].overflow is false
@@ -150,8 +150,8 @@ expect(result.demands[0].overflow).to_equal(false)
 
 #### errors when demand exceeds capacity
 
-1. make reservation
-2. make reservation
+- make reservation
+- make reservation
    - Expected: result.has_errors is true
    - Expected: result.passed_checks equals `0`
    - Expected: result.demands[0].total_demand equals `7`
@@ -184,9 +184,9 @@ expect(result.demands[0].overflow).to_equal(true)
 
 #### passes when all resources within capacity
 
-1. make leaf
-2. make leaf
-3. make reservation
+- make leaf
+- make leaf
+- make reservation
    - Expected: result.has_errors is false
    - Expected: result.passed_checks equals `2`
    - Expected: result.total_checks equals `2`
@@ -216,9 +216,9 @@ expect(result.total_checks).to_equal(2)
 
 #### errors when one resource overflows
 
-1. make leaf
-2. make leaf
-3. make reservation
+- make leaf
+- make leaf
+- make reservation
    - Expected: result.has_errors is true
    - Expected: result.passed_checks equals `1`
    - Expected: result.demands[0].overflow is false
@@ -251,9 +251,9 @@ expect(result.demands[1].overflow).to_equal(true)
 
 #### errors when all resources overflow
 
-1. make leaf
-2. make leaf
-3. make reservation
+- make leaf
+- make leaf
+- make reservation
    - Expected: result.has_errors is true
    - Expected: result.passed_checks equals `0`
    - Expected: result.demands[0].overflow is true
@@ -288,8 +288,8 @@ expect(result.demands[1].overflow).to_equal(true)
 
 #### tracks contributor names
 
-1. make reservation
-2. make reservation
+- make reservation
+- make reservation
    - Expected: demand.contributor_names.len() equals `2`
    - Expected: demand.contributor_names[0] equals `uart_rx`
    - Expected: demand.contributor_names[1] equals `parser`
@@ -318,8 +318,8 @@ expect(demand.contributor_names[1]).to_equal("parser")
 
 #### tracks contributor amounts
 
-1. make reservation
-2. make reservation
+- make reservation
+- make reservation
    - Expected: demand.contributor_amounts[0] equals `6`
    - Expected: demand.contributor_amounts[1] equals `8`
    - Expected: demand.total_demand equals `14`
@@ -351,7 +351,7 @@ expect(demand.total_demand).to_equal(14)
 
 #### uses exact spawn counts not declared instances
 
-1. make reservation
+- make reservation
    - Expected: result.has_errors is false
    - Expected: result.demands[0].total_demand equals `4`
 
@@ -378,7 +378,7 @@ expect(result.demands[0].total_demand).to_equal(4)
 
 #### would overflow with declared instances but not with actual
 
-1. make reservation
+- make reservation
    - Expected: result.has_errors is false
 
 
@@ -405,8 +405,8 @@ expect(result.has_errors).to_equal(false)
 
 #### task with no reserves contributes nothing
 
-1. make empty reservation
-2. make reservation
+- make empty reservation
+- make reservation
    - Expected: result.demands[0].total_demand equals `2`
    - Expected: result.demands[0].contributor_names.len() equals `1`
    - Expected: result.demands[0].contributor_names[0] equals `worker`
@@ -435,7 +435,7 @@ expect(result.demands[0].contributor_names[0]).to_equal("worker")
 
 #### resource with no reservers has zero demand
 
-1. make reservation
+- make reservation
    - Expected: result.demands[0].total_demand equals `0`
    - Expected: result.demands[0].overflow is false
    - Expected: result.demands[0].contributor_names.len() equals `0`
@@ -464,7 +464,7 @@ expect(result.demands[0].contributor_names.len()).to_equal(0)
 
 #### handles empty leaves list
 
-1. make reservation
+- make reservation
    - Expected: result.has_errors is false
    - Expected: result.total_checks equals `0`
    - Expected: result.passed_checks equals `0`
@@ -615,10 +615,10 @@ expect(output).to_contain("reservation overflow")
 
 #### validates full NetRes resource set
 
-1. make leaf
-2. make leaf
-3. make leaf
-4. make leaf
+- make leaf
+- make leaf
+- make leaf
+- make leaf
    - Expected: result.has_errors is false
    - Expected: result.total_checks equals `4`
    - Expected: result.passed_checks equals `4`

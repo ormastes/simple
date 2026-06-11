@@ -41,7 +41,7 @@ green_thread_spec -> std
 #### keeps OS thread runtime spawning available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(rt_thread_join(handle)).to_equal(42)
 #### schedules green thread without completing immediately
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -76,7 +76,7 @@ expect(handle.join()).to_equal(7)
 #### runs multiple green threads cooperatively
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -95,7 +95,7 @@ expect(h2.join()).to_equal(11)
 #### schedules precomputed values through the green queue
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -112,12 +112,12 @@ expect(handle.join()).to_equal(23)
 
 #### runs more than eight precomputed values without slot overwrite
 
-1. green run all
+- green run all
    - Expected: total equals `45`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -147,7 +147,7 @@ expect(total).to_equal(45)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/nogc_async_mut/green_thread_spec.spl` |
-| Updated | 2026-06-06 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

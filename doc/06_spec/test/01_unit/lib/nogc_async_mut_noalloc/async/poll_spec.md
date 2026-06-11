@@ -41,7 +41,7 @@ poll_spec
 #### defines pending and ready status constants
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -61,7 +61,7 @@ expect(poll).to_contain("value: i64")
 #### defines constructors and status predicates
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

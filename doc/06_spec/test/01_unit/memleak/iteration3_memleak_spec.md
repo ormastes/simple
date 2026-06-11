@@ -1,6 +1,6 @@
 # Iteration3 Memleak Specification
 
-> 1. fn do work
+> <details>
 
 <!-- sdn-diagram:id=iteration3_memleak_spec.arch -->
 <details class="sdn-source">
@@ -40,8 +40,8 @@ iteration3_memleak_spec
 
 #### performs typical test workload
 
-1. fn do work
-2. out push
+- fn do work
+- out push
    - Expected: data.len() equals `10`
 
 

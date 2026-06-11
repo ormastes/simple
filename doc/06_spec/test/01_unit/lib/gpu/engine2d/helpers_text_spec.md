@@ -41,7 +41,7 @@ helpers_text_spec -> std
 #### returns an empty payload for empty text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect(payload.pixels.len()).to_equal(0)
 #### keeps dimensions and pixels together for background text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -86,7 +86,7 @@ expect(fg_count > 0).to_equal(true)
 #### uses zero pixels as transparent background for foreground text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

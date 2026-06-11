@@ -1,6 +1,6 @@
 # Draw Text Bg Specification
 
-> 1. var engine = Engine2D create with backend
+> <details>
 
 <!-- sdn-diagram:id=draw_text_bg_spec.arch -->
 <details class="sdn-source">
@@ -42,12 +42,12 @@ draw_text_bg_spec -> std
 
 #### paints bg inside the glyph cell and preserves clear outside
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. engine draw text bg
-4. engine present
+- var engine = Engine2D create with backend
+- engine clear
+- engine draw text bg
+- engine present
    - Expected: pixels[outside_idx] equals `GREEN`
-5. engine shutdown
+- engine shutdown
 
 
 <details>
@@ -94,11 +94,11 @@ engine.shutdown()
 
 #### blends glyph edge coverage between bg and fg (per-pixel AA)
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. engine draw text bg
-4. engine present
-5. engine shutdown
+- var engine = Engine2D create with backend
+- engine clear
+- engine draw text bg
+- engine present
+- engine shutdown
 
 
 <details>
@@ -136,12 +136,12 @@ engine.shutdown()
 
 #### returns without panic on an empty string
 
-1. var engine = Engine2D create with backend
-2. engine clear
-3. engine draw text bg
-4. engine present
+- var engine = Engine2D create with backend
+- engine clear
+- engine draw text bg
+- engine present
    - Expected: pixels[0] equals `GREEN`
-5. engine shutdown
+- engine shutdown
 
 
 <details>

@@ -41,7 +41,7 @@ actor_scheduler_spec
 #### keeps actor priority state and scheduler config available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -62,7 +62,7 @@ expect(source).to_contain("static fn default() -> SchedulerConfig")
 #### keeps run queue actor context and scheduler operations available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

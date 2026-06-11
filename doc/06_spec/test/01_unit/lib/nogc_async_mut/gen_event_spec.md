@@ -41,7 +41,7 @@ gen_event_spec
 #### defines GenEvent handler and manager state
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -65,7 +65,7 @@ expect(src).to_contain("running: bool")
 #### defines event lifecycle, handler registration, and dispatch
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

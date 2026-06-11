@@ -58,7 +58,7 @@ path lookups correctly through MountTable longest-prefix match.
 #### path under /data routes to DbFsDriver
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -74,7 +74,7 @@ expect(resolved.driver_name()).to_equal("DbFsDriver")
 #### path under / (not /data) routes to RamFsDriver
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -90,7 +90,7 @@ expect(resolved.driver_name()).to_equal("RamFsDriver")
 #### exact /data route resolves to DbFsDriver
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -106,7 +106,7 @@ expect(resolved.driver_name()).to_equal("DbFsDriver")
 #### nested path /data/a/b/c routes to DbFsDriver
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -122,7 +122,7 @@ expect(resolved.driver_name()).to_equal("DbFsDriver")
 #### does not route sibling path names through the /data DBFS mount
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -140,7 +140,7 @@ expect(resolved.driver_name()).to_equal("RamFsDriver")
 #### DriverInstance.DbFs variant is present in driver_name()
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -159,12 +159,12 @@ expect(name).to_equal("DbFsDriver")
 
 #### unmount /data leaves / still resolvable
 
-1. mt unmount
+- mt unmount
    - Expected: resolved.driver_name() equals `RamFsDriver`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -180,12 +180,12 @@ expect(resolved.driver_name()).to_equal("RamFsDriver")
 
 #### resolve after unmount of /data returns error for /data path
 
-1. mt unmount
+- mt unmount
    - Expected: resolved.is_ok() is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -194,8 +194,8 @@ expect(found_after).to_equal(true)
 
 #### passes when spawns within instance count
 
-1. spawn sites: [make spawn site
-2. task infos: [make task info
+- spawn sites: [make spawn site
+- task infos: [make task info
    - Expected: result.has_errors is false
 
 
@@ -223,8 +223,8 @@ expect(result.has_errors).to_equal(false)
 
 #### passes when spawns equal instance count
 
-1. spawn sites: [make spawn site
-2. task infos: [make task info
+- spawn sites: [make spawn site
+- task infos: [make task info
    - Expected: result.has_errors is false
 
 
@@ -252,8 +252,8 @@ expect(result.has_errors).to_equal(false)
 
 #### errors when spawns exceed instance count
 
-1. spawn sites: [make spawn site
-2. task infos: [make task info
+- spawn sites: [make spawn site
+- task infos: [make task info
    - Expected: result.has_errors is true
    - Expected: found_instance_error is true
 
@@ -289,11 +289,11 @@ expect(found_instance_error).to_equal(true)
 
 #### passes when group total within cap
 
-1. make spawn site
-2. make spawn site
-3. make task info grouped
-4. make task info grouped
-5. group infos: [make group
+- make spawn site
+- make spawn site
+- make task info grouped
+- make task info grouped
+- group infos: [make group
    - Expected: result.has_errors is false
 
 
@@ -329,11 +329,11 @@ expect(result.has_errors).to_equal(false)
 
 #### errors when group total exceeds cap
 
-1. make spawn site
-2. make spawn site
-3. make task info grouped
-4. make task info grouped
-5. group infos: [make group
+- make spawn site
+- make spawn site
+- make task info grouped
+- make task info grouped
+- group infos: [make group
    - Expected: result.has_errors is true
    - Expected: found_group_error is true
 
@@ -375,10 +375,10 @@ expect(found_group_error).to_equal(true)
 
 #### reports multiple errors at once
 
-1. make spawn site
-2. make spawn site
-3. make task info
-4. make task info
+- make spawn site
+- make spawn site
+- make task info
+- make task info
    - Expected: result.has_errors is true
 
 

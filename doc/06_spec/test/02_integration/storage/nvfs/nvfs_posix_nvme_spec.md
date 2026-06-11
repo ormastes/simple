@@ -1,6 +1,6 @@
 # Nvfs Posix Nvme Specification
 
-> 1. var dev =  make posix device
+> <details>
 
 <!-- sdn-diagram:id=nvfs_posix_nvme_spec.arch -->
 <details class="sdn-source">
@@ -41,9 +41,8 @@ nvfs_posix_nvme_spec -> os
 
 #### write and read round-trip through NVMe backend
 
-1. var dev =  make posix device
-
-2. nvfs arena set block device
+- var dev =  make posix device
+- nvfs arena set block device
    - Expected: nvfs_arena_has_block_device() is true
    - Expected: trip.ok is true
    - Expected: trip.write_n equals `5`
@@ -51,7 +50,7 @@ nvfs_posix_nvme_spec -> os
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -72,9 +71,8 @@ expect(trip.read_n).to_equal(5)
 
 #### data lands on NVMe sectors (raw sector verification)
 
-1. var dev =  make posix device
-
-2. nvfs arena set block device
+- var dev =  make posix device
+- nvfs arena set block device
    - Expected: trip.ok is true
    - Expected: trip.sec0 equals `0xDE`
    - Expected: trip.sec1 equals `0xAD`
@@ -83,7 +81,7 @@ expect(trip.read_n).to_equal(5)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -106,16 +104,15 @@ expect(trip.sec3).to_equal(0xEF)
 
 #### multiple files each get distinct NVMe sector regions
 
-1. var dev =  make posix device
-
-2. nvfs arena set block device
+- var dev =  make posix device
+- nvfs arena set block device
    - Expected: result.ok is true
    - Expected: result.rn1 equals `3`
    - Expected: result.rn2 equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

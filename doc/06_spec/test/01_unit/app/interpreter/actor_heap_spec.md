@@ -1,6 +1,6 @@
 # Actor Heap Specification
 
-> 1. check
+> <details>
 
 <!-- sdn-diagram:id=actor_heap_spec.arch -->
 <details class="sdn-source">
@@ -40,9 +40,9 @@ actor_heap_spec -> std
 
 #### creates with default config
 
-1. check
-2. check
-3. check
+- check
+- check
+- check
 
 
 <details>
@@ -64,11 +64,11 @@ check(config.generational)
 
 #### creates with custom config
 
-1. initial size: ByteSize
-2. max size: ByteSize
-3. check
-4. check
-5. check
+- initial size: ByteSize
+- max size: ByteSize
+- check
+- check
+- check
 
 
 <details>
@@ -96,7 +96,7 @@ check(not heap.config.generational)
 
 #### creates small heap
 
-1. check
+- check
 
 
 <details>
@@ -114,7 +114,7 @@ check(heap.config.initial_size.value == 512)
 
 #### creates large heap
 
-1. check
+- check
 
 
 <details>
@@ -134,8 +134,8 @@ check(heap.config.initial_size.value == 65536)
 
 #### allocates memory
 
-1. var heap = ActorHeap new
-2. check
+- var heap = ActorHeap new
+- check
 
 
 <details>
@@ -155,11 +155,11 @@ check(result.is_success())
 
 #### tracks allocation stats
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. heap allocate
-4. check
-5. check
+- var heap = ActorHeap new
+- heap allocate
+- heap allocate
+- check
+- check
 
 
 <details>
@@ -182,11 +182,11 @@ check(stats.object_count.value == 2)
 
 #### fails when heap exhausted
 
-1. initial size: ByteSize
-2. max size: ByteSize
-3. var heap = ActorHeap new
-4. heap allocate
-5. check
+- initial size: ByteSize
+- max size: ByteSize
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
@@ -217,8 +217,8 @@ check(not result.is_success())
 
 #### handles zero-size allocation
 
-1. var heap = ActorHeap new
-2. check
+- var heap = ActorHeap new
+- check
 
 
 <details>
@@ -240,9 +240,9 @@ check(result.is_success())
 
 #### triggers GC when threshold reached
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. check
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
@@ -265,10 +265,10 @@ check(stats.allocated_bytes.value >= 0)
 
 #### collects garbage manually
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. heap collect garbage
-4. check
+- var heap = ActorHeap new
+- heap allocate
+- heap collect garbage
+- check
 
 
 <details>
@@ -291,10 +291,10 @@ check(stats.gc_count.value >= 1)
 
 #### collects young generation only
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. heap collect young generation
-4. check
+- var heap = ActorHeap new
+- heap allocate
+- heap collect young generation
+- check
 
 
 <details>
@@ -317,11 +317,11 @@ check(stats.young_gen_size.value >= 0)
 
 #### respects gc_enabled flag
 
-1. initial size: ByteSize
-2. max size: ByteSize
-3. var heap = ActorHeap new
-4. heap collect garbage
-5. check
+- initial size: ByteSize
+- max size: ByteSize
+- var heap = ActorHeap new
+- heap collect garbage
+- check
 
 
 <details>
@@ -352,10 +352,10 @@ check(stats.gc_count.value == 0)
 
 #### tracks peak usage
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. heap allocate
-4. check
+- var heap = ActorHeap new
+- heap allocate
+- heap allocate
+- check
 
 
 <details>
@@ -378,10 +378,10 @@ check(stats.peak_used_bytes.value >= 300)
 
 #### reports usage percent
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. check
-4. check
+- var heap = ActorHeap new
+- heap allocate
+- check
+- check
 
 
 <details>
@@ -403,9 +403,9 @@ check(usage <= 100)
 
 #### checks heap health
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. check
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
@@ -427,7 +427,7 @@ check(heap.is_healthy())
 
 #### formats heap for display
 
-1. check
+- check
 
 
 <details>
@@ -447,7 +447,7 @@ check(s.contains("ActorHeap"))
 
 #### formats stats for display
 
-1. check
+- check
 
 
 <details>
@@ -469,9 +469,9 @@ check(s.contains("HeapStats"))
 
 #### tracks young generation
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. check
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
@@ -491,9 +491,9 @@ check(heap.young_generation.used.value >= 100)
 
 #### handles non-generational heap
 
-1. var heap = ActorHeap new
-2. heap allocate
-3. check
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>

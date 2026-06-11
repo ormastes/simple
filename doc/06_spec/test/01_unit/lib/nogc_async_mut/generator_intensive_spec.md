@@ -59,7 +59,7 @@ finite and infinite (bounded) generators, and GeneratorState transitions.
 
 #### creates a generator with initial state
 
-1. var g =CountingGenerator new
+- var g =CountingGenerator new
    - Expected: g.is_complete() is false
    - Expected: g.done is false
 
@@ -80,7 +80,7 @@ expect(g.done).to_equal(false)
 
 #### new generator has correct initial current value
 
-1. var g =CountingGenerator new
+- var g =CountingGenerator new
    - Expected: g.current equals `42`
    - Expected: g.done is false
 
@@ -103,8 +103,8 @@ expect(g.done).to_equal(false)
 
 #### first next yields a value
 
-1. var g =CountingGenerator new
-2. var state = g next
+- var g =CountingGenerator new
+- var state = g next
    - Expected: state.is_yielded() is true
    - Expected: state.get_value() equals `1`
 
@@ -126,10 +126,10 @@ expect(state.get_value()).to_equal(1)
 
 #### subsequent nexts yield incremented values
 
-1. var g =CountingGenerator new
-2. var s1 = g next
-3. var s2 = g next
-4. var s3 = g next
+- var g =CountingGenerator new
+- var s1 = g next
+- var s2 = g next
+- var s3 = g next
    - Expected: s1.get_value() equals `1`
    - Expected: s2.get_value() equals `2`
    - Expected: s3.get_value() equals `3`
@@ -157,8 +157,8 @@ expect(s3.get_value()).to_equal(3)
 
 #### counts from 1 up to N then completes
 
-1. var g =CountingGenerator new
-2. var vals = collect counting
+- var g =CountingGenerator new
+- var vals = collect counting
    - Expected: vals.len() equals `4`
    - Expected: vals[0] equals `1`
    - Expected: vals[1] equals `2`
@@ -186,9 +186,9 @@ expect(vals[3]).to_equal(4)
 
 #### is_complete returns true after exhaustion
 
-1. var g =CountingGenerator new
-2. var v1 = g next
-3. var v2 = g next
+- var g =CountingGenerator new
+- var v1 = g next
+- var v2 = g next
    - Expected: g.is_complete() is true
 
 
@@ -211,8 +211,8 @@ expect(g.is_complete()).to_equal(true)
 
 #### yields fibonacci sequence
 
-1. var fib = FibGenerator new
-2. var vals = collect fib
+- var fib = FibGenerator new
+- var vals = collect fib
    - Expected: vals.len() equals `7`
    - Expected: vals[0] equals `1`
    - Expected: vals[1] equals `1`
@@ -246,12 +246,12 @@ expect(vals[6]).to_equal(13)
 
 #### fibonacci generator completes after requested count
 
-1. var fib = FibGenerator new
-2. var v1 = fib next
-3. var v2 = fib next
-4. var v3 = fib next
+- var fib = FibGenerator new
+- var v1 = fib next
+- var v2 = fib next
+- var v3 = fib next
    - Expected: fib.is_complete() is true
-5. var v4 = fib next
+- var v4 = fib next
    - Expected: v4.is_completed() is true
 
 
@@ -277,8 +277,8 @@ expect(v4.is_completed()).to_equal(true)
 
 #### yields values in range [start, end)
 
-1. var g =RangeGenerator new
-2. var vals = collect range
+- var g =RangeGenerator new
+- var vals = collect range
    - Expected: vals.len() equals `4`
    - Expected: vals[0] equals `3`
    - Expected: vals[1] equals `4`
@@ -308,8 +308,8 @@ expect(vals[3]).to_equal(6)
 
 #### yields one value then completes
 
-1. var g =SingleValueGenerator new
-2. var state = g next
+- var g =SingleValueGenerator new
+- var state = g next
    - Expected: state.is_yielded() is true
    - Expected: state.get_value() equals `99`
    - Expected: g.is_complete() is true
@@ -333,9 +333,9 @@ expect(g.is_complete()).to_equal(true)
 
 #### next after single value returns Completed
 
-1. var g =SingleValueGenerator new
-2. var s1 = g next
-3. var s2 = g next
+- var g =SingleValueGenerator new
+- var s1 = g next
+- var s2 = g next
    - Expected: s1.is_yielded() is true
    - Expected: s2.is_completed() is true
 
@@ -360,7 +360,7 @@ expect(s2.is_completed()).to_equal(true)
 
 #### is immediately complete
 
-1. var g =EmptyGenerator new
+- var g =EmptyGenerator new
    - Expected: g.is_complete() is true
 
 
@@ -379,8 +379,8 @@ expect(g.is_complete()).to_equal(true)
 
 #### next on empty generator returns Completed
 
-1. var g =EmptyGenerator new
-2. var state = g next
+- var g =EmptyGenerator new
+- var state = g next
    - Expected: state.is_completed() is true
 
 
@@ -402,7 +402,7 @@ expect(state.is_completed()).to_equal(true)
 
 #### Yielded state has a value
 
-1. var state = GeneratorState Yielded
+- var state = GeneratorState Yielded
    - Expected: state.is_yielded() is true
    - Expected: state.get_value() equals `10`
 
@@ -454,7 +454,7 @@ expect(state.is_yielded()).to_equal(false)
 
 #### is_completed returns false for Yielded
 
-1. var state = GeneratorState Yielded
+- var state = GeneratorState Yielded
    - Expected: state.is_completed() is false
 
 
@@ -475,8 +475,8 @@ expect(state.is_completed()).to_equal(false)
 
 #### collects all values from generator into list
 
-1. var g =CountingGenerator new
-2. var vals = collect counting
+- var g =CountingGenerator new
+- var vals = collect counting
    - Expected: vals.len() equals `3`
    - Expected: vals[0] equals `1`
    - Expected: vals[1] equals `2`
@@ -502,8 +502,8 @@ expect(vals[2]).to_equal(3)
 
 #### respects max_items limit
 
-1. var g =CountingGenerator new
-2. var vals = collect counting
+- var g =CountingGenerator new
+- var vals = collect counting
    - Expected: vals.len() equals `5`
 
 
@@ -525,10 +525,10 @@ expect(vals.len()).to_equal(5)
 
 #### next after complete returns Completed
 
-1. var g =SingleValueGenerator new
-2. var s1 = g next
-3. var s2 = g next
-4. var s3 = g next
+- var g =SingleValueGenerator new
+- var s1 = g next
+- var s2 = g next
+- var s3 = g next
    - Expected: s1.is_yielded() is true
    - Expected: s2.is_completed() is true
    - Expected: s3.is_completed() is true
@@ -554,8 +554,8 @@ expect(s3.is_completed()).to_equal(true)
 
 #### calling next many times after completion is safe
 
-1. var g =EmptyGenerator new
-2. var state = g next
+- var g =EmptyGenerator new
+- var state = g next
    - Expected: state.is_completed() is true
    - Expected: g.is_complete() is true
 
@@ -582,9 +582,9 @@ expect(g.is_complete()).to_equal(true)
 
 #### multiplies each yielded value
 
-1. var source = CountingGenerator new
-2. var doubled = DoublingGenerator new
-3. var vals = collect doubling
+- var source = CountingGenerator new
+- var doubled = DoublingGenerator new
+- var vals = collect doubling
    - Expected: vals.len() equals `4`
    - Expected: vals[0] equals `2`
    - Expected: vals[1] equals `4`
@@ -613,9 +613,9 @@ expect(vals[3]).to_equal(8)
 
 #### applies identity transform preserving values
 
-1. var source = CountingGenerator new
-2. var identity = IdentityGenerator new
-3. var vals = collect identity
+- var source = CountingGenerator new
+- var identity = IdentityGenerator new
+- var vals = collect identity
    - Expected: vals[0] equals `1`
    - Expected: vals[1] equals `2`
    - Expected: vals[2] equals `3`
@@ -642,9 +642,9 @@ expect(vals[2]).to_equal(3)
 
 #### skips values not matching predicate
 
-1. var source = CountingGenerator new
-2. var evens = EvenFilterGenerator new
-3. var vals = collect even filter
+- var source = CountingGenerator new
+- var evens = EvenFilterGenerator new
+- var vals = collect even filter
    - Expected: vals.len() equals `5`
    - Expected: vals[0] equals `2`
    - Expected: vals[1] equals `4`
@@ -676,9 +676,9 @@ expect(vals[4]).to_equal(10)
 
 #### filter with always-true predicate keeps all values
 
-1. var source = CountingGenerator new
-2. var all = PassAllFilterGenerator new
-3. var vals = collect pass all
+- var source = CountingGenerator new
+- var all = PassAllFilterGenerator new
+- var vals = collect pass all
    - Expected: vals.len() equals `3`
 
 
@@ -701,8 +701,8 @@ expect(vals.len()).to_equal(3)
 
 #### yields values with custom step size
 
-1. var g =StepGenerator new
-2. var vals = collect step
+- var g =StepGenerator new
+- var vals = collect step
    - Expected: vals.len() equals `4`
    - Expected: vals[0] equals `5`
    - Expected: vals[1] equals `10`

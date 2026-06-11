@@ -59,7 +59,7 @@ SimpleOS carrier workers.
 #### creates a runnable task on the least-loaded allowed CPU
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -79,7 +79,7 @@ expect(green_task_is_runnable(task)).to_equal(true)
 #### preserves affinity placement from the worker contract
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -100,7 +100,7 @@ expect(task.affinity_mask).to_equal(only_cpu2)
 #### parks a task without changing home or assigned CPU
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -123,7 +123,7 @@ expect(parked.assigned_cpu).to_equal(task.assigned_cpu)
 #### wakes a parked task onto the waker CPU when load is close
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -145,7 +145,7 @@ expect(wake.task.park_reason).to_equal("")
 #### does not enqueue an already runnable task
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -166,7 +166,7 @@ expect(wake.placement.reason).to_equal("not_parked")
 #### marks a task done and keeps the last carrier CPU
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
