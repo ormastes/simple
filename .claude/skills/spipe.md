@@ -319,9 +319,21 @@ such import can drag in hundreds of files (see `deps_tool.md` case study).
 This is the same rule that caused `app.io` hub to break `deep_report.spl` at
 startup — the `deps normal` exclusive column is the detector.
 
+## Lib tier rule (default = nogc_async_mut)
+
+`src/lib/nogc_async_mut/` is the default stdlib tier: every stdlib feature
+must be reachable there. New stdlib features land in `nogc_async_mut` first
+(pure Simple); other tiers (`nogc_sync_mut`, `gc_async_mut`,
+`nogc_async_mut_noalloc`) only hold deliberate optimized/specialized
+variants. A feature that exists only in another tier is a gap — close it
+with an `export use <tier>.<module>*` wrapper in `nogc_async_mut`
+(wrapper first, native port second). `common/` stays tier-neutral pure
+functions. See `doc/04_architecture/lib/runtime_family_tier_defaults.md`.
+
 References:
 - Full guide: `doc/07_guide/compiler/deps_tool.md`
 - Lazy parsing prior art: `doc/01_research/compiler/parser/lazy_parsing_prior_art.md`
+- Tier defaults ADR: `doc/04_architecture/lib/runtime_family_tier_defaults.md`
 
 ## Run
 
