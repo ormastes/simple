@@ -42,14 +42,20 @@
 
 ## Current Sync Status (2026-06-11)
 
-- `main` is now at `fa7f7ab27554` (`fix: harden multicore green docker perf profile`).
-- That sync narrowed the lane to the multicore/perf-profile script, updated the
-  Docker auto-binary selection rule, fixed the generated
-  `fanout_stress_multicore_green.spl` source shape, and refreshed
-  `doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`.
+- `origin/main` is now at `207c6be9d921`
+  (`docs: clarify multicore green parity gap`).
+- Since the earlier `fa7f7ab27554` profile-script hardening sync, the
+  multicore-green lane also synced:
+  - closure-aligned SimpleOS final AP ring/user handoff wording across
+    requirements, research, architecture, design, tracking, and reports;
+  - refreshed multicore-green agent-plan current-state text;
+  - refreshed Go-vs-Simple research wording so the remaining parity gap is
+    explicitly blocking integration and fairness/preemption, not final hardware
+    handoff proof.
 - The workspace remains dirty outside the multicore-green lane because other
   sessions are active in this checkout; future sync work must keep those files
   out of multicore-green commits unless the user explicitly asks for an
   integration commit.
-- Hosted SimpleOS feature specs were rerun after that push and still pass:
-  cooperative green `3`, multicore green `6`, green-channel wake `4`.
+- Hosted SimpleOS feature specs rerun during the later doc-alignment passes
+  still pass: cooperative green `3`, multicore green `6`, green-channel wake
+  `4`, and the final handoff blocker contract `3`.
