@@ -142,24 +142,23 @@ pub(crate) fn evaluate_method_call(
             // Try impl_methods for this type
             if let Some(methods) = impl_methods.get(type_name.as_str()) {
                 if let Some(func) = methods.iter().find(|m| m.name == method) {
-                    // Set up self as the dict
-                    env.insert("self".to_string(), recv_val.clone());
-                    for (k, v) in module_dict.iter() {
-                        env.insert(k.clone(), v.clone());
-                    }
-                    let result = super::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
-                    return result;
+                    // Build self_fields from the dict and pass via self_ctx so that args are
+                    // evaluated in the CALLER's env (outer_env) before self is rebound.
+                    // Previously this mutated outer_env with self= before calling exec_function,
+                    // which caused me.field arg expressions to resolve against the callee's
+                    // receiver rather than the caller's. (bug: self not found 2026-06-11)
+                    let self_fields = Arc::new(module_dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<HashMap<_, _>>());
+                    let type_name_str = type_name.as_str();
+                    return super::exec_function(func, args, env, functions, classes, enums, impl_methods, Some((type_name_str, &self_fields)));
                 }
             }
             // Try class methods
             if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
-                    env.insert("self".to_string(), recv_val.clone());
-                    for (k, v) in module_dict.iter() {
-                        env.insert(k.clone(), v.clone());
-                    }
-                    let result = super::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
-                    return result;
+                    // Same fix: build self_fields and pass via self_ctx instead of mutating outer_env.
+                    let self_fields = Arc::new(module_dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<HashMap<_, _>>());
+                    let type_name_str = type_name.as_str();
+                    return super::exec_function(func, args, env, functions, classes, enums, impl_methods, Some((type_name_str, &self_fields)));
                 }
             }
         }
@@ -1420,6 +1419,35 @@ pub(crate) fn evaluate_method_call_with_self_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression test: me.field as a direct argument to a nested me fn call must
+    // not produce "self not found". The bug was that the two typed-dict dispatch
+    // paths in evaluate_method_call mutated outer_env with self=recv_val before
+    // calling exec_function(..., None), causing arg expressions to evaluate in a
+    // scope where self was already rebound to the callee's receiver.
+    // Fix: pass self_fields via self_ctx instead of mutating outer_env.
+    #[test]
+    fn me_field_as_direct_arg_to_me_fn_does_not_error() {
+        use simple_parser::Parser;
+        use crate::interpreter::evaluate_module;
+        let source = r#"
+class Counter:
+    var count: i64 = 0
+
+    me fn add(n: i64) -> i64:
+        return me.count + n
+
+    me fn double_add() -> i64:
+        return me.add(me.count)
+
+var c = Counter { count: 5 }
+main = c.double_add()
+"#;
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse");
+        let result = evaluate_module(&module.items).expect("me.field as direct arg must not error");
+        assert_eq!(result, 10, "double_add() should return count + count = 10");
+    }
 
     #[test]
     fn numeric_ordering_compares_unsigned_matcher_values() {
