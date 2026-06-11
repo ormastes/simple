@@ -93,10 +93,44 @@ shared-var fixtures now work end-to-end self-hosted.
   (errors=false, decls=0). Now the reread only replaces the source when
   non-empty (lexer.spl). Identical built-string vs file-read sources now parse
   identically.
-- STILL OPEN: green_thread.spl full-file parse hang — now isolated to a
-  PARSER-level infinite loop, not the lexer (token dump of the repro is
-  healthy and terminates). Repro: head -96 green_thread.spl +
-  "    val pending = GreenTask(" + EOF. Minimal synthetic shapes (multi-line
-  struct literal, EOF-mid-paren, em-dash docstring combos) all terminate; the
-  trigger needs the real lines 25-96 prefix. Suspect parser error-recovery or
-  arg-list loop that does not consume EOF.
+## green_thread.spl parse hang fix (2026-06-11, follow-up 3)
+
+**Root cause identified and fixed** in `src/compiler/10.frontend/core/lexer.spl`.
+
+`lex_snapshot_save` / `lex_snapshot_restore` (used by `try_skip_ident_generic_args`
+for speculative `<TypeArgs>` lookahead) did not save/restore the `CoreLexer.indent_stack`.
+After each failed generic-arg probe the indent stack was silently reset to `[0]`
+(hardcoded in `current_core_lexer_save`). In deeply nested code like join()'s
+`while i < GREEN_TASKS.len():` (inside class → method → if → while), the next line's
+indentation was measured against the wrong stack, producing spurious INDENT/DEDENT tokens
+and causing `parse_block`'s 100,000-iteration loop to spin without progress.
+
+**Fix:** `lex_snapshot_save` now serialises `lx.indent_stack` into `txts[1]` via
+`current_core_indent_stack_format`. `lex_snapshot_restore` deserialises it back into
+`lx.indent_stack` before writing to `current_core_lexer_slot[0]`.
+
+**Verification:**
+- Minimal reproducer (nested class→method→if→while with `i < ARRAY.len()` condition)
+  parses: `errors=false decls=2` in ~7 s
+- First 97 lines of green_thread.spl parse: `errors=false decls=10` in ~70 s
+  (interpreter overhead, not a loop)
+- All 5 regression baselines: `errors=false`, correct decl counts
+- Lint specs: concurrency_share_nothing 9/9, concurrency_api_misuse 44/44
+
+**Remaining pre-existing issues (not regressions):**
+- Multi-line named-arg struct literals (`GreenTask(\n    field: val,\n    ...)`) emit
+  parse errors for `,` and `:` tokens; this is a pre-existing parser gap unrelated to
+  the hang fix. Full green_thread.spl parse completes (no hang) with these errors.
+
+## Post-fix status (parse now terminates; perf bug remains)
+
+With the snapshot indent-stack fix, truncated repros terminate and the full
+file is no longer an infinite loop — but interpreted parsing is severely
+superlinear: head-97 ≈ 70s, head-120 ≈ 148s, full 184 lines exceeds 420s
+(confirming run with 1200s pending). Perf bug (record, not normalize): the
+per-token env round-trips (SIMPLE_BOOTSTRAP_LEX_* save/restore on every
+lex_next) plus speculative generic-lookahead snapshots dominate; related to
+the known Rust-layer interpreter bottlenecks (debug_state mutex, Value::Str
+copies, extern dispatch). Also pre-existing and separate: multi-line
+named-arg struct literals inside parens emit parse errors for ','/':' tokens
+(t120 shows errors=true decls=15 yet terminates).
