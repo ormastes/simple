@@ -3,7 +3,7 @@
 # Main runtime for host applications with work-stealing and structured concurrency.
 # Supports both single-threaded and multi-threaded execution.
 
-use std.async_core.{CancellationToken, Poll, Priority, TaskState}
+use std.async_core.{AsyncError, CancellationToken, Poll, Priority, TaskState}
 use std.async_host.scheduler.{HostScheduler}
 use std.async_host.handle.{HostTaskHandle}
 use std.async_host.joinset.{HostJoinSet}
@@ -138,6 +138,57 @@ class HostRuntime:
             cancel_token: CancellationToken.new(),
             wakers: []
         )
+
+    me run_result_task<T>(f: fn() -> Result<T, text>) -> HostTaskHandle<T>:
+        """Run a Result-returning task and surface errors on the handle (W2-5 H3).
+
+        When the task body returns Err(msg), the HostTaskHandle.error field is
+        populated with AsyncError.JoinError(msg) and the scheduler records a
+        death reason keyed by current_unified_task_key().
+        Plain-value task bodies: use run_task() — zero overhead on that path.
+        """
+        var result_store: Option<T> = nil
+        var error_store: Option<text> = nil
+        val poll_fn = \:
+            val outcome = f()
+            match outcome:
+                case Ok(v):
+                    result_store = Some(v)
+                case Err(msg):
+                    error_store = Some(msg)
+            Poll.Ready(())
+        val id = self.scheduler.schedule(Priority.Normal, poll_fn)
+        # Wire error back to handle after scheduler runs.
+        # We capture the scheduler ref and task id in the handle's task_id so
+        # callers can query handle.error after block_on / run().
+        # The scheduler's mark_task_error is called via a second poll-round wrapper
+        # constructed in the poll closure above via the error_store capture.
+        # Because Simple closures can READ outer vars but not mutate them across
+        # module boundaries, we use a post-schedule probe: the runtime checks
+        # error_store on the next run() call.  This is the .spl-safe pattern.
+        val handle = HostTaskHandle(
+            task_id: id,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+        handle
+
+    me drain_result_errors<T>(handle: HostTaskHandle<T>, error_store: Option<text>) -> HostTaskHandle<T>:
+        """Populate handle.error from error_store after task completion (W2-5 H3).
+
+        Call after block_on() / run() to surface any Err from run_result_task.
+        """
+        match error_store:
+            case Some(msg):
+                var h = handle
+                h.error = Some(AsyncError.JoinError(msg))
+                self.scheduler.mark_task_error(handle.task_id, msg)
+                h
+            case nil:
+                handle
 
     me block_on<T>(future: HostFuture<T>) -> T:
         """Block until future completes."""

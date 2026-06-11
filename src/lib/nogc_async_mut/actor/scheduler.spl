@@ -27,6 +27,7 @@
 
 use std.actor.actor.{Actor, HandlerTable, ActorState}
 use std.actor.mailbox.{ActorMailbox, ActorMessage}
+use std.env.variables.{env_has}
 
 # ================================================================
 # Reply Store
@@ -94,13 +95,15 @@ struct ActorScheduler:
         ready_queue: IDs of actors with pending messages
         replies: Reply store for ask-style messages
         total_dispatched: Total messages dispatched
-        total_errors: Total dispatch errors
+        total_errors: Total dispatch errors (W2-6)
+        trace_enabled: True when SIMPLE_ACTOR_TRACE env var is set (read once at construction)
     """
     actors: [Actor]
     ready_queue: [i64]
     replies: ReplyStore
     total_dispatched: i64
     total_errors: i64
+    trace_enabled: bool   # W2-6: set once at construction from env; zero cost on happy path
 
 impl ActorScheduler:
     static fn new() -> ActorScheduler:
@@ -110,7 +113,8 @@ impl ActorScheduler:
             ready_queue: [],
             replies: ReplyStore.new(),
             total_dispatched: 0,
-            total_errors: 0
+            total_errors: 0,
+            trace_enabled: env_has("SIMPLE_ACTOR_TRACE")
         )
 
     me register_actor(act: Actor) -> i64:
@@ -236,6 +240,12 @@ impl ActorScheduler:
                     act.error_count = act.error_count + 1
                     act.last_error = result.error_msg
                     self.total_errors = self.total_errors + 1
+                    # W2-6: optional per-message trace log (zero cost when flag unset)
+                    if self.trace_enabled:
+                        val aid = act.id
+                        val method = the_msg.method
+                        val err = result.error_msg
+                        print("[SIMPLE_ACTOR_TRACE] actor={aid} method={method} error={err}")
 
                 # Re-enqueue if more messages remain
                 if act.has_messages():
@@ -323,6 +333,30 @@ impl ActorScheduler:
     fn stats_string() -> text:
         """Return scheduler statistics."""
         "Scheduler(actors={self.actors.len()}, dispatched={self.total_dispatched}, errors={self.total_errors}, pending={self.pending_message_count()})"
+
+    # ----------------------------------------------------------------
+    # W2-6: Per-actor error query API
+    # ----------------------------------------------------------------
+
+    fn actor_error_count(actor_id: i64) -> i64:
+        """Return the number of handler errors recorded for this actor.
+
+        Returns 0 if the actor is not registered. Zero allocation.
+        """
+        for act in self.actors:
+            if act.id == actor_id:
+                return act.error_count
+        0
+
+    fn actor_last_error(actor_id: i64) -> text:
+        """Return the last handler error message for this actor.
+
+        Returns empty string if no errors or actor not found. Zero allocation.
+        """
+        for act in self.actors:
+            if act.id == actor_id:
+                return act.last_error
+        ""
 
 # ================================================================
 # Global Scheduler
