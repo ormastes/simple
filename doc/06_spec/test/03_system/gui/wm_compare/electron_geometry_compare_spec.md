@@ -76,7 +76,7 @@ expect(boxes[1].y).to_equal(68)
 
 - Parse Chrome headless geometry with computed style box fields
 - Check exact border-box, padding, border, background, and text fields
-   - Expected: boxes.len() equals `1`
+   - Expected: boxes.len() equals `2`
    - Expected: boxes[0].label equals `box`
    - Expected: boxes[0].x equals `7`
    - Expected: boxes[0].y equals `9`
@@ -92,20 +92,21 @@ expect(boxes[1].y).to_equal(68)
    - Expected: boxes[0].border_bottom equals `4`
    - Expected: boxes[0].background_color equals `rgb(10, 20, 30)`
    - Expected: boxes[0].text equals `Hello`
+   - Expected: boxes[1].background_color equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Parse Chrome headless geometry with computed style box fields")
-val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"box\",\"tag\":\"div\",\"x\":7,\"y\":9,\"width\":33,\"height\":17,\"paddingLeft\":4,\"paddingTop\":5,\"paddingRight\":6,\"paddingBottom\":7,\"borderLeft\":1,\"borderTop\":2,\"borderRight\":3,\"borderBottom\":4,\"backgroundColor\":\"rgb(10, 20, 30)\",\"text\":\"Hello\"}]}"
+val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"box\",\"tag\":\"div\",\"x\":7,\"y\":9,\"width\":33,\"height\":17,\"paddingLeft\":4,\"paddingTop\":5,\"paddingRight\":6,\"paddingBottom\":7,\"borderLeft\":1,\"borderTop\":2,\"borderRight\":3,\"borderBottom\":4,\"backgroundColor\":\"rgb(10, 20, 30)\",\"text\":\"Hello\"},{\"index\":1,\"label\":\"transparent\",\"tag\":\"div\",\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"backgroundColor\":\"rgba(0, 0, 0, 0)\",\"text\":\"\"}]}"
 val boxes = electron_geometry_json_to_boxes(geometry_json)
 step("Check exact border-box, padding, border, background, and text fields")
-expect(boxes.len()).to_equal(1)
+expect(boxes.len()).to_equal(2)
 expect(boxes[0].label).to_equal("box")
 expect(boxes[0].x).to_equal(7)
 expect(boxes[0].y).to_equal(9)
@@ -121,6 +122,7 @@ expect(boxes[0].border_right).to_equal(3)
 expect(boxes[0].border_bottom).to_equal(4)
 expect(boxes[0].background_color).to_equal("rgb(10, 20, 30)")
 expect(boxes[0].text).to_equal("Hello")
+expect(boxes[1].background_color).to_equal("")
 ```
 
 </details>

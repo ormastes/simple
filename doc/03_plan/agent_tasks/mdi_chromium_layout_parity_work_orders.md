@@ -156,6 +156,14 @@ Prove and harden the requested GUI stack:
   `test/fixtures/html_compat/07_scrollable_list.html`; it wrote
   `chrome-headless-geometry` with computed padding and background fields and
   kept `blur_or_tolerance_used=false`.
+- Manifest geometry evidence (2026-06-11):
+  `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+  captured real Chrome headless geometry for 21 supported `html_compat`
+  fixture rows and compared exact Simple structural boxes for border-box rects,
+  computed padding, border widths, and background color. Report:
+  `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`;
+  result `status=pass`, `pass_count=21`, `fail_count=0`,
+  `blur_or_tolerance_used=false`.
 
 ## Agent A: MDI Render And Event Evidence
 
@@ -224,12 +232,16 @@ Small tasks:
 2. DONE (2026-06-11): extend the Chrome and Electron live bitmap runners to
    emit per-element DOM geometry for `[data-geom-label]` nodes, including
    border-box rects, padding, border widths, background, and text.
-3. Add or extend a runner that emits per-element Chromium DOM geometry for the
-   same manifest rows used by Simple layout.
-4. PARTIAL (2026-06-11): compare element `x`, `y`, `width`, `height`, border,
-   padding, and background without text antialiasing in the parser/report
-   schema. Remaining work is to run that expanded schema across the full
-   non-text manifest rows and publish per-element deltas.
+3. DONE (2026-06-11): add
+   `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`,
+   which emits per-element Chromium DOM geometry for the supported
+   `html_compat` manifest rows used by Simple layout and writes per-fixture
+   structural reports.
+4. DONE (2026-06-11): compare element `x`, `y`, `width`, `height`, border,
+   padding, and background without text antialiasing for 21 supported
+   `html_compat` manifest rows. Remaining work is broader than this manifest:
+   extend equivalent exact geometry/style evidence to larger famous-site corpus
+   rows and unresolved browser text/font raster behavior.
 
 Exit gate:
 
