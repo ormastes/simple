@@ -94,6 +94,11 @@ Updated: 2026-06-11
   first three RGB components into scalar slots instead of pushing each token
   into a temporary array. This removes per-call dynamic array allocation/copy
   work from CSS color parsing in the heuristic Engine2D startup path.
+- this commit -- Engine2D loop length hoisting: the heuristic surface clear
+  loop, first-class lookup, selector rule scan, and style-block selector scan
+  now hoist stable `.len()` values out of loop conditions. This trims repeated
+  dispatch in GUI startup scanning and pixel-fill hot paths without changing
+  rendered output.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
