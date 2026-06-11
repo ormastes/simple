@@ -1,0 +1,100 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, render_html_to_pixels_with_viewport}
+use std.gc_async_mut.gpu.browser_engine.html_string_parser.{
+    browser_renderer_normalize_style_rules, browser_renderer_normalize_style_blocks}
+use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{
+    create_gpu_browser_renderer, create_gpu_browser_renderer_with_backend, create_software_browser_renderer}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val TEST_WIDTH: i32 = 32
+val TEST_HEIGHT: i32 = 24
+val WHITE_BG: u32 = 0xFFFFFFFF
+
+fn _count_non_background(pixels: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] != bg:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _sum_red(pixels: [u32]) -> i64:
+    var total: i64 = 0
+    for pixel in pixels:
+        total = total + (((pixel >> 16) & 0xFF) as i64)
+    total
+
+fn _sum_green(pixels: [u32]) -> i64:
+    var total: i64 = 0
+    for pixel in pixels:
+        total = total + (((pixel >> 8) & 0xFF) as i64)
+    total
+
+fn _pixel_signature(pixels: [u32]) -> text:
+    if pixels.len() == 0:
+        return "empty"
+    val mid = pixels.len() / 2
+    val last = pixels.len() - 1
+    "{pixels[0]}|{pixels[mid]}|{pixels[last]}|{_count_non_background(pixels, WHITE_BG)}"
+
+fn _pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var idx: i32 = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn _count_region_changed(pixels: [u32], width: i32, x: i32, y: i32, w: i32, h: i32, bg: u32) -> i32:
+    var count: i32 = 0
+    var row: i32 = 0
+    while row < h:
+        var col: i32 = 0
+        while col < w:
+            val idx = (y + row) * width + (x + col)
+            if idx >= 0 and idx < pixels.len():
+                val pixel = pixels[idx]
+                if pixel != bg:
+                    count = count + 1
+            col = col + 1
+        row = row + 1
+    count
+
+fn _scene_has_fill_color(html: text, color: u32) -> bool:
+    val renderer = BrowserRenderer.create(140, 90)
+    val scene = renderer.render_html(html).to_scene()
+    var idx: i32 = 0
+    while idx < scene.commands.len():
+        val cmd = scene.commands[idx]
+        if cmd.kind == "fill_rect" and cmd.color == color:
+            return true
+        idx = idx + 1
+    false
+
+fn _html_compat_fixture(layer: text) -> text:
+    val html = rt_file_read_text("test/fixtures/html_compat/02_block_boxes.html")
+    val css = rt_file_read_text("test/fixtures/html_compat/{layer}.css")
+    html.replace("</head>", "<style>\n" + css + "</style>\n</head>")
+
+describe "BrowserRenderer HTML rendering":
+
+    it "composites rgba() background-color over the white page in the fallback pixel path":
+        val html = "<html><body style='background-color: rgba(0, 0, 0, 0.5)'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF808080u32)
+

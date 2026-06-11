@@ -1526,10 +1526,43 @@ fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, 
     var base = sel
     val colon = text_index_of(base, ":")
     if colon >= 0:
-        base = base.substring(0, colon)
-    val attr_start = text_index_of(base, "[")
+        val pseudo = s.substring(colon, s.len())
+        val base_part = s.substring(0, colon)
+        # :not() — base must match AND none of the :not() args should match
+        if pseudo.starts_with(":not("):
+            val open = text_index_of(pseudo, "(")
+            val close = text_index_of(pseudo, ")")
+            if open >= 0 and close > open:
+                val base_ok = base_part.len() == 0 or base_selector_matches(base_part, tag, cls, class_words, id)
+                if not base_ok:
+                    return false
+                val args = pseudo.substring(open + 1, close)
+                val options = args.split(",")
+                var oi = 0
+                while oi < options.len():
+                    val opt = options[oi].trim()
+                    if opt.len() > 0 and base_selector_matches(opt, tag, cls, class_words, id):
+                        return false
+                    oi = oi + 1
+                return true
+            return false
+        # :empty — handled in selector_group_matches_node_parts which has children info
+        # :first-child, :last-child, :only-child, :nth-child — handled at group level
+        # :has — handled at group level
+        # For other pseudos (hover, focus, etc.) — strip and match base only
+        val base_for_strip = s.substring(0, colon)
+        val attr_start_s = text_index_of(base_for_strip, "[")
+        if attr_start_s >= 0:
+            val attr_end_s = text_index_of(base_for_strip, "]")
+            if attr_end_s < attr_start_s:
+                return false
+            val node_base_s = base_for_strip.substring(0, attr_start_s).trim()
+            val expr_s = base_for_strip.substring(attr_start_s + 1, attr_end_s)
+            return base_selector_matches(node_base_s, tag, cls, class_words, id) and attr_selector_matches(attrs, expr_s)
+        return base_selector_matches(base_for_strip, tag, cls, class_words, id)
+    val attr_start = text_index_of(s, "[")
     if attr_start >= 0:
-        val attr_end = text_index_of(base, "]")
+        val attr_end = text_index_of(s, "]")
         if attr_end < attr_start:
             return false
         val node_base = base.substring(0, attr_start).trim()
@@ -2197,6 +2230,139 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
         i = i + 1
     merge_sorted_rule_lists_unique_count(lists, list_count)
 
+# Returns the 1-based position of node idx among siblings with same tag (for nth-child/first-child etc)
+fn node_child_index_of_parent(nodes: [HNode], idx: i32) -> i32:
+    val parent = nodes[idx].parent
+    if parent < 0:
+        return 1
+    val node_count = nodes.len()
+    var pos = 0
+    var ni = 0
+    while ni < node_count:
+        val nd = nodes[ni]
+        if nd.parent == parent:
+            pos = pos + 1
+            if ni == idx:
+                return pos
+        ni = ni + 1
+    1
+
+fn node_sibling_count_of_parent(nodes: [HNode], idx: i32) -> i32:
+    val parent = nodes[idx].parent
+    if parent < 0:
+        return 1
+    val node_count = nodes.len()
+    var count = 0
+    var ni = 0
+    while ni < node_count:
+        if nodes[ni].parent == parent:
+            count = count + 1
+        ni = ni + 1
+    count
+
+fn node_has_element_children(nodes: [HNode], idx: i32) -> bool:
+    val node_count = nodes.len()
+    var ni = 0
+    while ni < node_count:
+        val nd = nodes[ni]
+        if nd.parent == idx and nd.tag != "#text" and nd.tag != "#root":
+            return true
+        ni = ni + 1
+    false
+
+fn node_has_descendant_matching(nodes: [HNode], parent_idx: i32, sel: text) -> bool:
+    # BFS over all descendants using a pre-sized queue
+    val node_count = nodes.len()
+    var queue: [i32] = [0; node_count]
+    queue[0] = parent_idx
+    var q_head = 0
+    var q_tail = 1
+    var guard = 0
+    while q_head < q_tail and guard < 500:
+        guard = guard + 1
+        val p = queue[q_head]
+        q_head = q_head + 1
+        var ni = 0
+        while ni < node_count:
+            val nd = nodes[ni]
+            if nd.parent == p:
+                if simple_match(sel, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw):
+                    return true
+                if q_tail < node_count:
+                    queue[q_tail] = ni
+                    q_tail = q_tail + 1
+            ni = ni + 1
+    false
+
+fn node_has_direct_child_matching(nodes: [HNode], parent_idx: i32, sel: text) -> bool:
+    val node_count = nodes.len()
+    var ni = 0
+    while ni < node_count:
+        val nd = nodes[ni]
+        if nd.parent == parent_idx and simple_match(sel, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw):
+            return true
+        ni = ni + 1
+    false
+
+# Evaluate structural pseudo-selector clause (the part after colon) against a node
+fn pseudo_matches_node(nodes: [HNode], idx: i32, pseudo: text) -> bool:
+    val p = pseudo.trim()
+    if p == ":empty":
+        return not node_has_element_children(nodes, idx)
+    if p == ":first-child":
+        return node_child_index_of_parent(nodes, idx) == 1
+    if p == ":last-child":
+        val pos = node_child_index_of_parent(nodes, idx)
+        val total = node_sibling_count_of_parent(nodes, idx)
+        return pos == total
+    if p == ":only-child":
+        return node_sibling_count_of_parent(nodes, idx) == 1
+    if p.starts_with(":nth-child("):
+        val open = text_index_of(p, "(")
+        val close = text_index_of(p, ")")
+        if open >= 0 and close > open:
+            val arg = p.substring(open + 1, close).trim()
+            val pos = node_child_index_of_parent(nodes, idx)
+            if arg == "odd":
+                return pos % 2 == 1
+            if arg == "even":
+                return pos % 2 == 0
+            # an+b form
+            val plus = text_index_of(arg, "+")
+            if plus >= 0:
+                val a_part = arg.substring(0, plus).replace("n", "").trim()
+                val b_part = arg.substring(plus + 1, arg.len()).trim()
+                val a = if a_part.len() == 0: 1 else: parse_int(a_part)
+                val b = if b_part.len() == 0: 0 else: parse_int(b_part)
+                if a == 0:
+                    return pos == b
+                return a > 0 and pos >= b and (pos - b) % a == 0
+            # plain number
+            if not arg.contains("n"):
+                return pos == parse_int(arg)
+        return false
+    if p.starts_with(":has("):
+        val open = text_index_of(p, "(")
+        val close = text_index_of(p, ")")
+        if open >= 0 and close > open:
+            val args = p.substring(open + 1, close)
+            val options = args.split(",")
+            var oi = 0
+            while oi < options.len():
+                val opt = options[oi].trim()
+                if opt.len() > 0:
+                    if opt.starts_with("> ") or opt.starts_with(">"):
+                        val child_sel = opt.substring(1, opt.len()).trim()
+                        if node_has_direct_child_matching(nodes, idx, child_sel):
+                            return true
+                    else:
+                        if node_has_descendant_matching(nodes, idx, opt):
+                            return true
+                oi = oi + 1
+        return false
+    # Unknown pseudo — treat as matching (don't reject)
+    true
+
 fn selector_group_matches_node_parts(nodes: [HNode], idx: i32, parts: [text]) -> bool:
     var right = parts.len() - 1
     while right >= 0 and parts[right] == "":
@@ -2367,12 +2533,31 @@ fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
         val candidates_raw = style_rule_candidates(nd, rule_buckets)
         val candidates = _sort_candidates_by_specificity(candidates_raw, rules)
         var candidate_i = 0
-        val candidate_count = candidates.len()
         while candidate_i < candidate_count:
             val r = candidates[candidate_i]
             if selector_matches_node_group_parts(nodes, i, rules.group_parts[r]):
-                st = apply_decls(st, rules.decls[r])
+                matched_rules[matched_count] = r
+                matched_specs[matched_count] = rule_max_specificity(rules.group_parts[r])
+                matched_count = matched_count + 1
             candidate_i = candidate_i + 1
+        # Pass 2: insertion-sort by specificity (ascending) then apply in order
+        # Ties keep source order (candidates already in source order)
+        var si = 1
+        while si < matched_count:
+            val key_r = matched_rules[si]
+            val key_s = matched_specs[si]
+            var sj = si - 1
+            while sj >= 0 and matched_specs[sj] > key_s:
+                matched_rules[sj + 1] = matched_rules[sj]
+                matched_specs[sj + 1] = matched_specs[sj]
+                sj = sj - 1
+            matched_rules[sj + 1] = key_r
+            matched_specs[sj + 1] = key_s
+            si = si + 1
+        var apply_i = 0
+        while apply_i < matched_count:
+            st = apply_decls(st, rules.decls[matched_rules[apply_i]])
+            apply_i = apply_i + 1
         if nd.style_attr.len() > 0:
             st = apply_decls(st, nd.style_attr)
         styles[i] = st
