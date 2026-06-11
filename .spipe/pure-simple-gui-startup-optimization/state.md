@@ -790,3 +790,10 @@ dev-done
   numeric style parsing for width, height, and margin. Generated manual
   refreshed under `doc/06_spec`. Docker optimizer scans completed: renderer
   754 and focused spec 4 remaining static opportunities.
+- impl: Removed the redundant selector-token `trim()` from `simple_match(...)`.
+  Selector group preprocessing already stores trimmed parts, so node and
+  ancestor selector matching now reuses those tokens directly.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` remains 15/15, including the
+  existing spaced descendant/child selector oracle. Docker optimizer scan
+  completed for the renderer with 754 remaining static opportunities.

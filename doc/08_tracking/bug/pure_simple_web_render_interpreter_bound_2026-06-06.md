@@ -1238,3 +1238,21 @@ Verification:
   regenerated the mirrored manual.
 - Docker optimizer scans: renderer `754` and focused spec `4` remaining static
   opportunities.
+
+## 2026-06-11 Selector match trim removal
+
+After selector part pretrimming, `simple_match(...)` still trimmed each selector
+token during every node and ancestor selector match. All active calls pass
+preprocessed selector group parts, so that trim no longer changed the input.
+
+`simple_match(...)` now uses the already-trimmed selector token directly. The
+existing spaced descendant/child selector oracle continues to cover the
+pretrimmed selector contract.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `15 passed, 0 failed`
+- Docker optimizer scan: renderer `754` remaining static opportunities.
