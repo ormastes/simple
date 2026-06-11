@@ -797,7 +797,56 @@ fn runtime_family_from_source_path(source_file: &Path) -> Option<RuntimeFamily> 
     None
 }
 
+/// GC alias manifest: module path prefixes that resolve to a gc_* effective family.
+///
+/// Derived from src/lib shim files; keep in sync with the Simple-side GC_ALIAS_MANIFEST
+/// in src/compiler/35.semantics/gc_boundary_check.spl.
+///
+/// Entry: (alias_path, effective_family)
+/// - alias_path  : path after stripping leading `std.`/`lib.` (e.g. "gpu")
+/// - effective_family: the real runtime family the shim delegates to (e.g. "gc_async_mut")
+const GC_ALIAS_MANIFEST: &[(&str, &str)] = &[
+    // src/lib/nogc_async_mut/gpu/__init__.spl does `use gc_async_mut.gpu.*`
+    // Exposed as `std.gpu` (nogc_async_mut/gpu path) — gc-backed despite nogc prefix.
+    ("gpu", "gc_async_mut"),
+    // Same file exposed under its canonical nogc_async_mut.gpu path.
+    ("nogc_async_mut.gpu", "gc_async_mut"),
+];
+
+/// Resolve import segments through the GC alias manifest.
+///
+/// Mirrors resolve_gc_alias() from src/compiler/35.semantics/gc_boundary_check.spl.
+/// Strips a leading `std`/`lib` segment, joins the remainder with `.`, and checks
+/// whether the result equals an alias_path or starts with `<alias_path>.`.
+/// On a hit, returns the effective family name so family classification sees the
+/// gc_* family rather than the misleading nogc_* prefix.
+fn resolve_gc_alias_from_segments(segments: &[String]) -> Option<&'static str> {
+    let mut offset = 0usize;
+    if segments.first().map(|s| s.as_str()) == Some("std")
+        || segments.first().map(|s| s.as_str()) == Some("lib")
+    {
+        offset = 1;
+    }
+    let rest = &segments[offset..];
+    if rest.is_empty() {
+        return None;
+    }
+    let path = rest.join(".");
+    for &(alias_path, effective_family) in GC_ALIAS_MANIFEST {
+        if path == alias_path || path.starts_with(&format!("{}.", alias_path)) {
+            return Some(effective_family);
+        }
+    }
+    None
+}
+
 fn runtime_family_from_import_segments(segments: &[String]) -> Option<RuntimeFamily> {
+    // Resolve through the GC alias manifest first so that shim imports like
+    // `std.gpu` (which re-exports from gc_async_mut) are classified correctly.
+    if let Some(effective_family) = resolve_gc_alias_from_segments(segments) {
+        return RuntimeFamily::from_name(effective_family);
+    }
+
     let mut offset = 0;
     if segments.first().map(|s| s.as_str()) == Some("std") || segments.first().map(|s| s.as_str()) == Some("lib") {
         offset = 1;
@@ -901,5 +950,67 @@ fn runtime_family_from_attributes(items: &[Node], source_file: &Path) -> Option<
 impl Default for LintChecker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod gc_alias_tests {
+    use super::*;
+
+    fn segs(s: &str) -> Vec<String> {
+        s.split('.').map(|p| p.to_string()).collect()
+    }
+
+    // nogc-family source importing "std.gpu" must be flagged (gc-backed shim alias).
+    #[test]
+    fn test_gc_alias_std_gpu_classified_as_gc() {
+        let result = runtime_family_from_import_segments(&segs("std.gpu"));
+        assert_eq!(result, Some(RuntimeFamily::GcAsyncMut),
+            "std.gpu should resolve to gc_async_mut via alias manifest");
+    }
+
+    // nogc-family source importing "std.nogc_async_mut.gpu" must also be flagged.
+    #[test]
+    fn test_gc_alias_std_nogc_async_mut_gpu_classified_as_gc() {
+        let result = runtime_family_from_import_segments(&segs("std.nogc_async_mut.gpu"));
+        assert_eq!(result, Some(RuntimeFamily::GcAsyncMut),
+            "std.nogc_async_mut.gpu should resolve to gc_async_mut via alias manifest");
+    }
+
+    // Bare "nogc_async_mut.gpu" (no std/lib prefix) should also resolve via alias.
+    #[test]
+    fn test_gc_alias_bare_nogc_async_mut_gpu_classified_as_gc() {
+        let result = runtime_family_from_import_segments(&segs("nogc_async_mut.gpu"));
+        assert_eq!(result, Some(RuntimeFamily::GcAsyncMut),
+            "nogc_async_mut.gpu should resolve to gc_async_mut via alias manifest");
+    }
+
+    // A gc-family source importing "std.gpu": resolve_gc_alias yields gc_async_mut.
+    // runtime_family_import_violation_reason(GcAsyncMut, GcAsyncMut) should return None
+    // (same family — no violation), consistent with existing symmetric-rule handling.
+    #[test]
+    fn test_gc_alias_gc_source_imports_std_gpu_no_violation() {
+        let import_family = runtime_family_from_import_segments(&segs("std.gpu"));
+        assert_eq!(import_family, Some(RuntimeFamily::GcAsyncMut));
+        let reason = runtime_family_import_violation_reason(RuntimeFamily::GcAsyncMut, RuntimeFamily::GcAsyncMut);
+        assert!(reason.is_none(),
+            "gc_async_mut importing gc_async_mut (via std.gpu alias) should not be a violation");
+    }
+
+    // An unrelated import "std.fs" must not be flagged by the alias manifest.
+    #[test]
+    fn test_gc_alias_unrelated_std_fs_not_flagged() {
+        let result = resolve_gc_alias_from_segments(&segs("std.fs"));
+        assert!(result.is_none(), "std.fs should not match any GC alias");
+    }
+
+    // Verify nogc source + std.gpu alias → violation detected end-to-end.
+    #[test]
+    fn test_gc_alias_nogc_source_imports_std_gpu_violation() {
+        let import_family = runtime_family_from_import_segments(&segs("std.gpu"));
+        assert_eq!(import_family, Some(RuntimeFamily::GcAsyncMut));
+        let reason = runtime_family_import_violation_reason(RuntimeFamily::NogcSyncMut, RuntimeFamily::GcAsyncMut);
+        assert_eq!(reason, Some("nogc_imports_gc_family"),
+            "nogc_sync_mut importing std.gpu (gc_async_mut) must produce nogc_imports_gc_family violation");
     }
 }
