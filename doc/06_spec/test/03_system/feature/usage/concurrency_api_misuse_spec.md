@@ -104,7 +104,7 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `19`
+   - Expected: fixture_count() equals `20`
 
 
 <details>
@@ -115,7 +115,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(19)
+expect(fixture_count()).to_equal(20)
 ```
 
 </details>

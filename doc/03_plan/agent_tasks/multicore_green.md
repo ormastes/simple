@@ -204,6 +204,10 @@ Deliverables:
 - executable proof that hosted blocking compensation stays fixed, hosted
   bounded parallelism stays fixed, and a one-worker tight loop still keeps the
   fairness/preemption gap explicit until stronger evidence lands;
+- executable proof that raw `thread_yield()` inside a one-worker
+  `multicore_green_spawn` task is still insufficient, so the remaining host
+  gap is automatic preemption, compiler-inserted yield points, or a deeper
+  task-splitting model rather than a missing OS-thread yield primitive;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:

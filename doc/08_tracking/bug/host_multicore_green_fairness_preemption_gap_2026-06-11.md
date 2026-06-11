@@ -34,6 +34,20 @@ Current hosted multicore-green evidence does not yet prove:
 - long-running CPU work is preempted or yield-forced with a host-side contract
 - host fairness semantics comparable to Go's scheduler under sustained loop load
 
+Current hosted fairness/yield boundary now also includes:
+
+- `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl`
+  proves that raw `thread_yield()` inside a hosted multicore-green task is not
+  enough to create Go-like fairness: with hosted parallelism pinned to `1`, a
+  long-running task that calls `thread_yield()` still keeps a later quick task
+  unfinished during the first short observation window on both source-run and
+  standalone native paths
+- this narrows the remaining host gap from a vague fairness concern to a
+  concrete implementation boundary: non-resumable pool tasks need automatic
+  preemption, compiler-inserted yield points, or task-splitting semantics,
+  because raw OS-thread yield does not hand queued multicore-green work to the
+  same worker
+
 Current hosted fairness/preemption gap coverage now includes:
 
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
@@ -42,7 +56,8 @@ Current hosted fairness/preemption gap coverage now includes:
   unfinished through the first short observation window on both source-run and
   standalone native paths
 - this is the current executable proof that hosted multicore-green still lacks
-  Go-like preemption or an equivalent enforced yield contract
+  automatic Go-like preemption or compiler-inserted yield points for non-
+  yielding tight loops
 
 Current hosted blocking-compensation evidence now includes:
 
