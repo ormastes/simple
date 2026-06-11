@@ -67,3 +67,14 @@ Still open:
   >100s in interpreter mode.
 - parse_module no-ops (errors=false, decls=0) on concatenation-built strings;
   only rt_file_read_text sources parse — interpreter string/env issue.
+## Block-form fix (2026-06-11, follow-up)
+
+Block-body lambdas inside call parens now parse. Token-stream evidence showed
+the lexer emits INDENT (181) for the lambda body inside parens but no matching
+DEDENT before ')' (dedents flush at EOF/outdent), so parse_block — which
+requires a DEDENT terminator — errored at ')'. The lambda production in
+parse_primary_expr now uses its own block loop: parse_block's shape plus ')'
+(141) and ',' (160) as unconsumed terminators. Verified: the cooperative
+fixture parses and E-PAR-006 fires with kind "captured mutable variable write";
+expression-form fixtures and both lint specs (9/9, 44/44) unaffected. All three
+shared-var fixtures now work end-to-end self-hosted.
