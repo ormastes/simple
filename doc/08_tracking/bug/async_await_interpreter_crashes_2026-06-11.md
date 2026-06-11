@@ -36,7 +36,7 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 | B3 | `yield` / generator runtime interpreter crash (SIGABRT/SIGILL) | (c) Rust-seed | FIXED IN SEED (2026-06-12) | compile_yield safe NIL return; exit 132 eliminated; 2 regression tests green |
 | B3b | `actor` desugar class not visible in HIR scope | (c) Rust-seed | FIXED IN SEED — pending redeploy | S6: `Node::Actor` in Pass 0 + register_class; 5 tests green |
 | B4 | `spawn fn()` closure SIGABRTs (exit 132) at cleanup | (a) Fixed | VERIFIED FIXED | E6 in green_thread_direct_runtime_blockers_2026-06-06.md |
-| B5 | Promise vs FutureValue unreconciled in MIR executor | (c) Rust-seed | DOCUMENTED-CANONICAL (S8, 2026-06-11) | behavior pinned; 7 regression tests in async_gen_tests.rs green |
+| B5 | Promise vs FutureValue unreconciled in MIR executor | (c) Rust-seed | OPEN | root-cause note below |
 | B6 | HIR hardcodes `TypeId::I64` for await result type | (c) Rust-seed | FIXED IN SEED — pending redeploy | S5 batch: `ty: operand_ty`; tests green |
 | C1 | Coverage gap: 7 specs are single-skip placeholders | (b)/(c) mixed | DOCUMENTED | see Coverage section below |
 | C2 | `async_integration_spec` has 21 hollow `expect(1).to_equal(1)` tests | (b) | FILLED (S7, 2026-06-12) | 21/21 honest assertions; generator-blocked tests rewritten to pin declaration-level behaviour; 0 vacuous bodies remain |
@@ -125,78 +125,19 @@ Regression tests added: `src/compiler_rust/compiler/src/hir/lower/tests/async_de
 - `test_actor_methods_lowered_to_hir`
 - `test_actor_usable_after_declaration`
 
-### B5 — Promise vs FutureValue Representation (Rust-seed) — DOCUMENTED-CANONICAL (S8, 2026-06-11)
+### B5 — Promise vs FutureValue Representation (Rust-seed)
 
-**Status: DOCUMENTED-CANONICAL.** Behavior is correct and pinned by Rust regression
-tests. Unification is not required under current eager-async semantics.
+The MIR executor calls `rt_future_await` on a Simple-level `Promise` object
+(created by `wrap_in_promise` in the interpreter) while the Rust runtime's
+`rt_future_await` (`src/compiler_rust/runtime/src/value/async_gen.rs`) expects a
+`FutureValue` (a Rust-native type). The B1/B2 fix made `rt_future_await`
+identity-safe for non-FutureValue input, but the underlying representation split
+remains: Promise.poll() vs FutureValue.poll() are separate code paths.
 
-#### Representation Map
-
-Three distinct async value types exist across the two layers of the compiler:
-
-| Representation | Rust Type | Layer | Created by | Awaited by |
-|---|---|---|---|---|
-| **Promise** | `Value::Object { class: "Promise", fields: {state: Enum{PromiseState::Resolved(val)}, callbacks: []} }` | Interpreter (`compiler/src/`) | `wrap_in_promise` in `interpreter_call/core/async_support.rs` | `await_value` in `interpreter/async_support.rs` — matches `Value::Object{class=="Promise"}` and extracts `state.Resolved(inner)` |
-| **FutureValue** | `Value::Future(FutureValue)` | Interpreter (`compiler/src/value_async.rs`) | `FutureValue::new(f)`, `FutureValue::resolved(v)`, `FutureValue::rejected(e)` (also `interpreter_call/builtins.rs`) | `await_value` — matches `Value::Future` and calls `future.await_result()` |
-| **RuntimeFuture** | `RuntimeValue` tagged `HeapObjectType::Future` | Runtime (`runtime/src/value/async_gen.rs`) | `rt_future_new(body_func, ctx)`, `rt_future_resolve(val)` | `rt_future_await` — extracts `RuntimeFuture` via `get_typed_ptr_mut`, executes body on first await |
-
-#### Await Path Coverage
-
-- **Interpreter `Expr::Await`** (`compiler/src/interpreter/expr.rs` line 288):
-  calls `crate::interpreter::async_support::await_value(val)`, which handles
-  `Value::Future` (FutureValue) and `Value::Object{class=="Promise"}` and
-  identity-passthrough for all other values. Covers representations (a) and (b).
-
-- **MIR/JIT `rt_future_await`** (`runtime/src/value/async_gen.rs`):
-  handles `RuntimeFuture` (c). For non-`RuntimeFuture` input (including any
-  serialized-integer representation of a plain value from eager async calls),
-  `get_typed_ptr_mut` returns `None` and the function returns the input unchanged
-  (identity). This was the B1/B2 fix (commit 861e29bc99).
-
-- **ELF symbol dispatch** (`compiler/src/elf_utils.rs` line 544):
-  `"rt_future_await"` maps to `simple_runtime::rt_future_await`. Only (c) flows
-  through this path in MIR compilation.
-
-#### Why the Split Is Correct (No Unification Needed)
-
-Simple async is **EAGER**: `async fn` bodies execute at call time. By the time
-`await` is reached, the value is already resolved. This means:
-
-- **Interpreter path**: `wrap_in_promise` produces a `Promise` object with
-  `state = PromiseState::Resolved(actual_value)`. `await_value` extracts that
-  value synchronously. No polling required.
-- **MIR/JIT path**: async functions are compiled to call `rt_future_resolve` or
-  `rt_future_new` (with immediate body execution). `rt_future_await` on an
-  already-resolved `RuntimeFuture` returns `result` directly (`state == 1`).
-  For non-`RuntimeFuture` input (identity case), the value is returned as-is.
-
-The cross-path scenario (a `Promise` object — a `Value::Object` — reaching
-`rt_future_await`) only occurs if the interpreter produces a `Promise` and then
-passes it to a JIT-compiled call site. Under eager semantics this returns the
-opaque object unchanged (identity), which is correct: the resolved value is
-inside the `Promise.state.Resolved(v)` field. The interpreter's `await_value`
-would extract it if the `Await` node is evaluated in interpreter mode. The MIR
-path does not need to understand Promise internals because by the time MIR runs,
-the value has already been materialized.
-
-**Unification would only be required if:** lazy futures are introduced (async body
-executes asynchronously), at which point `rt_future_await` would need to
-understand Promise state to resume correctly. That is a future design milestone,
-not a current correctness issue.
-
-#### Regression Tests Added (S8, 2026-06-11)
-
-File: `src/compiler_rust/runtime/src/value/async_gen_tests.rs`
-
-| Test | What it pins |
-|---|---|
-| `test_b5_await_plain_int_identity` | await(i64) → identity, not NIL |
-| `test_b5_await_nil_identity` | await(NIL) → NIL, not crash |
-| `test_b5_nested_await_double_identity` | await(await(plain)) → identity both layers |
-| `test_b5_await_resolved_future_value` | await(rt_future_resolve(v)) → v |
-| `test_b5_nested_await_future_value` | await(await(future)) → second layer identity |
-| `test_b5_promise_object_through_rt_future_await` | non-Future opaque value → identity, not NIL |
-| `test_b5_lazy_future_await_returns_body_value` | lazy future executes body and returns value |
+Fix required: unify the two representations or add a conversion shim so that
+`wrap_in_promise` produces a `FutureValue`-compatible value. Authorized Rust
+change only. File: `src/compiler_rust/compiler/src/value_async.rs` +
+`src/compiler_rust/runtime/src/value/async_gen.rs`.
 
 All 7 tests green: `cargo test -p simple-runtime test_b5` → `7 passed; 0 failed` (S8 verification run, 2026-06-11).
 5 pre-existing failures in `executor`, `loader`, and `value::serial` modules are unrelated to B5.
@@ -271,7 +212,7 @@ in `hir/lower/tests/expression_tests.rs` (both green).
 2. **(DONE)** Interpreter `Expr::Await` passthrough for non-Future values.
 3. **(FIXED IN SEED — B3b, pending redeploy)** Register `Node::Actor` in HIR Pass 0 + `register_declarations_from_node` (S6: `module_pass.rs` +85 lines; 5 regression tests green).
 3b. **(OPEN — Rust)** Fix interpreter executor to handle `HirExprKind::Yield` in generator functions without SIGABRT (B3 — separate from B3b).
-4. **(DOCUMENTED-CANONICAL — S8, 2026-06-11)** Representation map + 7 regression tests pin the B5 cross-path behavior. Unification deferred to lazy-future milestone.
+4. **(OPEN — Rust)** Reconcile Promise vs FutureValue in the interpreter dispatch path (B5).
 5. **(FIXED IN SEED — pending redeploy)** Propagate the real operand type for `await` (B6): `ty: TypeId::I64` → `ty: operand_ty` in `hir/lower/expr/mod.rs`. When Future<T> representation is added, this site must extract T instead.
 
 ## Coverage Gap

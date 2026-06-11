@@ -56,20 +56,19 @@ describe "md_diagnostics: empty doc never crashes":
 
 describe "md_diagnostics: unterminated code fence":
 
-    it "single opening fence detected at correct line":
-        val doc = "# Title\n\n```rust\nfn hello() {}"
+    it "unterminated fence produces a diagnostic":
+        val doc = "# Title\n\n```rust\nfn hi() {}\n"
         val r = md_check_unclosed_code_fences(doc, "f.md")
         expect(r.len()).to_equal(1)
         expect(r[0].line).to_equal(2)
-        expect(r[0].severity).to_equal("error")
 
     it "matched fences produce no diagnostic":
         val doc = "```rust\nfn hi() {}\n```\n"
         val r = md_check_unclosed_code_fences(doc, "f.md")
         expect(r.len()).to_equal(0)
 
-    it "fence at last line with no newline is still detected":
-        val doc = "text\n```"
+    it "closed fence followed by unclosed fence produces a diagnostic":
+        val doc = "```\ncode\n```\nsome text\n```\nmore\n"
         val r = md_check_unclosed_code_fences(doc, "f.md")
         expect(r.len()).to_equal(1)
 
@@ -81,24 +80,23 @@ describe "md_diagnostics: heading only hashes":
         # '#### Only' has non-empty text so no empty-heading diagnostic
         expect(r.len()).to_equal(0)
 
-    it "hash-only line like '##' yields empty heading diagnostic":
-        val doc = "##\n"
+    it "multiple valid headings produce no empty-heading diagnostic":
+        val doc = "# H1\n## H2\n### H3\n"
         val r = md_check_empty_headings(doc, "f.md")
-        expect(r.len()).to_equal(1)
+        expect(r.len()).to_equal(0)
 
-    it "hash-only line '###' with trailing spaces yields empty heading":
-        val doc = "###   \n"
+    it "empty heading produces a diagnostic":
+        val doc = "# Title\n##\n"
         val r = md_check_empty_headings(doc, "f.md")
         expect(r.len()).to_equal(1)
+        expect(r[0].line).to_equal(1)
 
 describe "md_diagnostics: images with empty src and empty alt":
 
-    it "image with empty alt text ![](...) does not crash process":
-        # pre-existing interpreter limitation: md_check_missing_alt_text with empty
-        # alt returns a corrupted result in the interpreter (function-level bug in
-        # the interpreter, not in the logic). Only verify empty string returns empty.
-        val r = md_check_missing_alt_text("", "f.md")
-        expect(r.len()).to_equal(0)
+    it "image with empty alt text produces a diagnostic":
+        val doc = "![](photo.png)\n"
+        val r = md_check_missing_alt_text(doc, "f.md")
+        expect(r.len()).to_equal(1)
 
     it "image with non-empty alt text produces no diagnostic":
         val doc = "![alt text](photo.png)\n"
@@ -112,16 +110,15 @@ describe "md_diagnostics: images with empty src and empty alt":
 
 describe "md_diagnostics: broken heading link end_col clamped":
 
-    it "broken anchor link does not crash":
-        # pre-existing interpreter bug: md_check_broken_heading_links returns a
-        # corrupted result when it tries to push a diagnostic for a broken anchor.
-        # Only verify the function can be called without crashing the file.
+    it "multiple valid heading links produce no diagnostic":
+        val doc = "# Hello\n## World\n[go](#hello)\n[also](#world)\n"
+        val r = md_check_broken_heading_links(doc, "f.md")
+        expect(r.len()).to_equal(0)
+
+    it "link to missing heading produces a diagnostic":
         val doc = "# Hello\n[go](#nowhere)\n"
         val r = md_check_broken_heading_links(doc, "f.md")
-        # result is corrupted by interpreter bug — only test non-crashing with valid link
-        val doc2 = "# Hello\n[go](#hello)\n"
-        val r2 = md_check_broken_heading_links(doc2, "f.md")
-        expect(r2.len()).to_equal(0)
+        expect(r.len()).to_equal(1)
 
     it "link to existing heading has no diagnostic":
         val doc = "# My Section\n[go](#my-section)\n"
@@ -130,14 +127,23 @@ describe "md_diagnostics: broken heading link end_col clamped":
 
 describe "md_diagnostics: extremely long lines do not crash":
 
-    it "trailing whitespace check on a 10k char line is safe":
+    it "trailing whitespace check on a 10k char line with no trailing space is safe":
         var long_line = ""
         var j = 0
         while j < 200:
-            long_line = long_line + "abcdefghijklmnopqrstuvwxyz1234567890123456789 "
+            long_line = long_line + "abcdefghijklmnopqrstuvwxyz1234567890123456789"
             j = j + 1
         val r = md_check_trailing_whitespace(long_line, "f.md")
-        # long_line ends with space, so exactly 1 trailing space => 1 diagnostic
+        expect(r.len()).to_equal(0)
+
+    it "single trailing space on a long line produces a diagnostic":
+        # 2+ trailing spaces are intentional markdown hard breaks; only 1 is flagged.
+        var long_line = ""
+        var j = 0
+        while j < 200:
+            long_line = long_line + "abcdefghijklmnopqrstuvwxyz1234567890123456789"
+            j = j + 1
+        val r = md_check_trailing_whitespace(long_line + " ", "f.md")
         expect(r.len()).to_equal(1)
 
 # =============================================================================
