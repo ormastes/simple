@@ -18,15 +18,13 @@
   SchedState.runBatch      ↔  run-until-idle loop (future SimpleOS carrier)
   ─────────────────────────────────────────────────────────────────────────────
 
-  FINDING-T1: No double-complete guard in source
-  ───────────────────────────────────────────────
-  green_task_complete in green_task.spl does NOT check whether the task is
-  already in the "done" state.  Calling it twice sets result_val to the second
-  value.  T5b below proves the weaker property that IS true: calling complete
-  twice with the same result is idempotent.  A guard that blocks a second
-  complete would require an additional state check; that is a design gap, not
-  a safety violation (the carrier bridge is expected not to complete the same
-  logical task ID twice).
+  FINDING-T1: CLOSED — guard now in source and model
+  ────────────────────────────────────────────────────
+  green_task_complete now guards on state == GREEN_TASK_DONE at entry; a second
+  call with any result is a no-op (first-write-wins).  GreenTask.complete in
+  Basic.lean models this guard.  T5b below is upgraded from same-result
+  idempotency to full double-complete safety: the second call with ANY result
+  is identity.
 
   FINDING-T2: No run-until-idle loop in green_task/green_worker source
   ──────────────────────────────────────────────────────────────────────
@@ -42,7 +40,7 @@
   T3  unpark_parked_enqueues   — unpark of a parked task sets should_enqueue=true
   T4  unpark_nonparked_noop    — unpark of non-parked task is identity (no-op)
   T5a complete_marks_done      — complete sets state to done
-  T5b complete_idempotent      — complete twice with same result is idempotent
+  T5b complete_double_safe     — complete twice with ANY result is identity (first-write-wins)
   T6  runBatch_empties_queue   — runBatch terminates and leaves queue empty
   T7  enqueue_then_runBatch    — an enqueued task is consumed by runBatch
   T8  cpuAllowed_zero_mask     — mask=0 allows every non-negative cpu index
@@ -133,19 +131,26 @@ theorem unpark_nonparked_task_id (t : GreenTask) (waker_cpu : Nat)
 -- § E  T5 — complete
 -- ============================================================
 
-/-- T5a: complete sets state to done.
-    Mirrors: green_task_complete sets state = GREEN_TASK_DONE. -/
+/-- T5a: complete always results in state = done.
+    Mirrors: green_task_complete sets state = GREEN_TASK_DONE when not already done;
+    when already done the guard returns t unchanged (state is already done). -/
 theorem complete_marks_done (t : GreenTask) (r : Int) :
     (t.complete r).state = .done := by
-  simp [GreenTask.complete]
+  unfold GreenTask.complete
+  by_cases h : t.state = .done
+  · simp [h]
+  · simp [h]
 
-/-- T5b: complete is idempotent when called twice with the same result.
-    NOTE (FINDING-T1): the source has no guard against a second complete;
-    this theorem proves the safe property that IS true: same-result double
-    complete leaves the record identical to a single complete. -/
-theorem complete_idempotent (t : GreenTask) (r : Int) :
-    (t.complete r).complete r = t.complete r := by
-  simp [GreenTask.complete]
+/-- T5b: double-complete safety (full first-write-wins).
+    FINDING-T1 CLOSED: the guard is now in the source and in GreenTask.complete.
+    A second call to complete with ANY result on an already-done task is
+    identity — the record is unchanged and the first result is preserved. -/
+theorem complete_double_safe (t : GreenTask) (r1 r2 : Int) :
+    (t.complete r1).complete r2 = t.complete r1 := by
+  unfold GreenTask.complete
+  by_cases h : t.state = .done
+  · simp [h]
+  · simp [h]
 
 -- ============================================================
 -- § F  T6 — runBatch terminates and empties the queue

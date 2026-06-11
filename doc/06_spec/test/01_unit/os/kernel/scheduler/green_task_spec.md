@@ -28,7 +28,7 @@ green_task_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -183,12 +183,52 @@ expect(done.assigned_cpu).to_equal(task.assigned_cpu)
 
 </details>
 
+#### first-write-wins: completing an already-done task is a no-op
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val task = green_task_new(13, 4, 0, 0, 1, 2, 3)
+val first = green_task_complete(task, 42)
+val second = green_task_complete(first, 999)
+
+expect(green_task_is_done(second)).to_equal(true)
+expect(second.result).to_equal(42)
+expect(second.state).to_equal("done")
+```
+
+</details>
+
+#### second complete with different value is rejected; first result preserved
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val task = green_task_new(14, 4, 0, 0, 1, 2, 3)
+val first = green_task_complete(task, 7)
+val second = green_task_complete(first, -1)
+
+expect(second.result).to_equal(7)
+expect(second.task_id).to_equal(first.task_id)
+expect(second.assigned_cpu).to_equal(first.assigned_cpu)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -30,12 +30,13 @@
      modelled as a fold over a ready queue (see `runBatch`), not as an
      interpreter loop.
 
-  FINDING-T1: No double-run guard in the source
-  ──────────────────────────────────────────────
-  green_task_complete does not check whether the task is already done.
-  Calling it twice is not blocked.  Theorems note this as a contract
-  observation; we prove that complete is idempotent on the result field
-  (second call changes nothing visible), which is the actual safe property.
+  FINDING-T1: CLOSED — double-complete guard added to source
+  ────────────────────────────────────────────────────────────
+  green_task_complete in green_task.spl now checks `task.state == GREEN_TASK_DONE`
+  at entry; if the task is already done the call is a no-op and the first result
+  is preserved (first-write-wins).  GreenTask.complete below models this guard.
+  T5b in Theorems.lean is upgraded to prove full double-complete safety: a second
+  complete with ANY result is identity.
 -/
 
 namespace KernelScheduler
@@ -134,9 +135,12 @@ def GreenTask.unpark (t : GreenTask) (waker_cpu : Nat) : WakeDecision :=
     , should_enqueue := false }
 
 /-- Complete a green task.
-    Mirrors green_task_complete.  Assigned CPU is preserved. -/
+    Mirrors green_task_complete (with the FINDING-T1 guard now in source).
+    First-write-wins: if the task is already done, return it unchanged.
+    Assigned CPU is preserved on the first completion. -/
 def GreenTask.complete (t : GreenTask) (result : Int) : GreenTask :=
-  { t with state := .done, result_val := result }
+  if t.state = .done then t
+  else { t with state := .done, result_val := result }
 
 -- ============================================================
 -- § 6  CPU affinity helper
