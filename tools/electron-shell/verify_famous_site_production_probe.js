@@ -14,7 +14,7 @@ const corruptTextLineInkForTest = process.argv.includes("--corrupt-text-line-ink
 const corruptTextLineInkPositionForTest = process.argv.includes("--corrupt-text-line-ink-position-for-test");
 const dropTextLineInkDifferenceForTest = process.argv.includes("--drop-text-line-ink-difference-for-test");
 const hideResidualDifferenceForTest = process.argv.includes("--hide-residual-difference-for-test");
-const dir = path.join(root, "test", "baselines", "famous_site_corpus", sample);
+const dir = path.join(root, "test", "09_baselines", "famous_site_corpus", sample);
 const reportPath = path.join(dir, "report.production.sdn");
 const baselinePath = path.join(dir, "production_probe_baseline.json");
 

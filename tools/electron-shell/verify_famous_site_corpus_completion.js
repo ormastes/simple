@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 
 const root = process.cwd();
-const corpusDir = path.join(root, "test", "baselines", "famous_site_corpus");
+const corpusDir = path.join(root, "test", "09_baselines", "famous_site_corpus");
 
 function walkReports(dir, out = []) {
   if (!fs.existsSync(dir)) return out;

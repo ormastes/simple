@@ -230,3 +230,21 @@ Open gaps tied to the active browser objective:
     child; set SIMPLE_BINARY to the active runtime`
   - `site_corpus_compat.spl --only=site_0_google` has the same fast-fail guard
     for its bounded source-B watchdog path
+- Famous-site corpus verification now uses the canonical checked-in baseline
+  location consistently:
+  - Node corpus tools and the SSpec manual/spec now point at
+    `test/09_baselines/famous_site_corpus`, matching
+    `src/app/wm_compare/site_corpus.spl`
+  - existing corpus `report.sdn`, `report.production.sdn`, and manifest
+    metadata paths were migrated from the stale `test/baselines/...` location
+    without changing PPM pixels or Chromium metrics
+  - `simple test test/03_system/gui/wm_compare/famous_site_corpus_spec.spl
+    --mode=interpreter --clean --format json` now reports `45` passed and `0`
+    failed
+  - `verify_famous_site_corpus_completion.js` reports `STATUS: PASS`,
+    `reportCount=132`, `checkedPixelReportCount=132`, and
+    `computedMismatchCount=0`
+  - `verify_famous_site_production_probe.js --sample=site_0_google` reports
+    `STATUS: PASS` while preserving the honest production glyph/compositing
+    divergence: `differentPixels=2717`, `computedDifferentPixels=2717`, and
+    `chromeGlyphCompositingParity=false`

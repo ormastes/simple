@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 
 const root = process.cwd();
-const corpusDir = path.join(root, "test", "baselines", "famous_site_corpus");
+const corpusDir = path.join(root, "test", "09_baselines", "famous_site_corpus");
 const limitArg = process.argv.find((arg) => arg.startsWith("--limit="));
 const limit = limitArg ? Number.parseInt(limitArg.slice("--limit=".length), 10) : 5;
 
