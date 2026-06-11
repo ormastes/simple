@@ -16,22 +16,12 @@ scheduler layered over the existing hosted `multicore_green` worker pool:
 That design type-checks and compiles to a hosted native binary, but the hosted
 native binary still segfaults before returning the first completion. The
 earlier helper-returned function-value blocker that sat below this path is now
-closed. The direct helper-side `Channel.id()` native fallback is also closed.
-The former lower blocker beneath this path is tracked separately in
-`doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
-and is now closed.
-The older worker callback-registry blocker beneath this path is now closed.
-The current better lower blocker beneath this path is tracked separately in
-`doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`.
-The newer smaller seed blocker that briefly sat beneath both of those is now
-tracked historically in
-`doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md` and is
-closed.
-The earlier lower pool-plus-struct-send blocker in
-`doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md`
-is already closed. Historical loop-return tracking remains in
-`doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`,
-and that earlier loop-return blocker is also closed.
+closed. The current lower blocker beneath this path is now tracked separately in
+`doc/08_tracking/bug/native_struct_array_runtime_blocker_2026-06-11.md`.
+That lower native struct-array blocker sits below the worker-pool stepper path
+itself. Historical loop-return tracking remains in
+`doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`.
+That earlier loop-return blocker is also closed.
 
 ## Minimal Boundary
 
@@ -48,17 +38,16 @@ Segmentation fault (core dumped)
 EXIT=139
 ```
 
-So this is no longer a vague “fairness is hard” gap. The narrower remaining
-worker-pool blocker is:
+So this is no longer a vague “fairness is hard” gap. The narrower active
+blocker is:
 
 - rebuilt native hosted worker-pool execution for the resumable-stepper probe crashes
 - even when the work item is a single callback-id step with immediate completion
 - that crash remains after the helper-returned function-value regression was
   fixed and moved out of the critical path
 - the earlier loop/search helper-return path is now green
-- the lower function-valued local or parameter array path is now closed beneath it
-- the helper handle-array iteration plus returned result-array path is again
-  the current lower hosted symptom beneath it
+- a smaller native struct-array path still fails before the full stepper
+  machinery is required
 
 ## Why This Matters
 
