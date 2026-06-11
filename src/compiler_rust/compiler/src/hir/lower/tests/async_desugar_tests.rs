@@ -106,6 +106,56 @@ actor Counter:
     );
 }
 
+/// B3 executor fix: gen fn with yield must lower through HIR→MIR without error.
+/// The JIT path for gen fn is not yet fully wired (generator_states stays None
+/// at MIR level because the gen fn is not an outlined body); compile_yield
+/// emits a safe NIL return instead of an illegal-instruction trap, and the JIT
+/// compile error causes fallback to the interpreter which handles gen fn
+/// correctly via func.is_generator / GENERATOR_YIELDS.
+#[test]
+fn test_generator_fn_mir_lower_succeeds_single_yield() {
+    use crate::mir::lower_to_mir;
+    let source = r#"
+gen gen_counter():
+    yield 1
+
+fn main() -> i64:
+    val result = gen_counter()
+    return 0
+"#;
+    let hir = parse_and_lower(source)
+        .expect("generator fn with single yield should lower to HIR without error");
+    let mir = lower_to_mir(&hir)
+        .expect("generator fn should lower to MIR without error");
+
+    // gen_counter must be present in MIR
+    let gen_fn = mir.functions.iter().find(|f| f.name == "gen_counter");
+    assert!(gen_fn.is_some(), "gen_counter should appear in MIR module");
+}
+
+/// B3 executor fix: gen fn with two yields must lower through HIR→MIR without error.
+/// Same semantics as the single-yield case above.
+#[test]
+fn test_generator_fn_mir_lower_succeeds_two_yields() {
+    use crate::mir::lower_to_mir;
+    let source = r#"
+gen gen_counter():
+    yield 1
+    yield 2
+
+fn main() -> i64:
+    val result = gen_counter()
+    return 0
+"#;
+    let hir = parse_and_lower(source)
+        .expect("generator fn with two yields should lower to HIR without error");
+    let mir = lower_to_mir(&hir)
+        .expect("generator fn should lower to MIR without error");
+
+    let gen_fn = mir.functions.iter().find(|f| f.name == "gen_counter");
+    assert!(gen_fn.is_some(), "gen_counter should appear in MIR module");
+}
+
 /// Combined: actor type used in function body after being declared — full pipeline.
 #[test]
 fn test_actor_usable_after_declaration() {

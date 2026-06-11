@@ -19,6 +19,7 @@ impl<'a> MirLowerer<'a> {
                 ty: declared_ty,
                 value,
             } => {
+                let mut effective_declared_ty = *declared_ty;
                 self.with_func(|func, _| {
                     let param_count = func.params.len();
                     if *local_index >= param_count {
@@ -38,7 +39,7 @@ impl<'a> MirLowerer<'a> {
                             });
                         }
                         if let Some(local) = func.locals.get_mut(local_slot) {
-                            local.ty = *declared_ty;
+                            effective_declared_ty = local.ty;
                         }
                     }
                 })?;
@@ -50,7 +51,7 @@ impl<'a> MirLowerer<'a> {
                 if let Some(val) = value {
                     let is_u8_array_declared = self
                         .type_registry
-                        .and_then(|tr| tr.get(*declared_ty))
+                        .and_then(|tr| tr.get(effective_declared_ty))
                         .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8));
 
                     if is_u8_array_declared {
@@ -79,7 +80,7 @@ impl<'a> MirLowerer<'a> {
                                     block.instructions.push(MirInst::Store {
                                         addr,
                                         value: array,
-                                        ty: *declared_ty,
+                                        ty: effective_declared_ty,
                                     });
                                 })?;
                                 return Ok(());
@@ -133,7 +134,7 @@ impl<'a> MirLowerer<'a> {
                                     block.instructions.push(MirInst::Store {
                                         addr,
                                         value: array_reg,
-                                        ty: *declared_ty,
+                                        ty: effective_declared_ty,
                                     });
                                 })?;
                                 self.record_len_local_source(*local_index, Some(val));
@@ -148,10 +149,10 @@ impl<'a> MirLowerer<'a> {
                     let value_ty = val.ty;
 
                     // Wrap value in union if assigning to a union type
-                    let vreg = self.emit_union_wrap_if_needed(*declared_ty, value_ty, vreg)?;
+                    let vreg = self.emit_union_wrap_if_needed(effective_declared_ty, value_ty, vreg)?;
 
                     // Emit unit bound check if assigning to a unit type with constraints
-                    self.emit_unit_bound_check(*declared_ty, vreg)?;
+                    self.emit_unit_bound_check(effective_declared_ty, vreg)?;
 
                     // Track tagged status: if storing a tagged VReg, mark the local as tagged
                     if self.tagged_vregs.contains(&vreg) {
@@ -170,7 +171,7 @@ impl<'a> MirLowerer<'a> {
                         block.instructions.push(MirInst::Store {
                             addr: dest,
                             value: vreg,
-                            ty: *declared_ty,
+                            ty: effective_declared_ty,
                         });
                     })?;
                     self.record_len_local_source(*local_index, Some(val));

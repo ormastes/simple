@@ -121,6 +121,14 @@ class RocmBackend:
     HIP kernel. Grid/block dimensions are chosen to cover the bounding box
     of the primitive being drawn. Kernels are compiled from HIP C++ source
     via rt_rocm_compile_hsaco().
+
+    Hardening contract:
+    - Every draw method is a no-op when initialized is false.
+    - last_probe carries a typed BackendProbeResult after init(); callers
+      can inspect feature_gate to distinguish unavailable, init-failed,
+      and kernel-gap failure modes without parsing error strings.
+    - read_pixels() returns an empty array (not a stale pointer deref)
+      when d_framebuffer == 0.
     """
 
     host_buf: [u32]
@@ -138,6 +146,7 @@ class RocmBackend:
     clip_enabled: bool
     initialized: bool
     dirty: bool              # True when GPU has changes not yet copied to host
+    last_probe: BackendProbeResult   # Typed result from most recent probe/init
 
     # Cached kernel function handles
     fn_clear: i64
@@ -170,6 +179,7 @@ class RocmBackend:
             clip_enabled: false,
             initialized: false,
             dirty: false,
+            last_probe: BackendProbeResult.unavailable("rocm", "not probed"),
             fn_clear: 0,
             fn_rect_filled: 0,
             fn_rect_outline: 0,
@@ -189,15 +199,16 @@ impl RenderBackend for RocmBackend:
         "rocm"
 
     me init(width: i32, height: i32) -> bool:
-        # Check ROCm availability
-        if not rt_rocm_is_available():
+        # Check ROCm availability — record typed probe so callers can inspect
+        # feature_gate without parsing error strings.
+        self.last_probe = probe_rocm()
+        if self.last_probe.status != BackendStatus.Initialized:
+            self.initialized = false
             return false
 
-        val init_ok = rt_rocm_init()
-        if not init_ok:
-            return false
-
-        if rt_rocm_device_count() < 1:
+        if width <= 0 or height <= 0:
+            self.last_probe = _rocm_probe_failed("rocm-invalid-dimensions", "ROCm framebuffer dimensions must be positive")
+            self.initialized = false
             return false
 
         self.w = width
@@ -207,6 +218,8 @@ impl RenderBackend for RocmBackend:
         val fb_size = _i64(width) * _i64(height) * 4
         self.d_framebuffer = rt_rocm_malloc(fb_size)
         if self.d_framebuffer == 0:
+            self.last_probe = _rocm_probe_failed("rocm-alloc-failed", "ROCm device framebuffer allocation failed")
+            self.initialized = false
             return false
 
         # Clear device framebuffer to black
@@ -221,6 +234,8 @@ impl RenderBackend for RocmBackend:
         if self.hip_module == 0:
             rt_rocm_free(self.d_framebuffer)
             self.d_framebuffer = 0
+            self.last_probe = _rocm_probe_failed("rocm-kernel-gap", "ROCm HIP kernel compilation failed during surface init")
+            self.initialized = false
             return false
 
         # Cache kernel function handles
@@ -272,6 +287,8 @@ impl RenderBackend for RocmBackend:
         self.initialized = false
 
     me clear(color: u32):
+        if not self.initialized:
+            return
         # Launch clear kernel: one thread per pixel
         val block_size: i64 = 256
         val total = _i64(self.w) * _i64(self.h)
@@ -281,6 +298,8 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if not self.initialized:
+            return
         val args: [i64] = [self.d_framebuffer, _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color), _i64(self.w), _i64(self.h)]
         val grid_dim = _grid_for_rect(w, h)
         val block_dim = _block_for_rect()
@@ -288,6 +307,8 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if not self.initialized:
+            return
         val args: [i64] = [self.d_framebuffer, _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(color), _i64(self.w), _i64(self.h)]
         val grid_dim = _grid_for_rect(w, h)
         val block_dim = _block_for_rect()
@@ -295,6 +316,8 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        if not self.initialized:
+            return
         # Line kernel: launch one thread per pixel along the line length
         var dx = x2 - x1
         var dy = y2 - y1
@@ -314,6 +337,8 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        if not self.initialized:
+            return
         # Circle outline: launch kernel covering bounding box
         val bw = 2 * r + 1
         val bh = 2 * r + 1
@@ -324,6 +349,8 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        if not self.initialized:
+            return
         val bw = 2 * r + 1
         val bh = 2 * r + 1
         val grid_dim = _grid_for_rect(bw, bh)
@@ -333,6 +360,8 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        if not self.initialized:
+            return
         # Rounded rect kernel: each thread checks corner distance
         val grid_dim = _grid_for_rect(w, h)
         val block_dim = _block_for_rect()
@@ -341,6 +370,8 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        if not self.initialized:
+            return
         # Compute bounding box of triangle
         var min_x = x1
         if x2 < min_x: min_x = x2
@@ -364,6 +395,8 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        if not self.initialized:
+            return
         val grid_dim = _grid_for_rect(w, h)
         val block_dim = _block_for_rect()
         val args: [i64] = [self.d_framebuffer, _i64(x), _i64(y), _i64(w), _i64(h), _i64_from_u32(top_color), _i64_from_u32(bottom_color), _i64(self.w), _i64(self.h)]
@@ -372,7 +405,6 @@ impl RenderBackend for RocmBackend:
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         if not self.initialized:
-            self.dirty = true
             return
         val text_buf = text_transparent_blit_buffer(text_val, color, font_size)
         if text_buf.is_empty():
@@ -384,10 +416,10 @@ impl RenderBackend for RocmBackend:
         self.dirty = true
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if not self.initialized:
+            return
         if _draw_image_with_kernel(self, self.fn_blit_image, x, y, w, h, pixels):
             self.dirty = true
-            return
-        self.dirty = true
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.clip_x = x
@@ -414,14 +446,18 @@ impl RenderBackend for RocmBackend:
         self.mask_h = 0
 
     me present():
-        # Copy GPU framebuffer to host memory
-        if self.dirty:
+        # Copy GPU framebuffer to host memory; guard against uninitialized state
+        if self.initialized and self.dirty and self.d_framebuffer != 0:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size)
             rt_rocm_synchronize()
             self.dirty = false
 
     fn read_pixels() -> [u32]:
+        # Guard: if not initialized or framebuffer pointer is null, return empty
+        # to avoid a null-pointer device-memory read.
+        if not self.initialized or self.d_framebuffer == 0:
+            return []
         # Ensure host buffer is up to date
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
@@ -608,6 +644,9 @@ fn _gpu_draw_text_fallback(backend: RocmBackend, x: i32, y: i32, text_val: text,
     and sampled by a text-rendering kernel. This fallback is acceptable
     for low-frequency text draws (UI labels, debug overlays).
     """
+    # Guard: caller already checked initialized; guard d_framebuffer here too
+    if backend.d_framebuffer == 0:
+        return
     # Ensure host buffer is current
     if backend.dirty:
         val fb_size = _i64(backend.w) * _i64(backend.h) * 4

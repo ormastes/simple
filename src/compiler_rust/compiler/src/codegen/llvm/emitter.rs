@@ -282,7 +282,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let source_val = self.get(source)?;
         let result = self
             .backend
-            .compile_cast(source_val, &from_ty, &to_ty, self.builder)
+            .compile_cast(source_val, &from_ty, &to_ty, self.builder, self.module)
             .map_err(|e: crate::error::CompileError| e.to_string())?;
         self.set(dest, result);
         Ok(())

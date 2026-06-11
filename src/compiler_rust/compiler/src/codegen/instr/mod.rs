@@ -1305,10 +1305,15 @@ pub fn compile_instruction<M: Module>(
         MirInst::BoxFloat { dest, value } => {
             // Box float as RuntimeValue: (bits >> 3) << 3 | TAG_FLOAT
             // TAG_FLOAT is 2 (0b010)
-            let val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
+            let mut val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
                 // Missing VReg, use default 0
                 builder.ins().f64const(0.0)
             });
+            // f32 VRegs (e.g. struct fields typed f32) flow into BoxFloat too;
+            // bitcasting f32 straight to i64 is a 32-vs-64-bit verifier error.
+            if builder.func.dfg.value_type(val) == types::F32 {
+                val = builder.ins().fpromote(types::F64, val);
+            }
             let bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
             let three = builder.ins().iconst(types::I64, 3);
             let shifted = builder.ins().ushr(bits, three);

@@ -222,6 +222,26 @@ fn for_collection() {
 }
 
 #[test]
+fn for_collection_specialized_from_untyped_empty_array_keeps_object_element_type() {
+    let mir = compile_to_mir(
+        "class Boxed:\n    value: i64\n    fn get() -> i64:\n        self.value\n\nfn run_one() -> i64:\n    var items = []\n    items.append(Boxed(value: 7))\n    for item in items:\n        return item.get()\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = crate::test_helpers::find_mir_function(&mir, "run_one").expect("run_one MIR function should exist");
+    assert!(func
+        .locals
+        .iter()
+        .any(|local| local.name == "item" && local.ty != crate::hir::TypeId::I32));
+    assert!(!func.blocks.iter().flat_map(|block| block.instructions.iter()).any(|inst| {
+        matches!(
+            inst,
+            MirInst::MethodCallStatic { func_name, .. } if func_name == "i32.get"
+        )
+    }));
+}
+
+#[test]
 fn static_array_len_method_lowers_to_array_len() {
     let mir = compile_to_mir(
         "extern fn rt_array_new_with_cap(cap: u64) -> [u64]\n\nfn test() -> u64:\n    val data: [u64] = rt_array_new_with_cap(4u64)\n    return data.len().to_u64()\n",

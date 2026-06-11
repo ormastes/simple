@@ -32,6 +32,8 @@ Date: 2026-06-06
   `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` marker triplet proof and
   remains separately gated so readiness markers cannot be mistaken for final
   hardware proof.
+<<<<<<< Conflict 1 of 1
++++++++ Contents of side #1
 - Current source-built hosted-native fairness evidence is stricter than the
   checked-in `bin/release/simple` binary for this lane: the helper-return
   function-value probes, helper-side `Channel.id()` native path, the smaller
@@ -46,6 +48,29 @@ Date: 2026-06-06
   perf-sensitive because the host native compile/run SSpecs take about
   60 seconds. The checked-in release binary remains tracked as stale evidence
   in `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
+%%%%%%% Changes from base #1 to side #2
+-- Current source-built hosted-native fairness evidence is stricter than the
+-  checked-in `bin/release/simple` binary for this lane: the helper-return
+-  function-value probes are now fixed on rebuilt debug binaries, while the
+-  resumable-stepper native probe still crashes. A newer lower blocker beneath
+-  that path is now pinned in
+-  `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`,
+-  and the checked-in release binary remains tracked as stale evidence in
+-  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
+%%%%%%% Changes from base #2 to side #3
+ - Current source-built hosted-native fairness evidence is stricter than the
+   checked-in `bin/release/simple` binary for this lane: the helper-return
+   function-value probes are now fixed on rebuilt debug binaries, and the lower
+   loop-return helper path beneath the resumable-stepper probe is now also
+-  fixed. The remaining active native blocker for hosted fairness stays on the
++  fixed. The stale helper-side array-literal hybrid fallback above the current
++  struct-array runtime blocker is also closed on rebuilt debug binaries. The
++  remaining active native blocker for hosted fairness stays on the
+   resumable-stepper path, while historical lower-bound tracking remains in
+   `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`,
+   and the checked-in release binary remains tracked as stale evidence in
+   `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
+>>>>>>> Conflict 1 of 1 ends
 
 ## Coordination Contract
 

@@ -511,11 +511,28 @@ fn compile_inline_array_get<M: Module>(
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let zero = builder.ins().iconst(types::I64, 0);
     let nil = builder.ins().iconst(types::I64, 3);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
+
+    // Blocks: nil_check → bounds_block → load_block → {byte_block, word_block} → done_block
+    let bounds_block = builder.create_block();
+    let load_block = builder.create_block();
+    let byte_block = builder.create_block();
+    let word_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    // Guard: array must be a heap pointer (tag == 1). Nil (tag==3) or integer would
+    // load from address 0 if we skipped this, causing SIGSEGV.
+    let tag = builder.ins().band(array, tag_mask);
+    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+    builder.ins().brif(is_heap, bounds_block, &[], done_block, &[nil]);
+
+    // Bounds check — len and normalized_index computed here, after we know ptr is valid.
+    builder.switch_to_block(bounds_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -523,13 +540,6 @@ fn compile_inline_array_get<M: Module>(
         let from_end = builder.ins().iadd(len, index);
         builder.ins().select(negative, from_end, index)
     };
-
-    let load_block = builder.create_block();
-    let byte_block = builder.create_block();
-    let word_block = builder.create_block();
-    let done_block = builder.create_block();
-    builder.append_block_param(done_block, types::I64);
-
     let in_bounds = if index_is_unsigned {
         builder.ins().icmp(IntCC::UnsignedLessThan, normalized_index, len)
     } else {
@@ -540,8 +550,11 @@ fn compile_inline_array_get<M: Module>(
         builder.ins().band(ge_zero, lt_len)
     };
     builder.ins().brif(in_bounds, load_block, &[], done_block, &[nil]);
+    builder.seal_block(bounds_block);
 
+    // Load data_ptr only after bounds check passes — avoids the wild read on OOB.
     builder.switch_to_block(load_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
     let flags64 = builder.ins().uextend(types::I64, flags);
     let byte_packed = builder.ins().band_imm(flags64, 0x08);
@@ -587,11 +600,23 @@ fn compile_inline_array_get_word<M: Module>(
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let zero = builder.ins().iconst(types::I64, 0);
     let nil = builder.ins().iconst(types::I64, 3);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
+
+    let bounds_block = builder.create_block();
+    let load_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    // Guard: must be heap pointer (tag == 1) before dereferencing.
+    let tag = builder.ins().band(array, tag_mask);
+    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+    builder.ins().brif(is_heap, bounds_block, &[], done_block, &[nil]);
+
+    builder.switch_to_block(bounds_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -599,11 +624,6 @@ fn compile_inline_array_get_word<M: Module>(
         let from_end = builder.ins().iadd(len, index);
         builder.ins().select(negative, from_end, index)
     };
-
-    let load_block = builder.create_block();
-    let done_block = builder.create_block();
-    builder.append_block_param(done_block, types::I64);
-
     let in_bounds = if index_is_unsigned {
         builder.ins().icmp(IntCC::UnsignedLessThan, normalized_index, len)
     } else {
@@ -614,8 +634,10 @@ fn compile_inline_array_get_word<M: Module>(
         builder.ins().band(ge_zero, lt_len)
     };
     builder.ins().brif(in_bounds, load_block, &[], done_block, &[nil]);
+    builder.seal_block(bounds_block);
 
     builder.switch_to_block(load_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     let value = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
@@ -644,11 +666,25 @@ fn compile_inline_array_set<M: Module>(
     let value = get_vreg_or_default(ctx, builder, &args[2]);
     let zero = builder.ins().iconst(types::I64, 0);
     let one = builder.ins().iconst(types::I64, 1);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
+
+    let bounds_block = builder.create_block();
+    let store_block = builder.create_block();
+    let byte_block = builder.create_block();
+    let word_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    // Guard: must be heap pointer (tag == 1) before dereferencing.
+    let tag = builder.ins().band(array, tag_mask);
+    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+    builder.ins().brif(is_heap, bounds_block, &[], done_block, &[zero]);
+
+    builder.switch_to_block(bounds_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -656,13 +692,6 @@ fn compile_inline_array_set<M: Module>(
         let from_end = builder.ins().iadd(len, index);
         builder.ins().select(negative, from_end, index)
     };
-
-    let store_block = builder.create_block();
-    let byte_block = builder.create_block();
-    let word_block = builder.create_block();
-    let done_block = builder.create_block();
-    builder.append_block_param(done_block, types::I64);
-
     let in_bounds = if index_is_unsigned {
         builder.ins().icmp(IntCC::UnsignedLessThan, normalized_index, len)
     } else {
@@ -673,8 +702,10 @@ fn compile_inline_array_set<M: Module>(
         builder.ins().band(ge_zero, lt_len)
     };
     builder.ins().brif(in_bounds, store_block, &[], done_block, &[zero]);
+    builder.seal_block(bounds_block);
 
     builder.switch_to_block(store_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
     let flags64 = builder.ins().uextend(types::I64, flags);
     let byte_packed = builder.ins().band_imm(flags64, 0x08);
@@ -720,11 +751,23 @@ fn compile_inline_array_set_word<M: Module>(
     let value = get_vreg_or_default(ctx, builder, &args[2]);
     let zero = builder.ins().iconst(types::I64, 0);
     let one = builder.ins().iconst(types::I64, 1);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
-    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let index_is_unsigned = vreg_is_signed(ctx, args[1]) == Some(false);
+
+    let bounds_block = builder.create_block();
+    let store_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    // Guard: must be heap pointer (tag == 1) before dereferencing.
+    let tag = builder.ins().band(array, tag_mask);
+    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+    builder.ins().brif(is_heap, bounds_block, &[], done_block, &[zero]);
+
+    builder.switch_to_block(bounds_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
     let normalized_index = if index_is_unsigned {
         index
     } else {
@@ -732,11 +775,6 @@ fn compile_inline_array_set_word<M: Module>(
         let from_end = builder.ins().iadd(len, index);
         builder.ins().select(negative, from_end, index)
     };
-
-    let store_block = builder.create_block();
-    let done_block = builder.create_block();
-    builder.append_block_param(done_block, types::I64);
-
     let in_bounds = if index_is_unsigned {
         builder.ins().icmp(IntCC::UnsignedLessThan, normalized_index, len)
     } else {
@@ -747,8 +785,10 @@ fn compile_inline_array_set_word<M: Module>(
         builder.ins().band(ge_zero, lt_len)
     };
     builder.ins().brif(in_bounds, store_block, &[], done_block, &[zero]);
+    builder.seal_block(bounds_block);
 
     builder.switch_to_block(store_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
     let slot_offset = builder.ins().ishl_imm(normalized_index, 3);
     let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
     builder.ins().store(MemFlags::new(), value, slot_ptr, 0);
@@ -2495,6 +2535,11 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
                 // Float to int: bitcast to preserve bits (for RuntimeValue tagging)
                 if actual_ty == types::F64 && expected_ty == types::I64 {
                     adapted.push(builder.ins().bitcast(types::I64, MemFlags::new(), val));
+                } else if actual_ty == types::F32 && expected_ty == types::I64 {
+                    // Widen first — an i64 param here is a RuntimeValue slot,
+                    // so preserve bits (promote+bitcast), don't value-convert.
+                    let promoted = builder.ins().fpromote(types::F64, val);
+                    adapted.push(builder.ins().bitcast(types::I64, MemFlags::new(), promoted));
                 } else {
                     adapted.push(builder.ins().fcvt_to_sint(expected_ty, val));
                 }

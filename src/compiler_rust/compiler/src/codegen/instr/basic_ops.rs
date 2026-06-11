@@ -41,6 +41,42 @@ pub fn compile_cast<M: Module>(
         None => return Err(format!("Cast: source vreg {:?} not found", source)),
     };
 
+    if from_ty == TypeId::ANY {
+        match to_ty {
+            TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+            | TypeId::U64 => {
+                let unwrap_id = ctx
+                    .runtime_funcs
+                    .get("rt_value_as_int")
+                    .copied()
+                    .ok_or_else(|| "Cast: runtime function rt_value_as_int not declared".to_string())?;
+                let unwrap_ref = ctx.module.declare_func_in_func(unwrap_id, builder.func);
+                let unwrapped = adapted_call(builder, unwrap_ref, &[src_val]);
+                let raw_i64 = builder.inst_results(unwrapped)[0];
+                let target_ty = match to_ty {
+                    TypeId::I8 | TypeId::U8 => types::I8,
+                    TypeId::I16 | TypeId::U16 => types::I16,
+                    TypeId::I32 | TypeId::U32 => types::I32,
+                    _ => types::I64,
+                };
+                let narrowed = if target_ty == types::I64 {
+                    raw_i64
+                } else {
+                    builder.ins().ireduce(target_ty, raw_i64)
+                };
+                ctx.vreg_values.insert(dest, narrowed);
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     // Determine source and target types.
     //
     // Defensive: MIR lowering occasionally annotates a float-producing

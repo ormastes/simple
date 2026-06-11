@@ -42,21 +42,32 @@ file_system_spec -> std
 
 #### should check if file exists
 
+- file write text
+- file remove
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# This test file should exist
-val result = file.exist("simple/std_lib/test/unit/shell/file_system_spec.spl")
-expect(result)
+# Write a file, then check it exists
+val test_path = "/tmp/simple_test_exist_probe.txt"
+file.write_text(test_path, "probe")
+val result = file.exist(test_path)
+file.remove(test_path)
+assert_true(result)
 ```
 
 </details>
 
 #### should return false for non-existent files
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -66,15 +77,16 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = file.exist("/nonexistent/test/file.txt")
-expect(not result)
+assert_false(result)
 ```
 
 </details>
 
 #### should write and read text file
 
-1. file write text
-2. file remove
+- file write text
+- assert true
+- file remove
 
 
 <details>
@@ -92,7 +104,7 @@ file.write_text(test_path, test_content)
 
 # Read back
 val read_content = file.read_text(test_path)
-expect(read_content == test_content)
+assert_true(read_content == test_content)
 
 # Clean up
 file.remove(test_path)
@@ -102,9 +114,10 @@ file.remove(test_path)
 
 #### should append text to file
 
-1. file write text
-2. file append text
-3. file remove
+- file write text
+- file append text
+- assert true
+- file remove
 
 
 <details>
@@ -124,7 +137,7 @@ file.append_text(test_path, "Line 2\n")
 
 # Read all
 val content = file.read_text(test_path)
-expect(content == "Line 1\nLine 2\n")
+assert_true(content == "Line 1\nLine 2\n")
 
 # Clean up
 file.remove(test_path)
@@ -134,10 +147,12 @@ file.remove(test_path)
 
 #### should copy file
 
-1. file write text
-2. file copy
-3. file remove
-4. file remove
+- file write text
+- file copy
+- assert true
+- assert true
+- file remove
+- file remove
 
 
 <details>
@@ -157,9 +172,9 @@ file.write_text(src_path, "Copy me!")
 file.copy(src_path, dest_path)
 
 # Verify destination exists and has same content
-expect(file.exist(dest_path))
+assert_true(file.exist(dest_path))
 val dest_content = file.read_text(dest_path)
-expect(dest_content == "Copy me!")
+assert_true(dest_content == "Copy me!")
 
 # Clean up
 file.remove(src_path)
@@ -170,9 +185,12 @@ file.remove(dest_path)
 
 #### should rename/move file
 
-1. file write text
-2. file rename
-3. file remove
+- file write text
+- file rename
+- assert false
+- assert true
+- assert true
+- file remove
 
 
 <details>
@@ -192,10 +210,10 @@ file.write_text(src_path, "Move me!")
 file.rename(src_path, new_path)
 
 # Verify old doesn't exist, new does
-expect(not file.exist(src_path))
-expect(file.exist(new_path))
+assert_false(file.exist(src_path))
+assert_true(file.exist(new_path))
 val content = file.read_text(new_path)
-expect(content == "Move me!")
+assert_true(content == "Move me!")
 
 # Clean up
 file.remove(new_path)
@@ -207,8 +225,10 @@ file.remove(new_path)
 
 #### should create and remove directory
 
-1. dir create
-2. dir remove
+- dir create
+- assert true
+- dir remove
+- assert false
 
 
 <details>
@@ -224,21 +244,22 @@ val test_dir = "/tmp/simple_test_dir"
 dir.create(test_dir)
 
 # Verify it exists
-expect(dir.exist(test_dir))
+assert_true(dir.exist(test_dir))
 
 # Remove it
 dir.remove(test_dir)
 
 # Verify it's gone
-expect(not dir.exist(test_dir))
+assert_false(dir.exist(test_dir))
 ```
 
 </details>
 
 #### should create recursive directory
 
-1. dir create recursive
-2. dir remove recursive
+- dir create recursive
+- assert true
+- dir remove recursive
 
 
 <details>
@@ -254,7 +275,7 @@ val test_dir = "/tmp/simple_test/nested/deep"
 dir.create_recursive(test_dir)
 
 # Verify it exists
-expect(dir.exist(test_dir))
+assert_true(dir.exist(test_dir))
 
 # Clean up (recursive remove)
 dir.remove_recursive("/tmp/simple_test")
@@ -264,14 +285,15 @@ dir.remove_recursive("/tmp/simple_test")
 
 #### should list directory entries
 
-1. dir create
-2. file write text
-3. file write text
-4. file write text
-5. file remove
-6. file remove
-7. file remove
-8. dir remove
+- dir create
+- file write text
+- file write text
+- file write text
+- assert true
+- file remove
+- file remove
+- file remove
+- dir remove
 
 
 <details>
@@ -295,7 +317,7 @@ file.write_text("{test_dir}/file3.txt", "content3")
 val entries = dir.list(test_dir)
 
 # Should have 3 entries
-expect(entries.len() == 3)
+assert_true(entries.len() == 3)
 
 # Clean up
 file.remove("{test_dir}/file1.txt")
@@ -312,7 +334,7 @@ dir.remove(test_dir)
 |-------|-------|
 | Category | Standard Library |
 | Status | Active |
-| Source | `test/01_unit/lib/std/shell/file_system_spec.spl` |
+| Source | `/home/ormastes/dev/pub/simple/test/01_unit/lib/std/shell/file_system_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

@@ -170,6 +170,26 @@ fn vreg_is_signed(vreg_types: &VRegTypes, v: crate::mir::VReg) -> Option<bool> {
     }
 }
 
+#[cfg(feature = "llvm")]
+fn implicit_local_param_slots(func: &MirFunction) -> usize {
+    use crate::mir::MirInst;
+
+    let declared_slots = func.params.len() + func.locals.len();
+    let mut max_local_index = None;
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let MirInst::LocalAddr { local_index, .. } = inst {
+                max_local_index = Some(max_local_index.map_or(*local_index, |cur: usize| cur.max(*local_index)));
+            }
+        }
+    }
+
+    match max_local_index {
+        Some(max_idx) if max_idx + 1 > declared_slots => (max_idx + 1) - declared_slots,
+        _ => 0,
+    }
+}
+
 impl LlvmBackend {
     #[cfg(feature = "llvm")]
     pub(in crate::codegen::llvm) fn build_box_float_value(
@@ -183,8 +203,19 @@ impl LlvmBackend {
 
         if rv_width == 64 {
             let bits = if val.is_float_value() {
+                // f32 values (e.g. struct fields typed f32) must be widened
+                // first: bitcasting f32 straight to i64 is a size mismatch.
+                let f64_type = self.context_ref().f64_type();
+                let fv = val.into_float_value();
+                let fv = if fv.get_type() == f64_type {
+                    fv
+                } else {
+                    builder
+                        .build_float_ext(fv, f64_type, "box_fext")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?
+                };
                 builder
-                    .build_bit_cast(val.into_float_value(), rv_type, "f2i")
+                    .build_bit_cast(fv, rv_type, "f2i")
                     .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
                     .into_int_value()
             } else {
@@ -337,8 +368,11 @@ impl LlvmBackend {
         // If it doesn't exist, create it (for backwards compatibility)
         let function = module.get_function(resolved_name).unwrap_or_else(|| {
             let i64_type = self.runtime_int_type();
+            let implicit_slots = implicit_local_param_slots(func);
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                func.params.iter().map(|_| i64_type.into()).collect();
+                std::iter::repeat_n(i64_type.into(), implicit_slots)
+                    .chain(func.params.iter().map(|_| i64_type.into()))
+                    .collect();
             let fn_type = i64_type.fn_type(&param_types, false);
             module.add_function(resolved_name, fn_type, None)
         });
@@ -398,17 +432,26 @@ impl LlvmBackend {
             let entry_bb = llvm_blocks[&func.blocks[0].id];
             builder.position_at_end(entry_bb);
 
+            let implicit_slots = implicit_local_param_slots(func);
+
+            for slot in 0..implicit_slots {
+                let alloca = builder
+                    .build_alloca(self.runtime_int_type(), &format!("implicit_local_{slot}"))
+                    .map_err(|e| crate::error::factory::llvm_build_failed("implicit param alloca", &e))?;
+                local_allocas.insert(slot, alloca);
+            }
+
             // Create allocas for parameters (index 0..param_count)
             for (i, param) in func.params.iter().enumerate() {
                 let param_ty = self.llvm_type(&param.ty)?;
                 let alloca = builder
                     .build_alloca(param_ty, &param.name)
                     .map_err(|e| crate::error::factory::llvm_build_failed("param alloca", &e))?;
-                local_allocas.insert(i, alloca);
+                local_allocas.insert(implicit_slots + i, alloca);
             }
 
             // Create allocas for locals (index param_count..param_count+local_count)
-            let param_count = func.params.len();
+            let param_count = implicit_slots + func.params.len();
             for (i, local) in func.locals.iter().enumerate() {
                 let local_ty = self.llvm_type(&local.ty)?;
                 let alloca = builder
@@ -429,9 +472,19 @@ impl LlvmBackend {
             }
 
             // Store parameter values into their local allocas
-            for (i, _param) in func.params.iter().enumerate() {
+            for i in 0..implicit_slots {
                 if let Some(llvm_param) = function.get_nth_param(i as u32) {
                     if let Some(&alloca) = local_allocas.get(&i) {
+                        builder
+                            .build_store(alloca, llvm_param)
+                            .map_err(|e| crate::error::factory::llvm_build_failed("store implicit param", &e))?;
+                    }
+                }
+            }
+            for (i, _param) in func.params.iter().enumerate() {
+                let llvm_index = implicit_slots + i;
+                if let Some(llvm_param) = function.get_nth_param(llvm_index as u32) {
+                    if let Some(&alloca) = local_allocas.get(&llvm_index) {
                         builder
                             .build_store(alloca, llvm_param)
                             .map_err(|e| crate::error::factory::llvm_build_failed("store param", &e))?;
@@ -499,7 +552,8 @@ impl LlvmBackend {
 
         // Map function parameters to virtual registers
         for (i, _param) in func.params.iter().enumerate() {
-            if let Some(llvm_param) = function.get_nth_param(i as u32) {
+            let implicit_slots = implicit_local_param_slots(func);
+            if let Some(llvm_param) = function.get_nth_param((implicit_slots + i) as u32) {
                 vreg_map.insert(crate::mir::VReg(i as u32), llvm_param.into());
             }
         }
@@ -728,7 +782,7 @@ impl LlvmBackend {
                 to_ty,
             } => {
                 let source_val = self.get_vreg(source, vreg_map)?;
-                let result = self.compile_cast(source_val, from_ty, to_ty, builder)?;
+                let result = self.compile_cast(source_val, from_ty, to_ty, builder, module)?;
                 vreg_map.insert(*dest, result);
             }
 
@@ -1846,6 +1900,50 @@ impl LlvmBackend {
                     func_name.rsplit('.').next().unwrap_or(func_name)
                 };
 
+                // For qualified user-defined methods like `Boxed.get`, prefer
+                // the exact resolved function symbol before consulting builtin
+                // method shims such as `get -> rt_index_get`. Otherwise a
+                // struct method can be misrouted through a collection helper
+                // purely because it shares a common short name.
+                let resolved_direct = self
+                    .use_map
+                    .get(func_name)
+                    .or_else(|| self.import_map.get(func_name))
+                    .map(|s| s.as_str());
+                let dotted_direct = func_name.replace("_dot_", ".");
+                let direct_func = resolved_direct
+                    .and_then(|n| module.get_function(n))
+                    .or_else(|| resolved_direct.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
+                    .or_else(|| module.get_function(func_name))
+                    .or_else(|| module.get_function(&dotted_direct));
+                if direct_func.is_some() && (func_name.contains('.') || func_name.contains("_dot_")) {
+                    let mut all_args = vec![*receiver];
+                    all_args.extend_from_slice(args);
+                    let func = direct_func.unwrap();
+                    let declared_param_types = func.get_type().get_param_types();
+                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                    for (i, arg) in all_args.iter().enumerate() {
+                        let val = self.get_vreg(arg, vreg_map)?;
+                        let target_ty = declared_param_types
+                            .get(i)
+                            .copied()
+                            .or_else(|| Some(i64_type.into()));
+                        let casted = self.coerce_value_to_type(val, target_ty, builder)?;
+                        arg_vals.push(casted.into());
+                    }
+                    let call_site = builder
+                        .build_call(func, &arg_vals, "mcall_direct")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("qualified method call", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            vreg_map.insert(*d, ret_val);
+                        } else {
+                            vreg_map.insert(*d, i64_type.const_int(0, false).into());
+                        }
+                    }
+                    return Ok(());
+                }
+
                 // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
                 if method == "substring" && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
@@ -2164,24 +2262,29 @@ impl LlvmBackend {
                         suffix_match()?
                     };
 
-                    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    let fallback_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         all_args.iter().map(|_| i64_type.into()).collect();
-                    let fn_type = i64_type.fn_type(&param_types, false);
+                    let fallback_fn_type = i64_type.fn_type(&fallback_param_types, false);
                     let fallback_name = resolved
                         .map(|n| n.replace("_dot_", "."))
                         .unwrap_or_else(|| dotted_name.clone());
-                    let func = called_func.unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
+                    let func = called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None));
+                    let declared_param_types = func.get_type().get_param_types();
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for arg in &all_args {
+                    for (i, arg) in all_args.iter().enumerate() {
                         let val = self.get_vreg(arg, vreg_map)?;
-                        let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                        let target_ty = declared_param_types
+                            .get(i)
+                            .copied()
+                            .or_else(|| Some(i64_type.into()));
+                        let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         arg_vals.push(casted.into());
                     }
                     let declared_params = func.get_type().get_param_types().len();
                     let call_site = if declared_params != all_args.len() {
                         let fn_ptr = func.as_global_value().as_pointer_value();
                         builder
-                            .build_indirect_call(fn_type, fn_ptr, &arg_vals, "mcall")
+                            .build_indirect_call(fallback_fn_type, fn_ptr, &arg_vals, "mcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     } else {
                         builder

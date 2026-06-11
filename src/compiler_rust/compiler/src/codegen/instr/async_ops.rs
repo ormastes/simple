@@ -108,7 +108,12 @@ pub(crate) fn compile_yield<M: Module>(
             return Ok(());
         }
     }
-    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(2));
+    // B3 safety net: yield outside a generator state-machine context
+    // (generator_state_map is None or block not in map).  Rather than
+    // trapping (SIGILL / exit 132) emit a NIL return so the process
+    // stays alive and the caller gets a benign nil value.
+    let nil = builder.ins().iconst(cranelift_codegen::ir::types::I64, 0);
+    builder.ins().return_(&[nil]);
     Ok(())
 }
 

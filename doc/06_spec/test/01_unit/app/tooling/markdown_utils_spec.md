@@ -1,6 +1,6 @@
 # Markdown Utils Specification
 
-> 1. expect h1
+> <details>
 
 <!-- sdn-diagram:id=markdown_utils_spec.arch -->
 <details class="sdn-source">
@@ -42,7 +42,7 @@ markdown_utils_spec
 
 #### creates h1
 
-1. expect h1
+- expect h1
 
 
 <details>
@@ -59,7 +59,7 @@ expect h1("Title") == "# Title"
 
 #### creates h2
 
-1. expect h2
+- expect h2
 
 
 <details>
@@ -76,7 +76,7 @@ expect h2("Section") == "## Section"
 
 #### creates h3
 
-1. expect h3
+- expect h3
 
 
 <details>
@@ -93,7 +93,7 @@ expect h3("Subsection") == "### Subsection"
 
 #### creates heading with level
 
-1. expect heading
+- expect heading
 
 
 <details>
@@ -112,7 +112,7 @@ expect heading("Test", 4) == "#### Test"
 
 #### creates bold
 
-1. expect bold
+- expect bold
 
 
 <details>
@@ -129,7 +129,7 @@ expect bold("text") == "**text**"
 
 #### creates italic
 
-1. expect italic
+- expect italic
 
 
 <details>
@@ -146,7 +146,7 @@ expect italic("text") == "*text*"
 
 #### creates bold italic
 
-1. expect bold italic
+- expect bold italic
 
 
 <details>
@@ -163,7 +163,7 @@ expect bold_italic("text") == "***text***"
 
 #### creates inline code
 
-1. expect code
+- expect code
 
 
 <details>
@@ -180,7 +180,7 @@ expect code("variable") == "`variable`"
 
 #### creates strikethrough
 
-1. expect strikethrough
+- expect strikethrough
 
 
 <details>
@@ -199,7 +199,7 @@ expect strikethrough("old") == "~~old~~"
 
 #### creates link
 
-1. expect result == "[Google]
+- expect result == "[Google]
 
 
 <details>
@@ -217,7 +217,7 @@ expect result == "[Google](https://google.com)"
 
 #### creates image
 
-1. expect result == "![Alt text]
+- expect result == "![Alt text]
 
 
 <details>
@@ -235,8 +235,8 @@ expect result == "![Alt text](/path/to/image.png)"
 
 #### creates link with title
 
-1. expect result contains
-2. expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -255,7 +255,7 @@ expect result.contains("Example")
 
 #### creates reference link
 
-1. expect reference link
+- expect reference link
 
 
 <details>
@@ -274,9 +274,9 @@ expect reference_link(txt="Text", ref="ref1") == "[Text][ref1]"
 
 #### creates unordered list
 
-1. expect result contains
-2. expect result contains
-3. expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -296,9 +296,9 @@ expect result.contains("- Cherry")
 
 #### creates ordered list
 
-1. expect result contains
-2. expect result contains
-3. expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -318,8 +318,8 @@ expect result.contains("3. Third")
 
 #### creates checklist items
 
-1. expect checked contains
-2. expect unchecked contains
+- expect checked contains
+- expect unchecked contains
 
 
 <details>
@@ -342,9 +342,9 @@ expect unchecked.contains("[ ]")
 
 #### creates code block with language
 
-1. expect result contains
-2. expect result contains
-3. expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -364,8 +364,8 @@ expect result.contains("```")
 
 #### creates plain code block
 
-1. expect result contains
-2. expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -386,7 +386,7 @@ expect result.contains("some code")
 
 #### creates blockquote
 
-1. expect blockquote
+- expect blockquote
 
 
 <details>
@@ -403,8 +403,8 @@ expect blockquote("Quote") == "> Quote"
 
 #### creates multi-line blockquote
 
-1. expect result contains
-2. expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -425,7 +425,7 @@ expect result.contains("> Line 2")
 
 #### creates horizontal rule
 
-1. expect horizontal rule
+- expect horizontal rule
 
 
 <details>
@@ -442,7 +442,7 @@ expect horizontal_rule() == "---"
 
 #### creates hr alias
 
-1. expect hr
+- expect hr
 
 
 <details>
@@ -461,11 +461,11 @@ expect hr() == "---"
 
 #### creates table
 
-1. expect result contains
-2. expect result contains
-3. expect result contains
-4. expect result contains
-5. expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -492,9 +492,9 @@ expect result.contains("|")
 
 #### creates table with alignment
 
-1. expect result contains
-2. expect result contains
-3. expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -519,10 +519,10 @@ expect result.contains("---:")
 
 #### creates task list
 
-1.
-2.
-3. expect result contains
-4. expect result contains
+-
+-
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -547,8 +547,8 @@ expect result.contains("[ ] Pending task")
 
 #### creates definition
 
-1. expect result contains
-2. expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -569,7 +569,7 @@ expect result.contains(": Definition text")
 
 #### creates footnote reference
 
-1. expect footnote ref
+- expect footnote ref
 
 
 <details>
@@ -586,8 +586,8 @@ expect footnote_ref("1") == "[^1]"
 
 #### creates footnote definition
 
-1. expect result contains
-2. expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -608,8 +608,8 @@ expect result.contains("Footnote text")
 
 #### creates front matter
 
-1. expect result contains
-2. expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -628,7 +628,7 @@ expect result.contains("title: Test")
 
 #### creates TOC placeholder
 
-1. expect toc
+- expect toc
 
 
 <details>
@@ -647,8 +647,8 @@ expect toc() == "<!-- TOC -->"
 
 #### escapes markdown characters
 
-1. expect escaped contains
-2. expect escaped contains
+- expect escaped contains
+- expect escaped contains
 
 
 <details>
@@ -667,11 +667,11 @@ expect escaped.contains("\\#")
 
 #### creates document from sections
 
-1. MarkdownSection
-2. MarkdownSection
-3. expect result contains
-4. expect result contains
-5. expect result contains
+- MarkdownSection
+- MarkdownSection
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -697,9 +697,9 @@ expect result.contains("Welcome")
 
 #### creates README template
 
-1. expect result contains
-2. expect result contains
-3. expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -724,9 +724,9 @@ expect result.contains("## Usage")
 
 #### creates badge
 
-1. expect result contains
-2. expect result contains
-3. expect result contains
+- expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -746,8 +746,8 @@ expect result.contains("green")
 
 #### creates note
 
-1. expect result contains
-2. expect result contains
+- expect result contains
+- expect result contains
 
 
 <details>
@@ -766,7 +766,7 @@ expect result.contains("Important information")
 
 #### creates warning
 
-1. expect result contains
+- expect result contains
 
 
 <details>
@@ -784,7 +784,7 @@ expect result.contains("WARNING")
 
 #### creates important
 
-1. expect result contains
+- expect result contains
 
 
 <details>

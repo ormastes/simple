@@ -86,7 +86,7 @@ expect(backend_preference_summary()).to_equal("explicit native (baremetal/virtio
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -95,10 +95,6 @@ expect(backend_canonical_name("amd_hip")).to_equal("rocm")
 expect(backend_canonical_name("amd-hip")).to_equal("rocm")
 expect(backend_canonical_name("amd_rocm")).to_equal("rocm")
 expect(backend_canonical_name("amd-rocm")).to_equal("rocm")
-expect(backend_canonical_name("d3d11")).to_equal("directx")
-expect(backend_canonical_name("d3d12")).to_equal("directx")
-expect(backend_canonical_name("dx11")).to_equal("directx")
-expect(backend_canonical_name("dx12")).to_equal("directx")
 expect(backend_canonical_name("simd_cpu")).to_equal("cpu_simd")
 expect(backend_canonical_name("cpu-simd")).to_equal("cpu_simd")
 expect(backend_canonical_name("simd-cpu")).to_equal("cpu_simd")

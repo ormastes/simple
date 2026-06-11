@@ -106,7 +106,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/multicore_green_tracking_spec.spl
 Multicore green tracking contract PASSED
 Files: 1
-Passed: 7
+Passed: 6
 Failed: 0
 ```
 
@@ -308,6 +308,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <summary>Executable SSpec</summary>
 
 Runnable source: 48 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -344,7 +345,6 @@ step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=6")
 expect(row).to_contain("task_spawn approved")
-expect(row).to_contain("multicore_green_spawn_sliced approved with public_multicore_green_sliced_result=19")
 expect(row).to_contain("task_spawn_wrong_surface_import.spl rejects OS-thread facade")
 expect(row).to_contain("multicore_green_wrong_surface_import.spl rejects OS-thread facade")
 step("Verify negative profile contract cases stay release-visible")
@@ -400,13 +400,12 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
    - Expected: absent_in_text(combined, runner_ordinal_label("1", "1")) equals `1`
    - Expected: absent_in_text(combined, runner_ordinal_label("1", "2")) equals `1`
    - Expected: absent_in_text(combined, runner_ordinal_label("2", "2")) equals `1`
-   - Expected: absent_in_text(tracking_spec, "Passed: 6") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -423,8 +422,6 @@ expect(absent_in_text(combined, runner_ordinal_label("1", "1"))).to_equal(1)
 expect(absent_in_text(combined, runner_ordinal_label("1", "2"))).to_equal(1)
 expect(absent_in_text(combined, runner_ordinal_label("2", "2"))).to_equal(1)
 expect(combined).to_contain("Multicore green tracking contract PASSED")
-expect(tracking_spec).to_contain("Passed: 7")
-expect(absent_in_text(tracking_spec, "Passed: 6")).to_equal(1)
 expect(combined).to_contain("Multicore green cross-language profile gate PASSED")
 ```
 

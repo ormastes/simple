@@ -499,7 +499,7 @@ expect(has_emoji).to_equal(true)
 
 #### handles report with no files
 
-1. var report = CoverageReport create
+- var report = CoverageReport create
    - Expected: has_summary is true
 
 
@@ -525,8 +525,8 @@ expect(has_summary).to_equal(true)
 
 #### handles files with no items
 
-1. var report = CoverageReport create
-2. var file = FileCoverage create
+- var report = CoverageReport create
+- var file = FileCoverage create
    - Expected: has_structure is true
 
 

@@ -371,9 +371,14 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
         return Some(CommonMistake::TsConst);
     }
 
-    // Check for 'interface' (TypeScript/Java)
+    // Check for 'interface' (TypeScript/Java) — but not as a dotted
+    // module-path segment (`use std.common.torch.interface.{...}`)
     if current.lexeme == "interface" && matches!(current.kind, TokenKind::Identifier { .. }) {
-        return Some(CommonMistake::TsInterface);
+        let in_dotted_path =
+            previous.lexeme == "." || next.is_some_and(|n| n.lexeme == ".");
+        if !in_dotted_path {
+            return Some(CommonMistake::TsInterface);
+        }
     }
 
     // Check for 'namespace' (C++)

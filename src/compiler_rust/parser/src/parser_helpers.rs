@@ -718,8 +718,13 @@ impl<'a> Parser<'a> {
             TokenKind::Into => "into".to_string(),
             // Allow math keywords to be used as identifiers (e.g., struct Slice<T>)
             // These are only keywords inside m{} math blocks
-            TokenKind::Slice => "Slice".to_string(),
-            TokenKind::Flat => "Flat".to_string(),
+            // The lexer only produces these tokens for the LOWERCASE source
+            // text ("slice", "flat") — capitalized names lex as plain
+            // identifiers — so the identifier must be the literal lexeme.
+            // Capitalizing here silently corrupted field names like `slice:`
+            // into "Slice" (SliceIter HIR lowering failure, 2026-06-12).
+            TokenKind::Slice => "slice".to_string(),
+            TokenKind::Flat => "flat".to_string(),
             // Allow 'alias' to be used as identifier (e.g., `with resource as alias:`)
             // The 'alias' keyword is only used in type aliasing context: `alias NewType = OldType`
             TokenKind::Alias => "alias".to_string(),
@@ -929,10 +934,10 @@ impl<'a> Parser<'a> {
             TokenKind::Static => "static", // Allow "static" (contextual keyword)
             TokenKind::Default => "default", // Allow "default" (contextual keyword)
             // Allow math keywords in paths/exports
-            TokenKind::Slice => "Slice",
+            TokenKind::Slice => "slice",
             // Note: 'tensor' is no longer a keyword — it's a regular identifier (BUG-004 fix)
-            TokenKind::Grid => "Grid",
-            TokenKind::Flat => "Flat",
+            TokenKind::Grid => "grid",
+            TokenKind::Flat => "flat",
             // Allow additional keywords in module paths
             TokenKind::Repr => "repr",
             TokenKind::Super => "super",

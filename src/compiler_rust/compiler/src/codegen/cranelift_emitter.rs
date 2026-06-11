@@ -705,12 +705,17 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         Ok(())
     }
     fn emit_box_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
-        let val = self
+        let mut val = self
             .ctx
             .vreg_values
             .get(&value)
             .copied()
             .unwrap_or_else(|| self.builder.ins().f64const(0.0));
+        // f32 VRegs (e.g. struct fields typed f32) flow into BoxFloat too;
+        // bitcasting f32 straight to i64 is a 32-vs-64-bit verifier error.
+        if self.builder.func.dfg.value_type(val) == types::F32 {
+            val = self.builder.ins().fpromote(types::F64, val);
+        }
         let bits = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
         let three = self.builder.ins().iconst(types::I64, 3);
         let shifted = self.builder.ins().ushr(bits, three);

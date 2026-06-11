@@ -1,6 +1,6 @@
 # Vulkan Renderer Specification
 
-> 1. var backend = VulkanBackend create
+> <details>
 
 <!-- sdn-diagram:id=vulkan_renderer_spec.arch -->
 <details class="sdn-source">
@@ -42,7 +42,7 @@ vulkan_renderer_spec -> std
 
 #### creates an uninitialized Vulkan backend object
 
-1. var backend = VulkanBackend create
+- var backend = VulkanBackend create
    - Expected: backend.name() equals `vulkan`
    - Expected: backend.width() equals `0`
    - Expected: backend.height() equals `0`
@@ -67,10 +67,10 @@ expect(backend.read_pixels().len()).to_equal(0)
 
 #### reports either initialized state or a diagnostic
 
-1. var backend = VulkanBackend create
+- var backend = VulkanBackend create
    - Expected: backend.width() equals `8`
    - Expected: backend.height() equals `8`
-2. backend shutdown
+- backend shutdown
    - Expected: backend.read_pixels().len() equals `0`
 
 
@@ -98,13 +98,13 @@ else:
 
 #### clear and readback work when Vulkan initializes
 
-1. var backend = VulkanBackend create
-2. backend clear
-3. backend present
+- var backend = VulkanBackend create
+- backend clear
+- backend present
    - Expected: pixels.len() equals `64`
    - Expected: pixel_at(pixels, 0, 0, 8) equals `bg`
    - Expected: pixel_at(pixels, 7, 7, 8) equals `bg`
-4. backend shutdown
+- backend shutdown
 
 
 <details>
@@ -130,14 +130,14 @@ if backend.init(8, 8):
 
 #### draw_rect_filled updates only the requested region when Vulkan initializes
 
-1. var backend = VulkanBackend create
-2. backend clear
-3. backend draw rect filled
-4. backend present
+- var backend = VulkanBackend create
+- backend clear
+- backend draw rect filled
+- backend present
    - Expected: pixel_at(pixels, 3, 3, 8) equals `fg`
    - Expected: pixel_at(pixels, 0, 0, 8) equals `bg`
    - Expected: pixel_at(pixels, 7, 7, 8) equals `bg`
-5. backend shutdown
+- backend shutdown
 
 
 <details>

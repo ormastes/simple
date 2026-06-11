@@ -466,3 +466,38 @@ Updated: 2026-06-11
 - Update backend startup/render evidence set first.
 - Capture GPU/font offload decision proofs second.
 - Continue pure Simple text/layout optimization with explicit behavior-preservation checks.
++# GUI/Backend Performance Agent Task Plan
++
++Lane: ongoing Simple GUI/backend performance convergence  
++Updated: 2026-06-11
++
++## Completed (already pushed)
++
++- `e0a0ec15f0c60d96dd320054e02c8309229e54ce` — `perf(gui): carry browser text line widths`
++- `248bf87` — glyph fallback scan removal
++- `c166d` — backend preference lanes
++- `97ed` — DirectX backend order
++- `2dc841a399` — font offload backend order helpers exposed
++- Engine2D heuristic renderer now reuses precomputed fixture-marker booleans for fixture dispatch and wm/simple mark painting, avoiding HTML rescans per branch
++
++## Current remaining work
++
++1. Collect and record additional startup/render evidence (timing + throughput + parity)
++   - Add evidence artifacts for the latest startup/render behavior in the same shape as existing perf evidence.
++   - Update plan/spec references to point to the new evidence.
++2. Add Engine2D font offload evidence wrappers
++   - Select preferred vector/bitmap offload backend order through Engine2D wrappers before producing evidence.
++   - Demonstrate measured proof of GPU/font offload behavior for both vectors and bitmaps (or explicit typed unavailability).
++   - Ensure evidence includes decision path and fallback behavior.
++3. Execute focused pure Simple GUI text/layout optimization pass
++   - Target isolated hot-path opportunities in text layout, line width handling, and browser text path.
++   - Keep changes small and attributable with before/after measurements.
++4. Preserve app behavior
++   - Keep rendering semantics and UI behavior unchanged while tuning performance.
++   - Add/refresh regression checks if behavior drift risk is introduced by any micro-optimization.
++
++## Near-term handoff priorities
++
++- Update backend startup/render evidence set first (highest priority for verify/readability).
++- Capture GPU/font offload decision proofs second (required for performance claim closure).
++- Then do pure Simple text/layout optimization pass with explicit behavior-preservation checks.

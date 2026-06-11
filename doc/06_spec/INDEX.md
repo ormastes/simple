@@ -4,16 +4,23 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
-- **Stubs Remaining:** 0
-- **Total Lines:** 163
+- **Total Features:** 2
+- **Complete Documentation:** 0 (0%)
+- **Stubs Remaining:** 2
+- **Total Lines:** 0
+- **Warnings:** 2
 
 ---
 
-## Runtime Concurrency (1 features)
+## Standard Library (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Multicore Green Feature Tracking Specification](test/03_system/feature/usage/multicore_green_tracking_spec.md) | Current | N/A | 7 | 60% | 163 lines |
+| [Gpu Memory Roundtrip Specification](test/01_unit/lib/nogc_async_mut/gpu/gpu_memory_roundtrip_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
+
+## Application (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
 

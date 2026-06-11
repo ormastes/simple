@@ -7,7 +7,7 @@ use std.nogc_async_mut.gpu.device.{Gpu, GpuBackend}
 use std.nogc_async_mut.torch.sffi.{
     rt_torch_tensor_zeros, rt_torch_copy_data_to_cpu, spl_i64_is_zero,
     spl_f64_to_bits, rt_dyn_torch_tensor_from_bits_1d,
-    rt_torch_torchtensor_cuda as rt_torch_to_cuda,
+    rt_torch_torchtensor_cuda,
     rt_torch_torchtensor_cpu as rt_torch_to_cpu,
     rt_torch_torchtensor_free as rt_torch_free,
     rt_torch_torchtensor_clone as rt_torch_clone
@@ -16,15 +16,27 @@ use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i32, rt_ptr_write_
 
 class GpuArray[T]:
     backend: GpuBackend
-    device_id: i32
+    device_id: i64
     count: i64
     torch_handle: i64
+    host_buf: [f32]          # CPU/None_ backend store — gives upload/download round-trip parity with GPU backends
 
     fn size_bytes() -> i64:
         self.count * 4
 
     me upload(data: [f32]) -> bool:
+        """Upload host data to GPU buffer.
+
+        Args:
+            data: Host f32 array. Length must equal self.count.
+
+        Returns:
+            true on success, false on size mismatch or allocation failure.
+            On CPU/None_ backend the data is stored host-side so that
+            download() round-trips identically to the GPU backends.
+        """
         if data.len() != self.count:
+            eprint("GpuArray.upload: size mismatch — expected " + self.count.to_text() + " got " + data.len().to_text())
             return false
 
         match self.backend:
@@ -50,7 +62,7 @@ class GpuArray[T]:
                 if spl_i64_is_zero(handle) != 0:
                     return false
 
-                val gpu_handle = rt_torch_to_cuda(handle, self.device_id)
+                val gpu_handle = rt_torch_torchtensor_cuda(handle, self.device_id)
                 rt_torch_free(handle)
                 if spl_i64_is_zero(gpu_handle) != 0:
                     return false
@@ -60,7 +72,9 @@ class GpuArray[T]:
                 self.torch_handle = gpu_handle
                 true
             case _:
-                false
+                # CPU/None_ backend: store host-side for download() parity.
+                self.host_buf = data
+                true
 
     fn download() -> [f32]:
         match self.backend:
@@ -104,8 +118,7 @@ class GpuArray[T]:
                 rt_free(raw_ptr, bytes)
                 result
             case _:
-                var result: [f32] = []
-                result
+                self.host_buf
 
     fn copy_to(other: GpuArray[T]) -> bool:
         match self.backend:
@@ -122,7 +135,7 @@ class GpuArray[T]:
 
                 var copied_handle = cloned
                 if self.device_id != other.device_id:
-                    copied_handle = rt_torch_to_cuda(cloned, other.device_id)
+                    copied_handle = rt_torch_torchtensor_cuda(cloned, other.device_id)
                     rt_torch_free(cloned)
                     if spl_i64_is_zero(copied_handle) != 0:
                         return false
@@ -133,7 +146,11 @@ class GpuArray[T]:
                 other.count = self.count
                 true
             case _:
-                false
+                if other.backend == GpuBackend.Cuda:
+                    return false
+                other.host_buf = self.host_buf
+                other.count = self.count
+                true
 
     fn copy() -> GpuArray[T]:
         if spl_i64_is_zero(self.torch_handle) != 0:
@@ -141,7 +158,8 @@ class GpuArray[T]:
                 backend: self.backend,
                 device_id: self.device_id,
                 count: self.count,
-                torch_handle: 0
+                torch_handle: 0,
+                host_buf: self.host_buf
             )
 
         val cloned = rt_torch_clone(self.torch_handle)
@@ -149,8 +167,34 @@ class GpuArray[T]:
             backend: self.backend,
             device_id: self.device_id,
             count: self.count,
-            torch_handle: cloned
+            torch_handle: cloned,
+            host_buf: self.host_buf
         )
+
+    fn is_valid() -> bool:
+        """Return true if the GPU buffer handle is non-null.
+
+        On CPU/None_ backend always returns true (no handle needed).
+        On CUDA backend returns false if allocation failed at creation time.
+        """
+        match self.backend:
+            case GpuBackend.Cuda:
+                spl_i64_is_zero(self.torch_handle) == 0
+            case _:
+                true
+
+    me free():
+        """Explicitly free GPU buffer. Idempotent — safe to call multiple times.
+
+        Prefer letting drop() run at scope exit. Call free() only when you
+        need deterministic early release (e.g., before a long-running loop).
+        After free(), is_valid() returns false and upload/download are no-ops.
+        """
+        if spl_i64_is_zero(self.torch_handle) == 0:
+            rt_torch_free(self.torch_handle)
+            self.torch_handle = 0
+        var empty: [f32] = []
+        self.host_buf = empty
 
     fn drop():
         if spl_i64_is_zero(self.torch_handle) == 0:
@@ -165,26 +209,39 @@ fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
                     backend: GpuBackend.Cuda,
                     device_id: gpu.device_id,
                     count: count,
-                    torch_handle: 0
+                    torch_handle: 0,
+                    host_buf: []
                 )
 
-            val gpu_handle = rt_torch_to_cuda(cpu_handle, gpu.device_id)
+            val gpu_handle = rt_torch_torchtensor_cuda(cpu_handle, gpu.device_id)
             rt_torch_free(cpu_handle)
             GpuArray(
                 backend: GpuBackend.Cuda,
                 device_id: gpu.device_id,
                 count: count,
-                torch_handle: gpu_handle
+                torch_handle: gpu_handle,
+                host_buf: []
             )
         case _:
+            # CPU fallback mirrors the CUDA zeros allocation so download()
+            # returns `count` zeros on both paths.
+            var zeros: [f32] = []
+            var i = 0
+            while i < count:
+                zeros.push(0.0f32)
+                i = i + 1
             GpuArray(
                 backend: GpuBackend.None_,
                 device_id: -1,
                 count: count,
-                torch_handle: 0
+                torch_handle: 0,
+                host_buf: zeros
             )
 
 fn gpu_alloc_upload[T](gpu: Gpu, data: [T]) -> GpuArray[T]:
+    # NOTE: upload() only handles [f32] data. For other types T, the
+    # upload call is a no-op and the array will be empty on GPU.
+    # TODO: add typed upload variants (upload_f64, upload_i32, etc.)
     var arr = gpu_alloc(gpu, data.len())
     arr.upload(data)
     arr
@@ -194,3 +251,18 @@ fn gpu_alloc_zeros[T](gpu: Gpu, count: i64) -> GpuArray[T]:
 
 fn gpu_copy[T](source: GpuArray[T]) -> GpuArray[T]:
     source.copy()
+
+fn gpu_free[T](arr: GpuArray[T]):
+    """Explicitly free a GPU array. Equivalent to arr.free().
+
+    Provided for callers that prefer a free-function style consistent
+    with the gc_async_mut/gpu tier's gpu_free() signature.
+    """
+    arr.free()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GpuArray
+export gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros, gpu_copy, gpu_free

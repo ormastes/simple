@@ -332,6 +332,29 @@ fn _simple_binary_is_valid(candidate: text) -> bool:
     val (stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 5000)
     exit_code == 0 and stdout != ""
 
+fn _simple_binary_supports_backend(candidate: text, backend_name: text) -> bool:
+    if not _simple_binary_is_valid(candidate):
+        return false
+    if backend_name != "llvm":
+        return true
+    val probe_args = [
+        "native-build",
+        "--backend", "llvm",
+        "--source", "src",
+        "--entry", "src/app/cli/main.spl",
+        "--target", "definitely-invalid-target",
+        "-o", "/tmp/simple_backend_probe.elf",
+        "--linker-script", "examples/09_embedded/simple_os/arch/riscv64/linker.ld"
+    ]
+    val (_stdout, stderr, _exit_code) = rt_process_run_timeout(candidate, probe_args, 5000)
+    if stderr.contains("native backend 'llvm' is not available"):
+        return false
+    if stderr.contains("LLVM backend requested but 'llvm' feature not enabled"):
+        return false
+    if stderr.contains("No suitable version of LLVM was found"):
+        return false
+    true
+
 fn _find_simple_binary() -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "":
@@ -360,7 +383,7 @@ fn _find_simple_binary() -> text:
 fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
     if backend_name == "llvm" and target.arch == Architecture.X86 and _simple_binary_supports_backend("src/compiler_rust/target/bootstrap/simple", backend_name):
         return "src/compiler_rust/target/bootstrap/simple"
-    if backend_name == "llvm" and _simple_binary_is_valid("src/compiler_rust/target/release/simple"):
+    if backend_name == "llvm" and _simple_binary_supports_backend("src/compiler_rust/target/release/simple", backend_name):
         return "src/compiler_rust/target/release/simple"
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "" and _simple_binary_supports_backend(env_bin, backend_name):
@@ -437,7 +460,7 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     envs.join(" ")
 
 fn _is_ssh_live_target(target: OsTarget) -> bool:
-    target.entry == "examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl"
+    target.entry == "examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl" or _is_riscv64_ssh_live_target(target)
 
 fn _is_riscv64_ssh_live_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl" and

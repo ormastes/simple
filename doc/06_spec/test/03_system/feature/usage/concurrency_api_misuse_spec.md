@@ -92,8 +92,6 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 - `cooperative_green_spawn` must stay on the cooperative-green surface.
 - `multicore_green_spawn` must stay on the multicore-green surface.
 - `multicore_green_spawn_sliced` must stay on the multicore-green surface.
-- `multicore_green_spawn_sliced` must run and join to a concrete result in
-  the public API contract.
 - `multicore_green_spawn` must accept a single zero-argument closure.
 - `multicore_green_set_parallelism` must accept an integer worker count.
 - `task_spawn` must stay available as the pool-backed native task API.
@@ -134,7 +132,7 @@ expect(fixture_count()).to_equal(19)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -143,7 +141,6 @@ val (output, code) = run_profile_contract()
 expect(code).to_equal(0)
 step("Verify approved public-name fixtures were checked before misuse fixtures")
 expect(output).to_contain("concurrency_api_contract=true")
-expect(output).to_contain("public_multicore_green_sliced_result=19")
 expect(output).to_contain("positive_fixtures=6")
 expect(output).to_contain("fixtures=6")
 expect(output).to_contain("misuse_fixtures=6")

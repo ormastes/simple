@@ -4,6 +4,8 @@ Feature: `simple_browser_chromium_html_parity`
 
 Current state as of 2026-06-11:
 
+<<<<<<< Conflict 1 of 3
++++++++ Contents of side #1
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
   layers `10..17`, flex rows `18..26`, absolute positioning fixture `27`, and
@@ -13,26 +15,40 @@ Current state as of 2026-06-11:
   main-axis centering fixture `34`, flex cross-axis stretch fixture `35`,
   per-item flex cross-axis alignment fixture `36`, and centered flex gap
   fixture `37`.
+%%%%%%% Changes from base to side #2
+-- The authoritative current pixel harness in this worktree is
+-  `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
+-  layers `10..17`, and flex rows `18..25`.
++- The authoritative current harness in this worktree is still the older
++  `src/app/wm_compare/html_compat.spl` catalog covering fixtures
++  `00..07` and CSS layers `10..17`.
+>>>>>>> Conflict 1 of 3 ends
 - The newer focused fixture lane described in some earlier progress notes
   (`146+`, client-rect/box-model parity rows, no-cheat guard summaries) is not
   present in the current worktree and must not be treated as current evidence.
 - Current checked-in parity scope is still a mixed bitmap/golden lane. It is
   useful for regression pressure, but it is not yet broad Chromium layout-engine
-  parity. Exact Chrome/Simple pixel rows now exist for flex fixtures 18, 19,
-  20, 21, 23, 24, and 25; fixture 22 remains blocked by text glyph
-  raster/default font differences.
-- Important live-run caveat: the current CLI catalog reports 25 fixtures and
-  `test/09_baselines/html_compat/18_flex_grow_weights/report.sdn` contains an
-  exact checked-in row, but a fresh live source-B run on 2026-06-11 still times
-  out:
-  `SIMPLE_LIB=src bin/simple run src/app/wm_compare/html_compat.spl --only=18_flex_grow_weights`
-  exits `2` with `timed out after 20000 ms while rendering source B in child process`.
-  Direct worker execution renders fixture 18 in about `0.65s`, and the parent
-  harness passes in about `2.3s` when `SIMPLE_BINARY` points to the active
-  compiler, so the remaining blocker is automatic child-runtime discovery in
-  isolated/checker environments. Do not treat the checked-in fixture-18 pixel
-  row as portable live end-to-end proof until that runtime-selection issue is
-  fixed without bypassing pure Simple layout/raster logic.
+<<<<<<< Conflict 2 of 3
+%%%%%%% Changes from base to side #1
+   parity. Exact Chrome/Simple pixel rows now exist for flex fixtures 18, 19,
+   20, 21, 23, 24, and 25; fixture 22 remains blocked by text glyph
+   raster/default font differences.
+-- Important live-run caveat: the current CLI catalog reports 24 fixtures and
++- Important live-run caveat: the current CLI catalog reports 25 fixtures and
+   `test/09_baselines/html_compat/18_flex_grow_weights/report.sdn` contains an
+   exact checked-in row, but a fresh live source-B run on 2026-06-11 still times
+   out:
+   `SIMPLE_LIB=src bin/simple run src/app/wm_compare/html_compat.spl --only=18_flex_grow_weights`
+   exits `2` with `timed out after 20000 ms while rendering source B in child process`.
+   Direct worker execution renders fixture 18 in about `0.65s`, and the parent
+   harness passes in about `2.3s` when `SIMPLE_BINARY` points to the active
+   compiler, so the remaining blocker is automatic child-runtime discovery in
+   isolated/checker environments. Do not treat the checked-in fixture-18 pixel
+   row as portable live end-to-end proof until that runtime-selection issue is
+   fixed without bypassing pure Simple layout/raster logic.
++++++++ Contents of side #2
+  parity.
+>>>>>>> Conflict 2 of 3 ends
 - Text input/titlebar-related fixtures that do exist in the current lane are
   `04_button`, `05_text_input`, `06_card_panel`, and `07_scrollable_list`.
 
@@ -49,11 +65,6 @@ Manual/focused parity checks:
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=05_text_input`
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=06_card_panel`
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=07_scrollable_list`
-- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=19_flex_shrink_weights --update-baseline --simple-timeout-ms=1000`
-- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=20_flex_basis_override --update-baseline --simple-timeout-ms=1000`
-- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=21_flex_wrap_basic --update-baseline --simple-timeout-ms=1000`
-- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=23_flex_wrap_align_content_center --update-baseline --simple-timeout-ms=1000`
-- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=24_flex_wrap_reverse_basic --update-baseline --simple-timeout-ms=1000`
 
 Regression checks:
 
@@ -66,21 +77,6 @@ Open gaps tied to the active browser objective:
 - No current checked-in focused fixture lane for deeper flex/grid/LayoutNG-style
   geometry comparison.
 - No current direct Chromium layout extraction/access path in this worktree.
-- Pixel rows for `19_flex_shrink_weights`, `20_flex_basis_override`,
-  `21_flex_wrap_basic`, `23_flex_wrap_align_content_center`, and
-  `24_flex_wrap_reverse_basic` now write real Chrome and Simple P6 PPMs through
-  live Chromium capture plus the Simple software layout renderer and compare
-  byte-identical. Fixture `22_flex_align_items_baseline` writes both PPMs but
-  remains uncommitted as an accepted row because the text glyph area differs by
-  475 pixels after aligning the default text color with Chromium black; exact
-  completion requires browser-like font metrics, raster, and antialiasing
-  rather than tolerance or copied browser pixels.
-- Pixel fixture `18_flex_grow_weights` has checked-in exact PPMs and report
-  metadata, and it passes the live parent harness when `SIMPLE_BINARY` is set
-  to the active compiler. The same run currently times out when automatic child
-  runtime discovery falls through in clean/isolated worktrees. This is tracked
-  separately as
-  `doc/08_tracking/bug/html_compat_fixture18_live_source_b_timeout_2026-06-11.md`.
 - Existing `05_text_input` bitmap baseline is still non-accepted evidence in
   `test/09_baselines/html_compat/05_text_input/report.sdn`, so input visual
   parity remains incomplete.
@@ -159,15 +155,6 @@ Open gaps tied to the active browser objective:
     intrinsic width instead of implicit grow width, and apply a focused
     baseline offset for row-flex text items, plus focused text-label mapping on
     the Simple side
-  - evidence update: Chromium/Electron geometry capture now carries computed
-    text/style metadata (`display`, `align-items`, `font-size`,
-    `line-height`, `font-family`, `font-weight`, and `color`) in the structural
-    box report. This records the browser text stack behind the remaining
-    fixture-22 pixel blocker without treating font rasterization as solved.
-    The same evidence now also records subpixel client rects (`rect_left`,
-    `rect_top`, `rect_width`, and `rect_height`) alongside rounded integer
-    geometry, exposing Chromium's exact box boundaries for follow-up layout
-    parity work without changing the integer geometry comparison gate.
 - The same live geometry lane now passes for `23_flex_wrap_align_content_center`:
   - result: `layout_match`, `mismatch_count=0`
   - focused fix: parse `align-content: center`, keep explicit multi-line flex
@@ -515,60 +502,6 @@ Open gaps tied to the active browser objective:
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
     now reports `fixture_count=70`, `pass_count=70`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
-- The same live geometry lane now passes for
-  `74_flex_gap_justify_unsafe_center`:
-  - result: `layout_match`, `mismatch_count=0`
-  - focused result: records Chrome's row flex `gap:12px` plus
-    `justify-content:unsafe center`; the Pure Simple parser preserves the
-    overflow-position prefix and applies the same centered main-axis placement
-  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=71`, `pass_count=71`, `fail_count=0`, and
-    `blur_or_tolerance_used=false`
-- The same live geometry lane now passes for
-  `75_flex_gap_justify_unsafe_center_overflow`:
-  - result: `layout_match`, `mismatch_count=0`
-  - focused result: records Chrome's row flex `gap:12px` plus
-    nominally overflowing `justify-content:unsafe center`; Chromium resolves
-    default `flex-shrink:1` before alignment, so the Pure Simple renderer now
-    keeps the unsafe overflow-position prefix but does not apply a pre-shrink
-    negative center offset
-  - renderer update: row and column flex `unsafe center` remain center-aligned
-    for positive free space while shrink-resolved overflow starts from the
-    Chrome-matched start edge
-  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=72`, `pass_count=72`, `fail_count=0`, and
-    `blur_or_tolerance_used=false`
-- The same live geometry lane now passes for
-  `76_flex_gap_justify_unsafe_center_no_shrink_overflow`:
-  - result: `layout_match`, `mismatch_count=0`
-  - focused result: records Chrome's row flex `gap:12px`, `flex-shrink:0`,
-    and overflowing `justify-content:unsafe center`; the Pure Simple renderer
-    now treats `flex-shrink:0` as zero shrink weight and applies the same
-    negative unsafe center offset
-  - renderer update: fixed shrink-factor accounting so explicit
-    `flex-shrink:0` no longer behaves like `flex-shrink:1`
-  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=73`, `pass_count=73`, `fail_count=0`, and
-    `blur_or_tolerance_used=false`
-- The same live geometry lane now passes for
-  `77_flex_gap_justify_safe_center_no_shrink_overflow`:
-  - result: `layout_match`, `mismatch_count=0`
-  - focused result: records Chrome's row flex `gap:12px`, `flex-shrink:0`,
-    and overflowing `justify-content:safe center`; the Pure Simple renderer
-    preserves `safe-center` and falls back to start-edge placement instead of
-    applying the unsafe negative center offset
-  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=74`, `pass_count=74`, `fail_count=0`, and
-    `blur_or_tolerance_used=false`
-- The same live geometry lane now passes for
-  `78_flex_column_gap_justify_unsafe_center_no_shrink_overflow`:
-  - result: `layout_match`, `mismatch_count=0`
-  - focused result: records Chrome's column flex `gap:12px`, `flex-shrink:0`,
-    and overflowing `justify-content:unsafe center`; the Pure Simple renderer
-    now applies the same negative vertical unsafe center offset
-  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=75`, `pass_count=75`, `fail_count=0`, and
-    `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
     passes with one listed scenario and zero failures
@@ -613,138 +546,149 @@ Open gaps tied to the active browser objective:
     `24_flex_wrap_reverse_basic` after fixing closing-tag stack truncation:
     `scripts/check/check-electron-html-compat-geometry-evidence.shs` reports
     `layout_match`, `mismatch_count=0`
-- Source-B child runtime discovery now fails fast instead of timing out in
-  isolated worktrees:
-  - `src/app/wm_compare/html_compat_part1.spl` and
-    `src/app/wm_compare/site_corpus_compat.spl` validate configured/local
-    Simple child candidates with a bounded `--version` probe before launching
-    the render worker
-  - `SIMPLE_BINARY=/home/ormastes/dev/pub/simple/bin/simple ... html_compat.spl
-    --only=18_flex_grow_weights` still reports `RESULT: EXACT match`,
-    `different_pixels=0`, with no blur/tolerance/resolution workaround
-  - the same isolated worktree command without a runnable local child runtime
-    exits in under a second with `no runnable Simple binary found for source B
-    child; set SIMPLE_BINARY to the active runtime`
-  - `site_corpus_compat.spl --only=site_0_google` has the same fast-fail guard
-    for its bounded source-B watchdog path
-- Famous-site corpus verification now uses the canonical checked-in baseline
-  location consistently:
-  - Node corpus tools and the SSpec manual/spec now point at
-    `test/09_baselines/famous_site_corpus`, matching
-    `src/app/wm_compare/site_corpus.spl`
-  - existing corpus `report.sdn`, `report.production.sdn`, and manifest
-    metadata paths were migrated from the stale `test/baselines/...` location
-    without changing PPM pixels or Chromium metrics
-  - `simple test test/03_system/gui/wm_compare/famous_site_corpus_spec.spl
-    --mode=interpreter --clean --format json` now reports `45` passed and `0`
-    failed
-  - `verify_famous_site_corpus_completion.js` reports `STATUS: PASS`,
-    `reportCount=132`, `checkedPixelReportCount=132`, and
-    `computedMismatchCount=0`
-  - `verify_famous_site_production_probe.js --sample=site_0_google` reports
-    `STATUS: PASS` while preserving the honest production glyph/compositing
-    divergence: `differentPixels=2717`, `computedDifferentPixels=2717`, and
-    `chromeGlyphCompositingParity=false`
-- Shared MDI titlebar widget evidence now locks down the backend-neutral
-  titlebar control contract:
-  - `ui_shared_mdi_titlebar_widget_spec.spl` asserts the exact titlebar button
-    markup, including `class="simple-titlebar-widget"`,
-    `data-simple-titlebar-widget="button"`, the routed `data-action`, and
-    `type="button"` so the titlebar control cannot regress into an implicit
-    form submit or body-only button
-  - the same spec asserts the flex titlebar widget container CSS and the custom
-    titlebar widget color CSS used by the shared renderer source
-  - live Linux Electron evidence remains green through
-    `wm_browser_event_routing_evidence_spec.spl`, which passed `3/3` and
-    verifies titlebar drag/maximize routing, title command routing, titlebar
-    text input traffic, body input events, traffic-button computed styles, and
-    `blur_or_tolerance_used=false`
-- Full famous-site div-geometry evidence is no longer chunk-only in the current
-  runtime:
-  - `site_corpus_div_geometry_summary_cli.spl 0 0 160 120 ... 132` passes in a
-    single Simple process with `selected=132`, `matched=132`, `mismatched=0`,
-    and `missing_metrics=0`
-  - `structural_layout_report_spec.spl` now includes a regression scenario for
-    `build_site_corpus_div_geometry_summary(0, 160, 120)`, covering the
-    all-row aggregate API that previously had a segfault tracker
-  - the chunked wrapper remains a fallback diagnostic, but
-    `doc/09_report/famous_site_corpus_div_geometry_full_2026-06-11.md` is the
-    current single-command evidence; it uses no blur, tolerance, downscaling,
-    copied Chromium pixels, or text antialiasing normalization
-- macOS MDI live-window evidence is now MDI-specific while remaining honestly
-  host-gated:
-  - `scripts/check/check-macos-gui-live-window-evidence.shs` launches
-    `src/app/ui_shared_mdi/main.spl` by default instead of the generic GUI
-    sample
-  - `src/app/ui_shared_mdi/titlebar_contract_probe.spl` emits source-contract
-    fields for the shared MDI titlebar button, body button, text input, and
-    custom titlebar CSS
-  - the macOS capture wrapper now converts the captured window PNG to BMP and
-    emits rendered titlebar widget CSS pixel counts:
-    `macos_gui_live_window_evidence_titlebar_css_pixels`,
-    `macos_gui_live_window_evidence_titlebar_widget_fill_pixels`,
-    `macos_gui_live_window_evidence_titlebar_widget_accent_pixels`, and
-    `macos_gui_live_window_evidence_titlebar_widget_text_pixels`
-  - on a real macOS pass, the wrapper fails if the titlebar widget fill,
-    accent, or text CSS colors are missing from the capture; on Linux these
-    fields stay zero and the lane remains an explicit `requires-macos` skip
-  - `macos_gui_live_window_evidence_spec.spl` checks those MDI contract fields
-    in both lanes, while Linux still reports only
-    `macos_gui_live_window_evidence_status=skip` and
-    `reason=requires-macos` for the live macOS window/capture evidence
-- Windows native MDI evidence now requires the same titlebar CSS source
-  contract in its host-gated proof file:
-  - `src/os/hosted/hosted_win32_mdi_probe.spl` emits
-    `titlebar_css_present=true` when the terminal MDI HTML contains the shared
-    flex titlebar widget container CSS and the custom titlebar widget color CSS
-  - `scripts/check/check-windows-native-mdi-evidence.shs` and
-    `windows_native_mdi_evidence_spec.spl` fail the Windows pass lane if that
-    field is missing; on Linux this still only proves the explicit
-    `requires-windows` skip path
-  - the Win32 live screenshot validator also requires
-    `titlebar_css_pixels > 19` for the custom titlebar widget green colors and
-    the wrapper exposes that as
-    `windows_native_mdi_evidence_titlebar_css_pixels`
-  - the Win32 hosted probe scans the compositor DIB after Simple Web rendering
-    and requires `rendered_titlebar_css_applied=true`, exposing the exact
-    rendered count as
-    `windows_native_mdi_evidence_rendered_titlebar_css_pixels`
-- Flex main-axis distribution now has a Chromium-captured fixture:
-  - added `25_flex_justify_space_between` to the HTML compatibility catalog
-    and structural geometry probe
-  - `simple_web_html_layout_renderer.spl` parses `justify-content` and applies
-    row-flex positive free-space distribution for `space-between`, `center`,
-    and end alignment when flex-grow/shrink are not consuming the line space
-  - live Electron geometry evidence for fixture 25 reports `layout_match` with
-    `mismatch_count=0`
-  - live Chrome headless geometry manifest evidence now includes fixture 25:
-    `chrome_html_compat_geometry_manifest_evidence_2026-06-11.md` reports
-    `22` fixtures, `22` passes, `0` failures, and
-    `blur_or_tolerance_used=false`
-  - `html_compat_spec.spl` now includes a source-level no-cheat guard for the
-    Chrome geometry manifest wrapper and capture tool, requiring geometry JSON
-    to feed the structural probe and rejecting resize/scale/blur/filter,
-    pixelmatch, canvas, threshold, or image-smoothing shortcuts
-  - the fixture has real `chrome.ppm` captured via the existing Electron
-    `--update-baseline --skip-simple` path, and the follow-up Simple comparison
-    reports `RESULT: EXACT match`, `different_pixels=0`; no blur, tolerance,
-    copied Simple pixels, or resolution adjustment was used
-- Native focused geometry evidence now executes past the previous text-method
-  lowering blocker:
-  - `html_compat_geometry_probe_native_full_smoke.spl` now checks both
-    `06_card_panel` and `24_flex_wrap_reverse_basic`
-  - interpreter mode for that smoke reports `fixture=06_card_panel count=3`,
-    `fixture=24_flex_wrap_reverse_basic count=4`, and `status=pass`
-  - native compilation no longer fails first on the local iterable loops in the
-    focused renderer/probe/Draw IR closure; the `parse_html()` close-tag stack
-    path also avoids `pstack.pop()` by copying the kept stack prefix
-  - the Rust seed LLVM builtin-method path now maps `String.substring` to the
-    existing `rt_slice` runtime instead of nonexistent `rt_string_substring`;
-    the Pure Simple MIR lowering mirrors typed `text.substring` / `text.slice`
-    to native string slice calls
-  - rebuilt bootstrap compiler evidence:
-    `compile html_compat_geometry_probe_native_full_smoke.spl --native` emits
-    the native binary, and running it prints `status=pass`
-  - this proves the focused native geometry smoke executes; it does not prove
-    full Chromium layout parity, macOS live-window evidence, or Windows host
-    evidence for the broader objective
+<<<<<<< Conflict 3 of 3
+%%%%%%% Changes from base to side #1
+ - Source-B child runtime discovery now fails fast instead of timing out in
+   isolated worktrees:
+   - `src/app/wm_compare/html_compat_part1.spl` and
+     `src/app/wm_compare/site_corpus_compat.spl` validate configured/local
+     Simple child candidates with a bounded `--version` probe before launching
+     the render worker
+   - `SIMPLE_BINARY=/home/ormastes/dev/pub/simple/bin/simple ... html_compat.spl
+     --only=18_flex_grow_weights` still reports `RESULT: EXACT match`,
+     `different_pixels=0`, with no blur/tolerance/resolution workaround
+   - the same isolated worktree command without a runnable local child runtime
+     exits in under a second with `no runnable Simple binary found for source B
+     child; set SIMPLE_BINARY to the active runtime`
+   - `site_corpus_compat.spl --only=site_0_google` has the same fast-fail guard
+     for its bounded source-B watchdog path
+ - Famous-site corpus verification now uses the canonical checked-in baseline
+   location consistently:
+   - Node corpus tools and the SSpec manual/spec now point at
+     `test/09_baselines/famous_site_corpus`, matching
+     `src/app/wm_compare/site_corpus.spl`
+   - existing corpus `report.sdn`, `report.production.sdn`, and manifest
+     metadata paths were migrated from the stale `test/baselines/...` location
+     without changing PPM pixels or Chromium metrics
+   - `simple test test/03_system/gui/wm_compare/famous_site_corpus_spec.spl
+     --mode=interpreter --clean --format json` now reports `45` passed and `0`
+     failed
+   - `verify_famous_site_corpus_completion.js` reports `STATUS: PASS`,
+     `reportCount=132`, `checkedPixelReportCount=132`, and
+     `computedMismatchCount=0`
+   - `verify_famous_site_production_probe.js --sample=site_0_google` reports
+     `STATUS: PASS` while preserving the honest production glyph/compositing
+     divergence: `differentPixels=2717`, `computedDifferentPixels=2717`, and
+     `chromeGlyphCompositingParity=false`
+ - Shared MDI titlebar widget evidence now locks down the backend-neutral
+   titlebar control contract:
+   - `ui_shared_mdi_titlebar_widget_spec.spl` asserts the exact titlebar button
+     markup, including `class="simple-titlebar-widget"`,
+     `data-simple-titlebar-widget="button"`, the routed `data-action`, and
+     `type="button"` so the titlebar control cannot regress into an implicit
+     form submit or body-only button
+   - the same spec asserts the flex titlebar widget container CSS and the custom
+     titlebar widget color CSS used by the shared renderer source
+   - live Linux Electron evidence remains green through
+     `wm_browser_event_routing_evidence_spec.spl`, which passed `3/3` and
+     verifies titlebar drag/maximize routing, title command routing, titlebar
+     text input traffic, body input events, traffic-button computed styles, and
+     `blur_or_tolerance_used=false`
+ - Full famous-site div-geometry evidence is no longer chunk-only in the current
+   runtime:
+   - `site_corpus_div_geometry_summary_cli.spl 0 0 160 120 ... 132` passes in a
+     single Simple process with `selected=132`, `matched=132`, `mismatched=0`,
+     and `missing_metrics=0`
+   - `structural_layout_report_spec.spl` now includes a regression scenario for
+     `build_site_corpus_div_geometry_summary(0, 160, 120)`, covering the
+     all-row aggregate API that previously had a segfault tracker
+   - the chunked wrapper remains a fallback diagnostic, but
+     `doc/09_report/famous_site_corpus_div_geometry_full_2026-06-11.md` is the
+     current single-command evidence; it uses no blur, tolerance, downscaling,
+     copied Chromium pixels, or text antialiasing normalization
+ - macOS MDI live-window evidence is now MDI-specific while remaining honestly
+   host-gated:
+   - `scripts/check/check-macos-gui-live-window-evidence.shs` launches
+     `src/app/ui_shared_mdi/main.spl` by default instead of the generic GUI
+     sample
+   - `src/app/ui_shared_mdi/titlebar_contract_probe.spl` emits source-contract
+     fields for the shared MDI titlebar button, body button, text input, and
+     custom titlebar CSS
++  - the macOS capture wrapper now converts the captured window PNG to BMP and
++    emits rendered titlebar widget CSS pixel counts:
++    `macos_gui_live_window_evidence_titlebar_css_pixels`,
++    `macos_gui_live_window_evidence_titlebar_widget_fill_pixels`,
++    `macos_gui_live_window_evidence_titlebar_widget_accent_pixels`, and
++    `macos_gui_live_window_evidence_titlebar_widget_text_pixels`
++  - on a real macOS pass, the wrapper fails if the titlebar widget fill,
++    accent, or text CSS colors are missing from the capture; on Linux these
++    fields stay zero and the lane remains an explicit `requires-macos` skip
+   - `macos_gui_live_window_evidence_spec.spl` checks those MDI contract fields
+     in both lanes, while Linux still reports only
+     `macos_gui_live_window_evidence_status=skip` and
+     `reason=requires-macos` for the live macOS window/capture evidence
++- Windows native MDI evidence now requires the same titlebar CSS source
++  contract in its host-gated proof file:
++  - `src/os/hosted/hosted_win32_mdi_probe.spl` emits
++    `titlebar_css_present=true` when the terminal MDI HTML contains the shared
++    flex titlebar widget container CSS and the custom titlebar widget color CSS
++  - `scripts/check/check-windows-native-mdi-evidence.shs` and
++    `windows_native_mdi_evidence_spec.spl` fail the Windows pass lane if that
++    field is missing; on Linux this still only proves the explicit
++    `requires-windows` skip path
++  - the Win32 live screenshot validator also requires
++    `titlebar_css_pixels > 19` for the custom titlebar widget green colors and
++    the wrapper exposes that as
++    `windows_native_mdi_evidence_titlebar_css_pixels`
++  - the Win32 hosted probe scans the compositor DIB after Simple Web rendering
++    and requires `rendered_titlebar_css_applied=true`, exposing the exact
++    rendered count as
++    `windows_native_mdi_evidence_rendered_titlebar_css_pixels`
+ - Flex main-axis distribution now has a Chromium-captured fixture:
+   - added `25_flex_justify_space_between` to the HTML compatibility catalog
+     and structural geometry probe
+   - `simple_web_html_layout_renderer.spl` parses `justify-content` and applies
+     row-flex positive free-space distribution for `space-between`, `center`,
+     and end alignment when flex-grow/shrink are not consuming the line space
+   - live Electron geometry evidence for fixture 25 reports `layout_match` with
+     `mismatch_count=0`
++  - live Chrome headless geometry manifest evidence now includes fixture 25:
++    `chrome_html_compat_geometry_manifest_evidence_2026-06-11.md` reports
++    `22` fixtures, `22` passes, `0` failures, and
++    `blur_or_tolerance_used=false`
++  - `html_compat_spec.spl` now includes a source-level no-cheat guard for the
++    Chrome geometry manifest wrapper and capture tool, requiring geometry JSON
++    to feed the structural probe and rejecting resize/scale/blur/filter,
++    pixelmatch, canvas, threshold, or image-smoothing shortcuts
+   - the fixture has real `chrome.ppm` captured via the existing Electron
+     `--update-baseline --skip-simple` path, and the follow-up Simple comparison
+     reports `RESULT: EXACT match`, `different_pixels=0`; no blur, tolerance,
+     copied Simple pixels, or resolution adjustment was used
+-- Native focused geometry evidence is still blocked before it can prove
+-  end-to-end native parity:
++- Native focused geometry evidence now executes past the previous text-method
++  lowering blocker:
+   - `html_compat_geometry_probe_native_full_smoke.spl` now checks both
+     `06_card_panel` and `24_flex_wrap_reverse_basic`
+   - interpreter mode for that smoke reports `fixture=06_card_panel count=3`,
+     `fixture=24_flex_wrap_reverse_basic count=4`, and `status=pass`
+   - native compilation no longer fails first on the local iterable loops in the
+     focused renderer/probe/Draw IR closure; the `parse_html()` close-tag stack
+     path also avoids `pstack.pop()` by copying the kept stack prefix
+-  - native now stops on `error: codegen: undefined symbol: str.substring`
+-  - current blocker is tracked in
+-    `doc/08_tracking/bug/html_compat_native_text_method_lowering_blocker_2026-06-11.md`;
+-    do not describe this lane as a proved `06_card_panel` layout zero-box
+-    mismatch until native text-method lowering is fixed and the smoke executes
++  - the Rust seed LLVM builtin-method path now maps `String.substring` to the
++    existing `rt_slice` runtime instead of nonexistent `rt_string_substring`;
++    the Pure Simple MIR lowering mirrors typed `text.substring` / `text.slice`
++    to native string slice calls
++  - rebuilt bootstrap compiler evidence:
++    `compile html_compat_geometry_probe_native_full_smoke.spl --native` emits
++    the native binary, and running it prints `status=pass`
++  - this proves the focused native geometry smoke executes; it does not prove
++    full Chromium layout parity, macOS live-window evidence, or Windows host
++    evidence for the broader objective
++++++++ Contents of side #2
+>>>>>>> Conflict 3 of 3 ends

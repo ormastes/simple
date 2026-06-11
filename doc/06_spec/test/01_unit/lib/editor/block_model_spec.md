@@ -66,17 +66,17 @@ expect(model.block_at(5).kind).to_equal("embed")
 
 #### tracks active block and cursor mapping
 
-1. var model = BlockModel from markdown
+- var model = BlockModel from markdown
    - Expected: model.block_for_line(2) equals `1`
    - Expected: bm_cursor_block_index(model, 5) equals `2`
    - Expected: bm_cursor_block_changed(model, 2) is true
-2. model activate block
+- model activate block
    - Expected: model.active_block equals `1`
    - Expected: model.is_active(1) is true
    - Expected: bm_cursor_block_changed(model, 2) is false
    - Expected: bm_active_block_range(model) equals `2`
    - Expected: render_block_line_span(model.block_at(1)) equals `2`
-3. model deactivate block
+- model deactivate block
    - Expected: model.active_block equals `-1`
 
 
@@ -108,9 +108,9 @@ expect(model.active_block).to_equal(-1)
 
 #### rebuilds blocks and resets active state
 
-1. var model = BlockModel from markdown
-2. model activate block
-3. model rebuild
+- var model = BlockModel from markdown
+- model activate block
+- model rebuild
    - Expected: model.block_count() equals `1`
    - Expected: model.block_at(0).kind equals `paragraph`
    - Expected: model.active_block equals `-1`

@@ -51,6 +51,14 @@ distance test) and `triangle` (now integer barycentric). The CUDA PTX kernels:
   rounded_rect as a fill), not introduced by this fix. Aligning the CUDA kernels
   is tracked as separate follow-up work.
 
+**Status (2026-06-12):** The two mismatched kernels are now formally annotated
+with KNOWN PARITY NOTEs in `backend_cuda.spl` (`draw_circle` and
+`draw_rounded_rect` methods). The ROCm backend has also received the equivalent
+init-guard hardening (`last_probe` field, per-method `initialized` guards,
+`read_pixels`/`present` null-pointer guard). PTX kernel realignment
+(`kernel_draw_circle` → sw_midpoint, `kernel_draw_rounded_rect` → outline) is
+the remaining open item and requires NVIDIA hardware to verify.
+
 ## Summary
 
 The CPU (software) backend and the Metal GPU backend produce bit-identical

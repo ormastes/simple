@@ -481,10 +481,41 @@ fn render_pass_for_save_layer(bounds: SkRect) -> RenderPassDesc:
 class VulkanBackend:
     pipeline_cache: [PipelineCacheEntry]
     next_pipeline_id: i64
+    initialized: bool   # True after context is validated; false until vk_backend_init() succeeds
+    last_error: text    # Most recent error string; "" when healthy
 
 fn vk_backend_new() -> VulkanBackend:
+    """Create a context-free VulkanBackend for pure pipeline / command-record work.
+
+    Always returns initialized=true — no Vulkan device is required for the
+    pipeline cache and command translation path.  Use vk_backend_init(ctx) when
+    a validated SkVulkanContext is available.
+    """
     val empty_cache: [PipelineCacheEntry] = []
-    VulkanBackend(pipeline_cache: empty_cache, next_pipeline_id: 1)
+    VulkanBackend(pipeline_cache: empty_cache, next_pipeline_id: 1, initialized: true, last_error: "")
+
+fn vk_backend_init(ctx: SkVulkanContext) -> VulkanBackend:
+    """Create a VulkanBackend validated against the given context.
+
+    Returns an initialized backend when ctx.is_valid(), otherwise returns
+    a backend with initialized=false and last_error set — callers must check
+    before calling render_picture/submit.
+    """
+    val empty_cache: [PipelineCacheEntry] = []
+    if not ctx.is_valid():
+        VulkanBackend(
+            pipeline_cache: empty_cache,
+            next_pipeline_id: 1,
+            initialized: false,
+            last_error: "Vulkan context is not valid"
+        )
+    else:
+        VulkanBackend(
+            pipeline_cache: empty_cache,
+            next_pipeline_id: 1,
+            initialized: true,
+            last_error: ""
+        )
 
 impl VulkanBackend:
     # Look up or compile a pipeline for the given paint
@@ -503,6 +534,8 @@ impl VulkanBackend:
 
     # Render a recorded picture into a CommandBufferRecord
     me render_picture(picture: SkPicture, cull: SkRect) -> CommandBufferRecord:
+        if not me.initialized:
+            return CommandBufferRecord(commands: [], pipeline_cache_hits: 0, unique_pipelines: 0)
         var commands: [VkCommand] = []
         var cache_hits: i64 = 0
         var op_idx = 0
@@ -544,6 +577,14 @@ impl VulkanBackend:
 
     # Validate command ordering before crossing the native queue-submit edge.
     me submit(cb: CommandBufferRecord) -> VulkanSubmissionRecord:
+        if not me.initialized:
+            return VulkanSubmissionRecord(
+                submitted_commands: 0,
+                draw_commands: 0,
+                rejected_commands: 0,
+                last_pipeline_id: 0,
+                ok: false
+            )
         var submitted = 0 as i64
         var draws = 0 as i64
         var rejected = 0 as i64

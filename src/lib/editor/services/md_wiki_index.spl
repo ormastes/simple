@@ -355,7 +355,7 @@ fn md_wiki_extract_links(doc: MdWikiDocument, documents: [MdWikiDocument]) -> [M
         val line = lines[line_idx]
         var col = 0
         while col < line.len():
-            if col + 3 < line.len() and line.slice(col, col + 2) == "[[" and (col == 0 or line.char_at(col - 1) != "!"):
+            if col + 1 < line.len() and line.slice(col, col + 2) == "[[" and (col == 0 or line.char_at(col - 1) != "!"):
                 val close = md_wiki_find_text(line, "]]", col + 2)
                 if close >= 0:
                     val raw = line.slice(col + 2, close)
@@ -386,7 +386,7 @@ fn md_wiki_extract_embeds(doc: MdWikiDocument, documents: [MdWikiDocument]) -> [
         val line = lines[line_idx]
         var col = 0
         while col < line.len():
-            if col + 4 < line.len() and line.slice(col, col + 3) == "![[":
+            if col + 2 < line.len() and line.slice(col, col + 3) == "![[":
                 val close = md_wiki_find_text(line, "]]", col + 3)
                 if close >= 0:
                     val raw = line.slice(col + 3, close)
@@ -432,20 +432,29 @@ fn md_wiki_extract_tags(doc: MdWikiDocument) -> [MdWikiTag]:
                 result.push(MdWikiTag(path: doc.path, tag: prop_tag, line: 0))
     val lines = doc.content.split("\n")
     var line_idx = 0
+    var in_fence = false
     while line_idx < lines.len():
         val line = lines[line_idx]
-        var col = 0
-        while col < line.len():
-            if line.char_at(col) == "#" and md_wiki_tag_start(line, col):
-                val end = md_wiki_tag_end(line, col + 1)
-                if end > col + 1:
-                    result.push(MdWikiTag(path: doc.path, tag: line.slice(col + 1, end), line: line_idx))
-                    col = end
+        val trimmed_line = line.trim()
+        # Toggle fenced code block tracking — do not index tags inside fences
+        if trimmed_line.starts_with("```") or trimmed_line.starts_with("~~~"):
+            in_fence = not in_fence
+            line_idx = line_idx + 1
+        elif in_fence:
+            line_idx = line_idx + 1
+        else:
+            var col = 0
+            while col < line.len():
+                if line.char_at(col) == "#" and md_wiki_tag_start(line, col):
+                    val end = md_wiki_tag_end(line, col + 1)
+                    if end > col + 1:
+                        result.push(MdWikiTag(path: doc.path, tag: line.slice(col + 1, end), line: line_idx))
+                        col = end
+                    else:
+                        col = col + 1
                 else:
                     col = col + 1
-            else:
-                col = col + 1
-        line_idx = line_idx + 1
+            line_idx = line_idx + 1
     result
 
 fn md_wiki_extract_properties(doc: MdWikiDocument) -> [MdWikiProperty]:
@@ -507,7 +516,7 @@ fn md_wiki_extract_attachments(doc: MdWikiDocument) -> [MdWikiAttachment]:
         val line = lines[line_idx]
         var col = 0
         while col < line.len():
-            if col + 4 < line.len() and line.slice(col, col + 3) == "![[":
+            if col + 2 < line.len() and line.slice(col, col + 3) == "![[":
                 val close = md_wiki_find_text(line, "]]", col + 3)
                 if close >= 0:
                     val raw = line.slice(col + 3, close)
@@ -524,7 +533,7 @@ fn md_wiki_extract_attachments(doc: MdWikiDocument) -> [MdWikiAttachment]:
                     col = close + 2
                 else:
                     col = col + 1
-            elif col + 4 < line.len() and line.slice(col, col + 2) == "![":
+            elif col + 1 < line.len() and line.slice(col, col + 2) == "![":
                 val alt_close = md_wiki_find_char(line, "]", col + 2)
                 if alt_close >= 0 and alt_close + 1 < line.len() and line.char_at(alt_close + 1) == "(":
                     val path_close = md_wiki_find_char(line, ")", alt_close + 2)
@@ -597,11 +606,83 @@ fn md_wiki_target_exists(documents: [MdWikiDocument], target: text) -> bool:
     false
 
 fn md_wiki_transclusion_content(index: MdWikiIndex, target: text) -> text:
-    val slug = md_wiki_slug(target)
+    # "note#heading" embeds only that heading's section of the note
+    var note = target
+    var anchor = ""
+    val hash = md_wiki_find_char(target, "#", 0)
+    if hash > 0:
+        # Intermediate vars: chained slice().trim() corrupts in interpreter
+        val anchor_raw = target.slice(hash + 1, target.len())
+        anchor = anchor_raw.trim()
+        val note_raw = target.slice(0, hash)
+        note = note_raw.trim()
+    val slug = md_wiki_slug(note)
     for doc in index.documents:
-        if md_wiki_slug(doc.title) == slug:
-            return md_wiki_strip_frontmatter(doc.content)
+        # Slug match first; case-insensitive exact title as fallback because
+        # markdown_slugify is unreliable in the interpreter (see bug
+        # md_slugify_string_corruption).
+        var matched = md_wiki_slug(doc.title) == slug
+        if not matched:
+            matched = md_wiki_titles_equal(doc.title, note)
+        if matched:
+            val body = md_wiki_strip_frontmatter(doc.content)
+            if anchor == "":
+                return body
+            return md_wiki_heading_section(body, anchor)
     ""
+
+fn md_wiki_titles_equal(a: text, b: text) -> bool:
+    val ta = a.trim()
+    val tb = b.trim()
+    val la = ta.lower()
+    val lb = tb.lower()
+    la == lb
+
+# Section of `body` under the heading whose title equals `anchor` (exact
+# after trimming): the heading line through the line before the next heading
+# of the same or higher level. Empty when no heading matches.
+# Exact comparison, not slug comparison: markdown_slugify returns
+# heap-state-dependent corrupted values in the interpreter (see bug
+# md_slugify_string_corruption), so slugs only compare reliably against
+# other slugs produced by the identical call path.
+fn md_wiki_heading_section(body: text, anchor: text) -> text:
+    val lines = body.split("\n")
+    val want = anchor.trim()
+    var start = -1
+    var level = 0
+    var end = lines.len() - 1
+    var i = 0
+    while i < lines.len():
+        val hl = md_wiki_heading_line_level(lines[i])
+        if start < 0:
+            if hl > 0:
+                val raw_title = lines[i].slice(hl, lines[i].len())
+                val trimmed_title = raw_title.trim()
+                if trimmed_title == want:
+                    start = i
+                    level = hl
+        elif hl > 0 and hl <= level:
+            end = i - 1
+            i = lines.len()
+        i = i + 1
+    if start < 0:
+        return ""
+    var result = ""
+    var row = start
+    while row <= end:
+        if result != "":
+            result = result + "\n"
+        result = result + lines[row]
+        row = row + 1
+    result
+
+fn md_wiki_heading_line_level(line: text) -> i64:
+    var level = 0
+    while level < line.len() and line.char_at(level) == "#":
+        level = level + 1
+    if level > 0 and level <= 6 and level < line.len() and line.char_at(level) == " ":
+        return level
+    0
 
 fn md_wiki_strip_frontmatter(content: text) -> text:
     val lines = content.split("\n")

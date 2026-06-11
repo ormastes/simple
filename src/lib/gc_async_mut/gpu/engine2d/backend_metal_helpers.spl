@@ -40,6 +40,8 @@ impl MetalBackend:
 
     me _dispatch_1d(pipeline: i64, grid_x: i64, block_x: i64, params: [u8]):
         """Create command buffer, encode a 1D compute dispatch, commit and wait."""
+        if not self.initialized or self.d_framebuffer == 0:
+            return
         val cmd = metal_sffi_create_command_buffer(self.command_queue)
         if cmd == 0:
             return
@@ -58,6 +60,8 @@ impl MetalBackend:
 
     me _dispatch_2d(pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8]):
         """Create command buffer, encode a 2D compute dispatch, commit and wait."""
+        if not self.initialized or self.d_framebuffer == 0:
+            return
         val cmd = metal_sffi_create_command_buffer(self.command_queue)
         if cmd == 0:
             return
@@ -76,6 +80,8 @@ impl MetalBackend:
 
     me _dispatch_blit(pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8], src_buffer: i64):
         """Dispatch blit kernel with source image buffer bound at index 2."""
+        if not self.initialized or self.d_framebuffer == 0:
+            return
         val cmd = metal_sffi_create_command_buffer(self.command_queue)
         if cmd == 0:
             return
@@ -94,12 +100,23 @@ impl MetalBackend:
         metal_sffi_commit_command_buffer(cmd)
         metal_sffi_wait_completed(cmd)
 
-    me _download_framebuffer(byte_size: i64):
-        """Download device framebuffer to host buffer via Metal buffer download."""
+    me _download_framebuffer(byte_size: i64) -> [u32]:
+        """Download device framebuffer to a u32 pixel array via Metal buffer download.
+
+        Returns an empty array if not initialized, byte_size is zero, or the
+        computed pixel count would exceed bounds.
+        """
+        if not self.initialized or self.d_framebuffer == 0:
+            return []
+        val pixel_count = self.w * self.h
+        if pixel_count <= 0 or byte_size <= 0:
+            return []
+        if byte_size < _i64(pixel_count) * 4:
+            return []
         val host_bytes: [u8] = [0u8; byte_size]
         metal_sffi_buffer_download(host_bytes, self.d_framebuffer, byte_size)
         # Convert byte array back to u32 pixel array
-        val pixel_count = self.w * self.h
+        var pixels: [u32] = [0u32; pixel_count]
         var i = 0
         while i < pixel_count:
             val base = i * 4
@@ -113,13 +130,18 @@ impl MetalBackend:
             pixel = pixel | (_to_u32(b1) << 8)
             pixel = pixel | (_to_u32(b2) << 16)
             pixel = pixel | (_to_u32(b3) << 24)
-            self.host_buf[i] = pixel
+            pixels[i] = pixel
             i = i + 1
+        pixels
 
-    me _upload_host_to_device(byte_size: i64):
-        """Upload host buffer to device framebuffer."""
+    me _upload_host_to_device(host_pixels: [u32], byte_size: i64):
+        """Upload a u32 pixel array to the device framebuffer."""
+        if not self.initialized or self.d_framebuffer == 0:
+            return
         val pixel_count = self.w * self.h
-        val host_bytes = _pixels_to_bytes(self.host_buf, _i64(pixel_count))
+        if pixel_count <= 0 or byte_size <= 0:
+            return
+        val host_bytes = _pixels_to_bytes(host_pixels, _i64(pixel_count))
         metal_sffi_buffer_upload(self.d_framebuffer, host_bytes, byte_size)
 
     me _metal_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
@@ -129,17 +151,19 @@ impl MetalBackend:
         and sampled by a text-rendering kernel. This fallback is acceptable
         for low-frequency text draws (UI labels, debug overlays).
         """
-        # Ensure host buffer is current
-        if self.dirty:
-            val fb_size = _i64(self.w) * _i64(self.h) * 4
-            self._download_framebuffer(fb_size)
+        if not self.initialized or self.d_framebuffer == 0:
+            return
+        val fb_size = _i64(self.w) * _i64(self.h) * 4
+        # Download current GPU framebuffer to host pixels
+        var host_pixels = self._download_framebuffer(fb_size)
+        if host_pixels.len() == 0:
+            return
 
-        # Render glyphs into host buffer using shared glyph module
-        render_text_to_buffer(self.host_buf, self.w, self.h, x, y, text_val, color, font_size)
+        # Render glyphs into host pixels using shared glyph module
+        render_text_to_buffer(host_pixels, self.w, self.h, x, y, text_val, color, font_size)
 
         # Re-upload entire framebuffer to GPU
-        val fb_size = _i64(self.w) * _i64(self.h) * 4
-        self._upload_host_to_device(fb_size)
+        self._upload_host_to_device(host_pixels, fb_size)
 
 # ============================================================================
 # Type Conversion Helpers

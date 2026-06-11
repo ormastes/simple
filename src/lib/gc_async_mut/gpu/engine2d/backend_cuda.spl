@@ -635,6 +635,12 @@ impl RenderBackend for CudaBackend:
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
         self._sync_mirror_to_device_after_cpu_path()
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        # KNOWN PARITY NOTE: kernel_draw_circle uses a per-pixel distance annulus
+        # ((r-1)² ≤ dx²+dy² ≤ r²) — a pre-existing semantic mismatch vs the CPU
+        # sw_midpoint loop. The Metal backend was aligned to CPU midpoint in
+        # engine2d_cpu_metal_primitive_raster_divergence fix (2026-06-05).
+        # CUDA realignment is tracked as follow-up work: do not remove this note
+        # until the PTX kernel is updated to match sw_midpoint output.
         if r == 0:
             self.draw_rect_filled(cx, cy, 1, 1, color)
             return
@@ -667,6 +673,13 @@ impl RenderBackend for CudaBackend:
         self.mirror.draw_circle_filled(cx, cy, r, color)
         self._sync_mirror_to_device_after_cpu_path()
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        # KNOWN PARITY NOTE: kernel_draw_rounded_rect is a FILLED interior test
+        # (corners excluded via distance check, interior pixels painted). The CPU
+        # draw_rounded_rect draws an OUTLINE only. This is a pre-existing semantic
+        # mismatch. The Metal backend was aligned to CPU outline semantics in
+        # engine2d_cpu_metal_primitive_raster_divergence fix (2026-06-05).
+        # CUDA realignment is tracked as follow-up work: do not remove this note
+        # until the PTX kernel is updated to draw outline matching sw_corner_arc.
         if w <= 0 or h <= 0:
             return
         var r = radius
@@ -747,3 +760,5 @@ impl RenderBackend for CudaBackend:
         self.mirror.width()
     fn height() -> i32:
         self.mirror.height()
+
+export cuda_2d_ptx_source

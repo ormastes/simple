@@ -44,6 +44,8 @@
 - `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` checks that `doc/03_plan/agent_tasks/multicore_green.md` uses meaningful parallel-agent lane names instead of `Agent A`/`Agent B` labels, and keeps each lane tied to deliverables and acceptance evidence.
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the remaining hosted fairness/preemption gap explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths.
 - `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so the remaining host gap is deeper than a missing OS-thread yield primitive.
+<<<<<<< Conflict 1 of 2
++++++++ Contents of side #1
 - `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
   proves the explicit Pure Simple sliced-task API can provide a hosted
   fairness contract without changing plain closure semantics: with hosted
@@ -86,6 +88,48 @@
   now regression-covers the closed smaller standalone-native blocker beneath
   the resumable-stepper lane: returning a function value from inside a
   loop/search branch now returns `EXIT=0` in standalone native artifacts.
+%%%%%%% Changes from base #1 to side #2
+-- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_blocker_spec.spl`
+-  now pins the smaller hosted-native blocker beneath the callback-id
+-  resumable-stepper lane: a pool worker that sends a plain struct payload
+-  through a channel still segfaults in the standalone native artifact.
+-- `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
+-  records that the checked-in `bin/release/simple` binary has drifted from the
+-  current-source rebuilt `release` and `debug` compilers for the
+-  resumable-stepper native probe. The helper-return probes are now fixed on the
+-  rebuilt debug path, so rebuilt current-source artifacts remain the stronger
+-  evidence until the checked-in release binary is refreshed to match current
+-  source/runtime/compiler behavior.
+-- `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
+-  keeps the earlier standalone-native lower blocker closed: returning a
+-  function value from inside a loop/search branch is green again even without
+-  the worker pool.
+%%%%%%% Changes from base #2 to side #3
+-- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_blocker_spec.spl`
+-  now pins the smaller hosted-native blocker beneath the callback-id
+-  resumable-stepper lane: a pool worker that sends a plain struct payload
+-  through a channel still segfaults in the standalone native artifact.
++- `test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl`
++  now regression-covers the closed smaller hosted-native blocker beneath the
++  callback-id resumable-stepper lane: a direct native array of a by-value
++  struct is green again on current-source seed/native.
++- `test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl`
++  now pins the current smaller hosted-native blocker beneath the callback-id
++  resumable-stepper lane: local `MulticoreGreenHandle` array iteration plus
++  `join()` still returns `result={result}` with `EXIT=12` in the standalone
++  native artifact.
+ - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
+   records that the checked-in `bin/release/simple` binary has drifted from the
+   current-source rebuilt `release` and `debug` compilers for the
+   resumable-stepper native probe. The helper-return probes are now fixed on the
+   rebuilt debug path, so rebuilt current-source artifacts remain the stronger
+   evidence until the checked-in release binary is refreshed to match current
+   source/runtime/compiler behavior.
+ - `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
+   now pins the smaller standalone-native blocker beneath the resumable-stepper
+   lane: returning a function value from inside a loop/search branch still
+   crashes in native artifacts even without the worker pool.
+>>>>>>> Conflict 1 of 2 ends
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` checks the pure Simple green-channel contract: empty recv parks a logical green task, send unparks the oldest waiter, FIFO buffering works, and bounded backpressure does not block the carrier worker.
 
 ## Blocking Evidence To Track
@@ -114,6 +158,8 @@
   sessions are active in this checkout; future sync work must keep those files
   out of multicore-green commits unless the user explicitly asks for an
   integration commit.
+<<<<<<< Conflict 2 of 2
++++++++ Contents of side #1
 - Current-source rebuilt debug artifacts now pass the scalar/object
   helper-return probes, helper-side handle-array join, channel-struct send,
   callback registry, function-value param-array, inline lambda array literals,
@@ -127,3 +173,20 @@
   green `3`, multicore green `7`, and green-channel wake `4`. The profile
   report contract and numeric cross-language gate also pass against
   `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
+%%%%%%% Changes from base #1 to side #2
+-- Current-source rebuilt debug artifacts now pass both scalar and object-return
+-  helper-return native probes, while the resumable-stepper native probe still
+-  crashes with `EXIT=139`. The checked-in `bin/release/simple` remains tracked
+-  as stale lane evidence until it is refreshed against current source.
+ - Hosted SimpleOS feature specs rerun during the later doc-alignment passes
+   still pass: cooperative green `3`, multicore green `6`, green-channel wake
+   `4`, and the final handoff blocker contract `3`.
+%%%%%%% Changes from base #2 to side #3
+ - Current-source rebuilt debug artifacts now pass both scalar and object-return
+   helper-return native probes, while the resumable-stepper native probe still
+   crashes with `EXIT=139`. The checked-in `bin/release/simple` remains tracked
+   as stale lane evidence until it is refreshed against current source.
+ - Hosted SimpleOS feature specs rerun during the later doc-alignment passes
+   still pass: cooperative green `3`, multicore green `6`, green-channel wake
+   `4`, and the final handoff blocker contract `3`.
+>>>>>>> Conflict 2 of 2 ends

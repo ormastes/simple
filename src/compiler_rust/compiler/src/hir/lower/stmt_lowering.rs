@@ -74,7 +74,7 @@ impl Lowerer {
                 // Lower the value first (if present) to get the actual TypeId
                 // This avoids the issue where infer_type and lower_expr create
                 // different TypeIds for the same type (e.g., array types)
-                let value = if let Some(v) = &let_stmt.value {
+                let mut value = if let Some(v) = &let_stmt.value {
                     let lowered = self.lower_expr(v, ctx)?;
                     Some(lowered)
                 } else {
@@ -90,7 +90,8 @@ impl Lowerer {
 
                 // Use explicit type annotation if provided, otherwise use the
                 // type from the lowered value to ensure TypeId consistency
-                let ty = if let Some(t) = &let_stmt.ty {
+                let has_explicit_type = let_stmt.ty.is_some() || pattern_type.is_some();
+                let mut ty = if let Some(t) = &let_stmt.ty {
                     // Type on the let statement itself
                     self.resolve_type(t)?
                 } else if let Some(pt) = pattern_type {
@@ -119,6 +120,21 @@ impl Lowerer {
                     });
                 }
 
+                let is_untyped_empty_array_binding = !has_explicit_type
+                    && value.as_ref().is_some_and(|expr| {
+                        matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty())
+                    });
+                if is_untyped_empty_array_binding {
+                    let any_array_ty = self.module.types.register(HirType::Array {
+                        element: TypeId::ANY,
+                        size: Some(0),
+                    });
+                    if let Some(expr) = value.as_mut() {
+                        expr.ty = any_array_ty;
+                    }
+                    ty = any_array_ty;
+                }
+
                 // W1003: Check for mutable binding with shared pointer type
                 self.check_mutable_shared_binding(&name, ty, let_stmt.mutability, let_stmt.span);
 
@@ -142,6 +158,9 @@ impl Lowerer {
                 self.lifetime_context.register_variable(&name, origin);
 
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                if is_untyped_empty_array_binding {
+                    self.untyped_empty_array_locals.insert(local_index);
+                }
 
                 Ok(vec![HirStmt::Let { local_index, ty, value }])
             }

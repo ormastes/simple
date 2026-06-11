@@ -543,10 +543,12 @@ impl<'a> Parser<'a> {
             TokenKind::Unit => self.parse_keyword_as_pattern("Unit"),
             TokenKind::Sync => self.parse_keyword_as_pattern("Sync"),
             TokenKind::Async => self.parse_keyword_as_pattern("Async"),
-            TokenKind::Slice => self.parse_keyword_as_pattern("Slice"),
+            // Math keywords lex only from lowercase source text — keep the
+            // literal lexeme (capitalized names lex as plain identifiers).
+            TokenKind::Slice => self.parse_keyword_as_pattern("slice"),
             // Note: 'tensor' is no longer a keyword — it's a regular identifier (BUG-004 fix)
-            TokenKind::Grid => self.parse_keyword_as_pattern("Grid"),
-            TokenKind::Flat => self.parse_keyword_as_pattern("Flat"),
+            TokenKind::Grid => self.parse_keyword_as_pattern("grid"),
+            TokenKind::Flat => self.parse_keyword_as_pattern("flat"),
             TokenKind::Shared => self.parse_keyword_as_pattern("Shared"),
             TokenKind::Gpu => self.parse_keyword_as_pattern("Gpu"),
             TokenKind::Extern => self.parse_keyword_as_pattern("Extern"),
@@ -559,7 +561,7 @@ impl<'a> Parser<'a> {
             TokenKind::Mixin => self.parse_keyword_as_pattern("Mixin"),
             TokenKind::Actor => self.parse_keyword_as_pattern("Actor"),
             TokenKind::Ghost => self.parse_keyword_as_pattern("Ghost"),
-            TokenKind::Gen => self.parse_keyword_as_pattern("Gen"),
+            TokenKind::Gen => self.parse_keyword_as_pattern("gen"),
             TokenKind::Impl => self.parse_keyword_as_pattern("Impl"),
             TokenKind::Val => self.parse_keyword_as_pattern("Val"),
             TokenKind::Kernel => self.parse_keyword_as_pattern("Kernel"),

@@ -25,6 +25,10 @@ fn md_render_block(block: RenderBlock) -> [text]:
             _mdr_render_callout(block)
         "embed":
             _mdr_render_embed(block)
+        "frontmatter":
+            []
+        "math":
+            _mdr_render_math(block)
         "paragraph":
             block.rendered_lines
         _:
@@ -160,7 +164,7 @@ fn _mdr_render_code(block: RenderBlock) -> [text]:
     var result: [text] = []
     for line in block.rendered_lines:
         val trimmed = _mdr_trim(line)
-        if trimmed.starts_with("```"):
+        if trimmed.starts_with("```") or trimmed.starts_with("~~~"):
             if trimmed.len() > 3:
                 result.push("\x1b[90m── " + trimmed.slice(3, trimmed.len()) + " ──\x1b[0m")
             else:
@@ -193,14 +197,138 @@ fn _mdr_fence_body(lines: [text]) -> text:
         i = i + 1
     body.join("\n")
 
+# Render a table padded to a uniform column grid, honoring the separator
+# row's `:--` / `:-:` / `--:` alignment markers (0=left, 1=center, 2=right).
 fn _mdr_render_table(block: RenderBlock) -> [text]:
+    val rows = block.rendered_lines
+    # Pass 1: locate the separator row and the widest cell per column.
+    var sep_row = -1
+    var col_count = 0
+    var r = 0
+    while r < rows.len():
+        if sep_row < 0 and _mdr_is_separator_row(_mdr_trim(rows[r])):
+            sep_row = r
+        val cells = _mdr_table_cells(rows[r])
+        if cells.len() > col_count:
+            col_count = cells.len()
+        r = r + 1
+    if col_count == 0:
+        return rows
+    var aligns: [i64] = []
+    var c = 0
+    while c < col_count:
+        var align = 0
+        if sep_row >= 0:
+            val sep_cells = _mdr_table_cells(rows[sep_row])
+            if c < sep_cells.len():
+                val spec = sep_cells[c]
+                if spec.starts_with(":") and spec.ends_with(":"):
+                    align = 1
+                elif spec.ends_with(":"):
+                    align = 2
+        aligns.push(align)
+        c = c + 1
+    var widths: [i64] = []
+    c = 0
+    while c < col_count:
+        var w = 3
+        r = 0
+        while r < rows.len():
+            if r != sep_row:
+                val row_cells = _mdr_table_cells(rows[r])
+                if c < row_cells.len():
+                    val cell_len = row_cells[c].len()
+                    if cell_len > w:
+                        w = cell_len
+            r = r + 1
+        widths.push(w)
+        c = c + 1
+    # Pass 2: re-emit every row padded to the grid.
+    var result: [text] = []
+    r = 0
+    while r < rows.len():
+        if r == sep_row:
+            var sep = "|"
+            c = 0
+            while c < col_count:
+                sep = sep + " " + _mdr_table_separator_cell(widths[c], aligns[c]) + " |"
+                c = c + 1
+            result.push("\x1b[90m" + sep + "\x1b[0m")
+        else:
+            val row_cells = _mdr_table_cells(rows[r])
+            var out = "|"
+            c = 0
+            while c < col_count:
+                var cell = ""
+                if c < row_cells.len():
+                    cell = row_cells[c]
+                out = out + " " + _mdr_table_pad(cell, widths[c], aligns[c]) + " |"
+                c = c + 1
+            result.push(out)
+        r = r + 1
+    result
+
+fn _mdr_table_cells(line: text) -> [text]:
+    var trimmed = _mdr_trim(line)
+    if trimmed.starts_with("|"):
+        trimmed = trimmed.slice(1, trimmed.len())
+    if trimmed.ends_with("|"):
+        trimmed = trimmed.slice(0, trimmed.len() - 1)
+    val parts = trimmed.split("|")
+    var cells: [text] = []
+    for part in parts:
+        cells.push(_mdr_trim(part))
+    cells
+
+fn _mdr_table_pad(cell: text, width: i64, align: i64) -> text:
+    val gap = width - cell.len()
+    if gap <= 0:
+        return cell
+    if align == 2:
+        return _mdr_repeat(" ", gap) + cell
+    if align == 1:
+        val left = gap / 2
+        return _mdr_repeat(" ", left) + cell + _mdr_repeat(" ", gap - left)
+    cell + _mdr_repeat(" ", gap)
+
+fn _mdr_table_separator_cell(width: i64, align: i64) -> text:
+    if align == 1:
+        return ":" + _mdr_repeat("-", width - 2) + ":"
+    if align == 2:
+        return _mdr_repeat("-", width - 1) + ":"
+    _mdr_repeat("-", width)
+
+fn _mdr_repeat(ch: text, n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = out + ch
+        i = i + 1
+    out
+
+# Verbatim math rendering: dim "── math ──" delimiters, cyan body.
+# No formula layout — the $$ fences are replaced, content passes through.
+fn _mdr_render_math(block: RenderBlock) -> [text]:
     var result: [text] = []
     for line in block.rendered_lines:
         val trimmed = _mdr_trim(line)
-        if _mdr_is_separator_row(trimmed):
-            result.push("\x1b[90m" + trimmed + "\x1b[0m")
+        if trimmed.starts_with("$$") and trimmed.ends_with("$$") and trimmed.len() >= 4:
+            val body = _mdr_trim(trimmed.slice(2, trimmed.len() - 2))
+            result.push("\x1b[90m──\x1b[0m \x1b[36m" + body + "\x1b[0m \x1b[90m──\x1b[0m")
+        elif trimmed == "$$":
+            result.push("\x1b[90m── math ──\x1b[0m")
+        elif trimmed.starts_with("$$"):
+            result.push("\x1b[90m── math ──\x1b[0m")
+            val opener_rest = _mdr_trim(trimmed.slice(2, trimmed.len()))
+            if opener_rest != "":
+                result.push("\x1b[36m" + opener_rest + "\x1b[0m")
+        elif trimmed.ends_with("$$"):
+            val closer_body = _mdr_trim(trimmed.slice(0, trimmed.len() - 2))
+            if closer_body != "":
+                result.push("\x1b[36m" + closer_body + "\x1b[0m")
+            result.push("\x1b[90m── math ──\x1b[0m")
         else:
-            result.push(trimmed)
+            result.push("\x1b[36m" + line + "\x1b[0m")
     result
 
 fn _mdr_render_callout(block: RenderBlock) -> [text]:

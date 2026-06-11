@@ -439,11 +439,11 @@ spl_i64 rt_typed_words_u64_set(spl_i64 collection, spl_i64 index_value, spl_i64 
 }
 
 spl_i64 rt_typed_bytes_u8_push(spl_i64 collection, spl_i64 value) {
-    return rt_array_push(collection, value & 0xffLL);
+    return rt_array_push(collection, rt_int(value & 0xffLL));
 }
 
 spl_i64 rt_push_byte(spl_i64 collection, spl_i64 value) {
-    rt_array_push(collection, value & 0xffLL);
+    rt_array_push(collection, rt_int(value & 0xffLL));
     return collection;
 }
 
@@ -800,6 +800,21 @@ spl_i64 rt_bytes_slice(spl_i64 array_value, spl_i64 start_value, spl_i64 len_val
     return out;
 }
 
+spl_i64 rt_bytes_u8_at(spl_i64 array_value, spl_i64 index_value) {
+    RtArray *array = rt_as_array(array_value);
+    spl_i64 index = rt_index_arg(index_value);
+    if (!array) {
+        return 0;
+    }
+    if (index < 0) {
+        index = (spl_i64)array->len + index;
+    }
+    if (index < 0 || (spl_u64)index >= array->len) {
+        return 0;
+    }
+    return rt_index_arg(array->data[index]) & 0xffLL;
+}
+
 spl_i64 rt_bytes_concat(spl_i64 left_value, spl_i64 right_value) {
     RtArray *left = rt_as_array(left_value);
     RtArray *right = rt_as_array(right_value);
@@ -879,6 +894,24 @@ static void uart_write_bytes(const char *data, spl_u64 len) {
     for (spl_u64 i = 0; i < len; i = i + 1) {
         uart_put_byte((spl_u8)data[i]);
     }
+}
+
+static void uart_write_hex_byte(spl_u8 value) {
+    static const char hex[] = "0123456789abcdef";
+    uart_put_byte((spl_u8)hex[(value >> 4) & 0x0fU]);
+    uart_put_byte((spl_u8)hex[value & 0x0fU]);
+}
+
+static void uart_line_tcp_read5(const spl_u8 *data, spl_u64 len) {
+    uart_write_bytes("BTCP READ5 ", 11);
+    for (spl_u64 i = 0ULL; i < len; i = i + 1ULL) {
+        if (i > 0ULL) {
+            uart_put_byte(' ');
+        }
+        uart_write_hex_byte(data[i]);
+    }
+    uart_put_byte(13);
+    uart_put_byte(10);
 }
 
 void log_raw_println(spl_i64 msg) {
@@ -1718,6 +1751,7 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     const spl_u8 *tcp;
     spl_u16 src_port;
     spl_u16 dst_port;
+    const spl_u8 *payload;
     spl_u32 seq;
     spl_u8 flags;
     spl_u64 tcp_hlen;
@@ -1743,6 +1777,11 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
         return;
     }
     payload_len = (spl_u64)ip_total - ip_hlen - tcp_hlen;
+    payload = tcp + tcp_hlen;
+    if ((flags & 0x02U) && g_boot_tcp_client_open) {
+        uart_line("BTCP SYN");
+        return;
+    }
     for (spl_u64 i = 0; i < 6; i = i + 1) {
         g_boot_tcp_peer_mac[i] = frame[6 + i];
     }
@@ -1760,15 +1799,30 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
         return;
     }
     if (payload_len > 0) {
+        if (seq != g_boot_tcp_recv_next) {
+            if (seq < g_boot_tcp_recv_next) {
+                spl_u32 overlap = g_boot_tcp_recv_next - seq;
+                if ((spl_u64)overlap >= payload_len) {
+                    rt_send_tcp_packet(0x10U, (const spl_u8 *)0, 0);
+                    return;
+                }
+                payload = payload + overlap;
+                payload_len = payload_len - (spl_u64)overlap;
+                seq = g_boot_tcp_recv_next;
+            } else {
+                rt_send_tcp_packet(0x10U, (const spl_u8 *)0, 0);
+                return;
+            }
+        }
         uart_line("BTCP PAYLOAD");
         g_boot_tcp_response_kind = 1;
         if (payload_len >= 6 &&
-            tcp[tcp_hlen + 0] == 'G' &&
-            tcp[tcp_hlen + 1] == 'E' &&
-            tcp[tcp_hlen + 2] == 'T' &&
-            tcp[tcp_hlen + 3] == ' ' &&
-            tcp[tcp_hlen + 4] == '/' &&
-            tcp[tcp_hlen + 5] == ' ') {
+            payload[0] == 'G' &&
+            payload[1] == 'E' &&
+            payload[2] == 'T' &&
+            payload[3] == ' ' &&
+            payload[4] == '/' &&
+            payload[5] == ' ') {
             g_boot_tcp_response_kind = 2;
         }
         if (g_boot_tcp_rx_off > 0ULL && g_boot_tcp_rx_off < g_boot_tcp_rx_len) {
@@ -1786,7 +1840,7 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
             payload_len = sizeof(g_boot_tcp_rx_buf) - g_boot_tcp_rx_len;
         }
         for (spl_u64 i = 0; i < payload_len; i = i + 1ULL) {
-            g_boot_tcp_rx_buf[g_boot_tcp_rx_len + i] = tcp[tcp_hlen + i];
+            g_boot_tcp_rx_buf[g_boot_tcp_rx_len + i] = payload[i];
         }
         g_boot_tcp_rx_len = g_boot_tcp_rx_len + payload_len;
         g_boot_tcp_recv_next = seq + (spl_u32)payload_len;
@@ -2409,21 +2463,21 @@ spl_i64 rt_boot_tcp_send_kex_reply_ed25519(spl_i64 fd, spl_i64 host_key_blob_val
     packet[off++] = 0x00;
     packet[off++] = 0x33;
     for (spl_u64 i = 0ULL; i < 51ULL; i = i + 1ULL) {
-        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(host_key_blob_value, (spl_i64)i)) & 0xffULL);
+        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(host_key_blob_value, rt_int((spl_i64)i))) & 0xffULL);
     }
     packet[off++] = 0x00;
     packet[off++] = 0x00;
     packet[off++] = 0x00;
     packet[off++] = 0x20;
     for (spl_u64 i = 0ULL; i < 32ULL; i = i + 1ULL) {
-        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(server_public_value, (spl_i64)i)) & 0xffULL);
+        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(server_public_value, rt_int((spl_i64)i))) & 0xffULL);
     }
     packet[off++] = 0x00;
     packet[off++] = 0x00;
     packet[off++] = 0x00;
     packet[off++] = 0x53;
     for (spl_u64 i = 0ULL; i < 83ULL; i = i + 1ULL) {
-        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(sig_blob_value, (spl_i64)i)) & 0xffULL);
+        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(sig_blob_value, rt_int((spl_i64)i))) & 0xffULL);
     }
     rt_send_tcp_packet(0x18U, packet, (spl_u16)sizeof(packet));
     return (spl_i64)sizeof(packet);
@@ -2540,6 +2594,73 @@ spl_i64 rt_boot_tcp_write_bytes(spl_i64 fd, spl_i64 data_value) {
     return (spl_i64)array->len;
 }
 
+static spl_u64 rt_boot_tcp_read_raw(spl_u8 *dst, spl_u64 want) {
+    spl_u64 copied = 0ULL;
+    while (copied < want) {
+        if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+            for (spl_u64 polls = 0ULL; polls < 50000ULL; polls = polls + 1ULL) {
+                if (g_boot_tcp_rx_off < g_boot_tcp_rx_len) {
+                    break;
+                }
+                rt_poll_rx_once();
+            }
+        }
+        if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+            break;
+        }
+        spl_u64 available = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
+        spl_u64 take = want - copied;
+        if (take > available) {
+            take = available;
+        }
+        for (spl_u64 i = 0ULL; i < take; i = i + 1ULL) {
+            dst[copied + i] = g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i];
+        }
+        copied = copied + take;
+        g_boot_tcp_rx_off = g_boot_tcp_rx_off + take;
+        if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+            g_boot_tcp_rx_len = 0;
+            g_boot_tcp_rx_off = 0;
+        }
+    }
+    return copied;
+}
+
+spl_i64 rt_boot_tcp_read_ssh_plain_packet_payload(spl_i64 fd) {
+    spl_u8 header[5];
+    spl_u8 body[4096];
+    spl_u32 packet_len;
+    spl_u32 padding_len;
+    spl_u32 remaining_len;
+    spl_u32 payload_len;
+    spl_i64 out;
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return rt_array_new(0);
+    }
+    if (rt_boot_tcp_read_raw(header, 5ULL) != 5ULL) {
+        return rt_array_new(0);
+    }
+    uart_line_tcp_read5(header, 5ULL);
+    packet_len = ((spl_u32)header[0] << 24) | ((spl_u32)header[1] << 16) | ((spl_u32)header[2] << 8) | (spl_u32)header[3];
+    padding_len = (spl_u32)header[4];
+    if (packet_len < 1U || padding_len + 1U > packet_len) {
+        return rt_array_new(0);
+    }
+    remaining_len = packet_len - 1U;
+    if ((spl_u64)remaining_len > sizeof(body)) {
+        return rt_array_new(0);
+    }
+    if (rt_boot_tcp_read_raw(body, (spl_u64)remaining_len) != (spl_u64)remaining_len) {
+        return rt_array_new(0);
+    }
+    payload_len = remaining_len - padding_len;
+    out = rt_array_new((spl_i64)payload_len);
+    for (spl_u32 i = 0U; i < payload_len; i = i + 1U) {
+        rt_array_push(out, rt_int((spl_i64)body[i]));
+    }
+    return out;
+}
+
 spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
     spl_u64 want = max_len <= 0 ? 0ULL : (spl_u64)max_len;
     spl_u64 available;
@@ -2563,8 +2684,11 @@ spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
         want = available;
     }
     out = rt_array_new((spl_i64)want);
+    if (want == 5ULL) {
+        uart_line_tcp_read5(g_boot_tcp_rx_buf + g_boot_tcp_rx_off, want);
+    }
     for (spl_u64 i = 0ULL; i < want; i = i + 1ULL) {
-        rt_array_push(out, (spl_i64)g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i]);
+        rt_array_push(out, rt_int((spl_i64)g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i]));
     }
     g_boot_tcp_rx_off = g_boot_tcp_rx_off + want;
     if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {

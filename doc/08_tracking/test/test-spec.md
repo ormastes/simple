@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-11 14:25:47*
+*Generated: 2026-06-12 01:07:30*
 
-## test/01_unit/lib/gc_async_mut/gpu/browser_engine
+## test/03_system/os
 
-❌ **browser_renderer_spec.spl** (2605ms)
-  - Source: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`
-  - Generated doc: `doc/06_spec/browser_renderer_spec.md`
+❌ **rv64_ssh_live_login_in_qemu_spec.spl** (2108ms)
+  - Source: `test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl`
+  - Generated doc: `doc/06_spec/rv64_ssh_live_login_in_qemu_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 73 ✅
-- **Failed:** 25 ❌
-- **Duration:** 2625ms
+- **Passed:** 4 ✅
+- **Failed:** 1 ❌
+- **Duration:** 2153ms

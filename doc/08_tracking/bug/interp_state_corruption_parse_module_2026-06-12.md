@@ -13,26 +13,27 @@ converting a hex literal (`0xff` in `src/lib/bitwise_utils.spl:8`) when, and
 only when, specific interpreter constructs precede/surround the
 `parse_module()` call. The identical parse at top level of `main()` succeeds.
 
-## Repros (both minimal, probed 2026-06-12)
+## Repro (minimal, isolated 2026-06-12 via tmp/site12/name_matrix.spl)
 
-1. **for-in iteration**: calling `parse_module(src, path)` inside
-   `for fpath in [...]:` (array literal or split() result) crashes; the same
-   calls in an index-`while` loop succeed. Repro: `tmp/site12/loop_repro.spl`.
-   Wrapping the parse in a helper fn does NOT help — it is the for-in frame.
-2. **fs write before parse**: `file_write_text(...)` executed before
-   `parse_module(...)` poisons the next parse identically, even inside a
-   `while` loop with a hardcoded path. Repro: `tmp/site12/loop_matrix.spl`
-   (case A).
+The trigger is the MODULE NAME argument: `parse_module(src, name)` crashes
+iff `name` is a path to a REAL EXISTING file (e.g.
+"src/lib/bitwise_utils.spl"); the identical source with a fake name
+("plain.spl", "x/y.spl", "src/lib/fake_zz.spl") parses fine. Earlier
+suspicions (for-in iteration frames, file_write_text before parse) were
+confounders — every crashing variant passed a real path as the name and
+every passing variant did not.
 
 ## Hypothesis
 
-Some interpreter-global channel (likely the `SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT`
-env-var token-text transport, or a shared string buffer) is clobbered by
-for-in frames and by the fs-write extern path, so the number scanner's token
-text gets replaced/truncated and the IntLit conversion sees a hex digit.
+When the name resolves to a real file, some interpreter- or lean-side
+machinery (error-context source loading, module registration keyed by path)
+re-reads/re-lexes the file through a text→i64 conversion that cannot handle
+hex literals ("cannot parse 'f' as i64" on `0xff`).
 
-## Workarounds (active in sweep harnesses)
+Note: the COMPILED stage4 binary's check pipeline passes real paths without
+crashing — this affects only the seed-interpreted lean parser.
 
-- Iterate with index-`while`, never for-in, around interpreted `parse_module`.
-- No `file_write_text` calls interleaved with parses; buffer results in memory
-  and write once after the loop. See `tmp/site12/lean_parse_sweep.spl` header.
+## Workaround (active in sweep harnesses)
+
+Pass a fake module name to parse_module and keep the real path only for
+reporting. See `tmp/site12/lean_parse_sweep.spl`.

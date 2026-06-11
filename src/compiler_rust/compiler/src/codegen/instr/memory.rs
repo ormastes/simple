@@ -16,6 +16,7 @@ use cranelift_module::Module;
 use crate::hir::TypeId;
 use crate::mir::VReg;
 
+use crate::codegen::shared::implicit_local_param_slots;
 use super::super::types_util::type_id_size;
 use super::helpers::call_runtime_1;
 use super::{InstrContext, InstrResult};
@@ -92,10 +93,15 @@ pub fn compile_store<M: Module>(
         };
 
         // Get the expected Cranelift type for this local
-        let expected_cl_ty = if local_index < ctx.func.params.len() {
-            super::super::types_util::type_id_to_cranelift(ctx.func.params[local_index].ty)
-        } else if local_index - ctx.func.params.len() < ctx.func.locals.len() {
-            super::super::types_util::type_id_to_cranelift(ctx.func.locals[local_index - ctx.func.params.len()].ty)
+        let implicit_param_slots = implicit_local_param_slots(ctx.func);
+        let expected_cl_ty = if local_index < implicit_param_slots {
+            types::I64
+        } else if local_index - implicit_param_slots < ctx.func.params.len() {
+            super::super::types_util::type_id_to_cranelift(ctx.func.params[local_index - implicit_param_slots].ty)
+        } else if local_index - implicit_param_slots - ctx.func.params.len() < ctx.func.locals.len() {
+            super::super::types_util::type_id_to_cranelift(
+                ctx.func.locals[local_index - implicit_param_slots - ctx.func.params.len()].ty,
+            )
         } else {
             types::I64 // default for dynamically-created locals
         };

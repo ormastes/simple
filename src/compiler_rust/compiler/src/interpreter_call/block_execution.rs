@@ -434,7 +434,7 @@ pub(super) fn exec_block_closure(
                         impl_methods,
                     )?;
                     let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(pattern, &value, &mut bindings, enums)? {
+                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
                         for (name, val) in bindings {
                             local_env.insert(name, val);
                         }
@@ -537,7 +537,7 @@ pub(super) fn exec_block_closure(
                 let mut matched = false;
                 for arm in &match_stmt.arms {
                     let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums)? {
+                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
                         if let Some(guard) = &arm.guard {
                             let mut guard_env = local_env.clone();
                             for (name, value) in &bindings {
@@ -1123,7 +1123,7 @@ fn exec_block_closure_mut(
                 if let Some(pattern) = &if_stmt.let_pattern {
                     let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
                     let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(pattern, &value, &mut bindings, enums)? {
+                    if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
                         for (name, val) in bindings {
                             local_env.insert(name, val);
                         }
@@ -1205,7 +1205,7 @@ fn exec_block_closure_mut(
                 let mut matched = false;
                 for arm in &match_stmt.arms {
                     let mut bindings = std::collections::HashMap::new();
-                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums)? {
+                    if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
                         if let Some(guard) = &arm.guard {
                             let mut guard_env = local_env.clone();
                             for (name, value) in &bindings {

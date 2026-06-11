@@ -736,6 +736,24 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
+        let mut receiver = receiver.clone();
+        let hir_args = self.lower_call_args(args, ctx)?;
+
+        if matches!(method, "push" | "append") && hir_args.len() == 1 {
+            if let HirExprKind::Local(local_index) = receiver.kind {
+                if self.untyped_empty_array_locals.remove(&local_index) {
+                    let specialized_array_ty = self.module.types.register(HirType::Array {
+                        element: hir_args[0].ty,
+                        size: None,
+                    });
+                    if let Some(local) = ctx.locals.get_mut(local_index) {
+                        local.ty = specialized_array_ty;
+                    }
+                    receiver.ty = specialized_array_ty;
+                }
+            }
+        }
+
         if args.is_empty() {
             match method {
                 "unwrap" => {
@@ -814,12 +832,8 @@ impl Lowerer {
             }
         }
 
-        // Get receiver type to determine which builtin methods are available
         let is_string = matches!(self.module.types.get(receiver.ty), Some(HirType::String));
         let is_array = matches!(self.module.types.get(receiver.ty), Some(HirType::Array { .. }));
-
-        // Lower arguments
-        let hir_args = self.lower_call_args(args, ctx)?;
 
         if let Some(ty) = self.builtin_numeric_method_result_type(receiver.ty, method) {
             return Ok(Some(HirExpr {

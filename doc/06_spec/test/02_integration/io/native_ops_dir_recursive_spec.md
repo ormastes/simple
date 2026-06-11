@@ -43,9 +43,9 @@ native_ops_dir_recursive_spec -> app
 
 #### creates nested directories recursively _(slow)_
 
-1. check
-2. check
-3. check
+- check
+- check
+- check
 
 
 <details>

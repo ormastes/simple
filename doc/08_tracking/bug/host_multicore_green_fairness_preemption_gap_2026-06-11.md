@@ -108,24 +108,6 @@ Related active host-side blocker:
   function, and the regression spec above now proves source-run and native
   `EXIT=0`.
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
-  records the newer callback-id resumable-stepper prototype as closed. That
-  path removes function-valued queue items and now returns `result=7` with
-  `EXIT=0` in the debug-seed hosted native path.
-- `doc/08_tracking/bug/multicore_green_post_join_array_return_native_blocker_2026-06-12.md`
-  records the closed post-join array-return continuation regression with
-  `EXIT=0`.
-- `doc/08_tracking/bug/native_struct_array_runtime_blocker_2026-06-11.md`
-  now records the closed smaller hosted-native blocker that used to sit beneath
-  that stepper path: a direct native array of a by-value struct is green again
-  on current-source seed/native.
-- `doc/08_tracking/bug/multicore_green_handle_array_join_native_blocker_2026-06-11.md`
-  now records the closed smaller hosted-native blocker beneath that stepper
-  path: local `MulticoreGreenHandle` array iteration plus `join()` now returns
-  `result=7` with `EXIT=0`.
-- `doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`
-  now records the closed helper handle-array return boundary beneath that
-  stepper path: a helper can keep local `MulticoreGreenHandle` handles, join
-  them, and return a separate ordered result array with `EXIT=0`.
 - `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`
   now records the closed standalone-native blocker that used to sit underneath
   that stepper path: returning a function value from inside a loop/search

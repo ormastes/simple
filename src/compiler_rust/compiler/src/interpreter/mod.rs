@@ -69,8 +69,8 @@ pub(crate) use interpreter_state::{
 // Core types and utilities
 mod core_types;
 pub(crate) use core_types::{
-    get_identifier_name, get_pattern_name, is_immutable_by_pattern, Control, Enums, ExternFunctions, ImplMethods,
-    Macros, Traits, TraitImpls, UnitFamilies, UnitFamilyInfo, Units,
+    get_identifier_name, get_pattern_name, is_immutable_by_pattern, Classes, Control, Enums, ExternFunctions,
+    ImplMethods, Macros, Traits, TraitImpls, UnitFamilies, UnitFamilyInfo, Units,
 };
 
 // Async/await support

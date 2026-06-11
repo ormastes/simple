@@ -39,6 +39,9 @@ pub(crate) fn is_immutable_by_pattern(name: &str) -> bool {
 /// Stores enum definitions: name -> EnumDef (Arc-wrapped for cheap sharing)
 pub(crate) type Enums = HashMap<String, Arc<EnumDef>>;
 
+/// Stores class definitions: name -> ClassDef (Arc-wrapped for cheap sharing)
+pub(crate) type Classes = HashMap<String, Arc<simple_parser::ast::ClassDef>>;
+
 /// Stores impl block methods: type_name -> list of methods
 pub(crate) type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 

@@ -59,12 +59,12 @@ class Context:
             case GpuBackend.None_:
                 Context.new(backend: GpuBackend.None_, device: -1)
 
-    static fn new(backend: GpuBackend, device: i32) -> Context:
+    static fn new(backend: GpuBackend, device: i64) -> Context:
         """Create context for specific backend and device.
 
         Args:
             backend: GPU backend type
-            device: Device ID (0=1st GPU, 1=2nd GPU, etc.)
+            device: Device ID (0=1st GPU, 1=2nd GPU, -1=CPU fallback)
 
         Returns:
             Context for specified backend
@@ -75,14 +75,12 @@ class Context:
         """
         val gpu = match backend:
             case GpuBackend.Cuda: gpu_cuda(device)
-            case GpuBackend.Vulkan:
-                gpu_cuda(device)
+            case GpuBackend.Vulkan: gpu_vulkan(device)
             case GpuBackend.None_: gpu_none()
 
-        val device_i64 = device * 1
         val stream = match backend:
             case GpuBackend.Cuda:
-                Some(Stream.create(device_i64))
+                Some(Stream.create(device))
             case _:
                 nil
 
@@ -155,23 +153,39 @@ class Context:
     # Stream Management
     # ========================================================================
 
+    fn is_cuda() -> bool:
+        """Return true if this context is backed by a CUDA device."""
+        match self.backend:
+            case GpuBackend.Cuda: true
+            case _: false
+
     fn create_stream() -> Stream:
         """Create new stream for async operations.
 
+        Only valid on CUDA backends. Calling on CPU/None_ backend will
+        print a warning and call rt_torch_stream_create(0) which is a
+        no-op on GPU-less hosts where the torch runtime is absent.
+        Callers should guard with ctx.is_cuda() before calling.
+
         Returns:
-            New CUDA stream (unique ownership)
+            New CUDA stream (unique ownership). Caller must drop to avoid leak.
 
         Example:
-            val stream1 = ctx.create_stream()
-            val stream2 = ctx.create_stream()
-            # Use streams for parallel execution
+            if ctx.is_cuda():
+                val stream1 = ctx.create_stream()
+                val stream2 = ctx.create_stream()
         """
         val device_i64 = self.device.device_id * 1
         match self.backend:
             case GpuBackend.Cuda:
                 Stream.create(device_i64)
             case _:
-                eprint("Warning: create_stream() called on non-CUDA backend, returning dummy stream")
+                # BUG(gpu_context_stream_cpu_fallback): Stream.create() calls
+                # rt_torch_stream_create CUDA extern even on CPU backend.
+                # Workaround: callers must guard with is_cuda(). This path is
+                # only reached if caller ignores the guard. We call with 0
+                # and the extern is a no-op when torch is unavailable.
+                eprint("Warning: create_stream() called on non-CUDA backend — guard with is_cuda() first")
                 Stream.create(0)
 
     # ========================================================================
@@ -189,7 +203,7 @@ class Context:
             case GpuBackend.Vulkan: "Vulkan"
             case GpuBackend.None_: "CPU"
 
-    fn device_id() -> i32:
+    fn device_id() -> i64:
         """Get device ID.
 
         Returns:
@@ -236,3 +250,6 @@ fn create_context_from_config() -> Context:
 # ============================================================================
 # Exports
 # ============================================================================
+
+export Context
+export create_context_from_config

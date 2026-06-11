@@ -30,16 +30,53 @@ pub fn browser_renderer_normalize_style_blocks(html: text) -> text:
         pos = close
     out
 
+fn _find_matching_close_brace(css: text, open: i64) -> i64:
+    val css_len = css.len()
+    var depth = 1
+    var i = open + 1
+    while i < css_len:
+        val ch = css.char_at(i)
+        if ch == "{":
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _strip_at_wrapper(css: text, marker: text) -> text:
+    val css_len = css.len()
+    var out = ""
+    var pos: i64 = 0
+    while pos < css_len:
+        val at_pos = _find_from(css, marker, pos)
+        if at_pos < 0:
+            out = out + css.substring(pos, css_len)
+            break
+        out = out + css.substring(pos, at_pos)
+        val open = _find_from(css, "{", at_pos)
+        if open < 0:
+            out = out + css.substring(at_pos, css_len)
+            break
+        val close = _find_matching_close_brace(css, open)
+        if close < 0:
+            out = out + css.substring(at_pos, css_len)
+            break
+        out = out + css.substring(open + 1, close)
+        pos = close + 1
+    out
+
 fn _flatten_at_blocks(css: text) -> text:
     var out = css
-    out = out.replace("@layer components {", "")
-    out = out.replace("@layer utilities {", "")
+    out = _strip_at_wrapper(out, "@layer components {")
+    out = _strip_at_wrapper(out, "@layer utilities {")
     # Known-valid @supports conditions: strip the wrapper, keep the inner rules.
-    out = out.replace("@supports (display: grid) {", "")
-    out = out.replace("@supports (display: flex) {", "")
-    out = out.replace("@supports (text-overflow: ellipsis) {", "")
-    out = out.replace("@supports (text-transform: uppercase) {", "")
-    out = out.replace("@supports selector(:has()) {", "")
+    out = _strip_at_wrapper(out, "@supports (display: grid) {")
+    out = _strip_at_wrapper(out, "@supports (display: flex) {")
+    out = _strip_at_wrapper(out, "@supports (text-overflow: ellipsis) {")
+    out = _strip_at_wrapper(out, "@supports (text-transform: uppercase) {")
+    out = _strip_at_wrapper(out, "@supports selector(:has()) {")
     # Handle @supports not (...) — strip the wrapper, keep inner rules (condition is false → rules apply via not).
     out = _strip_supports_not_blocks(out)
     # Strip unknown/invalid @supports blocks entirely (including their inner rules).
@@ -104,38 +141,94 @@ fn _strip_unknown_supports_blocks(css: text) -> text:
         pos = close + 1
     out
 
-fn _normalize_css_nesting(css: text) -> text:
-    val amp = css.index_of("&")
-    if amp < 0:
-        return css
-    val outer_open = css.index_of("{")
-    if outer_open < 0:
-        return css
-    val parent = css.substring(0, outer_open).trim()
+fn _remove_char(s: text, ch: text) -> text:
+    var out = ""
+    var i: i64 = 0
+    val n = s.len()
+    while i < n:
+        val c = s.char_at(i)
+        if c != ch:
+            out = out + c
+        i = i + 1
+    out
+
+fn _norm_rule_open_brace(rule_body: text) -> text:
+    " { "
+
+fn _norm_rule_close_brace(rule_body: text) -> text:
+    " } "
+
+fn _normalize_one_rule(parent: text, rule_body: text) -> text:
+    val open_br = _norm_rule_open_brace(parent)
+    val close_br = _norm_rule_close_brace(parent)
+    val body_len = rule_body.len()
     var base_decls = ""
     var nested = ""
-    var pos = outer_open + 1
-    val css_len = css.len()
-    while pos < css_len:
-        val next_amp = _find_from(css, "&", pos)
+    var pos: i64 = 0
+    var guard = 0
+    while pos < body_len and guard < 100:
+        guard = guard + 1
+        val next_amp = _find_from(rule_body, "&", pos)
         if next_amp < 0:
-            val tail = css.substring(pos, css_len).replace("}", "").trim()
+            val tail_raw = rule_body.substring(pos, body_len)
+            val tail_no_brace = _remove_char(tail_raw, "}")
+            val tail = tail_no_brace.trim()
             if tail.len() > 0:
-                base_decls = base_decls + tail
+                base_decls = base_decls + " " + tail
             break
-        val before = css.substring(pos, next_amp).trim()
+        val before_raw = rule_body.substring(pos, next_amp)
+        val before = before_raw.trim()
         if before.len() > 0:
             base_decls = base_decls + " " + before
-        val nested_open = _find_from(css, "{", next_amp)
-        val nested_close = _find_from(css, "}", nested_open + 1)
-        if nested_open < 0 or nested_close < 0:
+        val nested_open = _find_from(rule_body, "{", next_amp)
+        if nested_open < 0:
             break
-        val sel_tail = css.substring(next_amp + 1, nested_open).trim()
-        val decl = css.substring(nested_open + 1, nested_close).trim()
-        val sep = if sel_tail.starts_with(".") or sel_tail.starts_with("#") or sel_tail.starts_with(":"): "" else: " "
-        nested = nested + parent + sep + sel_tail + " { " + decl + " } "
+        val nested_close = _find_matching_close_brace(rule_body, nested_open)
+        if nested_close < 0:
+            break
+        val sel_tail_raw = rule_body.substring(next_amp + 1, nested_open)
+        val sel_tail = sel_tail_raw.trim()
+        val decl_raw = rule_body.substring(nested_open + 1, nested_close)
+        val decl = decl_raw.trim()
+        var sep = " "
+        if sel_tail.starts_with(".") or sel_tail.starts_with("#") or sel_tail.starts_with(":"):
+            sep = ""
+        val rule_part = parent + sep + sel_tail + open_br + decl + close_br
+        nested = nested + rule_part
         pos = nested_close + 1
     var out = ""
     if base_decls.len() > 0:
-        out = parent + " { " + base_decls + " } "
+        out = parent + open_br + base_decls + close_br
     out + nested
+
+fn _norm_find_close(css: text, brace: i64) -> i64:
+    _find_matching_close_brace(css, brace)
+
+fn _normalize_css_nesting(css: text) -> text:
+    if css.index_of("&") < 0:
+        return css
+    val css_len = css.len()
+    var out = ""
+    var pos: i64 = 0
+    var guard = 0
+    while pos < css_len and guard < 200:
+        guard = guard + 1
+        val brace = _find_from(css, "{", pos)
+        if brace < 0:
+            out = out + css.substring(pos, css_len)
+            break
+        val close = _norm_find_close(css, brace)
+        if close < 0:
+            out = out + css.substring(pos, css_len)
+            break
+        val sel_raw = css.substring(pos, brace)
+        val sel = sel_raw.trim()
+        val body = css.substring(brace + 1, close)
+        if body.index_of("&") >= 0:
+            out = out + _normalize_one_rule(sel, body)
+        else:
+            val open_br = _norm_rule_open_brace(sel)
+            val close_br = _norm_rule_close_brace(sel)
+            out = out + sel + open_br + body + close_br
+        pos = close + 1
+    out

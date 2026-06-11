@@ -105,6 +105,12 @@ pub struct Lowerer {
     /// early-return in `expr/access.rs::lower_field_access` falls through
     /// to the field-access fallback (W13-F class 1, fixed in W15-H).
     pub(super) global_enum_defs: Option<GlobalEnumDefs>,
+    /// Local bindings authored as untyped empty array literals (`var xs = []`).
+    ///
+    /// These start as `[Any]` placeholders in HIR so later builtin `append`
+    /// calls can specialize the local to the appended element type instead of
+    /// freezing the seed to the configured scalar default element type.
+    pub(super) untyped_empty_array_locals: HashSet<usize>,
 }
 
 impl Lowerer {
@@ -148,6 +154,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             ambiguous_field_names: None,
             global_enum_defs: None,
+            untyped_empty_array_locals: HashSet::new(),
         }
     }
 
@@ -190,6 +197,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             ambiguous_field_names: None,
             global_enum_defs: None,
+            untyped_empty_array_locals: HashSet::new(),
         }
     }
 
@@ -255,6 +263,7 @@ impl Lowerer {
             duplicate_global_struct_defs: None,
             ambiguous_field_names: None,
             global_enum_defs: None,
+            untyped_empty_array_locals: HashSet::new(),
         }
     }
 

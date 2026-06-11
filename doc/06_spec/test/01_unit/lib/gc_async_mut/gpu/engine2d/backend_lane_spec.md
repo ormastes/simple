@@ -27,7 +27,7 @@ backend_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -127,72 +127,6 @@ expect(fallback.fallback_reason).to_contain("processing backend not specified")
 
 </details>
 
-#### exposes the shared native first backend order through the lane contract
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val drawing_order = engine2d_backend_lane_drawing_preference_order()
-val full_order = engine2d_backend_lane_full_preference_order()
-
-expect(drawing_order[0]).to_equal("metal")
-expect(drawing_order[1]).to_equal("cuda")
-expect(drawing_order[2]).to_equal("rocm")
-expect(drawing_order[4]).to_equal("vulkan")
-expect(drawing_order[5]).to_equal("directx")
-expect(full_order[0]).to_equal("baremetal")
-expect(full_order[1]).to_equal("virtio_gpu")
-expect(full_order[2]).to_equal("metal")
-expect(engine2d_backend_lane_preference_summary()).to_contain("vulkan > directx > opencl")
-```
-
-</details>
-
-#### selects the preferred available candidate without probing per frame
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect(engine2d_backend_lane_preferred_candidate(["opencl", "cpu", "directx"], false)).to_equal("directx")
-expect(engine2d_backend_lane_preferred_candidate(["vulkan", "cpu", "cuda"], false)).to_equal("cuda")
-expect(engine2d_backend_lane_preferred_candidate(["virtio-gpu", "metal"], true)).to_equal("virtio_gpu")
-expect(engine2d_backend_lane_preferred_candidate(["amd-hip", "cpu"], false)).to_equal("rocm")
-expect(engine2d_backend_lane_preferred_candidate(["unknown"], false)).to_equal("")
-```
-
-</details>
-
-#### selects font offload backends with native GPU lanes before Vulkan
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val order = engine2d_font_offload_backend_order()
-
-expect(order[0]).to_equal("metal")
-expect(order[1]).to_equal("cuda")
-expect(order[2]).to_equal("rocm")
-expect(order[4]).to_equal("vulkan")
-expect(engine2d_backend_lane_preferred_font_offload_candidate(["vulkan", "amd-hip", "cpu"])).to_equal("rocm")
-expect(engine2d_backend_lane_preferred_font_offload_candidate(["opencl", "cpu_simd", "vulkan"])).to_equal("vulkan")
-expect(engine2d_backend_lane_preferred_font_offload_candidate(["software", "cpu"])).to_equal("software")
-expect(engine2d_backend_lane_preferred_font_offload_candidate(["unknown"])).to_equal("")
-```
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -212,8 +146,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

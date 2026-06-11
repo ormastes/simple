@@ -338,6 +338,26 @@ impl Lowerer {
                             ty: field_ty,
                         });
                     }
+                    if std::env::var("SIMPLE_DEBUG_FIELD_FAIL").is_ok() {
+                        eprintln!(
+                            "[FIELD-FAIL] field='{field}' struct='{struct_name}' candidates={candidate_struct_names:?} has_known_method={has_known_method} ambiguous={}",
+                            self.is_ambiguous_global_field(field)
+                        );
+                        for (tid, t) in self.module.types.iter() {
+                            if let HirType::Struct { name, fields, .. } = t {
+                                if candidate_struct_names.iter().any(|c| c == name) {
+                                    eprintln!("[FIELD-FAIL]   module.types[{tid:?}] struct {name} fields={fields:?}");
+                                }
+                            }
+                        }
+                        if let Some(defs) = self.global_struct_defs.as_ref() {
+                            for c in &candidate_struct_names {
+                                eprintln!("[FIELD-FAIL]   global_defs[{c}] = {:?}", defs.get(c.as_str()));
+                            }
+                        } else {
+                            eprintln!("[FIELD-FAIL]   global_struct_defs=None");
+                        }
+                    }
                     if let Some(func_name) = &self.current_function_name {
                         return Err(LowerError::Unsupported(format!(
                             "cannot infer field type while lowering {func_name}: struct '{struct_name}' field '{field}'"

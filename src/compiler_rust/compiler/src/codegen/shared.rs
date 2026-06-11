@@ -138,11 +138,16 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
     // Pure-Simple runtime helpers may opt into exact runtime ABI parameters
     // when their declared Simple parameter types already match the runtime
     // table. This lets simple-core provide narrow ABI symbols like rt_enum_new.
+    let implicit_local_params = implicit_local_param_slots(func);
+
     if let Some(params) = runtime_param_types {
         for param_ty in params {
             sig.params.push(AbiParam::new(*param_ty));
         }
     } else {
+        for _ in 0..implicit_local_params {
+            sig.params.push(AbiParam::new(types::I64));
+        }
         for _param in &func.params {
             sig.params.push(AbiParam::new(types::I64));
         }
@@ -163,6 +168,23 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
     }
 
     sig
+}
+
+pub fn implicit_local_param_slots(func: &MirFunction) -> usize {
+    let declared_slots = func.params.len() + func.locals.len();
+    let mut max_local_index = None;
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let crate::mir::MirInst::LocalAddr { local_index, .. } = inst {
+                max_local_index = Some(max_local_index.map_or(*local_index, |cur: usize| cur.max(*local_index)));
+            }
+        }
+    }
+
+    match max_local_index {
+        Some(max_idx) if max_idx + 1 > declared_slots => (max_idx + 1) - declared_slots,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]

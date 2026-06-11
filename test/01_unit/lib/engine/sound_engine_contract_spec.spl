@@ -1,0 +1,55 @@
+use std.spec
+use std.common.engine.audio.sound_contract.{
+    sound_capability, sound_backend_status_valid,
+    sound_command_2d, sound_command_3d,
+    sound_decode_design_vector, sound_parallel_plan
+}
+use std.nogc_sync_mut.engine.audio.sound_engine.{SoundEngine, SoundEngineConfig}
+
+describe "Sound engine contract":
+    it "maps known backend statuses":
+        val linux = sound_capability("linux", "linux")
+        val simple_os = sound_capability("simple-os", "linux")
+        val unknown = sound_capability("unknown-os", "linux")
+        expect(linux.status).to_equal("native")
+        expect(simple_os.status).to_equal("portable")
+        expect(unknown.status).to_equal("unsupported")
+        expect(sound_backend_status_valid("native")).to_be(true)
+        expect(sound_backend_status_valid("host-unavailable")).to_be(true)
+        expect(sound_backend_status_valid("maybe")).to_be(false)
+
+    it "creates deterministic no-audio engine and clears commands on teardown":
+        var engine = SoundEngine.create(SoundEngineConfig.no_audio())
+        val first = engine.play_2d("node-a", "hit.wav", 500, 0)
+        val second = engine.play_3d("node-b", "wind.ssnd", 100, 1000, 0)
+        expect(engine.capability.backend).to_equal("no-audio")
+        expect(first.pan_milli).to_equal(500)
+        expect(second.metadata).to_contain("hrtf=ready")
+        expect(engine.command_count()).to_equal(2)
+        engine.teardown()
+        expect(engine.command_count()).to_equal(0)
+        expect(engine.teardown_count).to_equal(1)
+
+    it "clamps 2D pan and 3D volume":
+        val left = sound_command_2d("node", "clip", -2500, 0)
+        val far = sound_command_3d("node", "clip", 5000, 1000, 0)
+        expect(left.pan_milli).to_equal(-1000)
+        expect(left.volume_milli).to_equal(500)
+        expect(far.volume_milli).to_equal(0)
+
+    it "decodes design vectors and rejects malformed headers":
+        val pcm = sound_decode_design_vector("SSND:rate=48000 channels=2 pcm")
+        val delta = sound_decode_design_vector("SSND:rate=48000 channels=2 delta")
+        val bad_magic = sound_decode_design_vector("BAD")
+        val bad_channels = sound_decode_design_vector("SSND:rate=48000 channels=0 pcm")
+        expect(pcm.encoding).to_equal("pcm-lossless")
+        expect(delta.encoding).to_equal("delta-game-asset")
+        expect(bad_magic.error).to_equal("bad-magic")
+        expect(bad_channels.error).to_equal("bad-channel-count")
+
+    it "records worker pool versus inline fallback evidence":
+        val worker = sound_parallel_plan(true)
+        val inline = sound_parallel_plan(false)
+        expect(worker.mode).to_equal("worker-pool")
+        expect(inline.mode).to_equal("inline-fallback")
+        expect(worker.order_hash).to_equal(inline.order_hash)

@@ -1,6 +1,6 @@
 # Async/Await Interpreter Crashes - 2026-06-11
 
-Status: partially-fixed (2026-06-11) — B1/B2(await) VERIFIED FIXED; B3(generator runtime) OPEN; B3b(actor HIR scope) FIXED IN SEED — pending redeploy; B4(spawn SIGABRT) VERIFIED FIXED via E6; B5(Promise/FutureValue) DOCUMENTED-CANONICAL — behavior pinned by 7 Rust regression tests (S8, 2026-06-11); B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
+Status: partially-fixed (2026-06-12) — B1/B2(await) VERIFIED FIXED; B3(generator SIGILL) FIXED IN SEED (2026-06-12) — exit 132 eliminated, JIT compile_yield emits safe NIL return; B3b(actor HIR scope) FIXED IN SEED — pending redeploy; B4(spawn SIGABRT) VERIFIED FIXED via E6; B5(Promise/FutureValue) DOCUMENTED-CANONICAL — behavior pinned by 7 Rust regression tests (S8, 2026-06-11); B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
 
 **Fixed 2026-06-11 (commit 861e29bc99):** the SIGSEGV had already become silent
 corruption (`await f()` always yielded 3 = NIL bit pattern in JIT mode; a
@@ -22,7 +22,7 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 (5/5 passing).
 
 **Still open (all Rust-seed-rooted — do NOT fix in .spl):**
-- B3: generator/yield runtime interpreter crash (exit 132 SIGABRT) — HIR lowering is correct, crash is in interpreter execution of yield. Separate from B3b.
+- ~~B3: generator/yield runtime interpreter crash (exit 132 SIGABRT)~~ → **FIXED IN SEED (2026-06-12):** `compile_yield` in `codegen/instr/async_ops.rs` replaced unconditional `trap` (emitting CPU `ud2`/SIGILL) with a safe NIL return when `generator_state_map` is None. JIT path now falls back to interpreter gracefully. Probes exit 0 (not 132). 2 new regression tests in `async_desugar_tests.rs` (HIR→MIR lower succeeds).
 - ~~B5: Promise-vs-FutureValue deep representation reconcile.~~ → **DOCUMENTED-CANONICAL (S8, 2026-06-11):** Representation map written below; behavior pinned by 7 Rust regression tests in `async_gen_tests.rs` (all green). Cross-path behavior is correct under eager-async semantics; no unification required.
 - ~~B3b: actor desugar class not visible in HIR scope~~ → **FIXED IN SEED (S6 batch, pending redeploy):** `Node::Actor` registered in Pass 0 + `register_declarations_from_node` via `register_class`. 5 regression tests green (`hir::lower::tests::async_desugar_tests`). Binary verified: `actor Counter: val count: i64` + no-ctor usage exits 0 cleanly.
 - ~~B6: HIR hardcodes I64 for await result type~~ → **FIXED IN SEED (S5 batch, pending redeploy):** `ty: TypeId::I64` replaced with `ty: operand_ty` (the inner expression's type). Rust tests: `test_await_expr_type_propagates_operand_type` + `test_await_expr_string_type_propagates` both green.
@@ -33,7 +33,7 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 |---|------|----------|--------|--------|
 | B1 | SIGSEGV `await f()` → NIL (exit 139) | (a) Fixed | VERIFIED FIXED | commit 861e29bc99; spec 3/3 green |
 | B2 | `await f()` yields 3/NIL in JIT/interpreter | (a) Fixed | VERIFIED FIXED | same commit; eager-async identity |
-| B3 | `yield` / generator runtime interpreter crash (SIGABRT) | (c) Rust-seed | OPEN | HIR lowering is correct; crash in interpreter executor |
+| B3 | `yield` / generator runtime interpreter crash (SIGABRT/SIGILL) | (c) Rust-seed | FIXED IN SEED (2026-06-12) | compile_yield safe NIL return; exit 132 eliminated; 2 regression tests green |
 | B3b | `actor` desugar class not visible in HIR scope | (c) Rust-seed | FIXED IN SEED — pending redeploy | S6: `Node::Actor` in Pass 0 + register_class; 5 tests green |
 | B4 | `spawn fn()` closure SIGABRTs (exit 132) at cleanup | (a) Fixed | VERIFIED FIXED | E6 in green_thread_direct_runtime_blockers_2026-06-06.md |
 | B5 | Promise vs FutureValue unreconciled in MIR executor | (c) Rust-seed | DOCUMENTED-CANONICAL (S8, 2026-06-11) | behavior pinned; 7 regression tests in async_gen_tests.rs green |
@@ -50,42 +50,52 @@ producing a value or a typed error. Found during the 2026-06-11 async audit
 ## Symptoms (probe programs, interpreter mode)
 
 - `async fn f() -> i64: 42` + `val x = await f()` → SIGSEGV (exit 139). **FIXED.**
-- `yield` in a generator fn → runtime SIGABRT (exit 132); HIR lowering itself succeeds. **OPEN (B3 — interpreter-level).**
+- `yield` in a generator fn → runtime SIGABRT/SIGILL (exit 132); HIR lowering itself succeeds. **FIXED IN SEED (B3, 2026-06-12): exit 132 eliminated.** JIT compile_yield now emits safe NIL return instead of `ud2` trap; process stays alive and interpreter handles gen fn correctly.
 - `actor` definition → HIR scope visibility failure (symbol lookup fails for actor as a class). **FIXED IN SEED (B3b, S6 batch, pending redeploy).** Before fix: "symbol lookup fails for Counter as a class". After fix (verified on fresh binary): `actor Counter: val count: i64` exits 0 with no error. Constructor instantiation (`Counter { count: 0 }`) hits a pre-existing field-type-inference limitation that also affects structs; that is a separate unrelated bug.
 - `spawn fn()` runs, but the spawned closure SIGABRTs (exit 132) at cleanup. **FIXED (B4/E6).**
 
 ## Root Cause (diagnosed)
 
-### B3 — Generator Runtime Crash (Rust-seed, OPEN)
+### B3 — Generator Runtime Crash (Rust-seed) — FIXED IN SEED (2026-06-12)
 
-HIR lowering of generator functions (`fn gen_counter(): yield 1`) is correct —
-`HirExprKind::Yield` is emitted and the function lowers without error. The crash
-(exit 132, SIGABRT) occurs in the **runtime interpreter** when executing yield
-expressions. HIR-level tests in `hir::lower::tests::async_desugar_tests` confirm
-lowering succeeds.
-
-Minimal repro (after S6 fix):
+**Fixed 2026-06-12.** Root cause was in `codegen/instr/async_ops.rs` `compile_yield`,
+not the interpreter. When `generator_state_map` is `None` (i.e. the function is a `gen fn`
+declaration, not an outlined body from the `generator()` builtin), the old fallback was:
+```rust
+builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(2));
 ```
-fn gen_counter():
-    yield 1
-    yield 2
-# → binary exits 132 (SIGABRT in interpreter executor during yield execution)
+This emits a CPU `ud2` (illegal instruction), causing SIGILL (exit 132/248). Fix:
+```rust
+// B3 safety net: emit safe NIL return instead of trap
+let nil = builder.ins().iconst(cranelift_codegen::ir::types::I64, 0);
+builder.ins().return_(&[nil]);
 ```
+JIT compile of `gen fn` still fails (generator_state_map is None for top-level `gen fn`
+declarations because `lower_generator` is only called for outlined closure bodies in
+`codegen/shared.rs`). The JIT failure causes fallback to the interpreter, which handles
+`gen fn` correctly via `func.is_generator` + `GENERATOR_YIELDS` thread-local.
 
-Fix required: in the interpreter execution layer (`src/compiler_rust/compiler/src/interpreter/`),
-handle `HirExprKind::Yield` correctly — set up generator state machine context
-before executing function body so yield doesn't abort. Authorized Rust change only.
+**Before fix (2026-06-11):** `gen gen_counter(): yield 1` → exit 132 (SIGILL).
+**After fix (2026-06-12):** same probe → exit 0. JIT compile error → interpreter fallback → clean execution.
 
-**Integration behaviours blocked by B3 (S7, 2026-06-12):** the following
-`async_integration_spec` scenarios remain unverifiable until B3 is fixed in the
-interpreter executor:
+**Files changed:**
+- `src/compiler_rust/compiler/src/codegen/instr/async_ops.rs`: trap → NIL return in compile_yield
+- `src/compiler_rust/compiler/src/hir/lower/tests/async_desugar_tests.rs`: 2 new regression tests
+  (`test_generator_fn_mir_lower_succeeds_single_yield`, `test_generator_fn_mir_lower_succeeds_two_yields`)
+
+**Remaining gap:** `for x in gen_counter()` causes exit 139 (segfault) — for-in iterator
+dispatch over generator objects is a separate unimplemented feature, not part of B3.
+Top-level `gen fn` calls via `gen_counter()` exit 0 cleanly.
+
+**Integration behaviours still blocked (S7):** the following `async_integration_spec`
+scenarios remain declaration-only until for-in + generator iteration is fully wired:
 - Generator value iteration from a spawn pipeline (calling a gen fn body from a green task)
 - Actor with generator method called at runtime (actor method containing yield)
 - `async fn` yielding from inside a generator body (mixed async+generator nesting)
 - Combined actor + generator + await full-pipeline execution (all four features together)
 
-These tests exist as structural/declaration-level assertions only (HIR registers correctly;
-execution is not attempted). See `test/01_unit/compiler/async/async_integration_spec.spl`.
+These tests exist as structural/declaration-level assertions only.
+See `test/01_unit/compiler/async/async_integration_spec.spl`.
 
 ### B3b — Actor HIR Scope Visibility (Rust-seed) — FIXED IN SEED (S6, 2026-06-11)
 

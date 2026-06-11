@@ -232,6 +232,66 @@ fn test_mir_control_flow_compilation() {
 
 #[test]
 #[cfg(feature = "llvm")]
+fn test_mir_method_call_static_struct_receiver_ir() {
+    use crate::hir::TypeId as T;
+    use crate::mir::effects::LocalKind;
+    use crate::mir::{MirFunction, MirInst, MirLocal, Terminator, VReg};
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+    backend.create_module("method_struct_receiver").unwrap();
+
+    let mut method = MirFunction::new("Boxed.read".to_string(), T::I64, Visibility::Public);
+    let recv_ptr = VReg(0);
+    let recv_val = VReg(1);
+    let field = VReg(2);
+    method.blocks[0].instructions.push(MirInst::LocalAddr {
+        dest: recv_ptr,
+        local_index: 0,
+    });
+    method.blocks[0].instructions.push(MirInst::Load {
+        dest: recv_val,
+        addr: recv_ptr,
+        ty: T::ANY,
+    });
+    method.blocks[0].instructions.push(MirInst::FieldGet {
+        dest: field,
+        object: recv_val,
+        byte_offset: 0,
+        field_type: T::I64,
+    });
+    method.blocks[0].terminator = Terminator::Return(Some(field));
+
+    let mut caller = MirFunction::new("main".to_string(), T::I64, Visibility::Public);
+    caller.locals.push(MirLocal {
+        name: "item".to_string(),
+        ty: T::ANY,
+        kind: LocalKind::Local,
+        is_ghost: false,
+    });
+    let item = VReg(0);
+    let result = VReg(1);
+    caller.blocks[0].instructions.push(MirInst::ConstInt { dest: item, value: 3 });
+    caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+        dest: Some(result),
+        receiver: item,
+        func_name: "Boxed.read".to_string(),
+        args: vec![],
+    });
+    caller.blocks[0].terminator = Terminator::Return(Some(result));
+
+    backend.compile_function(&method).unwrap();
+    backend.compile_function(&caller).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("define i64 @\"Boxed.read\"(i64"), "{ir}");
+    assert!(ir.contains("call i64 @\"Boxed.read\"(i64"), "{ir}");
+    backend.verify().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
 fn test_mir_simd_runtime_call_symbols() {
     let (_backend, ir) = build_simd_runtime_call_test_function("mir_simd_runtime_symbols");
 

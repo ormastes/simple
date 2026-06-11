@@ -77,3 +77,49 @@ fn test_match_arm_leading_statements_are_kept() {
         "match arm `val y = 41` initializer was dropped: {repr}"
     );
 }
+
+#[test]
+fn test_untyped_empty_array_specializes_on_first_append() {
+    let module = parse_and_lower(
+        "class Boxed:\n    value: i64\n\nfn run_one() -> i64:\n    var items = []\n    items.append(Boxed(value: 7))\n    for item in items:\n        return item.value\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    let HirStmt::Let { local_index, ty, .. } = &func.body[0] else {
+        panic!("expected first statement to be the items binding");
+    };
+    let HirStmt::Expr(HirExpr {
+        kind: HirExprKind::MethodCall { receiver, .. },
+        ..
+    }) = &func.body[1]
+    else {
+        panic!("expected second statement to be items.append(...)");
+    };
+    let HirStmt::For { pattern_local, iterable, .. } = &func.body[2] else {
+        panic!("expected third statement to be the items loop");
+    };
+
+    assert!(matches!(
+        module.types.get(*ty),
+        Some(HirType::Array { element, .. }) if *element == TypeId::ANY
+    ));
+    assert!(matches!(receiver.as_ref().kind, HirExprKind::Local(idx) if idx == *local_index));
+
+    let specialized_local = &func.locals[*local_index];
+    assert!(matches!(
+        module.types.get(specialized_local.ty),
+        Some(HirType::Array { element, .. }) if matches!(module.types.get(*element), Some(HirType::Struct { name, .. }) if name == "Boxed")
+    ));
+    let loop_local_index = pattern_local.expect("loop local should be recorded");
+    let loop_local = &func.locals[loop_local_index];
+    assert_eq!(loop_local.name, "item");
+    assert!(matches!(
+        module.types.get(loop_local.ty),
+        Some(HirType::Struct { name, .. }) if name == "Boxed"
+    ));
+    assert!(matches!(
+        module.types.get(iterable.ty),
+        Some(HirType::Array { element, .. }) if matches!(module.types.get(*element), Some(HirType::Struct { name, .. }) if name == "Boxed")
+    ));
+}

@@ -801,7 +801,21 @@ impl NativeBackend for LlvmBackend {
             if !has_body && !referenced_function_names.contains(func.name.as_str()) {
                 continue;
             }
-            let param_types: Vec<_> = func.params.iter().map(|p| p.ty).collect();
+            let declared_slots = func.params.len() + func.locals.len();
+            let mut max_local_index = None;
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let crate::mir::MirInst::LocalAddr { local_index, .. } = inst {
+                        max_local_index = Some(max_local_index.map_or(*local_index, |cur: usize| cur.max(*local_index)));
+                    }
+                }
+            }
+            let implicit_slots = match max_local_index {
+                Some(max_idx) if max_idx + 1 > declared_slots => (max_idx + 1) - declared_slots,
+                _ => 0,
+            };
+            let mut param_types = vec![crate::hir::TypeId::I64; implicit_slots];
+            param_types.extend(func.params.iter().map(|p| p.ty));
             // Resolve through import_map/use_map to get the mangled name
             // (e.g., "exit" -> "app__io__cli_ops__exit") to avoid symbol collisions
             let resolved_name = self

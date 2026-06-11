@@ -93,6 +93,40 @@ fn _max_i32_vk(a: i32, b: i32) -> i32:
         b
 
 # ============================================================================
+# VulkanErrorKind3D — structured error classification (mirrors engine2d pattern)
+# ============================================================================
+
+enum VulkanErrorKind3D:
+    """Classification of Vulkan 3D runtime errors."""
+    DeviceLost
+    MissingExtension
+    ShaderCompile
+    NotAvailable
+    NoDevice
+    Other
+    None
+
+fn vulkan3d_classify_error(err: text) -> VulkanErrorKind3D:
+    """Classify a Vulkan 3D error string into a VulkanErrorKind3D variant.
+
+    Returns VulkanErrorKind3D.None when err is "" (no error).
+    """
+    if err == "":
+        VulkanErrorKind3D.None
+    elif (err.contains("device lost") or err.contains("DEVICE_LOST")):
+        VulkanErrorKind3D.DeviceLost
+    elif (err.contains("extension") or err.contains("Extension")):
+        VulkanErrorKind3D.MissingExtension
+    elif (err.contains("shader") or err.contains("SPIR-V") or err.contains("compile") or err.contains("pipeline")):
+        VulkanErrorKind3D.ShaderCompile
+    elif (err.contains("unavailable") or err.contains("rt_vulkan_init")):
+        VulkanErrorKind3D.NotAvailable
+    elif (err.contains("no Vulkan devices") or err.contains("select_device")):
+        VulkanErrorKind3D.NoDevice
+    else:
+        VulkanErrorKind3D.Other
+
+# ============================================================================
 # Vulkan Backend
 # ============================================================================
 
@@ -121,6 +155,7 @@ class VulkanBackend3D:
     mask_h: i32
     stats: RenderStats3D
     initialized: bool
+    last_error: text  # Most recent init/runtime failure; "" when healthy
 
     static fn create() -> VulkanBackend3D:
         """Create an uninitialized Vulkan 3D backend. Call init() before drawing."""
@@ -130,7 +165,7 @@ class VulkanBackend3D:
             lights: [], ambient_color: 0xFFFFFFFF, ambient_intensity: 0.2,
             depth_test_on: true, cull_mode: 1, blend_mode: 0,
             mask: [], mask_w: 0, mask_h: 0,
-            stats: render_stats3d_new(), initialized: false
+            stats: render_stats3d_new(), initialized: false, last_error: ""
         )
 
 # ============================================================================
@@ -434,6 +469,10 @@ impl RenderBackend3D for VulkanBackend3D:
         "vulkan3d"
 
     me init(width: i32, height: i32) -> bool:
+        self.last_error = ""
+        if width <= 0 or height <= 0:
+            self.last_error = "init: invalid dimensions"
+            return false
         self.w = width
         self.h = height
         val total = width * height
@@ -460,14 +499,21 @@ impl RenderBackend3D for VulkanBackend3D:
         self.w = 0
         self.h = 0
         self.initialized = false
+        self.last_error = ""
 
     me begin_frame():
+        if not self.initialized:
+            return
         self.stats = render_stats3d_new()
 
     me end_frame():
+        if not self.initialized:
+            return
         self.stats.frame_time_us = 0
 
     me present():
+        if not self.initialized:
+            return
         # GPU would display via Vulkan swap chain — no-op in software fallback
         self.stats.draw_calls = self.stats.draw_calls
 
@@ -480,6 +526,8 @@ impl RenderBackend3D for VulkanBackend3D:
         self.stats.draw_calls = self.stats.draw_calls
 
     me clear(color: u32):
+        if not self.initialized:
+            return
         val total = self.w * self.h
         var i = 0
         while i < total:
@@ -487,6 +535,8 @@ impl RenderBackend3D for VulkanBackend3D:
             i = i + 1
 
     me clear_depth():
+        if not self.initialized:
+            return
         val total = self.w * self.h
         var i = 0
         while i < total:
@@ -494,6 +544,8 @@ impl RenderBackend3D for VulkanBackend3D:
             i = i + 1
 
     me submit_triangle(v0: Vertex3D, v1: Vertex3D, v2: Vertex3D, material: Material3DParams, model: [f32]):
+        if not self.initialized:
+            return
         self.stats.draw_calls = self.stats.draw_calls + 1
         self.stats.triangles = self.stats.triangles + 1
 
@@ -624,6 +676,8 @@ impl RenderBackend3D for VulkanBackend3D:
         self.depth = [1.0; total]
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if not self.initialized:
+            return
         var row = 0
         while row < h:
             var col = 0
@@ -662,32 +716,50 @@ impl RenderBackend3D for VulkanBackend3D:
     # -- Built-in geometry (delegate to emulation layer) --
 
     me draw_cube(model: [f32], material: Material3DParams):
+        if not self.initialized:
+            return
         emu_draw_cube(self, model, material)
 
     me draw_sphere(model: [f32], material: Material3DParams, segments: i32):
+        if not self.initialized:
+            return
         emu_draw_sphere(self, model, material, segments)
 
     me draw_plane(model: [f32], material: Material3DParams):
+        if not self.initialized:
+            return
         emu_draw_plane(self, model, material)
 
     me draw_cylinder(model: [f32], material: Material3DParams, segments: i32):
+        if not self.initialized:
+            return
         emu_draw_cylinder(self, model, material, segments)
 
     me draw_cone(model: [f32], material: Material3DParams, segments: i32):
+        if not self.initialized:
+            return
         emu_draw_cone(self, model, material, segments)
 
     me draw_line_3d(x1: f32, y1: f32, z1: f32, x2: f32, y2: f32, z2: f32, color: u32, thickness: f32):
+        if not self.initialized:
+            return
         emu_draw_line_3d(self, x1, y1, z1, x2, y2, z2, color, thickness)
 
     me draw_wireframe(vertices: [Vertex3D], indices: [u32], model: [f32], color: u32):
+        if not self.initialized:
+            return
         emu_draw_wireframe(self, vertices, indices, model, color)
 
     # -- Batch mesh submission --
 
     me submit_indexed_mesh(vertices: [Vertex3D], indices: [u32], material: Material3DParams, model: [f32]):
+        if not self.initialized:
+            return
         emu_submit_indexed_mesh(self, vertices, indices, material, model)
 
     me submit_mesh_instanced(vertices: [Vertex3D], indices: [u32], transforms: [[f32]], count: i32, material: Material3DParams):
+        if not self.initialized:
+            return
         emu_submit_mesh_instanced(self, vertices, indices, transforms, count, material)
 
     # -- Textures --
@@ -741,3 +813,99 @@ impl RenderBackend3D for VulkanBackend3D:
 
     me generate_mipmaps(texture_id: i32):
         emu_generate_mipmaps(self, texture_id)
+
+    # -- Shader / Pipeline (trait-required; implementations in backend_vulkan_ext) --
+
+    me create_shader(vertex_src: text, fragment_src: text) -> i32:
+        emu_create_shader(self, vertex_src, fragment_src)
+
+    me delete_shader(shader_id: i32):
+        emu_delete_shader(self, shader_id)
+
+    me create_pipeline(shader_id: i32, depth_test: bool, blend_mode: i32, cull_mode: i32) -> i32:
+        emu_create_pipeline(self, shader_id, depth_test, blend_mode, cull_mode)
+
+    me bind_pipeline(pipeline_id: i32):
+        emu_bind_pipeline(self, pipeline_id)
+
+    # -- Buffer management --
+
+    me create_storage_buffer(size: i32) -> i32:
+        emu_create_storage_buffer(self, size)
+
+    me update_buffer(buffer_id: i32, data: [u8]):
+        emu_update_buffer(self, buffer_id, data)
+
+    me read_buffer(buffer_id: i32) -> [u8]:
+        emu_read_buffer(self, buffer_id)
+
+    # -- Render pass --
+
+    me begin_render_pass(color_target: i32, depth_target: i32):
+        emu_begin_render_pass(self, color_target, depth_target)
+
+    me end_render_pass():
+        emu_end_render_pass(self)
+
+    # -- Post-processing (advanced) --
+
+    me apply_ssao(radius: f32, bias: f32, intensity: f32):
+        emu_apply_ssao(self, radius, bias, intensity)
+
+    me apply_fxaa():
+        emu_apply_fxaa(self)
+
+    me apply_ssr(max_steps: i32, thickness: f32):
+        emu_apply_ssr(self, max_steps, thickness)
+
+    # -- Occlusion --
+
+    me occlusion_query(x: i32, y: i32, w: i32, h: i32) -> i32:
+        emu_occlusion_query(self, x, y, w, h)
+
+    # -- Animation --
+
+    me upload_bone_transforms(bones: [[f32]], count: i32):
+        emu_upload_bone_transforms(self, bones, count)
+
+    # -- GPU-driven rendering --
+
+    me draw_indirect(buffer_id: i32, offset: i32, count: i32):
+        emu_draw_indirect(self, buffer_id, offset, count)
+
+    # -- Synchronization --
+
+    me pipeline_barrier():
+        emu_pipeline_barrier(self)
+
+    # -- Extended texture ops (Core — Chrome WebGPU parity) --
+
+    me create_texture_ex(desc: TextureDescriptor3D, data: [u8]) -> i32:
+        emu_create_texture_ex(self, desc, data)
+
+    me create_sampler(desc: SamplerDescriptor3D) -> i32:
+        emu_create_sampler(self, desc)
+
+    me create_texture_view(texture_id: i32, dimension: i32, format: i32, base_mip: i32, mip_count: i32, base_layer: i32, layer_count: i32) -> i32:
+        emu_create_texture_view(self, texture_id, dimension, format, base_mip, mip_count, base_layer, layer_count)
+
+    me destroy_texture_ex(texture_id: i32):
+        emu_destroy_texture_ex(self, texture_id)
+
+    me destroy_sampler(sampler_id: i32):
+        emu_destroy_sampler(self, sampler_id)
+
+    me write_texture(texture_id: i32, x: i32, y: i32, z: i32, w: i32, h: i32, d: i32, data: [u8]):
+        emu_write_texture(self, texture_id, x, y, z, w, h, d, data)
+
+    me copy_texture_to_texture(src_id: i32, dst_id: i32, src_origin: [i32], dst_origin: [i32], copy_size: [i32]):
+        emu_copy_texture_to_texture(self, src_id, dst_id, src_origin, dst_origin, copy_size)
+
+    me generate_mipmaps_ex(texture_id: i32, format: i32):
+        emu_generate_mipmaps_ex(self, texture_id, format)
+
+    me compress_texture(texture_id: i32, target_format: i32) -> i32:
+        emu_compress_texture(self, texture_id, target_format)
+
+    me read_texture(texture_id: i32, mip: i32, layer: i32) -> [u8]:
+        emu_read_texture(self, texture_id, mip, layer)

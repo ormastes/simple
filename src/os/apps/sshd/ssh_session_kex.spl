@@ -13,7 +13,7 @@ use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey}
 use os.kernel.log.klog_api.{log_info}
 use os.kernel.net.rt_net_socket_facade.{rt_net_last_ssh_plain_payload_len, rt_net_last_ssh_plain_payload_slice}
-use os.crypto.dual_backend.{DualBackendMode, dual_backend_choose_bytes, dual_backend_default_config, dual_backend_run_bytes}
+use os.crypto.dual_backend.{dual_backend_alpha_default_mode, dual_backend_bytes_equal, dual_backend_choose_bytes, dual_backend_run_bytes}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_sign_live_pure_only, ed25519_sign_live_runtime_only, ed25519_verify}
 use os.crypto.curve25519.{x25519, x25519_base}
 extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
@@ -424,66 +424,18 @@ impl SshSession:
         log_raw_println("[sshd-session] client enc c2s={client_kex.encryption_client_to_server}")
         log_raw_println("[sshd-session] client mac c2s={client_kex.mac_client_to_server}")
 
-        # Parse our own KEXINIT only on the hosted path. The live RV64 lane
-        # already pins a constrained OpenSSH-compatible profile and does not
-        # need to materialize the full server algorithm lists here.
-        val server_kex = if using_live_openssh_profile:
-            SshKexInit(
-                cookie: [],
-                kex_algorithms: "curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com",
-                server_host_key_algorithms: "ssh-ed25519",
-                encryption_client_to_server: "aes256-gcm@openssh.com",
-                encryption_server_to_client: "aes256-gcm@openssh.com",
-                mac_client_to_server: "none",
-                mac_server_to_client: "none",
-                compression_client_to_server: "none",
-                compression_server_to_client: "none",
-                first_kex_packet_follows: false
-            )
-        else:
-            val r_server_kex = _parse_kexinit_fast(server_kexinit)
-            r_server_kex.unwrap()
-        log_info("[app.sshd] " + "[sshd-session] client kex list={client_kex.kex_algorithms}")
-        log_info("[app.sshd] " + "[sshd-session] server kex list={server_kex.kex_algorithms}")
-        log_raw_println("[sshd-session] server kex list={server_kex.kex_algorithms}")
-        log_raw_println("[sshd-session] server hostkey list={server_kex.server_host_key_algorithms}")
-        log_raw_println("[sshd-session] server enc c2s={server_kex.encryption_client_to_server}")
-        log_raw_println("[sshd-session] server mac c2s={server_kex.mac_client_to_server}")
-        serial_println("[sshd-session] client kex list={client_kex.kex_algorithms}")
-        serial_println("[sshd-session] client hostkey list={client_kex.server_host_key_algorithms}")
-        serial_println("[sshd-session] client enc c2s={client_kex.encryption_client_to_server}")
-        serial_println("[sshd-session] client mac c2s={client_kex.mac_client_to_server}")
-        serial_println("[sshd-session] server kex list={server_kex.kex_algorithms}")
-        serial_println("[sshd-session] server hostkey list={server_kex.server_host_key_algorithms}")
-        serial_println("[sshd-session] server enc c2s={server_kex.encryption_client_to_server}")
-        serial_println("[sshd-session] server mac c2s={server_kex.mac_client_to_server}")
-
-        # Negotiate algorithms
-        val r_algos = if using_live_openssh_profile:
-            Ok(SshAlgorithms(
-                kex: "curve25519-sha256",
-                host_key: "ssh-ed25519",
-                cipher_c2s: "aes256-gcm@openssh.com",
-                cipher_s2c: "aes256-gcm@openssh.com",
-                mac_c2s: "none",
-                mac_s2c: "none",
-                compress_c2s: "none",
-                compress_s2c: "none"
-            ))
-        else:
-            ssh_negotiate_algorithms(client_kex, server_kex)
-        if r_algos.is_err():
-            match r_algos:
-                case Err(msg):
-                    serial_println("[sshd-session] algo negotiation err={msg}")
-                case Ok(_):
-                    pass_dn
-            log_raw_println("[sshd-session] algo negotiation failed")
-            log_info("[app.sshd] " + "[sshd-session] algo negotiation failed")
-            self.disconnect(3, "algorithm negotiation failed")
-            return false
-        val algos_early = r_algos.unwrap()
-        val strict_kex = if using_live_openssh_profile: true else: ssh_kex_uses_strict_kex(client_kex.kex_algorithms, server_kex.kex_algorithms)
+        serial_println("[sshd-session] live server kex profile pinned")
+        val algos_early = SshAlgorithms(
+            kex: "curve25519-sha256",
+            host_key: "ssh-ed25519",
+            cipher_c2s: "aes256-gcm@openssh.com",
+            cipher_s2c: "aes256-gcm@openssh.com",
+            mac_c2s: "none",
+            mac_s2c: "none",
+            compress_c2s: "none",
+            compress_s2c: "none"
+        )
+        val strict_kex = true
         log_info("[app.sshd] " + "[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
         serial_println("[sshd-session] negotiated kex={algos_early.kex} hostkey={algos_early.host_key} c2s={algos_early.cipher_c2s} s2c={algos_early.cipher_s2c}")
 
@@ -529,7 +481,7 @@ impl SshSession:
         serial_println("[sshd-session] server private generation len={server_private.len()}")
         serial_println("[sshd-session] server public generation start")
         val server_public = if using_live_openssh_profile and server_private.len() == 32:
-            _live_bootstrap_x25519_public_key()
+            _rv64_live_x25519_public_alpha(server_private)
         elif server_private.len() == 32:
             x25519_base(server_private)
         else:
@@ -548,7 +500,7 @@ impl SshSession:
         # Compute shared secret
         serial_println("[sshd-session] shared secret generation start")
         val shared_secret = if using_live_openssh_profile and server_private.len() == 32 and client_public.len() == 32:
-            _live_bootstrap_shared_secret(client_public)
+            _rv64_live_x25519_shared_alpha(server_private, client_public)
         elif server_private.len() == 32 and client_public.len() == 32:
             x25519(server_private, client_public)
         else:
@@ -636,28 +588,27 @@ impl SshSession:
             serial_println("[sshd-session] host ed25519 sign pure start")
             var sig_raw: [u8] = []
             if using_live_openssh_profile:
-                val dual_config = dual_backend_default_config()
-                if dual_config.mode == DualBackendMode.Normal:
-                    sig_raw = ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
-                else:
-                    serial_println("[sshd-session] ed25519 alpha runtime start")
-                    val runtime_sig = ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
-                    serial_println("[sshd-session] ed25519 alpha runtime done len={runtime_sig.len()}")
-                    serial_println("[sshd-session] ed25519 alpha pure start")
-                    val pure_sig = ed25519_sign_live_pure_only(stable_seed, stable_pub, stable_hash)
-                    serial_println("[sshd-session] ed25519 alpha pure done len={pure_sig.len()}")
-                    sig_raw = dual_backend_choose_bytes(
-                        "ed25519",
-                        "sign_live",
-                        dual_config,
-                        [
-                            "seed_len=" + stable_seed.len().to_text(),
-                            "pub_len=" + stable_pub.len().to_text(),
-                            "msg_len=" + stable_hash.len().to_text()
-                        ],
-                        runtime_sig,
-                        pure_sig
-                    )
+                serial_println("[sshd-session] ed25519 alpha runtime start")
+                val runtime_sig = ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
+                serial_println("[sshd-session] ed25519 alpha runtime done len={runtime_sig.len()}")
+                serial_println("[sshd-session] ed25519 alpha pure start")
+                val pure_sig = ed25519_sign_live_pure_only(stable_seed, stable_pub, stable_hash)
+                serial_println("[sshd-session] ed25519 alpha pure done len={pure_sig.len()}")
+                sig_raw = dual_backend_choose_bytes(
+                    "ed25519",
+                    "sign_live",
+                    dual_backend_alpha_default_mode(),
+                    [
+                        "seed_len=" + stable_seed.len().to_text(),
+                        "pub_len=" + stable_pub.len().to_text(),
+                        "msg_len=" + stable_hash.len().to_text()
+                    ],
+                    runtime_sig,
+                    pure_sig
+                )
+                if not dual_backend_bytes_equal(runtime_sig, pure_sig):
+                    serial_println("[sshd-session] ed25519 alpha mismatch: refusing runtime signature")
+                    sig_raw = []
             else:
                 sig_raw = ed25519_sign(stable_seed, stable_pub, stable_hash)
             serial_println("[sshd-session] host ed25519 sign pure len={sig_raw.len()}")

@@ -609,18 +609,6 @@ fn decl_get(decls: text, prop: text) -> text:
         pos = pos + semi + 1
     found
 
-fn normalize_overflow_box_alignment(raw: text) -> text:
-    val value = raw.trim().lower()
-    if value == "safe center":
-        return "safe-center"
-    if value == "unsafe center":
-        return "unsafe-center"
-    if value.starts_with("safe "):
-        return value.substring(5, value.len()).trim()
-    if value.starts_with("unsafe "):
-        return value.substring(7, value.len()).trim()
-    value
-
 fn decl_last_pos(decls: text, prop: text) -> i32:
     var pos = 0
     var found = -1
@@ -940,9 +928,8 @@ fn apply_decls(st: Style, decls: text) -> Style:
             flex_wrap_v = flex_wrap_decl
     val justify_content_decl = decl_get(decls, "justify-content")
     if justify_content_decl.len() > 0:
-        val normalized_justify_content = normalize_overflow_box_alignment(justify_content_decl)
-        if normalized_justify_content == "space-between" or normalized_justify_content == "space-around" or normalized_justify_content == "space-evenly" or normalized_justify_content == "center" or normalized_justify_content == "safe-center" or normalized_justify_content == "unsafe-center" or normalized_justify_content == "flex-end" or normalized_justify_content == "flex-start" or normalized_justify_content == "start" or normalized_justify_content == "end":
-            justify_content_v = normalized_justify_content
+        if justify_content_decl == "space-between" or justify_content_decl == "space-around" or justify_content_decl == "space-evenly" or justify_content_decl == "center" or justify_content_decl == "flex-end" or justify_content_decl == "flex-start" or justify_content_decl == "start" or justify_content_decl == "end":
+            justify_content_v = justify_content_decl
     val ta = decl_get(decls, "text-align")
     if ta.len() > 0:
         text_align_v = ta
@@ -954,7 +941,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
         align_self_v = align_self_decl
     val align_content_decl = decl_get(decls, "align-content")
     if align_content_decl.len() > 0:
-        align_content_v = normalize_overflow_box_alignment(align_content_decl)
+        align_content_v = align_content_decl
     val fw = decl_get(decls, "font-weight")
     if fw.len() > 0:
         if fw == "bold" or fw == "700" or fw == "600" or fw == "800":
@@ -1245,6 +1232,21 @@ class RuleBuckets:
     tag_rules: [[i32]]
     fallback_rules: [i32]
 
+fn css_matching_close(css: text, open: i64) -> i64:
+    val css_len = css.len()
+    var depth = 1
+    var i = open + 1
+    while i < css_len:
+        val ch = css.char_at(i)
+        if ch == "{":
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
 fn count_css_rules(html: text) -> i32:
     var count = 0
     var pos = 0
@@ -1267,14 +1269,33 @@ fn count_css_rules(html: text) -> i32:
             val brace = find_from(css, "{", cp)
             if brace < 0:
                 break
-            val endb = find_from(css, "}", brace)
-            if endb < 0:
-                break
             val sel_raw = css.substring(cp, brace)
             val sel = sel_raw.trim()
-            if sel.len() > 0:
-                count = count + 1
-            cp = endb + 1
+            if sel.starts_with("@"):
+                val endb_outer = css_matching_close(css, brace)
+                if endb_outer < 0:
+                    break
+                var inner_cp = brace + 1
+                while inner_cp < endb_outer:
+                    val inner_brace = find_from(css, "{", inner_cp)
+                    if inner_brace < 0 or inner_brace >= endb_outer:
+                        break
+                    val inner_endb = css_matching_close(css, inner_brace)
+                    if inner_endb < 0 or inner_endb > endb_outer:
+                        break
+                    val inner_sel_raw = css.substring(inner_cp, inner_brace)
+                    val inner_sel = inner_sel_raw.trim()
+                    if inner_sel.len() > 0:
+                        count = count + 1
+                    inner_cp = inner_endb + 1
+                cp = endb_outer + 1
+            else:
+                val endb = css_matching_close(css, brace)
+                if endb < 0:
+                    break
+                if sel.len() > 0:
+                    count = count + 1
+                cp = endb + 1
         pos = close + 1
     count
 
@@ -1298,25 +1319,55 @@ fn extract_css(html: text) -> Rules:
             break
         val css = html.substring(open + 1, close)
         # split into "selector { decls }" chunks
+        # @-wrapper blocks (@layer, @supports, @media) are skipped at the outer
+        # brace level — their inner rules are parsed as if the wrapper were absent.
         var cp = 0
         val css_len = css.len()
         while cp < css_len:
             val brace = find_from(css, "{", cp)
             if brace < 0:
                 break
-            val endb = find_from(css, "}", brace)
-            if endb < 0:
-                break
             val sel_raw = css.substring(cp, brace)
             val sel = sel_raw.trim()
-            val decl_raw = css.substring(brace + 1, endb)
-            val decl = decl_raw.trim()
-            if sel.len() > 0:
-                val rule_groups = split_selector_groups(sel)
-                group_parts[rule_i] = split_selector_group_parts(rule_groups)
-                decls[rule_i] = decl
-                rule_i = rule_i + 1
-            cp = endb + 1
+            # @-rule wrapper: skip the outer brace, recurse into inner content
+            if sel.starts_with("@"):
+                val endb_outer = css_matching_close(css, brace)
+                if endb_outer < 0:
+                    break
+                cp = brace + 1
+                # Reset to parse inner content (outer brace already consumed by cp advance)
+                # Find inner rules by continuing the loop from brace+1 to endb_outer
+                var inner_cp = brace + 1
+                while inner_cp < endb_outer:
+                    val inner_brace = find_from(css, "{", inner_cp)
+                    if inner_brace < 0 or inner_brace >= endb_outer:
+                        break
+                    val inner_endb = css_matching_close(css, inner_brace)
+                    if inner_endb < 0 or inner_endb > endb_outer:
+                        break
+                    val inner_sel_raw = css.substring(inner_cp, inner_brace)
+                    val inner_sel = inner_sel_raw.trim()
+                    val inner_decl_raw = css.substring(inner_brace + 1, inner_endb)
+                    val inner_decl = inner_decl_raw.trim()
+                    if inner_sel.len() > 0 and rule_i < rule_count:
+                        val rule_groups = split_selector_groups(inner_sel)
+                        group_parts[rule_i] = split_selector_group_parts(rule_groups)
+                        decls[rule_i] = inner_decl
+                        rule_i = rule_i + 1
+                    inner_cp = inner_endb + 1
+                cp = endb_outer + 1
+            else:
+                val endb = css_matching_close(css, brace)
+                if endb < 0:
+                    break
+                val decl_raw = css.substring(brace + 1, endb)
+                val decl = decl_raw.trim()
+                if sel.len() > 0 and rule_i < rule_count:
+                    val rule_groups = split_selector_groups(sel)
+                    group_parts[rule_i] = split_selector_group_parts(rule_groups)
+                    decls[rule_i] = decl
+                    rule_i = rule_i + 1
+                cp = endb + 1
         pos = close + 1
     Rules(group_parts: group_parts, decls: decls)
 
@@ -1369,6 +1420,17 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
         return class_has_all(class_words, want)
     if base.substring(0, 1) == "#":
         return id == base.substring(1, base.len())
+    val hash = text_index_of(base, "#")
+    if hash > 0:
+        # tag#id or tag#id.class
+        val t = base.substring(0, hash)
+        val rest = base.substring(hash + 1, base.len())
+        val dot2 = text_index_of(rest, ".")
+        if dot2 >= 0:
+            val want_id = rest.substring(0, dot2)
+            val want_cls = rest.substring(dot2 + 1, rest.len())
+            return t == tag and id == want_id and class_has_all(class_words, want_cls)
+        return t == tag and id == rest
     val dot = text_index_of(base, ".")
     if dot >= 0:
         val t = base.substring(0, dot)
@@ -1377,10 +1439,90 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
     base == tag
 
 # does a single simple selector match this node? (rightmost token only)
+# Extract the pseudo-class name from a selector part (returns "" if none).
+# e.g. "div:not(.x)" -> "not", ".card:first-child" -> "first-child"
+fn _pseudo_name(sel: text) -> text:
+    val colon = text_index_of(sel, ":")
+    if colon < 0:
+        return ""
+    val after = sel.substring(colon + 1, sel.len())
+    val paren = text_index_of(after, "(")
+    if paren >= 0:
+        return after.substring(0, paren)
+    # strip trailing non-identifier chars (e.g. nothing after plain pseudo)
+    after
+
+# Extract the argument inside a functional pseudo (returns "" if not functional).
+# e.g. "div:not(.x, #y)" -> ".x, #y"
+fn _pseudo_arg(sel: text) -> text:
+    val colon = text_index_of(sel, ":")
+    if colon < 0:
+        return ""
+    val after = sel.substring(colon + 1, sel.len())
+    val paren_open = text_index_of(after, "(")
+    if paren_open < 0:
+        return ""
+    val paren_close = text_index_of(after, ")")
+    if paren_close <= paren_open:
+        return ""
+    after.substring(paren_open + 1, paren_close).trim()
+
+# Check :not(), :is(), :where() pseudo-class against this element's base properties.
+# Returns true if the selector pseudo condition is satisfied.
+fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_words: [text], id: text, attrs: text) -> bool:
+    # Split arg on commas (not inside parens) to get individual options
+    var options: [text] = [""; 16]
+    var opt_count = 0
+    var current = ""
+    var depth = 0
+    var i = 0
+    val arg_len = arg.len()
+    while i < arg_len:
+        val ch = arg.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = current + ch
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+            current = current + ch
+        elif ch == "," and depth == 0:
+            if opt_count < 16:
+                options[opt_count] = current.trim()
+                opt_count = opt_count + 1
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0 and opt_count < 16:
+        options[opt_count] = current.trim()
+        opt_count = opt_count + 1
+    if pseudo == "not":
+        # :not(sel, ...) — match if NONE of the options match
+        var j = 0
+        while j < opt_count:
+            val opt = options[j]
+            if opt.len() > 0 and simple_match(opt, tag, cls, class_words, id, attrs):
+                return false
+            j = j + 1
+        return true
+    if pseudo == "is" or pseudo == "where":
+        # :is(sel, ...) / :where(sel, ...) — match if ANY option matches
+        var j = 0
+        while j < opt_count:
+            val opt = options[j]
+            if opt.len() > 0 and simple_match(opt, tag, cls, class_words, id, attrs):
+                return true
+            j = j + 1
+        return false
+    # Unknown pseudo-class: treat as non-matching for reject tests, but allow pass-through
+    # for unknown structural pseudos (handled in full context).
+    false
+
 fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text) -> bool:
     if sel.len() == 0:
         return false
-    # strip pseudo (:hover, :nth-child(..))
+    # Split off the base (before the first colon at depth 0)
     var base = sel
     val colon = text_index_of(base, ":")
     if colon >= 0:
@@ -1392,8 +1534,22 @@ fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, 
             return false
         val node_base = base.substring(0, attr_start).trim()
         val expr = base.substring(attr_start + 1, attr_end)
-        return base_selector_matches(node_base, tag, cls, class_words, id) and attr_selector_matches(attrs, expr)
-    base_selector_matches(base, tag, cls, class_words, id)
+        if not (base_selector_matches(node_base, tag, cls, class_words, id) and attr_selector_matches(attrs, expr)):
+            return false
+    else:
+        if not base_selector_matches(base, tag, cls, class_words, id):
+            return false
+    # Now check pseudo-classes (at the current element level, no node-position context)
+    if colon < 0:
+        return true
+    val pseudo = _pseudo_name(sel)
+    val arg = _pseudo_arg(sel)
+    if pseudo == "not" or pseudo == "is" or pseudo == "where":
+        return _pseudo_list_matches(pseudo, arg, tag, cls, class_words, id, attrs)
+    # Position-based pseudos (first-child, last-child, only-child, nth-child, empty, has)
+    # require full node context — return true here (base matched); the full context check
+    # in simple_match_with_ctx will apply the real constraint.
+    true
 
 fn class_has_all(words: [text], wants: text) -> bool:
     val parts = wants.split(".")
@@ -1408,6 +1564,190 @@ fn class_has_all(words: [text], wants: text) -> bool:
 
 fn class_contains(cls: text, want: text) -> bool:
     cls.contains(want)
+
+# Count element-type siblings of node[idx] up to and including idx (1-based child position).
+fn _child_position(nodes: [HNode], idx: i32) -> i32:
+    val parent = nodes[idx].parent
+    if parent < 0:
+        return 1
+    var pos = 0
+    var c = 0
+    val node_count = nodes.len()
+    while c < node_count:
+        if nodes[c].parent == parent and nodes[c].tag != "#text":
+            pos = pos + 1
+            if c == idx:
+                return pos
+        c = c + 1
+    1
+
+# Count total element-type children of parent of node[idx].
+fn _sibling_count(nodes: [HNode], idx: i32) -> i32:
+    val parent = nodes[idx].parent
+    if parent < 0:
+        return 1
+    var count = 0
+    var c = 0
+    val node_count = nodes.len()
+    while c < node_count:
+        if nodes[c].parent == parent and nodes[c].tag != "#text":
+            count = count + 1
+        c = c + 1
+    count
+
+# Evaluate :nth-child(expr) where expr is odd, even, or an+b / n+b / b.
+fn _nth_child_matches(expr: text, pos: i32) -> bool:
+    val e = expr.trim()
+    if e == "odd":
+        return (pos % 2) == 1
+    if e == "even":
+        return (pos % 2) == 0
+    # Check for "an+b" or "n+b" or just "b"
+    val n_idx = text_index_of(e, "n")
+    if n_idx >= 0:
+        val a_str = e.substring(0, n_idx).trim()
+        val a = if a_str == "" or a_str == "+": 1 elif a_str == "-": -1 else: parse_int(a_str)
+        val after_n = e.substring(n_idx + 1, e.len()).trim()
+        val b = if after_n.len() == 0: 0 else: parse_int(after_n)
+        if a == 0:
+            return pos == b
+        val rem = pos - b
+        if rem < 0:
+            return false
+        return (rem % a) == 0
+    # plain number
+    parse_int(e) == pos
+
+# Check whether any node that is a child of parent_idx matches simple selector sel_arg.
+fn _has_direct_child_match(nodes: [HNode], parent_idx: i32, sel_arg: text) -> bool:
+    val parent_idx64 = parent_idx.to_i64()
+    var c = 0
+    val node_count = nodes.len()
+    while c < node_count:
+        val nd = nodes[c]
+        if nd.parent == parent_idx64 and nd.tag != "#text":
+            if simple_match(sel_arg, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw):
+                return true
+        c = c + 1
+    false
+
+# Check whether any descendant of node[idx] matches simple selector sel_arg.
+fn _has_descendant_match(nodes: [HNode], idx: i32, sel_arg: text) -> bool:
+    val idx64 = idx.to_i64()
+    var c = 0
+    val node_count = nodes.len()
+    while c < node_count:
+        if c != idx:
+            val nd = nodes[c]
+            if nd.tag != "#text":
+                # walk ancestors to check if idx is an ancestor of c
+                var anc = nd.parent
+                var is_desc = false
+                var guard = 0
+                while anc >= 0 and not is_desc and guard < 200:
+                    guard = guard + 1
+                    if anc == idx64:
+                        is_desc = true
+                    else:
+                        anc = nodes[anc].parent
+                if is_desc:
+                    if simple_match(sel_arg, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw):
+                        return true
+        c = c + 1
+    false
+
+# Check any :has() option (space-separated = descendant, "> .x" = direct child).
+fn _has_option_matches(nodes: [HNode], idx: i32, opt: text) -> bool:
+    val trimmed = opt.trim()
+    if trimmed.starts_with("> "):
+        val child_sel = trimmed.substring(2, trimmed.len()).trim()
+        return _has_direct_child_match(nodes, idx, child_sel)
+    if trimmed == ">":
+        return false
+    _has_descendant_match(nodes, idx, trimmed)
+
+# Check whether a node has any child element (non-text) or non-whitespace text children.
+fn _node_is_empty(nodes: [HNode], idx: i32) -> bool:
+    val idx64 = idx.to_i64()
+    var c = 0
+    val node_count = nodes.len()
+    while c < node_count:
+        val nd = nodes[c]
+        if nd.parent == idx64:
+            if nd.tag == "#text":
+                if nd.text_trimmed.len() > 0:
+                    return false
+            else:
+                return false
+        c = c + 1
+    true
+
+# Full-context pseudo-class check. Called after simple_match() passes the base check.
+# Returns true if all pseudo-class conditions on sel are satisfied given node context.
+fn _pseudo_ctx_matches(sel: text, nodes: [HNode], idx: i32) -> bool:
+    val colon = text_index_of(sel, ":")
+    if colon < 0:
+        return true
+    val pseudo = _pseudo_name(sel)
+    val arg = _pseudo_arg(sel)
+    if pseudo == "not" or pseudo == "is" or pseudo == "where":
+        # Already handled in simple_match; return true here.
+        return true
+    if pseudo == "empty":
+        return _node_is_empty(nodes, idx)
+    if pseudo == "first-child":
+        return _child_position(nodes, idx) == 1
+    if pseudo == "last-child":
+        val pos = _child_position(nodes, idx)
+        val total = _sibling_count(nodes, idx)
+        return pos == total
+    if pseudo == "only-child":
+        return _sibling_count(nodes, idx) == 1
+    if pseudo == "nth-child":
+        val pos = _child_position(nodes, idx)
+        return _nth_child_matches(arg, pos)
+    if pseudo == "has":
+        # split arg on commas (depth-aware) to get :has(opt1, opt2, ...)
+        var opts: [text] = [""; 8]
+        var opt_count = 0
+        var current = ""
+        var depth = 0
+        var i = 0
+        val arg_len = arg.len()
+        while i < arg_len:
+            val ch = arg.substring(i, i + 1)
+            if ch == "(":
+                depth = depth + 1
+                current = current + ch
+            elif ch == ")":
+                if depth > 0:
+                    depth = depth - 1
+                current = current + ch
+            elif ch == "," and depth == 0:
+                if opt_count < 8:
+                    opts[opt_count] = current.trim()
+                    opt_count = opt_count + 1
+                current = ""
+            else:
+                current = current + ch
+            i = i + 1
+        if current.trim().len() > 0 and opt_count < 8:
+            opts[opt_count] = current.trim()
+            opt_count = opt_count + 1
+        var j = 0
+        while j < opt_count:
+            if _has_option_matches(nodes, idx, opts[j]):
+                return true
+            j = j + 1
+        return false
+    # Unknown pseudo — pass through (non-positional, already base-matched)
+    true
+
+# Full-context simple match: base match + pseudo-class positional check.
+fn simple_match_ctx(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text, nodes: [HNode], idx: i32) -> bool:
+    if not simple_match(sel, tag, cls, class_words, id, attrs):
+        return false
+    _pseudo_ctx_matches(sel, nodes, idx)
 
 fn split_selector_groups(sel: text) -> [text]:
     var current = ""
@@ -1461,9 +1801,17 @@ fn normalize_child_combinators(group: text) -> text:
     var out = ""
     var i = 0
     val group_len = group.len()
+    var depth = 0
     while i < group_len:
         val ch = group.substring(i, i + 1)
-        if ch == ">":
+        if ch == "(":
+            depth = depth + 1
+            out = out + ch
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+            out = out + ch
+        elif ch == ">" and depth == 0:
             out = out + " > "
         else:
             out = out + ch
@@ -1471,13 +1819,63 @@ fn normalize_child_combinators(group: text) -> text:
     out.trim()
 
 fn selector_group_parts(group: text) -> [text]:
-    val raw_parts = normalize_child_combinators(group).split(" ")
-    val part_count = raw_parts.len()
-    var parts: [text] = [""; part_count]
-    var i = 0
-    while i < part_count:
-        parts[i] = raw_parts[i].trim()
-        i = i + 1
+    # Split on spaces at depth-0 only: depth counts ( ) and [ ] so that spaces
+    # inside :has(> .x) args and [attr='val with spaces'] are preserved.
+    val normalized = normalize_child_combinators(group)
+    val norm_len = normalized.len()
+    # First pass: count tokens
+    var token_count = 0
+    var depth = 0
+    var in_token = false
+    var pi = 0
+    while pi < norm_len:
+        val ch = normalized.substring(pi, pi + 1)
+        if ch == "(" or ch == "[":
+            depth = depth + 1
+            if not in_token:
+                token_count = token_count + 1
+                in_token = true
+        elif ch == ")" or ch == "]":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == " " and depth == 0:
+            in_token = false
+        else:
+            if not in_token:
+                token_count = token_count + 1
+                in_token = true
+        pi = pi + 1
+    if token_count == 0:
+        return [""]
+    var parts: [text] = [""; token_count]
+    var part_i = 0
+    depth = 0
+    in_token = false
+    var current = ""
+    pi = 0
+    while pi < norm_len:
+        val ch = normalized.substring(pi, pi + 1)
+        if ch == "(" or ch == "[":
+            depth = depth + 1
+            in_token = true
+            current = current + ch
+        elif ch == ")" or ch == "]":
+            if depth > 0:
+                depth = depth - 1
+            current = current + ch
+        elif ch == " " and depth == 0:
+            if in_token:
+                if part_i < token_count:
+                    parts[part_i] = current.trim()
+                    part_i = part_i + 1
+                current = ""
+                in_token = false
+        else:
+            in_token = true
+            current = current + ch
+        pi = pi + 1
+    if current.trim().len() > 0 and part_i < token_count:
+        parts[part_i] = current.trim()
     parts
 
 fn split_selector_group_parts(groups: [text]) -> [[text]]:
@@ -1519,6 +1917,10 @@ fn selector_bucket_kind_from_base(base: text) -> text:
         return "id"
     if base.substring(0, 1) == ".":
         return "class"
+    # tag#id compound: bucket as "id" so rules fire when node has that id
+    val hash = text_index_of(base, "#")
+    if hash > 0:
+        return "id"
     if text_index_of(base, ".") >= 0:
         return "class"
     "tag"
@@ -1536,6 +1938,14 @@ fn selector_bucket_value_from_base(base: text) -> text:
         if dot >= 0:
             return raw.substring(0, dot)
         return raw
+    # tag#id compound: return the id part as the bucket key
+    val hash = text_index_of(base, "#")
+    if hash > 0:
+        val after_hash = base.substring(hash + 1, base.len())
+        val dot2 = text_index_of(after_hash, ".")
+        if dot2 >= 0:
+            return after_hash.substring(0, dot2)
+        return after_hash
     val dot = text_index_of(base, ".")
     if dot >= 0:
         val raw = base.substring(dot + 1, base.len())
@@ -1794,7 +2204,10 @@ fn selector_group_matches_node_parts(nodes: [HNode], idx: i32, parts: [text]) ->
     if right < 0:
         return false
     val nd = nodes[idx]
-    if not simple_match(parts[right], nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw):
+    # Use full-context match for the rightmost part (the target element) so that
+    # position-based pseudos (:first-child, :last-child, :nth-child, :empty, :has, etc.)
+    # are evaluated against the real node tree.
+    if not simple_match_ctx(parts[right], nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, idx):
         return false
     var ancestor = nd.parent
     var want = right - 1
@@ -1840,6 +2253,105 @@ fn selector_matches_node_group_parts(nodes: [HNode], idx: i32, group_parts: [[te
     false
 
 # ---------------------------------------------------------------------------
+# CSS specificity helpers
+# ---------------------------------------------------------------------------
+
+fn _part_specificity(part: text) -> i32:
+    var base = part
+    val colon = text_index_of(base, ":")
+    if colon >= 0:
+        base = base.substring(0, colon)
+    val attr_bracket = text_index_of(base, "[")
+    if attr_bracket >= 0:
+        base = base.substring(0, attr_bracket).trim()
+    if base.len() == 0 or base == "*":
+        return 0
+    if base.substring(0, 1) == "#":
+        val rest = base.substring(1, base.len())
+        val dot = text_index_of(rest, ".")
+        if dot >= 0:
+            return 110
+        return 100
+    if base.substring(0, 1) == ".":
+        val rest = base.substring(1, base.len())
+        var class_count = 1
+        var i = 0
+        val rest_len = rest.len()
+        while i < rest_len:
+            if rest.substring(i, i + 1) == ".":
+                class_count = class_count + 1
+            i = i + 1
+        return class_count * 10
+    val hash = text_index_of(base, "#")
+    if hash > 0:
+        val after_hash = base.substring(hash + 1, base.len())
+        val dot = text_index_of(after_hash, ".")
+        if dot >= 0:
+            return 111
+        return 101
+    val dot = text_index_of(base, ".")
+    if dot >= 0:
+        val after_dot = base.substring(dot + 1, base.len())
+        var class_count2 = 1
+        var j = 0
+        val after_len = after_dot.len()
+        while j < after_len:
+            if after_dot.substring(j, j + 1) == ".":
+                class_count2 = class_count2 + 1
+            j = j + 1
+        return 1 + class_count2 * 10
+    1
+
+fn _group_specificity(parts: [text]) -> i32:
+    var total = 0
+    var i = 0
+    val part_count = parts.len()
+    while i < part_count:
+        val p = parts[i]
+        if p.len() > 0 and p != ">":
+            total = total + _part_specificity(p)
+        i = i + 1
+    total
+
+fn _rule_specificity(rules: Rules, r: i32) -> i32:
+    val groups = rules.group_parts[r]
+    var best = 0
+    var g = 0
+    val group_count = groups.len()
+    while g < group_count:
+        val s = _group_specificity(groups[g])
+        if s > best:
+            best = s
+        g = g + 1
+    best
+
+fn _sort_candidates_by_specificity(candidates: [i32], rules: Rules) -> [i32]:
+    val n = candidates.len()
+    if n <= 1:
+        return candidates
+    var result: [i32] = [0; n]
+    var i = 0
+    while i < n:
+        result[i] = candidates[i]
+        i = i + 1
+    var outer = 1
+    while outer < n:
+        val cur = result[outer]
+        val cur_spec = _rule_specificity(rules, cur)
+        var inner = outer - 1
+        while inner >= 0:
+            val prev = result[inner]
+            val prev_spec = _rule_specificity(rules, prev)
+            if prev_spec > cur_spec or (prev_spec == cur_spec and prev > cur):
+                result[inner + 1] = result[inner]
+                inner = inner - 1
+            else:
+                break
+        result[inner + 1] = cur
+        outer = outer + 1
+    result
+
+# ---------------------------------------------------------------------------
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
 
@@ -1852,7 +2364,8 @@ fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
         st = tag_defaults(st, nd.tag)
-        val candidates = style_rule_candidates(nd, rule_buckets)
+        val candidates_raw = style_rule_candidates(nd, rule_buckets)
+        val candidates = _sort_candidates_by_specificity(candidates_raw, rules)
         var candidate_i = 0
         val candidate_count = candidates.len()
         while candidate_i < candidate_count:
@@ -2688,7 +3201,6 @@ fn styles_with_height(styles: [Style], index: i32, height_px: i32) -> [Style]:
             result[si] = styles[si]
         si = si + 1
     result
-
 fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
     if widths[i] >= 0:
         return IntrinsicWidthResult(width: widths[i], widths: widths)
@@ -2958,7 +3470,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             var align_content_gap_extra = 0
             var align_content_line_extra = 0
             var total_line_h_with_align = total_line_h
-            if (st.align_content == "center" or st.align_content == "safe-center" or st.align_content == "unsafe-center") and explicit_content_h > total_line_h:
+            if st.align_content == "center" and explicit_content_h > total_line_h:
                 align_content_offset = (explicit_content_h - total_line_h) / 2
             elif (st.align_content == "flex-end" or st.align_content == "end") and explicit_content_h > total_line_h:
                 align_content_offset = explicit_content_h - total_line_h
@@ -3057,7 +3569,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     base_w = iw * (0 - pcst.width_px) / 100
                 if base_w > 0:
                     sum_explicit = sum_explicit + base_w
-                    val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 0
+                    val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 1
                     shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
                 else:
                     val intrinsic = intrinsic_text_width(nodes, styles, child_index, ps, out_intrinsic_widths)
@@ -3066,7 +3578,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     if intrinsic_w > 0 and pcst.flex_grow == 0:
                         base_w = intrinsic_w
                         sum_explicit = sum_explicit + base_w
-                        val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 0
+                        val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 1
                         shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
                     else:
                         val grow = if pcst.flex_grow > 0: pcst.flex_grow else: 1
@@ -3080,8 +3592,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         var auto_avail = iw - sum_explicit - gaps_total
         if auto_avail < auto_weight:
             auto_avail = auto_weight
-        val main_free_space = iw - sum_explicit - gaps_total
-        val positive_free_space = if shrink_deficit == 0 and auto_weight == 0 and main_free_space > 0: main_free_space else: 0
+        val positive_free_space = if shrink_deficit == 0 and auto_weight == 0 and iw > sum_explicit + gaps_total: iw - sum_explicit - gaps_total else: 0
         var justify_start_offset = 0
         var justify_gap_extra = 0
         if positive_free_space > 0:
@@ -3093,12 +3604,10 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             elif st.justify_content == "space-evenly" and nonabs_count > 0:
                 justify_start_offset = positive_free_space / (nonabs_count + 1)
                 justify_gap_extra = positive_free_space / (nonabs_count + 1)
-            elif st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center":
+            elif st.justify_content == "center":
                 justify_start_offset = positive_free_space / 2
             elif st.justify_content == "flex-end" or st.justify_content == "end":
                 justify_start_offset = positive_free_space
-        elif main_free_space < 0 and st.justify_content == "unsafe-center" and shrink_scaled_total == 0:
-            justify_start_offset = main_free_space / 2
         var cx = ix + justify_start_offset
         var max_child_h = 0
         var flex_child_count = 0
@@ -3149,7 +3658,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 var force_used_w = false
                 if shrink_deficit > 0 and shrink_scaled_total > 0 and (cst.width_px > 0 or cst.flex_basis_px > 0):
                     val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
-                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 0
+                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 1
                     val scaled_shrink = shrink_factor * base_w
                     val cumulative_shrink = (shrink_deficit * (shrink_scaled_used + scaled_shrink)) / shrink_scaled_total
                     remaining_w = base_w - (cumulative_shrink - shrink_width_assigned)
@@ -3181,7 +3690,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     remaining_w = cst.flex_basis_px
                 elif shrink_deficit > 0 and shrink_scaled_total > 0:
                     val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
-                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 0
+                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 1
                     val scaled_shrink = shrink_factor * base_w
                     val cumulative_shrink = (shrink_deficit * (shrink_scaled_used + scaled_shrink)) / shrink_scaled_total
                     remaining_w = base_w - (cumulative_shrink - shrink_width_assigned)
@@ -3270,8 +3779,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
         else:
             0
-        val col_main_free_space = col_container_main - col_run_h
-        val col_positive_free_space = if col_main_free_space > 0: col_main_free_space else: 0
+        val col_positive_free_space = if col_container_main > col_run_h: col_container_main - col_run_h else: 0
         var col_justify_start_offset = 0
         var col_justify_gap_extra = 0
         if col_positive_free_space > 0:
@@ -3283,12 +3791,10 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             elif st.justify_content == "space-evenly" and col_nonabs_count > 0:
                 col_justify_start_offset = col_positive_free_space / (col_nonabs_count + 1)
                 col_justify_gap_extra = col_positive_free_space / (col_nonabs_count + 1)
-            elif st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center":
+            elif st.justify_content == "center":
                 col_justify_start_offset = col_positive_free_space / 2
             elif st.justify_content == "flex-end" or st.justify_content == "end":
                 col_justify_start_offset = col_positive_free_space
-        elif col_main_free_space < 0 and st.justify_content == "unsafe-center":
-            col_justify_start_offset = col_main_free_space / 2
         var cy_flex = y + st.border_t + st.pad_t + col_justify_start_offset
         var flex_c = child_index.first_child[i]
         var flex_child_count_col = 0

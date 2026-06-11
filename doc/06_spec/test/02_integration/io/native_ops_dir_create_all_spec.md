@@ -43,9 +43,9 @@ native_ops_dir_create_all_spec -> app
 
 #### creates directory tree with dir_create_all _(slow)_
 
-1. check
-2. check
-3. check
+- check
+- check
+- check
 
 
 <details>

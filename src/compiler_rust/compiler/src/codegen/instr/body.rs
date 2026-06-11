@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::hir::{BinOp, TypeId, UnaryOp};
 use crate::mir::{BlockId, CallTarget, MirFunction, MirInst, Terminator, VReg};
 
+use crate::codegen::shared::implicit_local_param_slots;
 use super::super::types_util::type_to_cranelift;
 use super::async_ops::compile_yield;
 use super::helpers::adapted_call;
@@ -392,12 +393,20 @@ pub fn compile_function_body<M: Module>(
     // Create variables for parameters and locals
     let mut variables = HashMap::new();
     let mut var_idx = 0u32;
+    let implicit_param_slots = implicit_local_param_slots(func);
+
+    for i in 0..implicit_param_slots {
+        let var = Variable::from_u32(var_idx);
+        builder.declare_var(var, types::I64);
+        variables.insert(i, var);
+        var_idx += 1;
+    }
 
     for (i, param) in func.params.iter().enumerate() {
         let var = Variable::from_u32(var_idx);
         let ty = type_to_cranelift(param.ty);
         builder.declare_var(var, ty);
-        variables.insert(i, var);
+        variables.insert(implicit_param_slots + i, var);
         var_idx += 1;
     }
 
@@ -405,7 +414,7 @@ pub fn compile_function_body<M: Module>(
         let var = Variable::from_u32(var_idx);
         let ty = type_to_cranelift(local.ty);
         builder.declare_var(var, ty);
-        variables.insert(func.params.len() + i, var);
+        variables.insert(implicit_param_slots + func.params.len() + i, var);
         var_idx += 1;
     }
 
@@ -456,9 +465,15 @@ pub fn compile_function_body<M: Module>(
     // Initialize parameter variables.
     // Function signatures normally use uniform I64 params; exact-ABI runtime
     // helpers can use narrower params. Convert block params to variable types.
-    for (i, param) in func.params.iter().enumerate() {
+    for i in 0..implicit_param_slots {
         let val = builder.block_params(entry_block)[i];
         let var = variables[&i];
+        builder.def_var(var, val);
+    }
+
+    for (i, param) in func.params.iter().enumerate() {
+        let val = builder.block_params(entry_block)[implicit_param_slots + i];
+        let var = variables[&(implicit_param_slots + i)];
         let expected_ty = type_to_cranelift(param.ty);
         let actual_ty = builder.func.dfg.value_type(val);
         let converted = if actual_ty == expected_ty {
@@ -510,7 +525,7 @@ pub fn compile_function_body<M: Module>(
                 let call = adapted_call(&mut builder, get_ctx_ref, &[gen_param]);
                 builder.inst_results(call)[0]
             } else {
-                builder.block_params(entry_block)[func.params.len().saturating_sub(1)]
+                builder.block_params(entry_block)[implicit_param_slots + func.params.len().saturating_sub(1)]
             };
             let get_id = runtime_funcs["rt_array_get"];
             let get_ref = module.declare_func_in_func(get_id, builder.func);

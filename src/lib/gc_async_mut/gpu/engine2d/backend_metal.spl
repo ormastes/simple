@@ -26,6 +26,33 @@ extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
 extern fn rt_metal_buffer_download(data_ptr: i64, buffer: i64, size: i64) -> i64
 extern fn rt_metal_set_bytes(encoder: i64, data_ptr: i64, length: i64, index: i64) -> i64
 
+enum MetalErrorKind:
+    NotAvailable
+    DeviceLost
+    ShaderCompile
+    NoDevice
+    PipelineCreate
+    AllocFailed
+    Other
+    None
+
+fn metal_classify_error(err: text) -> MetalErrorKind:
+    if err.contains("not available") or err.contains("SFFI not available"):
+        return MetalErrorKind.NotAvailable
+    if err.contains("device lost") or err.contains("device creation failed"):
+        return MetalErrorKind.DeviceLost
+    if err.contains("shader") or err.contains("compilation"):
+        return MetalErrorKind.ShaderCompile
+    if err.contains("No Metal") or err.contains("no device") or err.contains("no devices"):
+        return MetalErrorKind.NoDevice
+    if err.contains("pipeline"):
+        return MetalErrorKind.PipelineCreate
+    if err.contains("alloc") or err.contains("framebuffer allocation") or err.contains("mirror"):
+        return MetalErrorKind.AllocFailed
+    if err.len() == 0:
+        return MetalErrorKind.None
+    MetalErrorKind.Other
+
 fn _metal_status_message(code: i64) -> text:
     if code == 1:
         return "Metal SFFI not available"
@@ -112,6 +139,7 @@ class MetalBackend:
     initialized: bool
     gpu_frame_complete: bool
     last_probe: BackendProbeResult
+    last_error: text
 
     static fn create() -> MetalBackend:
         make_metal_backend()
@@ -127,7 +155,8 @@ fn make_metal_backend():
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
-        last_probe: BackendProbeResult.unavailable("metal", "not probed")
+        last_probe: BackendProbeResult.unavailable("metal", "not probed"),
+        last_error: ""
     )
 
 impl RenderBackend for MetalBackend:
@@ -139,15 +168,18 @@ impl RenderBackend for MetalBackend:
             self.last_probe = probe_metal()
             self.initialized = false
             self.gpu_frame_complete = false
+            self.last_error = "Metal requires macOS"
             return false
         if not self.session.init():
             val status = self.session.error_code()
-            self.last_probe = BackendProbeResult.failed("metal", _metal_status_message(status))
+            val msg = _metal_status_message(status)
+            self.last_probe = BackendProbeResult.failed("metal", msg)
             self.last_probe.api_name = "metal"
             self.last_probe.feature_gate = "metal_runtime"
             self.last_probe.shader_format = "msl"
             self.initialized = false
             self.gpu_frame_complete = false
+            self.last_error = msg
             return false
         val total = width * height
         val bytes = _metal_i64(total) * 4
@@ -160,6 +192,7 @@ impl RenderBackend for MetalBackend:
             self.last_probe.shader_format = "msl"
             self.initialized = false
             self.gpu_frame_complete = false
+            self.last_error = "Metal framebuffer allocation failed"
             return false
         if not self.mirror.init(width, height):
             metal_sffi_free_buffer(self.d_framebuffer)
@@ -171,6 +204,7 @@ impl RenderBackend for MetalBackend:
             self.last_probe.shader_format = "msl"
             self.initialized = false
             self.gpu_frame_complete = false
+            self.last_error = "Metal mirror surface allocation failed"
             return false
         self.command_queue = self.session.command_queue
         self.w = width
@@ -178,6 +212,7 @@ impl RenderBackend for MetalBackend:
         self.dirty = false
         self.initialized = true
         self.gpu_frame_complete = false
+        self.last_error = ""
         self.last_probe = BackendProbeResult.success("metal", "Metal initialized")
         self.last_probe.api_name = "metal"
         self.last_probe.feature_gate = "metal_runtime"
@@ -204,6 +239,8 @@ impl RenderBackend for MetalBackend:
             self.dirty = true
         else:
             self.gpu_frame_complete = false
+            if not self.initialized:
+                self.last_error = "MetalBackend not initialized"
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         self.mirror.draw_rect(x, y, w, h, color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_rect_outline != 0:
@@ -687,3 +724,9 @@ impl Engine2DExtended for MetalBackend:
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
         self.mirror.draw_rect_blend(x, y, w, h, color)
         self.gpu_frame_complete = false
+
+export MetalBackend
+export MetalErrorKind
+export metal_classify_error
+export probe_metal
+export make_metal_backend

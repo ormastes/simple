@@ -10,7 +10,13 @@
 #   RFC 8032 — Edwards-Curve Digital Signature Algorithm
 #   HWCD08   — Twisted Edwards Curves Revisited
 
-use os.crypto.curve25519.{Fe25519, fe_zero, fe_one, fe_add, fe_sub, fe_mul, fe_sq, fe_invert, fe_reduce, fe_from_bytes, fe_to_bytes}
+use os.crypto.curve25519.{Fe25519, _fe_to_smalllimb, _smalllimb_to_fe, fe_zero, fe_one, fe_add, fe_sub, fe_mul, fe_sq, fe_invert, fe_reduce, fe_from_bytes, fe_to_bytes}
+use os.crypto.curve25519_smalllimb.{_x25519_fe_add, _x25519_fe_add_raw, _x25519_fe_sub, _x25519_fe_sub_raw, _x25519_fe_neg, _x25519_fe_mul, _x25519_fe_sq}
+extern fn serial_println(msg: text)
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _ed_u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
 
 # ============================================================================
 # Extended Point on Ed25519
@@ -25,6 +31,22 @@ struct EdPoint:
     y: Fe25519
     z: Fe25519
     t: Fe25519
+
+struct SmallEdPoint:
+    x: [u64]
+    y: [u64]
+    z: [u64]
+    t: [u64]
+
+struct SmallEdCached:
+    yplusx: [u64]
+    yminusx: [u64]
+    z2: [u64]
+    t2d: [u64]
+
+struct SmallEdCachedPair:
+    first: SmallEdCached
+    second: SmallEdCached
 
 # ============================================================================
 # Field Helpers (supplementing curve25519.spl)
@@ -184,14 +206,13 @@ fn _ed25519_d() -> Fe25519:
 
     d = 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3
     """
-    # Precomputed d as bytes (little-endian)
-    var bytes: [u8] = [
-        0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75,
-        0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
-        0x98, 0xe8, 0x79, 0x77, 0x79, 0x40, 0xc7, 0x8c,
-        0x73, 0xfe, 0x6f, 0x2b, 0xee, 0x6c, 0x03, 0x52
-    ]
-    fe_from_bytes(bytes)
+    Fe25519(
+        l0: 929955233495203,
+        l1: 466365720129213,
+        l2: 1662059464998953,
+        l3: 2033849074728123,
+        l4: 1442794654840575
+    )
 
 fn _ed25519_2d() -> Fe25519:
     """Compute 2*d mod p. Used in point addition formulas."""
@@ -210,22 +231,20 @@ fn _ed25519_base_point() -> EdPoint:
     By = 0x6666666666666666666666666666666666666666666666666666666666666658
     Bx = 0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a
     """
-    # Bx in little-endian
-    var bx_bytes: [u8] = [
-        0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9,
-        0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7, 0x2c, 0x69,
-        0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0,
-        0xfe, 0x53, 0x6e, 0xcd, 0xd3, 0x36, 0x69, 0x21
-    ]
-    # By in little-endian
-    var by_bytes: [u8] = [
-        0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66
-    ]
-    val bx = fe_from_bytes(bx_bytes)
-    val by = fe_from_bytes(by_bytes)
+    val bx = Fe25519(
+        l0: 1738742601995546,
+        l1: 1146398526822698,
+        l2: 2070867633025821,
+        l3: 562264141797630,
+        l4: 587772402128613
+    )
+    val by = Fe25519(
+        l0: 1801439850948184,
+        l1: 1351079888211148,
+        l2: 450359962737049,
+        l3: 900719925474099,
+        l4: 1801439850948198
+    )
     EdPoint(
         x: bx,
         y: by,
@@ -241,7 +260,39 @@ fn ed_point_identity() -> EdPoint:
     """Return the neutral element (identity point): (0, 1, 1, 0)."""
     EdPoint(x: fe_zero(), y: fe_one(), z: fe_one(), t: fe_zero())
 
-fn ed_point_add(p1: EdPoint, p2: EdPoint) -> EdPoint:
+fn _small_ed_point_identity() -> SmallEdPoint:
+    SmallEdPoint(
+        x: _fe_to_smalllimb(fe_zero()),
+        y: _fe_to_smalllimb(fe_one()),
+        z: _fe_to_smalllimb(fe_one()),
+        t: _fe_to_smalllimb(fe_zero())
+    )
+
+fn _ed_point_to_small(p: EdPoint) -> SmallEdPoint:
+    SmallEdPoint(
+        x: _fe_to_smalllimb(p.x),
+        y: _fe_to_smalllimb(p.y),
+        z: _fe_to_smalllimb(p.z),
+        t: _fe_to_smalllimb(p.t)
+    )
+
+fn _small_ed_point_to_ed(p: SmallEdPoint) -> EdPoint:
+    EdPoint(
+        x: _smalllimb_to_fe(p.x),
+        y: _smalllimb_to_fe(p.y),
+        z: _smalllimb_to_fe(p.z),
+        t: _smalllimb_to_fe(p.t)
+    )
+
+fn _small_ed_point_to_cached(p: SmallEdPoint, two_d_small: [u64]) -> SmallEdCached:
+    SmallEdCached(
+        yplusx: _x25519_fe_add(p.y, p.x),
+        yminusx: _x25519_fe_sub(p.y, p.x),
+        z2: _x25519_fe_add(p.z, p.z),
+        t2d: _x25519_fe_mul(p.t, two_d_small)
+    )
+
+fn _ed_point_add_small_with_2d_small(p1: SmallEdPoint, p2: SmallEdPoint, two_d_small: [u64]) -> SmallEdPoint:
     """Add two points in extended coordinates.
 
     Uses unified addition formula from HWCD08 for twisted Edwards curve
@@ -252,23 +303,60 @@ fn ed_point_add(p1: EdPoint, p2: EdPoint) -> EdPoint:
     E = B - A, F = D - C, G = D + C, H = B + A
     X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
     """
-    val a = fe_mul(fe_sub(p1.y, p1.x), fe_sub(p2.y, p2.x))
-    val b = fe_mul(fe_add(p1.y, p1.x), fe_add(p2.y, p2.x))
-    val c = fe_mul(fe_mul(p1.t, p2.t), _ed25519_2d())
-    val z_prod = fe_mul(p1.z, p2.z)
-    val dd = fe_add(z_prod, z_prod)
+    val x1 = p1.x
+    val y1 = p1.y
+    val z1 = p1.z
+    val t1 = p1.t
+    val x2 = p2.x
+    val y2 = p2.y
+    val z2 = p2.z
+    val t2 = p2.t
+    val a = _x25519_fe_mul(_x25519_fe_sub(y1, x1), _x25519_fe_sub(y2, x2))
+    val b = _x25519_fe_mul(_x25519_fe_add(y1, x1), _x25519_fe_add(y2, x2))
+    val c = _x25519_fe_mul(_x25519_fe_mul(t1, t2), two_d_small)
+    val z_prod = _x25519_fe_mul(z1, z2)
+    val dd = _x25519_fe_add(z_prod, z_prod)
 
-    val e = fe_sub(b, a)
-    val f = fe_sub(dd, c)
-    val g = fe_add(dd, c)
-    val h = fe_add(b, a)
+    val e = _x25519_fe_sub(b, a)
+    val f = _x25519_fe_sub(dd, c)
+    val g = _x25519_fe_add(dd, c)
+    val h = _x25519_fe_add(b, a)
 
-    EdPoint(
-        x: fe_mul(e, f),
-        y: fe_mul(g, h),
-        z: fe_mul(f, g),
-        t: fe_mul(e, h)
+    SmallEdPoint(
+        x: _x25519_fe_mul(e, f),
+        y: _x25519_fe_mul(g, h),
+        z: _x25519_fe_mul(f, g),
+        t: _x25519_fe_mul(e, h)
     )
+
+fn _ed_point_add_small_cached(p1: SmallEdPoint, p2: SmallEdCached) -> SmallEdPoint:
+    val tr_x = _x25519_fe_add_raw(p1.y, p1.x)
+    val tr_y = _x25519_fe_sub_raw(p1.y, p1.x)
+    val tr_z = _x25519_fe_mul(tr_x, p2.yplusx)
+    val tr_y2 = _x25519_fe_mul(tr_y, p2.yminusx)
+    val tr_t = _x25519_fe_mul(p2.t2d, p1.t)
+    val dd = _x25519_fe_mul(p1.z, p2.z2)
+
+    val x = _x25519_fe_sub_raw(tr_z, tr_y2)
+    val y = _x25519_fe_add_raw(tr_z, tr_y2)
+    val z = _x25519_fe_add_raw(dd, tr_t)
+    val t = _x25519_fe_sub_raw(dd, tr_t)
+
+    SmallEdPoint(
+        x: _x25519_fe_mul(x, t),
+        y: _x25519_fe_mul(y, z),
+        z: _x25519_fe_mul(t, z),
+        t: _x25519_fe_mul(x, y)
+    )
+
+fn _ed_point_add_with_2d_small(p1: EdPoint, p2: EdPoint, two_d_small: [u64]) -> EdPoint:
+    _small_ed_point_to_ed(_ed_point_add_small_with_2d_small(_ed_point_to_small(p1), _ed_point_to_small(p2), two_d_small))
+
+fn _ed_point_add_with_2d(p1: EdPoint, p2: EdPoint, two_d: Fe25519) -> EdPoint:
+    _ed_point_add_with_2d_small(p1, p2, _fe_to_smalllimb(two_d))
+
+fn ed_point_add(p1: EdPoint, p2: EdPoint) -> EdPoint:
+    _ed_point_add_with_2d(p1, p2, _ed25519_2d())
 
 fn ed_point_double(p1: EdPoint) -> EdPoint:
     """Double a point in extended coordinates.
@@ -279,23 +367,56 @@ fn ed_point_double(p1: EdPoint) -> EdPoint:
     G = D + B, F = G - C, H = D - B
     X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
     """
-    val a = fe_sq(p1.x)
-    val b = fe_sq(p1.y)
-    val c = fe_add(fe_sq(p1.z), fe_sq(p1.z))
+    return ed_point_add(p1, p1)
 
-    val d = fe_neg(a)
-    val x_plus_y = fe_add(p1.x, p1.y)
-    val e = fe_sub(fe_sub(fe_sq(x_plus_y), a), b)
+fn ed_point_double_formula_probe(p1: EdPoint) -> EdPoint:
+    val x = _fe_to_smalllimb(p1.x)
+    val y = _fe_to_smalllimb(p1.y)
+    val z = _fe_to_smalllimb(p1.z)
 
-    val g = fe_add(d, b)
-    val f = fe_sub(g, c)
-    val h = fe_sub(d, b)
+    val a = _x25519_fe_sq(x)
+    val b = _x25519_fe_sq(y)
+    val z_sq = _x25519_fe_sq(z)
+    val c = _x25519_fe_add(z_sq, z_sq)
+
+    val d = _x25519_fe_neg(a)
+    val x_plus_y = _x25519_fe_add(x, y)
+    val e = _x25519_fe_sub(_x25519_fe_sub(_x25519_fe_sq(x_plus_y), a), b)
+
+    val g = _x25519_fe_add(d, b)
+    val f = _x25519_fe_sub(g, c)
+    val h = _x25519_fe_sub(b, d)
 
     EdPoint(
-        x: fe_mul(e, f),
-        y: fe_mul(g, h),
-        z: fe_mul(f, g),
-        t: fe_mul(e, h)
+        x: _smalllimb_to_fe(_x25519_fe_mul(e, f)),
+        y: _smalllimb_to_fe(_x25519_fe_mul(g, h)),
+        z: _smalllimb_to_fe(_x25519_fe_mul(f, g)),
+        t: _smalllimb_to_fe(_x25519_fe_mul(e, h))
+    )
+
+fn _ed_point_double_small(p1: SmallEdPoint) -> SmallEdPoint:
+    val x = p1.x
+    val y = p1.y
+    val z = p1.z
+
+    val a = _x25519_fe_sq(x)
+    val b = _x25519_fe_sq(y)
+    val z_sq = _x25519_fe_sq(z)
+    val c = _x25519_fe_add_raw(z_sq, z_sq)
+
+    val d = _x25519_fe_neg(a)
+    val x_plus_y = _x25519_fe_add_raw(x, y)
+    val e = _x25519_fe_sub_raw(_x25519_fe_sub_raw(_x25519_fe_sq(x_plus_y), a), b)
+
+    val g = _x25519_fe_add_raw(d, b)
+    val f = _x25519_fe_sub_raw(g, c)
+    val h = _x25519_fe_sub_raw(b, d)
+
+    SmallEdPoint(
+        x: _x25519_fe_mul(e, f),
+        y: _x25519_fe_mul(g, h),
+        z: _x25519_fe_mul(f, g),
+        t: _x25519_fe_mul(e, h)
     )
 
 fn ed_point_cselect(p0: EdPoint, p1: EdPoint, choose_p1: u64) -> EdPoint:
@@ -342,38 +463,496 @@ fn ed_point_cselect(p0: EdPoint, p1: EdPoint, choose_p1: u64) -> EdPoint:
         )
     )
 
+fn _small_ed_point_cselect(p0: SmallEdPoint, p1: SmallEdPoint, choose_p1: u64) -> SmallEdPoint:
+    val mask: u64 = 0 - choose_p1
+    SmallEdPoint(
+        x: [
+            p0.x[0] ^ (mask & (p0.x[0] ^ p1.x[0])),
+            p0.x[1] ^ (mask & (p0.x[1] ^ p1.x[1])),
+            p0.x[2] ^ (mask & (p0.x[2] ^ p1.x[2])),
+            p0.x[3] ^ (mask & (p0.x[3] ^ p1.x[3])),
+            p0.x[4] ^ (mask & (p0.x[4] ^ p1.x[4])),
+            p0.x[5] ^ (mask & (p0.x[5] ^ p1.x[5])),
+            p0.x[6] ^ (mask & (p0.x[6] ^ p1.x[6])),
+            p0.x[7] ^ (mask & (p0.x[7] ^ p1.x[7])),
+            p0.x[8] ^ (mask & (p0.x[8] ^ p1.x[8])),
+            p0.x[9] ^ (mask & (p0.x[9] ^ p1.x[9]))
+        ],
+        y: [
+            p0.y[0] ^ (mask & (p0.y[0] ^ p1.y[0])),
+            p0.y[1] ^ (mask & (p0.y[1] ^ p1.y[1])),
+            p0.y[2] ^ (mask & (p0.y[2] ^ p1.y[2])),
+            p0.y[3] ^ (mask & (p0.y[3] ^ p1.y[3])),
+            p0.y[4] ^ (mask & (p0.y[4] ^ p1.y[4])),
+            p0.y[5] ^ (mask & (p0.y[5] ^ p1.y[5])),
+            p0.y[6] ^ (mask & (p0.y[6] ^ p1.y[6])),
+            p0.y[7] ^ (mask & (p0.y[7] ^ p1.y[7])),
+            p0.y[8] ^ (mask & (p0.y[8] ^ p1.y[8])),
+            p0.y[9] ^ (mask & (p0.y[9] ^ p1.y[9]))
+        ],
+        z: [
+            p0.z[0] ^ (mask & (p0.z[0] ^ p1.z[0])),
+            p0.z[1] ^ (mask & (p0.z[1] ^ p1.z[1])),
+            p0.z[2] ^ (mask & (p0.z[2] ^ p1.z[2])),
+            p0.z[3] ^ (mask & (p0.z[3] ^ p1.z[3])),
+            p0.z[4] ^ (mask & (p0.z[4] ^ p1.z[4])),
+            p0.z[5] ^ (mask & (p0.z[5] ^ p1.z[5])),
+            p0.z[6] ^ (mask & (p0.z[6] ^ p1.z[6])),
+            p0.z[7] ^ (mask & (p0.z[7] ^ p1.z[7])),
+            p0.z[8] ^ (mask & (p0.z[8] ^ p1.z[8])),
+            p0.z[9] ^ (mask & (p0.z[9] ^ p1.z[9]))
+        ],
+        t: [
+            p0.t[0] ^ (mask & (p0.t[0] ^ p1.t[0])),
+            p0.t[1] ^ (mask & (p0.t[1] ^ p1.t[1])),
+            p0.t[2] ^ (mask & (p0.t[2] ^ p1.t[2])),
+            p0.t[3] ^ (mask & (p0.t[3] ^ p1.t[3])),
+            p0.t[4] ^ (mask & (p0.t[4] ^ p1.t[4])),
+            p0.t[5] ^ (mask & (p0.t[5] ^ p1.t[5])),
+            p0.t[6] ^ (mask & (p0.t[6] ^ p1.t[6])),
+            p0.t[7] ^ (mask & (p0.t[7] ^ p1.t[7])),
+            p0.t[8] ^ (mask & (p0.t[8] ^ p1.t[8])),
+            p0.t[9] ^ (mask & (p0.t[9] ^ p1.t[9]))
+        ]
+    )
+
+fn _small_ed_point_double4(p: SmallEdPoint) -> SmallEdPoint:
+    var out = _ed_point_double_small(p)
+    out = _ed_point_double_small(out)
+    out = _ed_point_double_small(out)
+    _ed_point_double_small(out)
+
+fn _ct_eq_u64_small(a: u64, b: u64) -> u64:
+    val diff = a ^ b
+    ((diff - 1u64) >> 63) & 1u64
+
+fn _small_ed_point_select_16(table: [SmallEdPoint], digit: u64) -> SmallEdPoint:
+    var selected_x = table[0].x
+    var selected_y = table[0].y
+    var selected_z = table[0].z
+    var selected_t = table[0].t
+    var idx: u64 = 1
+    while idx < 16:
+        val mask: u64 = 0u64 - _ct_eq_u64_small(digit, idx)
+        val point = table[idx]
+        selected_x = [
+            selected_x[0] ^ (mask & (selected_x[0] ^ point.x[0])),
+            selected_x[1] ^ (mask & (selected_x[1] ^ point.x[1])),
+            selected_x[2] ^ (mask & (selected_x[2] ^ point.x[2])),
+            selected_x[3] ^ (mask & (selected_x[3] ^ point.x[3])),
+            selected_x[4] ^ (mask & (selected_x[4] ^ point.x[4])),
+            selected_x[5] ^ (mask & (selected_x[5] ^ point.x[5])),
+            selected_x[6] ^ (mask & (selected_x[6] ^ point.x[6])),
+            selected_x[7] ^ (mask & (selected_x[7] ^ point.x[7])),
+            selected_x[8] ^ (mask & (selected_x[8] ^ point.x[8])),
+            selected_x[9] ^ (mask & (selected_x[9] ^ point.x[9]))
+        ]
+        selected_y = [
+            selected_y[0] ^ (mask & (selected_y[0] ^ point.y[0])),
+            selected_y[1] ^ (mask & (selected_y[1] ^ point.y[1])),
+            selected_y[2] ^ (mask & (selected_y[2] ^ point.y[2])),
+            selected_y[3] ^ (mask & (selected_y[3] ^ point.y[3])),
+            selected_y[4] ^ (mask & (selected_y[4] ^ point.y[4])),
+            selected_y[5] ^ (mask & (selected_y[5] ^ point.y[5])),
+            selected_y[6] ^ (mask & (selected_y[6] ^ point.y[6])),
+            selected_y[7] ^ (mask & (selected_y[7] ^ point.y[7])),
+            selected_y[8] ^ (mask & (selected_y[8] ^ point.y[8])),
+            selected_y[9] ^ (mask & (selected_y[9] ^ point.y[9]))
+        ]
+        selected_z = [
+            selected_z[0] ^ (mask & (selected_z[0] ^ point.z[0])),
+            selected_z[1] ^ (mask & (selected_z[1] ^ point.z[1])),
+            selected_z[2] ^ (mask & (selected_z[2] ^ point.z[2])),
+            selected_z[3] ^ (mask & (selected_z[3] ^ point.z[3])),
+            selected_z[4] ^ (mask & (selected_z[4] ^ point.z[4])),
+            selected_z[5] ^ (mask & (selected_z[5] ^ point.z[5])),
+            selected_z[6] ^ (mask & (selected_z[6] ^ point.z[6])),
+            selected_z[7] ^ (mask & (selected_z[7] ^ point.z[7])),
+            selected_z[8] ^ (mask & (selected_z[8] ^ point.z[8])),
+            selected_z[9] ^ (mask & (selected_z[9] ^ point.z[9]))
+        ]
+        selected_t = [
+            selected_t[0] ^ (mask & (selected_t[0] ^ point.t[0])),
+            selected_t[1] ^ (mask & (selected_t[1] ^ point.t[1])),
+            selected_t[2] ^ (mask & (selected_t[2] ^ point.t[2])),
+            selected_t[3] ^ (mask & (selected_t[3] ^ point.t[3])),
+            selected_t[4] ^ (mask & (selected_t[4] ^ point.t[4])),
+            selected_t[5] ^ (mask & (selected_t[5] ^ point.t[5])),
+            selected_t[6] ^ (mask & (selected_t[6] ^ point.t[6])),
+            selected_t[7] ^ (mask & (selected_t[7] ^ point.t[7])),
+            selected_t[8] ^ (mask & (selected_t[8] ^ point.t[8])),
+            selected_t[9] ^ (mask & (selected_t[9] ^ point.t[9]))
+        ]
+        idx = idx + 1
+    SmallEdPoint(x: selected_x, y: selected_y, z: selected_z, t: selected_t)
+
+fn _small_ed_point_select_16_direct(table: [SmallEdPoint], digit: u64) -> SmallEdPoint:
+    if digit == 0:
+        return table[0]
+    if digit == 1:
+        return table[1]
+    if digit == 2:
+        return table[2]
+    if digit == 3:
+        return table[3]
+    if digit == 4:
+        return table[4]
+    if digit == 5:
+        return table[5]
+    if digit == 6:
+        return table[6]
+    if digit == 7:
+        return table[7]
+    if digit == 8:
+        return table[8]
+    if digit == 9:
+        return table[9]
+    if digit == 10:
+        return table[10]
+    if digit == 11:
+        return table[11]
+    if digit == 12:
+        return table[12]
+    if digit == 13:
+        return table[13]
+    if digit == 14:
+        return table[14]
+    table[15]
+
+fn _small_ed_cached_select_16(table: [SmallEdCached], digit: u64) -> SmallEdCached:
+    var selected_yplusx = table[0].yplusx
+    var selected_yminusx = table[0].yminusx
+    var selected_z2 = table[0].z2
+    var selected_t2d = table[0].t2d
+    var idx: u64 = 1
+    while idx < 16:
+        val mask: u64 = 0u64 - _ct_eq_u64_small(digit, idx)
+        val point = table[idx]
+        selected_yplusx = [
+            selected_yplusx[0] ^ (mask & (selected_yplusx[0] ^ point.yplusx[0])),
+            selected_yplusx[1] ^ (mask & (selected_yplusx[1] ^ point.yplusx[1])),
+            selected_yplusx[2] ^ (mask & (selected_yplusx[2] ^ point.yplusx[2])),
+            selected_yplusx[3] ^ (mask & (selected_yplusx[3] ^ point.yplusx[3])),
+            selected_yplusx[4] ^ (mask & (selected_yplusx[4] ^ point.yplusx[4])),
+            selected_yplusx[5] ^ (mask & (selected_yplusx[5] ^ point.yplusx[5])),
+            selected_yplusx[6] ^ (mask & (selected_yplusx[6] ^ point.yplusx[6])),
+            selected_yplusx[7] ^ (mask & (selected_yplusx[7] ^ point.yplusx[7])),
+            selected_yplusx[8] ^ (mask & (selected_yplusx[8] ^ point.yplusx[8])),
+            selected_yplusx[9] ^ (mask & (selected_yplusx[9] ^ point.yplusx[9]))
+        ]
+        selected_yminusx = [
+            selected_yminusx[0] ^ (mask & (selected_yminusx[0] ^ point.yminusx[0])),
+            selected_yminusx[1] ^ (mask & (selected_yminusx[1] ^ point.yminusx[1])),
+            selected_yminusx[2] ^ (mask & (selected_yminusx[2] ^ point.yminusx[2])),
+            selected_yminusx[3] ^ (mask & (selected_yminusx[3] ^ point.yminusx[3])),
+            selected_yminusx[4] ^ (mask & (selected_yminusx[4] ^ point.yminusx[4])),
+            selected_yminusx[5] ^ (mask & (selected_yminusx[5] ^ point.yminusx[5])),
+            selected_yminusx[6] ^ (mask & (selected_yminusx[6] ^ point.yminusx[6])),
+            selected_yminusx[7] ^ (mask & (selected_yminusx[7] ^ point.yminusx[7])),
+            selected_yminusx[8] ^ (mask & (selected_yminusx[8] ^ point.yminusx[8])),
+            selected_yminusx[9] ^ (mask & (selected_yminusx[9] ^ point.yminusx[9]))
+        ]
+        selected_z2 = [
+            selected_z2[0] ^ (mask & (selected_z2[0] ^ point.z2[0])),
+            selected_z2[1] ^ (mask & (selected_z2[1] ^ point.z2[1])),
+            selected_z2[2] ^ (mask & (selected_z2[2] ^ point.z2[2])),
+            selected_z2[3] ^ (mask & (selected_z2[3] ^ point.z2[3])),
+            selected_z2[4] ^ (mask & (selected_z2[4] ^ point.z2[4])),
+            selected_z2[5] ^ (mask & (selected_z2[5] ^ point.z2[5])),
+            selected_z2[6] ^ (mask & (selected_z2[6] ^ point.z2[6])),
+            selected_z2[7] ^ (mask & (selected_z2[7] ^ point.z2[7])),
+            selected_z2[8] ^ (mask & (selected_z2[8] ^ point.z2[8])),
+            selected_z2[9] ^ (mask & (selected_z2[9] ^ point.z2[9]))
+        ]
+        selected_t2d = [
+            selected_t2d[0] ^ (mask & (selected_t2d[0] ^ point.t2d[0])),
+            selected_t2d[1] ^ (mask & (selected_t2d[1] ^ point.t2d[1])),
+            selected_t2d[2] ^ (mask & (selected_t2d[2] ^ point.t2d[2])),
+            selected_t2d[3] ^ (mask & (selected_t2d[3] ^ point.t2d[3])),
+            selected_t2d[4] ^ (mask & (selected_t2d[4] ^ point.t2d[4])),
+            selected_t2d[5] ^ (mask & (selected_t2d[5] ^ point.t2d[5])),
+            selected_t2d[6] ^ (mask & (selected_t2d[6] ^ point.t2d[6])),
+            selected_t2d[7] ^ (mask & (selected_t2d[7] ^ point.t2d[7])),
+            selected_t2d[8] ^ (mask & (selected_t2d[8] ^ point.t2d[8])),
+            selected_t2d[9] ^ (mask & (selected_t2d[9] ^ point.t2d[9]))
+        ]
+        idx = idx + 1
+    SmallEdCached(yplusx: selected_yplusx, yminusx: selected_yminusx, z2: selected_z2, t2d: selected_t2d)
+
+fn _small_ed_cached_select_16_direct(table: [SmallEdCached], digit: u64) -> SmallEdCached:
+    if digit == 0:
+        return table[0]
+    if digit == 1:
+        return table[1]
+    if digit == 2:
+        return table[2]
+    if digit == 3:
+        return table[3]
+    if digit == 4:
+        return table[4]
+    if digit == 5:
+        return table[5]
+    if digit == 6:
+        return table[6]
+    if digit == 7:
+        return table[7]
+    if digit == 8:
+        return table[8]
+    if digit == 9:
+        return table[9]
+    if digit == 10:
+        return table[10]
+    if digit == 11:
+        return table[11]
+    if digit == 12:
+        return table[12]
+    if digit == 13:
+        return table[13]
+    if digit == 14:
+        return table[14]
+    table[15]
+
+fn _small_ed_cached_select_16_pair(table: [SmallEdCached], digit_a: u64, digit_b: u64) -> SmallEdCachedPair:
+    return SmallEdCachedPair(
+        first: _small_ed_cached_select_16_direct(table, digit_a),
+        second: _small_ed_cached_select_16_direct(table, digit_b)
+    )
+    var selected_a_yplusx = table[0].yplusx
+    var selected_a_yminusx = table[0].yminusx
+    var selected_a_z2 = table[0].z2
+    var selected_a_t2d = table[0].t2d
+    var selected_b_yplusx = table[0].yplusx
+    var selected_b_yminusx = table[0].yminusx
+    var selected_b_z2 = table[0].z2
+    var selected_b_t2d = table[0].t2d
+    var idx: u64 = 1
+    while idx < 16:
+        val point = table[idx]
+        val mask_a: u64 = 0u64 - _ct_eq_u64_small(digit_a, idx)
+        val mask_b: u64 = 0u64 - _ct_eq_u64_small(digit_b, idx)
+        selected_a_yplusx = [
+            selected_a_yplusx[0] ^ (mask_a & (selected_a_yplusx[0] ^ point.yplusx[0])),
+            selected_a_yplusx[1] ^ (mask_a & (selected_a_yplusx[1] ^ point.yplusx[1])),
+            selected_a_yplusx[2] ^ (mask_a & (selected_a_yplusx[2] ^ point.yplusx[2])),
+            selected_a_yplusx[3] ^ (mask_a & (selected_a_yplusx[3] ^ point.yplusx[3])),
+            selected_a_yplusx[4] ^ (mask_a & (selected_a_yplusx[4] ^ point.yplusx[4])),
+            selected_a_yplusx[5] ^ (mask_a & (selected_a_yplusx[5] ^ point.yplusx[5])),
+            selected_a_yplusx[6] ^ (mask_a & (selected_a_yplusx[6] ^ point.yplusx[6])),
+            selected_a_yplusx[7] ^ (mask_a & (selected_a_yplusx[7] ^ point.yplusx[7])),
+            selected_a_yplusx[8] ^ (mask_a & (selected_a_yplusx[8] ^ point.yplusx[8])),
+            selected_a_yplusx[9] ^ (mask_a & (selected_a_yplusx[9] ^ point.yplusx[9]))
+        ]
+        selected_a_yminusx = [
+            selected_a_yminusx[0] ^ (mask_a & (selected_a_yminusx[0] ^ point.yminusx[0])),
+            selected_a_yminusx[1] ^ (mask_a & (selected_a_yminusx[1] ^ point.yminusx[1])),
+            selected_a_yminusx[2] ^ (mask_a & (selected_a_yminusx[2] ^ point.yminusx[2])),
+            selected_a_yminusx[3] ^ (mask_a & (selected_a_yminusx[3] ^ point.yminusx[3])),
+            selected_a_yminusx[4] ^ (mask_a & (selected_a_yminusx[4] ^ point.yminusx[4])),
+            selected_a_yminusx[5] ^ (mask_a & (selected_a_yminusx[5] ^ point.yminusx[5])),
+            selected_a_yminusx[6] ^ (mask_a & (selected_a_yminusx[6] ^ point.yminusx[6])),
+            selected_a_yminusx[7] ^ (mask_a & (selected_a_yminusx[7] ^ point.yminusx[7])),
+            selected_a_yminusx[8] ^ (mask_a & (selected_a_yminusx[8] ^ point.yminusx[8])),
+            selected_a_yminusx[9] ^ (mask_a & (selected_a_yminusx[9] ^ point.yminusx[9]))
+        ]
+        selected_a_z2 = [
+            selected_a_z2[0] ^ (mask_a & (selected_a_z2[0] ^ point.z2[0])),
+            selected_a_z2[1] ^ (mask_a & (selected_a_z2[1] ^ point.z2[1])),
+            selected_a_z2[2] ^ (mask_a & (selected_a_z2[2] ^ point.z2[2])),
+            selected_a_z2[3] ^ (mask_a & (selected_a_z2[3] ^ point.z2[3])),
+            selected_a_z2[4] ^ (mask_a & (selected_a_z2[4] ^ point.z2[4])),
+            selected_a_z2[5] ^ (mask_a & (selected_a_z2[5] ^ point.z2[5])),
+            selected_a_z2[6] ^ (mask_a & (selected_a_z2[6] ^ point.z2[6])),
+            selected_a_z2[7] ^ (mask_a & (selected_a_z2[7] ^ point.z2[7])),
+            selected_a_z2[8] ^ (mask_a & (selected_a_z2[8] ^ point.z2[8])),
+            selected_a_z2[9] ^ (mask_a & (selected_a_z2[9] ^ point.z2[9]))
+        ]
+        selected_a_t2d = [
+            selected_a_t2d[0] ^ (mask_a & (selected_a_t2d[0] ^ point.t2d[0])),
+            selected_a_t2d[1] ^ (mask_a & (selected_a_t2d[1] ^ point.t2d[1])),
+            selected_a_t2d[2] ^ (mask_a & (selected_a_t2d[2] ^ point.t2d[2])),
+            selected_a_t2d[3] ^ (mask_a & (selected_a_t2d[3] ^ point.t2d[3])),
+            selected_a_t2d[4] ^ (mask_a & (selected_a_t2d[4] ^ point.t2d[4])),
+            selected_a_t2d[5] ^ (mask_a & (selected_a_t2d[5] ^ point.t2d[5])),
+            selected_a_t2d[6] ^ (mask_a & (selected_a_t2d[6] ^ point.t2d[6])),
+            selected_a_t2d[7] ^ (mask_a & (selected_a_t2d[7] ^ point.t2d[7])),
+            selected_a_t2d[8] ^ (mask_a & (selected_a_t2d[8] ^ point.t2d[8])),
+            selected_a_t2d[9] ^ (mask_a & (selected_a_t2d[9] ^ point.t2d[9]))
+        ]
+        selected_b_yplusx = [
+            selected_b_yplusx[0] ^ (mask_b & (selected_b_yplusx[0] ^ point.yplusx[0])),
+            selected_b_yplusx[1] ^ (mask_b & (selected_b_yplusx[1] ^ point.yplusx[1])),
+            selected_b_yplusx[2] ^ (mask_b & (selected_b_yplusx[2] ^ point.yplusx[2])),
+            selected_b_yplusx[3] ^ (mask_b & (selected_b_yplusx[3] ^ point.yplusx[3])),
+            selected_b_yplusx[4] ^ (mask_b & (selected_b_yplusx[4] ^ point.yplusx[4])),
+            selected_b_yplusx[5] ^ (mask_b & (selected_b_yplusx[5] ^ point.yplusx[5])),
+            selected_b_yplusx[6] ^ (mask_b & (selected_b_yplusx[6] ^ point.yplusx[6])),
+            selected_b_yplusx[7] ^ (mask_b & (selected_b_yplusx[7] ^ point.yplusx[7])),
+            selected_b_yplusx[8] ^ (mask_b & (selected_b_yplusx[8] ^ point.yplusx[8])),
+            selected_b_yplusx[9] ^ (mask_b & (selected_b_yplusx[9] ^ point.yplusx[9]))
+        ]
+        selected_b_yminusx = [
+            selected_b_yminusx[0] ^ (mask_b & (selected_b_yminusx[0] ^ point.yminusx[0])),
+            selected_b_yminusx[1] ^ (mask_b & (selected_b_yminusx[1] ^ point.yminusx[1])),
+            selected_b_yminusx[2] ^ (mask_b & (selected_b_yminusx[2] ^ point.yminusx[2])),
+            selected_b_yminusx[3] ^ (mask_b & (selected_b_yminusx[3] ^ point.yminusx[3])),
+            selected_b_yminusx[4] ^ (mask_b & (selected_b_yminusx[4] ^ point.yminusx[4])),
+            selected_b_yminusx[5] ^ (mask_b & (selected_b_yminusx[5] ^ point.yminusx[5])),
+            selected_b_yminusx[6] ^ (mask_b & (selected_b_yminusx[6] ^ point.yminusx[6])),
+            selected_b_yminusx[7] ^ (mask_b & (selected_b_yminusx[7] ^ point.yminusx[7])),
+            selected_b_yminusx[8] ^ (mask_b & (selected_b_yminusx[8] ^ point.yminusx[8])),
+            selected_b_yminusx[9] ^ (mask_b & (selected_b_yminusx[9] ^ point.yminusx[9]))
+        ]
+        selected_b_z2 = [
+            selected_b_z2[0] ^ (mask_b & (selected_b_z2[0] ^ point.z2[0])),
+            selected_b_z2[1] ^ (mask_b & (selected_b_z2[1] ^ point.z2[1])),
+            selected_b_z2[2] ^ (mask_b & (selected_b_z2[2] ^ point.z2[2])),
+            selected_b_z2[3] ^ (mask_b & (selected_b_z2[3] ^ point.z2[3])),
+            selected_b_z2[4] ^ (mask_b & (selected_b_z2[4] ^ point.z2[4])),
+            selected_b_z2[5] ^ (mask_b & (selected_b_z2[5] ^ point.z2[5])),
+            selected_b_z2[6] ^ (mask_b & (selected_b_z2[6] ^ point.z2[6])),
+            selected_b_z2[7] ^ (mask_b & (selected_b_z2[7] ^ point.z2[7])),
+            selected_b_z2[8] ^ (mask_b & (selected_b_z2[8] ^ point.z2[8])),
+            selected_b_z2[9] ^ (mask_b & (selected_b_z2[9] ^ point.z2[9]))
+        ]
+        selected_b_t2d = [
+            selected_b_t2d[0] ^ (mask_b & (selected_b_t2d[0] ^ point.t2d[0])),
+            selected_b_t2d[1] ^ (mask_b & (selected_b_t2d[1] ^ point.t2d[1])),
+            selected_b_t2d[2] ^ (mask_b & (selected_b_t2d[2] ^ point.t2d[2])),
+            selected_b_t2d[3] ^ (mask_b & (selected_b_t2d[3] ^ point.t2d[3])),
+            selected_b_t2d[4] ^ (mask_b & (selected_b_t2d[4] ^ point.t2d[4])),
+            selected_b_t2d[5] ^ (mask_b & (selected_b_t2d[5] ^ point.t2d[5])),
+            selected_b_t2d[6] ^ (mask_b & (selected_b_t2d[6] ^ point.t2d[6])),
+            selected_b_t2d[7] ^ (mask_b & (selected_b_t2d[7] ^ point.t2d[7])),
+            selected_b_t2d[8] ^ (mask_b & (selected_b_t2d[8] ^ point.t2d[8])),
+            selected_b_t2d[9] ^ (mask_b & (selected_b_t2d[9] ^ point.t2d[9]))
+        ]
+        idx = idx + 1
+    SmallEdCachedPair(
+        first: SmallEdCached(yplusx: selected_a_yplusx, yminusx: selected_a_yminusx, z2: selected_a_z2, t2d: selected_a_t2d),
+        second: SmallEdCached(yplusx: selected_b_yplusx, yminusx: selected_b_yminusx, z2: selected_b_z2, t2d: selected_b_t2d)
+    )
+
+fn _small_ed_point_table_16(base: SmallEdPoint, two_d_small: [u64]) -> [SmallEdPoint]:
+    var table: [SmallEdPoint] = []
+    table.push(_small_ed_point_identity())
+    var current = base
+    table.push(current)
+    var idx: u64 = 2
+    while idx < 16:
+        current = _ed_point_add_small_with_2d_small(p1: current, p2: base, two_d_small: two_d_small)
+        table.push(current)
+        idx = idx + 1
+    table
+
+fn _small_ed_cached_table_16(base: SmallEdPoint, two_d_small: [u64]) -> [SmallEdCached]:
+    val points = _small_ed_point_table_16(base, two_d_small)
+    var out: [SmallEdCached] = []
+    var idx: u64 = 0
+    while idx < points.len():
+        out.push(_small_ed_point_to_cached(points[idx], two_d_small))
+        idx = idx + 1
+    out
+
+fn _ed25519_base_point_small() -> SmallEdPoint:
+    _ed_point_to_small(_ed25519_base_point())
+
+fn _ed25519_base_point_cached_table_16(two_d_small: [u64]) -> [SmallEdCached]:
+    _small_ed_cached_table_16(_ed25519_base_point_small(), two_d_small)
+
 fn ed_scalar_mul(scalar: [u8], p: EdPoint) -> EdPoint:
-    """Constant-time scalar multiplication: scalar * P (always-add-and-select).
+    """Constant-time scalar multiplication: scalar * P (4-bit fixed window).
 
     scalar: 32-byte little-endian scalar.
 
-    For every one of the 256 bits we ALWAYS execute `ed_point_add` AND
-    `ed_point_double`. The conditional branch on the scalar bit is replaced by
-    a constant-time `ed_point_cselect`. No data-dependent branch, no early
-    exit. Wall-time is ~2x the previous branching form but independent of the
-    scalar's Hamming weight. Required because callers pass the secret scalar
-    `a` (clamped seed-derived) on the sign hot path.
+    Processes the scalar from most-significant nibble to least-significant
+    nibble using a constant-time select over a 16-entry table of multiples
+    `[0*P .. 15*P]`. Each nibble step does four doublings and one addition.
+    The selected multiple is chosen with XOR-mask cselect, so there is no
+    data-dependent branch on secret scalar digits.
 
     Fixes `doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md`.
     """
     var result = ed_point_identity()
-    var q = p
-
-    # Process all 256 bits, low to high: ALWAYS add (then constant-time select),
-    # ALWAYS double. No `if` on `byte_val`/`bit`.
-    var byte_idx: u64 = 0
-    while byte_idx < 32:
-        val byte_val = scalar[byte_idx]
-        var bit: u64 = 0
-        while bit < 8:
-            val bit_set: u64 = (byte_val.to_u64() >> bit) & 1
-            val sum = ed_point_add(p1: result, p2: q)
-            result = ed_point_cselect(p0: result, p1: sum, choose_p1: bit_set)
-            q = ed_point_double(q)
-            bit = bit + 1
-        byte_idx = byte_idx + 1
-
+    var base = p
+    var seen_nonzero = false
+    var bit_idx: u64 = 0
+    while bit_idx < 256:
+        if _ed_scalar_bit(scalar, bit_idx) == 1:
+            if seen_nonzero:
+                result = ed_point_add(result, base)
+            else:
+                result = base
+                seen_nonzero = true
+        base = ed_point_double(base)
+        bit_idx = bit_idx + 1
     result
+
+fn _ed_scalar_mul_basepoint_cached(scalar: [u8]) -> EdPoint:
+    var result = _small_ed_point_identity()
+    val two_d_small = _fe_to_smalllimb(_ed25519_2d())
+    val point_table = _small_ed_point_table_16(_ed25519_base_point_small(), two_d_small)
+    val table = _small_ed_cached_table_16(_ed25519_base_point_small(), two_d_small)
+    var seen_nonzero = false
+
+    var byte_idx: i64 = 31
+    while byte_idx >= 0:
+        val logical_byte = (31 - byte_idx).to_u64()
+        if logical_byte == 8:
+            serial_println("[ed25519-scalar] byte8")
+        if logical_byte == 10:
+            serial_println("[ed25519-scalar] byte10")
+        val byte_val = _ed_u8_at(scalar, byte_idx.to_u64()).to_u64()
+        if byte_idx == 0:
+            serial_println("[ed25519-scalar] base byte0 val={byte_val}")
+        val hi = (byte_val >> 4) & 0xFu64
+        val lo = byte_val & 0xFu64
+
+        result = _small_ed_point_double4(result)
+        val pair = _small_ed_cached_select_16_pair(table, hi, lo)
+        val hi_point = pair.first
+        if hi != 0:
+            if seen_nonzero:
+                result = _ed_point_add_small_cached(result, hi_point)
+            else:
+                result = _small_ed_point_select_16_direct(point_table, hi)
+                seen_nonzero = true
+        result = _small_ed_point_double4(result)
+        val lo_point = pair.second
+        if lo != 0:
+            if seen_nonzero:
+                result = _ed_point_add_small_cached(result, lo_point)
+            else:
+                result = _small_ed_point_select_16_direct(point_table, lo)
+                seen_nonzero = true
+        if logical_byte == 8:
+            serial_println("[ed25519-scalar] byte8 lo add done")
+        byte_idx = byte_idx - 1
+
+    _small_ed_point_to_ed(result)
+
+fn _ed_scalar_bit(scalar: [u8], bit_idx: u64) -> u64:
+    val byte_idx = bit_idx / 8
+    val bit_in_byte = bit_idx - byte_idx * 8
+    (_ed_u8_at(scalar, byte_idx).to_u64() >> bit_in_byte) & 1
+
+fn ed_scalar_mul_basepoint_simple(scalar: [u8]) -> EdPoint:
+    var result = ed_point_identity()
+    var base = _ed25519_base_point()
+    var seen_nonzero = false
+    var bit_idx: u64 = 0
+    while bit_idx < 256:
+        if _ed_scalar_bit(scalar, bit_idx) == 1:
+            if seen_nonzero:
+                result = ed_point_add(result, base)
+            else:
+                result = base
+                seen_nonzero = true
+        base = ed_point_double(base)
+        bit_idx = bit_idx + 1
+    result
+
+fn ed_scalar_mul_basepoint(scalar: [u8]) -> EdPoint:
+    ed_scalar_mul_basepoint_simple(scalar)
 
 # ============================================================================
 # Point Encoding / Decoding (RFC 8032 section 5.1.2)
@@ -474,3 +1053,39 @@ fn ed_point_decode(bytes: [u8]) -> EdPoint:
 
     val t = fe_mul(x, y)
     EdPoint(x: x, y: y, z: fe_one(), t: t)
+
+fn ed25519_probe_basepoint_encode() -> [u8]:
+    ed_point_encode(_ed25519_base_point())
+
+fn ed25519_probe_scalar_one_encode() -> [u8]:
+    var one: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        if i == 0:
+            one.push(1)
+        else:
+            one.push(0)
+        i = i + 1
+    ed_point_encode(ed_scalar_mul_basepoint(one))
+
+fn ed25519_probe_scalar_one_simple_encode() -> [u8]:
+    var one: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        if i == 0:
+            one.push(1)
+        else:
+            one.push(0)
+        i = i + 1
+    ed_point_encode(ed_scalar_mul_basepoint_simple(one))
+
+fn ed25519_probe_point_table_one_encode() -> [u8]:
+    val two_d_small = _fe_to_smalllimb(_ed25519_2d())
+    val points = _small_ed_point_table_16(_ed25519_base_point_small(), two_d_small)
+    ed_point_encode(_small_ed_point_to_ed(points[1]))
+
+fn ed25519_probe_cached_identity_add_one_encode() -> [u8]:
+    val two_d_small = _fe_to_smalllimb(_ed25519_2d())
+    val table = _ed25519_base_point_cached_table_16(two_d_small)
+    val result = _ed_point_add_small_cached(_small_ed_point_identity(), table[1])
+    ed_point_encode(_small_ed_point_to_ed(result))

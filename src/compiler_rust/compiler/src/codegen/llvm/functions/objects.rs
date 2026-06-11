@@ -76,11 +76,17 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
-        // Convert struct pointer to i64 (tagged-value ABI)
+        // Native structs still use the flat rt_alloc layout for direct field
+        // access, but once they cross into generic RuntimeValue containers
+        // they must carry the heap tag bit so arrays/channels do not reinterpret
+        // the pointer as an integer payload.
         let struct_i64 = builder
             .build_ptr_to_int(struct_ptr, self.runtime_int_type(), "struct_i64")
             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
-        vreg_map.insert(dest, struct_i64.into());
+        let tagged_struct = builder
+            .build_or(struct_i64, i64_type.const_int(1, false), "struct_tagged")
+            .map_err(|e| crate::error::factory::llvm_build_failed("or struct tag", &e))?;
+        vreg_map.insert(dest, tagged_struct.into());
         Ok(())
     }
 
@@ -100,9 +106,12 @@ impl LlvmBackend {
         let ptr = match obj_val {
             inkwell::values::BasicValueEnum::PointerValue(p) => p,
             inkwell::values::BasicValueEnum::IntValue(iv) => {
+                let masked = builder
+                    .build_and(iv, self.runtime_int_type().const_int(!0x7u64, false), "obj_ptr_bits")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("mask heap tag", &e))?;
                 let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
                 builder
-                    .build_int_to_ptr(iv, ptr_type, "obj_ptr")
+                    .build_int_to_ptr(masked, ptr_type, "obj_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
             }
             _ => {
@@ -154,9 +163,12 @@ impl LlvmBackend {
         let ptr = match obj_val {
             inkwell::values::BasicValueEnum::PointerValue(p) => p,
             inkwell::values::BasicValueEnum::IntValue(iv) => {
+                let masked = builder
+                    .build_and(iv, self.runtime_int_type().const_int(!0x7u64, false), "obj_ptr_bits")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("mask heap tag", &e))?;
                 let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
                 builder
-                    .build_int_to_ptr(iv, ptr_type, "obj_ptr")
+                    .build_int_to_ptr(masked, ptr_type, "obj_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
             }
             _ => return Ok(()), // Fallback: no-op

@@ -10,6 +10,12 @@
 # No imports from ed25519_ops.spl — this file is standalone except for
 # the std.crypto types needed by callers.
 
+extern fn serial_println(msg: text)
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _sc_u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
 # L as 8 u32 limbs (little-endian)
 fn _sc_L() -> [u32]:
     """Return the group order L as 8 u32 limbs (little-endian)."""
@@ -32,13 +38,13 @@ fn _bytes_to_limbs32(b: [u8], count: u64) -> [u32]:
         val idx = i * 4
         var val_u32: u32 = 0
         if idx < b.len():
-            val_u32 = val_u32 | b[idx].to_u32()
+            val_u32 = val_u32 | _sc_u8_at(b, idx).to_u32()
         if (idx + 1) < b.len():
-            val_u32 = val_u32 | (b[idx + 1].to_u32() << 8)
+            val_u32 = val_u32 | (_sc_u8_at(b, idx + 1).to_u32() << 8)
         if (idx + 2) < b.len():
-            val_u32 = val_u32 | (b[idx + 2].to_u32() << 16)
+            val_u32 = val_u32 | (_sc_u8_at(b, idx + 2).to_u32() << 16)
         if (idx + 3) < b.len():
-            val_u32 = val_u32 | (b[idx + 3].to_u32() << 24)
+            val_u32 = val_u32 | (_sc_u8_at(b, idx + 3).to_u32() << 24)
         limbs.push(val_u32)
         i = i + 1
     limbs
@@ -82,101 +88,63 @@ fn _sc_sub_L(a: [u32]) -> [u32]:
     result.push(borrow.to_u32())
     result
 
+fn _sc_get_bit_bytes(s: [u8], bit_idx: u64) -> u64:
+    val byte_idx = bit_idx / 8
+    if byte_idx >= s.len():
+        return 0
+    val bit_in_byte = bit_idx - byte_idx * 8
+    (_sc_u8_at(s, byte_idx).to_u64() >> bit_in_byte) & 1
+
+fn _sc_shift_left1_add_bit(a: [u32], bit: u64) -> [u32]:
+    var result: [u32] = []
+    var carry = bit
+    var i: u64 = 0
+    while i < 8:
+        val v = a[i].to_u64() * 2 + carry
+        result.push((v & 0xFFFFFFFF).to_u32())
+        carry = v >> 32
+        i = i + 1
+    result
+
+fn _sc_ge_L(a: [u32]) -> bool:
+    val l = _sc_L()
+    var i: i64 = 7
+    while i >= 0:
+        val idx = i as u64
+        val ai = a[idx].to_u64()
+        val li = l[idx].to_u64()
+        if ai > li:
+            return true
+        if ai < li:
+            return false
+        i = i - 1
+    true
+
+fn _sc_sub_L8(a: [u32]) -> [u32]:
+    val sub = _sc_sub_L(a)
+    var result: [u32] = []
+    var i: u64 = 0
+    while i < 8:
+        result.push(sub[i])
+        i = i + 1
+    result
+
 fn sc_reduce(s: [u8]) -> [u8]:
     """Reduce a 64-byte scalar modulo L to 32 bytes.
 
     Input: 64 bytes (512 bits), output: 32 bytes (< L).
     Uses schoolbook reduction by repeatedly subtracting L * 2^k.
     """
-    # Load 64 bytes into 16 u32 limbs
-    var limbs = _bytes_to_limbs32(s, 16)
-
-    # Barrett-like reduction: we reduce from the top down.
-    # L ~ 2^252, so we need to reduce the upper portion.
-    #
-    # Simple approach: interpret as a big number, then do schoolbook
-    # modular reduction. We'll use the fact that for any value v < 2^512,
-    # we can reduce mod L by repeated subtraction.
-    #
-    # More efficient: split into low 252 bits and high bits, multiply high
-    # part by appropriate constant, and reduce.
-    #
-    # For simplicity, we use the classic Barrett reduction approach:
-    # q = floor(x / L), r = x - q * L
-    #
-    # We implement a simpler iterative approach since this is not
-    # performance-critical (called once per sign/verify).
-
-    # Convert to a wide representation and reduce step by step.
-    # Process from the top: for each bit from 511 down to 252,
-    # if the bit is set, subtract L shifted to that position.
-
-    # We'll work with 16 u32 limbs (512 bits)
-    var bit: u64 = 511
-    val l = _sc_L()
-
-    while bit >= 252:
-        # Check if bit is set
-        val limb_idx = bit / 32
-        val bit_idx = bit % 32
-        val is_set = (limbs[limb_idx].to_u64() >> bit_idx) & 1
-
-        if is_set == 1:
-            # Subtract L << (bit - 252) from limbs
-            val shift = bit - 252
-            val word_shift = shift / 32
-            val bit_shift = shift % 32
-
-            var borrow: u64 = 0
-            var j: u64 = 0
-            while j < 9:
-                val target = j + word_shift
-                if target < 16:
-                    # Get the shifted L limb value
-                    var l_val: u64 = 0
-                    if j < 8:
-                        l_val = l[j].to_u64() << bit_shift
-                    # Add carry from previous limb shift
-                    if bit_shift > 0:
-                        if j > 0:
-                            if (j - 1) < 8:
-                                l_val = l_val | (l[j - 1].to_u64() >> (32 - bit_shift))
-                    val cur: u64 = limbs[target].to_u64()
-                    val sub_val = (l_val & 0xFFFFFFFF) + borrow
-                    if cur >= sub_val:
-                        limbs[target] = (cur - sub_val).to_u32()
-                        borrow = 0
-                    else:
-                        limbs[target] = ((cur + 0x100000000) - sub_val).to_u32()
-                        borrow = 1
-                j = j + 1
-
-        if bit == 252:
-            # Prevent underflow when decrementing at 252
-            break
-        bit = bit - 1
-
-    # Now limbs[0..7] holds a value < 2*L (approximately).
-    # Do a final conditional subtraction.
-    var low8: [u32] = []
-    var k: u64 = 0
-    while k < 8:
-        low8.push(limbs[k])
-        k = k + 1
-
-    val sub_result = _sc_sub_L(low8)
-    # If borrow (limb[8]) is 0, the subtraction was valid (a >= L), use the result
-    # If borrow is 1, a < L, keep the original
-    if sub_result[8] == 0:
-        # a >= L, use subtracted result
-        var final_limbs: [u32] = []
-        k = 0
-        while k < 8:
-            final_limbs.push(sub_result[k])
-            k = k + 1
-        return _limbs32_to_bytes(final_limbs, 32)
-
-    _limbs32_to_bytes(low8, 32)
+    serial_println("[ed25519-sc] reduce start")
+    var rem: [u32] = [0,0,0,0,0,0,0,0]
+    var bit_idx: i64 = 511
+    while bit_idx >= 0:
+        rem = _sc_shift_left1_add_bit(rem, _sc_get_bit_bytes(s, bit_idx as u64))
+        if _sc_ge_L(rem):
+            rem = _sc_sub_L8(rem)
+        bit_idx = bit_idx - 1
+    serial_println("[ed25519-sc] reduce done")
+    _limbs32_to_bytes(rem, 32)
 
 fn sc_muladd(a_bytes: [u8], b_bytes: [u8], c_bytes: [u8]) -> [u8]:
     """Compute (a * b + c) mod L, where a, b, c are 32-byte scalars.
