@@ -1274,3 +1274,22 @@ Verification:
 - `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
   `15 passed, 0 failed`
 - Docker optimizer scan: renderer `754` remaining static opportunities.
+
+## 2026-06-11 Selector bucket base trim removal
+
+Selector bucket classification receives rightmost selector parts from the
+preprocessed selector group part list. Those parts are already trimmed, but
+`selector_bucket_base(...)` still trimmed the part again before checking pseudo,
+attribute, id, class, and tag bucket keys.
+
+The helper now starts from the pretrimmed part directly and keeps the existing
+trim on the substring before an attribute selector. Bucket behavior stays
+covered by the focused selector bucket and spaced selector specs.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `15 passed, 0 failed`
+- Docker optimizer scan: renderer `754` remaining static opportunities.

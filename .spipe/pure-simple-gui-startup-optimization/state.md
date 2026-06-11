@@ -804,3 +804,10 @@ dev-done
   `simple_web_layout_child_index_spec.spl` remains 15/15, including existing
   compound class and spaced selector oracles. Docker optimizer scan completed
   for the renderer with 754 remaining static opportunities.
+- impl: Removed the redundant initial trim from `selector_bucket_base(...)`.
+  Rightmost selector parts are already trimmed by selector preprocessing, so
+  bucket classification reuses that text directly while retaining the
+  attribute-prefix trim.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` remains 15/15. Docker optimizer scan
+  completed for the renderer with 754 remaining static opportunities.
