@@ -161,14 +161,42 @@ fn _capture_chrome_for_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) ->
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
+fn _simple_child_candidate_runnable(candidate: text) -> bool:
+    if candidate == "":
+        return false
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 2000)
+    exit_code == 0
+
+fn _simple_child_select_candidate(candidate: text) -> text:
+    if candidate == "":
+        return ""
+    if not rt_file_exists(candidate):
+        return ""
+    if _simple_child_candidate_runnable(candidate):
+        return candidate
+    ""
+
 fn _simple_child_binary() -> text:
-    val simple_bin = rt_env_get("SIMPLE_BIN") ?? ""
-    if simple_bin != "":
-        return simple_bin
     val simple_binary = rt_env_get("SIMPLE_BINARY") ?? ""
-    if simple_binary != "":
+    if _simple_child_candidate_runnable(simple_binary):
         return simple_binary
-    "bin/simple"
+    val simple_bin = rt_env_get("SIMPLE_BIN") ?? ""
+    if _simple_child_candidate_runnable(simple_bin):
+        return simple_bin
+
+    val local_bin = _simple_child_select_candidate("bin/simple")
+    if local_bin != "":
+        return local_bin
+    val local_release_arch = _simple_child_select_candidate("bin/release/x86_64-unknown-linux-gnu/simple")
+    if local_release_arch != "":
+        return local_release_arch
+    val local_release_linux = _simple_child_select_candidate("bin/release/linux-x86_64/simple")
+    if local_release_linux != "":
+        return local_release_linux
+    val local_compiler_release = _simple_child_select_candidate("src/compiler_rust/target/release/simple")
+    if local_compiler_release != "":
+        return local_compiler_release
+    ""
 
 fn _simple_watchdog_html_path(sample_id: text) -> text:
     "/tmp/simple_site_corpus_watchdog_{sample_id}.html"
@@ -181,6 +209,9 @@ fn _run_simple_child_watchdog(sample: SiteSample, opts: SiteCorpusCompatOpts) ->
     val ppm_path = _simple_watchdog_ppm_path(sample.id)
     if not file_write_text(html_path, sample.html):
         return "failed to write child input html: {html_path}"
+    val simple_bin = _simple_child_binary()
+    if simple_bin == "":
+        return "no runnable Simple binary found for source B child; set SIMPLE_BINARY to the active runtime"
     val args = [
         "run",
         "src/app/wm_compare/simple_html_capture_worker.spl",
@@ -189,7 +220,7 @@ fn _run_simple_child_watchdog(sample: SiteSample, opts: SiteCorpusCompatOpts) ->
         "--width=" + opts.width.to_string(),
         "--height=" + opts.height.to_string()
     ]
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(_simple_child_binary(), args, opts.simple_timeout_ms)
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, opts.simple_timeout_ms)
     if exit_code == -1:
         return "timed out after {opts.simple_timeout_ms} ms while rendering source B in child process"
     if exit_code != 0:

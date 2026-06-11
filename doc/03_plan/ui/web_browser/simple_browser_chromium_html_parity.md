@@ -216,3 +216,17 @@ Open gaps tied to the active browser objective:
     `24_flex_wrap_reverse_basic` after fixing closing-tag stack truncation:
     `scripts/check/check-electron-html-compat-geometry-evidence.shs` reports
     `layout_match`, `mismatch_count=0`
+- Source-B child runtime discovery now fails fast instead of timing out in
+  isolated worktrees:
+  - `src/app/wm_compare/html_compat_part1.spl` and
+    `src/app/wm_compare/site_corpus_compat.spl` validate configured/local
+    Simple child candidates with a bounded `--version` probe before launching
+    the render worker
+  - `SIMPLE_BINARY=/home/ormastes/dev/pub/simple/bin/simple ... html_compat.spl
+    --only=18_flex_grow_weights` still reports `RESULT: EXACT match`,
+    `different_pixels=0`, with no blur/tolerance/resolution workaround
+  - the same isolated worktree command without a runnable local child runtime
+    exits in under a second with `no runnable Simple binary found for source B
+    child; set SIMPLE_BINARY to the active runtime`
+  - `site_corpus_compat.spl --only=site_0_google` has the same fast-fail guard
+    for its bounded source-B watchdog path

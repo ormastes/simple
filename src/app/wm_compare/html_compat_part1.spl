@@ -488,20 +488,43 @@ fn _simple_capture_input_path(fixture_id: text) -> text:
 fn _simple_capture_output_path(fixture_id: text) -> text:
     "/tmp/simple_html_compat_{fixture_id}.ppm"
 
+fn _simple_capture_candidate_runnable(candidate: text) -> bool:
+    if candidate == "":
+        return false
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout(candidate, ["--version"], 2000)
+    exit_code == 0
+
+fn _simple_capture_select_candidate(candidate: text) -> text:
+    if candidate == "":
+        return ""
+    if not rt_file_exists(candidate):
+        return ""
+    if _simple_capture_candidate_runnable(candidate):
+        return candidate
+    ""
+
 fn _simple_capture_binary_path() -> text:
     val configured = rt_env_get("SIMPLE_BINARY") ?? ""
-    if configured != "":
+    if _simple_capture_candidate_runnable(configured):
         return configured
     val configured_bin = rt_env_get("SIMPLE_BIN") ?? ""
-    if configured_bin != "":
+    if _simple_capture_candidate_runnable(configured_bin):
         return configured_bin
-    val local_bin = rt_env_cwd() + "/bin/simple"
-    if rt_file_exists(local_bin):
+
+    val cwd = rt_env_cwd()
+    val local_bin = _simple_capture_select_candidate(cwd + "/bin/simple")
+    if local_bin != "":
         return local_bin
-    val local_release = rt_env_cwd() + "/src/compiler_rust/target/release/simple"
-    if rt_file_exists(local_release):
-        return local_release
-    "simple"
+    val local_release_arch = _simple_capture_select_candidate(cwd + "/bin/release/x86_64-unknown-linux-gnu/simple")
+    if local_release_arch != "":
+        return local_release_arch
+    val local_release_linux = _simple_capture_select_candidate(cwd + "/bin/release/linux-x86_64/simple")
+    if local_release_linux != "":
+        return local_release_linux
+    val local_compiler_release = _simple_capture_select_candidate(cwd + "/src/compiler_rust/target/release/simple")
+    if local_compiler_release != "":
+        return local_compiler_release
+    ""
 
 fn capture_simple(fixture_id: text, html: text, width: i32, height: i32, timeout_ms: i64) -> CaptureResult:
     """Capture HTML via the Simple browser engine in a bounded child process."""
@@ -513,6 +536,10 @@ fn capture_simple(fixture_id: text, html: text, width: i32, height: i32, timeout
             "failed to write child input html: {html_path}")
 
     val simple_bin = _simple_capture_binary_path()
+    if simple_bin == "":
+        return capture_error(
+            "simple_browser_engine", width, height,
+            "no runnable Simple binary found for source B child; set SIMPLE_BINARY to the active runtime")
     val worker_path = "src/app/wm_compare/simple_html_capture_worker.spl"
     val args = [
         "run", worker_path,

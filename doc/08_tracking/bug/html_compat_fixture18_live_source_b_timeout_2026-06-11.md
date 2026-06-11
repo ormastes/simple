@@ -22,6 +22,20 @@ selection in isolated worktrees, not to the fixture layout algorithm itself:
   may exist without their architecture-specific native payload, and `_` is only
   `/usr/bin/env`, not the parent Simple binary.
 
+Follow-up fix on 2026-06-11 made child runtime selection fail fast instead of
+falling through to a stale or missing runtime:
+
+- `html_compat_part1.spl` and `site_corpus_compat.spl` now accept only
+  configured/local Simple child candidates that pass a bounded `--version`
+  probe.
+- With `SIMPLE_BINARY` set to the active runtime,
+  `18_flex_grow_weights` still reports `RESULT: EXACT match` in about `2.7s`.
+- In an isolated worktree with no runnable local Simple payload, the same
+  command exits quickly with `no runnable Simple binary found for source B
+  child; set SIMPLE_BINARY to the active runtime` instead of timing out.
+- This does not change the renderer output and does not use blur, tolerance, or
+  copied Chromium pixels.
+
 ## Reproduction
 
 ```sh
@@ -36,7 +50,7 @@ Observed result on Linux:
 [html_compat]   loading source A (checked-in Chromium golden)...
 [html_compat]     ok  pixels=76800
 [html_compat]   capturing source B (Simple browser engine)...
-[html_compat]     fail: timed out after 20000 ms while rendering source B in child process
+[html_compat]     fail: no runnable Simple binary found for source B child; set SIMPLE_BINARY to the active runtime
 [html_compat]   RESULT: simple capture failed
 ```
 
@@ -75,7 +89,11 @@ Likely areas to inspect:
 
 ## Acceptance Criteria
 
-- The reproduction command exits `0` without increasing blur/tolerance.
+- With `SIMPLE_BINARY` set to the active runtime, the reproduction command exits
+  `0` without increasing blur/tolerance.
+- Without a runnable local child runtime, the reproduction command fails quickly
+  with a clear missing-runtime message instead of using `simple` from PATH or
+  waiting for the render timeout.
 - `test/09_baselines/html_compat/18_flex_grow_weights/report.sdn` records
   `simple: (capture success: true ...)`.
 - The compare row remains exact: `exact: true`, `different_pixels: 0`,
