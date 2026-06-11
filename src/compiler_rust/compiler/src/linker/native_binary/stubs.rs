@@ -393,12 +393,14 @@ _start:
             &stub_c,
             r#"
 extern int spl_main(void);
+extern void __attribute__((weak)) __module_init(void);
 __attribute__((weak)) void rt_set_args(int argc, char** argv) {
     (void)argc;
     (void)argv;
 }
 int main(int argc, char** argv) {
     rt_set_args(argc, argv);
+    if (__module_init) __module_init();
     return spl_main();
 }
 "#,

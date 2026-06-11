@@ -1,6 +1,6 @@
-# Cooperative Green Compiled Handle-Array Blocker
+# Cooperative Green Compiled Handle-Array Regression
 
-> This SSpec keeps the remaining compiled cooperative-green function-spawn crash explicit. A minimal workload that stores multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` runs in the interpreter and in SMF, but the standalone native artifact still crashes.
+> This SSpec keeps the compiled cooperative-green function-spawn path fixed. A minimal workload that stores multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` must run in the interpreter, in SMF, and in the standalone native artifact.
 
 <!-- sdn-diagram:id=cooperative_green_compiled_handle_array_blocker_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ cooperative_green_compiled_handle_array_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Cooperative Green Compiled Handle-Array Blocker
+# Cooperative Green Compiled Handle-Array Regression
 
-This SSpec keeps the remaining compiled cooperative-green function-spawn crash explicit. A minimal workload that stores multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` runs in the interpreter and in SMF, but the standalone native artifact still crashes.
+This SSpec keeps the compiled cooperative-green function-spawn path fixed. A minimal workload that stores multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` must run in the interpreter, in SMF, and in the standalone native artifact.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec keeps the remaining compiled cooperative-green function-spawn crash e
 |-------|-------|
 | Feature IDs | #green-cooperative-compiled-handle-array |
 | Category | Runtime / Native / SMF / Concurrency |
-| Status | Known Blocker |
+| Status | Implemented |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Research | doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md |
@@ -52,10 +52,10 @@ This SSpec keeps the remaining compiled cooperative-green function-spawn crash e
 
 ## Overview
 
-This SSpec keeps the remaining compiled cooperative-green function-spawn crash
-explicit. A minimal workload that stores multiple `GreenThreadHandle` values
-returned from `cooperative_green_spawn(worker)` runs in the interpreter and in
-SMF, but the standalone native artifact still crashes.
+This SSpec keeps the compiled cooperative-green function-spawn path fixed. A
+minimal workload that stores multiple `GreenThreadHandle` values returned from
+`cooperative_green_spawn(worker)` must run in the interpreter, in SMF, and in
+the standalone native artifact.
 
 ## Requirements
 
@@ -77,9 +77,9 @@ SMF, but the standalone native artifact still crashes.
 
 ## Scenarios
 
-### cooperative green compiled handle-array blocker
+### cooperative green compiled handle-array regression
 
-#### keeps the compiled cooperative_green_spawn handle-array crash explicit
+#### keeps compiled cooperative_green_spawn handle arrays working across interpreter, SMF, and native
 
 - Write the minimal compiled cooperative-green handle-array fixture
    - Expected: mkdir_code equals `0`
@@ -92,7 +92,8 @@ SMF, but the standalone native artifact still crashes.
    - Expected: interp_code equals `0`
 - Keep the fixed SMF path green
    - Expected: smf_code equals `0`
-- Keep the remaining native crash explicit
+- Keep the standalone native path green
+   - Expected: native_code equals `0`
 
 
 <details>
@@ -128,10 +129,10 @@ val (smf_out, smf_code) = shell("timeout 20s " + SIMPLE_BIN + " " + SMF_PATH)
 expect(smf_out).to_contain("cooperative_green_handle_array_pass=true")
 expect(smf_code).to_equal(0)
 
-step("Keep the remaining native crash explicit")
+step("Keep the standalone native path green")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
-expect(native_out.contains("cooperative_green_handle_array_pass=true")).to_be(false)
-expect(native_code).to_be_greater_than(0)
+expect(native_out).to_contain("cooperative_green_handle_array_pass=true")
+expect(native_code).to_equal(0)
 ```
 
 </details>

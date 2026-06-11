@@ -302,13 +302,17 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             for arg in args {
                 analyze_expr(&arg.value, reasons);
             }
-            add_reason(reasons, FallbackReason::MethodCall);
+            if !matches!(receiver.as_ref(), Expr::Identifier(name) if name == "self") {
+                add_reason(reasons, FallbackReason::MethodCall);
+            }
         }
 
         // Field access needs runtime support for dynamic objects
         Expr::FieldAccess { receiver, .. } => {
             analyze_expr(receiver, reasons);
-            add_reason(reasons, FallbackReason::FieldAccess);
+            if !matches!(receiver.as_ref(), Expr::Identifier(name) if name == "self") {
+                add_reason(reasons, FallbackReason::FieldAccess);
+            }
         }
 
         // Index access needs collection runtime
@@ -908,6 +912,35 @@ fn cooperative_green_spawn_value(result: i64) -> i64:
             status.is_compilable(),
             "cooperative wrapper should compile natively, got {:?}",
             status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_self_field_and_method_helpers_compilable() {
+        let results = parse_and_analyze(
+            r#"class Counter:
+    value: i64
+
+    fn is_ready() -> bool:
+        self.value > 0
+
+    fn read() -> i64:
+        if self.is_ready():
+            return self.value
+        0
+"#,
+        );
+        let is_ready = results.get("is_ready").unwrap();
+        assert!(
+            is_ready.is_compilable(),
+            "self field helper should compile natively, got {:?}",
+            is_ready.reasons()
+        );
+        let read = results.get("read").unwrap();
+        assert!(
+            read.is_compilable(),
+            "self method helper should compile natively, got {:?}",
+            read.reasons()
         );
     }
 

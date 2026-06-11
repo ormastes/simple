@@ -33,9 +33,8 @@ Date: 2026-06-06
 - Preserve public API names and semantics:
   `thread_spawn` is the explicit OS-thread API, `cooperative_green_spawn` is
   the primary current-carrier cooperative queue surface,
-  `cooperative_green_spawn_value` remains the precomputed-result helper and the
-  current standalone-native profile-row workaround for the handle-array
-  blocker, and
+  `cooperative_green_spawn_value` remains the precomputed-result helper for
+  callers that already have a value, and
   `multicore_green_spawn` is the current Pure Simple bounded-worker M:N
   candidate over `rt_pool_*`.
 - Do not use numbered API names to distinguish behavior.

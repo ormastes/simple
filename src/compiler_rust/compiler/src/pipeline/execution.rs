@@ -898,6 +898,16 @@ impl CompilerPipeline {
         // sources using `text?`, missing `panic`, etc. can still self-host.
         let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
 
+        // Standalone native binaries need the same hybrid boundary as SMF/native-memory
+        // compilation so imported stdlib helpers can keep using interpreter fallback
+        // where the direct AOT surface is still incomplete.
+        let compilability = analyze_module(&ast_module.items);
+        let non_compilable: HashSet<String> = compilability
+            .iter()
+            .filter(|(_, status)| !status.is_compilable())
+            .map(|(name, _)| name.clone())
+            .collect();
+
         // Run lint + validation only when not in bootstrap to keep output clean.
         if !bootstrap_mode {
             self.run_lint_checks(&ast_module.items, None)?;
@@ -908,7 +918,7 @@ impl CompilerPipeline {
 
         // Produce MIR.
         let native_project_hint = source_path.and_then(native_single_file_project_hint);
-        let mir_module = if bootstrap_mode {
+        let mut mir_module = if bootstrap_mode {
             // Lenient lowering path (mirrors native_project bootstrap flow)
             use crate::hir::Lowerer;
             let dummy_path = source_path.unwrap_or_else(|| Path::new("bootstrap.spl"));
@@ -945,6 +955,14 @@ impl CompilerPipeline {
                     ctx,
                 ));
             }
+        }
+
+        if !non_compilable.is_empty() {
+            mir::apply_hybrid_transform(&mut mir_module, &non_compilable);
+            tracing::debug!(
+                "Hybrid execution (standalone native): {} functions require interpreter fallback",
+                non_compilable.len()
+            );
         }
 
         // Generate object code

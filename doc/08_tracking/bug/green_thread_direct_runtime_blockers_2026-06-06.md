@@ -75,21 +75,27 @@ Function-valued globals and global function-valued arrays are also covered by
 direct `simple run` checks in that script. SMF function-valued
 global/global-array storage now has matching regression coverage.
 
-2026-06-11 follow-up: a different compiled cooperative-green boundary is still
-open. A minimal workload that stores multiple `GreenThreadHandle` values
-returned from `cooperative_green_spawn(worker)` runs in the interpreter and in
-SMF, but the standalone native executable still segfaults (`exit=139`).
-Focused blocker coverage now lives in
-`test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl`.
+2026-06-11 follow-up: the standalone native cooperative-green crashes are now
+closed. The remaining compiled cooperative lane is no longer blocked on direct
+`cooperative_green_spawn(worker)` or imported
+`cooperative_green_spawn_value(...)` execution:
 
-2026-06-11 root-cause narrowing: the compiled cooperative lane is not only a
-"handle array" issue. A smaller value-only repro that imports
-`cooperative_green_spawn_value(...)` also fails after standalone native AOT
-compilation. The SMF side is now fixed, which proves the stale compilability
-classification was one real cause on the SMF lane. The remaining standalone
-native executable still crashes with `exit=139`, so the open boundary is now
-native-only. The focused blocker coverage lives in
-`test/03_system/feature/usage/cooperative_green_imported_fallback_blocker_spec.spl`.
+- the standalone native compile path now applies the same hybrid transform used
+  by the SMF/native-memory path, so imported stdlib helpers keep the same
+  fallback boundary instead of forcing direct AOT codegen;
+- self-receiver field/method helper bodies now classify as compilable, which
+  keeps `GreenThreadHandle.is_done()` and `GreenThreadHandle.join()` on the
+  native path instead of falling back through the standalone native
+  `rt_interp_call()` nil stub;
+- the one-object standalone native main shim now calls `__module_init()` before
+  `spl_main()`, which closes the mutable-global scheduler crash in
+  `green_spawn_value()` even though the emitted ELF `.init_array` remained empty
+  for this path.
+
+Focused regression coverage still lives in:
+
+- `test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl`
+- `test/03_system/feature/usage/cooperative_green_imported_fallback_blocker_spec.spl`
 
 The cross-language harness now reports Simple OS-thread and Simple cooperative
 green rows separately. A 20-worker OS-thread fanout smoke compiles and runs
@@ -119,14 +125,12 @@ which keeps both minimal SMF fixtures compiling and requires their pass markers
 after the SMF `__module_init` execution fix.
 Compiled cooperative-green handle-array blocker evidence is now covered by
 `test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl`,
-which keeps the remaining standalone native
-`cooperative_green_spawn(worker)` crash explicit while the profile lane stays on
-`cooperative_green_spawn_value`.
+which now acts as regression coverage for interpreter, SMF, and standalone
+native `cooperative_green_spawn(worker)` execution.
 Imported cooperative helper fallback blocker evidence is now covered by
 `test/03_system/feature/usage/cooperative_green_imported_fallback_blocker_spec.spl`,
-which keeps the narrower standalone native
-`cooperative_green_spawn_value(...)` crash explicit now that the SMF import/
-fallback miss is fixed.
+which now acts as regression coverage for interpreter, SMF, and standalone
+native `cooperative_green_spawn_value(...)` execution.
 Cooperative-green queue rows are still not M:N CPU-parallel evidence; keep them
 classified separately from native and SMF `multicore_green_spawn` evidence.
 
@@ -155,9 +159,7 @@ The focused regression spec above keeps that fixed path executable.
 Switch or add a perf harness green row for delayed `green_spawn(fn)` closure
 execution timing. Keep
 `test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
-passing so the fixed callback, SMF import/classification path, and direct-run
-function-global paths do not regress. Then close the remaining standalone
-native imported cooperative helper crash and the standalone native compiled
-`GreenThreadHandle` array crash before the profile harness switches its
-compiled cooperative-green rows from
-`cooperative_green_spawn_value` to `cooperative_green_spawn`.
+passing so the fixed callback, SMF import/classification path, standalone
+native cooperative-green init path, and direct-run function-global paths do not
+regress. The profile harness can now keep its compiled cooperative-green rows
+on `cooperative_green_spawn`.

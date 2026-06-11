@@ -1,6 +1,6 @@
-# Cooperative Green Imported Fallback Native Blocker
+# Cooperative Green Imported Fallback Native Regression
 
-> This SSpec pins the remaining standalone-native blocker behind the cooperative- green AOT crashes. A minimal value-only workload that calls `cooperative_green_spawn_value(...)` from an imported stdlib module now runs in the interpreter and in SMF, but the standalone native artifact still crashes.
+> This SSpec keeps the imported cooperative-green value helper fixed across the interpreter, SMF, and standalone native paths. A minimal value-only workload that calls `cooperative_green_spawn_value(...)` from an imported stdlib module must compile and run successfully on all three paths.
 
 <!-- sdn-diagram:id=cooperative_green_imported_fallback_blocker_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ cooperative_green_imported_fallback_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Cooperative Green Imported Fallback Native Blocker
+# Cooperative Green Imported Fallback Native Regression
 
-This SSpec pins the remaining standalone-native blocker behind the cooperative- green AOT crashes. A minimal value-only workload that calls `cooperative_green_spawn_value(...)` from an imported stdlib module now runs in the interpreter and in SMF, but the standalone native artifact still crashes.
+This SSpec keeps the imported cooperative-green value helper fixed across the interpreter, SMF, and standalone native paths. A minimal value-only workload that calls `cooperative_green_spawn_value(...)` from an imported stdlib module must compile and run successfully on all three paths.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the remaining standalone-native blocker behind the cooperative- 
 |-------|-------|
 | Feature IDs | #green-cooperative-imported-fallback-native |
 | Category | Runtime / Native / Interpreter Fallback |
-| Status | Known Blocker |
+| Status | Implemented |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Research | doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md |
@@ -52,10 +52,10 @@ This SSpec pins the remaining standalone-native blocker behind the cooperative- 
 
 ## Overview
 
-This SSpec pins the remaining standalone-native blocker behind the cooperative-
-green AOT crashes. A minimal value-only workload that calls
-`cooperative_green_spawn_value(...)` from an imported stdlib module now runs in
-the interpreter and in SMF, but the standalone native artifact still crashes.
+This SSpec keeps the imported cooperative-green value helper fixed across the
+interpreter, SMF, and standalone native paths. A minimal value-only workload
+that calls `cooperative_green_spawn_value(...)` from an imported stdlib module
+must compile and run successfully on all three paths.
 
 ## Requirements
 
@@ -77,9 +77,9 @@ the interpreter and in SMF, but the standalone native artifact still crashes.
 
 ## Scenarios
 
-### cooperative green imported fallback native blocker
+### cooperative green imported fallback native regression
 
-#### keeps the remaining native cooperative_green_spawn_value crash explicit
+#### keeps imported cooperative_green_spawn_value working across interpreter, SMF, and native
 
 - Write the minimal imported cooperative-green value-only fixture
    - Expected: mkdir_code equals `0`
@@ -92,7 +92,8 @@ the interpreter and in SMF, but the standalone native artifact still crashes.
    - Expected: interp_code equals `0`
 - Keep the fixed imported-function SMF path green
    - Expected: smf_code equals `0`
-- Keep the remaining native crash explicit
+- Keep the standalone native path green
+   - Expected: native_code equals `0`
 
 
 <details>
@@ -128,10 +129,10 @@ val (smf_out, smf_code) = shell("timeout 20s " + SIMPLE_BIN + " " + SMF_PATH)
 expect(smf_out).to_contain("cooperative_green_spawn_value_literal_pass=true")
 expect(smf_code).to_equal(0)
 
-step("Keep the remaining native crash explicit")
+step("Keep the standalone native path green")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
-expect(native_out.contains("cooperative_green_spawn_value_literal_pass=true")).to_be(false)
-expect(native_code).to_be_greater_than(0)
+expect(native_out).to_contain("cooperative_green_spawn_value_literal_pass=true")
+expect(native_code).to_equal(0)
 ```
 
 </details>
