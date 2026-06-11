@@ -33,6 +33,7 @@ use std.io.crypto_sffi.{hmac_sha256, random_hex}
 use std.security.types.{SecurityEvent, AuditEntry, AuditConfig}
 use std.security.audit_log.{log_security_event}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.common.crypto.constant_time.{constant_time_compare}
 
 fn _http_time_now_ms() -> i64:
     current_time_ms()
@@ -75,6 +76,10 @@ fn generate_csrf_token(config: CsrfConfig, session_id: text) -> text:
     Returns:
         Hex-encoded CSRF token
     """
+    # Fail closed: never mint a token under an empty secret_key. An empty HMAC
+    # key is publicly known, so the token would be forgeable by any client.
+    if config.secret_key == "":
+        return ""
     val timestamp = _http_time_now_ms()
     val payload = "{session_id}|{timestamp}"
     hmac_sha256(config.secret_key, payload)
@@ -95,6 +100,9 @@ fn generate_csrf_token_with_timestamp(config: CsrfConfig,
     Returns:
         Hex-encoded CSRF token
     """
+    # Fail closed: never mint a token under an empty secret_key.
+    if config.secret_key == "":
+        return ""
     val payload = "{session_id}|{timestamp}"
     hmac_sha256(config.secret_key, payload)
 
@@ -128,6 +136,13 @@ fn csrf_handler(request: HttpRequestData,
     for path in config.exempt_paths:
         if request.path == path:
             return PhaseResult.Continue
+
+    # Fail closed: a missing secret_key means issued tokens are forgeable, so
+    # CSRF protection is not actually in force. Deny state-changing requests
+    # rather than appear protected while accepting attacker-minted tokens.
+    if config.secret_key == "":
+        log_csrf_violation(request, "CSRF secret_key not configured")
+        return PhaseResult.Error(403, "CSRF validation failed")
 
     # Extract token from header
     val header_token = get_header_value(request.headers, config.token_header)
@@ -187,24 +202,10 @@ fn get_cookie_value(headers: [(text, text)], cookie_name: text) -> text:
 fn constant_time_eq(a: text, b: text) -> bool:
     """Compare two strings in constant time to prevent timing attacks.
 
-    Always iterates over max(len(a), len(b)) characters regardless of
-    where a mismatch occurs. Returns true only if lengths and all bytes
-    are identical.
+    Thin wrapper over the canonical std.common.crypto.constant_time_compare
+    so the timing-safe implementation lives in exactly one place.
     """
-    val len_a = a.len()
-    val len_b = b.len()
-    # Length comparison leaks length difference — that is acceptable for
-    # CSRF tokens because an attacker already knows the expected token length.
-    if len_a != len_b:
-        return false
-    var diff = 0
-    var i = 0
-    while i < len_a:
-        val ca = a.byte_at(i)
-        val cb = b.byte_at(i)
-        diff = diff or (ca xor cb)
-        i = i + 1
-    diff == 0
+    constant_time_compare(a, b)
 
 # ============================================================================
 # Audit Logging
