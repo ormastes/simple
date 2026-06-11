@@ -38,6 +38,59 @@ struct FamilyImportViolation:
     reason: text
     message: text
 
+struct GcAliasManifestEntry:
+    """Maps a top-level or std-level shim module path prefix to its effective
+    runtime family for GC boundary classification.
+
+    Derived from src/lib shim files that re-export from gc_* families via
+    `use gc_*.*` or `export use gc_*.*`. This table MUST be kept in sync
+    whenever a new std-level or top-level shim is added that re-exports from
+    a gc_* family tree.
+
+    Key: The module path prefix as it appears in import statements (after
+         stripping `std.` / `lib.` prefixes), e.g. "gpu", "nogc_async_mut.gpu".
+    Value: The effective runtime family name used for boundary classification,
+           e.g. "gc_async_mut".
+
+    Known shim sources (as of this writing):
+      src/lib/nogc_async_mut/gpu/__init__.spl  → uses gc_async_mut.gpu.*
+        Exposed as `std.gpu` (via nogc_async_mut/gpu path) and
+                   `lib.nogc_async_mut.gpu` — both are gc-backed.
+    """
+    alias_path: text
+    effective_family: text
+
+# Alias manifest: module path prefixes that resolve to a gc_* effective family.
+# Derived from src/lib shim files; keep in sync when new gc_*-backed shims are added.
+val GC_ALIAS_MANIFEST: [GcAliasManifestEntry] = [
+    # src/lib/nogc_async_mut/gpu/__init__.spl does `use gc_async_mut.gpu.*`
+    # Exposed as `std.gpu` (nogc_async_mut/gpu path) — gc-backed despite prefix
+    GcAliasManifestEntry(alias_path: "gpu", effective_family: "gc_async_mut"),
+    # Same file exposed under its canonical nogc_async_mut.gpu path
+    GcAliasManifestEntry(alias_path: "nogc_async_mut.gpu", effective_family: "gc_async_mut")
+]
+
+fn resolve_gc_alias(module_path: text) -> text:
+    """Resolve a module path through the GC alias manifest.
+
+    If the module path (after stripping std./lib. prefix) matches a known
+    gc_*-backed shim alias, returns a synthetic path with the effective family
+    prepended so that runtime_family_manifest_entry classifies it correctly.
+
+    Returns the original module_path unchanged if no alias matches.
+    """
+    var path = module_path
+    if path.starts_with("std."):
+        path = path[4:path.len()]
+    elif path.starts_with("lib."):
+        path = path[4:path.len()]
+
+    for entry in GC_ALIAS_MANIFEST:
+        if path == entry.alias_path or path.starts_with("{entry.alias_path}."):
+            # Return synthetic path with effective family so classification works
+            return "{entry.effective_family}.alias.{path}"
+    module_path
+
 val RUNTIME_FAMILY_MANIFEST: [RuntimeFamilyManifestEntry] = [
     RuntimeFamilyManifestEntry(family: "common", gc_mode: "neutral", rank: 0, allocates: false, noalloc: false),
     RuntimeFamilyManifestEntry(family: "nogc_async_mut_noalloc", gc_mode: "nogc", rank: 1, allocates: false, noalloc: true),
@@ -100,9 +153,14 @@ fn is_known_runtime_family_path(module_path: text) -> bool:
     runtime_family_rank(module_path) >= 0
 
 fn import_violation_reason(source_module: text, imported_module: text) -> text:
-    """Return a hard violation reason for a runtime-family import, or empty text."""
+    """Return a hard violation reason for a runtime-family import, or empty text.
+
+    Resolves gc_*-backed alias shims (e.g. std.gpu → gc_async_mut) before
+    family classification so that alias imports produce the same violation
+    reasons as direct gc_* imports.
+    """
     val source = runtime_family_manifest_entry(source_module)
-    val imported = runtime_family_manifest_entry(imported_module)
+    val imported = runtime_family_manifest_entry(resolve_gc_alias(imported_module))
     if source.rank < 0 or imported.rank < 0:
         return ""
     if imported.gc_mode == "neutral":
@@ -234,6 +292,8 @@ fn format_family_warnings(warnings: [FamilyImportWarning]) -> [text]:
     messages
 
 export FamilyImportWarning, RuntimeFamilyManifestEntry, FamilyImportViolation
-export RUNTIME_FAMILY_MANIFEST
+export GcAliasManifestEntry
+export RUNTIME_FAMILY_MANIFEST, GC_ALIAS_MANIFEST
 export runtime_family_manifest_entry, runtime_family_rank
+export resolve_gc_alias
 export check_gc_boundary_imports, format_family_warnings

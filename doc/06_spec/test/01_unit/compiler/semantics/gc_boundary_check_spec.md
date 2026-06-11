@@ -28,7 +28,7 @@ gc_boundary_check_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -216,6 +216,88 @@ expect(violations[0].reason).to_equal("higher_layer_runtime_family")
 
 </details>
 
+#### warns when nogc module imports std.gpu alias (gc-backed shim)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# std.gpu is exposed via nogc_async_mut/gpu/__init__.spl which does
+# `use gc_async_mut.gpu.*` — the alias resolver must detect this.
+val warnings = check_gc_boundary_imports(
+    "std.nogc_sync_mut.fs",
+    ["std.gpu"]
+)
+expect(warnings.len()).to_equal(1)
+expect(warnings[0].message).to_contain("no-gc module")
+expect(warnings[0].message).to_contain("imports GC family")
+```
+
+</details>
+
+#### warns when nogc module imports std.nogc_async_mut.gpu (gc-backed shim)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# std.nogc_async_mut.gpu/__init__.spl re-exports gc_async_mut.gpu.*;
+# the alias resolver classifies it as gc family despite the nogc_ prefix.
+val warnings = check_gc_boundary_imports(
+    "std.nogc_sync_mut.fs",
+    ["std.nogc_async_mut.gpu"]
+)
+expect(warnings.len()).to_equal(1)
+expect(warnings[0].message).to_contain("no-gc module")
+expect(warnings[0].message).to_contain("imports GC family")
+```
+
+</details>
+
+#### does not warn when gc module imports std.gpu alias
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# A gc_async_mut module importing std.gpu (also gc-backed) is not a boundary
+# crossing — both sides resolve to the gc family.
+val warnings = check_gc_boundary_imports(
+    "std.gc_async_mut.task",
+    ["std.gpu"]
+)
+expect(warnings.len()).to_equal(0)
+```
+
+</details>
+
+#### resolve_gc_alias rewrites gpu alias to effective gc family path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val resolved = resolve_gc_alias("std.gpu")
+expect(resolved).to_contain("gc_async_mut")
+
+val resolved2 = resolve_gc_alias("std.nogc_async_mut.gpu")
+expect(resolved2).to_contain("gc_async_mut")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -235,8 +317,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
