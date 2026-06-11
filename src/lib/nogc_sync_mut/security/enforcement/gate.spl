@@ -71,13 +71,32 @@ class CapabilityGate:
             Ok(_):
                 Ok(())
 
+# Validate all capability strings in a SecurityContext against parse_capability.
+#
+# Returns Err if ANY entry is malformed or unrecognised. Fail-closed: a context
+# containing a forged or invalid capability string is rejected entirely rather
+# than silently granting or skipping the bad entry.
+fn _validate_context_capabilities(ctx: SecurityContext) -> Result<(), text>:
+    var i = 0
+    while i < ctx.capabilities.len():
+        val cap_str = ctx.capabilities[i]
+        i = i + 1
+        val parsed = parse_capability(cap_str)
+        if parsed.is_err():
+            return Err("malformed capability in context: '{cap_str}'")
+    Ok(())
+
 # Convenience: check capability by SecurityContext and text-format capability string.
 #
 # Uses the context's capabilities list (text-based) to check the given string.
 # Does NOT use the CapabilityStore — for simple annotation-driven checks.
+# Fail-closed: returns false if any capability string in the context is malformed.
 fn check_capability(ctx: SecurityContext, capability_str: text) -> bool:
     """
     Check capability from SecurityContext's text-based capabilities list.
+
+    Validates all capability strings in the context via parse_capability before
+    performing the check. Returns false (deny) if any string is malformed.
 
     sdoctest:
         val ctx = SecurityContext(
@@ -92,12 +111,19 @@ fn check_capability(ctx: SecurityContext, capability_str: text) -> bool:
     """
     if not ctx.is_authenticated():
         return false
+    val validation = _validate_context_capabilities(ctx)
+    if validation.is_err():
+        return false
     ctx.has_capability(capability_str)
 
 # Convenience: enforce a text-format capability, returning Err on denial.
+# Fail-closed: returns Err if any capability string in the context is malformed.
 fn enforce_permission(ctx: SecurityContext, capability_str: text) -> Result<(), text>:
     """
     Enforce permission using SecurityContext's text-based capabilities list.
+
+    Validates all capability strings in the context via parse_capability before
+    performing the check. Returns Err (deny) if any string is malformed.
 
     sdoctest:
         val ctx = SecurityContext(
@@ -112,6 +138,9 @@ fn enforce_permission(ctx: SecurityContext, capability_str: text) -> Result<(), 
     """
     if not ctx.is_authenticated():
         return Err("authentication required")
+    val validation = _validate_context_capabilities(ctx)
+    if validation.is_err():
+        return Err(validation.unwrap_err())
     if ctx.has_capability(capability_str):
         Ok(())
     else:

@@ -15,6 +15,7 @@
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend}
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
+use std.gpu.engine2d.helpers_text.{text_metrics, text_aa_blit_buffer}
 use std.gpu.engine2d.simd_provider.{record_simd_fill_hit, record_simd_copy_hit, record_simd_alpha_hit}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
@@ -327,11 +328,10 @@ impl RenderBackend for SoftwareBackend:
         # Use glyph_data directly via sw_set_pixel — avoids passing self.buf
         # to any free function (which would silently drop writes due to the
         # self-pass-to-free-fn mutation-loss bug).
-        val gh = glyph_height()
-        var scale = font_size / gh
-        if scale < 1:
-            scale = 1
-        val advance = glyph_advance(scale)
+        val metrics = text_metrics(text_val, font_size)
+        val gh = metrics.glyph_height_px
+        val scale = metrics.scale
+        val advance = metrics.advance
         var i: i64 = 0
         var cursor_x = x
         while i < text_val.len():
@@ -495,18 +495,10 @@ impl Engine2DExtended for SoftwareBackend:
     # because both calls route through the `self.*` helpers that already
     # mark tiles dirty.
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        # Fill background rect first, then draw glyphs on top via sw_set_pixel.
-        val gh = glyph_height()
-        var scale = font_size / gh
-        if scale < 1:
-            scale = 1
-        val advance = glyph_advance(scale)
-        val text_w = text_val.len().to_i32() * advance
-        val text_h = gh * scale
-        if text_w <= 0 or text_h <= 0:
+        val text_buf = text_aa_blit_buffer(text_val, fg, bg, font_size)
+        if text_buf.is_empty():
             return
-        self.draw_rect_filled(x, y, text_w, text_h, bg)
-        self.draw_text(x, y, text_val, fg, font_size)
+        self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
 
     me draw_ellipse(cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
         emu_draw_ellipse(self, cx, cy, rx, ry, color)

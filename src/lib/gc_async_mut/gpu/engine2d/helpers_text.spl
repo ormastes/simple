@@ -17,6 +17,7 @@ Usage:
 """
 
 use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance}
+use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
 
 # ============================================================================
 # Text Blit Payload
@@ -31,6 +32,32 @@ class TextBlitBuffer:
     fn is_empty() -> bool:
         self.width <= 0 or self.height <= 0 or self.pixels.len() == 0
 
+class TextMetrics:
+    char_count: i32
+    glyph_height_px: i32
+    scale: i32
+    advance: i32
+    width: i32
+    height: i32
+
+fn text_metrics(text_val: text, font_size: i32) -> TextMetrics:
+    val gh = glyph_height()
+    var scale = font_size / gh
+    if scale < 1:
+        scale = 1
+    val advance = glyph_advance(scale)
+    val char_count = text_val.len().to_i32()
+    val width = if char_count > 0: char_count * advance else: 0
+    val height = gh * scale
+    TextMetrics(
+        char_count: char_count,
+        glyph_height_px: gh,
+        scale: scale,
+        advance: advance,
+        width: width,
+        height: height
+    )
+
 # ============================================================================
 # Text Buffer Dimensions
 # ============================================================================
@@ -41,31 +68,18 @@ fn text_buf_width(text_val: text, font_size: i32) -> i32:
     Uses the same scale/advance calculation as draw_text_bg across all
     backends. Returns 0 for empty strings.
     """
-    val char_count = text_val.len().to_i32()
-    if char_count <= 0:
+    val metrics = text_metrics(text_val, font_size)
+    if metrics.char_count <= 0:
         return 0
-    val gh = glyph_height()
-    var scale = font_size / gh
-    if scale < 1:
-        scale = 1
-    val advance = glyph_advance(scale)
-    char_count * advance
+    metrics.width
 
 fn text_buf_height(font_size: i32) -> i32:
     """Compute the pixel height of a rendered text string."""
-    val gh = glyph_height()
-    var scale = font_size / gh
-    if scale < 1:
-        scale = 1
-    gh * scale
+    text_metrics("", font_size).height
 
 fn text_scale(font_size: i32) -> i32:
     """Integer scale factor derived from font_size vs glyph_height."""
-    val gh = glyph_height()
-    var scale = font_size / gh
-    if scale < 1:
-        scale = 1
-    scale
+    text_metrics("", font_size).scale
 
 # ============================================================================
 # Text-to-Buffer Fallback
@@ -81,18 +95,19 @@ fn text_render_to_buf(text_val: text, fg: u32, bg: u32, font_size: i32) -> [u32]
 
     Backends blit this buffer with `draw_image(x, y, text_w, text_h, buf)`.
     """
-    val text_w = text_buf_width(text_val, font_size)
-    val text_h = text_buf_height(font_size)
+    val metrics = text_metrics(text_val, font_size)
+    val text_w = metrics.width
+    val text_h = metrics.height
     if text_w <= 0 or text_h <= 0:
         var empty: [u32] = []
         return empty
     val buf_size = text_w * text_h
     var buf: [u32] = [bg; buf_size]
-    val scale = text_scale(font_size)
     val text_len = text_val.len()
     val buf_len = buf.len()
-    val advance = glyph_advance(scale)
-    val gh = glyph_height()
+    val scale = metrics.scale
+    val advance = metrics.advance
+    val gh = metrics.glyph_height_px
     var i: i64 = 0
     var cursor_x = 0
     while i < text_len:
@@ -126,12 +141,104 @@ fn text_render_to_buf(text_val: text, fg: u32, bg: u32, font_size: i32) -> [u32]
 
 fn text_blit_buffer(text_val: text, fg: u32, bg: u32, font_size: i32) -> TextBlitBuffer:
     """Build a rendered text payload with dimensions and pixels together."""
-    val text_w = text_buf_width(text_val, font_size)
-    val text_h = text_buf_height(font_size)
+    val metrics = text_metrics(text_val, font_size)
+    val text_w = metrics.width
+    val text_h = metrics.height
     if text_w <= 0 or text_h <= 0:
         var empty: [u32] = []
         return TextBlitBuffer(width: 0, height: 0, pixels: empty)
     TextBlitBuffer(width: text_w, height: text_h, pixels: text_render_to_buf(text_val, fg, bg, font_size))
+
+fn glyph_sample(bitmap: [i32], gx: f32, gy: f32, gh: i32) -> i32:
+    val x0 = floor_to_i32(gx)
+    val y0 = floor_to_i32(gy)
+    val x1 = x0 + 1
+    val y1 = y0 + 1
+    val tx = gx - _i32_to_f32(x0)
+    val ty = gy - _i32_to_f32(y0)
+    val one = 1000
+    val txi = _f32_to_i32(tx * 1000.0)
+    val tyi = _f32_to_i32(ty * 1000.0)
+    val w00 = (one - txi) * (one - tyi)
+    val w10 = txi * (one - tyi)
+    val w01 = (one - txi) * tyi
+    val w11 = txi * tyi
+    val s00 = glyph_sample_point(bitmap, x0, y0, gh)
+    val s10 = glyph_sample_point(bitmap, x1, y0, gh)
+    val s01 = glyph_sample_point(bitmap, x0, y1, gh)
+    val s11 = glyph_sample_point(bitmap, x1, y1, gh)
+    (s00 * w00 + s10 * w10 + s01 * w01 + s11 * w11) / (one * one)
+
+fn floor_to_i32(v: f32) -> i32:
+    val truncated = _f32_to_i32(v)
+    if _i32_to_f32(truncated) > v:
+        return truncated - 1
+    truncated
+
+fn glyph_sample_point(bitmap: [i32], gx: i32, gy: i32, gh: i32) -> i32:
+    if gx < 0 or gx >= 5 or gy < 0 or gy >= gh:
+        return 0
+    val row_data = bitmap[gy]
+    ((row_data >> (4 - gx)) & 1) * 1000
+
+fn blend_text_coverage(fg: u32, bg: u32, alpha: i32) -> u32:
+    if alpha <= 0:
+        return bg
+    if alpha >= 255:
+        return fg
+    val fg_r = color_r(fg)
+    val fg_g = color_g(fg)
+    val fg_b = color_b(fg)
+    val fg_a = color_a(fg)
+    val bg_r = color_r(bg)
+    val bg_g = color_g(bg)
+    val bg_b = color_b(bg)
+    val bg_a = color_a(bg)
+    val inv = 255 - alpha
+    rgba(
+        (fg_r * alpha + bg_r * inv) / 255,
+        (fg_g * alpha + bg_g * inv) / 255,
+        (fg_b * alpha + bg_b * inv) / 255,
+        (fg_a * alpha + bg_a * inv) / 255
+    )
+
+fn text_aa_blit_buffer(text_val: text, fg: u32, bg: u32, font_size: i32) -> TextBlitBuffer:
+    """Build a foreground/background text payload with bilinear edge coverage."""
+    val metrics = text_metrics(text_val, font_size)
+    val text_w = metrics.width
+    val text_h = if font_size > metrics.height: font_size else: metrics.height
+    if text_w <= 0 or text_h <= 0:
+        var empty: [u32] = []
+        return TextBlitBuffer(width: 0, height: 0, pixels: empty)
+    var buf: [u32] = [bg; text_w * text_h]
+    val text_len = text_val.len()
+    val scale = metrics.scale
+    val gh = metrics.glyph_height_px
+    val advance = metrics.advance
+    var i: i64 = 0
+    var cursor_x = 0
+    while i < text_len:
+        val code = text_val.char_code_at(i)
+        val ch = "{code as char}"
+        val bitmap = glyph_data(ch)
+        var py = 0
+        while py < text_h:
+            var px = 0
+            while px < advance:
+                if px < 5 * scale:
+                    val sample_x = (_i32_to_f32(px) + 0.5) / _i32_to_f32(scale) - 0.5
+                    val sample_y = (_i32_to_f32(py) + 0.5) / _i32_to_f32(scale) - 0.5
+                    val coverage = glyph_sample(bitmap, sample_x, sample_y, gh)
+                    if coverage > 0:
+                        val dst_x = cursor_x + px
+                        val idx = py * text_w + dst_x
+                        if idx >= 0 and idx < buf.len():
+                            buf[idx] = blend_text_coverage(fg, bg, coverage * 255 / 1000)
+                px = px + 1
+            py = py + 1
+        cursor_x = cursor_x + advance
+        i = i + 1
+    TextBlitBuffer(width: text_w, height: text_h, pixels: buf)
 
 fn text_transparent_blit_buffer(text_val: text, fg: u32, font_size: i32) -> TextBlitBuffer:
     """Build a foreground-only text payload where zero pixels are transparent."""

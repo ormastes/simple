@@ -40,20 +40,45 @@ struct AdviceContext:
     start_time: i64
     end_time: i64?
 
+# Reserved priority band for security aspects.
+# Aspects with priority >= RESERVED_SECURITY_MIN are reserved for security use.
+# Non-security registrations that claim this band are clamped below it.
+val RESERVED_SECURITY_MIN: i64 = 1000000
+
 struct AspectRegistry:
     aspects: [Aspect]
     enabled: bool
+    # Once sealed (after init_aop registers security aspects), disable_unsafe and
+    # unregister_unsafe become no-ops. New aspect registrations are still permitted.
+    sealed: bool
 
 impl AspectRegistry:
     static fn empty() -> AspectRegistry:
-        AspectRegistry(aspects: [], enabled: true)
+        AspectRegistry(aspects: [], enabled: true, sealed: false)
 
     me register(aspect: Aspect):
-        self.aspects = self.aspects.push(aspect)
+        # Clamp any aspect that attempts to claim the reserved security priority band.
+        # The reserved band (>= RESERVED_SECURITY_MIN) is for security aspects woven at
+        # compile time via weaving_config. Runtime-registered aspects must stay below it.
+        val safe_priority = if aspect.priority >= RESERVED_SECURITY_MIN:
+            RESERVED_SECURITY_MIN - 1
+        else:
+            aspect.priority
+        val clamped = Aspect(
+            name: aspect.name,
+            pointcut: aspect.pointcut,
+            advice: aspect.advice,
+            enabled: aspect.enabled,
+            priority: safe_priority
+        )
+        self.aspects = self.aspects.push(clamped)
 
     me unregister_unsafe(name: text):
         # SECURITY: only call from trusted initialization code.
         # Removing a registered aspect at runtime can silently disable security enforcement.
+        # No-op when registry is sealed — security aspects cannot be removed.
+        if self.sealed:
+            return
         self.aspects = self.aspects.filter(_.name != name)
 
     fn find_aspects(join_point: JoinPoint) -> [Aspect]:
@@ -71,8 +96,13 @@ impl AspectRegistry:
             val matches = _match_join_point(aspect.pointcut.kind, effective_pattern, join_point)
             if matches:
                 matched = matched.push(aspect)
-        # Sort by priority, highest first
-        matched = matched.sort_by(\a, b: b.priority - a.priority)
+        # Sort by priority, highest first.
+        # Use safe comparison (not subtraction) to avoid i64 overflow with large priorities.
+        matched = matched.sort_by(\a, b:
+            if a.priority > b.priority: -1
+            else if a.priority < b.priority: 1
+            else: 0
+        )
         return matched
 
 fn time_now_ms() -> i64:
@@ -84,7 +114,9 @@ impl AspectRegistry:
 
     me disable_unsafe():
         # SECURITY: disabling the registry suppresses ALL advice including security enforcement.
-        # Only call from trusted shutdown/test code.
+        # No-op when registry is sealed — security enforcement cannot be bypassed at runtime.
+        if self.sealed:
+            return
         self.enabled = false
 
 struct LogAspects:
@@ -262,12 +294,23 @@ fn _glob_match(pattern: text, value: text) -> bool:
 var global_registry: AspectRegistry? = nil
 var global_weaver: AspectWeaver? = nil
 
+# Seal the global registry so that disable_unsafe and unregister_unsafe become no-ops.
+# Called by init_aop after security aspects have been registered.
+# Not pub — only the init path may seal the registry.
+fn _seal_registry():
+    if global_registry.is_some():
+        val reg = global_registry.unwrap()
+        reg.sealed = true
+        global_registry = Some(reg)
+
 pub fn init_aop(config: AopConfig):
     # SECURITY: only initialize once. Re-initialization would wipe all registered security aspects.
     if global_registry.is_some():
         return
     global_registry = Some(AspectRegistry.empty())
     global_weaver = Some(AspectWeaver.with_registry(global_registry.unwrap()))
+    # Seal after creation so security aspects registered immediately after cannot be removed.
+    _seal_registry()
 
 pub fn get_registry() -> AspectRegistry:
     if global_registry.is_none():

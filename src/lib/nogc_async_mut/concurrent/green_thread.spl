@@ -5,12 +5,26 @@
 # Green threads are scheduled cooperatively in the current OS thread. They are
 # cheaper than OS threads, but they do not run in parallel and cannot preempt a
 # long-running closure.
+#
+# SCHEDULER STATE: All mutable scheduler state is held in a single module-level
+# GreenScheduler instance (GREEN_SCHEDULER). The three counters that were
+# previously bare module-level vars (GREEN_NEXT_ID, GREEN_VALUE_READY_COUNT,
+# GREEN_VALUE_DONE_COUNT) are now fields of that struct, so cross-task state
+# sharing is encapsulated in one named value rather than three scattered globals.
+#
+# EAGER EVALUATION: green_spawn(fn) evaluates task() immediately at spawn and
+# enqueues the result via green_spawn_value. Deferred closure storage is blocked
+# by the SMF function-valued global / global-array codegen issue; see
+# doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md for
+# the open blocker. No TODO here — the blocker doc is the tracker.
 
-var GREEN_NEXT_ID: usize = 1
-var GREEN_VALUE_READY_COUNT: usize = 0
-var GREEN_VALUE_DONE_COUNT: usize = 0
+class GreenScheduler:
+    """Encapsulated scheduler state for the cooperative green-thread queue."""
+    next_id: usize
+    ready_count: usize
+    done_count: usize
 
-class GreenThreadHandle:
+export class GreenThreadHandle:
     """Handle for a cooperative green thread."""
     task_id: usize
     value_mode: usize
@@ -22,7 +36,7 @@ class GreenThreadHandle:
 
     fn is_done() -> bool:
         if self.value_mode == 1:
-            return self.value_order <= GREEN_VALUE_DONE_COUNT
+            return self.value_order <= GREEN_SCHEDULER.done_count
         false
 
     fn join() -> i64:
@@ -32,32 +46,34 @@ class GreenThreadHandle:
             return self.value_result
         0
 
-fn green_spawn(task: fn() -> i64) -> GreenThreadHandle:
+var GREEN_SCHEDULER: GreenScheduler = GreenScheduler(next_id: 1, ready_count: 0, done_count: 0)
+
+export fn green_spawn(task: fn() -> i64) -> GreenThreadHandle:
     """Schedule a closure on the cooperative green-thread queue."""
     # The current direct interpreter/SMF path cannot safely persist function
     # values in scheduler storage. Evaluate now and enqueue the result so the
     # cooperative queue itself remains usable and measurable.
     green_spawn_value(task())
 
-fn green_spawn_value(result: i64) -> GreenThreadHandle:
+export fn green_spawn_value(result: i64) -> GreenThreadHandle:
     """Schedule an already computed result on the cooperative queue."""
-    val task_id = GREEN_NEXT_ID
-    GREEN_NEXT_ID = GREEN_NEXT_ID + 1
-    val value_order = GREEN_VALUE_READY_COUNT + 1
-    GREEN_VALUE_READY_COUNT = GREEN_VALUE_READY_COUNT + 1
+    val task_id = GREEN_SCHEDULER.next_id
+    GREEN_SCHEDULER.next_id = GREEN_SCHEDULER.next_id + 1
+    val value_order = GREEN_SCHEDULER.ready_count + 1
+    GREEN_SCHEDULER.ready_count = GREEN_SCHEDULER.ready_count + 1
     GreenThreadHandle(task_id: task_id, value_mode: 1, value_order: value_order, value_result: result)
 
-fn green_ready_count() -> usize:
-    GREEN_VALUE_READY_COUNT - GREEN_VALUE_DONE_COUNT
+export fn green_ready_count() -> usize:
+    GREEN_SCHEDULER.ready_count - GREEN_SCHEDULER.done_count
 
-fn green_run_one() -> bool:
+export fn green_run_one() -> bool:
     """Run one ready green thread to completion."""
-    if GREEN_VALUE_DONE_COUNT < GREEN_VALUE_READY_COUNT:
-        GREEN_VALUE_DONE_COUNT = GREEN_VALUE_DONE_COUNT + 1
+    if GREEN_SCHEDULER.done_count < GREEN_SCHEDULER.ready_count:
+        GREEN_SCHEDULER.done_count = GREEN_SCHEDULER.done_count + 1
         return true
     false
 
-fn green_run_all() -> usize:
+export fn green_run_all() -> usize:
     """Run all currently ready green threads."""
     var ran: usize = 0
     while green_run_one():

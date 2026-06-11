@@ -1,0 +1,95 @@
+# Cancellation - Cooperative Cancellation Tokens
+#
+# CancellationToken: hierarchical cancel propagation (parent -> child).
+# Pure Simple state, cooperative (no OS signals).
+
+use nogc_async_mut.async.poll.{Poll}
+use nogc_async_mut.async.future.{Future}
+
+# ============================================================
+# CancellationToken
+# ============================================================
+
+class CancellationToken:
+    """Cooperative cancellation token.
+
+    Create a root token with token_new(), then call child() to create
+    child tokens. Cancelling a parent propagates to all children.
+
+    Example:
+        var tok = token_new()
+        tok.cancel()
+        val cancelled = tok.is_cancelled()  # true
+    """
+    cancelled: bool
+    # child token slots (fixed-size; extend as needed)
+    child0: CancellationToken?
+    child1: CancellationToken?
+    child2: CancellationToken?
+    child3: CancellationToken?
+
+fn token_new() -> CancellationToken:
+    """Create a new root cancellation token (not cancelled)."""
+    CancellationToken(
+        cancelled: false,
+        child0: nil,
+        child1: nil,
+        child2: nil,
+        child3: nil
+    )
+
+impl CancellationToken:
+    me cancel():
+        """Cancel this token and propagate to registered children."""
+        self.cancelled = true
+        if self.child0 != nil:
+            self.child0.cancel()
+        if self.child1 != nil:
+            self.child1.cancel()
+        if self.child2 != nil:
+            self.child2.cancel()
+        if self.child3 != nil:
+            self.child3.cancel()
+
+    fn is_cancelled() -> bool:
+        """Return true if this token has been cancelled."""
+        self.cancelled
+
+    me register_child(child: CancellationToken):
+        """Register a child token so cancel() propagates to it.
+
+        Up to 4 child slots are supported. Extra registrations are ignored.
+        """
+        if self.child0 == nil:
+            self.child0 = child
+        else if self.child1 == nil:
+            self.child1 = child
+        else if self.child2 == nil:
+            self.child2 = child
+        else if self.child3 == nil:
+            self.child3 = child
+
+    fn child() -> CancellationToken:
+        """Create a child token linked to this parent.
+
+        Cancelling the parent also cancels the returned child.
+        """
+        val c = token_new()
+        self.register_child(c)
+        c
+
+    fn guard_future() -> Future<bool>:
+        """Poll-once future that is Ready(true) when cancelled, Pending otherwise.
+
+        Use at suspension points to exit a cooperative async loop early.
+
+        Example:
+            val f = tok.guard_future()
+            val p = f.poll()
+            if p.is_ready():
+                # cancelled — stop work
+        """
+        if self.cancelled:
+            Future.from_value(true)
+        else:
+            Future.pending<bool>()

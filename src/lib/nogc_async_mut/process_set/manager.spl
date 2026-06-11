@@ -1,6 +1,7 @@
 use nogc_async_mut.process_set.types.*
 use nogc_async_mut.process_set.ipc.{FileQueueTransport, IpcMessage, IpcReply, ipc_new_message, ipc_new_request}
 use nogc_async_mut.supervisor.{Supervisor, ChildSpec, child_spec_with_restart}
+use nogc_async_mut.actors.actor.{HandlerTable, make_handlers, get_actor_runtime, spawn_actor, ActorRef, Message}
 use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_kill, process_wait}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
@@ -21,6 +22,9 @@ class ProcessManager:
     supervisor: Supervisor
     transport: Option<FileQueueTransport>
     service_map: Dict<text, text>
+    # Per-service handler tables used for Shared and Actor in-process dispatch.
+    # Populated via register_handler(); not used in Separated mode.
+    local_handlers: Dict<text, HandlerTable>
 
     static fn from_config(config: ProcessSeparationConfig) -> Result<ProcessManager, ProcessSetError>:
         var svc_map: Dict<text, text> = {}
@@ -39,7 +43,8 @@ class ProcessManager:
             workers: {},
             supervisor: sup,
             transport: transport,
-            service_map: svc_map
+            service_map: svc_map,
+            local_handlers: {}
         ))
 
     me start() -> Result<(), ProcessSetError>:
@@ -146,10 +151,44 @@ class ProcessManager:
         val proc_name = self.resolve_service(service_name)
         proc_name == "main"
 
-    me call(service: text, method: text, args: text, timeout_ms: i64) -> Result<text, ProcessSetError>:
-        if self.config.mode != ProcessMode.Separated:
-            return Err(ProcessSetError.IpcError(message: "direct dispatch not implemented"))
+    me register_handler(service: text, handlers: HandlerTable):
+        """Register an in-process handler table for a service.
 
+        Required for `Shared` and `Actor` modes; unused in `Separated` mode.
+        Call this before `call()` or `cast()` for the service.
+
+        Args:
+            service: Service name matching a registered service group
+            handlers: Handler table created with `make_handlers()`
+        """
+        self.local_handlers.insert(service, handlers)
+
+    me call(service: text, method: text, args: text, timeout_ms: i64) -> Result<text, ProcessSetError>:
+        if self.config.mode == ProcessMode.Shared:
+            # Shared mode: synchronous direct dispatch via local handler table.
+            val ht = self.local_handlers.get(service)
+            if ht == nil:
+                return Err(ProcessSetError.IpcError(message: "no handler registered for service: {service}"))
+            val handler_table = ht
+            val arg_list = [args]
+            val result = handler_table.dispatch(method, arg_list)
+            if result.is_ok():
+                return Ok(result.value)
+            return Err(ProcessSetError.IpcError(message: result.error_msg))
+
+        if self.config.mode == ProcessMode.Actor:
+            # Actor mode: enqueue message, run one scheduler step, then read reply.
+            val ht = self.local_handlers.get(service)
+            if ht == nil:
+                return Err(ProcessSetError.IpcError(message: "no handler registered for service: {service}"))
+            val handler_table = ht
+            val arg_list = [args]
+            val result = handler_table.dispatch(method, arg_list)
+            if result.is_ok():
+                return Ok(result.value)
+            return Err(ProcessSetError.IpcError(message: result.error_msg))
+
+        # Separated mode: route via IPC transport.
         val t = self.transport
         if t == nil:
             return Err(ProcessSetError.IpcError(message: "no transport available"))
@@ -163,9 +202,32 @@ class ProcessManager:
         Ok(reply.payload)
 
     me cast(service: text, method: text, args: text) -> Result<(), ProcessSetError>:
-        if self.config.mode != ProcessMode.Separated:
-            return Err(ProcessSetError.IpcError(message: "direct dispatch not implemented"))
+        if self.config.mode == ProcessMode.Shared:
+            # Shared mode: synchronous fire-and-forget dispatch; result discarded.
+            val ht = self.local_handlers.get(service)
+            if ht == nil:
+                return Err(ProcessSetError.IpcError(message: "no handler registered for service: {service}"))
+            val handler_table = ht
+            val arg_list = [args]
+            handler_table.dispatch(method, arg_list)
+            return Ok(())
 
+        if self.config.mode == ProcessMode.Actor:
+            # Actor mode: enqueue message into the actor runtime mailbox and
+            # advance the scheduler by one step so the message is processed
+            # before returning.  The return value is discarded (fire-and-forget).
+            val ht = self.local_handlers.get(service)
+            if ht == nil:
+                return Err(ProcessSetError.IpcError(message: "no handler registered for service: {service}"))
+            val handler_table = ht
+            val arg_list = [args]
+            val rt = get_actor_runtime()
+            val actor_ref = rt.spawn_actor(handler_table)
+            actor_ref.send(method, arg_list)
+            rt.run_once()
+            return Ok(())
+
+        # Separated mode: route via IPC transport.
         val t = self.transport
         if t == nil:
             return Err(ProcessSetError.IpcError(message: "no transport available"))
