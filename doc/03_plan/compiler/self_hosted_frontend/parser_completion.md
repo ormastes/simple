@@ -69,37 +69,56 @@ Fix in prelude-closure-first order (G1→G4 poison every run through prelude fil
 
 ### Verification harness pattern (use for every milestone)
 
-No file_ops — keep sources inline. Run via `bin/simple run`:
+**Protocol corrections (2026-06-11, learned from M1 false-green):**
+- `parser_error_count()` is a hardcoded-0 stub (`core/parser.spl:500`) — NEVER use it.
+  Use `parser_has_errors() -> bool` and scan output for `[parser_error]` lines.
+- `bin/simple check/lint/run` are DELEGATED to the Rust seed since the 2026-06-11
+  deploy — they do NOT exercise the lean parser natively. Run harnesses with the
+  seed directly: `src/compiler_rust/target/release/simple run tmp/site12/<h>.spl`
+  (the seed interprets the lean parser .spl sources, so this DOES test the fix).
+- A harness importing only parser+ast segfaults the seed interpreter; adding
+  `use compiler.frontend.flat_ast_bridge_part2.{flat_ast_to_module}` as a third
+  import avoids it (template: `tmp/site12/m1_reverify.spl`).
+- ALWAYS include a must-fail control case (e.g. `"fn h() -> i64:\n    val q = ((\n"`
+  → `parser_has_errors()` must be true). If the control passes, the harness is
+  broken — stop and investigate.
 
 ```
-# tmp_test.spl — inline harness (no file_ops import)
-use compiler.core.parser.{parse_module, parser_has_errors, parser_error_count}
+# inline harness (no file_ops import)
+use compiler.core.parser.{parse_module, parser_has_errors}
 use compiler.core.ast.{ast_reset}
+use compiler.frontend.flat_ast_bridge_part2.{flat_ast_to_module}
 
-fn main() -> i64:
+fn main():
     ast_reset()
-    val src = "<inline source under test>"
-    val m = parse_module(src, "test", "test")
-    val errs = parser_error_count()
-    if errs == 0:
-        print "PASS"
-    else:
-        print "FAIL errs={errs}"
-    0
+    parse_module("<inline source under test>", "case1.spl")
+    print "case1 has_errors={parser_has_errors()}"
+    ast_reset()
+    parse_module("fn h() -> i64:\n    val q = ((\n", "ctrl.spl")
+    print "control has_errors={parser_has_errors()}"
 ```
 
-Run: `bin/simple run tmp_test.spl`  
-Docker re-check after each milestone: `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl`
+Run: `timeout 120 src/compiler_rust/target/release/simple run tmp/site12/<h>.spl`
 
 ---
 
-### M1 — G1: Lex `&` as TOK_AMPERSAND (fixes ~522 files)
+### M1 — G1: Lex `&` as TOK_AMPERSAND (fixes ~522 files) — DONE 2026-06-11
 
-Highest priority — poisons prelude closure.  
-**File:** `src/compiler/10.frontend/lexer_struct.spl`  
-Add `'&'` → emit `TOK_AMPERSAND` (kind=120). Token defined at `core/tokens.spl:105`, exported line 529; no emit rule exists today.  
-**Test:** `"val x = (n & (n - 1)) == 0"` → 0 errors.  
-**Docker:** `bin/simple check src/compiler/00.common/simd_types.spl`
+Landed in two halves:
+- `1ea5249607` — lexer: `core/lexer_struct.spl` emits `&`(120), `^`(122), `~`(123)
+  (previously fell through to Unknown 191).
+- `0ff597f009` — parser: infix `&`/`^` (and `|` in the main chain) at the
+  multiplication level of `core/parser_expr.spl` `parse_multiplication()` +
+  `parse_binary_from()`; prefix `~` in `parse_unary()`. The lexer half alone was
+  NOT enough — `tok_precedence()` in `core/tokens.spl` is dead code the parser
+  never calls; the leveled chain hardcodes operator kinds.
+
+Verified: `a & b`, `(n & (n - 1)) == 0`, `a ^ 3` + `~x` all parse with
+`parser_has_errors()=false`; control errors correctly. Regression
+`lazy_outline_equivalence_spec` 16/16.
+Known follow-up: `|`/`&`/`^` sit at multiplication level, diverging from the
+`tok_precedence` spec (pipe 4 < caret 5 < amp 6 < eq 7) — recorded in
+`doc/08_tracking/bug/lean_parser_bitwise_pipe_precedence_divergence_2026-06-11.md`.
 
 ---
 
