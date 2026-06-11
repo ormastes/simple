@@ -35,8 +35,10 @@ Date: 2026-06-06
 - Current source-built hosted-native fairness evidence is stricter than the
   checked-in `bin/release/simple` binary for this lane: the helper-return
   function-value probes are now fixed on rebuilt debug binaries, while the
-  resumable-stepper native probe still crashes and the checked-in release
-  binary remains tracked as stale evidence in
+  resumable-stepper native probe still crashes. A newer lower blocker beneath
+  that path is now pinned in
+  `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`,
+  and the checked-in release binary remains tracked as stale evidence in
   `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 
 ## Coordination Contract

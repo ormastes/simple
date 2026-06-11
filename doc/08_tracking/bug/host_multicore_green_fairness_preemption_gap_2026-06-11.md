@@ -77,6 +77,10 @@ Related active host-side blocker:
   records the newer callback-id resumable-stepper prototype. That path removes
   function-valued queue items, but a single completed stepper still segfaults
   in the debug-seed hosted native path with `EXIT=139`.
+- `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`
+  records the newer standalone-native blocker found underneath that stepper
+  path: returning a function value from inside a loop/search branch still
+  crashes even without the worker pool.
 - `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`
   now records the closed helper-return regression that used to sit below the
   stepper path.

@@ -16,7 +16,8 @@ scheduler layered over the existing hosted `multicore_green` worker pool:
 That design type-checks and compiles to a hosted native binary, but the hosted
 native binary still segfaults before returning the first completion. The
 earlier helper-returned function-value blocker that sat below this path is now
-closed; this crash remains after that fix.
+closed. The current lower blocker beneath this path is now tracked separately in
+`doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`.
 
 ## Minimal Boundary
 
@@ -39,6 +40,8 @@ So this is no longer a vague “fairness is hard” gap. The narrower blocker is
 - even when the work item is a single callback-id step with immediate completion
 - that crash remains after the helper-returned function-value regression was
   fixed and moved out of the critical path
+- the remaining lower standalone-native blocker now appears to be returning a
+  function value from inside a loop/search branch before the worker-pool layer
 
 ## Why This Matters
 

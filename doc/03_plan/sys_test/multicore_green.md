@@ -51,6 +51,10 @@
   rebuilt debug path, so rebuilt current-source artifacts remain the stronger
   evidence until the checked-in release binary is refreshed to match current
   source/runtime/compiler behavior.
+- `test/03_system/feature/usage/native_function_value_loop_return_blocker_spec.spl`
+  now pins the smaller standalone-native blocker beneath the resumable-stepper
+  lane: returning a function value from inside a loop/search branch still
+  crashes in native artifacts even without the worker pool.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` checks the pure Simple green-channel contract: empty recv parks a logical green task, send unparks the oldest waiter, FIFO buffering works, and bounded backpressure does not block the carrier worker.
 
 ## Blocking Evidence To Track
