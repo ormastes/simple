@@ -332,13 +332,14 @@ expose stable primitive operations and backend sessions while hiding
 backend-specific device details from UI and wrapper code. Drawing backends
 handle primitive draw, framebuffer ownership, present, and readback. Processing
 backends handle compute kernels, generated artifacts, filters, and offload.
-Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan, Metal,
-or WebGPU, but GUI code sees only the typed Simple 2D and plugin contracts.
+Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan,
+DirectX, Metal, or WebGPU, but GUI code sees only the typed Simple 2D and
+plugin contracts.
 
 Backend preference has two layers. `backend_full_preference_order()` records the
 stable user-visible order, with explicit native surfaces first:
-`baremetal`, `virtio_gpu`, Metal, CUDA, ROCm/HIP, Qualcomm, Vulkan, OpenCL,
-OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU. The automatic
+`baremetal`, `virtio_gpu`, Metal, CUDA, ROCm/HIP, Qualcomm, Vulkan, DirectX,
+OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU. The automatic
 width/height-only probe remains `backend_default_priority_order()` and starts at
 Metal because `baremetal` and `virtio_gpu` require a caller-owned platform or
 VirtIO framebuffer. Diagnostics and reports should use

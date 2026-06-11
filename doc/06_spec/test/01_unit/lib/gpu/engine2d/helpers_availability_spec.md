@@ -43,7 +43,7 @@ helpers_availability_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -51,6 +51,7 @@ expect(backend_canonical_name("native")).to_equal("baremetal")
 expect(backend_canonical_name("platform-native")).to_equal("baremetal")
 expect(backend_canonical_name("virtio-gpu")).to_equal("virtio_gpu")
 expect(backend_canonical_name("hip")).to_equal("rocm")
+expect(backend_canonical_name("dx11")).to_equal("directx")
 expect(backend_canonical_name("simd-cpu")).to_equal("cpu_simd")
 ```
 
@@ -74,7 +75,7 @@ expect(full[0]).to_equal("baremetal")
 expect(full[1]).to_equal("virtio_gpu")
 expect(full[2]).to_equal("metal")
 expect(auto_order[0]).to_equal("metal")
-expect(auto_order).to_equal(["metal", "cuda", "rocm", "qualcomm", "vulkan", "opencl", "opengl", "intel", "webgpu", "software", "cpu_simd", "cpu"])
+expect(auto_order).to_equal(["metal", "cuda", "rocm", "qualcomm", "vulkan", "directx", "opencl", "opengl", "intel", "webgpu", "software", "cpu_simd", "cpu"])
 ```
 
 </details>
@@ -84,7 +85,7 @@ expect(auto_order).to_equal(["metal", "cuda", "rocm", "qualcomm", "vulkan", "ope
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -92,9 +93,12 @@ expect(backend_priority("baremetal")).to_equal(-2)
 expect(backend_priority("virtio")).to_equal(-1)
 expect(backend_display_name("baremetal")).to_equal("Platform Native Framebuffer")
 expect(backend_display_name("virtio_gpu")).to_equal("VirtIO GPU Framebuffer")
+expect(backend_display_name("directx")).to_equal("DirectX (D3D11 via DXVK on Linux)")
 expect(backend_is_hardware("baremetal")).to_equal(true)
+expect(backend_is_hardware("directx")).to_equal(true)
 expect(backend_requires_gpu("baremetal")).to_equal(false)
 expect(feature_gate_description("virtio_gpu")).to_contain("VirtIO GPU")
+expect(feature_gate_description("directx")).to_contain("D3D11")
 expect(backend_preference_summary()).to_contain("explicit native")
 ```
 

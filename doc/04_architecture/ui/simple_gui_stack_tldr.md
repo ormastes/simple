@@ -86,9 +86,10 @@ Host input
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
 - Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
 - Engine2D backend preference: `backend_full_preference_order()` puts explicit
-  native surfaces (`baremetal`, `virtio_gpu`) before Metal/CUDA/ROCm, while the
-  automatic probe order starts at Metal because native surfaces need a
-  preinitialized framebuffer.
+  native surfaces (`baremetal`, `virtio_gpu`) before Metal/CUDA/ROCm,
+  Qualcomm, Vulkan, DirectX, and portable fallback lanes; the automatic probe
+  order starts at Metal because native surfaces need a preinitialized
+  framebuffer.
 - Text fallback hot path: AA glyph loops touch only glyph coverage pixels; the
   prefilled buffer owns advance gaps and font-size padding rows as background.
 - WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts

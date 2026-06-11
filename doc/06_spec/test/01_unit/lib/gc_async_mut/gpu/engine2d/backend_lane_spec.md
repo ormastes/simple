@@ -132,7 +132,7 @@ expect(fallback.fallback_reason).to_contain("processing backend not specified")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -143,10 +143,11 @@ expect(drawing_order[0]).to_equal("metal")
 expect(drawing_order[1]).to_equal("cuda")
 expect(drawing_order[2]).to_equal("rocm")
 expect(drawing_order[4]).to_equal("vulkan")
+expect(drawing_order[5]).to_equal("directx")
 expect(full_order[0]).to_equal("baremetal")
 expect(full_order[1]).to_equal("virtio_gpu")
 expect(full_order[2]).to_equal("metal")
-expect(engine2d_backend_lane_preference_summary()).to_contain("metal > cuda > rocm/hip")
+expect(engine2d_backend_lane_preference_summary()).to_contain("vulkan > directx > opencl")
 ```
 
 </details>
@@ -156,10 +157,11 @@ expect(engine2d_backend_lane_preference_summary()).to_contain("metal > cuda > ro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+expect(engine2d_backend_lane_preferred_candidate(["opencl", "cpu", "directx"], false)).to_equal("directx")
 expect(engine2d_backend_lane_preferred_candidate(["vulkan", "cpu", "cuda"], false)).to_equal("cuda")
 expect(engine2d_backend_lane_preferred_candidate(["virtio-gpu", "metal"], true)).to_equal("virtio_gpu")
 expect(engine2d_backend_lane_preferred_candidate(["amd-hip", "cpu"], false)).to_equal("rocm")
