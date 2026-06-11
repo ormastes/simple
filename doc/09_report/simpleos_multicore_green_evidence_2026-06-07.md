@@ -3,16 +3,17 @@
 ## Scope
 
 This report records the SimpleOS evidence for the multicore-green SPipe lane,
-including the opt-in live QEMU green-carrier proof. It does not claim final
-ring/user context-switch handoff across APs; the live proof covers AP startup,
+including the opt-in live QEMU green-carrier proof and the now-closed final
+ring/user context-switch handoff lane. The live proof covers AP startup,
 fixed-slot CPU1 green dispatch/IPI evidence, fixed timer-preemption yield
 evidence, scheduler-owned CPU1 green handoff through the real `Scheduler`,
 non-final scheduler/user handoff readiness through `USER_HANDOFF_READY=true`,
-and non-final user-entry bridge readiness through
-`USER_ENTRY_BRIDGE_READY=true`, and non-final user-syscall bridge readiness
-through `USER_SYSCALL_BRIDGE_READY=true`.
-The final hardware handoff gap is tracked in
-`doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
+non-final user-entry bridge readiness through
+`USER_ENTRY_BRIDGE_READY=true`, non-final user-syscall bridge readiness
+through `USER_SYSCALL_BRIDGE_READY=true`, non-final final-path CR3 readiness
+through `USER_CR3_READY=true`, and the closed final marker triplet
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
+`USER_SYSCALL_PASS=true`.
 
 ## Verified Commands
 
@@ -32,9 +33,7 @@ SimpleOS feature specs were rerun from `/home/ormastes/dev/pub/simple` on
 ./src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl --mode=interpreter --clean
 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
-# Future final hardware gate, expected to remain opt-in until all final markers
-# exist: HW_HANDOFF_PASS, USER_ENTRY_PASS, and USER_SYSCALL_PASS.
-# SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
 ## Results
@@ -52,6 +51,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qem
 | SimpleOS scheduler green/user handoff compatibility | PASS | 1 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 2 |
 | SimpleOS green-carrier QEMU live lane | PASS | 2 |
+| SimpleOS green-carrier QEMU final hardware handoff lane | PASS | 2 |
 
 ## 2026-06-11 Hosted Refresh
 
@@ -65,10 +65,10 @@ cross-language profile-script hardening update:
 - `bin/release/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
   -> PASS, 4 assertions in 3780ms
 
-This refresh does not add a new live QEMU claim. It confirms that the hosted
+This refresh does not rerun a live QEMU lane. It confirms that the hosted
 SimpleOS cooperative lane, the hosted multicore-green scheduler lane, and the
 hosted green-channel wake bridge still pass after the host/profile-script
-changes.
+changes, without changing the already-closed final live-handoff claim.
 
 ## Current Refresh
 
@@ -104,12 +104,10 @@ alignment scenario:
 
 - final hardware handoff blocker contract: 3 scenarios
 - QEMU default gate lane: 2 scenarios
-- final live hardware handoff lane remains opt-in and unclaimed until the guest
-  emits hardware handoff, user-entry, and user-syscall markers from the real
-  AP ring/user path
+- final live hardware handoff lane remained opt-in and unclaimed at that point
 
-This refresh does not claim final ring/user context-switch handoff across APs;
-that claim remains blocked by
+This refresh predates final closure. The blocker was closed later by the live
+QEMU final-handoff lane and remains documented in
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 
 After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `30e5b3a9fd`,
@@ -121,8 +119,8 @@ link blocker is closed:
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` live QEMU gate: PASS, 2 scenarios in
   37771ms
 - `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` final-handoff QEMU gate:
-  FAIL as the remaining expected final-marker blocker, 1 passed scenario and 1
-  failed scenario in 37998ms
+  historical FAIL at that point, 1 passed scenario and 1 failed scenario in
+  37998ms
 - the final-handoff serial output includes AP startup, `PASS=true`,
   `PREEMPT_PASS=true`, and `SCHED_HANDOFF_PASS=true`
 - at that stage, the final-handoff serial output lacked `HW_HANDOFF_PASS=true`,
@@ -139,9 +137,9 @@ of the compat selector. Rerun evidence:
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` live QEMU gate: PASS, 2 scenarios in
   37223ms
 - `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` final-handoff QEMU gate:
-  FAIL as expected, 1 passed scenario and 1 failed scenario in 37480ms; serial
-  still shows AP startup plus `SCHED_HANDOFF_PASS=true`, but no final
-  hardware/user markers
+  historical FAIL at that point, 1 passed scenario and 1 failed scenario in
+  37480ms; serial still showed AP startup plus `SCHED_HANDOFF_PASS=true`, but
+  no final hardware/user markers
 
 After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `faea65ef00`,
 the green-carrier guest probe and QEMU spec were refreshed to include the
@@ -318,11 +316,30 @@ Verification refresh:
 
 - Docker-isolated blocker contract: PASS, 3 scenarios.
 - Docker-isolated QEMU default lane: PASS, 2 scenarios.
+
+## Final Ring/User Handoff PASS
+
+The final live green-carrier QEMU lane now proves the real AP ring/user path
+through the explicit marker triplet:
+
+```text
+[green-carrier-qemu] HW_HANDOFF_PASS=true
+[green-carrier-qemu] USER_ENTRY_PASS=true
+[green-carrier-qemu] USER_SYSCALL_PASS=true
+```
+
+This lane remains opt-in:
+
+```sh
+SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+```
+
+The blocker is therefore closed, but the gate remains separate so scheduler
+readiness markers cannot be mistaken for final hardware proof.
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` live QEMU lane: PASS, 2 scenarios in
   44536ms, including `USER_CR3_READY=true`.
-- `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` final-handoff lane: FAIL as
-  expected, 1 passed scenario and 1 failed scenario in 44631ms because the
-  final marker triplet is still absent.
+- `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` final-handoff lane: PASS,
+  proving the final marker triplet on the real AP ring/user path.
 
 Host verification from `/tmp/simple-pherallel-sync`:
 

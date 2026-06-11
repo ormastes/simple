@@ -207,9 +207,11 @@ SimpleOS path:
   receivers can re-enter scheduler-owned execution without bypassing carrier
   limits.
 - QEMU proof currently covers AP startup, CPU1 fixed-slot dispatch, fixed
-  timer-preemption yield, and scheduler-owned CPU1 green handoff. Full
-  ring/user hardware context-switch handoff remains tracked in
-  `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
+  timer-preemption yield, scheduler-owned CPU1 green handoff, and the closed
+  final AP ring/user marker triplet. The final handoff stays an explicit
+  opt-in live gate documented in
+  `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`
+  so readiness markers and final hardware proof remain separate.
 
 ## Requirement Mapping
 
@@ -224,11 +226,11 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 - SimpleOS Scheduler Layer owns logical green tasks, carrier queues, remote
   wake/IPI intent, and AP evidence.
 
-Future roadmap work remains explicit: carrying bounded worker-loop/yield/tick,
-timer-vector, and named runtime/compiler safepoint sweeps into final AP
-hardware handoff, expanding blocking coverage beyond the current green-channel
-wake pass, and wiring final IDT/APIC-owned queue state plus actual compiler
-insertion/poll-placement before claiming tight-loop fairness comparable to Go.
+Future roadmap work remains explicit: expanding blocking coverage beyond the
+current green-channel wake pass, and wiring final IDT/APIC-owned queue state
+plus actual compiler insertion/poll-placement before claiming tight-loop
+fairness comparable to Go. The final AP ring/user handoff proof itself is now
+closed by the opt-in live gate.
 
 ## Known Gaps
 

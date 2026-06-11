@@ -176,7 +176,8 @@ Repository guards:
   `multicore_green_set_parallelism`, `multicore_green_parallelism`, and
   work-stealing evidence, but the final SimpleOS scheduler-aware green runtime
   still needs the handoff from hosted pool limits to scheduler-owned carrier
-  limits, with the final AP ring/user context-switch proof tracked in
+  limits. The AP ring/user context-switch proof itself is now closed by the
+  opt-in live gate tracked in
   `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
   explicit cooperative-only guarantee until later.
