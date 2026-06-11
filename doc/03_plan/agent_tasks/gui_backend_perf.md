@@ -55,6 +55,11 @@ Updated: 2026-06-11
   min/avg/max elapsed and throughput into
   `production_gui_web_renderer_parity_backend_*` fields and its Markdown
   summary, so archived full-wrapper reports retain the aggregate evidence.
+- this commit -- production GUI font offload evidence: added
+  `scripts/check/check-production-gui-font-offload-evidence.shs` to exercise the
+  preferred vector and bitmap font offload/readback wrappers together and emit
+  explicit typed unavailable rows when the host has no device submit/readback
+  proof.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
@@ -67,9 +72,23 @@ Updated: 2026-06-11
      now that it promotes backend aggregate sample fields.
    - Add broader throughput thresholds after enough host-stable samples exist.
 2. Provide GPU/font offload proof
-   - Demonstrate measured proof of real GPU/font offload path behavior or explicit typed unavailability.
+   - Demonstrate measured proof of real vector/bitmap GPU font offload and readback path behavior or explicit typed unavailability.
+   - Use `scripts/check/check-production-gui-font-offload-evidence.shs` as the
+     canonical evidence wrapper for current host captures.
    - Ensure device submit/readback evidence uses preferred glyph readback wrappers after
      candidate ordering.
+   - For every relevant wrapper execution, capture `status_code` plus `reason`:
+     vector statuses include `gpu-glyph-returned`,
+     `gpu-proof-with-cpu-glyph`, `cpu-fallback`,
+     `vector-font-glyph-readback-matched`,
+     `vector-font-glyph-not-submitted`, `vector-font-glyph-return-missing`,
+     and `cuda-runtime-unavailable`; bitmap statuses include
+     `gpu-copy-with-cpu-glyph`, `cpu-glyph-baseline`,
+     `gpu-glyph-raster-readback-matched`, `gpu-glyph-raster-not-submitted`,
+     `gpu-glyph-raster-invalid-expected-checksum`, and
+     `opencl-runtime-or-queue-unavailable`.
+   - Prefer explicit unavailable status/reason rows over silent fallback for
+     missing runtimes, queues, or readback.
 3. Execute focused pure Simple GUI text/layout optimization pass
    - Target isolated hot-path opportunities in text layout, line width handling, and browser text path.
    - Keep changes small and attributable with before/after measurements.

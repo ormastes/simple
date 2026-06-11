@@ -1,0 +1,217 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/production_gui_font_offload_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_font_offload_evidence_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_SRC="$BUILD_DIR/production_gui_font_offload_evidence.spl"
+SIMPLE_OUT="$BUILD_DIR/simple.out"
+ENV_PATH="$BUILD_DIR/evidence.env"
+TIMEOUT_SECS="${PRODUCTION_GUI_FONT_EVIDENCE_TIMEOUT_SECS:-60}"
+KILL_SECS="${PRODUCTION_GUI_FONT_EVIDENCE_KILL_SECS:-5}"
+
+VECTOR_RUNTIME_READY="${VECTOR_FONT_RUNTIME_READY:-false}"
+VECTOR_MODULE_READY="${VECTOR_FONT_MODULE_READY:-false}"
+VECTOR_BACKEND_SUBMIT_OK="${VECTOR_FONT_BACKEND_SUBMIT_OK:-false}"
+VECTOR_READBACK_AVAILABLE="${VECTOR_FONT_READBACK_AVAILABLE:-false}"
+VECTOR_ACCEL_ATTEMPTS="${VECTOR_FONT_ACCEL_ATTEMPTS:-0}"
+VECTOR_CUDA_HITS="${VECTOR_FONT_CUDA_HITS:-0}"
+VECTOR_OPENCL_HITS="${VECTOR_FONT_OPENCL_HITS:-0}"
+VECTOR_CPU_FALLBACK_HITS="${VECTOR_FONT_CPU_FALLBACK_HITS:-1}"
+VECTOR_GPU_RETURNED_GLYPHS="${VECTOR_FONT_GPU_RETURNED_GLYPHS:-0}"
+VECTOR_GPU_RETURNED_GLYPH_PIXELS="${VECTOR_FONT_GPU_RETURNED_GLYPH_PIXELS:-0}"
+VECTOR_REASON="${VECTOR_FONT_REASON:-font-device-readback-unavailable}"
+
+BITMAP_RUNTIME_READY="${BITMAP_FONT_RUNTIME_READY:-false}"
+BITMAP_MODULE_READY="${BITMAP_FONT_MODULE_READY:-false}"
+BITMAP_BACKEND_SUBMIT_OK="${BITMAP_FONT_BACKEND_SUBMIT_OK:-false}"
+BITMAP_READBACK_AVAILABLE="${BITMAP_FONT_READBACK_AVAILABLE:-false}"
+
+if [ -n "${PRODUCTION_GUI_FONT_CANDIDATES_SIMPLE:-}" ]; then
+    FONT_CANDIDATES_SIMPLE="$PRODUCTION_GUI_FONT_CANDIDATES_SIMPLE"
+elif [ "$(uname -s 2>/dev/null || printf unknown)" = "Darwin" ]; then
+    FONT_CANDIDATES_SIMPLE='["metal", "cuda", "amd-hip", "opencl", "vulkan", "cpu"]'
+else
+    FONT_CANDIDATES_SIMPLE='["cuda", "amd-hip", "opencl", "vulkan", "cpu"]'
+fi
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$ENV_PATH" "$REPORT_PATH"
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "production_gui_font_offload_status=unavailable"
+        echo "production_gui_font_offload_reason=$reason"
+        echo "production_gui_font_offload_vector_status=unavailable"
+        echo "production_gui_font_offload_bitmap_status=unavailable"
+        echo "production_gui_font_offload_report=$REPORT_PATH"
+    } >"$ENV_PATH"
+    {
+        echo "# Production GUI Font Offload Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$ENV_PATH"
+}
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    emit_unavailable "missing-simple-bin"
+    exit 1
+fi
+
+run_simple_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k "$KILL_SECS" "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+cat >"$SIMPLE_SRC" <<SIMPLE_EOF
+module production_gui_font_offload_evidence
+
+use std.gpu.engine2d.vector_font_offload.{vector_font_glyph_pixels_checksum, vector_font_preferred_offload_evidence, vector_font_preferred_glyph_readback_evidence}
+use std.gpu.engine2d.bitmap_font_offload.{bitmap_font_preferred_offload_evidence, bitmap_glyph_raster_mask_checksum, bitmap_glyph_raster_preferred_mask_readback_evidence}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
+
+fn bool_text(v: bool) -> text:
+    if v:
+        return "true"
+    "false"
+
+fn overall_status(vector_ready: bool, bitmap_ready: bool, vector_status: text, bitmap_status: text) -> text:
+    if vector_ready and bitmap_ready:
+        return "pass"
+    if vector_status.contains("unavailable") or vector_status.contains("not-submitted") or bitmap_status.contains("unavailable") or bitmap_status.contains("not-submitted"):
+        return "unavailable"
+    "fail"
+
+fn main() -> i32:
+    val candidates = $FONT_CANDIDATES_SIMPLE
+    val vector_pixels = [0u8, 64u8, 255u8, 128u8]
+    val vector_checksum = vector_font_glyph_pixels_checksum(vector_pixels)
+    val vector_accel = VectorFontAcceleratorStats(
+        attempts: $VECTOR_ACCEL_ATTEMPTS,
+        cuda_hits: $VECTOR_CUDA_HITS,
+        opencl_hits: $VECTOR_OPENCL_HITS,
+        cpu_fallback_hits: $VECTOR_CPU_FALLBACK_HITS,
+        gpu_returned_glyphs: $VECTOR_GPU_RETURNED_GLYPHS,
+        gpu_returned_glyph_pixels: $VECTOR_GPU_RETURNED_GLYPH_PIXELS,
+        unavailable_reason: "$VECTOR_REASON"
+    )
+    val vector_offload = vector_font_preferred_offload_evidence(candidates, 4, 1, $VECTOR_RUNTIME_READY, $VECTOR_MODULE_READY, 4096, vector_accel)
+    val vector_readback = vector_font_preferred_glyph_readback_evidence(candidates, 4, 1, 4096, 7, 11, $VECTOR_RUNTIME_READY, $VECTOR_BACKEND_SUBMIT_OK, $VECTOR_READBACK_AVAILABLE, vector_accel, vector_pixels, vector_checksum)
+
+    val bitmap_bits = [1u32, 0u32, 1u32, 0u32]
+    val bitmap_checksum = bitmap_glyph_raster_mask_checksum(bitmap_bits, 2, 2, 0xff224466u32)
+    val bitmap_offload = bitmap_font_preferred_offload_evidence(candidates, 2, 2, $BITMAP_RUNTIME_READY, $BITMAP_MODULE_READY, 4096)
+    val bitmap_readback = bitmap_glyph_raster_preferred_mask_readback_evidence(candidates, bitmap_bits, 2, 2, 0xff224466u32, 4096, 7, 11, $BITMAP_RUNTIME_READY, $BITMAP_BACKEND_SUBMIT_OK, $BITMAP_READBACK_AVAILABLE, bitmap_checksum)
+
+    val status = overall_status(vector_readback.production_ready, bitmap_readback.production_ready, vector_readback.status_code, bitmap_readback.status_code)
+    var reason = "font-device-readback-unavailable"
+    if status == "pass":
+        reason = "vector-and-bitmap-font-readback-matched"
+    else:
+        reason = vector_readback.reason + ";" + bitmap_readback.reason
+
+    print "production_gui_font_offload_status={status}"
+    print "production_gui_font_offload_reason={reason}"
+    print "production_gui_font_offload_vector_backend={vector_offload.backend_name}"
+    print "production_gui_font_offload_vector_status={vector_offload.status_code}"
+    print "production_gui_font_offload_vector_reason={vector_offload.reason}"
+    print "production_gui_font_offload_vector_readback_status={vector_readback.status_code}"
+    print "production_gui_font_offload_vector_readback_reason={vector_readback.reason}"
+    print "production_gui_font_offload_vector_production_ready={bool_text(vector_readback.production_ready)}"
+    print "production_gui_font_offload_vector_expected_checksum={vector_readback.execution.expected_checksum}"
+    print "production_gui_font_offload_vector_actual_checksum={vector_readback.execution.actual_checksum}"
+    print "production_gui_font_offload_bitmap_backend={bitmap_offload.backend_name}"
+    print "production_gui_font_offload_bitmap_status={bitmap_offload.status_code}"
+    print "production_gui_font_offload_bitmap_reason={bitmap_offload.reason}"
+    print "production_gui_font_offload_bitmap_readback_status={bitmap_readback.status_code}"
+    print "production_gui_font_offload_bitmap_readback_reason={bitmap_readback.reason}"
+    print "production_gui_font_offload_bitmap_production_ready={bool_text(bitmap_readback.production_ready)}"
+    print "production_gui_font_offload_bitmap_expected_checksum={bitmap_readback.execution.expected_checksum}"
+    print "production_gui_font_offload_bitmap_actual_checksum={bitmap_readback.execution.actual_checksum}"
+    0
+SIMPLE_EOF
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_simple_with_timeout "$SIMPLE_BIN" run "$SIMPLE_SRC" --mode=interpreter --clean >"$SIMPLE_OUT" 2>&1
+simple_code=$?
+set -e
+
+if [ "$simple_code" -ne 0 ]; then
+    if [ "$simple_code" -eq 124 ] || [ "$simple_code" -eq 137 ] || [ "$simple_code" -eq 143 ]; then
+        emit_unavailable "simple-font-offload-evidence-timeout"
+    else
+        emit_unavailable "simple-font-offload-evidence-failed"
+    fi
+    {
+        echo
+        echo "## Simple Output"
+        sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true
+    } >>"$REPORT_PATH"
+    exit 1
+fi
+
+value_of() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$SIMPLE_OUT" | tail -n 1
+}
+
+status="$(value_of production_gui_font_offload_status)"
+reason="$(value_of production_gui_font_offload_reason)"
+vector_backend="$(value_of production_gui_font_offload_vector_backend)"
+vector_status="$(value_of production_gui_font_offload_vector_status)"
+vector_reason="$(value_of production_gui_font_offload_vector_reason)"
+vector_readback_status="$(value_of production_gui_font_offload_vector_readback_status)"
+vector_ready="$(value_of production_gui_font_offload_vector_production_ready)"
+bitmap_backend="$(value_of production_gui_font_offload_bitmap_backend)"
+bitmap_status="$(value_of production_gui_font_offload_bitmap_status)"
+bitmap_reason="$(value_of production_gui_font_offload_bitmap_reason)"
+bitmap_readback_status="$(value_of production_gui_font_offload_bitmap_readback_status)"
+bitmap_ready="$(value_of production_gui_font_offload_bitmap_production_ready)"
+
+{
+    echo "production_gui_font_offload_status=$status"
+    echo "production_gui_font_offload_reason=$reason"
+    echo "production_gui_font_offload_vector_backend=$vector_backend"
+    echo "production_gui_font_offload_vector_status=$vector_status"
+    echo "production_gui_font_offload_vector_reason=$vector_reason"
+    echo "production_gui_font_offload_vector_readback_status=$vector_readback_status"
+    echo "production_gui_font_offload_vector_production_ready=$vector_ready"
+    echo "production_gui_font_offload_vector_expected_checksum=$(value_of production_gui_font_offload_vector_expected_checksum)"
+    echo "production_gui_font_offload_vector_actual_checksum=$(value_of production_gui_font_offload_vector_actual_checksum)"
+    echo "production_gui_font_offload_bitmap_backend=$bitmap_backend"
+    echo "production_gui_font_offload_bitmap_status=$bitmap_status"
+    echo "production_gui_font_offload_bitmap_reason=$bitmap_reason"
+    echo "production_gui_font_offload_bitmap_readback_status=$bitmap_readback_status"
+    echo "production_gui_font_offload_bitmap_production_ready=$bitmap_ready"
+    echo "production_gui_font_offload_bitmap_expected_checksum=$(value_of production_gui_font_offload_bitmap_expected_checksum)"
+    echo "production_gui_font_offload_bitmap_actual_checksum=$(value_of production_gui_font_offload_bitmap_actual_checksum)"
+    echo "production_gui_font_offload_report=$REPORT_PATH"
+} >"$ENV_PATH"
+
+{
+    echo "# Production GUI Font Offload Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- vector backend: $vector_backend"
+    echo "- vector offload status: $vector_status"
+    echo "- vector offload reason: $vector_reason"
+    echo "- vector readback status: $vector_readback_status"
+    echo "- vector production ready: $vector_ready"
+    echo "- bitmap backend: $bitmap_backend"
+    echo "- bitmap offload status: $bitmap_status"
+    echo "- bitmap offload reason: $bitmap_reason"
+    echo "- bitmap readback status: $bitmap_readback_status"
+    echo "- bitmap production ready: $bitmap_ready"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"

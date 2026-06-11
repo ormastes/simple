@@ -58,7 +58,7 @@ node tools/pixel_compare/diff_ppm.js reference.ppm test.ppm diff_output.ppm
 - **STRUCTURAL**: `large_delta(>30) > small_delta(<=30)` — fundamental layout or color differences
 - **FRINGE**: small deltas dominate — anti-aliasing edge differences
 
-## Current Status (2026-06-05)
+## Current Status (2026-06-11)
 
 The canonical production GUI renderer parity gate is:
 
@@ -87,6 +87,19 @@ rows.
 The canonical production wrapper promotes the same values under
 `production_gui_web_renderer_parity_backend_*`, so archived full-wrapper reports
 can be compared without opening the nested backend evidence file.
+
+The canonical production GUI font offload/readback evidence gate is:
+
+```bash
+sh scripts/check/check-production-gui-font-offload-evidence.shs
+```
+
+It exercises the preferred vector and bitmap font offload/readback wrappers
+together and emits `production_gui_font_offload_*` env rows plus a Markdown
+report. Missing hardware, runtime, queue, submit, or readback capability must
+remain explicit: examples include `cuda-runtime-unavailable`,
+`opencl-runtime-or-queue-unavailable`, `vector-font-glyph-not-submitted`,
+`vector-font-glyph-return-missing`, and `gpu-glyph-raster-not-submitted`.
 
 The generated-GUI matrix intentionally records
 `text_normalization_pixels=269` for the fixture-specific text antialiasing
