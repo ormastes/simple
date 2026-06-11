@@ -77,6 +77,9 @@ Prove and harden the requested GUI stack:
   - `tools/chrome-live-bitmap/capture_html_argb.js` captures real Chrome ARGB
     screenshots and now exports matching `chrome-headless-geometry` DOM
     geometry when `CHROME_CAPTURE_GEOMETRY_OUTPUT` is set.
+  - `scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs` records
+    the Chrome geometry artifact beside the ARGB proof and fails closed if a
+    successful Chrome capture does not write it.
   - `test/03_system/gui/wm_compare/famous_site_corpus_spec.spl` validates
     stored Chrome metrics for corpus fixtures, including text rect/line data.
 - Live sanity evidence (2026-06-11): Chrome headless geometry capture for
