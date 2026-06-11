@@ -145,8 +145,8 @@ Acceptance evidence:
 
 - cooperative green unit/system specs pass;
 - cross-language report keeps cooperative rows separate from M:N rows;
-- blocker docs record the closed SMF/native runtime fixes and keep the current
-  SSpec runner mismatch current.
+- blocker docs record the closed SMF/native runtime fixes and keep the
+  green/cooperative SSpec runner mismatch regression-covered.
 
 ## Multicore Green Runtime-Pool Agent
 
@@ -194,8 +194,9 @@ Primary paths:
 Deliverables:
 
 - hosted SimpleOS cooperative/multicore/channel-wake contracts;
-- hosted SimpleOS cooperative/multicore specs are trusted again once the
-  green/cooperative SSpec runner mismatch is closed;
+- hosted SimpleOS cooperative/multicore specs are trusted current evidence
+  again because the green/cooperative SSpec runner mismatch is closed and
+  regression-covered;
 - live QEMU proof for AP startup plus scheduler-visible CPU1 green dispatch;
 - final hardware context-switch handoff kept separate from scheduler-state
   proof and backed by the `HW_HANDOFF_PASS`, `USER_ENTRY_PASS`, and
@@ -205,7 +206,7 @@ Acceptance evidence:
 
 - hosted SimpleOS green specs pass in interpreter mode after the
   `doc/08_tracking/bug/green_thread_spec_runner_mismatch_2026-06-11.md`
-  blocker is closed;
+  blocker is closed and regression coverage is in place;
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`
 - `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`
   proves the final AP ring/user handoff marker triplet.

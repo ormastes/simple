@@ -39,9 +39,9 @@
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl` verifies hosted SimpleOS multicore-green contracts across SMP IPI, carrier dispatch, scheduler-owned green execution state, and topology growth.
 - `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl` verifies hosted SimpleOS green-channel wake integration from pure channel send-unpark output through carrier enqueue, dispatch, and scheduler-owned execution-state update.
 - 2026-06-11 follow-up: the earlier interpreter-mode runner mismatch for
-  minimal green/cooperative assertions is closed. The fix is tracked in
-  `doc/08_tracking/bug/green_thread_spec_runner_mismatch_2026-06-11.md`, and
-  hosted SimpleOS cooperative/multicore feature specs are current green
+  minimal green/cooperative assertions is now closed and regression-covered.
+  The fix is tracked in `doc/08_tracking/bug/green_thread_spec_runner_mismatch_2026-06-11.md`,
+  and hosted SimpleOS cooperative/multicore feature specs are current green
   evidence again.
 - `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` verifies the opt-in live SimpleOS/QEMU lane. The forced run on 2026-06-06 used `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 --clean`, built the x86_64 guest probe, observed `[smp] AP reached 64-bit entry`, and observed `[green-carrier-qemu] PASS=true` after CPU1 fixed-slot green dispatch.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl` verifies fanout/fanin checksum parity between Simple OS threads, cooperative green, and multicore green while keeping runtime-pool evidence separate from inline fallback.

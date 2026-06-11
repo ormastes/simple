@@ -23,7 +23,7 @@
 - `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl` checks SimpleOS-lane cooperative green semantics: logical work queues on the current carrier, `run_all` drains queued work, and direct value scheduling remains available for profile fanout rows.
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl` checks hosted SimpleOS multicore-green contracts: remote enqueue records a reschedule IPI, green dispatch applies to scheduler-owned multicore execution state, topology growth extends green execution slots, named runtime/timer/compiler preemption safepoint adapters route through active green carriers, and invalid preemption sources are rejected without ticking carriers.
 - `test/03_system/feature/usage/cooperative_green_spec_runner_mismatch_spec.spl`
-  now keeps regression coverage on the earlier interpreter-mode runner
+  keeps regression coverage on the now-closed interpreter-mode runner
   mismatch: the same minimal green-thread queue logic must pass under both
   `simple run` and `simple test`, and hosted SimpleOS cooperative/multicore
   specs are current green-lane evidence again.
