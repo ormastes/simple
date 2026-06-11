@@ -11,6 +11,7 @@ use compiler.core.parser_decls.{parse_module_body}
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
 use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
+use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
 use compiler.core.ast.{decl_is_packed}
@@ -520,7 +521,7 @@ fn convert_decl_fn(idx: i64) -> Function:
     val inferred_ret = Type(kind: TypeKind.Infer, span: span)
     val body_block = Block(stmts: stmts, span: span)
     var fn_attributes: [Attribute] = []
-    if decl_is_gpu_kernel[idx] != 0:
+    if decl_get_is_gpu_kernel(idx) != 0:
         var gpu_args: [Expr] = []
         val gpu_target = decl_get_gpu_target_text(idx)
         val gpu_target_arg_name = decl_get_gpu_target_arg_name_text(idx)
@@ -551,7 +552,7 @@ fn convert_decl_fn(idx: i64) -> Function:
         false,
         false,
         decl_get_is_comptime(idx),
-        decl_is_gpu_kernel[idx] != 0,
+        decl_get_is_gpu_kernel(idx) != 0,
         false,
         fn_attributes,
         false,
@@ -563,36 +564,38 @@ fn convert_decl_fn(idx: i64) -> Function:
     converted
 
 fn convert_decl_method_fn(idx: i64, target_name: text) -> Function:
+    # NOTE: must use field access, not a positional `case Function(...)`
+    # destructure — wide positional class matches silently fail to match in
+    # the interpreter and SIGSEGV in cranelift-compiled binaries (see
+    # doc/08_tracking/bug/positional_class_match_wide_destructure_2026-06-11.md).
     val base: Function = convert_decl_fn(idx)
-    val method_mode = decl_is_async[idx]
-    match base:
-        case Function(base_name, base_type_params, base_params, base_has_return_type, base_return_type, base_body, base_visibility, _, _, base_is_public, _, _, base_is_const, base_is_kernel, base_is_extern, base_attributes, base_has_doc_comment, base_doc_comment, base_span):
-            val prefix = target_name + "__"
-            val method_name = if base_name.starts_with(prefix):
-                base_name.substring(prefix.len(), base_name.len())
-            else:
-                base_name
-            parser_function_new(
-                method_name,
-                base_type_params,
-                base_params,
-                base_has_return_type,
-                base_return_type,
-                base_body,
-                base_visibility,
-                false,
-                method_mode == 1,
-                base_is_public,
-                method_mode != 1,
-                method_mode == 2,
-                base_is_const,
-                base_is_kernel,
-                base_is_extern,
-                base_attributes,
-                base_has_doc_comment,
-                base_doc_comment,
-                base_span
-            )
+    val method_mode = decl_get_is_async(idx)
+    val prefix = target_name + "__"
+    val method_name = if base.name.starts_with(prefix):
+        base.name.substring(prefix.len(), base.name.len())
+    else:
+        base.name
+    parser_function_new(
+        method_name,
+        base.type_params,
+        base.params,
+        base.has_return_type,
+        base.return_type,
+        base.body,
+        base.visibility,
+        false,
+        method_mode == 1,
+        base.is_public,
+        method_mode != 1,
+        method_mode == 2,
+        base.is_const,
+        base.is_kernel,
+        base.is_extern,
+        base.attributes,
+        base.has_doc_comment,
+        base.doc_comment,
+        base.span
+    )
 
 fn convert_decl_extern_fn(idx: i64) -> Function:
     val name = decl_get_name(idx)
