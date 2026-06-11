@@ -203,9 +203,9 @@ Verifies the modern Simple Web window-manager shell at the contract level. The s
 #### generates rounded translucent WM chrome and motion CSS
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 903 lines folded for reproduction.
+Runnable source: 908 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -898,6 +898,11 @@ expect(html).to_contain("@keyframes wm-control-action-feedback")
 expect(html).to_contain("prefers-reduced-motion")
 expect(html).to_contain("data-wm-motion=reduced")
 expect(html).to_contain("data-wm-motion=off")
+expect(html).to_contain("@media (prefers-reduced-motion: reduce) { :root, :root[data-wm-motion=standard], :root[data-wm-motion=reduced], :root[data-wm-motion=off]")
+expect(html).to_contain(":root[data-wm-backdrop-motion=ambient]")
+expect(html).to_contain("--ui-wallpaper-motion-ms: 0")
+expect(html).to_contain("--ui-backdrop-duration-ms: 0")
+expect(html).to_contain("--ui-wallpaper-state: wallpaper_static")
 expect(html).to_contain(":root[data-wm-motion=reduced] { --ui-motion-open-ms: 120")
 expect(html).to_contain(":root[data-wm-motion=off] { --ui-motion-open-ms: 0")
 expect(html).to_contain("transition-duration: 80ms")
@@ -1119,9 +1124,9 @@ expect(html).to_contain("@keyframes wm-hot-corner-activate")
 #### client applies lifecycle and icon classes without protocol changes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 1640 lines folded for reproduction.
+Runnable source: 1641 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2762,6 +2767,7 @@ expect(retained).to_contain("'wm-resize-handle wm-resize-'")
 expect(retained).to_contain("handle.dataset.direction = direction")
 expect(retained).to_contain("closing")
 expect(retained).to_contain("minimizing")
+expect(retained).to_contain("title.textContent = surface.title || surface.surface_id")
 expect(retained).to_contain("Close window")
 expect(retained).to_contain("Minimize window")
 expect(retained).to_contain("Maximize window")
@@ -2772,7 +2778,7 @@ expect(retained).to_contain("Maximize window")
 #### generates a standalone modern WM visual preview fixture
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 1510 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -4294,15 +4300,18 @@ expect(preview).to_contain("contrast_ratio_x100=450")
 
 #### writes a browser-loadable modern WM preview evidence artifact
 
-<details>
-<summary>Executable SPipe</summary>
+- assert true
 
-Runnable source: 119 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 125 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val path = "build/simple_wm_modern_preview.html"
-expect(write_wm_modern_preview_html(path, "glass_dark"))
+assert_true(write_wm_modern_preview_html(path, "glass_dark"))
 val written = rt_file_read_text(path)
 expect(written).to_contain("<!DOCTYPE html>")
 expect(written).to_contain("Simple WM Modern Preview")
@@ -4334,8 +4343,9 @@ expect(report).to_contain("overflow_policy=fail-on-text-clipping")
 expect(report).to_contain("computed_style_required=true")
 expect(report).to_contain("reduced_motion_required=true")
 expect(report).to_contain("reduced_transparency_required=true")
-expect(report).to_contain("media_features=prefers-contrast=more")
+expect(report).to_contain("media_features=prefers-contrast=more,prefers-reduced-motion=reduce")
 expect(report).to_contain("os_contrast_required=true")
+expect(report).to_contain("os_reduced_motion_required=true")
 val browser_audit = wm_modern_preview_browser_audit_command(path, "build/simple_wm_modern_preview_argb.json", 1360, 840)
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_HTML=\"build/simple_wm_modern_preview.html\"")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_WIDTH=1360")
@@ -4345,7 +4355,7 @@ expect(browser_audit).to_contain("ELECTRON_CAPTURE_AUDIT_SELECTORS=\"#wm-desktop
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_AUDIT_OUTPUT=\"build/simple_wm_modern_preview_audit.json\"")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_CONTRAST_MIN_X100=450")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_TOUCH_MIN_PX=44")
-expect(browser_audit).to_contain("ELECTRON_CAPTURE_MEDIA_FEATURES=\"prefers-contrast=more\"")
+expect(browser_audit).to_contain("ELECTRON_CAPTURE_MEDIA_FEATURES=\"prefers-contrast=more,prefers-reduced-motion=reduce\"")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_FAIL_ON_AUDIT=1")
 expect(browser_audit).to_contain("ELECTRON_CAPTURE_SETTLE_MS=1500")
 expect(browser_audit).to_contain("xvfb-run --auto-servernum")
@@ -4374,6 +4384,11 @@ expect(capture_js).to_contain("touchFailures")
 expect(capture_js).to_contain("mediaPreferenceResults")
 expect(capture_js).to_contain("rootQualityTokens")
 expect(capture_js).to_contain("contrastPolicy")
+expect(capture_js).to_contain("motionOpenMs")
+expect(capture_js).to_contain("wallpaperMotionMs")
+expect(capture_js).to_contain("wallpaperState")
+expect(capture_js).to_contain("lifecycle-motion")
+expect(capture_js).to_contain("backdrop-motion")
 expect(capture_js).to_contain("os-high")
 expect(capture_js).to_contain("mediaPreferenceFailures")
 expect(capture_js).to_contain("overlapPairs")
@@ -4426,34 +4441,171 @@ expect(wm_js).to_contain("dataset.browserAuditReasons")
 
 #### reports theme quality for color size layout motion and shell affordances
 
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+   - Expected: report.titlebar_height_px equals `46`
+   - Expected: report.window_min_width_px equals `200`
+   - Expected: report.window_min_height_px equals `120`
+   - Expected: report.title_input_min_width_px equals `140`
+   - Expected: report.taskbar_icon_size_px equals `26`
+- assert true
+   - Expected: report.system_hud_max_width_px equals `280`
+   - Expected: report.privacy_indicator_max_width_px equals `300`
+   - Expected: report.workspace_switcher_max_width_px equals `420`
+   - Expected: report.clipboard_history_max_width_px equals `360`
+   - Expected: report.screen_capture_max_width_px equals `560`
+   - Expected: report.quick_settings_max_width_px equals `300`
+   - Expected: report.notification_center_max_width_px equals `340`
+   - Expected: report.live_activity_max_width_px equals `420`
+   - Expected: report.hot_corner_max_size_px equals `44`
+   - Expected: report.resize_hud_max_width_px equals `240`
+   - Expected: report.gesture_hints_max_width_px equals `360`
+   - Expected: report.command_palette_max_width_px equals `680`
+   - Expected: report.quality_inspector_max_width_px equals `420`
+   - Expected: report.control_center_max_width_px equals `320`
+   - Expected: report.desktop_widget_max_width_px equals `260`
+   - Expected: report.app_launcher_max_width_px equals `520`
+   - Expected: report.wallpaper_picker_max_width_px equals `380`
+   - Expected: report.accent_palette_max_width_px equals `360`
+   - Expected: report.dock_stack_max_width_px equals `340`
+   - Expected: report.stage_rail_max_width_px equals `88`
+   - Expected: report.window_switcher_max_width_px equals `460`
+   - Expected: report.top_menu_bar_height_px equals `38`
+   - Expected: report.overview_card_min_width_px equals `180`
+   - Expected: report.touch_target_min_height_px equals `44`
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 259 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val report = wm_theme_quality_report("glass_dark")
-expect(report.passed)
-expect(report.color_checked)
-expect(report.contrast_preference_media_ready)
+assert_true(report.passed)
+assert_true(report.color_checked)
+assert_true(report.contrast_preference_media_ready)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
 expect(report.contrast_ratio_x100).to_be_greater_than(1700)
 expect(report.contrast_ratio_x100).to_be_less_than(1900)
 expect(report.contrast_delta).to_be_greater_than(96)
-expect(report.semantic_tokens)
+assert_true(report.semantic_tokens)
 val html_source = rt_file_read_text("src/app/ui.web/html.spl")
 expect(html_source).to_contain("fn build_modern_theme_css")
 expect(html_source).to_contain("fn _wm_css")
 expect(html_source).to_contain("build_modern_theme_css(theme)")
-expect(report.stable_layout)
-expect(report.size_layout_configured)
+assert_true(report.stable_layout)
+assert_true(report.size_layout_configured)
 expect(report.titlebar_height_px).to_equal(46)
 expect(report.window_min_width_px).to_equal(200)
 expect(report.window_min_height_px).to_equal(120)
 expect(report.title_input_min_width_px).to_equal(140)
 expect(report.taskbar_icon_size_px).to_equal(26)
-expect(report.taskbar_attention_ready)
+assert_true(report.taskbar_attention_ready)
 expect(report.system_hud_max_width_px).to_equal(280)
 expect(report.privacy_indicator_max_width_px).to_equal(300)
 expect(report.workspace_switcher_max_width_px).to_equal(420)
@@ -4478,105 +4630,105 @@ expect(report.window_switcher_max_width_px).to_equal(460)
 expect(report.top_menu_bar_height_px).to_equal(38)
 expect(report.overview_card_min_width_px).to_equal(180)
 expect(report.touch_target_min_height_px).to_equal(44)
-expect(report.rounded_shapes)
-expect(report.round_icon_masking)
-expect(report.round_icon_converter)
-expect(report.round_scrollbars)
-expect(report.translucent_shell)
-expect(report.lifecycle_motion)
-expect(report.lifecycle_motion_profile_ready)
-expect(report.widget_motion)
-expect(report.reduced_motion)
-expect(report.motion_verbosity_control)
-expect(report.preview_fixture_ready)
-expect(report.command_context_ready)
-expect(report.command_palette_ready)
-expect(report.command_palette_grouping_ready)
-expect(report.context_menu_actions_ready)
-expect(report.context_menu_keyboard_ready)
-expect(report.context_menu_workspace_targets_ready)
-expect(report.context_menu_visuals_ready)
-expect(report.quality_inspector_ready)
-expect(report.quality_inspector_summary_ready)
-expect(report.quality_inspector_details_ready)
-expect(report.quality_inspector_policy_ready)
-expect(report.quality_inspector_actions_ready)
-expect(report.quality_inspector_evidence_ready)
-expect(report.quality_inspector_filters_ready)
-expect(report.quality_inspector_check_detail_ready)
-expect(report.quality_inspector_audit_mode_ready)
-expect(report.quality_inspector_guidance_ready)
-expect(report.quality_inspector_fix_action_ready)
-expect(report.quality_inspector_motion_preview_ready)
-expect(report.quality_inspector_motion_samples_ready)
-expect(report.quality_inspector_motion_policy_ready)
-expect(report.quality_inspector_animation_preview_ready)
-expect(report.quality_inspector_widget_preview_ready)
-expect(report.quality_inspector_material_preview_ready)
-expect(report.quality_inspector_surface_preview_ready)
-expect(report.quality_inspector_color_preview_ready)
-expect(report.quality_inspector_layout_preview_ready)
-expect(report.quality_inspector_titlebar_preview_ready)
-expect(report.quality_inspector_icon_preview_ready)
-expect(report.quality_inspector_typography_preview_ready)
-expect(report.quality_inspector_depth_preview_ready)
-expect(report.quality_inspector_interaction_preview_ready)
-expect(report.quality_inspector_state_preview_ready)
-expect(report.quality_inspector_verbosity_preview_ready)
-expect(report.quality_inspector_performance_preview_ready)
-expect(report.quality_inspector_spatial_preview_ready)
-expect(report.quality_inspector_dock_preview_ready)
-expect(report.quality_inspector_responsive_preview_ready)
-expect(report.quality_inspector_accessibility_preview_ready)
-expect(report.title_input_ready)
-expect(report.title_command_modes_ready)
-expect(report.visual_layering_ready)
-expect(report.accessible_controls_ready)
-expect(report.snap_assist_ready)
-expect(report.drag_snap_feedback_ready)
-expect(report.snap_layout_palette_ready)
-expect(report.window_arrange_ready)
-expect(report.desktop_peek_ready)
-expect(report.system_hud_ready)
-expect(report.taskbar_preview_actions_ready)
-expect(report.privacy_indicator_ready)
-expect(report.workspace_switcher_ready)
-expect(report.workspace_switcher_actions_ready)
-expect(report.clipboard_history_ready)
-expect(report.clipboard_history_search_ready)
-expect(report.screen_capture_ready)
-expect(report.quick_settings_ready)
-expect(report.quick_settings_levels_ready)
-expect(report.notification_center_ready)
-expect(report.notification_center_actions_ready)
-expect(report.notification_center_filters_ready)
-expect(report.focus_mode_ready)
-expect(report.live_activity_ready)
-expect(report.live_activity_controls_ready)
-expect(report.hot_corners_ready)
-expect(report.resize_hud_ready)
-expect(report.gesture_hints_ready)
-expect(report.desktop_widgets_ready)
-expect(report.desktop_widget_controls_ready)
-expect(report.desktop_items_ready)
-expect(report.top_menu_bar_ready)
-expect(report.wallpaper_picker_ready)
-expect(report.accent_palette_ready)
-expect(report.dock_stack_ready)
-expect(report.app_launcher_ready)
-expect(report.app_launcher_categories_ready)
-expect(report.shortcut_overlay_ready)
-expect(report.shortcut_overlay_search_ready)
-expect(report.wm_tooltips_ready)
-expect(report.widget_gallery_ready)
-expect(report.stage_rail_ready)
-expect(report.stage_rail_actions_ready)
-expect(report.window_switcher_ready)
-expect(report.window_overview_ready)
-expect(report.window_overview_search_ready)
-expect(report.control_center_ready)
-expect(report.control_center_personalization_ready)
-expect(report.responsive_layout_ready)
+assert_true(report.rounded_shapes)
+assert_true(report.round_icon_masking)
+assert_true(report.round_icon_converter)
+assert_true(report.round_scrollbars)
+assert_true(report.translucent_shell)
+assert_true(report.lifecycle_motion)
+assert_true(report.lifecycle_motion_profile_ready)
+assert_true(report.widget_motion)
+assert_true(report.reduced_motion)
+assert_true(report.motion_verbosity_control)
+assert_true(report.preview_fixture_ready)
+assert_true(report.command_context_ready)
+assert_true(report.command_palette_ready)
+assert_true(report.command_palette_grouping_ready)
+assert_true(report.context_menu_actions_ready)
+assert_true(report.context_menu_keyboard_ready)
+assert_true(report.context_menu_workspace_targets_ready)
+assert_true(report.context_menu_visuals_ready)
+assert_true(report.quality_inspector_ready)
+assert_true(report.quality_inspector_summary_ready)
+assert_true(report.quality_inspector_details_ready)
+assert_true(report.quality_inspector_policy_ready)
+assert_true(report.quality_inspector_actions_ready)
+assert_true(report.quality_inspector_evidence_ready)
+assert_true(report.quality_inspector_filters_ready)
+assert_true(report.quality_inspector_check_detail_ready)
+assert_true(report.quality_inspector_audit_mode_ready)
+assert_true(report.quality_inspector_guidance_ready)
+assert_true(report.quality_inspector_fix_action_ready)
+assert_true(report.quality_inspector_motion_preview_ready)
+assert_true(report.quality_inspector_motion_samples_ready)
+assert_true(report.quality_inspector_motion_policy_ready)
+assert_true(report.quality_inspector_animation_preview_ready)
+assert_true(report.quality_inspector_widget_preview_ready)
+assert_true(report.quality_inspector_material_preview_ready)
+assert_true(report.quality_inspector_surface_preview_ready)
+assert_true(report.quality_inspector_color_preview_ready)
+assert_true(report.quality_inspector_layout_preview_ready)
+assert_true(report.quality_inspector_titlebar_preview_ready)
+assert_true(report.quality_inspector_icon_preview_ready)
+assert_true(report.quality_inspector_typography_preview_ready)
+assert_true(report.quality_inspector_depth_preview_ready)
+assert_true(report.quality_inspector_interaction_preview_ready)
+assert_true(report.quality_inspector_state_preview_ready)
+assert_true(report.quality_inspector_verbosity_preview_ready)
+assert_true(report.quality_inspector_performance_preview_ready)
+assert_true(report.quality_inspector_spatial_preview_ready)
+assert_true(report.quality_inspector_dock_preview_ready)
+assert_true(report.quality_inspector_responsive_preview_ready)
+assert_true(report.quality_inspector_accessibility_preview_ready)
+assert_true(report.title_input_ready)
+assert_true(report.title_command_modes_ready)
+assert_true(report.visual_layering_ready)
+assert_true(report.accessible_controls_ready)
+assert_true(report.snap_assist_ready)
+assert_true(report.drag_snap_feedback_ready)
+assert_true(report.snap_layout_palette_ready)
+assert_true(report.window_arrange_ready)
+assert_true(report.desktop_peek_ready)
+assert_true(report.system_hud_ready)
+assert_true(report.taskbar_preview_actions_ready)
+assert_true(report.privacy_indicator_ready)
+assert_true(report.workspace_switcher_ready)
+assert_true(report.workspace_switcher_actions_ready)
+assert_true(report.clipboard_history_ready)
+assert_true(report.clipboard_history_search_ready)
+assert_true(report.screen_capture_ready)
+assert_true(report.quick_settings_ready)
+assert_true(report.quick_settings_levels_ready)
+assert_true(report.notification_center_ready)
+assert_true(report.notification_center_actions_ready)
+assert_true(report.notification_center_filters_ready)
+assert_true(report.focus_mode_ready)
+assert_true(report.live_activity_ready)
+assert_true(report.live_activity_controls_ready)
+assert_true(report.hot_corners_ready)
+assert_true(report.resize_hud_ready)
+assert_true(report.gesture_hints_ready)
+assert_true(report.desktop_widgets_ready)
+assert_true(report.desktop_widget_controls_ready)
+assert_true(report.desktop_items_ready)
+assert_true(report.top_menu_bar_ready)
+assert_true(report.wallpaper_picker_ready)
+assert_true(report.accent_palette_ready)
+assert_true(report.dock_stack_ready)
+assert_true(report.app_launcher_ready)
+assert_true(report.app_launcher_categories_ready)
+assert_true(report.shortcut_overlay_ready)
+assert_true(report.shortcut_overlay_search_ready)
+assert_true(report.wm_tooltips_ready)
+assert_true(report.widget_gallery_ready)
+assert_true(report.stage_rail_ready)
+assert_true(report.stage_rail_actions_ready)
+assert_true(report.window_switcher_ready)
+assert_true(report.window_overview_ready)
+assert_true(report.window_overview_search_ready)
+assert_true(report.control_center_ready)
+assert_true(report.control_center_personalization_ready)
+assert_true(report.responsive_layout_ready)
 expect(wm_theme_quality_summary("glass_dark")).to_contain("status=pass")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("lifecycle_motion=true")
 expect(wm_theme_quality_summary("glass_dark")).to_contain("lifecycle_motion_profile_ready=true")
