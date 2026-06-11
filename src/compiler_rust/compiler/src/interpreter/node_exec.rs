@@ -737,27 +737,62 @@ fn exec_assignment(
                 }
                 Ok(Control::Next)
             } else {
-                // Collect all known names for typo suggestion
-                let known_names: Vec<&str> = env
-                    .keys()
-                    .map(|s| s.as_str())
-                    .chain(functions.keys().map(|s| s.as_str()))
-                    .chain(classes.keys().map(|s| s.as_str()))
-                    .collect();
-                // E1001 - Undefined Variable
-                let suggestion = crate::error::typo::suggest_name(obj_name, known_names.clone());
-                let mut ctx = ErrorContext::new()
-                    .with_code(codes::UNDEFINED_VARIABLE)
-                    .with_help("check that the variable is defined and in scope");
+                let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
+                if let Some(obj_val) = global_obj {
+                    match obj_val {
+                        Value::Object { class, mut fields } => {
+                            {
+                                let bf_check = Value::Object {
+                                    class: class.clone(),
+                                    fields: Arc::clone(&fields),
+                                };
+                                if let Some(updated) = super::update_bitfield_field(&bf_check, field, value.clone()) {
+                                    MODULE_GLOBALS.with(|cell| {
+                                        cell.borrow_mut().insert(obj_name.clone(), updated);
+                                    });
+                                    return Ok(Control::Next);
+                                }
+                            }
+                            Arc::make_mut(&mut fields).insert(field.clone(), value);
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut()
+                                    .insert(obj_name.clone(), Value::Object { class, fields });
+                            });
+                            Ok(Control::Next)
+                        }
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_ASSIGNMENT)
+                                .with_help("field assignment requires an object with mutable access");
+                            Err(CompileError::semantic_with_context(
+                                "invalid assignment: cannot assign field on non-object value",
+                                ctx,
+                            ))
+                        }
+                    }
+                } else {
+                    // Collect all known names for typo suggestion
+                    let known_names: Vec<&str> = env
+                        .keys()
+                        .map(|s| s.as_str())
+                        .chain(functions.keys().map(|s| s.as_str()))
+                        .chain(classes.keys().map(|s| s.as_str()))
+                        .collect();
+                    // E1001 - Undefined Variable
+                    let suggestion = crate::error::typo::suggest_name(obj_name, known_names.clone());
+                    let mut ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("check that the variable is defined and in scope");
 
-                if let Some(best_match) = suggestion {
-                    ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+                    if let Some(best_match) = suggestion {
+                        ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+                    }
+
+                    Err(CompileError::semantic_with_context(
+                        format!("variable `{}` not found", obj_name),
+                        ctx,
+                    ))
                 }
-
-                Err(CompileError::semantic_with_context(
-                    format!("variable `{}` not found", obj_name),
-                    ctx,
-                ))
             }
         }
         // Case 2: Nested field access: obj.inner.field = value
@@ -1582,14 +1617,59 @@ pub(crate) fn exec_augmented_assignment(
                     }
                 }
             } else {
-                // E1001 - Undefined Variable
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNDEFINED_VARIABLE)
-                    .with_help("check that the variable is defined and in scope");
-                Err(CompileError::semantic_with_context(
-                    format!("variable `{}` not found", obj_name),
-                    ctx,
-                ))
+                let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
+                if let Some(obj_val) = global_obj {
+                    match obj_val {
+                        Value::Object { class, mut fields } => {
+                            let new_value = if let Some(op) = bin_op {
+                                let current = fields
+                                    .get(field)
+                                    .cloned()
+                                    .ok_or_else(|| crate::error::factory::undefined_field(field))?;
+                                let temp_lhs = "__lhs_temp__".to_string();
+                                let temp_rhs = "__rhs_temp__".to_string();
+                                env.insert(temp_lhs.clone(), current);
+                                env.insert(temp_rhs.clone(), rhs_value);
+                                let binary_expr = Expr::Binary {
+                                    op,
+                                    left: Box::new(Expr::Identifier(temp_lhs.clone())),
+                                    right: Box::new(Expr::Identifier(temp_rhs.clone())),
+                                };
+                                let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                                env.remove(&temp_lhs);
+                                env.remove(&temp_rhs);
+                                result
+                            } else {
+                                rhs_value
+                            };
+
+                            Arc::make_mut(&mut fields).insert(field.clone(), new_value);
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut()
+                                    .insert(obj_name.clone(), Value::Object { class, fields });
+                            });
+                            Ok(Control::Next)
+                        }
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_ASSIGNMENT)
+                                .with_help("augmented assignment on fields requires an object value");
+                            Err(CompileError::semantic_with_context(
+                                "invalid assignment: cannot use augmented assignment on non-object value",
+                                ctx,
+                            ))
+                        }
+                    }
+                } else {
+                    // E1001 - Undefined Variable
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("check that the variable is defined and in scope");
+                    Err(CompileError::semantic_with_context(
+                        format!("variable `{}` not found", obj_name),
+                        ctx,
+                    ))
+                }
             }
         }
         // Case 2: Nested field access: obj.inner.field += value

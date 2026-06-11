@@ -267,6 +267,28 @@ pub(super) fn exec_block_closure(
                             let mut fields = fields;
                             Arc::make_mut(&mut fields).insert(field.clone(), val);
                             local_env.insert(obj_name.clone(), Value::Object { class, fields });
+                        } else if let Some(Value::Object { class, fields }) =
+                            MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned())
+                        {
+                            let object = Value::Object {
+                                class: class.clone(),
+                                fields: fields.clone(),
+                            };
+                            if let Some(updated) =
+                                crate::interpreter::update_bitfield_field(&object, field, val.clone())
+                            {
+                                MODULE_GLOBALS.with(|cell| {
+                                    cell.borrow_mut().insert(obj_name.clone(), updated);
+                                });
+                                last_value = Value::Nil;
+                                continue;
+                            }
+                            let mut fields = fields;
+                            Arc::make_mut(&mut fields).insert(field.clone(), val);
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut()
+                                    .insert(obj_name.clone(), Value::Object { class, fields });
+                            });
                         }
                     }
                 } else if let simple_parser::ast::Expr::Index { receiver, index } = &assign_stmt.target {
@@ -1036,6 +1058,28 @@ fn exec_block_closure_mut(
                             let mut fields = fields;
                             Arc::make_mut(&mut fields).insert(field.clone(), val);
                             local_env.insert(obj_name.clone(), Value::Object { class, fields });
+                        } else if let Some(Value::Object { class, fields }) =
+                            MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned())
+                        {
+                            let object = Value::Object {
+                                class: class.clone(),
+                                fields: fields.clone(),
+                            };
+                            if let Some(updated) =
+                                crate::interpreter::update_bitfield_field(&object, field, val.clone())
+                            {
+                                MODULE_GLOBALS.with(|cell| {
+                                    cell.borrow_mut().insert(obj_name.clone(), updated);
+                                });
+                                last_value = Value::Nil;
+                                continue;
+                            }
+                            let mut fields = fields;
+                            Arc::make_mut(&mut fields).insert(field.clone(), val);
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut()
+                                    .insert(obj_name.clone(), Value::Object { class, fields });
+                            });
                         }
                     }
                 } else if let simple_parser::ast::Expr::Index { receiver, index } = &assign_stmt.target {
