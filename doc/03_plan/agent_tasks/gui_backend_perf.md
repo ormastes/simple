@@ -80,6 +80,11 @@ Updated: 2026-06-11
   scaled glyph pixel. Scaled glyphs still render solid, preserving the prior
   visual semantics while removing per-pixel function dispatch from GUI text
   startup rendering.
+- this commit -- flex stretch style-copy optimization: `styles_with_height`
+  now preallocates the output style array and assigns by index instead of
+  rebuilding it through repeated single-element appends. This removes a
+  quadratic copy pattern from flex stretch layout while preserving the returned
+  style values.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
