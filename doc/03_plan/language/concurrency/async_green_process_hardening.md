@@ -141,16 +141,30 @@ All waves executed and verified. Final E-PAR-006 validation (deployed seed binar
 
 ## Follow-up: port E-PAR-001..005 to pure-Simple lint
 
-E-PAR-006 is now implemented in pure Simple (`src/compiler/35.semantics/lint/concurrency_share_nothing.spl`).
-The remaining E-PAR rules (001–005) covering concurrency API misuse (wrong arity, wrong argument
-kind, wrong surface, etc.) still live only in the Rust seed (`src/compiler_rust/driver/src/cli/check.rs`).
-Each rule should be ported as a separate lint file under `src/compiler/35.semantics/lint/`, following
-the same text-heuristic + AST-walker pattern used for E-PAR-006, and registered in `__init__.spl`.
+DONE (2026-06-11): E-PAR-001..005 ported to
+`src/compiler/35.semantics/lint/concurrency_api_misuse.spl` and registered in
+`src/compiler/35.semantics/lint/__init__.spl`.  Unit spec:
+`test/01_unit/compiler/semantics/lint/concurrency_api_misuse_lint_spec.spl`
+(text-heuristic mirror, same convention as concurrency_share_nothing_spec.spl).
 
-Note (review): `check_concurrency_share_nothing` is exported from the lint hub but
-not yet invoked by a lint runner — same status as `check_closure_capture`. The
-unit spec follows the existing lint-spec convention (self-contained text-heuristic
-mirror; see `closure_capture_spec.spl` header) because AST-arena lints cannot be
-driven from interpreter-mode specs yet. Real end-to-end E-PAR-006 coverage today
-is the Rust-seed fixtures + `concurrency_api_misuse_spec.spl`; wiring the
-pure-Simple lint into the self-hosted check driver is part of the port above.
+Per-rule semantics extracted from check.rs:
+- E-PAR-001: `task_spawn` imported from any `std.concurrent.thread` path →
+  "task_spawn is not part of the OS-thread facade"; help: use std.nogc_async_mut.thread_pool
+- E-PAR-002: numbered alias (thread_spawn2 / spawn_isolated2 / spawn_limited2) →
+  "<name> is a numbered name and is not a public API"; help: use *_with_args form
+- E-PAR-003: concurrency symbol imported from wrong module surface →
+  "<name> belongs to <expected_owner>, not <actual_owner>"
+- E-PAR-004: call-shape violation — covers BOTH wrong arity (argc != 1) AND wrong first-arg type:
+  - wrong arity → message contains "single zero-argument value closure"
+  - non-closure arg to spawn fns → message contains "pass a closure"
+  - bad arg to multicore_green_set_parallelism → message contains "single integer worker count"
+- E-PAR-005: direct use of internal rt_pool_* extern symbol (rt_pool_submit, rt_pool_join,
+  rt_pool_is_done, rt_pool_set_parallelism, rt_pool_get_parallelism) outside the sanctioned
+  multicore_green facade.  Trigger: any `extern fn` line containing a rt_pool symbol name.
+  Exempt paths (ends_with check): src/lib/{nogc_async_mut,gc_async_mut,nogc_sync_mut,gc_sync_mut}/concurrent/multicore_green.spl
+  Message: "<name> is an internal runtime-pool symbol and is not a public API"
+
+Remaining item: wire `check_concurrency_api_misuse` into the self-hosted lint
+runner so it runs at `bin/simple check` time (same gap as E-PAR-006 /
+`check_closure_capture`). The lint is exported and ready; only the runner
+call-site is missing.
