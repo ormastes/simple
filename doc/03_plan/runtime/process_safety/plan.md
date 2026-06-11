@@ -147,6 +147,17 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
              two halves together hang/crash). Expected to be the same
              for-loop binder miscompile family — re-validate after
              stage4 rebuild with fix (b).
+      7. [ ] Matrix re-run 2026-06-11 06:50 binary (post-fixes): 6/8
+         green — (a) recursion guard and (c) stray `-c` output CONFIRMED
+         FIXED; all 4 specs rc=0, `-c` prints exactly `2`. Remaining
+         (11th-site cluster): `check text.spl` now rc=139 CORE DUMP
+         (progressed past the counter bug) with parser_error_ctx kind
+         191 text '"' at src/lib/nogc_sync_mut/src/core/context_manager.spl
+         then [flat-bridge] crash — seed passes the SAME tree (file
+         unmodified since 06-04), so it is a stage4 parser/flat-bridge
+         miscompile; and `lint text.spl` still hangs >240s (hypothesis
+         (d) refuted — not the for-loop binder family). Deploy remains
+         blocked; bin/simple stays the Rust seed.
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).
