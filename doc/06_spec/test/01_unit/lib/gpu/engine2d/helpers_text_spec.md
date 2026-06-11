@@ -27,7 +27,7 @@ helpers_text_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -104,6 +104,36 @@ while idx < pixel_count:
     idx = idx + 1
 
 expect(payload.pixels.len()).to_equal(direct.len())
+expect(mismatch_count).to_equal(0)
+```
+
+</details>
+
+#### keeps bitmap glyph advance gap as background at scale one
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val bg = 0xff222222u32
+val payload = text_blit_buffer("A", 0xff111111u32, bg, 7)
+val glyph_pixel_width = 5 * text_scale(7)
+var mismatch_count = 0
+var row = 0
+while row < payload.height:
+    var x = glyph_pixel_width
+    while x < payload.width:
+        val idx = row * payload.width + x
+        if payload.pixels[idx] != bg:
+            mismatch_count = mismatch_count + 1
+        x = x + 1
+    row = row + 1
+
+expect(text_scale(7)).to_equal(1)
+expect(glyph_pixel_width).to_be_less_than(payload.width)
 expect(mismatch_count).to_equal(0)
 ```
 
@@ -214,8 +244,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

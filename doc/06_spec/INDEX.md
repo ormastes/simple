@@ -16,5 +16,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Helpers Text Specification](test/01_unit/lib/gpu/engine2d/helpers_text_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
+| [Helpers Text Specification](test/01_unit/lib/gpu/engine2d/helpers_text_spec.md) | Auto-generated | N/A | 7 | 0% | 0 lines |
 

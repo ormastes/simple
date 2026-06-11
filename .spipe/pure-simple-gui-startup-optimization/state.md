@@ -663,6 +663,17 @@ dev-done
   6/6. Docker optimizer scans completed for the final slice: helpers text 37
   and helpers-text spec 13 remaining static opportunities; the static count did
   not change, but the edit removes repeated arithmetic from hot inner loops.
+- impl: Added a scale-1 bitmap text fallback fast path for the common 5x7
+  glyph-buffer case. `text_render_metrics_to_buf(...)` now routes `scale == 1`
+  to `text_render_metrics_to_buf_scale1(...)`, which writes one foreground
+  pixel per set glyph bit and leaves the prefilled advance gap as background
+  instead of entering the scaled `sy`/`sx` loops.
+- verify: Focused helpers-text check passes and helpers-text spec now passes
+  7/7, including a new scale-one advance-gap assertion. Generated manual
+  refreshed under `doc/06_spec`. Docker optimizer scans completed: helpers text
+  45 and helpers-text spec 16 remaining static opportunities; the static count
+  rises because the common-path loop is split out, but runtime scale-one bitmap
+  text avoids the nested scaled-pixel loops.
 - impl: Added checksum-gated vector font glyph readback evidence.
   `vector_font_glyph_readback_evidence(...)` now derives the expected checksum
   from returned vector glyph alpha pixels and requires both GPU-returned glyph
