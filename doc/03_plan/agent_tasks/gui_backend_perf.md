@@ -189,6 +189,9 @@ Updated: 2026-06-11
 - this commit -- CSS var lookup tail allocation removal:
   `_first_var_color_after` now scans from a caller-supplied offset and finds
   `var(...)` directly in the original HTML buffer, removing style-tail slices.
+- this commit -- declaration background scan allocation removal:
+  `_declaration_background_color` now searches the original declaration buffer
+  directly for background properties instead of allocating a tail each loop.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
