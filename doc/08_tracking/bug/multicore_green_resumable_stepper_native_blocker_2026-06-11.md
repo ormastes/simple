@@ -17,9 +17,11 @@ That design type-checks and compiles to a hosted native binary, but the hosted
 native binary still segfaults before returning the first completion. The
 earlier helper-returned function-value blocker that sat below this path is now
 closed. The current lower blocker beneath this path is now tracked separately in
+`doc/08_tracking/bug/multicore_green_handle_array_join_native_blocker_2026-06-11.md`.
+The older direct native struct-array blocker below that layer is now closed and
+kept as regression coverage in
 `doc/08_tracking/bug/native_struct_array_runtime_blocker_2026-06-11.md`.
-That lower native struct-array blocker sits below the worker-pool stepper path
-itself. Historical loop-return tracking remains in
+Historical loop-return tracking remains in
 `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`.
 That earlier loop-return blocker is also closed.
 
@@ -46,8 +48,8 @@ blocker is:
 - that crash remains after the helper-returned function-value regression was
   fixed and moved out of the critical path
 - the earlier loop/search helper-return path is now green
-- a smaller native struct-array path still fails before the full stepper
-  machinery is required
+- a smaller hosted-native handle-array join path still fails before the full
+  stepper machinery is required
 
 ## Why This Matters
 

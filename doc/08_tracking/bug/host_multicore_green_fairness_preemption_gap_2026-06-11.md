@@ -61,6 +61,18 @@ Current hosted parallelism-boundary evidence also includes:
 - `test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.spl`
   now regression-covers the bounded-parallelism fix: with requested hosted
   parallelism `2`, the fresh hosted runtime stays at `2` under CPU saturation
+- bounded parallelism now has executable hosted regression coverage
+
+Current hosted fairness-gap evidence also includes:
+
+- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
+  keeps the one-worker monopolization boundary explicit: with hosted
+  parallelism pinned to `1`, one tight CPU task can still keep a later quick
+  task unfinished during the first short observation window
+- `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl`
+  proves raw `thread_yield()` is not enough for hosted fairness: even with
+  `thread_yield()` inside the monopolizing task, the later quick task still
+  does not finish during that same first short observation window
 
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
@@ -78,12 +90,14 @@ Related active host-side blocker:
   function-valued queue items, but a single completed stepper still segfaults
   in the debug-seed hosted native path with `EXIT=139`.
 - `doc/08_tracking/bug/native_struct_array_runtime_blocker_2026-06-11.md`
-  now records the smaller hosted-native blocker beneath that stepper path:
-  a direct native array of a by-value struct already returns `result=3`
-  with `EXIT=77` even without worker-pool fairness logic.
-  The older helper-side array-literal hybrid fallback above that boundary is
-  closed on current-source seed builds, so the remaining lower blocker is the
-  native struct-array runtime path itself.
+  now records the closed smaller hosted-native blocker that used to sit beneath
+  that stepper path: a direct native array of a by-value struct is green again
+  on current-source seed/native.
+- `doc/08_tracking/bug/multicore_green_handle_array_join_native_blocker_2026-06-11.md`
+  now records the current smaller hosted-native blocker beneath that stepper
+  path: local `MulticoreGreenHandle` array iteration plus `join()` still
+  returns `result={result}` with `EXIT=12` even before the full resumable
+  stepper machinery is required.
 - `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`
   now records the closed standalone-native blocker that used to sit underneath
   that stepper path: returning a function value from inside a loop/search

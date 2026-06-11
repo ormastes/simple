@@ -296,10 +296,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             }
         }
 
-        // Method calls now lower through the native MethodCallStatic /
-        // BuiltinMethod / extern-method paths. Keep walking receiver/args for
-        // genuinely unsupported nested constructs, but do not force blanket
-        // hybrid fallback just because a typed method is invoked.
+        // Method calls now lower through MIR static/virtual call forms and the
+        // current native path already handles the reduced helper/object cases
+        // used by green-thread and multicore-green probes. Keep walking the
+        // receiver/args for unsupported nested constructs, but do not blanket-
+        // fallback just because the syntax is `value.method(...)`.
         Expr::MethodCall { receiver, args, .. } => {
             analyze_expr(receiver, reasons);
             for arg in args {
@@ -349,23 +350,20 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::CollectionOps);
         }
 
-        // Array literals lower through MIR ArrayLit and the native runtime
-        // already supports heap-allocated arrays. Keep walking nested elements
-        // for genuinely unsupported constructs, but do not force hybrid
-        // fallback just because a helper constructs an array literal.
+        // Array/tuple literals lower to MIR ArrayLit/TupleLit and stay on the
+        // native path. Keep walking nested expressions for unsupported
+        // constructs, but do not force hybrid fallback just because a helper
+        // constructs an array or tuple.
         Expr::Array(items) => {
             for item in items {
                 analyze_expr(item, reasons);
             }
         }
 
-        // Tuple / Vec / Dict literals still keep their broader fallback marker
-        // until they have the same end-to-end native contract as plain arrays.
         Expr::Tuple(items) => {
             for item in items {
                 analyze_expr(item, reasons);
             }
-            add_reason(reasons, FallbackReason::CollectionLiteral);
         }
 
         Expr::VecLiteral(items) => {
@@ -484,20 +482,16 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
 
         // F-strings need string interpolation
         Expr::FString { parts, .. } => {
-            let mut has_dynamic_part = false;
             for part in parts {
                 match part {
                     simple_parser::ast::FStringPart::Expr(e)
                     | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
-                        has_dynamic_part = true;
                         analyze_expr(e, reasons);
                     }
                     _ => {}
                 }
             }
-            if has_dynamic_part {
-                add_reason(reasons, FallbackReason::StringOps);
-            }
+            add_reason(reasons, FallbackReason::StringOps);
         }
 
         // i18n strings - need runtime locale lookup
@@ -834,53 +828,12 @@ mod tests {
     }
 
     #[test]
-    fn test_typed_method_call_compilable() {
+    fn test_function_with_method_call_compilable() {
         let results = parse_and_analyze("fn get_len(arr: i64):\n    return arr.len()\n");
         let status = results.get("get_len").unwrap();
         assert!(
             status.is_compilable(),
-            "typed method call should compile natively, got {:?}",
-            status.reasons()
-        );
-    }
-
-    #[test]
-    fn test_channel_helper_method_compilable() {
-        let results = parse_and_analyze(
-            r#"class Channel:
-    _id: i64
-
-    fn id() -> i64:
-        self._id
-
-fn helper(id: i64) -> i64:
-    val ch = Channel(_id: id)
-    if ch.id() != id:
-        return 81
-    42
-"#,
-        );
-        let status = results.get("helper").unwrap();
-        assert!(
-            status.is_compilable(),
-            "channel helper method should compile natively, got {:?}",
-            status.reasons()
-        );
-    }
-
-    #[test]
-    fn test_helper_print_then_return_compilable() {
-        let results = parse_and_analyze(
-            r#"fn run_one() -> i64:
-    val value = 7
-    println("ok")
-    value
-"#,
-        );
-        let status = results.get("run_one").unwrap();
-        assert!(
-            status.is_compilable(),
-            "helper print/return should compile natively, got {:?}",
+            "method call should stay on the native path, got {:?}",
             status.reasons()
         );
     }

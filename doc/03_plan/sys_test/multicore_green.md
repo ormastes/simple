@@ -44,26 +44,26 @@
 - `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` checks that `doc/03_plan/agent_tasks/multicore_green.md` uses meaningful parallel-agent lane names instead of `Agent A`/`Agent B` labels, and keeps each lane tied to deliverables and acceptance evidence.
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the remaining hosted fairness/preemption gap explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths.
 - `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so the remaining host gap is deeper than a missing OS-thread yield primitive.
-- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_regression_spec.spl`
-  now keeps the earlier smaller hosted-native blocker closed: a pool worker
-  can send a plain struct payload through a channel and the standalone native
-  artifact returns `value=7`, `EXIT=0`.
-- `test/03_system/feature/usage/native_function_value_param_array_regression_spec.spl`
-  keeps the former lower hosted-native function-valued local or parameter
-  array degradation closed as regression coverage beneath the current
-  resumable-stepper lane.
+- `test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl`
+  now regression-covers the closed smaller hosted-native blocker beneath the
+  callback-id resumable-stepper lane: a direct native array of a by-value
+  struct is green again on current-source seed/native.
+- `test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl`
+  now pins the current smaller hosted-native blocker beneath the callback-id
+  resumable-stepper lane: local `MulticoreGreenHandle` array iteration plus
+  `join()` still returns `result={result}` with `EXIT=12` in the standalone
+  native artifact.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records that the checked-in `bin/release/simple` binary has drifted from the
   current-source rebuilt `release` and `debug` compilers for the
   resumable-stepper native probe. The helper-return probes are now fixed on the
-  rebuilt debug path, and the lower param-array regression is now fixed there
-  as well, so rebuilt current-source artifacts remain the stronger evidence
-  until the checked-in release binary is refreshed to match current
+  rebuilt debug path, so rebuilt current-source artifacts remain the stronger
+  evidence until the checked-in release binary is refreshed to match current
   source/runtime/compiler behavior.
 - `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
-  keeps the earlier standalone-native lower blocker closed: returning a
-  function value from inside a loop/search branch is green again even without
-  the worker pool.
+  now pins the smaller standalone-native blocker beneath the resumable-stepper
+  lane: returning a function value from inside a loop/search branch still
+  crashes in native artifacts even without the worker pool.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` checks the pure Simple green-channel contract: empty recv parks a logical green task, send unparks the oldest waiter, FIFO buffering works, and bounded backpressure does not block the carrier worker.
 
 ## Blocking Evidence To Track
