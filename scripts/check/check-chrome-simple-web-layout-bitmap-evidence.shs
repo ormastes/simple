@@ -14,6 +14,8 @@ CAPTURED_ARGB="$BUILD_DIR/chrome-argb.json"
 CHROME_GEOMETRY="$BUILD_DIR/chrome-geometry.json"
 CHROME_OUT="$BUILD_DIR/chrome.out"
 CHROME_PROOF="$BUILD_DIR/chrome-proof.json"
+TIMEOUT_SECS="${CHROME_LAYOUT_TIMEOUT_SECS:-${ELECTRON_BITMAP_TIMEOUT_SECS:-20}}"
+KILL_SECS="${CHROME_LAYOUT_KILL_SECS:-5}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$CAPTURED_ARGB" "$CHROME_GEOMETRY" "$CHROME_OUT" "$CHROME_PROOF" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
@@ -97,18 +99,35 @@ if [ "$EXPECTED_ARGB" = "" ] || [ ! -s "$EXPECTED_ARGB" ]; then
 fi
 
 set +e
-CHROME_CAPTURE_HTML="$HTML_PATH" \
-CHROME_CAPTURE_WIDTH="$WIDTH" \
-CHROME_CAPTURE_HEIGHT="$HEIGHT" \
-CHROME_CAPTURE_OUTPUT="$CAPTURED_ARGB" \
-CHROME_CAPTURE_GEOMETRY_OUTPUT="$CHROME_GEOMETRY" \
-CHROME_CAPTURE_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" \
-CHROME_CAPTURE_PROOF_PATH="$CHROME_PROOF" \
-    node tools/chrome-live-bitmap/capture_html_argb.js >"$CHROME_OUT" 2>&1
+if command -v timeout >/dev/null 2>&1; then
+    CHROME_CAPTURE_HTML="$HTML_PATH" \
+    CHROME_CAPTURE_WIDTH="$WIDTH" \
+    CHROME_CAPTURE_HEIGHT="$HEIGHT" \
+    CHROME_CAPTURE_OUTPUT="$CAPTURED_ARGB" \
+    CHROME_CAPTURE_GEOMETRY_OUTPUT="$CHROME_GEOMETRY" \
+    CHROME_CAPTURE_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" \
+    CHROME_CAPTURE_PROOF_PATH="$CHROME_PROOF" \
+    CHROME_CAPTURE_TIMEOUT_MS="$((TIMEOUT_SECS * 1000))" \
+        timeout -k "$KILL_SECS" "$TIMEOUT_SECS" node tools/chrome-live-bitmap/capture_html_argb.js >"$CHROME_OUT" 2>&1
+else
+    CHROME_CAPTURE_HTML="$HTML_PATH" \
+    CHROME_CAPTURE_WIDTH="$WIDTH" \
+    CHROME_CAPTURE_HEIGHT="$HEIGHT" \
+    CHROME_CAPTURE_OUTPUT="$CAPTURED_ARGB" \
+    CHROME_CAPTURE_GEOMETRY_OUTPUT="$CHROME_GEOMETRY" \
+    CHROME_CAPTURE_EXPECTED_ARGB_PATH="$EXPECTED_ARGB" \
+    CHROME_CAPTURE_PROOF_PATH="$CHROME_PROOF" \
+    CHROME_CAPTURE_TIMEOUT_MS="$((TIMEOUT_SECS * 1000))" \
+        node tools/chrome-live-bitmap/capture_html_argb.js >"$CHROME_OUT" 2>&1
+fi
 chrome_code=$?
 set -e
 
 if [ "$chrome_code" -ne 0 ]; then
+    if [ "$chrome_code" -eq 124 ] || [ "$chrome_code" -eq 137 ] || [ "$chrome_code" -eq 143 ]; then
+        emit_fail "chrome-live-capture-timeout"
+        exit 1
+    fi
     reason="$(sed -n 's/^chrome_capture_reason=//p' "$CHROME_OUT" | tail -n 1)"
     if [ "$reason" = "" ] && [ -s "$CHROME_PROOF" ]; then
         reason="$(field_of_json reason "$CHROME_PROOF")"
@@ -194,6 +213,7 @@ fi
     echo "- mismatch count: $mismatch_count"
     echo "- blur/tolerance used: $blur_used"
     echo "- Chrome frame us: $frame_us"
+    echo "- timeout seconds: $TIMEOUT_SECS"
     echo "- captured ARGB path: $CAPTURED_ARGB"
     echo "- Chrome geometry path: $CHROME_GEOMETRY"
     echo

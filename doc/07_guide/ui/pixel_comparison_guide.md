@@ -104,6 +104,11 @@ The canonical production GUI renderer parity wrapper also runs this font gate
 and promotes its typed rows under
 `production_gui_web_renderer_parity_font_offload_*`, including vector and bitmap
 backend, offload status, readback status, reason, and production-ready fields.
+Chrome live bitmap capture is bounded by `CHROME_LAYOUT_TIMEOUT_SECS` and
+`CHROME_LAYOUT_KILL_SECS` in
+`scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs`; a stuck
+DevTools capture must surface as `chrome-live-capture-timeout` rather than
+hanging the production parity wrapper.
 
 The generated-GUI matrix intentionally records
 `text_normalization_pixels=269` for the fixture-specific text antialiasing

@@ -15,6 +15,26 @@ const expectedPath = process.env.CHROME_CAPTURE_EXPECTED_ARGB_PATH || "";
 const proofPath = process.env.CHROME_CAPTURE_PROOF_PATH || "";
 const geometryOutputPath = process.env.CHROME_CAPTURE_GEOMETRY_OUTPUT || "";
 const chromeBin = process.env.CHROME_CAPTURE_BIN || findChromeBinary();
+let activeChromeChild = null;
+
+function terminateActiveChromeChild() {
+  if (!activeChromeChild || activeChromeChild.killed) return;
+  try {
+    activeChromeChild.kill("SIGTERM");
+  } catch (_err) {
+    // Best-effort cleanup for timeout and signal paths.
+  }
+}
+
+process.on("SIGTERM", () => {
+  terminateActiveChromeChild();
+  process.exit(143);
+});
+process.on("SIGINT", () => {
+  terminateActiveChromeChild();
+  process.exit(130);
+});
+process.on("exit", terminateActiveChromeChild);
 
 function executableExists(candidate) {
   try {
@@ -421,6 +441,7 @@ async function captureViaDevTools(fileUrl) {
   ];
   const start = process.hrtime.bigint();
   const child = childProcess.spawn(chromeBin, args, { stdio: ["ignore", "ignore", "pipe"] });
+  activeChromeChild = child;
   let stderr = "";
   const timeoutMs = Number(process.env.CHROME_CAPTURE_TIMEOUT_MS || 20000);
   const endpoint = await new Promise((resolve, reject) => {
@@ -469,6 +490,7 @@ async function captureViaDevTools(fileUrl) {
   } finally {
     if (conn) conn.socket.destroy();
     child.kill();
+    if (activeChromeChild === child) activeChromeChild = null;
   }
 }
 

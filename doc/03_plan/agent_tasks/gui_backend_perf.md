@@ -64,6 +64,12 @@ Updated: 2026-06-11
   GUI web renderer parity wrapper now runs the font offload/readback wrapper and
   promotes typed vector and bitmap font evidence under
   `production_gui_web_renderer_parity_font_offload_*` fields.
+- this commit -- Chrome live capture timeout hardening: the Chrome layout
+  bitmap evidence wrapper now bounds DevTools capture with
+  `CHROME_LAYOUT_TIMEOUT_SECS` / `CHROME_LAYOUT_KILL_SECS`, emits
+  `chrome-live-capture-timeout`, and cleans up spawned Chrome children on
+  signal/exit so full parity evidence cannot hang indefinitely in the surface
+  manifest.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
@@ -74,6 +80,11 @@ Updated: 2026-06-11
 1. Collect and record additional startup/render evidence (timing + throughput + parity)
    - Run and archive the full production GUI web renderer parity evidence wrapper
      now that it promotes backend aggregate sample fields.
+   - Current local blocker after installing `tools/electron-shell` dependencies:
+     generated-GUI Electron matrix and layout manifest pass, but the
+     Tauri/Chrome surface manifest still fails with live-surface divergence
+     (`tauri`: 16/18 pass, 216 mismatches; `chrome`: 14/18 pass, 1785 mismatches
+     in the latest local run) and one bounded Chrome timeout row.
    - Add broader throughput thresholds after enough host-stable samples exist.
 2. Provide GPU/font offload proof
    - Demonstrate measured proof of real vector/bitmap GPU font offload and readback path behavior or explicit typed unavailability.
