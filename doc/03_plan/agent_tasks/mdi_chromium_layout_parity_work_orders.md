@@ -28,8 +28,8 @@ Prove and harden the requested GUI stack:
 
 ## Current Evidence Snapshot
 
-- `origin/main` at `c42574e65381` includes the latest pushed live browser event
-  and computed-style evidence.
+- `origin/main` at `2cde4bfb233d` includes the latest pushed live browser event,
+  computed-style, QMP drag-gate, and multicore green follow-up evidence.
 - Generated-GUI Electron matrix is exact at `80x64`, `96x72`, `128x96`, and
   `160x120`.
 - Electron layout manifest has 18 rows: 16 exact, 2 tracked text divergences,
@@ -71,6 +71,17 @@ Prove and harden the requested GUI stack:
   Residual risk: the current gate checks a global framebuffer delta rather than
   a drag-region-specific movement signature, so later work should tighten it
   after the runner path executes reliably.
+- `scripts/check/check-simpleos-wm-qmp-drag-delta-evidence.shs` is the current
+  standalone live wrapper for the same host-QMP path. It launches
+  `src/app/test/simpleos_desktop_qmp_launch.spl` with
+  `SIMPLEOS_DESKTOP_QMP_TARGET=wm-simple-web`, verifies the MDI/WM/Web marker
+  set, captures before/after BGA frames with QMP `pmemsave`, injects HMP mouse
+  drag events, and requires both global byte deltas and source/destination
+  drag-region deltas. The 2026-06-11 local run is intentionally failing:
+  launcher status is `pass`, all marker state fields are true, but
+  `changed_bytes=0`, so host-QMP mouse input is not yet wired into the guest WM
+  event path. Bug:
+  `doc/08_tracking/bug/simpleos_wm_host_qmp_mouse_input_no_framebuffer_delta_2026-06-11.md`.
 - Windows and macOS live evidence is host-gated today:
   `test/03_system/gui/windows_native_mdi_evidence_spec.spl` reports
   `requires-windows` off Windows, and
@@ -253,5 +264,9 @@ Exit gate:
   before executing the scenario (`total_listed=0` on both modified and baseline
   copies), so the next work item is to fix that route or add an equivalent
   standalone QMP evidence wrapper.
+- The standalone QMP evidence wrapper now executes the exact WM target, but it
+  fails honestly with `qemu_wm_drag_delta_reason=qmp-drag-delta-not-proven` and
+  `changed_bytes=0`. The next implementation task is real host pointer delivery
+  into the SimpleOS WM event path, not a weaker pixel oracle.
 - macOS and Windows live platform evidence is not proven from this Linux host;
   host-specific rows must not be promoted without real capture artifacts.

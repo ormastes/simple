@@ -1,0 +1,220 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_qmp_drag_delta_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_qmp_drag_delta_evidence_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+LAUNCH_OUT="$BUILD_DIR/launch.out"
+DRAG_OUT="$BUILD_DIR/drag.out"
+BEFORE_PPM="$BUILD_DIR/before-drag.ppm"
+AFTER_PPM="$BUILD_DIR/after-drag.ppm"
+PID=""
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$LAUNCH_OUT" "$DRAG_OUT" "$BEFORE_PPM" "$AFTER_PPM" "$BEFORE_PPM.raw" "$AFTER_PPM.raw" "$BUILD_DIR/evidence.env"
+
+cleanup() {
+    if [ -n "$PID" ]; then
+        kill "$PID" >/dev/null 2>&1 || true
+        wait "$PID" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+file_byte_count() {
+    if [ -f "$1" ]; then
+        wc -c <"$1" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+field() {
+    sed -n "s/^$1=//p" "$2" | tail -n 1
+}
+
+status=unavailable
+reason=not-run
+changed_bytes=0
+source_region_changed=0
+target_region_changed=0
+before_sha256=
+after_sha256=
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" \
+SIMPLEOS_DESKTOP_QMP_TARGET=wm-simple-web \
+SIMPLEOS_DESKTOP_QMP_LAUNCH_TIMEOUT_MS="${SIMPLEOS_WM_QMP_LAUNCH_TIMEOUT_MS:-90000}" \
+    "$SIMPLE_BIN" run src/app/test/simpleos_desktop_qmp_launch.spl --mode=interpreter --clean >"$LAUNCH_OUT" 2>&1
+launch_code=$?
+set -e
+
+launcher_status="$(field simpleos_desktop_qmp_status "$LAUNCH_OUT")"
+launcher_reason="$(field simpleos_desktop_qmp_reason "$LAUNCH_OUT")"
+launcher_target="$(field simpleos_desktop_qmp_target "$LAUNCH_OUT")"
+PID="$(field simpleos_desktop_qmp_pid "$LAUNCH_OUT")"
+qmp_socket="$(field simpleos_desktop_qmp_socket "$LAUNCH_OUT")"
+serial_log="$(field simpleos_desktop_qmp_serial_log "$LAUNCH_OUT")"
+stderr_log="$(field simpleos_desktop_qmp_stderr_log "$LAUNCH_OUT")"
+marker_state="$(field simpleos_desktop_qmp_marker_state "$LAUNCH_OUT")"
+
+if [ "$launch_code" -eq 0 ] && [ "$launcher_status" = "pass" ] && [ -S "$qmp_socket" ]; then
+    set +e
+    python3 - "$qmp_socket" "$BEFORE_PPM" "$AFTER_PPM" >"$DRAG_OUT" 2>&1 <<'PY'
+import hashlib
+import json
+import os
+import socket
+import sys
+import time
+
+sock_path, before_ppm, after_ppm = sys.argv[1], sys.argv[2], sys.argv[3]
+before_raw = before_ppm + ".raw"
+after_raw = after_ppm + ".raw"
+
+def write_qmp(f, obj):
+    f.write(json.dumps(obj).encode() + b"\n")
+    f.flush()
+    return f.readline()
+
+def hmp(f, cmd):
+    return write_qmp(f, {"execute": "human-monitor-command", "arguments": {"command-line": cmd}})
+
+def wait_raw(path):
+    for _ in range(100):
+        if os.path.exists(path) and os.path.getsize(path) >= 3145728:
+            return True
+        time.sleep(0.1)
+    return False
+
+def pmem(f, raw_path, ppm_path):
+    hmp(f, 'pmemsave 0xfd000000 3145728 "%s"' % raw_path)
+    ok = wait_raw(raw_path)
+    data = open(raw_path, "rb").read() if ok else b""
+    if len(data) == 3145728:
+        pix = bytearray()
+        for i in range(0, 1024 * 768 * 4, 4):
+            pix.extend([data[i + 2], data[i + 1], data[i]])
+        with open(ppm_path, "wb") as out:
+            out.write(b"P6\n1024 768\n255\n" + bytes(pix))
+    return data
+
+def changed_pixels_in(mem0, mem1, x0, y0, x1, y1):
+    total = 0
+    for y in range(y0, y1):
+        row = y * 1024 * 4
+        for x in range(x0, x1):
+            i = row + x * 4
+            if mem0[i:i + 4] != mem1[i:i + 4]:
+                total += 1
+    return total
+
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock_path)
+f = s.makefile("rwb", buffering=0)
+f.readline()
+write_qmp(f, {"execute": "qmp_capabilities"})
+
+mem0 = pmem(f, before_raw, before_ppm)
+hmp(f, "mouse_move 360 190")
+time.sleep(0.05)
+hmp(f, "mouse_button 1")
+time.sleep(0.08)
+hmp(f, "mouse_move 160 80")
+time.sleep(0.08)
+hmp(f, "mouse_move 160 80")
+time.sleep(0.08)
+hmp(f, "mouse_button 0")
+time.sleep(0.35)
+mem1 = pmem(f, after_raw, after_ppm)
+
+valid = len(mem0) == 3145728 and len(mem1) == 3145728
+changed = sum(1 for a, b in zip(mem0, mem1) if a != b) if valid else 0
+source_region = changed_pixels_in(mem0, mem1, 320, 140, 470, 240) if valid else 0
+target_region = changed_pixels_in(mem0, mem1, 120, 60, 300, 190) if valid else 0
+sha0 = hashlib.sha256(mem0).hexdigest() if mem0 else ""
+sha1 = hashlib.sha256(mem1).hexdigest() if mem1 else ""
+print("qemu_wm_drag_delta before_raw_bytes=%d after_raw_bytes=%d changed_bytes=%d source_region_changed=%d target_region_changed=%d before_sha256=%s after_sha256=%s before_ppm=%s after_ppm=%s" % (
+    len(mem0), len(mem1), changed, source_region, target_region, sha0, sha1, before_ppm, after_ppm
+))
+sys.exit(0 if valid and changed > 2048 and source_region > 100 and target_region > 100 and sha0 != sha1 else 5)
+PY
+    drag_code=$?
+    set -e
+    drag_line="$(sed -n '/^qemu_wm_drag_delta /p' "$DRAG_OUT" | tail -n 1)"
+    changed_bytes="$(printf '%s\n' "$drag_line" | sed -n 's/.* changed_bytes=\([0-9][0-9]*\).*/\1/p')"
+    source_region_changed="$(printf '%s\n' "$drag_line" | sed -n 's/.* source_region_changed=\([0-9][0-9]*\).*/\1/p')"
+    target_region_changed="$(printf '%s\n' "$drag_line" | sed -n 's/.* target_region_changed=\([0-9][0-9]*\).*/\1/p')"
+    before_sha256="$(printf '%s\n' "$drag_line" | sed -n 's/.* before_sha256=\([^ ]*\).*/\1/p')"
+    after_sha256="$(printf '%s\n' "$drag_line" | sed -n 's/.* after_sha256=\([^ ]*\).*/\1/p')"
+    if [ "$drag_code" -eq 0 ]; then
+        status=pass
+        reason=pass
+    else
+        status=fail
+        reason=qmp-drag-delta-not-proven
+    fi
+else
+    reason="${launcher_reason:-wm-qmp-launch-failed}"
+fi
+
+{
+    echo "qemu_wm_drag_delta_status=$status"
+    echo "qemu_wm_drag_delta_reason=$reason"
+    echo "qemu_wm_drag_delta_launcher_status=${launcher_status:-}"
+    echo "qemu_wm_drag_delta_launcher_reason=${launcher_reason:-}"
+    echo "qemu_wm_drag_delta_launcher_target=${launcher_target:-}"
+    echo "qemu_wm_drag_delta_launcher_exit_code=$launch_code"
+    echo "qemu_wm_drag_delta_qmp_socket=${qmp_socket:-}"
+    echo "qemu_wm_drag_delta_serial_log=${serial_log:-}"
+    echo "qemu_wm_drag_delta_serial_log_bytes=$(file_byte_count "${serial_log:-}")"
+    echo "qemu_wm_drag_delta_stderr_log=${stderr_log:-}"
+    echo "qemu_wm_drag_delta_stderr_log_bytes=$(file_byte_count "${stderr_log:-}")"
+    echo "qemu_wm_drag_delta_marker_state=${marker_state:-}"
+    echo "qemu_wm_drag_delta_changed_bytes=${changed_bytes:-0}"
+    echo "qemu_wm_drag_delta_source_region_changed=${source_region_changed:-0}"
+    echo "qemu_wm_drag_delta_target_region_changed=${target_region_changed:-0}"
+    echo "qemu_wm_drag_delta_before_sha256=$before_sha256"
+    echo "qemu_wm_drag_delta_after_sha256=$after_sha256"
+    echo "qemu_wm_drag_delta_before_ppm=$BEFORE_PPM"
+    echo "qemu_wm_drag_delta_before_ppm_bytes=$(file_byte_count "$BEFORE_PPM")"
+    echo "qemu_wm_drag_delta_after_ppm=$AFTER_PPM"
+    echo "qemu_wm_drag_delta_after_ppm_bytes=$(file_byte_count "$AFTER_PPM")"
+    echo "qemu_wm_drag_delta_launch_out=$LAUNCH_OUT"
+    echo "qemu_wm_drag_delta_drag_out=$DRAG_OUT"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# SimpleOS WM QMP Drag Delta Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- launcher status: ${launcher_status:-}"
+    echo "- launcher reason: ${launcher_reason:-}"
+    echo "- launcher target: ${launcher_target:-}"
+    echo "- qmp socket: ${qmp_socket:-}"
+    echo "- marker state: ${marker_state:-}"
+    echo "- changed bytes: ${changed_bytes:-0}"
+    echo "- source region changed pixels: ${source_region_changed:-0}"
+    echo "- target region changed pixels: ${target_region_changed:-0}"
+    echo "- before sha256: $before_sha256"
+    echo "- after sha256: $after_sha256"
+    echo "- before ppm: $BEFORE_PPM ($(file_byte_count "$BEFORE_PPM") bytes)"
+    echo "- after ppm: $AFTER_PPM ($(file_byte_count "$AFTER_PPM") bytes)"
+    echo "- serial log: ${serial_log:-} ($(file_byte_count "${serial_log:-}") bytes)"
+    echo "- stderr log: ${stderr_log:-} ($(file_byte_count "${stderr_log:-}") bytes)"
+    echo
+    echo "This wrapper launches the exact WM + Simple Web + Engine2D target in a"
+    echo "separate QEMU process, captures the BGA framebuffer with QMP"
+    echo "\`pmemsave\`, injects HMP \`mouse_move\` / \`mouse_button\` events, and"
+    echo "requires both global byte changes and drag-region-local changes. It does"
+    echo "not use blur, downscaling, tolerance matching, or copied reference pixels."
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+
+[ "$status" = "pass" ]

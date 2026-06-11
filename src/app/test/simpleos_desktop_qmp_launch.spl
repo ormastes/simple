@@ -1,4 +1,4 @@
-use os.qemu_runner.{OsTarget, get_desktop_browser_target, _x64_nvme_disk_args, build_os, build_qemu_command, ensure_desktop_disk_image}
+use os.qemu_runner.{OsTarget, get_desktop_browser_target, get_wm_simple_web_check_target, _x64_nvme_disk_args, build_os, build_qemu_command, ensure_desktop_disk_image}
 use std.nogc_sync_mut.sffi.io.{dir_create_all}
 
 extern fn rt_env_get(key: text) -> text?
@@ -44,6 +44,23 @@ fn _desktop_qmp_capture_target() -> OsTarget:
         qemu_memory: base.qemu_memory,
         qemu_bios: base.qemu_bios,
         qemu_extra: ["-vga", "std"] + _x64_nvme_disk_args(),
+        gui_mode: false
+    )
+
+fn _wm_simple_web_qmp_capture_target() -> OsTarget:
+    val base = get_wm_simple_web_check_target()
+    OsTarget(
+        arch: base.arch,
+        entry: base.entry,
+        linker_script: base.linker_script,
+        target_triple: base.target_triple,
+        output: base.output,
+        qemu_system: base.qemu_system,
+        qemu_machine: base.qemu_machine,
+        qemu_cpu: base.qemu_cpu,
+        qemu_memory: base.qemu_memory,
+        qemu_bios: base.qemu_bios,
+        qemu_extra: ["-vga", "std"],
         gui_mode: false
     )
 
@@ -270,7 +287,8 @@ fn _print_launch_failure_context(handle_pid: i64, qmp_socket: text, serial_log: 
     print "simpleos_desktop_qmp_stderr_bytes={stderr_text.len()}"
 
 fn main() -> i64:
-    val build_target = get_desktop_browser_target()
+    val target_name = rt_env_get("SIMPLEOS_DESKTOP_QMP_TARGET") ?? "desktop"
+    val build_target = if target_name == "wm-simple-web": get_wm_simple_web_check_target() else: get_desktop_browser_target()
     val token = "{rt_getpid()}_{rt_time_now_unix_micros()}"
     val qmp_socket = rt_env_get("SIMPLEOS_DESKTOP_QMP_SOCKET") ?? "/tmp/simpleos_desktop_qmp_{token}.sock"
     val serial_log = rt_env_get("SIMPLEOS_DESKTOP_QMP_SERIAL_LOG") ?? "build/os/simpleos_desktop_qmp_{token}.log"
@@ -279,32 +297,65 @@ fn main() -> i64:
     if not rt_file_exists(build_target.output) and not build_os(build_target):
         print "simpleos_desktop_qmp_status=unavailable"
         print "simpleos_desktop_qmp_reason=desktop-build-failed"
+        print "simpleos_desktop_qmp_target={target_name}"
         return 1
-    if not ensure_desktop_disk_image():
+    if target_name != "wm-simple-web" and not ensure_desktop_disk_image():
         print "simpleos_desktop_qmp_status=unavailable"
         print "simpleos_desktop_qmp_reason=desktop-disk-image-unavailable"
+        print "simpleos_desktop_qmp_target={target_name}"
         return 1
-    val target = _desktop_qmp_capture_target()
+    val target = if target_name == "wm-simple-web": _wm_simple_web_qmp_capture_target() else: _desktop_qmp_capture_target()
     if not can_run_target(target):
         print "simpleos_desktop_qmp_status=unavailable"
         print "simpleos_desktop_qmp_reason=qemu-target-unavailable"
+        print "simpleos_desktop_qmp_target={target_name}"
         return 1
 
     match spawn_guest_with_qmp(target, qmp_socket, serial_log):
         Ok(handle):
             val handle_pid = handle.pid
             val handle_stderr_log = serial_log + ".stderr"
-            val saw_launcher = wait_for_serial_marker(handle, "[desktop-e2e] launcher-ready", _timeout_ms())
+            val ready_marker = if target_name == "wm-simple-web": "[integrated-demo] render-ready" else: "[desktop-e2e] launcher-ready"
+            val saw_launcher = wait_for_serial_marker(handle, ready_marker, _timeout_ms())
             if not saw_launcher:
                 print "simpleos_desktop_qmp_status=unavailable"
                 print "simpleos_desktop_qmp_reason=launcher-ready-marker-missing"
-                _print_launch_failure_context(handle_pid, qmp_socket, serial_log, handle_stderr_log, "[desktop-e2e] launcher-ready", _timeout_ms())
+                print "simpleos_desktop_qmp_target={target_name}"
+                _print_launch_failure_context(handle_pid, qmp_socket, serial_log, handle_stderr_log, ready_marker, _timeout_ms())
                 stop_guest(handle)
                 return 1
+            if target_name == "wm-simple-web":
+                val serial = read_serial_log(handle)
+                val saw_wm = serial.contains("[wm-demo] wm-service-ready")
+                val saw_engine = serial.contains("[e2d-demo] engine-core-ready")
+                val saw_web = serial.contains("[web-demo] pixels-ready")
+                val saw_mdi = serial.contains("[mdi-demo] shared-mdi-ready surfaces=5") and serial.contains("[mdi-demo] windows-ready count=5")
+                val saw_top = serial.contains("[mdi-demo] top-command-lane-ready")
+                val saw_taskbar = serial.contains("[mdi-demo] taskbar-ready")
+                val saw_html = serial.contains("[mdi-demo] html-renderable window=browser")
+                val saw_probe = serial.contains("[GUI] mmio-probe-painted")
+                if not saw_probe or not saw_wm or not saw_engine or not saw_web or not saw_mdi or not saw_top or not saw_taskbar or not saw_html:
+                    print "simpleos_desktop_qmp_status=unavailable"
+                    print "simpleos_desktop_qmp_reason=wm-simple-web-marker-missing"
+                    print "simpleos_desktop_qmp_target={target_name}"
+                    print "simpleos_desktop_qmp_marker_state=probe:{_bool_text(saw_probe)} wm:{_bool_text(saw_wm)} engine:{_bool_text(saw_engine)} web:{_bool_text(saw_web)} mdi:{_bool_text(saw_mdi)} top:{_bool_text(saw_top)} taskbar:{_bool_text(saw_taskbar)} html:{_bool_text(saw_html)}"
+                    _print_launch_failure_context(handle_pid, qmp_socket, serial_log, handle_stderr_log, "wm-simple-web-markers", _timeout_ms())
+                    stop_guest(handle)
+                    return 1
+                print "simpleos_desktop_qmp_status=pass"
+                print "simpleos_desktop_qmp_reason=pass"
+                print "simpleos_desktop_qmp_target={target_name}"
+                print "simpleos_desktop_qmp_pid={handle_pid}"
+                print "simpleos_desktop_qmp_socket={qmp_socket}"
+                print "simpleos_desktop_qmp_serial_log={serial_log}"
+                print "simpleos_desktop_qmp_stderr_log={handle_stderr_log}"
+                print "simpleos_desktop_qmp_marker_state=probe:true wm:true engine:true web:true mdi:true top:true taskbar:true html:true"
+                return 0
             val saw_paint = wait_for_serial_marker(handle, "[desktop-e2e] paint-settle:done", 30000)
             if not saw_paint:
                 print "simpleos_desktop_qmp_status=unavailable"
                 print "simpleos_desktop_qmp_reason=paint-settle-marker-missing"
+                print "simpleos_desktop_qmp_target={target_name}"
                 _print_launch_failure_context(handle_pid, qmp_socket, serial_log, handle_stderr_log, "[desktop-e2e] paint-settle:done", 30000)
                 stop_guest(handle)
                 return 1
@@ -312,11 +363,13 @@ fn main() -> i64:
             if not saw_perf:
                 print "simpleos_desktop_qmp_status=unavailable"
                 print "simpleos_desktop_qmp_reason=qemu-perf-marker-missing"
+                print "simpleos_desktop_qmp_target={target_name}"
                 _print_launch_failure_context(handle_pid, qmp_socket, serial_log, handle_stderr_log, "[desktop-e2e] qemu-perf", 10000)
                 stop_guest(handle)
                 return 1
             print "simpleos_desktop_qmp_status=pass"
             print "simpleos_desktop_qmp_reason=pass"
+            print "simpleos_desktop_qmp_target={target_name}"
             print "simpleos_desktop_qmp_pid={handle_pid}"
             print "simpleos_desktop_qmp_socket={qmp_socket}"
             print "simpleos_desktop_qmp_serial_log={serial_log}"
@@ -326,6 +379,7 @@ fn main() -> i64:
         Err(err):
             print "simpleos_desktop_qmp_status=unavailable"
             print "simpleos_desktop_qmp_reason={err}"
+            print "simpleos_desktop_qmp_target={target_name}"
             print "simpleos_desktop_qmp_socket={qmp_socket}"
             print "simpleos_desktop_qmp_serial_log={serial_log}"
             return 1
