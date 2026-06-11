@@ -27,7 +27,7 @@ simple_web_engine2d_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -94,9 +94,25 @@ expect(cl).to_equal(sw)
 
 </details>
 
+#### debug attr lookup preserves parsed attributes across node scans
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><section id='outer'><div id='target' class='card primary' data-route='/app/home'></div></section></body></html>"
+expect(simple_web_layout_debug_attr_by_id(html, "target", "class")).to_equal("card primary")
+expect(simple_web_layout_debug_attr_by_id(html, "target", "data-route")).to_equal("/app/home")
+```
+
+</details>
+
 #### reuses retained pixels for unchanged static html
 
-1. var cache = SimpleWebEngine2DStaticPixelCache create
+- var cache = SimpleWebEngine2DStaticPixelCache create
    - Expected: first.len() equals `12 * 10`
    - Expected: second[0] equals `0xFF123456u32`
    - Expected: cache.stores equals `1`
@@ -313,8 +329,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

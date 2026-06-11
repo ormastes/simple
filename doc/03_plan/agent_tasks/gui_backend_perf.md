@@ -213,6 +213,9 @@ Updated: 2026-06-11
   layout renderer now searches from an offset directly in the original text
   buffer instead of allocating a tail substring before every parser `find_from`
   call.
+- this commit -- debug attr loop length hoist:
+  `simple_web_layout_debug_attr_by_id` now reuses the parsed node count instead
+  of dispatching `nodes.len()` on every scan iteration.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
