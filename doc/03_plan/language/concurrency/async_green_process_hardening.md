@@ -119,3 +119,22 @@ Easy = Sonnet sub-agent; Hard = lead/Fable.
 - spawn closure cleanup SIGABRT.
 - 14 unlinked async SFFI externs (needs seed+runtime work and bootstrap
   redeploy).
+
+## Completion State (2026-06-11)
+
+All waves executed and verified. Final E-PAR-006 validation (deployed seed binary):
+
+- Implementation committed in `32964b2093` (`driver/src/cli/check.rs`): share-nothing
+  capture analysis for `green_spawn` / `cooperative_green_spawn` /
+  `multicore_green_spawn` closures; `thread_spawn` exempt. Rejects module-level
+  mutable var reads and captured mutable var writes.
+- 3 new fixtures fire E-PAR-006 with the right symbol + variable name; old
+  E-PAR-004 fixture regression still fires.
+- False-positive sweep: 0 E-PAR-006 across all 12 green-spawn specs and the 3
+  green stdlib modules.
+- Binary deployed to `bin/release/x86_64-unknown-linux-gnu/simple` (backup in
+  `build/backup/`); `concurrency_api_misuse_spec.spl` 6/6 green in interpreter
+  mode (19 fixtures incl. the new E-PAR-006 block).
+- Note: `strings | grep E-PAR-006` is NOT a valid deploy oracle — Rust merges
+  string literals (even E-PAR-001..005 never appear standalone). Verify
+  functionally via `simple check` on a fixture.
