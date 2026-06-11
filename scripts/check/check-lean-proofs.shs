@@ -66,12 +66,14 @@ check_project() {
         return
     fi
 
-    # Grep for real `sorry` usage: match lines that have `sorry` not inside a comment.
-    # Strategy: exclude lines starting with optional whitespace then `--`.
-    sorry_hits=$(find "$proj_dir/src" -name '*.lean' 2>/dev/null \
-        | xargs grep -l 'sorry' 2>/dev/null \
-        | xargs grep -v '^\s*--' 2>/dev/null \
-        | grep -c 'sorry' 2>/dev/null || true)
+    # Grep for real `sorry` usage: whole project tree (srcDir varies per
+    # project), excluding the .lake build dir, comment lines, and doc-text
+    # mentions like "without sorry".
+    sorry_hits=$(find "$proj_dir" -name '*.lean' -not -path '*/.lake/*' 2>/dev/null \
+        -exec grep -h 'sorry' {} + 2>/dev/null \
+        | grep -v '^\s*--' \
+        | grep -v -- '--.*sorry' \
+        | grep -cv 'without .sorry.\|zero sorry\|no sorry\|No sorry' || true)
 
     if [ "${sorry_hits:-0}" -gt 0 ]; then
         fail "$label" "contains $sorry_hits sorry tactic(s) outside comments"
@@ -84,24 +86,14 @@ check_project() {
 
 printf '\n=== Lean Proof Integrity Check ===\n\n'
 
-# L1 projects: verification sub-projects
+# Verification sub-projects: auto-discover every Lake project under
+# src/verification (any depth) so newly added models are never silently
+# skipped by a stale hardcoded list.
 VDIR="$ROOT_DIR/src/verification"
-for proj_dir in \
-    "$VDIR/memory_capabilities" \
-    "$VDIR/async_compile" \
-    "$VDIR/gc_manual_borrow" \
-    "$VDIR/manual_pointer_borrow" \
-    "$VDIR/memory_model_drf" \
-    "$VDIR/nogc_compile" \
-    "$VDIR/module_resolution" \
-    "$VDIR/macro_auto_import" \
-    "$VDIR/tensor_dimensions" \
-    "$VDIR/type_inference_compile" \
-    "$VDIR/visibility_export" \
-    "$VDIR/formal/nvfs" \
-; do
-    label="${proj_dir#$ROOT_DIR/src/verification/}"
-    check_project "$proj_dir" "verification/$label"
+for lakefile in $(find "$VDIR" -maxdepth 3 \( -name 'lakefile.toml' -o -name 'lakefile.lean' \) -not -path '*/.lake/*' | sort); do
+    proj_dir="$(dirname "$lakefile")"
+    label="verification/${proj_dir#$VDIR/}"
+    check_project "$proj_dir" "$label"
 done
 
 # L3 std proofs project

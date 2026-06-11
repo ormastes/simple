@@ -321,7 +321,9 @@ private theorem arenaLive_map_ne {s : FsState} {ar ar' : Arena} {a : ArenaId}
   simp [hbne]
 
 /-! ## `arena_seal`, `arena_append`, `arena_discard`, `arena_clone_range`,
-`pmap_publish` — left as `sorry` with precise rationale. -/
+`pmap_publish` — preservation theorems, all fully proved (stale "left as
+placeholder" note removed 2026-06-11; every theorem below carries a complete
+tactic proof). -/
 
 theorem arena_seal_preserves_all
     (s : FsState) (id : ArenaId) (s' : FsState)
