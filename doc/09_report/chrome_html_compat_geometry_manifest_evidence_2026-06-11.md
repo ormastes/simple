@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 35
-- pass count: 35
+- fixtures: 36
+- pass count: 36
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -58,6 +58,7 @@ pixels, or text antialiasing normalization.
 | `36_flex_align_self_flex_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/36_flex_align_self_flex_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/36_flex_align_self_flex_end_structural_report.sdn` |
 | `37_flex_gap_justify_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/37_flex_gap_justify_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/37_flex_gap_justify_center_structural_report.sdn` |
 | `38_flex_gap_space_between` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/38_flex_gap_space_between_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/38_flex_gap_space_between_structural_report.sdn` |
+| `39_flex_gap_flex_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/39_flex_gap_flex_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/39_flex_gap_flex_end_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -102,3 +103,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `36_flex_align_self_flex_end` | 0 | 0.000 | `` |
 | `37_flex_gap_justify_center` | 0 | 0.000 | `` |
 | `38_flex_gap_space_between` | 0 | 0.000 | `` |
+| `39_flex_gap_flex_end` | 0 | 0.000 | `` |
