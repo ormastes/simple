@@ -646,10 +646,12 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                 } else {
                     let ret_llvm = self.backend.llvm_type(&return_type).map_err(|e| e.to_string())?;
                     match ret_llvm {
-                        inkwell::types::BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::ArrayType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::FloatType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
                         inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
-                        _ => return Err("Unsupported return type in indirect call".to_string()),
+                        inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
                     }
                 };
 

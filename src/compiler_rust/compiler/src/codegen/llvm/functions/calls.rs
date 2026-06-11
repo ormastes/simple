@@ -2456,11 +2456,17 @@ impl LlvmBackend {
                     args.iter().map(|_| i64_type.into()).collect();
                 llvm_param_types.extend(user_param_types);
 
-                // Default to i64 return (tagged value) — void is rare for indirect calls
                 let fn_type = if *return_type == TypeId::VOID {
                     self.context_ref().void_type().fn_type(&llvm_param_types, false)
                 } else {
-                    i64_type.fn_type(&llvm_param_types, false)
+                    match self.llvm_type(return_type)? {
+                        inkwell::types::BasicTypeEnum::ArrayType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::FloatType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
+                        inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
+                    }
                 };
 
                 let call_site = builder

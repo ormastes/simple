@@ -316,11 +316,10 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             analyze_expr(receiver, reasons);
         }
 
-        // Index access lowers to rt_index_get / rt_array_get in MIR and the
-        // current native pipeline handles those runtime calls directly.
-        // Keep walking the receiver/index expressions for nested unsupported
-        // constructs, but do not force hybrid fallback just because a helper
-        // reads from an array or other collection.
+        // Indexed access now lowers through MIR `rt_array_get` / `rt_index_get`
+        // and can stay on the native path. Keep walking nested operands for any
+        // genuinely unsupported constructs, but do not force fallback just
+        // because an element is indexed out of a collection.
         Expr::Index { receiver, index } => {
             analyze_expr(receiver, reasons);
             analyze_expr(index, reasons);
@@ -990,7 +989,7 @@ fn get0() -> fn() -> i64:
         let status = results.get("get0").unwrap();
         assert!(
             status.is_compilable(),
-            "function-valued array helper should compile natively, got {:?}",
+            "function-value array helper should compile natively, got {:?}",
             status.reasons()
         );
     }

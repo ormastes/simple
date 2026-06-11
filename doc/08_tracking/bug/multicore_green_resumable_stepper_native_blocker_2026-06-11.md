@@ -15,8 +15,8 @@ scheduler layered over the existing hosted `multicore_green` worker pool:
 
 That design type-checks and compiles to a hosted native binary, but the hosted
 native binary still segfaults before returning the first completion. The
-earlier helper-returned function-value blocker that first narrowed this lane is
-now closed; the remaining crash persists after that fix.
+earlier helper-returned function-value blocker that sat below this path is now
+closed; this crash remains after that fix.
 
 ## Minimal Boundary
 
@@ -33,12 +33,12 @@ Segmentation fault (core dumped)
 EXIT=139
 ```
 
-So this is no longer a vague “fairness is hard” gap. The current blocker is:
+So this is no longer a vague “fairness is hard” gap. The narrower blocker is:
 
 - rebuilt native hosted worker-pool execution for the resumable-stepper probe crashes
 - even when the work item is a single callback-id step with immediate completion
-- that crash still reproduces after the helper-returned function-value
-  regression was fixed
+- that crash remains after the helper-returned function-value regression was
+  fixed and moved out of the critical path
 
 ## Why This Matters
 

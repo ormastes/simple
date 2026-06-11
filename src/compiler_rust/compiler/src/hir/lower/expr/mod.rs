@@ -218,7 +218,7 @@ impl Lowerer {
     // Identifier expressions
     // ============================================================================
 
-    fn lower_identifier(&self, name: &str, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    fn lower_identifier(&mut self, name: &str, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         // Handle "None" as alias for nil (Python compatibility)
         if name == "None" {
             return Ok(HirExpr {
@@ -272,7 +272,7 @@ impl Lowerer {
                 kind: HirExprKind::Local(idx),
                 ty,
             })
-        } else if let Some(ty) = self.named_callable_return_type(name) {
+        } else if let Some(ty) = self.named_callable_value_type(name) {
             Ok(HirExpr {
                 kind: HirExprKind::Global(name.to_string()),
                 ty,
@@ -375,6 +375,24 @@ impl Lowerer {
                         .or_else(|| self.globals.get(target).copied())
                 })
             })
+    }
+
+    fn named_callable_value_type(&mut self, name: &str) -> Option<TypeId> {
+        let target = self
+            .resolve_function_alias(name)
+            .map(str::to_string)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(function) = self.module.functions.iter().find(|function| function.name == target) {
+            return Some(self.module.types.register(HirType::Function {
+                params: function.params.iter().map(|param| param.ty).collect(),
+                ret: function.return_type,
+            }));
+        }
+
+        match self.globals.get(&target).copied() {
+            Some(ty) if matches!(self.module.types.get(ty), Some(HirType::Function { .. })) => Some(ty),
+            _ => None,
+        }
     }
 
     fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {

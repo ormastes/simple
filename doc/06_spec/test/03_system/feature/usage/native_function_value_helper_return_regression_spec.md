@@ -1,6 +1,6 @@
 # Native Function Value Helper Return Regression
 
-> This SSpec keeps regression coverage on the helper-returned function-value boundary under the hosted multicore-green resumable-stepper experiment. Fresh release and debug seed binaries now preserve a function value returned from a helper and invoked in the standalone native artifact.
+> This SSpec keeps native helper-returned function values covered after the hybrid-compilability and HIR function-value typing fixes. Both scalar and object-returning function arrays must preserve the returned callable and invoke it correctly in fresh native artifacts.
 
 <!-- sdn-diagram:id=native_function_value_helper_return_regression_spec.arch -->
 <details class="sdn-source">
@@ -34,15 +34,15 @@ native_function_value_helper_return_regression_spec -> std
 
 # Native Function Value Helper Return Regression
 
-This SSpec keeps regression coverage on the helper-returned function-value boundary under the hosted multicore-green resumable-stepper experiment. Fresh release and debug seed binaries now preserve a function value returned from a helper and invoked in the standalone native artifact.
+This SSpec keeps native helper-returned function values covered after the hybrid-compilability and HIR function-value typing fixes. Both scalar and object-returning function arrays must preserve the returned callable and invoke it correctly in fresh native artifacts.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #native-function-value-helper-return |
+| Feature IDs | #native-function-value-helper-return-regression |
 | Category | Runtime / Native / Function Values |
-| Status | Fixed |
+| Status | Implemented |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,10 +53,10 @@ This SSpec keeps regression coverage on the helper-returned function-value bound
 
 ## Overview
 
-This SSpec keeps regression coverage on the helper-returned function-value
-boundary under the hosted multicore-green resumable-stepper experiment. Fresh
-release and debug seed binaries now preserve a function value returned from a
-helper and invoked in the standalone native artifact.
+This SSpec keeps native helper-returned function values covered after the
+hybrid-compilability and HIR function-value typing fixes. Both scalar and
+object-returning function arrays must preserve the returned callable and invoke
+it correctly in fresh native artifacts.
 
 ## Requirements
 
@@ -77,79 +77,71 @@ helper and invoked in the standalone native artifact.
 ## Syntax
 
 ```sh
-src/compiler_rust/target/release/simple test test/03_system/feature/usage/native_function_value_helper_return_regression_spec.spl --mode=interpreter --clean
+src/compiler_rust/target/debug/simple test test/03_system/feature/usage/native_function_value_helper_return_regression_spec.spl --mode=interpreter --clean
 ```
 
 ## Scenarios
 
-### native function value helper return blocker
+### native function value helper return regression
 
-#### keeps helper-returned function values working in standalone native builds
+#### keeps scalar and object-returning helper values native and callable
 
-- Write the direct and helper-return native callback probes
-   - Expected: mkdir_code equals `0`
-   - Expected: rt_file_write_text(DIRECT_SOURCE, direct_probe_source()) is true
-   - Expected: rt_file_write_text(HELPER_SOURCE, helper_probe_source()) is true
-- Direct global-array callback still works in the fresh debug native path
-   - Expected: direct_compile_code equals `0`
-   - Expected: direct_run_code equals `0`
-- The fresh release path now handles helper-returned function values
-   - Expected: release_compile_code equals `0`
-   - Expected: release_run_code equals `0`
-- The fresh debug seed binary now matches the release helper-return path
-   - Expected: helper_compile_code equals `0`
-   - Expected: helper_run_code equals `0`
-- The tracker records the helper-return fix and the remaining downstream blocker
-   - Expected: blocker_code equals `0`
+- Write the scalar and object-return helper probes
+- " && cat > " + SCALAR SOURCE + " <<'EOF1'\n" + scalar probe
+- "cat > " + STRUCT SOURCE + " <<'EOF2'\n" + struct probe
+   - Expected: write_code equals `0`
+- Compile both probes to standalone native binaries
+   - Expected: scalar_compile_code equals `0`
+   - Expected: struct_compile_code equals `0`
+- The scalar helper-return probe now preserves and invokes the returned function value
+   - Expected: scalar_run_code equals `0`
+- The object-return helper-return probe also preserves and invokes the returned function value
+   - Expected: struct_run_code equals `0`
+- The blocker tracker records this boundary as closed
+   - Expected: tracker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Write the direct and helper-return native callback probes")
-val (_mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
-expect(mkdir_code).to_equal(0)
-expect(rt_file_write_text(DIRECT_SOURCE, direct_probe_source())).to_equal(true)
-expect(rt_file_write_text(HELPER_SOURCE, helper_probe_source())).to_equal(true)
+step("Write the scalar and object-return helper probes")
+val (write_out, write_code) = shell(
+    "mkdir -p " + BUILD_DIR +
+    " && cat > " + SCALAR_SOURCE + " <<'EOF1'\n" + scalar_probe() + "\nEOF1\n" +
+    "cat > " + STRUCT_SOURCE + " <<'EOF2'\n" + struct_probe() + "\nEOF2"
+)
+expect(write_out.len()).to_be_greater_than(-1)
+expect(write_code).to_equal(0)
 
-step("Direct global-array callback still works in the fresh debug native path")
-val (direct_compile_out, direct_compile_code) = shell(DEBUG_SIMPLE_BIN + " compile " + DIRECT_SOURCE + " --native -o " + DIRECT_NATIVE_DEBUG)
-expect(direct_compile_code).to_equal(0)
-expect(direct_compile_out).to_contain("Compiled")
-val (direct_run_out, direct_run_code) = shell("sh -c '" + DIRECT_NATIVE_DEBUG + " >/tmp/native_fn_direct.out 2>&1; code=$?; cat /tmp/native_fn_direct.out; echo EXIT=$code'")
-expect(direct_run_code).to_equal(0)
-expect(direct_run_out).to_contain("got=7")
-expect(direct_run_out).to_contain("EXIT=0")
+step("Compile both probes to standalone native binaries")
+val (scalar_compile_out, scalar_compile_code) = shell(SIMPLE_BIN + " compile " + SCALAR_SOURCE + " --native -o " + SCALAR_NATIVE)
+expect(scalar_compile_code).to_equal(0)
+expect(scalar_compile_out).to_contain("Compiled")
+val (struct_compile_out, struct_compile_code) = shell(SIMPLE_BIN + " compile " + STRUCT_SOURCE + " --native -o " + STRUCT_NATIVE)
+expect(struct_compile_code).to_equal(0)
+expect(struct_compile_out).to_contain("Compiled")
 
-step("The fresh release path now handles helper-returned function values")
-val (release_compile_out, release_compile_code) = shell(RELEASE_SIMPLE_BIN + " compile " + HELPER_SOURCE + " --native -o " + HELPER_NATIVE_RELEASE)
-expect(release_compile_code).to_equal(0)
-expect(release_compile_out).to_contain("Compiled")
-val (release_run_out, release_run_code) = shell("sh -c '" + HELPER_NATIVE_RELEASE + " >/tmp/native_fn_helper_release.out 2>&1; code=$?; cat /tmp/native_fn_helper_release.out; echo EXIT=$code'")
-expect(release_run_code).to_equal(0)
-expect(release_run_out).to_contain("got=7")
-expect(release_run_out).to_contain("EXIT=0")
+step("The scalar helper-return probe now preserves and invokes the returned function value")
+val (scalar_run_out, scalar_run_code) = shell(SCALAR_NATIVE)
+expect(scalar_run_out).to_contain("got=7")
+expect(scalar_run_code).to_equal(0)
 
-step("The fresh debug seed binary now matches the release helper-return path")
-val (helper_compile_out, helper_compile_code) = shell(DEBUG_SIMPLE_BIN + " compile " + HELPER_SOURCE + " --native -o " + HELPER_NATIVE_DEBUG)
-expect(helper_compile_code).to_equal(0)
-expect(helper_compile_out).to_contain("Compiled")
-val (helper_run_out, helper_run_code) = shell("sh -c '" + HELPER_NATIVE_DEBUG + " >/tmp/native_fn_helper.out 2>&1; code=$?; cat /tmp/native_fn_helper.out; echo EXIT=$code'")
-expect(helper_run_code).to_equal(0)
-expect(helper_run_out).to_contain("got=7")
-expect(helper_run_out).to_contain("EXIT=0")
+step("The object-return helper-return probe also preserves and invokes the returned function value")
+val (struct_run_out, struct_run_code) = shell(STRUCT_NATIVE)
+expect(struct_run_out).to_contain("done=true")
+expect(struct_run_out).to_contain("value=7")
+expect(struct_run_code).to_equal(0)
 
-step("The tracker records the helper-return fix and the remaining downstream blocker")
-val (blocker_out, blocker_code) = shell("cat doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md")
-expect(blocker_code).to_equal(0)
-expect(blocker_out).to_contain("Status: closed")
-expect(blocker_out).to_contain("preserve and invoke helper-returned function")
-expect(blocker_out).to_contain("remaining hosted multicore-green resumable-stepper crash is a separate")
-expect(blocker_out).to_contain("downstream blocker")
+step("The blocker tracker records this boundary as closed")
+val (tracker_out, tracker_code) = shell("cat doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md")
+expect(tracker_code).to_equal(0)
+expect(tracker_out).to_contain("Status: closed")
+expect(tracker_out).to_contain("scalar and object-returning helper probes")
+expect(tracker_out).to_contain("resumable-stepper native crash remains a separate blocker")
 ```
 
 </details>

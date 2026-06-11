@@ -51,7 +51,7 @@ impl Lowerer {
             Expr::Identifier(name) => {
                 if let Some(idx) = ctx.lookup(name) {
                     Ok(ctx.locals[idx].ty)
-                } else if let Some(ty) = self.named_callable_return_type(name) {
+                } else if let Some(ty) = self.named_callable_value_type(name) {
                     Ok(ty)
                 } else if let Some(ty) = self.globals.get(name) {
                     Ok(*ty)

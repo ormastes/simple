@@ -59,11 +59,8 @@ Current hosted blocking-compensation evidence now includes:
 Current hosted parallelism-boundary evidence also includes:
 
 - `test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.spl`
-  proves that after the compensation-worker change, a requested hosted
-  parallelism of `2` can still grow to `3` under pure CPU saturation after the
-  worker pool is fully occupied
-- that means the current hosted runtime still does not match a Go-like bounded
-  `GOMAXPROCS`-style execution cap for CPU-bound work
+  now regression-covers the bounded-parallelism fix: with requested hosted
+  parallelism `2`, the fresh hosted runtime stays at `2` under CPU saturation
 
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
@@ -79,17 +76,16 @@ Related active host-side blocker:
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
   records the newer callback-id resumable-stepper prototype. That path removes
   function-valued queue items, but a single completed stepper still segfaults
-  in the hosted native path with `EXIT=139`.
+  in the debug-seed hosted native path with `EXIT=139`.
 - `doc/08_tracking/bug/native_function_value_helper_return_blocker_2026-06-11.md`
-  now records the closed helper-return runtime regression that first narrowed
-  this lane.
+  now records the closed helper-return regression that used to sit below the
+  stepper path.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records the newer evidence split: the checked-in `bin/release/simple` binary
   is stale for this lane, while current-source rebuilt `release` and `debug`
   artifacts are the stronger evidence for the remaining hosted-native blocker.
-  The native symbol-collision sub-bug (`worker.1`) is fixed there, the rebuilt
-  helper-return probes now pass, and the resumable-stepper probe still fails at
-  runtime.
+  The native symbol-collision sub-bug (`worker.1`) is fixed there, but the
+  rebuilt helper-return and resumable-stepper probes still fail at runtime.
 
 ## Current Evidence Boundary
 

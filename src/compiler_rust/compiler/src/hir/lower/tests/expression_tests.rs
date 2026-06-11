@@ -135,6 +135,22 @@ fn test_lower_callable_field_method_call_uses_function_return_type() {
 }
 
 #[test]
+fn test_lower_function_identifier_in_array_keeps_function_value_type() {
+    let module = parse_and_lower(
+        "var FUNCS: [fn() -> i64] = []\n\nfn worker() -> i64:\n    7\n\nfn test() -> i64:\n    FUNCS = [worker]\n    val thunk = FUNCS[0]\n    val value = thunk()\n    return value\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
+    let thunk_ty = func.locals[0].ty;
+    let Some(HirType::Function { ret, .. }) = module.types.get(thunk_ty) else {
+        panic!("expected function-typed local for indexed function value, got {:?}", module.types.get(thunk_ty));
+    };
+    assert_eq!(*ret, TypeId::I64);
+    assert_eq!(func.locals[1].ty, TypeId::I64, "calling the indexed function value should produce its return type");
+}
+
+#[test]
 fn test_lower_if_expression() {
     let module = parse_and_lower("fn test(x: i64) -> i64:\n    let y = if x > 0: 1 else: 0\n    return y\n").unwrap();
 

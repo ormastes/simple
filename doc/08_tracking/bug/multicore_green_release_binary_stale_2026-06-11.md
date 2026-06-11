@@ -17,7 +17,8 @@ disagree on the same probes:
   - resumable-stepper probe fails earlier at compile time with
     `undefined symbol: rt_pool_is_done`
 - current-source rebuilt `src/compiler_rust/target/release/simple`:
-  - helper-return probe compiles, but the native binary crashes with `EXIT=139`
+  - helper-return probes now compile and run successfully on both scalar and
+    object-returning shapes
   - resumable-stepper probe compiles, but the native binary crashes with
     `EXIT=139`
 
@@ -30,16 +31,23 @@ cargo build --release -p simple-driver
 Finished `release` profile [optimized] target(s) in 2m 09s
 ```
 
-Current-source rebuilt helper-return probe:
+Current-source rebuilt helper-return probes:
 
 ```text
-src/compiler_rust/target/release/simple compile /tmp/helper_return_fn_value_probe.spl --native -o /tmp/helper_return_fn_value_probe_rebuilt_release.bin
-Compiled ... -> /tmp/helper_return_fn_value_probe_rebuilt_release.bin
+src/compiler_rust/target/release/simple compile build/tmp/fn_i64_helper.spl --native -o /tmp/fn_i64_helper_rel_fixed.bin
+Compiled ... -> /tmp/fn_i64_helper_rel_fixed.bin
 
-/tmp/helper_return_fn_value_probe_rebuilt_release.bin
-direct=7
-Segmentation fault (core dumped)
-EXIT=139
+/tmp/fn_i64_helper_rel_fixed.bin
+got=7
+EXIT=0
+
+src/compiler_rust/target/release/simple compile build/tmp/fn_struct_helper.spl --native -o /tmp/fn_struct_helper_rel_fixed.bin
+Compiled ... -> /tmp/fn_struct_helper_rel_fixed.bin
+
+/tmp/fn_struct_helper_rel_fixed.bin
+done=true
+value=7
+EXIT=0
 ```
 
 Current-source rebuilt resumable-stepper probe:
