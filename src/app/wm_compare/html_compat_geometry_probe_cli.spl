@@ -1,0 +1,69 @@
+use app.wm_compare.electron_geometry_compare.{electron_geometry_json_to_boxes}
+use app.wm_compare.html_compat_geometry_probe.{html_compat_fixture_simple_boxes}
+use app.wm_compare.structural_layout_report.{structural_box_layout_compare, structural_box_layout_report_sdn}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn _env_or(key: text, fallback: text) -> text:
+    val value = rt_env_get(key) ?? ""
+    if value == "":
+        return fallback
+    value
+
+fn _env_i32_or(key: text, fallback: i32) -> i32:
+    val value = _env_or(key, "")
+    if value == "":
+        return fallback
+    value.to_i32()
+
+fn main() -> i64:
+    val fixture_id = _env_or("HTML_COMPAT_GEOMETRY_FIXTURE", "02_block_boxes")
+    val geometry_path = _env_or("HTML_COMPAT_GEOMETRY_JSON", "")
+    val output_path = _env_or("HTML_COMPAT_GEOMETRY_REPORT", "")
+    val viewport_width = _env_i32_or("HTML_COMPAT_GEOMETRY_WIDTH", 320)
+    val viewport_height = _env_i32_or("HTML_COMPAT_GEOMETRY_HEIGHT", 240)
+
+    if geometry_path == "":
+        print "status=fail"
+        print "reason=missing-geometry-json-path"
+        return 1
+
+    val geometry_json = rt_file_read_text(geometry_path) ?? ""
+    if geometry_json == "":
+        print "status=fail"
+        print "reason=missing-geometry-json"
+        return 1
+
+    val electron_boxes = electron_geometry_json_to_boxes(geometry_json)
+    val simple_boxes = html_compat_fixture_simple_boxes(fixture_id, viewport_width, viewport_height)
+    if simple_boxes.len() == 0:
+        print "status=fail"
+        print "reason=unsupported-fixture:{fixture_id}"
+        return 1
+
+    val report = structural_box_layout_compare(
+        "electron_geometry", "simple_renderer_geometry",
+        viewport_width, viewport_height,
+        electron_boxes, simple_boxes,
+        "simple_renderer:{fixture_id}", geometry_path
+    )
+    val sdn = structural_box_layout_report_sdn(report, electron_boxes, simple_boxes)
+
+    if output_path != "":
+        rt_file_write_text(output_path, sdn)
+
+    print "status={if report.status == \"layout_match\": \"pass\" else: \"fail\"}"
+    print "report_status={report.status}"
+    print "mismatch_count={report.mismatch_count}"
+    print "source_a_count={report.source_a_count}"
+    print "source_b_count={report.source_b_count}"
+    print "fixture={fixture_id}"
+    print "geometry_json={geometry_path}"
+    if output_path != "":
+        print "report_path={output_path}"
+
+    if report.status == "layout_match":
+        return 0
+    1

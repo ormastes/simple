@@ -356,6 +356,7 @@ pub use value::{
     rt_closure_new,
     rt_closure_set_capture,
     // Dict operations
+    rt_dict_entries,
     rt_dict_get,
     rt_dict_len,
     rt_dict_new,
@@ -397,6 +398,7 @@ pub use value::{
     rt_bytes_u8_set,
     rt_typed_words_u32_set,
     rt_typed_words_u64_set,
+    rt_for_iterable,
     rt_index_get,
     rt_index_set,
     // Object operations

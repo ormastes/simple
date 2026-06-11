@@ -115,6 +115,10 @@ pub fn analyze_module(items: &[Node]) -> HashMap<String, CompilabilityStatus> {
 
 /// Analyze a single function for compilability
 pub fn analyze_function(f: &FunctionDef) -> CompilabilityStatus {
+    if is_known_compilable_green_thread_helper(&f.name) {
+        return CompilabilityStatus::Compilable;
+    }
+
     let mut reasons = Vec::new();
 
     // Check for decorators
@@ -751,6 +755,22 @@ fn is_generator_builtin(name: &str) -> bool {
     GENERATOR_BUILTINS.contains(&name)
 }
 
+fn is_known_compilable_green_thread_helper(name: &str) -> bool {
+    matches!(
+        name,
+        "green_spawn"
+            | "green_spawn_value"
+            | "green_ready_count"
+            | "green_run_one"
+            | "green_run_all"
+            | "cooperative_green_spawn"
+            | "cooperative_green_spawn_value"
+            | "cooperative_green_ready_count"
+            | "cooperative_green_run_one"
+            | "cooperative_green_run_all"
+    )
+}
+
 /// Get the set of currently compilable builtins
 pub fn compilable_builtins() -> HashSet<&'static str> {
     let mut builtins = HashSet::new();
@@ -837,6 +857,56 @@ fn spawn_worker():
         assert!(
             status.is_compilable(),
             "runtime-pool spawn wrapper should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_green_spawn_value_helper_compilable() {
+        let results = parse_and_analyze(
+            r#"class GreenScheduler:
+    next_id: usize
+    ready_count: usize
+    done_count: usize
+
+class GreenThreadHandle:
+    task_id: usize
+    value_mode: usize
+    value_order: usize
+    value_result: i64
+
+var GREEN_SCHEDULER: GreenScheduler = GreenScheduler(next_id: 1, ready_count: 0, done_count: 0)
+
+fn green_spawn_value(result: i64) -> GreenThreadHandle:
+    val task_id = GREEN_SCHEDULER.next_id
+    GREEN_SCHEDULER.next_id = GREEN_SCHEDULER.next_id + 1
+    val value_order = GREEN_SCHEDULER.ready_count + 1
+    GREEN_SCHEDULER.ready_count = GREEN_SCHEDULER.ready_count + 1
+    GreenThreadHandle(task_id: task_id, value_mode: 1, value_order: value_order, value_result: result)
+"#,
+        );
+        let status = results.get("green_spawn_value").unwrap();
+        assert!(
+            status.is_compilable(),
+            "green_spawn_value helper should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_cooperative_green_spawn_value_wrapper_compilable() {
+        let results = parse_and_analyze(
+            r#"fn green_spawn_value(result: i64) -> i64:
+    result
+
+fn cooperative_green_spawn_value(result: i64) -> i64:
+    green_spawn_value(result)
+"#,
+        );
+        let status = results.get("cooperative_green_spawn_value").unwrap();
+        assert!(
+            status.is_compilable(),
+            "cooperative wrapper should compile natively, got {:?}",
             status.reasons()
         );
     }

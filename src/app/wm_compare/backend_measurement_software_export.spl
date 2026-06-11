@@ -5,7 +5,7 @@
 # not pay GPU probe/import costs before the render loop starts.
 
 use app.wm_compare.backend_measurement_report.{BackendComparisonSample, backend_comparison_samples_sdn}
-use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
 use std.nogc_sync_mut.sffi.io.{file_write_text}
 
 extern fn rt_cli_get_args() -> [text]
@@ -69,6 +69,14 @@ fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
 fn _sample_html(fixture_id: text) -> text:
     "<html><head><title>GUI Perf</title><style>body{background:#102030;color:#f8fafc} .panel{padding:12px;border:1px solid #38bdf8}</style></head><body><main class='panel'><h1>Simple GUI Perf</h1><p>" + fixture_id + "</p><button>Render</button><section><h2>Text lane</h2><p>abcdefghijklmnopqrstuvwxyz 0123456789</p></section></main></body></html>"
 
+fn _is_supported_software_backend(backend: text) -> bool:
+    backend == "software" or backend == "cpu" or backend == "cpu_simd"
+
+fn _render_software_pixels(html: text, width: i32, height: i32, backend: text) -> [u32]:
+    if _is_supported_software_backend(backend):
+        return simple_web_layout_render_html_software_pixels(html, width, height)
+    []
+
 fn _checksum_u32_pixels(pixels: [u32]) -> i64:
     var checksum: i64 = 0
     var i = 0
@@ -87,25 +95,28 @@ fn _nonzero_pixels(pixels: [u32]) -> i64:
     count
 
 pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
-    val width = _arg_i64(args, "--width", 64)
-    val height = _arg_i64(args, "--height", 64)
+    val width = _arg_i32(args, "--width", 64)
+    val height = _arg_i32(args, "--height", 64)
     val warmup_count = _arg_i32(args, "--warmup-count", 0)
     val sample_count = _arg_i32(args, "--sample-count", 1)
     val backend = _arg_value(args, "--software-render-backend", "software")
     val fixture_id = _arg_value(args, "--fixture", "software-render-loop")
     val html = _sample_html(fixture_id)
+    val supported_backend = _is_supported_software_backend(backend)
     var warmup = 0
-    while warmup < warmup_count:
-        simple_web_render_html_to_pixels_with_engine2d_backend(html, width.to_i32(), height.to_i32(), backend)
-        warmup = warmup + 1
+    if supported_backend:
+        while warmup < warmup_count:
+            _render_software_pixels(html, width, height, backend)
+            warmup = warmup + 1
     var samples: [i64] = []
     var pixels: [u32] = []
     var i = 0
-    while i < sample_count:
-        val start_us = rt_time_now_micros()
-        pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, width.to_i32(), height.to_i32(), backend)
-        samples.push(_positive_elapsed_us(start_us))
-        i = i + 1
+    if supported_backend:
+        while i < sample_count:
+            val start_us = rt_time_now_micros()
+            pixels = _render_software_pixels(html, width, height, backend)
+            samples.push(_positive_elapsed_us(start_us))
+            i = i + 1
     val sorted = _sort_i64(samples)
     val p50 = _percentile_nearest_rank(sorted, 50)
     val p95 = _percentile_nearest_rank(sorted, 95)
@@ -117,7 +128,7 @@ pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
         backend_family: "software",
         shell: _arg_value(args, "--shell", "simple-web"),
         requested_backend: backend,
-        selected_backend: backend,
+        selected_backend: if supported_backend: backend else: "software",
         device_id: "host-software",
         status: "Initialized",
         command: _arg_value(args, "--command", "software-render-loop"),
@@ -147,17 +158,17 @@ pub fn software_only_render_loop_export_sdn(args: [text]) -> text:
         generated_binary_format: "none",
         generated_artifact_path_suffix: "",
         runtime_compute_target: "cpu_scalar",
-        runtime_execution_path: "engine2d-cpu_scalar",
+        runtime_execution_path: "simple_web_layout_software",
         runtime_launch_api: "RenderBackend",
         runtime_entry_symbol: "RenderBackend.draw_text_or_text_blit",
         runtime_artifact_name: "",
-        runtime_status: "cpu-scalar-baseline-ready",
+        runtime_status: if supported_backend: "cpu-scalar-baseline-ready" else: "unsupported-backend",
         checksum: "sum32:" + checksum_value.to_string(),
         pixel_proof: "nonzero_pixels:" + proof_count.to_string(),
         scalar_baseline_compared: true,
         fallback_used: false,
         fallback_reason: "",
-        unavailable_reason: ""
+        unavailable_reason: if supported_backend: "" else: "software-only exporter supports software|cpu|cpu_simd"
         )
     ])
 

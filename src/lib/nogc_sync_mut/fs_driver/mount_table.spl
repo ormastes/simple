@@ -216,6 +216,16 @@ struct MountResolution:
     mount_id: MountId
     relpath:  Path
 
+struct OpenFileBinding:
+    virtual_handle: u64
+    mount_id: MountId
+    inner_handle: FileHandle
+
+struct OpenDirBinding:
+    virtual_handle: u64
+    mount_id: MountId
+    inner_handle: DirHandle
+
 struct MountTable:
     """Registry of active mounts.
 
@@ -226,12 +236,54 @@ struct MountTable:
     before calling mutating methods (mount, unmount). Reads (lookup, resolve)
     may race only if the caller guarantees no concurrent mounts/unmounts.
     """
-    mounts:  [MountEntry]
-    next_id: u32
+    mounts:           [MountEntry]
+    next_id:          u32
+    open_files:       [OpenFileBinding]
+    next_file_handle: u64
+    open_dirs:        [OpenDirBinding]
+    next_dir_handle:  u64
 
 impl MountTable:
     static fn new() -> MountTable:
-        MountTable(mounts: [], next_id: 1)
+        MountTable(mounts: [], next_id: 1, open_files: [], next_file_handle: 1001u64, open_dirs: [], next_dir_handle: 2001u64)
+
+    me fn open_file_count() -> i64:
+        self.open_files.len() as i64
+
+    me fn open_dir_count() -> i64:
+        self.open_dirs.len() as i64
+
+    fn _file_binding(handle: FileHandle) -> OpenFileBinding?:
+        var i: i32 = 0
+        while i < self.open_files.len() as i32:
+            if self.open_files[i].virtual_handle == handle.id:
+                return Some(self.open_files[i])
+            i = i + 1
+        nil
+
+    fn _dir_binding(handle: DirHandle) -> OpenDirBinding?:
+        var i: i32 = 0
+        while i < self.open_dirs.len() as i32:
+            if self.open_dirs[i].virtual_handle == handle.id:
+                return Some(self.open_dirs[i])
+            i = i + 1
+        nil
+
+    me fn _unbind_file_handle(handle: FileHandle):
+        var i: i32 = 0
+        while i < self.open_files.len() as i32:
+            if self.open_files[i].virtual_handle == handle.id:
+                self.open_files = self.open_files.remove(i)
+                return
+            i = i + 1
+
+    me fn _unbind_dir_handle(handle: DirHandle):
+        var i: i32 = 0
+        while i < self.open_dirs.len() as i32:
+            if self.open_dirs[i].virtual_handle == handle.id:
+                self.open_dirs = self.open_dirs.remove(i)
+                return
+            i = i + 1
 
     me fn mount(path: text, driver: DriverInstance, opts: MountOptions) -> Result<MountId, FsError>:
         """Add a new mount at path.
@@ -357,7 +409,17 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
-                        return _driver_open_path(self.mounts[i].driver, relpath, flags)
+                        val opened = _driver_open_path(self.mounts[i].driver, relpath, flags)
+                        if opened.is_err():
+                            return Err(opened.unwrap_err())
+                        val virtual_handle = self.next_file_handle
+                        self.next_file_handle = self.next_file_handle + 1u64
+                        self.open_files = self.open_files.push(OpenFileBinding(
+                            virtual_handle: virtual_handle,
+                            mount_id: mount_id,
+                            inner_handle: opened.unwrap()
+                        ))
+                        return Ok(FileHandle(id: virtual_handle))
                     i = i + 1
                 Err(FsError.NotFound)
 
@@ -373,12 +435,31 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id == mount_id:
-                        return _driver_opendir_path(self.mounts[i].driver, relpath)
+                        val opened = _driver_opendir_path(self.mounts[i].driver, relpath)
+                        if opened.is_err():
+                            return Err(opened.unwrap_err())
+                        val virtual_handle = self.next_dir_handle
+                        self.next_dir_handle = self.next_dir_handle + 1u64
+                        self.open_dirs = self.open_dirs.push(OpenDirBinding(
+                            virtual_handle: virtual_handle,
+                            mount_id: mount_id,
+                            inner_handle: opened.unwrap()
+                        ))
+                        return Ok(DirHandle(id: virtual_handle))
                     i = i + 1
                 Err(FsError.NotFound)
 
     me fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
         """Read directory entries via the driver that owns the handle (probe each mount)."""
+        val binding_opt = self._dir_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        return _driver_readdir_handle(self.mounts[i].driver, binding.inner_handle)
+                    i = i + 1
+            case nil: pass_dn
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val r = _driver_readdir_handle(self.mounts[i].driver, handle)
@@ -389,6 +470,15 @@ impl MountTable:
 
     me fn read(handle: FileHandle, length: i64) -> Result<text, FsError>:
         """Read up to length bytes; probe each mount to find handle owner."""
+        val binding_opt = self._file_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        return _driver_read_handle(self.mounts[i].driver, binding.inner_handle, length)
+                    i = i + 1
+            case nil: pass_dn
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val r = _driver_read_handle(self.mounts[i].driver, handle, length)
@@ -424,6 +514,15 @@ impl MountTable:
 
     me fn write(handle: FileHandle, content: text) -> Result<(), FsError>:
         """Write text content to an open file handle; probe each mount to find handle owner."""
+        val binding_opt = self._file_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        return _driver_write_text_handle(self.mounts[i].driver, binding.inner_handle, content)
+                    i = i + 1
+            case nil: pass_dn
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val r = _driver_write_text_handle(self.mounts[i].driver, handle, content)
@@ -434,6 +533,15 @@ impl MountTable:
 
     me fn pwrite(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
         """Write text patch at offset; probe each mount to find handle owner."""
+        val binding_opt = self._file_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        return _driver_pwrite_text_handle(self.mounts[i].driver, binding.inner_handle, patch, offset)
+                    i = i + 1
+            case nil: pass_dn
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val r = _driver_pwrite_text_handle(self.mounts[i].driver, handle, patch, offset)
@@ -444,6 +552,15 @@ impl MountTable:
 
     me fn pread(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
         """Read length chars at offset; probe each mount to find handle owner."""
+        val binding_opt = self._file_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        return _driver_pread_text_handle(self.mounts[i].driver, binding.inner_handle, offset, length)
+                    i = i + 1
+            case nil: pass_dn
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val r = _driver_pread_text_handle(self.mounts[i].driver, handle, offset, length)
@@ -454,6 +571,18 @@ impl MountTable:
 
     me fn close(handle: FileHandle) -> Result<(), FsError>:
         """Close an open file handle; probe each mount to find handle owner."""
+        val binding_opt = self._file_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        val r = _driver_close_handle(self.mounts[i].driver, binding.inner_handle)
+                        if r.is_ok():
+                            self._unbind_file_handle(handle)
+                        return r
+                    i = i + 1
+            case nil: pass_dn
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val r = _driver_close_handle(self.mounts[i].driver, handle)
@@ -501,6 +630,15 @@ impl MountTable:
 
     me fn ftruncate(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
         """Truncate or extend an open file; probe each mount to find handle owner."""
+        val binding_opt = self._file_binding(handle)
+        match binding_opt:
+            case Some(binding):
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == binding.mount_id:
+                        return _driver_ftruncate_handle(self.mounts[i].driver, binding.inner_handle, new_size)
+                    i = i + 1
+            case nil: pass_dn
         var i: i32 = 0
         while i < self.mounts.len() as i32:
             val r = _driver_ftruncate_handle(self.mounts[i].driver, handle, new_size)

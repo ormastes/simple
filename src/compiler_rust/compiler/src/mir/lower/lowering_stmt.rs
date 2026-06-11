@@ -1223,6 +1223,24 @@ impl<'a> MirLowerer<'a> {
                 // Lower the iterable expression
                 let collection_reg = self.lower_expr(iterable)?;
 
+                // Normalize the iterable for index-based iteration. Dicts are
+                // converted to an array of (key, value) tuples at runtime
+                // (rt_for_iterable is a pass-through for everything else).
+                // Without this, `rt_array_len(dict)` / `IndexGet(dict, i)`
+                // below silently treat the dict handle as an array: the loop
+                // body sees nil/garbage items (stage4 SIGSEGV in
+                // `desugar_module` iterating `module.functions`).
+                let collection_reg = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::CallTarget::from_name("rt_for_iterable"),
+                        args: vec![collection_reg],
+                    });
+                    dest
+                })?;
+
                 // Create a local for the loop variable if it doesn't exist
                 let pattern_local_index = self.with_func(|func, _| {
                     let num_params = func.params.len();

@@ -246,6 +246,22 @@ pub extern "C" fn rt_dict_values(dict: RuntimeValue) -> RuntimeValue {
     dict_collect(dict, |data_ptr, i| unsafe { *data_ptr.add(i * 2 + 1) })
 }
 
+/// Get all entries from a dictionary as an array of (key, value) tuples.
+/// Matches interpreter for-loop semantics: `for item in dict` binds each
+/// item to a 2-tuple of (key, value).
+#[no_mangle]
+pub extern "C" fn rt_dict_entries(dict: RuntimeValue) -> RuntimeValue {
+    use super::collections::{rt_tuple_new, rt_tuple_set};
+    dict_collect(dict, |data_ptr, i| unsafe {
+        let pair = rt_tuple_new(2);
+        if !pair.is_nil() {
+            rt_tuple_set(pair, 0, *data_ptr.add(i * 2));
+            rt_tuple_set(pair, 1, *data_ptr.add(i * 2 + 1));
+        }
+        pair
+    })
+}
+
 /// Remove a key from a dictionary and return its value
 #[no_mangle]
 pub extern "C" fn rt_dict_remove(dict: RuntimeValue, key: RuntimeValue) -> RuntimeValue {

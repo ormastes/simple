@@ -42,7 +42,7 @@ simple_portal_content_db_spec -> app
 #### loads the packaged portal content root
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -57,7 +57,7 @@ expect(result.is_ok()).to_equal(true)
 #### prefers a complete filesystem-backed data root over a missing app root
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -76,7 +76,7 @@ expect(source.db.pages[0].slug).to_equal("docs")
 #### loads portal content from a DBFS-backed mount table root
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -104,7 +104,7 @@ expect(source_text).to_contain("print \"hello\"")
 #### rejects malformed page body paths
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -124,7 +124,7 @@ expect(result.is_err()).to_equal(true)
 #### rejects unsupported example execution modes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

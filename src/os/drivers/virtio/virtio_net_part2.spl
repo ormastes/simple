@@ -20,6 +20,7 @@ use os.userlib.syscall_raw.{syscall}
 use os.drivers.virtio.virtio_common.{VirtqDesc, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
 use os.drivers.virtio.virtio_net_async.{VirtioNetRecvFuture, VirtioNetSendFuture}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
+use os.apps.sshd.ssh_hex.{format_hex_width}
 
 
 # ============================================================================
@@ -240,6 +241,8 @@ impl VirtioNetDriver:
         write received frames into (virtio-net header + ethernet frame).
         """
         var i: u64 = 0
+        val buffer_size_u32: u32 = 2048
+        val virtq_desc_f_write_u32: u32 = 2
         while i < RX_BUFFER_COUNT and i < self.rx_queue_size.to_u64():
             val desc_off = self.rx_desc_virt + (i * 16)
             val buf_phys = self.rx_bufs_phys + (i * BUFFER_SIZE)
@@ -249,8 +252,8 @@ impl VirtioNetDriver:
             val phys_high = (buf_phys >> 32).to_u32()
             mmio_write32(desc_off, phys_low)           # addr low
             mmio_write32(desc_off + 4, phys_high)      # addr high
-            mmio_write32(desc_off + 8, BUFFER_SIZE.to_u32())  # len
-            val flags = VIRTQ_DESC_F_WRITE.to_u32()
+            mmio_write32(desc_off + 8, buffer_size_u32)  # len
+            val flags = virtq_desc_f_write_u32
             mmio_write32(desc_off + 12, flags << 16)   # flags (high 16) | next=0 (low 16)
 
             # Add to available ring
@@ -397,12 +400,12 @@ impl VirtioNetDriver:
 
     fn mac_string() -> text:
         """Format MAC address as colon-separated hex string."""
-        val m0 = self.mac0.to_hex()
-        val m1 = self.mac1.to_hex()
-        val m2 = self.mac2.to_hex()
-        val m3 = self.mac3.to_hex()
-        val m4 = self.mac4.to_hex()
-        val m5 = self.mac5.to_hex()
+        val m0 = format_hex_width(self.mac0.to_u64(), 2)
+        val m1 = format_hex_width(self.mac1.to_u64(), 2)
+        val m2 = format_hex_width(self.mac2.to_u64(), 2)
+        val m3 = format_hex_width(self.mac3.to_u64(), 2)
+        val m4 = format_hex_width(self.mac4.to_u64(), 2)
+        val m5 = format_hex_width(self.mac5.to_u64(), 2)
         "{m0}:{m1}:{m2}:{m3}:{m4}:{m5}"
 
     # ========================================================================
@@ -433,6 +436,7 @@ impl VirtioNetDriver:
         val slot = (self.tx_last_used % self.tx_queue_size).to_u64()
         val buf_virt = self.tx_bufs_virt + slot * BUFFER_SIZE
         val buf_phys = self.tx_bufs_phys + slot * BUFFER_SIZE
+        val virtio_net_hdr_size_u64: u64 = 10
 
         # Write virtio-net header (10 bytes, all zeros = no checksum/GSO offload)
         # flags:u8=0, gso_type:u8=0, hdr_len:u16=0, gso_size:u16=0,
@@ -445,12 +449,12 @@ impl VirtioNetDriver:
         var i: u64 = 0
         while i < len:
             val byte = mmio_read8(data_virt + i)
-            mmio_write8(buf_virt + VIRTIO_NET_HDR_SIZE + i, byte)
+            mmio_write8(buf_virt + virtio_net_hdr_size_u64 + i, byte)
             i = i + 1
 
         # Set up TX descriptor by copying payload into driver-owned DMA.
         val desc_off = self.tx_desc_virt + slot * 16
-        val total_len = VIRTIO_NET_HDR_SIZE + len
+        val total_len = virtio_net_hdr_size_u64 + len
         val phys_low = (buf_phys & 0xFFFFFFFF).to_u32()
         val phys_high = (buf_phys >> 32).to_u32()
         mmio_write32(desc_off, phys_low)           # addr low

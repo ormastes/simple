@@ -61,14 +61,13 @@ Verifies the POSIX-compat subset (D10):
 
 #### pwrite at offset rewrites EXTENT_REF; subsequent pread returns new data
 
-1. mt write
-
-2. mt pwrite
+- mt write
+- mt pwrite
    - Expected: got equals `AAAAACCCCC`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -87,15 +86,14 @@ expect(got).to_equal("AAAAACCCCC")
 
 #### pwrite does not corrupt bytes before the written offset
 
-1. mt write
-
-2. mt pwrite
+- mt write
+- mt pwrite
    - Expected: got[0] equals `'X'`
    - Expected: got[8] equals `'Y'`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -117,20 +115,16 @@ expect(got[8]).to_equal('Y')
 
 #### rename-over-existing is atomic (target replaced)
 
-1. mt write
-
-2. mt close
-
-3. mt write
-
-4. mt close
-
-5. mt rename
+- mt write
+- mt close
+- mt write
+- mt close
+- mt rename
    - Expected: got equals `aaa`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -155,16 +149,14 @@ expect(got).to_equal("aaa")
 
 #### unlink while handle open: data accessible until close
 
-1. mt write
-
-2. mt unlink
+- mt write
+- mt unlink
    - Expected: got equals `ghost`
-
-3. mt close
+- mt close
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -184,14 +176,13 @@ mt.close(fh).unwrap()
 
 #### after close, unlinked file is not accessible
 
-1. mt unlink
-
-2. mt close
+- mt unlink
+- mt close
    - Expected: r.is_err() is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -211,14 +202,13 @@ expect(r.is_err()).to_equal(true)
 
 #### truncate shrinks file; stat shows new size
 
-1. mt write
-
-2. mt ftruncate
+- mt write
+- mt ftruncate
    - Expected: stat.size equals `5`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -236,14 +226,13 @@ expect(stat.size).to_equal(5)
 
 #### truncate grows file; extended region reads as zeros
 
-1. mt write
-
-2. mt ftruncate
+- mt write
+- mt ftruncate
    - Expected: got[0] equals `\0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -265,7 +254,7 @@ expect(got[0]).to_equal("\0")
 #### mmap_shared_writable returns ENOTSUP
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -281,12 +270,12 @@ expect(r.is_err()).to_equal(true)
 
 #### link (hard link) returns ENOTSUP
 
-1. mt close
+- mt close
    - Expected: r.is_err() is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

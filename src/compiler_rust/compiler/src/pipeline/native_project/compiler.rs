@@ -783,6 +783,8 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
                 }
                 j += 1;
             }
+            // End of the `fn(...)` parameter list (one past the closing paren).
+            let params_end = j;
             if j + 4 <= bytes.len() && &s[j..j + 4] == " -> " {
                 j += 4;
                 let mut type_depth = 0i32;
@@ -805,7 +807,15 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
                 }
             }
             if j < bytes.len() && bytes[j] == b':' {
-                result.push_str("fn()");
+                // `fn(...)` directly followed by `:` is a lambda EXPRESSION
+                // (`run_fn: fn(m): body`, `val f = fn(m): body`), not a
+                // function-type annotation. Preserve its parameter list —
+                // emitting `fn()` here stripped lambda params, so the body's
+                // param reads lowered to `GlobalLoad` (= nil/0 at runtime):
+                // the stage4 `CompileContext.create_outlined_*` SIGSEGV.
+                // Any ` -> Type` return annotation is still dropped (the
+                // seed parser does not accept it in lambda headers).
+                result.push_str(&s[fn_start..params_end]);
             } else {
                 result.push_str("any");
             }
@@ -901,4 +911,44 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
     }
 
     s
+}
+
+#[cfg(test)]
+mod bootstrap_rewrite_tests {
+    use super::apply_bootstrap_rewrite;
+
+    /// Lambda EXPRESSIONS (`fn(...)` followed by `:`) must keep their
+    /// parameter list. Regression test for the stage4
+    /// `CompileContext.create_outlined_*` SIGSEGV: `run_fn: fn(m): ...`
+    /// was rewritten to `run_fn: fn(): ...`, so `m` lowered to a
+    /// GlobalLoad (nil) instead of a parameter read.
+    #[test]
+    fn lambda_expr_in_named_struct_field_keeps_params() {
+        let src = "val p = BackendPort(name: \"interp\", run_fn: fn(m): impl.process_module(m))\n";
+        let out = apply_bootstrap_rewrite(src);
+        assert!(out.contains("run_fn: fn(m): impl.process_module(m)"), "got: {out}");
+    }
+
+    #[test]
+    fn lambda_expr_in_let_binding_keeps_params() {
+        let src = "val f = fn(m): impl.process_module(m)\n";
+        let out = apply_bootstrap_rewrite(src);
+        assert!(out.contains("= fn(m): impl.process_module(m)"), "got: {out}");
+    }
+
+    #[test]
+    fn lambda_expr_with_return_type_keeps_params_drops_ret() {
+        let src = "val f = fn(m) -> i64: m + 1\n";
+        let out = apply_bootstrap_rewrite(src);
+        assert!(out.contains("= fn(m): m + 1"), "got: {out}");
+    }
+
+    /// Function-TYPE annotations (not followed by `:`) must still
+    /// collapse to `any` for the seed parser.
+    #[test]
+    fn fn_type_annotation_still_becomes_any() {
+        let src = "struct P:\n    run_fn: fn(Module) -> any\n    done: bool\n";
+        let out = apply_bootstrap_rewrite(src);
+        assert!(out.contains("run_fn: any\n"), "got: {out}");
+    }
 }

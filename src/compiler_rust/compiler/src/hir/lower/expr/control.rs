@@ -684,54 +684,15 @@ impl Lowerer {
             }
         }
 
-        // For multiple statements, we need to lower them all and return the last value
-        // For now, just look for the last expression or return
-        let mut last_expr = HirExpr {
-            kind: HirExprKind::Nil,
-            ty: TypeId::NIL,
-        };
-
-        for stmt in &body.statements {
-            match stmt {
-                simple_parser::ast::Node::Expression(expr) => {
-                    last_expr = self.lower_expr(expr, ctx)?;
-                }
-                simple_parser::ast::Node::Return(ret_stmt) => {
-                    if let Some(expr) = &ret_stmt.value {
-                        last_expr = self.lower_expr(expr, ctx)?;
-                    } else {
-                        last_expr = HirExpr {
-                            kind: HirExprKind::Nil,
-                            ty: TypeId::NIL,
-                        };
-                    }
-                }
-                // Handle Let statements to add local variables
-                simple_parser::ast::Node::Let(let_stmt) => {
-                    // Lower the initializer expression (if present)
-                    let init_ty = if let Some(ref value) = let_stmt.value {
-                        let init_expr = self.lower_expr(value, ctx)?;
-                        init_expr.ty
-                    } else {
-                        TypeId::NIL
-                    };
-
-                    // Extract variable name from pattern
-                    if let simple_parser::ast::Pattern::Identifier(name) = &let_stmt.pattern {
-                        // Add the variable to the context
-                        ctx.add_local(name.clone(), init_ty, let_stmt.mutability);
-                        // The let statement doesn't produce a value itself
-                    } else if let simple_parser::ast::Pattern::MutIdentifier(name) = &let_stmt.pattern {
-                        ctx.add_local(name.clone(), init_ty, simple_parser::ast::Mutability::Mutable);
-                    }
-                    // Other patterns (typed, tuple, etc.) would need more complex handling
-                }
-                // Skip other statement types for now
-                _ => {}
-            }
-        }
-
-        Ok(last_expr)
+        // For multiple statements, lower the whole arm body as a value-producing
+        // block, exactly like a do-block. The previous hand-rolled loop here
+        // dropped every non-final statement: `val x = f()` only registered the
+        // local (no `HirStmt::Let`, so no store — the local stayed
+        // uninitialized/zero), and side-effecting expression statements before
+        // the last one were lowered and discarded. A lambda in the arm's
+        // result expression capturing such a `val` then read garbage at
+        // runtime (stage4 `CompileContext.create` SIGSEGV, receiver = nil).
+        self.lower_do_block(&body.statements, ctx)
     }
 
     /// Lower a do block expression to HIR

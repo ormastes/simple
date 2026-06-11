@@ -797,7 +797,8 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
 }
 
 fn build_safe_mode_child_args(path: &Path, options: &super::types::TestOptions) -> Vec<String> {
-    let mut args = vec!["run".to_string(), path.display().to_string()];
+    let child_path = preprocess_matchers_only(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut args = vec!["run".to_string(), child_path.display().to_string()];
 
     if let Some(mode) = options.execution_mode.cli_value() {
         args.push(format!("--mode={}", mode));
@@ -2122,7 +2123,7 @@ mod tests {
         let args = build_safe_mode_child_args(Path::new("test/example_spec.spl"), &options);
 
         assert_eq!(args.first().map(String::as_str), Some("run"));
-        assert_eq!(args.get(1).map(String::as_str), Some("test/example_spec.spl"));
+        assert_eq!(args.get(1).map(String::as_str), Some("test/.spipe_matchers_example_spec.spl"));
         assert!(!args.iter().any(|arg| arg == "test"));
     }
 

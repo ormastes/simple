@@ -22,6 +22,8 @@
 #   - `text`      — text payload for text nodes / attribute summary for elements
 #   - `depth`     — indentation depth in the flattened tree listing
 #   - `child_ids` — ordered child identities, resolved via `find_by_id`
+#   - `bounds`    — optional `(x, y, width, height)` layout box recorded from
+#                   the shell or a DevTools-backed geometry probe
 #
 # No inheritance: `DevToolsDomMirror` composes `DevToolsDomNode` values in a
 # flat `[DevToolsDomNode]` so iteration, find-by-id, and flattened listing
@@ -46,6 +48,10 @@ class DevToolsDomNode:
     text_value: text
     depth: i32
     child_ids: [i64]
+    x: i32
+    y: i32
+    width: i32
+    height: i32
 
 impl DevToolsDomNode:
 
@@ -56,7 +62,11 @@ impl DevToolsDomNode:
             tag: tag,
             text_value: "",
             depth: depth,
-            child_ids: []
+            child_ids: [],
+            x: -1,
+            y: -1,
+            width: 0,
+            height: 0
         )
 
     static fn new_text(id: i64, text_value: text, depth: i32) -> DevToolsDomNode:
@@ -68,7 +78,11 @@ impl DevToolsDomNode:
             tag: "#text",
             text_value: text_value,
             depth: depth,
-            child_ids: []
+            child_ids: [],
+            x: -1,
+            y: -1,
+            width: 0,
+            height: 0
         )
 
     fn is_text() -> bool:
@@ -86,6 +100,20 @@ impl DevToolsDomNode:
         """Replace the text payload (used when an element summarises its
         attributes or a text node is updated in place)."""
         self.text_value = value
+
+    me set_bounds(x: i32, y: i32, width: i32, height: i32):
+        """Record a layout box for this node.
+
+        This is the storage point for per-node geometry captured from a live
+        Chromium shell snapshot or an external DevTools geometry probe.
+        """
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+    fn has_bounds() -> bool:
+        self.width > 0 and self.height > 0
 
     fn display_label() -> text:
         """Return a short human-readable label for the devtools tree view.
@@ -189,6 +217,21 @@ impl DevToolsDomMirror:
             i = i + 1
         false
 
+    me set_bounds(node_id: i64, x: i32, y: i32, width: i32, height: i32) -> bool:
+        """Record a layout box for `node_id`.
+
+        Returns false when the node is absent from the mirror.
+        """
+        var i: i32 = 0
+        val n = self.nodes_list.len().to_i32()
+        while i < n:
+            val node = self.nodes_list[i]
+            if node.id == node_id:
+                node.set_bounds(x, y, width, height)
+                return true
+            i = i + 1
+        false
+
     fn find_by_id(id: i64) -> i32:
         """Return the index of the node with `id`, or -1 if not present."""
         var i: i32 = 0
@@ -227,6 +270,13 @@ impl DevToolsDomMirror:
         var i: i32 = 0
         val n = self.nodes_list.len().to_i32()
         while i < n:
-            out = out + [self.nodes_list[i].display_label()]
+            val node = self.nodes_list[i]
+            if node.tag == "#text":
+                out = out + [node.text_value]
+            else:
+                if node.text_value == "":
+                    out = out + ["<" + node.tag + ">"]
+                else:
+                    out = out + ["<" + node.tag + " " + node.text_value + ">"]
             i = i + 1
         out

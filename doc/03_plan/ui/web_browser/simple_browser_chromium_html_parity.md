@@ -92,3 +92,80 @@ Open gaps tied to the active browser objective:
   - result: `layout_match`, `mismatch_count=0`
   - focused result: confirms the same dedicated flex-column container path also
     matches Chromium for the nested column-on-column case
+- The same live geometry lane now passes for `18_flex_grow_weights`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused fix: parse `flex` / `flex-grow` into integer grow weights and
+    distribute leftover row flex width with weighted cumulative rounding so the
+    single-pixel remainder matches Chromium
+- The same live geometry lane now passes for `19_flex_shrink_weights`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused fix: parse `flex-shrink` and the second `flex` shorthand component,
+    distribute negative free space by scaled shrink factors, and preserve the
+    flex-resolved child width instead of letting the authored explicit width
+    overwrite the final box geometry
+- The same live geometry lane now passes for `20_flex_basis_override`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused fix: parse `flex-basis` plus the third `flex` shorthand component,
+    use flex basis as the main-axis base size, and let it override authored
+    width in the child’s used geometry
+- The same live geometry lane now passes for `21_flex_wrap_basic`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused fix: parse `flex-wrap: wrap`, start a new row when the next item no
+    longer fits the current line, and accumulate container height across
+    multiple flex lines
+- The same live geometry lane now passes for `22_flex_align_items_baseline`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused fix: parse `align-items: baseline`, keep plain text flex items at
+    intrinsic width instead of implicit grow width, and apply a focused
+    baseline offset for row-flex text items, plus focused text-label mapping on
+    the Simple side
+- The same live geometry lane now passes for `23_flex_wrap_align_content_center`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused fix: parse `align-content: center`, keep explicit multi-line flex
+    container height, precompute wrapped line heights, and center the block of
+    flex lines within the container’s cross size
+- The same live geometry lane now passes for `24_flex_wrap_reverse_basic`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused fix: treat `flex-wrap` as a mode instead of a boolean, place
+    wrapped lines from the opposite cross-axis edge for `wrap-reverse`, and
+    compute the container height from total stacked line height
+- The focused geometry spec file is green again in the default runner:
+  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl`
+    passes after refactoring the file into helper functions behind one `it`
+    block, which preserves the runner-state workaround without leaving one
+    giant test body
+- Native-mode proof for that spec is still missing:
+  - `simple test ... --mode=native --json` still fails with `error: null`
+  - direct execution of the emitted ELF crashes with a NULL `SIGSEGV`
+  - so focused Chromium geometry evidence is strong in the live Electron lane
+    and default interpreter-style spec lane, but not yet in native spec mode
+  - follow-up isolation reduced the native fault surface:
+    - a minimal native spec calling only
+      `html_compat_fixture_simple_boxes("02_block_boxes", 320, 240)` still
+      reproduces the crash, proving the problem is in the renderer-backed box
+      export path rather than the higher-level fixture spec shape
+    - replacing `FONT_CHARSET.index_of(...)` with a local glyph charset scan
+      removed the `FONT_CHARSET_dot_index_of` unresolved stub from the native
+      artifact
+    - splitting the CLI compare wrapper out of
+      `html_compat_geometry_probe.spl` removed `json_deep_equals` from the
+      minimal probe’s unresolved set
+    - the remaining native unresolved set for the minimal probe is now only
+      the `spl_*` dynamic-loader quartet, which points at a smaller transitive
+      GPU/runtime closure issue
+    - after splitting `Engine2D` presentation into
+      `simple_web_html_engine2d_presenter.spl`, the native geometry-spec
+      rebuild no longer carries the `spl_*` loader quartet; the remaining
+      unresolved symbol is `json_deep_equals`, which belongs to the compare
+      bridge rather than the renderer-backed box export
+    - a standalone native smoke entry at
+      `src/app/wm_compare/html_compat_geometry_probe_native_smoke.spl`
+      now builds cleanly after fixing the stale `TextRenderCache.char_w`
+      debug-field reference, and its artifact contains the renderer-backed
+      Draw IR entry without `spl_*`, `json_deep_equals`, or
+      `rt_bdd_expect_eq_rv`
+    - the file-backed path still leaves `rt_file_read_text_rv` unresolved, so
+      the smoke uses a direct inline HTML fixture; that binary now runs without
+      the previous NULL `SIGSEGV` but fails with `status=fail` /
+      `reason=no-boxes`, leaving native geometry proof incomplete and narrowed
+      to the direct-HTML box extraction path

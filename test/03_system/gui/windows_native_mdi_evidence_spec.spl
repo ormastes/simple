@@ -1,0 +1,87 @@
+# @tag:system, slow
+# @tag:gui
+# @tag:windows
+
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.spec.*
+
+extern fn rt_platform_name() -> text
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _run_id() -> text:
+    getpid().to_text() + "_" + time_now_unix_micros().to_text()
+
+fn _build_dir(run_id: text) -> text:
+    "build/tmp/windows_native_mdi_evidence_spec_" + run_id
+
+fn _report_path(run_id: text) -> text:
+    "build/tmp/windows_native_mdi_evidence_spec_" + run_id + ".md"
+
+fn _run_evidence(run_id: text) -> (text, text, i32):
+    rt_process_run_timeout(
+        "/bin/sh",
+        [
+            "-c",
+            "BUILD_DIR=" + _build_dir(run_id) + " REPORT_PATH=" + _report_path(run_id) +
+                " SIMPLE_LIB=src sh scripts/check/check-windows-native-mdi-evidence.shs"
+        ],
+        180000
+    )
+
+fn _extract_field(output: text, prefix: text) -> text:
+    for line in output.split("\n"):
+        if line.starts_with(prefix):
+            return line.substring(prefix.len())
+    ""
+
+fn _extract_i64_field(output: text, prefix: text) -> i64:
+    val value = _extract_field(output, prefix)
+    if value == "":
+        return 0
+    value.to_i64()
+
+describe "windows native MDI evidence":
+    slow_it "passes on Windows and reports an explicit requires-windows skip elsewhere":
+        val run_id = _run_id()
+        val result = _run_evidence(run_id)
+        val stdout = result[0]
+        val stderr = result[1]
+        val code = result[2]
+        val host_os = rt_platform_name()
+        if code != 0:
+            print "windows_native_mdi_evidence stdout: " + stdout
+            print "windows_native_mdi_evidence stderr: " + stderr
+        if host_os == "windows":
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("windows_native_mdi_evidence_status=pass")
+            expect(stdout).to_contain("windows_native_mdi_evidence_reason=pass")
+            expect(stdout).to_contain("windows_native_mdi_evidence_host_os=windows")
+            expect(stdout).to_contain("windows_native_mdi_evidence_window_found=true")
+            expect(stdout).to_contain("windows_native_mdi_evidence_window_title=SimpleOS Win32 Hosted MDI Probe")
+            expect(stdout).to_contain("windows_native_mdi_evidence_proof_path=" + _build_dir(run_id) + "/windows_native_mdi_proof.env")
+            expect(stdout).to_contain("windows_native_mdi_evidence_screenshot_path=" + _build_dir(run_id) + "/windows_native_mdi.png")
+            val report = rt_file_read_text(_report_path(run_id))
+            expect(report).to_contain("# Windows Native MDI Evidence")
+            expect(report).to_contain("windows_native_mdi_evidence_status=pass")
+            expect(report).to_contain("windows_native_mdi_evidence_window_found=true")
+            val proof = rt_file_read_text(_build_dir(run_id) + "/windows_native_mdi_proof.env")
+            expect(proof).to_contain("status=pass")
+            expect(proof).to_contain("backend=win32-native")
+            expect(proof).to_contain("drag_moved=true")
+            expect(proof).to_contain("focus_cycle_changed=true")
+            expect(proof).to_contain("titlebar_widget_markup_present=true")
+            expect(proof).to_contain("body_button_markup_present=true")
+            expect(proof).to_contain("body_input_markup_present=true")
+            expect(proof).to_contain("minimized_after_restore=0")
+        else:
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("windows_native_mdi_evidence_status=skip")
+            expect(stdout).to_contain("windows_native_mdi_evidence_reason=requires-windows")
+            expect(stdout).to_contain("windows_native_mdi_evidence_window_found=false")
+            expect(stdout).to_contain("windows_native_mdi_evidence_proof_path=")
+            expect(stdout).to_contain("windows_native_mdi_evidence_screenshot_path=")
+            val report = rt_file_read_text(_report_path(run_id))
+            expect(report).to_contain("# Windows Native MDI Evidence")
+            expect(report).to_contain("windows_native_mdi_evidence_status=skip")
+            expect(report).to_contain("windows_native_mdi_evidence_reason=requires-windows")

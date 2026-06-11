@@ -41,7 +41,7 @@ web_stack_sample_persistence_spec
 #### persists app-surface register create login and search across reopen
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

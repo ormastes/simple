@@ -43,7 +43,7 @@ simple_portal_server_spec -> os
 #### serves the landing page from the app filesystem root
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect(resp).to_contain("Content-Security-Policy:")
 #### normalizes duplicate slashes for public APIs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -76,7 +76,7 @@ expect(resp).to_contain("\"releases\"")
 #### serves content APIs from a filesystem-backed data root even when the app root is absent
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -102,7 +102,7 @@ expect(resp).to_contain("Simple Portal Docs")
 #### rejects static path traversal
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -117,7 +117,7 @@ expect(resp).to_start_with("HTTP/1.1 404 Not Found")
 #### rejects disallowed methods on public endpoints
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -133,7 +133,7 @@ expect(resp).to_contain("Allow: GET, HEAD")
 #### rejects unauthorized playground runs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -149,7 +149,7 @@ expect(resp).to_start_with("HTTP/1.1 403 Forbidden")
 #### accepts authorized playground runs and returns a sandbox envelope
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -167,7 +167,7 @@ expect(resp).to_contain("\"sandbox\":{\"filesystem\":false,\"network\":false,\"p
 #### rejects oversized playground bodies
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -191,7 +191,7 @@ expect(resp).to_start_with("HTTP/1.1 413 Request Entity Too Large")
 #### uses stable sys app paths
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -43,7 +43,7 @@ engine2d_backend_spec -> std
 #### returns at least software and cpu
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -70,7 +70,7 @@ expect(has_cpu).to_equal(true)
 #### returns a non-empty list
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -86,17 +86,16 @@ expect(backends.len()).to_be_greater_than(1)
 
 #### initializes with correct dimensions
 
-1. var backend = SoftwareBackend create
+- var backend = SoftwareBackend create
    - Expected: backend.init(100, 100) is true
    - Expected: backend.name() equals `software`
    - Expected: backend.width() equals `100`
    - Expected: backend.height() equals `100`
-
-2. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -114,15 +113,14 @@ backend.shutdown()
 
 #### read_pixels works after initialization
 
-1. var backend = SoftwareBackend create
+- var backend = SoftwareBackend create
    - Expected: backend.init(10, 10) is true
    - Expected: pixels.len() equals `100`
-
-2. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -139,22 +137,19 @@ backend.shutdown()
 
 #### shutdown releases dimensions and pixels
 
-1. var backend = SoftwareBackend create
+- var backend = SoftwareBackend create
    - Expected: backend.init(16, 16) is true
-
-2. backend clear
-
-3. backend present
+- backend clear
+- backend present
    - Expected: backend.read_pixels().len() equals `256`
-
-4. backend shutdown
+- backend shutdown
    - Expected: backend.width() equals `0`
    - Expected: backend.height() equals `0`
    - Expected: backend.read_pixels().len() equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -177,17 +172,16 @@ expect(backend.read_pixels().len()).to_equal(0)
 
 #### initializes through the software raster surface
 
-1. var backend = CpuBackend create
+- var backend = CpuBackend create
    - Expected: backend.init(100, 100) is true
    - Expected: backend.name() equals `cpu`
    - Expected: backend.width() equals `100`
    - Expected: backend.height() equals `100`
-
-2. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -205,22 +199,18 @@ backend.shutdown()
 
 #### draws and reads pixels
 
-1. var backend = CpuBackend create
+- var backend = CpuBackend create
    - Expected: backend.init(12, 12) is true
-
-2. backend clear
-
-3. backend draw rect filled
-
-4. backend present
+- backend clear
+- backend draw rect filled
+- backend present
    - Expected: pixels.len() equals `144`
    - Expected: pixels[2 * 12 + 2] equals `rgb(10, 20, 30)`
-
-5. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -241,25 +231,20 @@ backend.shutdown()
 
 #### can create multiple backends sequentially
 
-1. var e1 = SoftwareBackend create
+- var e1 = SoftwareBackend create
    - Expected: e1.init(64, 64) is true
-
-2. e1 shutdown
-
-3. var e2 = CpuBackend create
+- e1 shutdown
+- var e2 = CpuBackend create
    - Expected: e2.init(128, 128) is true
-
-4. e2 shutdown
-
-5. var e3 = SoftwareBackend create
+- e2 shutdown
+- var e3 = SoftwareBackend create
    - Expected: e3.init(32, 32) is true
    - Expected: e3.width() equals `32`
-
-6. e3 shutdown
+- e3 shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -284,7 +269,7 @@ e3.shutdown()
 #### documents the default backend preference as platform native then CUDA HIP then Vulkan
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -306,7 +291,7 @@ expect(backend_preference_summary()).to_contain("vulkan > opencl")
 #### canonicalizes HIP and SIMD aliases before backend selection
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -326,7 +311,7 @@ expect(feature_gate_description("hip")).to_contain("ROCm")
 #### cpu_simd is a first-class strict backend alias
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -342,7 +327,7 @@ expect(probe.selected_name).to_equal("cpu_simd")
 #### hip alias probes the ROCm HIP backend instead of unknown fallback
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -359,24 +344,19 @@ expect(probe.reason).to_contain("ROCm")
 
 #### simd_cpu alias renders through the CPU SIMD surface
 
-1. reset simd hits
-
-2. var engine = Engine2D create with backend
-
-3. engine clear
-
-4. engine draw rect filled
-
-5. engine present
+- reset simd hits
+- var engine = Engine2D create with backend
+- engine clear
+- engine draw rect filled
+- engine present
    - Expected: engine.backend_name() equals `cpu_simd`
    - Expected: pixels.len() equals `256`
    - Expected: pixels[2 * 16 + 2] equals `rgb(10, 20, 30)`
-
-6. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -401,7 +381,7 @@ engine.shutdown()
 #### metal strict probe does not silently fall back to cpu
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

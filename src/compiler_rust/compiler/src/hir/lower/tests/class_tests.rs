@@ -37,7 +37,7 @@ class Counter:
 "#;
     let result = parse_and_lower(source);
     assert!(
-        matches!(result, Err(LowerError::SelfMutationInImmutableMethod)),
+        matches!(result, Err(LowerError::SelfMutationInImmutableMethod { .. })),
         "Self mutation in fn method should produce E1052 error"
     );
 }
@@ -58,7 +58,7 @@ class Outer:
 "#;
     let result = parse_and_lower(source);
     assert!(
-        matches!(result, Err(LowerError::SelfMutationInImmutableMethod)),
+        matches!(result, Err(LowerError::SelfMutationInImmutableMethod { .. })),
         "Nested self mutation in fn method should produce E1052 error"
     );
 }

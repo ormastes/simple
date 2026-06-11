@@ -5,17 +5,16 @@
 # Parses HTML into a flat node arena (avoiding the interpreter's nested-field
 # push bug), applies inline + <style>-block CSS, does block-flow layout with
 # word-wrapped text, and paints boxes + text into a staging [u32] framebuffer
-# using a tiny 5x7 bitmap font. The final frame is presented through Engine2D
-# so generic Simple Web rendering shares the same backend interface as GUI/WM
-# surfaces while preserving this renderer's pixel-exact text and CSS fixtures.
+# using a tiny 5x7 bitmap font. Engine2D presentation lives in a separate shim
+# so Draw IR and software layout stay free of the GPU backend closure.
 #
 # Two interpreter bugs are worked around here (both worth a seed fix):
 #   * text.index_of(needle, pos) IGNORES pos -> use find_from() (substring+find).
 #   * obj.field.push() on an array element does not persist -> use a flat arena
 #     of nodes keyed by integer parent index; only ever append to the top array.
 #
-# Public entry: simple_web_layout_render_html_pixels(html, w, h, backend_name)
-#   parse -> CSS cascade -> block layout -> paint text+boxes -> Engine2D -> [u32]
+# Public entry: simple_web_layout_render_html_software_pixels(html, w, h)
+#   parse -> CSS cascade -> block layout -> paint text+boxes -> [u32]
 
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
@@ -30,7 +29,6 @@ use common.ui.draw_ir.{
     draw_ir_source_html_ast,
     draw_ir_style_prop
 }
-use std.gpu.engine2d.engine.{Engine2D}
 
 # ---------------------------------------------------------------------------
 # Flat node arena
@@ -39,14 +37,25 @@ use std.gpu.engine2d.engine.{Engine2D}
 class HNode:
     tag: text          # lowercased tag, "#text", or "#root"
     text_data: text    # text for #text nodes
+    text_trimmed: text
     style_attr: text   # raw style="" value
     class_attr: text
+    class_words: [text]
+    has_widget_class: bool
+    has_icon_image_class: bool
+    has_widget_panel_class: bool
+    has_widget_button_class: bool
+    has_widget_image_class: bool
+    has_focused_class: bool
     id_attr: text
     attrs_raw: text    # raw tag inner text for attribute selectors
     parent: i64        # index of parent in the arena (-1 for root)
 
 fn mk_node(tag: text, parent: i64) -> HNode:
-    HNode(tag: tag, text_data: "", style_attr: "", class_attr: "", id_attr: "", attrs_raw: "", parent: parent)
+    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent)
+
+pub fn simple_web_layout_debug_loaded() -> i64:
+    1
 
 # ---------------------------------------------------------------------------
 # Position-aware string find (works around index_of(needle,pos) ignoring pos)
@@ -124,6 +133,7 @@ fn parse_html(html: text) -> [HNode]:
             if tail.trim().len() > 0:
                 var tn = mk_node("#text", pstack[pstack.len() - 1])
                 tn.text_data = tail
+                tn.text_trimmed = tail.trim()
                 nodes.push(tn)
             break
         if lt > pos:
@@ -131,6 +141,7 @@ fn parse_html(html: text) -> [HNode]:
             if txt.trim().len() > 0:
                 var tn = mk_node("#text", pstack[pstack.len() - 1])
                 tn.text_data = txt
+                tn.text_trimmed = txt.trim()
                 nodes.push(tn)
         # comment?
         val c4 = if lt + 4 <= n: html.substring(lt, lt + 4) else: ""
@@ -167,6 +178,13 @@ fn parse_html(html: text) -> [HNode]:
         val name = tag_name_of(inner)
         var node = mk_node(name, pstack[pstack.len() - 1])
         node.class_attr = attr_value(inner, "class")
+        node.class_words = node.class_attr.split(" ")
+        node.has_widget_class = class_contains(node.class_attr, "widget-")
+        node.has_icon_image_class = class_contains(node.class_attr, "icon-image")
+        node.has_widget_panel_class = class_contains(node.class_attr, "widget-panel")
+        node.has_widget_button_class = class_contains(node.class_attr, "widget-button")
+        node.has_widget_image_class = class_contains(node.class_attr, "widget-image")
+        node.has_focused_class = class_contains(node.class_attr, "focused")
         node.id_attr = attr_value(inner, "id")
         node.style_attr = attr_value(inner, "style")
         node.attrs_raw = inner
@@ -386,6 +404,12 @@ class Style:
     min_height_px: i32
     min_height_vh: bool
     flex_fill: bool
+    flex_grow: i32
+    flex_shrink: i32
+    flex_basis_px: i32
+    flex_wrap: text
+    align_items: text
+    align_content: text
     pad_l: i32
     pad_t: i32
     pad_r: i32
@@ -422,11 +446,11 @@ class Style:
     bold: bool
 
 fn default_style() -> Style:
-    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, line_height_px: 0, width_px: 0, height_px: 0, border_box: false, min_height_px: 0, min_height_vh: false, flex_fill: false, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, display: "block", overflow_hidden: false, overflow_auto_y: false, visibility_hidden: false, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", bold: false)
+    Style(bg: 0u32, fg: argb(20, 20, 24), font_size: 16, line_height_px: 0, width_px: 0, height_px: 0, border_box: false, min_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, flex_wrap: "nowrap", align_items: "stretch", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, display: "block", overflow_hidden: false, overflow_auto_y: false, visibility_hidden: false, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: "left", bold: false)
 
 fn inherit_style(p: Style) -> Style:
     val display = if p.display == "none": "none" else: "block"
-    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, line_height_px: p.line_height_px, width_px: 0, height_px: 0, border_box: false, min_height_px: 0, min_height_vh: false, flex_fill: false, pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, display: display, overflow_hidden: false, overflow_auto_y: false, visibility_hidden: p.visibility_hidden, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: p.text_align, bold: p.bold)
+    Style(bg: 0u32, fg: p.fg, font_size: p.font_size, line_height_px: p.line_height_px, width_px: 0, height_px: 0, border_box: false, min_height_px: 0, min_height_vh: false, flex_fill: false, flex_grow: 0, flex_shrink: 1, flex_basis_px: 0, flex_wrap: "nowrap", align_items: "stretch", align_content: "stretch", pad_l: 0, pad_t: 0, pad_r: 0, pad_b: 0, border_w: 0, border_color: 0u32, border_l: 0, border_t: 0, border_r: 0, border_b: 0, border_color_l: 0u32, border_color_t: 0u32, border_color_r: 0u32, border_color_b: 0u32, gap_px: 0, margin_l: 0, margin_t: 0, margin_r: 0, margin_b: 0, display: display, overflow_hidden: false, overflow_auto_y: false, visibility_hidden: p.visibility_hidden, position_relative: false, position_absolute: false, left_px: 0, top_px: 0, right_px: -1, bottom_px: -1, z_index: 0, opacity_pct: 100, flex_direction: "row", text_align: p.text_align, bold: p.bold)
 
 fn is_inline_tag(tag: text) -> bool:
     tag == "a" or tag == "span" or tag == "b" or tag == "strong" or tag == "em" or tag == "i" or tag == "small" or tag == "code" or tag == "#text"
@@ -451,6 +475,12 @@ fn apply_decls(st: Style, decls: text) -> Style:
     var min_height_v = st.min_height_px
     var min_height_vh_v = st.min_height_vh
     var flex_fill_v = st.flex_fill
+    var flex_grow_v = st.flex_grow
+    var flex_shrink_v = st.flex_shrink
+    var flex_basis_px_v = st.flex_basis_px
+    var flex_wrap_v = st.flex_wrap
+    var align_items_v = st.align_items
+    var align_content_v = st.align_content
     var pad_l_v = st.pad_l
     var pad_t_v = st.pad_t
     var pad_r_v = st.pad_r
@@ -543,8 +573,31 @@ fn apply_decls(st: Style, decls: text) -> Style:
         else:
             min_height_v = parse_int(min_height)
     val flex = decl_get(decls, "flex")
-    if flex.len() > 0 and parse_int(flex) > 0:
-        flex_fill_v = true
+    if flex.len() > 0:
+        val flex_grow_raw = parse_nth_int(flex, 0)
+        if flex_grow_raw >= 0:
+            flex_grow_v = flex_grow_raw
+        val flex_shrink_raw = parse_nth_int(flex, 1)
+        if flex_shrink_raw >= 0:
+            flex_shrink_v = flex_shrink_raw
+        val flex_basis_raw = parse_nth_int(flex, 2)
+        if flex_basis_raw > 0:
+            flex_basis_px_v = flex_basis_raw
+    val flex_grow_decl = decl_get(decls, "flex-grow")
+    if flex_grow_decl.len() > 0:
+        val grow_v = parse_int(flex_grow_decl)
+        if grow_v > 0:
+            flex_grow_v = grow_v
+    val flex_shrink_decl = decl_get(decls, "flex-shrink")
+    if flex_shrink_decl.len() > 0:
+        val shrink_v = parse_int(flex_shrink_decl)
+        if shrink_v >= 0:
+            flex_shrink_v = shrink_v
+    val flex_basis_decl = decl_get(decls, "flex-basis")
+    if flex_basis_decl.len() > 0:
+        val basis_v = parse_int(flex_basis_decl)
+        if basis_v > 0:
+            flex_basis_px_v = basis_v
     val display_decl = decl_get(decls, "display")
     if display_decl.len() > 0:
         if display_decl == "none":
@@ -613,9 +666,19 @@ fn apply_decls(st: Style, decls: text) -> Style:
             flex_direction_v = "column"
         else:
             flex_direction_v = "row"
+    val flex_wrap_decl = decl_get(decls, "flex-wrap")
+    if flex_wrap_decl.len() > 0:
+        if flex_wrap_decl == "wrap" or flex_wrap_decl == "wrap-reverse" or flex_wrap_decl == "nowrap":
+            flex_wrap_v = flex_wrap_decl
     val ta = decl_get(decls, "text-align")
     if ta.len() > 0:
         text_align_v = ta
+    val align_items_decl = decl_get(decls, "align-items")
+    if align_items_decl.len() > 0:
+        align_items_v = align_items_decl
+    val align_content_decl = decl_get(decls, "align-content")
+    if align_content_decl.len() > 0:
+        align_content_v = align_content_decl
     val fw = decl_get(decls, "font-weight")
     if fw.len() > 0:
         if fw == "bold" or fw == "700" or fw == "600" or fw == "800":
@@ -815,7 +878,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
         margin_t_v = 0
         margin_r_v = 0
         margin_b_v = 0
-    Style(bg: bg_v, fg: fg_v, font_size: font_size_v, line_height_px: line_height_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_height_px: min_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, gap_px: gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, visibility_hidden: visibility_hidden_v, position_relative: position_relative_v, position_absolute: position_absolute_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, bold: bold_v)
+    Style(bg: bg_v, fg: fg_v, font_size: font_size_v, line_height_px: line_height_v, width_px: width_v, height_px: height_v, border_box: border_box_v, min_height_px: min_height_v, min_height_vh: min_height_vh_v, flex_fill: flex_fill_v, flex_grow: flex_grow_v, flex_shrink: flex_shrink_v, flex_basis_px: flex_basis_px_v, flex_wrap: flex_wrap_v, align_items: align_items_v, align_content: align_content_v, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: border_w_v, border_color: border_color_v, border_l: border_l_v, border_t: border_t_v, border_r: border_r_v, border_b: border_b_v, border_color_l: border_color_l_v, border_color_t: border_color_t_v, border_color_r: border_color_r_v, border_color_b: border_color_b_v, gap_px: gap_v, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, display: display_v, overflow_hidden: overflow_hidden_v, overflow_auto_y: overflow_auto_y_v, visibility_hidden: visibility_hidden_v, position_relative: position_relative_v, position_absolute: position_absolute_v, left_px: left_px_v, top_px: top_px_v, right_px: right_px_v, bottom_px: bottom_px_v, z_index: z_index_v, opacity_pct: opacity_pct_v, flex_direction: flex_direction_v, text_align: text_align_v, bold: bold_v)
 
 # default per-tag tweaks (block/inline, heading sizes, spacing)
 fn tag_defaults(st: Style, tag: text) -> Style:
@@ -831,7 +894,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
     var margin_b_v = st.margin_b
     var bold_v = st.bold
     if is_non_rendered_tag(tag):
-        return Style(bg: st.bg, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_height_px: st.min_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, gap_px: st.gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, display: "none", overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, bold: bold_v)
+        return Style(bg: st.bg, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_height_px: st.min_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, flex_wrap: st.flex_wrap, align_items: st.align_items, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, gap_px: st.gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, display: "none", overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, bold: bold_v)
     if is_inline_tag(tag):
         display_v = "inline"
     if tag == "h1":
@@ -869,7 +932,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
         margin_b_v = 3
     elif tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "table" or tag == "tr" or tag == "div" or tag == "ul" or tag == "li":
         display_v = "block"
-    Style(bg: st.bg, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_height_px: st.min_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, gap_px: st.gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, bold: bold_v)
+    Style(bg: st.bg, fg: st.fg, font_size: font_size_v, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_height_px: st.min_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, flex_wrap: st.flex_wrap, align_items: st.align_items, align_content: st.align_content, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, gap_px: st.gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, visibility_hidden: st.visibility_hidden, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, bold: bold_v)
 
 # ---------------------------------------------------------------------------
 # CSS rules from <style> blocks
@@ -877,10 +940,14 @@ fn tag_defaults(st: Style, tag: text) -> Style:
 
 class Rules:
     sels: [text]
+    groups: [[text]]
+    group_parts: [[[text]]]
     decls: [text]
 
 fn extract_css(html: text) -> Rules:
     var sels: [text] = []
+    var groups: [[text]] = []
+    var group_parts: [[[text]]] = []
     var decls: [text] = []
     var pos = 0
     var guard = 0
@@ -910,11 +977,14 @@ fn extract_css(html: text) -> Rules:
             val decl_raw = css.substring(brace + 1, endb)
             val decl = decl_raw.trim()
             if sel.len() > 0:
+                val rule_groups = split_selector_groups(sel)
                 sels.push(sel)
+                groups.push(rule_groups)
+                group_parts.push(split_selector_group_parts(rule_groups))
                 decls.push(decl)
             cp = endb + 1
         pos = close + 1
-    Rules(sels: sels, decls: decls)
+    Rules(sels: sels, groups: groups, group_parts: group_parts, decls: decls)
 
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
@@ -948,23 +1018,31 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
         return attr_value(attrs, name) == want
     attr_value(attrs, raw).len() > 0
 
-fn base_selector_matches(base: text, tag: text, cls: text, id: text) -> bool:
+fn class_words_has(words: [text], want: text) -> bool:
+    var i = 0
+    while i < words.len():
+        if words[i] == want:
+            return true
+        i = i + 1
+    false
+
+fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], id: text) -> bool:
     if base.len() == 0:
         return true
     if base.substring(0, 1) == ".":
         val want = base.substring(1, base.len())
-        return class_has_all(cls, want)
+        return class_has_all(class_words, want)
     if base.substring(0, 1) == "#":
         return id == base.substring(1, base.len())
     val dot = base.index_of(".")
     if dot >= 0:
         val t = base.substring(0, dot)
         val want = base.substring(dot + 1, base.len())
-        return t == tag and class_has_all(cls, want)
+        return t == tag and class_has_all(class_words, want)
     base == tag
 
 # does a single simple selector match this node? (rightmost token only)
-fn simple_match(sel: text, tag: text, cls: text, id: text, attrs: text) -> bool:
+fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text) -> bool:
     val s = sel.trim()
     if s.len() == 0:
         return false
@@ -980,8 +1058,8 @@ fn simple_match(sel: text, tag: text, cls: text, id: text, attrs: text) -> bool:
             return false
         val node_base = base.substring(0, attr_start).trim()
         val expr = base.substring(attr_start + 1, attr_end)
-        return base_selector_matches(node_base, tag, cls, id) and attr_selector_matches(attrs, expr)
-    base_selector_matches(base, tag, cls, id)
+        return base_selector_matches(node_base, tag, cls, class_words, id) and attr_selector_matches(attrs, expr)
+    base_selector_matches(base, tag, cls, class_words, id)
 
 fn class_has(cls: text, want: text) -> bool:
     if cls == want:
@@ -996,12 +1074,12 @@ fn class_has(cls: text, want: text) -> bool:
         i = i + 1
     false
 
-fn class_has_all(cls: text, wants: text) -> bool:
+fn class_has_all(words: [text], wants: text) -> bool:
     val parts = wants.split(".")
     var i = 0
     while i < parts.len():
         val want = parts[i].trim()
-        if want.len() > 0 and not class_has(cls, want):
+        if want.len() > 0 and not class_words_has(words, want):
             return false
         i = i + 1
     true
@@ -1009,15 +1087,39 @@ fn class_has_all(cls: text, wants: text) -> bool:
 fn class_contains(cls: text, want: text) -> bool:
     cls.contains(want)
 
+fn split_selector_groups(sel: text) -> [text]:
+    var groups: [text] = []
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < sel.len():
+        val ch = sel.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = current + ch
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+            current = current + ch
+        elif ch == "," and depth == 0:
+            groups.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0:
+        groups.push(current.trim())
+    groups
+
 # Rightmost compound only. Kept for callers that do not have tree context.
 fn selector_matches(sel: text, tag: text, cls: text, id: text) -> bool:
-    val groups = sel.split(",")
+    val groups = split_selector_groups(sel)
     var g = 0
     while g < groups.len():
         val gg = groups[g].trim()
         val sp = gg.last_index_of(" ")
         val right = if sp >= 0: gg.substring(sp + 1, gg.len()) else: gg
-        if simple_match(right, tag, cls, id, ""):
+        if simple_match(right, tag, cls, cls.split(" "), id, ""):
             return true
         g = g + 1
     false
@@ -1034,16 +1136,25 @@ fn normalize_child_combinators(group: text) -> text:
         i = i + 1
     out.trim()
 
-fn selector_group_matches_node(nodes: [HNode], idx: i32, group: text) -> bool:
-    val trimmed_group = normalize_child_combinators(group)
-    val parts = trimmed_group.split(" ")
+fn selector_group_parts(group: text) -> [text]:
+    normalize_child_combinators(group).split(" ")
+
+fn split_selector_group_parts(groups: [text]) -> [[text]]:
+    var parts: [[text]] = []
+    var i = 0
+    while i < groups.len():
+        parts.push(selector_group_parts(groups[i]))
+        i = i + 1
+    parts
+
+fn selector_group_matches_node_parts(nodes: [HNode], idx: i32, parts: [text]) -> bool:
     var right = parts.len() - 1
     while right >= 0 and parts[right].trim().len() == 0:
         right = right - 1
     if right < 0:
         return false
     val nd = nodes[idx]
-    if not simple_match(parts[right], nd.tag, nd.class_attr, nd.id_attr, nd.attrs_raw):
+    if not simple_match(parts[right], nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw):
         return false
     var ancestor = nd.parent
     var want = right - 1
@@ -1060,7 +1171,7 @@ fn selector_group_matches_node(nodes: [HNode], idx: i32, group: text) -> bool:
                 if ancestor < 0:
                     return false
                 val anc = nodes[ancestor]
-                if simple_match(part, anc.tag, anc.class_attr, anc.id_attr, anc.attrs_raw):
+                if simple_match(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
                     ancestor = anc.parent
                     require_direct = false
                 else:
@@ -1069,7 +1180,7 @@ fn selector_group_matches_node(nodes: [HNode], idx: i32, group: text) -> bool:
                 var found = false
                 while ancestor >= 0 and not found:
                     val anc = nodes[ancestor]
-                    if simple_match(part, anc.tag, anc.class_attr, anc.id_attr, anc.attrs_raw):
+                    if simple_match(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
                         found = true
                     else:
                         ancestor = anc.parent
@@ -1079,8 +1190,11 @@ fn selector_group_matches_node(nodes: [HNode], idx: i32, group: text) -> bool:
             want = want - 1
     not require_direct
 
+fn selector_group_matches_node(nodes: [HNode], idx: i32, group: text) -> bool:
+    selector_group_matches_node_parts(nodes, idx, selector_group_parts(group))
+
 fn selector_matches_node(nodes: [HNode], idx: i32, sel: text) -> bool:
-    val groups = sel.split(",")
+    val groups = split_selector_groups(sel)
     var g = 0
     while g < groups.len():
         if selector_group_matches_node(nodes, idx, groups[g]):
@@ -1088,55 +1202,28 @@ fn selector_matches_node(nodes: [HNode], idx: i32, sel: text) -> bool:
         g = g + 1
     false
 
-fn style_block_decls_for_node(html: text, nodes: [HNode], node_index: i32) -> text:
-    var out = ""
-    var pos = 0
-    var guard = 0
-    while guard < 1000:
-        guard = guard + 1
-        val sp = find_from(html, "<style", pos)
-        if sp < 0:
-            break
-        val open = find_from(html, ">", sp)
-        if open < 0:
-            break
-        val close = find_from(html, "</style", open)
-        if close < 0:
-            break
-        val css = html.substring(open + 1, close)
-        var cp = 0
-        while cp < css.len():
-            val brace = find_from(css, "{", cp)
-            if brace < 0:
-                break
-            val endb = find_from(css, "}", brace)
-            if endb < 0:
-                break
-            val sel = css.substring(cp, brace).trim()
-            val decl = css.substring(brace + 1, endb).trim()
-            if sel.len() > 0 and decl.len() > 0 and selector_matches_node(nodes, node_index, sel):
-                out = out + decl + ";"
-            cp = endb + 1
-        pos = close + 1
-    out
+fn selector_matches_node_group_parts(nodes: [HNode], idx: i32, group_parts: [[text]]) -> bool:
+    var g = 0
+    while g < group_parts.len():
+        if selector_group_matches_node_parts(nodes, idx, group_parts[g]):
+            return true
+        g = g + 1
+    false
 
 # ---------------------------------------------------------------------------
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
 
-fn compute_styles(nodes: [HNode], rules: Rules, html: text) -> [Style]:
+fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
     var styles: [Style] = []
     var i = 0
     while i < nodes.len():
         val nd = nodes[i]
         var st = if nd.parent >= 0: inherit_style(styles[nd.parent]) else: default_style()
         st = tag_defaults(st, nd.tag)
-        val direct_style_decls = style_block_decls_for_node(html, nodes, i)
-        if direct_style_decls.len() > 0:
-            st = apply_decls(st, direct_style_decls)
         var r = 0
         while r < rules.sels.len():
-            if selector_matches_node(nodes, i, rules.sels[r]):
+            if selector_matches_node_group_parts(nodes, i, rules.group_parts[r]):
                 st = apply_decls(st, rules.decls[r])
             r = r + 1
         if nd.style_attr.len() > 0:
@@ -1268,11 +1355,61 @@ fn glyph_rows(gi: i32) -> [i32]:
     if gi == 87: return [0b00000, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111, 0b00000]  # z
     [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111]  # unknown -> box
 
+fn glyph_index_for_char_code(code: i32) -> i32:
+    if code >= 65 and code <= 90:
+        return code - 65
+    if code >= 48 and code <= 57:
+        return 26 + (code - 48)
+    if code == 32: return 36
+    if code == 46: return 37
+    if code == 44: return 38
+    if code == 58: return 39
+    if code == 59: return 40
+    if code == 33: return 41
+    if code == 63: return 42
+    if code == 45: return 43
+    if code == 95: return 44
+    if code == 40: return 45
+    if code == 41: return 46
+    if code == 91: return 47
+    if code == 93: return 48
+    if code == 47: return 49
+    if code == 92: return 50
+    if code == 39: return 51
+    if code == 34: return 52
+    if code == 43: return 53
+    if code == 61: return 54
+    if code == 35: return 55
+    if code == 37: return 56
+    if code == 38: return 57
+    if code == 64: return 58
+    if code == 42: return 59
+    if code == 60: return 60
+    if code == 62: return 61
+    if code >= 97 and code <= 122:
+        return 62 + (code - 97)
+    -1
+
+fn _glyph_charset_index_of(ch: text) -> i32:
+    if ch.len() != 1:
+        return -1
+    val needle = ch.char_code_at(0)
+    var i = 0
+    while i < FONT_CHARSET.len():
+        if FONT_CHARSET.char_code_at(i) == needle:
+            return i
+        i = i + 1
+    -1
+
 fn glyph_index_for_char(ch: text) -> i32:
-    val direct = FONT_CHARSET.index_of(ch)
+    if ch.len() == 1:
+        val direct_code = glyph_index_for_char_code(ch.char_code_at(0))
+        if direct_code >= 0:
+            return direct_code
+    val direct = _glyph_charset_index_of(ch)
     if direct >= 0:
         return direct
-    FONT_CHARSET.index_of(ch.upper())
+    _glyph_charset_index_of(ch.upper())
 
 # integer nearest scale based on font size; 16->2, 34->4
 fn glyph_scale(fs: i32) -> i32:
@@ -1495,9 +1632,10 @@ fn fb_text(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color: u32, s
     var cx = x
     val adv = 6 * scale
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw:
-            val gi = glyph_index_for_char(ch)
+            var gi = glyph_index_for_char_code(s.char_code_at(i))
+            if gi < 0:
+                gi = glyph_index_for_char(s.substring(i, i + 1))
             if gi >= 0 and gi != 36:
                 out = fb_glyph(out, fbw, fbh, cx, y, gi, color, scale)
         cx = cx + adv
@@ -1548,9 +1686,10 @@ fn fb_text_thin_scaled(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, c
     val n = s.len()
     var cx = x
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw:
-            val gi = glyph_index_for_char(ch)
+            var gi = glyph_index_for_char_code(s.char_code_at(i))
+            if gi < 0:
+                gi = glyph_index_for_char(s.substring(i, i + 1))
             if gi >= 0 and gi != 36:
                 out = fb_glyph_thin_scaled(out, fbw, fbh, cx, y, gi, color, scale)
         cx = cx + advance
@@ -1591,9 +1730,25 @@ fn fb_text_thin_scaled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: te
     val n = s.len()
     var cx = x
     while i < n:
-        val ch = s.substring(i, i + 1)
         if cx < fbw and cx < clip.x1:
-            val gi = glyph_index_for_char(ch)
+            var gi = glyph_index_for_char_code(s.char_code_at(i))
+            if gi < 0:
+                gi = glyph_index_for_char(s.substring(i, i + 1))
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, clip)
+        cx = cx + advance
+        i = i + 1
+    out
+
+fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, scale: i32, advance: i32, clip: ClipRect) -> [u32]:
+    var out = fb
+    var i = start
+    var cx = x
+    while i < endv:
+        if cx < fbw and cx < clip.x1:
+            var gi = glyph_index_for_char_code(s.char_code_at(i))
+            if gi < 0:
+                gi = glyph_index_for_char(s.substring(i, i + 1))
             if gi >= 0 and gi != 36:
                 out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, clip)
         cx = cx + advance
@@ -1622,9 +1777,25 @@ fn fb_text_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, color:
     var i = 0
     var cx = x
     while i < s.len():
-        val ch = s.substring(i, i + 1)
         if cx < fbw:
-            val gi = glyph_index_for_char(ch)
+            var gi = glyph_index_for_char_code(s.char_code_at(i))
+            if gi < 0:
+                gi = glyph_index_for_char(s.substring(i, i + 1))
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_sparse(out, fbw, fbh, cx, y, gi, color)
+        cx = cx + 6
+        i = i + 1
+    out
+
+fn fb_text_sparse_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32) -> [u32]:
+    var out = fb
+    var i = start
+    var cx = x
+    while i < endv:
+        if cx < fbw:
+            var gi = glyph_index_for_char_code(s.char_code_at(i))
+            if gi < 0:
+                gi = glyph_index_for_char(s.substring(i, i + 1))
             if gi >= 0 and gi != 36:
                 out = fb_glyph_sparse(out, fbw, fbh, cx, y, gi, color)
         cx = cx + 6
@@ -1701,15 +1872,24 @@ fn fb_generated_widget_chrome_text(fb: [u32], fbw: i32, fbh: i32) -> [u32]:
 fn has_widget_ancestor(nodes: [HNode], i: i32) -> bool:
     var p = nodes[i].parent
     while p >= 0:
-        if class_contains(nodes[p].class_attr, "widget-") or class_contains(nodes[p].class_attr, "icon-image"):
+        if nodes[p].has_widget_class or nodes[p].has_icon_image_class:
             return true
         p = nodes[p].parent
     false
 
 fn has_nonempty_widget_text_node(nodes: [HNode]) -> bool:
+    var widget_ancestor_flags: [i32] = [0; nodes.len()]
     var i = 0
     while i < nodes.len():
-        if nodes[i].tag == "#text" and nodes[i].text_data.trim() != "" and has_widget_ancestor(nodes, i):
+        var has_widget_parent = 0
+        val p = nodes[i].parent
+        if p >= 0:
+            if nodes[p].has_widget_class or nodes[p].has_icon_image_class:
+                has_widget_parent = 1
+            elif widget_ancestor_flags[p] == 1:
+                has_widget_parent = 1
+        widget_ancestor_flags[i] = has_widget_parent
+        if nodes[i].tag == "#text" and nodes[i].text_trimmed != "" and has_widget_parent == 1:
             return true
         i = i + 1
     false
@@ -1722,7 +1902,7 @@ fn is_text_flow_fixture(nodes: [HNode], fbw: i32, fbh: i32) -> bool:
     var i = 0
     while i < nodes.len():
         if nodes[i].tag == "#text":
-            val txt = nodes[i].text_data.trim()
+            val txt = nodes[i].text_trimmed
             if txt == "GUI":
                 has_title = true
             if txt == "taskbar command":
@@ -1903,7 +2083,29 @@ class LayoutResult:
     by: [i32]
     bw: [i32]
     bh: [i32]
+    wrap_starts: [[i32]]
+    wrap_ends: [[i32]]
     height: i32
+
+class TextWrapCache:
+    starts: [[i32]]
+    ends: [[i32]]
+
+class TextRenderCache:
+    char_widths: [i32]
+    advances: [i32]
+    scales: [i32]
+    line_heights: [i32]
+    ink_x_offsets: [i32]
+    ink_y_offsets: [i32]
+
+class IntrinsicWidthResult:
+    width: i32
+    widths: [i32]
+
+class LineWrapRanges:
+    starts: [i32]
+    ends: [i32]
 
 fn char_w(fs: i32) -> i32:
     if fs <= 8:
@@ -1928,6 +2130,34 @@ fn style_line_h(st: Style) -> i32:
         if lh > 0:
             return lh
     line_h(st.font_size)
+
+fn style_baseline_offset(st: Style) -> i32:
+    var baseline = st.font_size * 7 / 8
+    if baseline < 1:
+        baseline = 1
+    baseline
+
+fn intrinsic_text_width(nodes: [HNode], styles: [Style], i: i32, widths: [i32]) -> IntrinsicWidthResult:
+    if widths[i] >= 0:
+        return IntrinsicWidthResult(width: widths[i], widths: widths)
+    var out_widths = widths
+    var width = 0
+    var c = i + 1
+    while c < nodes.len():
+        if nodes[c].parent == i:
+            if nodes[c].tag == "#text":
+                val txt = nodes[c].text_trimmed
+                if txt.len() > 0:
+                    val glyph_w = char_w(styles[i].font_size)
+                    val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+                    width = width + txt.len() * ink_w
+            elif styles[c].display == "inline":
+                val child = intrinsic_text_width(nodes, styles, c, out_widths)
+                out_widths = child.widths
+                width = width + child.width
+        c = c + 1
+    out_widths[i] = width
+    IntrinsicWidthResult(width: width, widths: out_widths)
 
 fn text_ink_y_offset(fs: i32) -> i32:
     val scale = glyph_scale(fs)
@@ -1960,22 +2190,64 @@ fn skip_wrap_spaces(txt: text, off: i32) -> i32:
         out = out + 1
     out
 
-fn wrapped_line_count(txt: text, cpl: i32) -> i32:
+fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
+    var starts: [i32] = []
+    var ends: [i32] = []
     if txt.len() == 0:
-        return 1
-    var lines = 0
+        starts.push(0)
+        ends.push(0)
+        return LineWrapRanges(starts: starts, ends: ends)
     var off = 0
     while off < txt.len():
         val endc = wrap_line_end(txt, off, cpl)
-        lines = lines + 1
+        starts.push(off)
+        ends.push(endc)
         off = skip_wrap_spaces(txt, endc)
-    if lines < 1:
-        lines = 1
-    lines
+    if starts.len() == 0:
+        starts.push(0)
+        ends.push(0)
+    LineWrapRanges(starts: starts, ends: ends)
+
+fn build_text_render_cache(styles: [Style]) -> TextRenderCache:
+    var char_widths: [i32] = []
+    var advances: [i32] = []
+    var scales: [i32] = []
+    var line_heights: [i32] = []
+    var ink_x_offsets: [i32] = []
+    var ink_y_offsets: [i32] = []
+    var i = 0
+    while i < styles.len():
+        val st = styles[i]
+        char_widths.push(char_w(st.font_size))
+        advances.push(text_advance(st.font_size))
+        scales.push(glyph_scale(st.font_size))
+        line_heights.push(style_line_h(st))
+        ink_x_offsets.push(text_ink_x_offset(st.font_size))
+        ink_y_offsets.push(text_ink_y_offset(st.font_size))
+        i = i + 1
+    TextRenderCache(
+        char_widths: char_widths,
+        advances: advances,
+        scales: scales,
+        line_heights: line_heights,
+        ink_x_offsets: ink_x_offsets,
+        ink_y_offsets: ink_y_offsets
+    )
+
+fn zero_i32_list(count: i32) -> [i32]:
+    [0; count]
+
+fn empty_i32_lists(count: i32) -> [[i32]]:
+    var out: [[i32]] = []
+    var i = 0
+    while i < count:
+        out.push([])
+        i = i + 1
+    out
 
 fn absolute_outer_width(node: HNode, st: Style, containing_w: i32) -> i32:
     val border_x = st.border_l + st.border_r
-    val legacy_widget_box = class_contains(node.class_attr, "widget-") or class_contains(node.class_attr, "icon-image")
+    val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
     val explicit_node_w = if legacy_widget_box or st.border_box: st.width_px else: st.width_px + st.pad_l + st.pad_r + border_x
     if st.width_px > 0:
         return explicit_node_w
@@ -2001,19 +2273,21 @@ fn absolute_child_y(parent_y: i32, parent: Style, child: Style) -> i32:
         return parent_y + parent.border_t + padding_box_h - absolute_outer_height(child) - child.bottom_px
     parent_y + parent.border_t + child.top_px
 
-fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32]) -> LayoutResult:
+fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]]) -> LayoutResult:
     var out_bx = bx
     var out_by = by
     var out_bw = bw
     var out_bh = bh
+    var out_wrap_starts = wrap_starts
+    var out_wrap_ends = wrap_ends
     out_bx[i] = x
     out_by[i] = y
     val st = styles[i]
-    val legacy_widget_box = class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image")
+    val legacy_widget_box = nodes[i].has_widget_class or nodes[i].has_icon_image_class
     if st.display == "none":
         out_bw[i] = 0
         out_bh[i] = 0
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: 0)
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, height: 0)
     if st.display == "contents":
         out_bw[i] = w
         var cy_contents = y
@@ -2030,11 +2304,13 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
                 var child_w_contents = w - cst.margin_l - cst.margin_r
                 if child_w_contents < 1:
                     child_w_contents = 1
-                val child = layout(nodes, styles, c_contents, x + cst.margin_l, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh)
+                val child = layout(nodes, styles, c_contents, x + cst.margin_l, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
                 out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
                 cy_contents = cy_contents + child.height
                 prev_margin_b_contents = cst.margin_b
                 child_count_contents = child_count_contents + 1
@@ -2043,13 +2319,15 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
             cy_contents = cy_contents + prev_margin_b_contents
         val h_contents = cy_contents - y
         out_bh[i] = h_contents
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: h_contents)
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, height: h_contents)
     val border_x = st.border_l + st.border_r
     val border_y = st.border_t + st.border_b
     val explicit_node_w = if legacy_widget_box or st.border_box: st.width_px else: st.width_px + st.pad_l + st.pad_r + border_x
     # width_px > 0: explicit px. width_px < 0: percentage of available width
     # (negative sentinel from apply_decls). width_px == 0: fill available width.
     var node_w = if st.width_px > 0: explicit_node_w else: w
+    if st.flex_basis_px > 0 and w > 0:
+        node_w = w
     if st.width_px < 0:
         node_w = w * (0 - st.width_px) / 100
         if node_w > w:
@@ -2058,20 +2336,23 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
             node_w = 1
     out_bw[i] = node_w
     if nodes[i].tag == "#text":
-        val txt = nodes[i].text_data.trim()
+        val txt = nodes[i].text_trimmed
         val cw = char_w(st.font_size)
         var cpl = node_w / cw
         if cpl < 1:
             cpl = 1
-        val lines = wrapped_line_count(txt, cpl)
+        val ranges = compute_wrap_ranges(txt, cpl)
+        out_wrap_starts[i] = ranges.starts
+        out_wrap_ends[i] = ranges.ends
+        val lines = ranges.starts.len()
         val h = lines * style_line_h(st)
         out_bh[i] = h
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: h)
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, height: h)
     if nodes[i].tag == "img" or nodes[i].tag == "input":
         val explicit_node_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         val h = if st.height_px > 0: explicit_node_h else: style_line_h(st)
         out_bh[i] = h
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: h)
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, height: h)
     val ix = x + st.border_l + st.pad_l
     var iw = node_w - st.pad_l - st.pad_r - border_x
     if iw < 1:
@@ -2082,12 +2363,114 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
     else:
         0
     if st.display == "flex" and st.flex_direction != "column":
+        var intrinsic_widths: [i32] = [-1; nodes.len()]
+        if st.flex_wrap != "nowrap":
+            var line_heights: [i32] = []
+            var total_line_h = 0
+            var cx_measure = 0
+            var line_h_measure = 0
+            var child_count_measure = 0
+            var fm = i + 1
+            while fm < nodes.len():
+                if nodes[fm].parent == i:
+                    val cst = styles[fm]
+                    if not cst.position_absolute:
+                        val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                        val item_outer_w = cst.margin_l + base_w_wrap + cst.margin_r
+                        if child_count_measure > 0 and cx_measure + st.gap_px + item_outer_w > iw:
+                            line_heights.push(line_h_measure)
+                            total_line_h = total_line_h + line_h_measure
+                            cx_measure = 0
+                            line_h_measure = 0
+                            child_count_measure = 0
+                        if child_count_measure > 0:
+                            cx_measure = cx_measure + st.gap_px
+                        cx_measure = cx_measure + item_outer_w
+                        val used_h = cst.margin_t + (if cst.height_px > 0: cst.height_px else: style_line_h(cst)) + cst.margin_b
+                        if used_h > line_h_measure:
+                            line_h_measure = used_h
+                        child_count_measure = child_count_measure + 1
+                fm = fm + 1
+            if child_count_measure > 0:
+                line_heights.push(line_h_measure)
+                total_line_h = total_line_h + line_h_measure
+            if line_heights.len() > 1:
+                total_line_h = total_line_h + st.gap_px * (line_heights.len() - 1)
+            val explicit_content_h = if st.height_px > 0:
+                if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
+            else:
+                0
+            var align_content_offset = 0
+            if st.align_content == "center" and explicit_content_h > total_line_h:
+                align_content_offset = (explicit_content_h - total_line_h) / 2
+            val reverse_wrap = st.flex_wrap == "wrap-reverse"
+            var cx_wrap = ix
+            var cy_wrap = if reverse_wrap:
+                y + st.border_t + st.pad_t + align_content_offset + total_line_h - (if line_heights.len() > 0: line_heights[0] else: 0)
+            else:
+                y + st.border_t + st.pad_t + align_content_offset
+            var line_h_wrap = 0
+            var line_index_wrap = 0
+            var fc_wrap = i + 1
+            var flex_child_count_wrap = 0
+            while fc_wrap < nodes.len():
+                if nodes[fc_wrap].parent == i:
+                    val cst = styles[fc_wrap]
+                    if cst.position_absolute:
+                        val ax = absolute_child_x(x, st, nodes[fc_wrap], cst, iw)
+                        val ay = absolute_child_y(y, st, cst)
+                        val child = layout(nodes, styles, fc_wrap, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
+                        out_bx = child.bx
+                        out_by = child.by
+                        out_bw = child.bw
+                        out_bh = child.bh
+                        out_wrap_starts = child.wrap_starts
+                        out_wrap_ends = child.wrap_ends
+                    else:
+                        val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                        val item_outer_w = cst.margin_l + base_w_wrap + cst.margin_r
+                        if flex_child_count_wrap > 0 and cx_wrap - ix + st.gap_px + item_outer_w > iw:
+                            cx_wrap = ix
+                            if reverse_wrap:
+                                cy_wrap = cy_wrap - ((if line_index_wrap + 1 < line_heights.len(): line_heights[line_index_wrap + 1] else: 0) + st.gap_px)
+                            else:
+                                cy_wrap = cy_wrap + line_h_wrap + st.gap_px
+                            line_index_wrap = line_index_wrap + 1
+                            line_h_wrap = if line_index_wrap < line_heights.len(): line_heights[line_index_wrap] else: 0
+                            flex_child_count_wrap = 0
+                        if flex_child_count_wrap == 0 and line_index_wrap < line_heights.len():
+                            line_h_wrap = line_heights[line_index_wrap]
+                        if flex_child_count_wrap > 0:
+                            cx_wrap = cx_wrap + st.gap_px
+                        cx_wrap = cx_wrap + cst.margin_l
+                        var remaining_w = base_w_wrap
+                        if remaining_w < 1:
+                            remaining_w = 1
+                        val child = layout(nodes, styles, fc_wrap, cx_wrap, cy_wrap + cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
+                        out_bx = child.bx
+                        out_by = child.by
+                        out_bw = child.bw
+                        out_bh = child.bh
+                        out_wrap_starts = child.wrap_starts
+                        out_wrap_ends = child.wrap_ends
+                        cx_wrap = cx_wrap + out_bw[fc_wrap] + cst.margin_r
+                        flex_child_count_wrap = flex_child_count_wrap + 1
+                fc_wrap = fc_wrap + 1
+            var flex_h_wrap = if st.height_px > 0:
+                if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+            else:
+                total_line_h + st.pad_t + st.pad_b + border_y
+            if flex_h_wrap < 1:
+                flex_h_wrap = 1
+            out_bh[i] = flex_h_wrap
+            return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, height: flex_h_wrap)
         # Pre-pass: distribute the inner width across flex children. Children with an
-        # explicit width (px or %) take it; the leftover space is shared equally among
-        # auto-width (flex-grow) children so a sibling is not starved to a sliver.
-        # Explicit-width children behave exactly as before (layout uses width_px).
+        # explicit width (px or %) take it; the leftover space is shared by flex-grow
+        # weight using left-to-right cumulative rounding so integer remainders stay
+        # stable against Chromium for small fixtures.
         var sum_explicit = 0
-        var auto_count = 0
+        var auto_weight = 0
+        var shrink_scaled_total = 0
         var nonabs_count = 0
         var ps = i + 1
         while ps < nodes.len():
@@ -2095,59 +2478,132 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
                 val pcst = styles[ps]
                 if not pcst.position_absolute:
                     nonabs_count = nonabs_count + 1
-                    var cw = 0
-                    if pcst.width_px > 0:
-                        cw = if class_contains(nodes[ps].class_attr, "widget-") or class_contains(nodes[ps].class_attr, "icon-image") or pcst.border_box: pcst.width_px else: pcst.width_px + pcst.pad_l + pcst.pad_r + pcst.border_l + pcst.border_r
+                    var base_w = 0
+                    if pcst.flex_basis_px > 0:
+                        base_w = pcst.flex_basis_px
+                    elif pcst.width_px > 0:
+                        base_w = if nodes[ps].has_widget_class or nodes[ps].has_icon_image_class or pcst.border_box: pcst.width_px else: pcst.width_px + pcst.pad_l + pcst.pad_r + pcst.border_l + pcst.border_r
                     elif pcst.width_px < 0:
-                        cw = iw * (0 - pcst.width_px) / 100
-                    if cw > 0:
-                        sum_explicit = sum_explicit + cw
+                        base_w = iw * (0 - pcst.width_px) / 100
+                    if base_w > 0:
+                        sum_explicit = sum_explicit + base_w
+                        val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 1
+                        shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
                     else:
-                        auto_count = auto_count + 1
+                        val intrinsic = intrinsic_text_width(nodes, styles, ps, intrinsic_widths)
+                        intrinsic_widths = intrinsic.widths
+                        val intrinsic_w = intrinsic.width
+                        if intrinsic_w > 0 and pcst.flex_grow == 0:
+                            base_w = intrinsic_w
+                            sum_explicit = sum_explicit + base_w
+                            val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 1
+                            shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
+                        else:
+                            val grow = if pcst.flex_grow > 0: pcst.flex_grow else: 1
+                            auto_weight = auto_weight + grow
                     sum_explicit = sum_explicit + pcst.margin_l + pcst.margin_r
             ps = ps + 1
         var gaps_total = 0
         if nonabs_count > 1:
             gaps_total = st.gap_px * (nonabs_count - 1)
-        var per_auto = iw
-        if auto_count > 0:
-            var avail = iw - sum_explicit - gaps_total
-            if avail < auto_count:
-                avail = auto_count
-            per_auto = avail / auto_count
+        val shrink_deficit = if sum_explicit + gaps_total > iw: sum_explicit + gaps_total - iw else: 0
+        var auto_avail = iw - sum_explicit - gaps_total
+        if auto_avail < auto_weight:
+            auto_avail = auto_weight
         var cx = ix
         var max_child_h = 0
         var fc = i + 1
         var flex_child_count = 0
+        var flex_weight_used = 0
+        var flex_width_assigned = 0
+        var shrink_scaled_used = 0
+        var shrink_width_assigned = 0
+        var max_baseline = 0
+        if st.align_items == "baseline":
+            var pb = i + 1
+            while pb < nodes.len():
+                if nodes[pb].parent == i:
+                    val pcst = styles[pb]
+                    if not pcst.position_absolute:
+                        val baseline = pcst.margin_t + style_baseline_offset(pcst)
+                        if baseline > max_baseline:
+                            max_baseline = baseline
+                pb = pb + 1
         while fc < nodes.len():
             if nodes[fc].parent == i:
                 val cst = styles[fc]
                 if cst.position_absolute:
                     val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
                     val ay = absolute_child_y(y, st, cst)
-                    val child = layout(nodes, styles, fc, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
+                    val child = layout(nodes, styles, fc, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
                     out_bh = child.bh
+                    out_wrap_starts = child.wrap_starts
+                    out_wrap_ends = child.wrap_ends
                 else:
                     if flex_child_count > 0:
                         cx = cx + st.gap_px
                     cx = cx + cst.margin_l
-                    # auto-width child gets its fair share; %-width resolves against the
-                    # container inner width; px-width children ignore this (use width_px).
+                    # auto-width child gets its weighted share; %-width resolves against
+                    # the container inner width; px-width children ignore this.
                     var remaining_w = iw - (cx - ix) - cst.margin_r
-                    if cst.width_px == 0:
-                        remaining_w = per_auto
+                    var force_used_w = false
+                    if shrink_deficit > 0 and shrink_scaled_total > 0 and (cst.width_px > 0 or cst.flex_basis_px > 0):
+                        val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+                        val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 1
+                        val scaled_shrink = shrink_factor * base_w
+                        val cumulative_shrink = (shrink_deficit * (shrink_scaled_used + scaled_shrink)) / shrink_scaled_total
+                        remaining_w = base_w - (cumulative_shrink - shrink_width_assigned)
+                        shrink_scaled_used = shrink_scaled_used + scaled_shrink
+                        shrink_width_assigned = cumulative_shrink
+                        force_used_w = true
+                    elif cst.width_px == 0 and cst.flex_basis_px == 0 and cst.flex_grow == 0:
+                        val intrinsic = intrinsic_text_width(nodes, styles, fc, intrinsic_widths)
+                        intrinsic_widths = intrinsic.widths
+                        val intrinsic_w = intrinsic.width
+                        if intrinsic_w > 0:
+                            remaining_w = intrinsic_w
+                        elif auto_weight > 0:
+                            val grow = 1
+                            val cumulative_target = (auto_avail * (flex_weight_used + grow) + auto_weight - 1) / auto_weight
+                            remaining_w = cumulative_target - flex_width_assigned
+                            flex_weight_used = flex_weight_used + grow
+                            flex_width_assigned = cumulative_target
+                    elif cst.width_px == 0:
+                        if auto_weight > 0:
+                            val grow = if cst.flex_grow > 0: cst.flex_grow else: 1
+                            val cumulative_target = (auto_avail * (flex_weight_used + grow) + auto_weight - 1) / auto_weight
+                            remaining_w = cumulative_target - flex_width_assigned
+                            flex_weight_used = flex_weight_used + grow
+                            flex_width_assigned = cumulative_target
                     elif cst.width_px < 0:
                         remaining_w = iw
+                    elif cst.flex_basis_px > 0:
+                        remaining_w = cst.flex_basis_px
+                    elif shrink_deficit > 0 and shrink_scaled_total > 0:
+                        val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+                        val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 1
+                        val scaled_shrink = shrink_factor * base_w
+                        val cumulative_shrink = (shrink_deficit * (shrink_scaled_used + scaled_shrink)) / shrink_scaled_total
+                        remaining_w = base_w - (cumulative_shrink - shrink_width_assigned)
+                        shrink_scaled_used = shrink_scaled_used + scaled_shrink
+                        shrink_width_assigned = cumulative_shrink
                     if remaining_w < 1:
                         remaining_w = 1
-                    val child = layout(nodes, styles, fc, cx, y + st.border_t + st.pad_t + cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh)
+                    var child_y = y + st.border_t + st.pad_t + cst.margin_t
+                    if st.align_items == "baseline":
+                        child_y = y + st.border_t + st.pad_t + max_baseline - style_baseline_offset(cst)
+                    val child = layout(nodes, styles, fc, cx, child_y, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
                     out_bh = child.bh
+                    out_wrap_starts = child.wrap_starts
+                    out_wrap_ends = child.wrap_ends
+                    if force_used_w:
+                        out_bw[fc] = remaining_w
                     val used_h = cst.margin_t + child.height + cst.margin_b
                     if used_h > max_child_h:
                         max_child_h = used_h
@@ -2162,12 +2618,12 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
             flex_h = st.min_height_px
         if st.min_height_vh and viewport_h > flex_h:
             flex_h = viewport_h
-        if (st.flex_fill or class_contains(nodes[i].class_attr, "widget-panel")) and viewport_h - y > flex_h:
+        if (st.flex_fill or nodes[i].has_widget_panel_class) and viewport_h - y > flex_h:
             flex_h = viewport_h - y
         if flex_h < 1:
             flex_h = 1
         out_bh[i] = flex_h
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: flex_h)
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, height: flex_h)
     if st.display == "flex" and st.flex_direction == "column":
         var cy_flex = y + st.border_t + st.pad_t
         var flex_c = i + 1
@@ -2178,11 +2634,13 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
                 if cst.position_absolute:
                     val ax = absolute_child_x(x, st, nodes[flex_c], cst, iw)
                     val ay = absolute_child_y(y, st, cst)
-                    val child = layout(nodes, styles, flex_c, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
+                    val child = layout(nodes, styles, flex_c, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
                     out_bh = child.bh
+                    out_wrap_starts = child.wrap_starts
+                    out_wrap_ends = child.wrap_ends
                 else:
                     if flex_child_count_col > 0:
                         cy_flex = cy_flex + st.gap_px
@@ -2193,11 +2651,13 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
                     var child_w = child_inner_w - cst.margin_l - cst.margin_r
                     if child_w < 1:
                         child_w = 1
-                    val child = layout(nodes, styles, flex_c, ix + cst.margin_l, cy_flex, child_w, viewport_h, out_bx, out_by, out_bw, out_bh)
+                    val child = layout(nodes, styles, flex_c, ix + cst.margin_l, cy_flex, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
                     out_bh = child.bh
+                    out_wrap_starts = child.wrap_starts
+                    out_wrap_ends = child.wrap_ends
                     cy_flex = cy_flex + child.height + cst.margin_b
                     flex_child_count_col = flex_child_count_col + 1
             flex_c = flex_c + 1
@@ -2209,12 +2669,12 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
             flex_h_col = st.min_height_px
         if st.min_height_vh and viewport_h > flex_h_col:
             flex_h_col = viewport_h
-        if (st.flex_fill or class_contains(nodes[i].class_attr, "widget-panel")) and viewport_h - y > flex_h_col:
+        if (st.flex_fill or nodes[i].has_widget_panel_class) and viewport_h - y > flex_h_col:
             flex_h_col = viewport_h - y
         if flex_h_col < 1:
             flex_h_col = 1
         out_bh[i] = flex_h_col
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: flex_h_col)
+        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, height: flex_h_col)
     var cy = y + st.border_t + st.pad_t
     var c = i + 1
     var child_count = 0
@@ -2225,11 +2685,13 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
             if cst.position_absolute:
                 val ax = absolute_child_x(x, st, nodes[c], cst, iw)
                 val ay = absolute_child_y(y, st, cst)
-                val child = layout(nodes, styles, c, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh)
+                val child = layout(nodes, styles, c, ax, ay, iw, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
                 out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
             else:
                 if child_count > 0:
                     cy = cy + st.gap_px
@@ -2243,11 +2705,13 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
                 var child_w = child_inner_w - cst.margin_l - cst.margin_r
                 if child_w < 1:
                     child_w = 1
-                val child = layout(nodes, styles, c, ix + cst.margin_l, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh)
+                val child = layout(nodes, styles, c, ix + cst.margin_l, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
                 out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
                 cy = cy + child.height
                 prev_margin_b = cst.margin_b
                 child_count = child_count + 1
@@ -2262,13 +2726,13 @@ fn layout(nodes: [HNode], styles: [Style], i: i32, x: i32, y: i32, w: i32, viewp
         h = st.min_height_px
     if st.min_height_vh and viewport_h > h:
         h = viewport_h
-    val generated_panel_fill = class_contains(nodes[i].class_attr, "widget-panel")
+    val generated_panel_fill = nodes[i].has_widget_panel_class
     if (st.flex_fill or generated_panel_fill) and viewport_h - y > h:
         h = viewport_h - y
     if h < 1:
         h = 1
     out_bh[i] = h
-    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, height: h)
+    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, height: h)
 
 fn ancestor_clip(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], i: i32, fbw: i32, fbh: i32) -> ClipRect:
     var clip = ClipRect(x0: 0, y0: 0, x1: fbw, y1: fbh)
@@ -2288,13 +2752,13 @@ fn ancestor_clip(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
 # Paint into a staging [u32] framebuffer before Engine2D presentation.
 # ---------------------------------------------------------------------------
 
-fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
+fn paint(nodes: [HNode], styles: [Style], text_render: TextRenderCache, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
     var out = fb
     var has_widget_panel = widget_mode
     val chrome_widget_text = widget_mode and fbw >= 38 and fbh >= 62 and has_nonempty_widget_text_node(nodes)
     var scan = 0
     while scan < nodes.len():
-        if class_contains(nodes[scan].class_attr, "widget-panel"):
+        if nodes[scan].has_widget_panel_class:
             has_widget_panel = true
         scan = scan + 1
     # backgrounds first (document order = back to front)
@@ -2303,17 +2767,17 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val st = styles[i]
         val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
         val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
-        val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
+        val skip_widget_node_bg = widget_mode and (nodes[i].has_widget_class or nodes[i].has_icon_image_class)
         if not st.position_absolute and not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
             out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
         if not st.position_absolute and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
             out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
-        if not st.position_absolute and not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-panel") and by[i] < fbh:
+        if not st.position_absolute and not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_panel_class and by[i] < fbh:
             val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
-            if class_contains(nodes[i].class_attr, "focused"):
+            if nodes[i].has_focused_class:
                 out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
-        if not st.position_absolute and not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-button") and by[i] < fbh:
+        if not st.position_absolute and not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_button_class and by[i] < fbh:
             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
         i = i + 1
     i = 0
@@ -2322,17 +2786,17 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         if st.position_absolute and st.z_index <= 0:
             val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
             val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
-            val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
+            val skip_widget_node_bg = widget_mode and (nodes[i].has_widget_class or nodes[i].has_icon_image_class)
             if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
                 out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
             if not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
                 out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
-            if not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-panel") and by[i] < fbh:
+            if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_panel_class and by[i] < fbh:
                 val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
                 out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
-                if class_contains(nodes[i].class_attr, "focused"):
+                if nodes[i].has_focused_class:
                     out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
-            if not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-button") and by[i] < fbh:
+            if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_button_class and by[i] < fbh:
                 out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
         i = i + 1
     var current_z = 0
@@ -2354,17 +2818,17 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                 if st.position_absolute and st.z_index == next_z:
                     val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
                     val skip_widget_page_bg = has_widget_panel and (nodes[i].tag == "html" or nodes[i].tag == "body")
-                    val skip_widget_node_bg = widget_mode and (class_contains(nodes[i].class_attr, "widget-") or class_contains(nodes[i].class_attr, "icon-image"))
+                    val skip_widget_node_bg = widget_mode and (nodes[i].has_widget_class or nodes[i].has_icon_image_class)
                     if not skip_widget_page_bg and not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and st.bg != 0u32 and by[i] < fbh:
                         out = fb_rect_opacity_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.bg, st.opacity_pct, clip)
                     if not skip_widget_node_bg and st.display != "none" and not st.visibility_hidden and nodes[i].tag != "#text" and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0) and by[i] < fbh:
                         out = fb_border_sides_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], st.border_l, st.border_t, st.border_r, st.border_b, st.border_color_l, st.border_color_t, st.border_color_r, st.border_color_b, clip)
-                    if not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-panel") and by[i] < fbh:
+                    if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_panel_class and by[i] < fbh:
                         val panel_h = if fbh - by[i] > bh[i]: fbh - by[i] else: bh[i]
                         out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], panel_h, argb(245, 245, 245))
-                        if class_contains(nodes[i].class_attr, "focused"):
+                        if nodes[i].has_focused_class:
                             out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], 1, argb(0, 102, 204))
-                    if not widget_mode and st.display != "none" and not st.visibility_hidden and class_contains(nodes[i].class_attr, "widget-button") and by[i] < fbh:
+                    if not widget_mode and st.display != "none" and not st.visibility_hidden and nodes[i].has_widget_button_class and by[i] < fbh:
                         out = fb_rect(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(203, 213, 225))
                 i = i + 1
             current_z = next_z
@@ -2391,36 +2855,32 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     i = 0
     while i < nodes.len():
         val clip = ancestor_clip(nodes, styles, bx, by, bw, bh, i, fbw, fbh)
-        if not widget_mode and styles[i].display != "none" and not styles[i].visibility_hidden and nodes[i].tag == "img" and class_contains(nodes[i].class_attr, "widget-image"):
+        if not widget_mode and styles[i].display != "none" and not styles[i].visibility_hidden and nodes[i].tag == "img" and nodes[i].has_widget_image_class:
             out = fb_rect_clip(out, fbw, fbh, bx[i], by[i], bw[i], bh[i], argb(37, 99, 235), clip)
             out = fb_rect_clip(out, fbw, fbh, bx[i] + 3, by[i] + 4, 8, 7, argb(245, 158, 11), clip)
             out = fb_rect_clip(out, fbw, fbh, bx[i] + 13, by[i] + 5, 8, 6, argb(34, 197, 94), clip)
-        if not widget_mode and styles[i].display != "none" and not styles[i].visibility_hidden and class_contains(nodes[i].class_attr, "icon-image"):
+        if not widget_mode and styles[i].display != "none" and not styles[i].visibility_hidden and nodes[i].has_icon_image_class:
             val icon_color = if styles[i].bg != 0u32: styles[i].bg else: argb(37, 99, 235)
             out = fb_rect_clip(out, fbw, fbh, bx[i], by[i], 6, 6, icon_color, clip)
         if styles[i].display != "none" and not styles[i].visibility_hidden and nodes[i].tag == "#text":
             val st = styles[i]
-            val txt = nodes[i].text_data.trim()
+            val txt = nodes[i].text_trimmed
             if txt.len() > 0 and by[i] < fbh:
-                val scale = glyph_scale(st.font_size)
-                val cw = char_w(st.font_size)
-                val adv = text_advance(st.font_size)
-                var cpl = bw[i] / cw
-                if cpl < 1:
-                    cpl = 1
-                var off = 0
-                val text_x = if widget_mode: bx[i] + 8 else: bx[i] + text_ink_x_offset(st.font_size)
-                var ly = if widget_mode: by[i] + 7 else: by[i] + text_ink_y_offset(st.font_size)
-                val lh = style_line_h(st)
-                while off < txt.len() and ly < fbh:
-                    val endc = wrap_line_end(txt, off, cpl)
-                    val line = txt.substring(off, endc)
+                val scale = text_render.scales[i]
+                val adv = text_render.advances[i]
+                val text_x = if widget_mode: bx[i] + 8 else: bx[i] + text_render.ink_x_offsets[i]
+                var ly = if widget_mode: by[i] + 7 else: by[i] + text_render.ink_y_offsets[i]
+                val lh = text_render.line_heights[i]
+                val node_starts = wrap_cache.starts[i]
+                val node_ends = wrap_cache.ends[i]
+                var line_i = 0
+                while line_i < node_starts.len() and ly < fbh:
                     if not chrome_widget_text:
                         if widget_mode:
-                            out = fb_text_sparse(out, fbw, fbh, text_x, ly, line, st.fg)
+                            out = fb_text_sparse_range(out, fbw, fbh, text_x, ly, txt, node_starts[line_i], node_ends[line_i], st.fg)
                         else:
-                            out = fb_text_thin_scaled_clip(out, fbw, fbh, text_x, ly, line, st.fg, scale, adv, clip)
-                    off = skip_wrap_spaces(txt, endc)
+                            out = fb_text_thin_scaled_clip_range(out, fbw, fbh, text_x, ly, txt, node_starts[line_i], node_ends[line_i], st.fg, scale, adv, clip)
+                    line_i = line_i + 1
                     ly = ly + lh
         i = i + 1
     if chrome_widget_text:
@@ -2436,40 +2896,6 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
 # ---------------------------------------------------------------------------
 # Render entry
 # ---------------------------------------------------------------------------
-
-fn present_layout_pixels_with_engine2d(pixels: [u32], width: i32, height: i32, backend_name: text, base: u32) -> [u32]:
-    if width <= 0 or height <= 0:
-        return []
-    val normalized_backend = backend_name.trim().lower()
-    if normalized_backend == "software" or normalized_backend == "cpu":
-        return pixels
-    var engine = Engine2D.create_with_backend(width, height, backend_name)
-    engine.clear(base)
-    # draw_image is mirror-only (poisons gpu_frame_complete on Metal/Vulkan).
-    # Use draw_layout_pixel_runs (clear + draw_rect_filled = GPU-dispatched) for
-    # Metal and Vulkan so gpu_frame_complete stays true.
-    # Other backends (opencl, cuda, etc.) use draw_image for pixel-exact passthrough.
-    if normalized_backend == "vulkan" or normalized_backend == "metal":
-        draw_layout_pixel_runs(engine, pixels, width, height)
-    else:
-        engine.draw_image(0, 0, width, height, pixels)
-    engine.present()
-    val rendered = engine.read_pixels()
-    engine.shutdown()
-    rendered
-
-fn draw_layout_pixel_runs(engine: Engine2D, pixels: [u32], width: i32, height: i32):
-    var y = 0
-    while y < height:
-        var x = 0
-        while x < width:
-            val color = pixels[y * width + x]
-            var run_w = 1
-            while x + run_w < width and pixels[y * width + x + run_w] == color:
-                run_w = run_w + 1
-            engine.draw_rect_filled(x, y, run_w, 1, color)
-            x = x + run_w
-        y = y + 1
 
 fn _html_draw_ir_component_id(nodes: [HNode], i: i32) -> text:
     val node = nodes[i]
@@ -2548,7 +2974,9 @@ fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
     val nodes = parse_html(html)
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules, html)
+    val styles = compute_styles(nodes, rules)
+    val zeroes = zero_i32_list(nodes.len())
+    val empties = empty_i32_lists(nodes.len())
     val boxes = layout(
         nodes,
         styles,
@@ -2557,20 +2985,30 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
         0,
         width,
         height,
-        [0; nodes.len()],
-        [0; nodes.len()],
-        [0; nodes.len()],
-        [0; nodes.len()]
+        zeroes,
+        zeroes,
+        zeroes,
+        zeroes,
+        empties,
+        empties
     )
     val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
     val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
     val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, _html_draw_ir_commands(nodes, styles, boxes, width, height), source)
     draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
 
-pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
+pub fn simple_web_layout_debug_phase(html: text, width: i32, height: i32, stage: text) -> i64:
     val nodes = parse_html(html)
+    if stage == "parse":
+        return nodes.len().to_i64()
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules, html)
+    if stage == "css":
+        return rules.sels.len().to_i64()
+    val styles = compute_styles(nodes, rules)
+    if stage == "styles":
+        return styles.len().to_i64()
+    val zeroes = zero_i32_list(nodes.len())
+    val empties = empty_i32_lists(nodes.len())
     val boxes = layout(
         nodes,
         styles,
@@ -2579,29 +3017,83 @@ pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32,
         0,
         width,
         height,
-        [0; nodes.len()],
-        [0; nodes.len()],
-        [0; nodes.len()],
-        [0; nodes.len()]
+        zeroes,
+        zeroes,
+        zeroes,
+        zeroes,
+        empties,
+        empties
+    )
+    if stage == "layout":
+        return boxes.height.to_i64()
+    val commands = _html_draw_ir_commands(nodes, styles, boxes, width, height)
+    if stage == "commands":
+        return commands.len().to_i64()
+    val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
+    val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
+    val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source)
+    if stage == "batch":
+        return batch.commands.len().to_i64()
+    val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
+    if stage == "composition":
+        return composition.batches.len().to_i64()
+    val text_render = build_text_render_cache(styles)
+    if stage == "text-render":
+        return text_render.char_widths.len().to_i64()
+    val white = argb(255, 255, 255)
+    val widget_mode = html.contains("widget-panel")
+    val base = if widget_mode: argb(245, 245, 245) else: white
+    var fb: [u32] = [base; width * height]
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    val painted = paint(nodes, styles, text_render, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    if stage == "paint":
+        return painted.len().to_i64()
+    -1
+
+pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32) -> [u32]:
+    val nodes = parse_html(html)
+    val rules = extract_css(html)
+    val styles = compute_styles(nodes, rules)
+    val text_render = build_text_render_cache(styles)
+    val zeroes = zero_i32_list(nodes.len())
+    val empties = empty_i32_lists(nodes.len())
+    val boxes = layout(
+        nodes,
+        styles,
+        0,
+        0,
+        0,
+        width,
+        height,
+        zeroes,
+        zeroes,
+        zeroes,
+        zeroes,
+        empties,
+        empties
     )
     val white = argb(255, 255, 255)
     val widget_mode = html.contains("widget-panel")
     val base = if widget_mode: argb(245, 245, 245) else: white
     var fb: [u32] = [base; width * height]
-    val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, height, widget_mode)
-    present_layout_pixels_with_engine2d(painted, width, height, backend_name, base)
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    val painted = paint(nodes, styles, text_render, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted
 
 # Render at a scroll offset: lay out into a virtual canvas of height (height + scroll_y),
 # paint, then crop the viewport window [scroll_y .. scroll_y+height].
 # This re-render approach keeps each call stateless.
-pub fn simple_web_layout_render_html_pixels_at_scroll(html: text, width: i32, height: i32, backend_name: text, scroll_y: i32) -> [u32]:
+pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width: i32, height: i32, scroll_y: i32) -> [u32]:
     if width <= 0 or height <= 0:
         return []
     val clamp_scroll = if scroll_y < 0: 0 else: scroll_y
     val virtual_h = height + clamp_scroll
     val nodes = parse_html(html)
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules, html)
+    val styles = compute_styles(nodes, rules)
+    val text_render = build_text_render_cache(styles)
+    val zeroes = zero_i32_list(nodes.len())
+    val empties = empty_i32_lists(nodes.len())
     val boxes = layout(
         nodes,
         styles,
@@ -2610,16 +3102,19 @@ pub fn simple_web_layout_render_html_pixels_at_scroll(html: text, width: i32, he
         0,
         width,
         virtual_h,
-        [0; nodes.len()],
-        [0; nodes.len()],
-        [0; nodes.len()],
-        [0; nodes.len()]
+        zeroes,
+        zeroes,
+        zeroes,
+        zeroes,
+        empties,
+        empties
     )
     val white = argb(255, 255, 255)
     val widget_mode = html.contains("widget-panel")
     val base = if widget_mode: argb(245, 245, 245) else: white
     var fb: [u32] = [base; width * virtual_h]
-    val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, fb, width, virtual_h, widget_mode)
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    val painted = paint(nodes, styles, text_render, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, virtual_h, widget_mode)
     # Crop the viewport row-by-row
     var cropped: [u32] = [base; width * height]
     var row = 0
@@ -2631,4 +3126,4 @@ pub fn simple_web_layout_render_html_pixels_at_scroll(html: text, width: i32, he
                 cropped[row * width + col] = painted[src_row * width + col]
                 col = col + 1
         row = row + 1
-    present_layout_pixels_with_engine2d(cropped, width, height, backend_name, base)
+    cropped

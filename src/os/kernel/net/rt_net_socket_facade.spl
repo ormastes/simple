@@ -1,0 +1,217 @@
+use os.services.netstack.netstack_init.{
+    net_tcp_available, net_boot_init, net_service_init_port,
+    net_tcp_bind, net_tcp_accept, net_tcp_read, net_tcp_write, net_tcp_close
+}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+struct RtNetSocketEntry:
+    fd: i64
+    port: u16
+    os_fd: i32
+    listening: bool
+
+var _rt_net_sockets: [RtNetSocketEntry] = []
+var _rt_net_next_fd: i64 = 1000
+var _rt_net_port_inited: bool = false
+var _rt_net_last_plain_payload: [u8] = []
+
+fn rt_net_socket_facade_link_anchor() -> bool:
+    true
+
+fn rt_net_last_ssh_plain_payload_len() -> i64:
+    _rt_net_last_plain_payload.len().to_i64()
+
+fn rt_net_last_ssh_plain_payload_slice(start: i64, length: i64) -> [u8]:
+    _rt_net_last_plain_payload.slice(start.to_u64(), (start + length).to_u64())
+
+fn _rt_net_ensure_ready() -> bool:
+    if not net_tcp_available():
+        if not net_boot_init():
+            return false
+    if not _rt_net_port_inited:
+        net_service_init_port()
+        _rt_net_port_inited = true
+    true
+
+fn _rt_net_find(fd: i64) -> RtNetSocketEntry?:
+    var i: u64 = 0
+    while i < _rt_net_sockets.len():
+        if _rt_net_sockets[i].fd == fd:
+            return _rt_net_sockets[i]
+        i = i + 1
+    nil
+
+fn _rt_net_set(entry: RtNetSocketEntry):
+    var i: u64 = 0
+    while i < _rt_net_sockets.len():
+        if _rt_net_sockets[i].fd == entry.fd:
+            _rt_net_sockets[i] = entry
+            return
+        i = i + 1
+    _rt_net_sockets.push(entry)
+
+fn _rt_net_remove(fd: i64):
+    var next: [RtNetSocketEntry] = []
+    var i: u64 = 0
+    while i < _rt_net_sockets.len():
+        if _rt_net_sockets[i].fd != fd:
+            next.push(_rt_net_sockets[i])
+        i = i + 1
+    _rt_net_sockets = next
+
+fn _rt_net_read_exact(os_fd: i64, want: u64) -> [u8]:
+    var out: [u8] = []
+    while out.len() < want:
+        val chunk = net_tcp_read(os_fd, want - out.len())
+        if chunk.len() == 0:
+            return []
+        var i: u64 = 0
+        while i < chunk.len():
+            out.push(chunk[i])
+            i = i + 1
+    out
+
+fn _rt_net_trim_crlf(data: [u8]) -> [u8]:
+    var end = data.len()
+    while end > 0:
+        val ch = data[end - 1]
+        if ch == '\n' or ch == '\r':
+            end = end - 1
+        else:
+            break
+    data.slice(0, end)
+
+@export("C", name: "rt_net_socket")
+fn rt_net_socket(proto: i64) -> i64:
+    if proto != 1:
+        return -1
+    val fd = _rt_net_next_fd
+    _rt_net_next_fd = _rt_net_next_fd + 1
+    _rt_net_sockets.push(RtNetSocketEntry(fd: fd, port: 0u16, os_fd: -1, listening: false))
+    fd
+
+@export("C", name: "rt_net_bind")
+fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64:
+    val entry = _rt_net_find(sock_fd)
+    if entry == nil:
+        return -1
+    val updated = RtNetSocketEntry(
+        fd: entry.unwrap().fd,
+        port: port_num.to_u16(),
+        os_fd: entry.unwrap().os_fd,
+        listening: entry.unwrap().listening
+    )
+    _rt_net_set(updated)
+    0
+
+@export("C", name: "rt_net_listen")
+fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64:
+    val entry = _rt_net_find(sock_fd)
+    if entry == nil:
+        return -1
+    if not _rt_net_ensure_ready():
+        return -1
+    val current = entry.unwrap()
+    var os_fd = current.os_fd
+    if os_fd < 0:
+        os_fd = net_tcp_bind(0u32, current.port, backlog.to_u32()).to_i32()
+        if os_fd < 0:
+            return -1
+    val updated = RtNetSocketEntry(
+        fd: current.fd,
+        port: current.port,
+        os_fd: os_fd,
+        listening: true
+    )
+    _rt_net_set(updated)
+    0
+
+@export("C", name: "rt_net_accept")
+fn rt_net_accept(sock_fd: i64) -> i64:
+    val entry = _rt_net_find(sock_fd)
+    if entry == nil or not entry.unwrap().listening:
+        return -1
+    if not _rt_net_ensure_ready():
+        return -1
+    val client_os_fd = net_tcp_accept(entry.unwrap().os_fd.to_i64())
+    if client_os_fd < 0:
+        return -1
+    val fd = _rt_net_next_fd
+    _rt_net_next_fd = _rt_net_next_fd + 1
+    _rt_net_sockets.push(RtNetSocketEntry(fd: fd, port: entry.unwrap().port, os_fd: client_os_fd.to_i32(), listening: false))
+    fd
+
+@export("C", name: "rt_net_close")
+fn rt_net_close(sock_fd: i64) -> i64:
+    val entry = _rt_net_find(sock_fd)
+    if entry == nil:
+        return -1
+    if entry.unwrap().os_fd >= 0:
+        val closed = net_tcp_close(entry.unwrap().os_fd.to_i64())
+        if not closed:
+            return -1
+    _rt_net_remove(sock_fd)
+    0
+
+@export("C", name: "rt_net_send_bytes")
+fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64:
+    val entry = _rt_net_find(sock_fd)
+    if entry == nil or entry.unwrap().os_fd < 0:
+        return -1
+    if not _rt_net_ensure_ready():
+        return -1
+    net_tcp_write(entry.unwrap().os_fd.to_i64(), data)
+
+@export("C", name: "rt_net_recv_bytes")
+fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]:
+    val entry = _rt_net_find(sock_fd)
+    if entry == nil or entry.unwrap().os_fd < 0:
+        return []
+    if not _rt_net_ensure_ready():
+        return []
+    net_tcp_read(entry.unwrap().os_fd.to_i64(), max_len.to_u64())
+
+@export("C", name: "rt_net_recv_version_text")
+fn rt_net_recv_version_text(sock_fd: i64) -> text:
+    val entry = _rt_net_find(sock_fd)
+    if entry == nil or entry.unwrap().os_fd < 0:
+        return ""
+    if not _rt_net_ensure_ready():
+        return ""
+    var line: [u8] = []
+    while true:
+        val chunk = net_tcp_read(entry.unwrap().os_fd.to_i64(), 1u64)
+        if chunk.len() == 0:
+            break
+        line.push(chunk[0])
+        if chunk[0] == '\n':
+            break
+    if line.len() == 0:
+        return ""
+    rt_bytes_to_text(_rt_net_trim_crlf(line))
+
+@export("C", name: "rt_net_recv_ssh_plain_packet_payload")
+fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]:
+    val entry = _rt_net_find(sock_fd)
+    if entry == nil or entry.unwrap().os_fd < 0:
+        return []
+    if not _rt_net_ensure_ready():
+        return []
+    val header = _rt_net_read_exact(entry.unwrap().os_fd.to_i64(), 5u64)
+    if header.len() != 5:
+        return []
+    val packet_len =
+        (header[0].to_u32() << 24) |
+        (header[1].to_u32() << 16) |
+        (header[2].to_u32() << 8) |
+        header[3].to_u32()
+    val padding_len = header[4].to_u32()
+    if packet_len < 1u32 or padding_len + 1u32 > packet_len:
+        return []
+    val remaining = _rt_net_read_exact(entry.unwrap().os_fd.to_i64(), (packet_len - 1u32).to_u64())
+    if remaining.len() != (packet_len - 1u32).to_u64():
+        return []
+    val payload_len = packet_len - padding_len - 1u32
+    _rt_net_last_plain_payload = remaining.slice(0, payload_len.to_u64())
+    _rt_net_last_plain_payload

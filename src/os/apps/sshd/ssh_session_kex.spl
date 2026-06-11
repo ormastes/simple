@@ -4,22 +4,18 @@
 # Contains: impl SshSession.do_kex()
 
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32}
+use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_negotiate_algorithms, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex, ssh_build_disconnect}
-use os.apps.sshd.ssh_kex.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob, host_key_set_advertised_algorithms}
+use os.apps.sshd.ssh_kex.{ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob, host_key_set_advertised_algorithms}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY}
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey}
 use os.kernel.log.klog_api.{log_info, log_raw_println}
-use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
-use std.format.{format_hex}
-
-extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
-extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
-extern fn rt_ed25519_verify(message: [u8], pubkey: [u8], signature: [u8]) -> i64
+use os.kernel.net.rt_net_socket_facade.{rt_net_last_ssh_plain_payload_len, rt_net_last_ssh_plain_payload_slice}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_verify}
+use os.crypto.curve25519.{x25519, x25519_base}
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn serial_println(msg: text)
-extern fn rt_tls13_ed25519_sign(seed: [u8], pubkey: [u8], message: [u8]) -> [u8]
-extern fn rt_net_last_ssh_plain_payload_len() -> i64
-extern fn rt_net_last_ssh_plain_payload_slice(start: i64, length: i64) -> [u8]
 
 fn _live_bootstrap_x25519_private_key() -> [u8]:
     """Deterministic live-QEMU bootstrap scalar used only while baremetal random_bytes is unstable."""
@@ -207,7 +203,7 @@ impl SshSession:
         serial_println("[sshd-session] server private generation len={server_private.len()}")
         serial_println("[sshd-session] server public generation start")
         val server_public = if server_private.len() == 32 {
-            rt_tls13_x25519_public_key(server_private)
+            x25519_base(server_private)
         } else {
             []
         }
@@ -225,7 +221,7 @@ impl SshSession:
         # Compute shared secret
         serial_println("[sshd-session] shared secret generation start")
         val shared_secret = if server_private.len() == 32 and client_public.len() == 32 {
-            rt_tls13_x25519_shared_secret(server_private, client_public)
+            x25519(server_private, client_public)
         } else {
             []
         }
@@ -297,10 +293,7 @@ impl SshSession:
             else:
                 serial_println("[sshd-session] host ed25519 seed={_bytes_to_hex(stable_seed)}")
                 serial_println("[sshd-session] host ed25519 pub={_bytes_to_hex(stable_pub)}")
-            val sig_raw = if using_live_openssh_profile:
-                rt_tls13_ed25519_sign(stable_seed, stable_pub, stable_hash)
-            else:
-                ed25519_sign(stable_seed, stable_pub, stable_hash)
+            val sig_raw = ed25519_sign(stable_seed, stable_pub, stable_hash)
             if sig_raw.len() != 64:
                 log_info("[app.sshd] " + "[sshd-session] host key signing err")
                 self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")
@@ -340,7 +333,7 @@ impl SshSession:
         if negotiated_hk_algo == "ssh-ed25519" and not using_live_openssh_profile:
             val sig_pubkey = _extract_ed25519_pubkey(host_key_blob)
             val sig_raw = _unwrap_ssh_signature(sig_blob)
-            val sig_verify = rt_ed25519_verify(exchange_hash, sig_pubkey, sig_raw)
+            val sig_verify = if ed25519_verify(sig_pubkey, exchange_hash, sig_raw): 1 else: 0
             log_info("[app.sshd] " + "[sshd-session] sig self-verify rc={sig_verify} pub len={sig_pubkey.len()} raw len={sig_raw.len()}")
             log_info("[app.sshd] " + "[sshd-session] sig self-verify pub={_bytes_to_hex(sig_pubkey)}")
             log_info("[app.sshd] " + "[sshd-session] sig self-verify hash={_bytes_to_hex(exchange_hash)}")

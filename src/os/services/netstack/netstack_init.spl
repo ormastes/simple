@@ -17,7 +17,6 @@ use os.services.netstack.ipv4.{Ipv4Address}
 use os.services.netstack.socket.{SockAddr, SocketProtocol}
 use os.services.netstack.tcp_connection.{TcpConnection}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_vendor, pcimgr_grant_device, pcimgr_get_device_vendor, pcimgr_get_device_class, pcimgr_get_device_subclass, pcimgr_device_count}
-use os.services.pcimgr.driver_match.{PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, VIRTIO_VENDOR, VIRTIO_DEV_NET}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 
 use os.kernel.log.klog_api.{log_raw_println}
@@ -27,6 +26,19 @@ extern fn rt_net_init() -> i64
 extern fn rt_net_tx_test() -> i64
 extern fn rt_net_rx_ready() -> i64
 extern fn rt_net_stats() -> i64
+
+val VIRTIO_VENDOR: u16 = 0x1AF4
+val VIRTIO_DEV_NET: u16 = 0x1000
+
+fn _decode_riscv_status(raw: i64) -> i64:
+    # Some freestanding RV64 runtime status externs can surface small negative
+    # errno-style values as 61-bit wrapped positives (2^61 - n). Normalize
+    # them before comparing or logging so boot lanes fail on the real status.
+    val wrapped_negative_floor = 1i64 << 60
+    val wrapped_negative_span = 1i64 << 61
+    if raw >= wrapped_negative_floor:
+        return raw - wrapped_negative_span
+    raw
 
 # ============================================================================
 # QEMU User-Mode Networking Defaults
@@ -51,6 +63,9 @@ val QEMU_MASK_A: u8 = 255
 val QEMU_MASK_B: u8 = 255
 val QEMU_MASK_C: u8 = 255
 val QEMU_MASK_D: u8 = 0
+
+val PCI_CLASS_NETWORK: u8 = 0x02
+val PCI_SUBCLASS_ETHERNET: u8 = 0x00
 
 # ============================================================================
 # Module-Level State
@@ -122,22 +137,22 @@ fn net_boot_init() -> bool:
     # On baremetal, the C VirtIO-net driver (syscall 90) handles the NIC.
     # Do not assume C boot already did this for every entrypoint.
     log_raw_println("[net-init] Initializing C VirtIO-net driver via rt_net_init")
-    val init_rc = rt_net_init()
+    val init_rc = _decode_riscv_status(rt_net_init())
     if init_rc < 0:
         log_raw_println("[net-init] C network init failed rc={init_rc}")
         return false
 
-    val tx_ready = rt_net_tx_test()
+    val tx_ready = _decode_riscv_status(rt_net_tx_test())
     if tx_ready < 0:
         log_raw_println("[net-init] C network TX unavailable rc={tx_ready}")
         return false
 
-    val rx_ready = rt_net_rx_ready()
+    val rx_ready = _decode_riscv_status(rt_net_rx_ready())
     if rx_ready < 0:
         log_raw_println("[net-init] C network RX unavailable rc={rx_ready}")
         return false
 
-    val stats = rt_net_stats()
+    val stats = _decode_riscv_status(rt_net_stats())
     if stats < 0:
         log_raw_println("[net-init] C network stats probe failed rc={stats}")
         return false

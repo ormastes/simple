@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 51 | 51 | 0 | 0 |
+| 52 | 52 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -192,11 +192,34 @@ expect(card.hit_rect.present).to_equal(true)
 expect(card.clip_rect.present).to_equal(true)
 expect(card.content_rect.x).to_equal(card.x + 3)
 expect(card.content_rect.y).to_equal(card.y + 3)
-expect(card.content_rect.width).to_equal(34)
-expect(card.content_rect.height).to_equal(12)
+expect(card.content_rect.width).to_equal(40)
+expect(card.content_rect.height).to_equal(18)
 expect(_draw_ir_style_value(card, "tag")).to_equal("section")
 expect(_draw_ir_style_value(card, "display")).to_equal("block")
 expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
+```
+
+</details>
+
+#### uses generated widget chrome text only when non-empty text sits under a widget ancestor
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html_with_widget_text = "<html><body><section class='widget-panel'><div class='widget-button'><span>Menu</span></div></section></body></html>"
+val html_without_widget_text = "<html><body><section class='widget-panel'></section><div>Menu</div></body></html>"
+val with_widget_text = simple_web_render_html_to_pixels(html_with_widget_text, 40, 64)
+val without_widget_text = simple_web_render_html_to_pixels(html_without_widget_text, 40, 64)
+val chrome_probe = 9 + 7 * 40
+expect(with_widget_text.len()).to_equal(40 * 64)
+expect(without_widget_text.len()).to_equal(40 * 64)
+expect(with_widget_text[chrome_probe]).to_equal(0xFF48484Bu32)
+expect(without_widget_text[chrome_probe]).to_equal(0xFFF5F5F5u32)
+expect(_pixels_equal(with_widget_text, without_widget_text)).to_equal(false)
 ```
 
 </details>
@@ -721,17 +744,19 @@ expect(pixels.len()).to_equal(96 * 64)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name).to_equal("cuda")
+expect(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name).to_equal("rocm")
 expect(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name).to_equal("opencl")
 expect(SimpleWebRenderer.create_with_backend(96, 64, "vulkan").backend_name).to_equal("vulkan")
 expect(SimpleWebRenderer.create_with_backend(96, 64, "metal").backend_name).to_equal("metal")
 expect(SimpleWebRenderer.create_with_backend(96, 64, "cpu_simd").backend_name).to_equal("cpu_simd")
 expect(SimpleWebRenderer.create_with_backend(96, 64, "simd_cpu").backend_name).to_equal("cpu_simd")
 expect(simple_web_resolved_engine2d_backend_name(96, 64, "cuda")).to_equal("cuda")
+expect(simple_web_resolved_engine2d_backend_name(96, 64, "hip")).to_equal("rocm")
 expect(simple_web_resolved_engine2d_backend_name(96, 64, "opencl")).to_equal("opencl")
 expect(simple_web_resolved_engine2d_backend_name(96, 64, "vulkan")).to_equal("vulkan")
 expect(simple_web_resolved_engine2d_backend_name(96, 64, "metal")).to_equal("metal")
@@ -1121,8 +1146,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 51 |
-| Active scenarios | 51 |
+| Total scenarios | 52 |
+| Active scenarios | 52 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

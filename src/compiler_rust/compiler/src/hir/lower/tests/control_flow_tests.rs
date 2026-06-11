@@ -53,3 +53,27 @@ fn test_lower_simd_loop_metadata() {
         }
     ));
 }
+
+/// Regression: multi-statement match arms must keep their leading statements.
+/// `lower_match_arm_body` used to discard everything but the trailing
+/// expression — `val y = ...` only registered the local without a Let store,
+/// so the local stayed uninitialized (stage4 `CompileContext.create` SIGSEGV
+/// where a lambda captured the arm-local receiver as nil).
+#[test]
+fn test_match_arm_leading_statements_are_kept() {
+    let module = parse_and_lower(
+        "fn pick(mode: i64) -> i64:\n    val r = match mode:\n        case 0:\n            val y = 41\n            y + 1\n        case _:\n            0\n    return r\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    let repr = format!("{:?}", func.body[0]);
+    assert!(
+        repr.contains("Block"),
+        "match arm body lost its statement block: {repr}"
+    );
+    assert!(
+        repr.contains("Integer(41)"),
+        "match arm `val y = 41` initializer was dropped: {repr}"
+    );
+}

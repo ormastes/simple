@@ -21,6 +21,7 @@ use std.storage.storage_class.{StorageClass}
 use std.storage.nvme_feature_policy.{samsung_mzql2960hcjr_sysfs_facts, nvme_policy_for_class}
 
 extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_string_len(value: text) -> i64
 
 # --- Internal inode kinds ---
 
@@ -266,21 +267,22 @@ fn _dbfs_write_device_bytes(inst_id: i64, base_block: i64, block_count: i64, off
         return Err(FsError.InvalidArg)
     val sector_size = _dbfs_sector_size(inst_id)
     val max_data_bytes = (block_count - 2) * sector_size
-    if offset + data.len() as i64 > max_data_bytes:
+    val data_len: i64 = data.len() as i64
+    if offset + data_len > max_data_bytes:
         return Err(FsError.TooLarge)
 
     var written: i64 = 0
-    while written < data.len() as i64:
+    while written < data_len:
         val absolute = offset + written
         val sector_idx = absolute / sector_size
         val intra = absolute - sector_idx * sector_size
         val lba = (base_block + 1 + sector_idx) as u64
         val read = _dbfs_device_store_devices[dev_idx].read_sector(lba)
-        var sector = if read.is_ok(): read.unwrap() else: _dbfs_zero_sector(sector_size)
+        var sector: [u8] = if read.is_ok(): read.unwrap() else: _dbfs_zero_sector(sector_size)
         if sector.len() == 0:
             sector = _dbfs_zero_sector(sector_size)
         var pos = intra
-        while pos < sector_size and written < data.len() as i64:
+        while pos < sector_size and written < data_len:
             sector[pos] = data[written]
             pos = pos + 1
             written = written + 1
@@ -306,7 +308,7 @@ fn _dbfs_read_device_bytes(inst_id: i64, base_block: i64, offset: i64, length: i
         val read = _dbfs_device_store_devices[dev_idx].read_sector(lba)
         if read.is_err():
             return Err(FsError.IoError(code: 0))
-        val sector = read.unwrap()
+        val sector: [u8] = read.unwrap()
         var pos = intra
         while pos < sector_size and read_count < length and pos < sector.len():
             out.push(sector[pos])
@@ -342,23 +344,23 @@ fn _dbfs_replay_namespace(inst_id: i64, dev: BlockDevice, base_block: i64, block
     val read = dev.read_sector(_dbfs_namespace_lba(base_block, block_count))
     if read.is_err():
         return 2u64
-    val text_data = _dbfs_bytes_to_text(read.unwrap(), dev.sector_size() as i64)
+    val text_data: text = _dbfs_bytes_to_text(read.unwrap(), dev.sector_size() as i64)
     if not text_data.starts_with("DBFSNS1\n"):
         return 2u64
     var max_id: u64 = 1u64
     var max_offset: i64 = 0
-    val lines = text_data.split("\n")
+    val lines: [text] = text_data.split("\n")
     for line in lines:
         if line.starts_with("F|") or line.starts_with("D|"):
-            val parts = line.split("|")
+            val parts: [text] = line.split("|")
             if parts.len() >= 6:
                 val kind_text = parts[0]
                 val inode_id = (parts[1].to_i64() ?? 0) as u64
                 val size_val = parts[2].to_i64() ?? 0
                 val blob_offset = parts[3].to_i64() ?? 0
                 val blob_len = parts[4].to_i64() ?? 0
-                val path = parts[5]
-                if inode_id > 1u64 and path.len() > 0:
+                val path: text = parts[5]
+                if inode_id > 1u64 and rt_string_len(path) > 0:
                     val kind = if kind_text == "D": DbFsKind.Dir else: DbFsKind.File
                     _dbfs_inodes.push(DbFsInode(
                         inst_id:  inst_id,

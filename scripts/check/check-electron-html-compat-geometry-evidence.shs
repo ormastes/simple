@@ -1,0 +1,129 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/electron_html_compat_geometry_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/electron_html_compat_geometry_evidence_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+FIXTURE_ID="${HTML_COMPAT_GEOMETRY_FIXTURE:-02_block_boxes}"
+WIDTH="${HTML_COMPAT_GEOMETRY_WIDTH:-320}"
+HEIGHT="${HTML_COMPAT_GEOMETRY_HEIGHT:-240}"
+TIMEOUT_SECS="${HTML_COMPAT_GEOMETRY_TIMEOUT_SECS:-60}"
+
+HTML_PATH="test/fixtures/html_compat/${FIXTURE_ID}.html"
+CSS_PATH="test/fixtures/html_compat/${FIXTURE_ID}.css"
+BASE_HTML_PATH="test/fixtures/html_compat/02_block_boxes.html"
+COMBINED_HTML_PATH="$BUILD_DIR/${FIXTURE_ID}_combined.html"
+GEOMETRY_JSON="$BUILD_DIR/${FIXTURE_ID}_geometry.json"
+PIXEL_JSON="$BUILD_DIR/${FIXTURE_ID}_argb.json"
+STRUCTURAL_SDN="$BUILD_DIR/${FIXTURE_ID}_structural_report.sdn"
+ELECTRON_LOG="$BUILD_DIR/${FIXTURE_ID}_electron.log"
+SIMPLE_LOG="$BUILD_DIR/${FIXTURE_ID}_simple.log"
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+rm -f "$GEOMETRY_JSON" "$PIXEL_JSON" "$STRUCTURAL_SDN" "$ELECTRON_LOG" "$SIMPLE_LOG" "$COMBINED_HTML_PATH"
+
+fail() {
+    reason="$1"
+    {
+        echo "status=fail"
+        echo "reason=$reason"
+        echo "fixture=$FIXTURE_ID"
+    }
+    {
+        echo "# Electron HTML Compat Geometry Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- fixture: $FIXTURE_ID"
+    } >"$REPORT_PATH"
+    exit 1
+}
+
+command -v node >/dev/null 2>&1 || fail "node not found"
+command -v npm >/dev/null 2>&1 || fail "npm not found"
+command -v xvfb-run >/dev/null 2>&1 || fail "xvfb-run not found"
+test -x "$SIMPLE_BIN" || fail "Simple runtime missing: $SIMPLE_BIN"
+if [ -f "$HTML_PATH" ]; then
+    CAPTURE_HTML_PATH="$HTML_PATH"
+elif [ -f "$CSS_PATH" ] && [ -f "$BASE_HTML_PATH" ]; then
+    python3 - "$BASE_HTML_PATH" "$CSS_PATH" "$COMBINED_HTML_PATH" <<'PY'
+from pathlib import Path
+import sys
+base = Path(sys.argv[1]).read_text()
+css = Path(sys.argv[2]).read_text()
+combined = base.replace("</head>", "<style>\n" + css + "</style>\n</head>")
+Path(sys.argv[3]).write_text(combined)
+PY
+    CAPTURE_HTML_PATH="$COMBINED_HTML_PATH"
+else
+    fail "HTML fixture missing: $HTML_PATH"
+fi
+
+if command -v timeout >/dev/null 2>&1; then
+    timeout "$TIMEOUT_SECS" \
+        env ELECTRON_CAPTURE_HTML="$CAPTURE_HTML_PATH" \
+            ELECTRON_CAPTURE_WIDTH="$WIDTH" \
+            ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
+            ELECTRON_CAPTURE_OUTPUT="$PIXEL_JSON" \
+            ELECTRON_CAPTURE_GEOMETRY_OUTPUT="$GEOMETRY_JSON" \
+            xvfb-run -a --server-args="-screen 0 1280x720x24" \
+            npm --prefix "$ROOT_DIR/tools/electron-shell" exec -- electron --no-sandbox --disable-gpu \
+            "$ROOT_DIR/tools/electron-live-bitmap/capture_html_argb.js" >"$ELECTRON_LOG" 2>&1 \
+        || fail "Electron geometry capture failed; see $ELECTRON_LOG"
+else
+    env ELECTRON_CAPTURE_HTML="$CAPTURE_HTML_PATH" \
+        ELECTRON_CAPTURE_WIDTH="$WIDTH" \
+        ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
+        ELECTRON_CAPTURE_OUTPUT="$PIXEL_JSON" \
+        ELECTRON_CAPTURE_GEOMETRY_OUTPUT="$GEOMETRY_JSON" \
+        xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        npm --prefix "$ROOT_DIR/tools/electron-shell" exec -- electron --no-sandbox --disable-gpu \
+        "$ROOT_DIR/tools/electron-live-bitmap/capture_html_argb.js" >"$ELECTRON_LOG" 2>&1 \
+        || fail "Electron geometry capture failed; see $ELECTRON_LOG"
+fi
+
+test -s "$GEOMETRY_JSON" || fail "Geometry JSON missing: $GEOMETRY_JSON"
+
+set +e
+env HTML_COMPAT_GEOMETRY_FIXTURE="$FIXTURE_ID" \
+    HTML_COMPAT_GEOMETRY_JSON="$GEOMETRY_JSON" \
+    HTML_COMPAT_GEOMETRY_REPORT="$STRUCTURAL_SDN" \
+    HTML_COMPAT_GEOMETRY_WIDTH="$WIDTH" \
+    HTML_COMPAT_GEOMETRY_HEIGHT="$HEIGHT" \
+    "$SIMPLE_BIN" run src/app/wm_compare/html_compat_geometry_probe_cli.spl --mode=interpreter >"$SIMPLE_LOG" 2>&1
+simple_code=$?
+set -e
+
+test -s "$STRUCTURAL_SDN" || fail "Structural report missing: $STRUCTURAL_SDN"
+
+status="$(sed -n 's/^status=//p' "$SIMPLE_LOG" | tail -n 1)"
+report_status="$(sed -n 's/^report_status=//p' "$SIMPLE_LOG" | tail -n 1)"
+mismatch_count="$(sed -n 's/^mismatch_count=//p' "$SIMPLE_LOG" | tail -n 1)"
+
+{
+    echo "# Electron HTML Compat Geometry Evidence"
+    echo
+    echo "- fixture: $FIXTURE_ID"
+    echo "- viewport: ${WIDTH}x${HEIGHT}"
+    echo "- electron geometry json: \`$GEOMETRY_JSON\`"
+    echo "- structural report: \`$STRUCTURAL_SDN\`"
+    echo "- report status: $report_status"
+    echo "- mismatch count: $mismatch_count"
+    echo "- simple exit code: $simple_code"
+} >"$REPORT_PATH"
+
+echo "fixture=$FIXTURE_ID"
+echo "geometry_json=$GEOMETRY_JSON"
+echo "structural_report=$STRUCTURAL_SDN"
+echo "report_path=$REPORT_PATH"
+echo "report_status=$report_status"
+echo "mismatch_count=$mismatch_count"
+if [ "$status" = "pass" ] && [ "$simple_code" -eq 0 ]; then
+    echo "status=pass"
+    exit 0
+fi
+echo "status=fail"
+exit 1

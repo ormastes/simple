@@ -210,11 +210,22 @@ For pure-Simple Engine2D GUI rendering, `auto` follows the shared graphics order
 
 `metal > cuda > rocm/hip > qualcomm > vulkan > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
 
+The dedicated order note is in
+`doc/07_guide/app/ui/engine2d_backend_order.md`.
+
 `metal` is the platform-native Apple path. `hip`, `amd_hip`, and `amd-rocm`
 are accepted as aliases for the canonical `rocm` backend. Use an explicit
 backend only when the test or deployment target requires that exact path;
 strict GPU requests must report an unavailable backend instead of silently
 falling back to CPU.
+
+The pure browser adapter and the Simple Web renderer both route backend names
+through the shared Engine2D resolver. That means `cuda`, `rocm`/HIP aliases,
+`vulkan`, `opencl`, `cpu_simd`, and the other canonical names stay visible
+through the GUI-facing API instead of being collapsed to `software` by an
+adapter-local fallback shim. `BrowserBackend.backend_name()` is the adapter
+identity (`"browser"`); the selected Engine2D lane is reported separately by
+`BrowserBackend.gpu_backend()`.
 
 Startup text rendering uses the shared bitmap/vector-font path. Bitmap fallback
 buffers are allocated at their final dimensions and then filled, so new GUI

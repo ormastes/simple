@@ -125,6 +125,10 @@ static spl_i64 rt_special(spl_u64 payload) {
     return (spl_i64)((payload << 3) | RT_VALUE_TAG_SPECIAL);
 }
 
+static spl_i64 rt_int(spl_i64 value) {
+    return value << 3;
+}
+
 static spl_i64 rt_nil(void) {
     return rt_special(RT_VALUE_SPECIAL_NIL);
 }
@@ -327,6 +331,10 @@ spl_i64 rt_array_len(spl_i64 array_value) {
     return array ? (spl_i64)array->len : -1;
 }
 
+spl_i64 rt_array_new_with_cap_u64(spl_i64 capacity_value) {
+    return rt_array_new(capacity_value);
+}
+
 spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value) {
     RtArray *array = rt_as_array(array_value);
     spl_i64 *new_data;
@@ -405,6 +413,27 @@ spl_i64 rt_index_set(spl_i64 collection, spl_i64 index_value, spl_i64 value) {
     }
     array->data[index] = value;
     return 1;
+}
+
+spl_i64 rt_typed_words_u64_set(spl_i64 collection, spl_i64 index_value, spl_i64 value) {
+    return rt_index_set(collection, index_value, value);
+}
+
+spl_i64 rt_typed_bytes_u8_push(spl_i64 collection, spl_i64 value) {
+    return rt_array_push(collection, value & 0xffLL);
+}
+
+spl_i64 rt_push_byte(spl_i64 collection, spl_i64 value) {
+    rt_array_push(collection, value & 0xffLL);
+    return collection;
+}
+
+spl_i64 rt_typed_words_u32_push(spl_i64 collection, spl_i64 value) {
+    return rt_array_push(collection, value & 0xffffffffLL);
+}
+
+spl_i64 rt_typed_words_u64_push(spl_i64 collection, spl_i64 value) {
+    return rt_array_push(collection, value);
 }
 
 spl_i64 rt_slice(spl_i64 value, spl_i64 start_value, spl_i64 end_value, spl_i64 step_value) {
@@ -535,8 +564,217 @@ spl_i64 rt_native_eq(spl_i64 lhs, spl_i64 rhs) {
     return lhs == rhs ? 1 : 0;
 }
 
+spl_i64 rt_string_eq(spl_i64 lhs, spl_i64 rhs) {
+    RtString *a = rt_as_string(lhs);
+    RtString *b = rt_as_string(rhs);
+    if (!a || !b || a->len != b->len) {
+        return 0;
+    }
+    for (spl_u64 i = 0; i < a->len; i = i + 1) {
+        if (a->data[i] != b->data[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+spl_i64 rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
+    RtString *string = rt_as_string(value);
+    spl_i64 index = rt_index_arg(index_value);
+    if (!string) {
+        return -1;
+    }
+    if (index < 0) {
+        index = (spl_i64)string->len + index;
+    }
+    if (index < 0 || (spl_u64)index >= string->len) {
+        return -1;
+    }
+    return (spl_i64)(spl_u8)string->data[index];
+}
+
+spl_i64 rt_string_starts_with(spl_i64 value, spl_i64 prefix_value) {
+    RtString *string = rt_as_string(value);
+    RtString *prefix = rt_as_string(prefix_value);
+    if (!string || !prefix) {
+        return 0;
+    }
+    if (prefix->len > string->len) {
+        return 0;
+    }
+    for (spl_u64 i = 0; i < prefix->len; i = i + 1) {
+        if (string->data[i] != prefix->data[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+spl_i64 rt_string_trim(spl_i64 value) {
+    RtString *string = rt_as_string(value);
+    spl_u64 start = 0;
+    spl_u64 end;
+    if (!string) {
+        return rt_nil();
+    }
+    end = string->len;
+    while (start < end) {
+        spl_u8 ch = (spl_u8)string->data[start];
+        if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') {
+            start = start + 1;
+        } else {
+            break;
+        }
+    }
+    while (end > start) {
+        spl_u8 ch = (spl_u8)string->data[end - 1];
+        if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') {
+            end = end - 1;
+        } else {
+            break;
+        }
+    }
+    return rt_string_new((spl_i64)(spl_u64)&string->data[start], (spl_i64)(end - start));
+}
+
+spl_i64 rt_string_ends_with(spl_i64 value, spl_i64 suffix_value) {
+    RtString *string = rt_as_string(value);
+    RtString *suffix = rt_as_string(suffix_value);
+    if (!string || !suffix) {
+        return 0;
+    }
+    if (suffix->len > string->len) {
+        return 0;
+    }
+    for (spl_u64 i = 0; i < suffix->len; i = i + 1) {
+        if (string->data[string->len - suffix->len + i] != suffix->data[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+spl_i64 rt_string_split(spl_i64 value, spl_i64 sep_value) {
+    RtString *string = rt_as_string(value);
+    RtString *sep = rt_as_string(sep_value);
+    spl_i64 out = rt_array_new(4);
+    spl_u64 start = 0;
+    if (!string || !sep) {
+        return out;
+    }
+    if (sep->len == 0) {
+        rt_array_push(out, value);
+        return out;
+    }
+    while (start <= string->len) {
+        spl_u64 match_at = string->len;
+        for (spl_u64 i = start; i + sep->len <= string->len; i = i + 1) {
+            spl_i64 matched = 1;
+            for (spl_u64 j = 0; j < sep->len; j = j + 1) {
+                if (string->data[i + j] != sep->data[j]) {
+                    matched = 0;
+                    break;
+                }
+            }
+            if (matched) {
+                match_at = i;
+                break;
+            }
+        }
+        if (match_at == string->len) {
+            rt_array_push(out, rt_string_new((spl_i64)(spl_u64)&string->data[start], (spl_i64)(string->len - start)));
+            break;
+        }
+        rt_array_push(out, rt_string_new((spl_i64)(spl_u64)&string->data[start], (spl_i64)(match_at - start)));
+        start = match_at + sep->len;
+        if (start == string->len) {
+            rt_array_push(out, rt_string_new((spl_i64)(spl_u64)"", 0));
+            break;
+        }
+    }
+    return out;
+}
+
+spl_i64 rt_string_from_byte_array(spl_i64 array_value) {
+    RtArray *array = rt_as_array(array_value);
+    RtString *out;
+    if (!array) {
+        return rt_string_new((spl_i64)(spl_u64)"", 0);
+    }
+    out = (RtString *)rt_alloc((spl_i64)(sizeof(RtString) + array->len + 1));
+    if (!out) {
+        return rt_nil();
+    }
+    out->header.object_type = RT_HEAP_STRING;
+    out->header.gc_flags = 0;
+    out->header.reserved = 0;
+    out->header.size = (spl_u32)(sizeof(RtString) + array->len);
+    out->len = array->len;
+    out->hash = 0;
+    for (spl_u64 i = 0; i < array->len; i = i + 1) {
+        out->data[i] = (char)(rt_index_arg(array->data[i]) & 0xff);
+    }
+    out->data[array->len] = 0;
+    return rt_heap(out);
+}
+
+spl_i64 rt_bytes_slice(spl_i64 array_value, spl_i64 start_value, spl_i64 len_value) {
+    RtArray *array = rt_as_array(array_value);
+    spl_i64 start = rt_index_arg(start_value);
+    spl_i64 len = rt_index_arg(len_value);
+    spl_i64 out;
+    if (!array || len <= 0) {
+        return rt_array_new(0);
+    }
+    if (start < 0) {
+        start = (spl_i64)array->len + start;
+    }
+    if (start < 0) {
+        start = 0;
+    }
+    if ((spl_u64)start >= array->len) {
+        return rt_array_new(0);
+    }
+    if ((spl_u64)(start + len) > array->len) {
+        len = (spl_i64)array->len - start;
+    }
+    out = rt_array_new(len);
+    for (spl_i64 i = 0; i < len; i = i + 1) {
+        rt_array_push(out, array->data[start + i]);
+    }
+    return out;
+}
+
+spl_i64 rt_bytes_concat(spl_i64 left_value, spl_i64 right_value) {
+    RtArray *left = rt_as_array(left_value);
+    RtArray *right = rt_as_array(right_value);
+    spl_i64 out;
+    if (!left || !right) {
+        return rt_array_new(0);
+    }
+    out = rt_array_new((spl_i64)(left->len + right->len));
+    for (spl_u64 i = 0; i < left->len; i = i + 1) {
+        rt_array_push(out, left->data[i]);
+    }
+    for (spl_u64 i = 0; i < right->len; i = i + 1) {
+        rt_array_push(out, right->data[i]);
+    }
+    return out;
+}
+
+spl_i64 rt_for_iterable(spl_i64 collection) {
+    return collection;
+}
+
 spl_i64 rt_native_neq(spl_i64 lhs, spl_i64 rhs) {
     return rt_native_eq(lhs, rhs) ? 0 : 1;
+}
+
+spl_i64 rt_any_add(spl_i64 lhs, spl_i64 rhs) {
+    if (rt_as_string(lhs) || rt_as_string(rhs)) {
+        return rt_string_concat(lhs, rhs);
+    }
+    return lhs + rhs;
 }
 
 spl_i64 rt_mmio_read_u8(spl_i64 addr) {
@@ -600,6 +838,119 @@ void log_raw_println(spl_i64 msg) {
     }
     uart_put_byte(13);
     uart_put_byte(10);
+}
+
+void serial_println(spl_i64 msg) {
+    log_raw_println(msg);
+}
+
+spl_i64 rt_string_len(spl_i64 value) {
+    RtString *string = rt_as_string(value);
+    return string ? (spl_i64)string->len : 0;
+}
+
+spl_i64 rt_string_data(spl_i64 value) {
+    RtString *string = rt_as_string(value);
+    if (!string) {
+        return 0;
+    }
+    return (spl_i64)(spl_u64)string->data;
+}
+
+spl_i64 rt_byte_array_new(spl_i64 capacity_value) {
+    return rt_array_new(capacity_value);
+}
+
+spl_i64 rt_byte_array_new_len(spl_i64 len_value) {
+    spl_i64 array = rt_array_new(len_value);
+    RtArray *arr = rt_as_array(array);
+    spl_i64 len = rt_index_arg(len_value);
+    if (!arr || len <= 0) {
+        return array;
+    }
+    for (spl_i64 i = 0; i < len; i = i + 1) {
+        rt_array_push(array, rt_int(0));
+    }
+    return array;
+}
+
+spl_i64 rt_text_to_bytes(spl_i64 text_value) {
+    RtString *string = rt_as_string(text_value);
+    spl_i64 out;
+    if (!string) {
+        return rt_array_new(0);
+    }
+    out = rt_array_new((spl_i64)string->len);
+    for (spl_u64 i = 0; i < string->len; i = i + 1) {
+        rt_array_push(out, rt_int((spl_i64)(unsigned char)string->data[i]));
+    }
+    return out;
+}
+
+spl_i64 rt_ssh_userauth_password_only_failure_payload(void) {
+    spl_i64 out = rt_array_new(14);
+    rt_array_push(out, rt_int(51));
+    rt_array_push(out, rt_int(0));
+    rt_array_push(out, rt_int(0));
+    rt_array_push(out, rt_int(0));
+    rt_array_push(out, rt_int(8));
+    rt_array_push(out, rt_int('p'));
+    rt_array_push(out, rt_int('a'));
+    rt_array_push(out, rt_int('s'));
+    rt_array_push(out, rt_int('s'));
+    rt_array_push(out, rt_int('w'));
+    rt_array_push(out, rt_int('o'));
+    rt_array_push(out, rt_int('r'));
+    rt_array_push(out, rt_int('d'));
+    rt_array_push(out, rt_special(RT_VALUE_SPECIAL_FALSE));
+    return out;
+}
+
+spl_i64 rt_string_join(spl_i64 array_value, spl_i64 separator_value) {
+    RtArray *array = rt_as_array(array_value);
+    RtString *separator = rt_as_string(separator_value);
+    RtString *joined;
+    spl_u64 total_len = 0;
+    spl_u64 out_index = 0;
+    if (!array) {
+        return rt_string_new((spl_i64)(spl_u64)"", 0);
+    }
+    for (spl_u64 i = 0; i < array->len; i = i + 1) {
+        RtString *elem = rt_as_string(rt_to_string(array->data[i]));
+        if (elem) {
+            total_len = total_len + elem->len;
+        }
+        if (separator && i + 1 < array->len) {
+            total_len = total_len + separator->len;
+        }
+    }
+    joined = (RtString *)rt_alloc((spl_i64)(sizeof(RtString) + total_len + 1));
+    if (!joined) {
+        return rt_nil();
+    }
+    joined->header.object_type = RT_HEAP_STRING;
+    joined->header.gc_flags = 0;
+    joined->header.reserved = 0;
+    joined->header.size = (spl_u32)(sizeof(RtString) + total_len);
+    joined->len = total_len;
+    joined->hash = 0;
+    for (spl_u64 i = 0; i < array->len; i = i + 1) {
+        RtString *elem = rt_as_string(rt_to_string(array->data[i]));
+        if (elem) {
+            for (spl_u64 j = 0; j < elem->len; j = j + 1) {
+                joined->data[out_index] = elem->data[j];
+                out_index = out_index + 1;
+            }
+        }
+        if (separator && i + 1 < array->len) {
+            for (spl_u64 j = 0; j < separator->len; j = j + 1) {
+                joined->data[out_index] = separator->data[j];
+                out_index = out_index + 1;
+            }
+        }
+    }
+    joined->data[out_index] = 0;
+    return rt_heap(joined);
 }
 
 void unsafe(void) {
@@ -726,6 +1077,19 @@ spl_i64 rt_time_now_unix_micros(void) {
     spl_u64 cycles;
     __asm__ volatile("rdtime %0" : "=r"(cycles));
     return (spl_i64)(cycles / 10ULL);
+}
+
+void rt_thread_sleep(spl_i64 millis) {
+    spl_i64 start;
+    spl_i64 target_delta;
+    if (millis <= 0) {
+        return;
+    }
+    start = rt_time_now_unix_micros();
+    target_delta = millis * 1000LL;
+    while ((rt_time_now_unix_micros() - start) < target_delta) {
+        __asm__ volatile("" ::: "memory");
+    }
 }
 
 spl_u64 rt_riscv_seed(void) {

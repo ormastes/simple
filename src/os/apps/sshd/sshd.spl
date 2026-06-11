@@ -9,19 +9,12 @@
 #   daemon.start()
 
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
-use os.crypto.random.{random_bytes}
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
-use os.apps.sshd.ssh_kex.{HostKeySet, HostCertificateSet, ssh_build_kexinit_for_host_keys_and_certs}
+use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet}
 use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
-use os.apps.sshd.host_key_loader.{load_rsa_pkcs8_from_file, load_ssh_host_certificate_from_file}
-
-extern fn rt_net_socket(proto: i64) -> i64
-extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
-extern fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64
-extern fn rt_net_accept(sock_fd: i64) -> i64
-extern fn rt_net_close(sock_fd: i64) -> i64
+use os.kernel.net.rt_net_socket_facade.{rt_net_socket, rt_net_bind, rt_net_listen, rt_net_accept, rt_net_close}
 extern fn serial_println(msg: text)
-extern fn rt_tls13_ed25519_public_key(seed: [u8]) -> [u8]
 
 # ============================================================================
 # Constants
@@ -229,23 +222,25 @@ impl SshDaemon:
             0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
             0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
         ]
-        var public_key: [u8] = [
+        val expected_public_key: [u8] = [
             0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
             0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
             0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
             0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a
         ]
+        val derived_public = ed25519_keypair_from_seed(seed).1
+        if derived_public.len() != 32:
+            return Err("Ed25519 public-key derivation failed")
         if self.advertise_ed25519_host_key and self.host_rsa_pkcs8 == nil:
             serial_println("[sshd] Running Ed25519 live helper self-test")
-            val derived_public = rt_tls13_ed25519_public_key(seed)
-            if not _sshd_bytes_equal(derived_public, public_key):
+            if not _sshd_bytes_equal(derived_public, expected_public_key):
                 return Err("Ed25519 live helper self-test failed")
             serial_println("[sshd] Ed25519 live helper self-test: PASS")
         else:
             serial_println("[sshd] Ed25519 host key disabled for live lane")
         serial_println("[sshd] Seed bytes={seed.len()}")
         self.host_private_key = seed
-        self.host_public_key = public_key
+        self.host_public_key = derived_public
         serial_println("[sshd] Host keys ready")
 
         # The x64-ssh live lane uses the C-backed TCP runtime directly.
@@ -380,25 +375,3 @@ impl SshDaemon:
     fn session_count() -> u32:
         """Return the number of active sessions."""
         self.sessions.len().to_u32()
-
-    me load_host_rsa_key(path: text) -> Result<(), text>:
-        """Load an RSA PKCS#8 private key from PEM or DER file and install it."""
-        match load_rsa_pkcs8_from_file(path):
-            Ok(pkcs8):
-                self.set_host_rsa_key(pkcs8)
-                Ok(())
-            Err(msg): Err(msg)
-
-    me load_host_certificate(path: text, algorithm: text) -> Result<(), text>:
-        match load_ssh_host_certificate_from_file(path, algorithm):
-            Ok(blob):
-                if algorithm == "ssh-ed25519-cert-v01@openssh.com":
-                    self.set_host_ed25519_certificate(blob)
-                elif algorithm == "rsa-sha2-256-cert-v01@openssh.com":
-                    self.set_host_rsa_sha2_256_certificate(blob)
-                elif algorithm == "rsa-sha2-512-cert-v01@openssh.com":
-                    self.set_host_rsa_sha2_512_certificate(blob)
-                else:
-                    return Err("unsupported SSH certificate algorithm: {algorithm}")
-                Ok(())
-            Err(msg): Err(msg)

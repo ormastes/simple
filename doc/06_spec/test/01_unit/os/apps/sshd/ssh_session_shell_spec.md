@@ -41,7 +41,7 @@ ssh_session_shell_spec -> os
 #### emits the shell banner and prompt when the session shell starts
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -59,7 +59,7 @@ expect(output).to_contain("$ ")
 #### round-trips a built-in command through the shell transport adapter
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -75,7 +75,7 @@ expect(output).to_end_with("$ ")
 #### keeps multi-command input ordered across one transport chunk
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -91,7 +91,7 @@ expect(output).to_end_with("$ ")
 
 #### resolves SSH shell SMF commands through the filesystem app registry
 
-1.  seed launchable apps
+-  seed launchable apps
    - Expected: report.command equals `simple.smf`
    - Expected: report.resolved_path equals `/usr/bin/simple.smf`
    - Expected: report.fat32_alias equals `/SYS/APPS/SIMPLSTC.SMF`
@@ -102,7 +102,7 @@ expect(output).to_end_with("$ ")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -123,7 +123,7 @@ expect(report.shell_exec_path).to_equal(true)
 
 #### resolves SSH shell executable-file commands through the same launch path
 
-1.  seed launchable apps
+-  seed launchable apps
    - Expected: report.command equals `simple`
    - Expected: report.resolved_path equals `/usr/bin/simple`
    - Expected: report.fat32_alias equals `/SYS/APPS/SIMPLSTC.SMF`
@@ -134,7 +134,7 @@ expect(report.shell_exec_path).to_equal(true)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -155,7 +155,7 @@ expect(report.shell_exec_path).to_equal(true)
 
 #### resolves SSH shell sh commands to the shell SMF executable
 
-1.  seed launchable apps
+-  seed launchable apps
    - Expected: report.command equals `sh`
    - Expected: report.resolved_path equals `/usr/bin/sh`
    - Expected: report.fat32_alias equals `/SYS/APPS/SHELLSMF.SMF`
@@ -166,7 +166,7 @@ expect(report.shell_exec_path).to_equal(true)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

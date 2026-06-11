@@ -1,0 +1,49 @@
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_render_html_software_pixels_at_scroll
+}
+use std.gpu.engine2d.engine.{Engine2D}
+
+fn present_layout_pixels_with_engine2d(pixels: [u32], width: i32, height: i32, backend_name: text, base: u32) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    val normalized_backend = backend_name.trim().lower()
+    if normalized_backend == "software" or normalized_backend == "cpu":
+        return pixels
+    var engine = Engine2D.create_with_backend(width, height, backend_name)
+    engine.clear(base)
+    # draw_image is mirror-only (poisons gpu_frame_complete on Metal/Vulkan).
+    # Use draw_layout_pixel_runs (clear + draw_rect_filled = GPU-dispatched) for
+    # Metal and Vulkan so gpu_frame_complete stays true.
+    # Other backends (opencl, cuda, etc.) use draw_image for pixel-exact passthrough.
+    if normalized_backend == "vulkan" or normalized_backend == "metal":
+        draw_layout_pixel_runs(engine, pixels, width, height)
+    else:
+        engine.draw_image(0, 0, width, height, pixels)
+    engine.present()
+    val rendered = engine.read_pixels()
+    engine.shutdown()
+    rendered
+
+fn draw_layout_pixel_runs(engine: Engine2D, pixels: [u32], width: i32, height: i32):
+    var y = 0
+    while y < height:
+        var x = 0
+        while x < width:
+            val color = pixels[y * width + x]
+            var run_w = 1
+            while x + run_w < width and pixels[y * width + x + run_w] == color:
+                run_w = run_w + 1
+            engine.draw_rect_filled(x, y, run_w, 1, color)
+            x = x + run_w
+        y = y + 1
+
+pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
+    val pixels = simple_web_layout_render_html_software_pixels(html, width, height)
+    val base = if html.contains("widget-panel"): 0xFFF5F5F5u32 else: 0xFFFFFFFFu32
+    present_layout_pixels_with_engine2d(pixels, width, height, backend_name, base)
+
+pub fn simple_web_layout_render_html_pixels_at_scroll(html: text, width: i32, height: i32, backend_name: text, scroll_y: i32) -> [u32]:
+    val pixels = simple_web_layout_render_html_software_pixels_at_scroll(html, width, height, scroll_y)
+    val base = if html.contains("widget-panel"): 0xFFF5F5F5u32 else: 0xFFFFFFFFu32
+    present_layout_pixels_with_engine2d(pixels, width, height, backend_name, base)

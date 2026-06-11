@@ -27,6 +27,7 @@ const auditSelectors = (process.env.ELECTRON_CAPTURE_AUDIT_SELECTORS || "")
   .map(s => s.trim())
   .filter(Boolean);
 const auditOutputPath = process.env.ELECTRON_CAPTURE_AUDIT_OUTPUT || "";
+const geometryOutputPath = process.env.ELECTRON_CAPTURE_GEOMETRY_OUTPUT || "";
 const contrastMinX100 = Number(process.env.ELECTRON_CAPTURE_CONTRAST_MIN_X100 || 450);
 const touchMinPx = Number(process.env.ELECTRON_CAPTURE_TOUCH_MIN_PX || 44);
 const failOnAudit = /^(1|true|yes)$/i.test(process.env.ELECTRON_CAPTURE_FAIL_ON_AUDIT || "");
@@ -406,6 +407,32 @@ async function collectAudit(win, selectors, mediaFeatures) {
   `);
 }
 
+async function collectGeometry(win) {
+  return win.webContents.executeJavaScript(`
+    (() => {
+      const nodes = Array.from(document.querySelectorAll("[data-geom-label]"));
+      return {
+        producer: "electron-chromium-geometry",
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        items: nodes.map((el, index) => {
+          const rect = el.getBoundingClientRect();
+          const text = String(el.textContent || "").replace(/\\s+/g, " ").trim();
+          return {
+            index,
+            label: String(el.getAttribute("data-geom-label") || ""),
+            tag: el.tagName.toLowerCase(),
+            x: Math.round(rect.left),
+            y: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            text
+          };
+        })
+      };
+    })()
+  `);
+}
+
 async function main() {
   if (!htmlPath) {
     console.error("ELECTRON_CAPTURE_HTML is required");
@@ -434,6 +461,7 @@ async function main() {
   await new Promise(r => setTimeout(r, settleMs));
 
   const audit = await collectAudit(win, auditSelectors, emulatedMediaFeatures);
+  const geometry = geometryOutputPath ? await collectGeometry(win) : null;
   const image = await win.capturePage({ x: 0, y: 0, width, height });
   const result = bitmapToLogicalArgb(image);
 
@@ -448,6 +476,7 @@ async function main() {
     pixels: Array.from(result.pixels, v => v >>> 0),
   };
   if (audit) payload.audit = audit;
+  if (geometry) payload.geometry = geometry;
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(payload));
@@ -455,11 +484,19 @@ async function main() {
     fs.mkdirSync(path.dirname(auditOutputPath), { recursive: true });
     fs.writeFileSync(auditOutputPath, JSON.stringify(audit, null, 2));
   }
+  if (geometry && geometryOutputPath) {
+    fs.mkdirSync(path.dirname(geometryOutputPath), { recursive: true });
+    fs.writeFileSync(geometryOutputPath, JSON.stringify(geometry, null, 2));
+  }
   console.log("captured=" + outputPath);
   console.log("size=" + width + "x" + height);
   console.log("native=" + result.nativeWidth + "x" + result.nativeHeight);
   console.log("downsampled=" + result.downsampled);
   console.log("pixels=" + result.pixels.length);
+  if (geometry) {
+    console.log("geometry_items=" + geometry.items.length);
+    if (geometryOutputPath) console.log("geometry=" + geometryOutputPath);
+  }
   if (audit) {
     console.log("audit_items=" + audit.items.length);
     console.log("audit_overlaps=" + audit.overlapPairs.length);

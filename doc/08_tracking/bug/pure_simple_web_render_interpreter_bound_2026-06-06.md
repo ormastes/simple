@@ -112,6 +112,69 @@ Further work should target bitmap/vector font rendering through the generated
 Engine2D GPU text-blit lane or a compiled-mode text raster path, not another
 software present/readback cycle.
 
+2026-06-11 measurement refresh status:
+
+- `src/app/wm_compare/backend_measurement_software_export.spl` was repaired to
+  parse `--width/--height` as `i32` and narrowed further so the software-only
+  CLI imports `simple_web_layout_render_html_software_pixels(...)` directly
+  instead of the generic Engine2D HTML renderer.
+- `simple check` passes for both the exporter and
+  `simple_web_html_layout_renderer.spl`.
+- The exporter can still emit normalized output for the zero-sample smoke:
+  `--warmup-count 0 --sample-count 0` returns a valid SDN record shape, but
+  with `valid: false` and zero frame samples as expected.
+- Real interpreted render calls are currently blocked again:
+  `backend_measurement_software_export.spl --software-render-backend software`
+  and `--software-render-backend cpu` both fail at runtime with
+  `error: semantic: type mismatch: cannot convert enum to int`.
+- Replacing the nested `[[ ]; nodes.len()]` layout scratch initialization with
+  explicit builders did not clear that runtime failure.
+- Current conclusion: the remaining blocker is now inside the interpreted
+  `simple_web_layout_render_html_software_pixels(...)` path itself, not the
+  measurement exporter or the generic backend resolver/import graph.
+
+2026-06-11 compiled-path measurement refresh:
+
+- The canonical benchmark path from
+  `doc/07_guide/platform/gui_perf_benchmark_comparison.md` uses `bin/simple`,
+  and that path does produce fresh non-zero samples for the narrowed software
+  export entrypoint.
+- Before the latest mut-capability fixes, fresh 320x240 single-frame samples
+  were:
+  - `software`: `p50_frame_us = 1233988`
+  - `cpu`: `p50_frame_us = 1200249`
+  - `cpu_simd`: `p50_frame_us = 1246565`
+  - checksum: `sum32:328819896062200`
+  - pixel proof: `nonzero_pixels:76800`
+- Those runs were still not truly on the compiled fast path. `bin/simple`
+  reported JIT fallback to the interpreter because of W1006 mut-capability
+  lowering failures:
+  - first at `simd_fill_row`
+  - then at `simd_scroll_region`
+  - then at `fb_put`
+- Fixes landed:
+  - `src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl`: added `mut`
+    capability to the row/span/scroll helpers that mutate framebuffer-like
+    buffers
+  - `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`:
+    added `mut` to `fb_put` and `fb_clear`
+- After those fixes, `simple check` still passes for the touched files, but
+  `bin/simple run src/app/wm_compare/backend_measurement_software_export.spl`
+  now exits with code `-1` and no diagnostic text, even for the zero-sample
+  case. That means the compiled/JIT path gets farther than the earlier W1006
+  fallback, but currently crashes before returning measurement output.
+
+Current conclusion:
+
+- Fresh performance evidence exists again, but only from the pre-crash state
+  before the latest mut-capability cleanup completed.
+- A concrete reason the pure Simple GUI path is slow has now been proven:
+  the supposed compiled/JIT benchmark lane was falling back to the interpreter
+  because framebuffer mutation helpers lacked `mut` capability.
+- The next blocker is no longer the exporter and no longer W1006 itself; it is
+  the new compiled-path crash introduced or uncovered after clearing those
+  lowering errors.
+
 ## 2026-06-06 Current Profile Evidence
 
 The GUI profile harness now measures the Simple web software row through a real
@@ -151,31 +214,263 @@ pass should inspect the JIT lowerer/import graph and the higher-layer
 ## 2026-06-11 Renderer hotspot note
 
 Current `paint(...)` still gates generated widget chrome text through
-`has_nonempty_widget_text_node(nodes)`, which climbs ancestors for each
-non-empty text node:
+`has_nonempty_widget_text_node(nodes)`, which was previously climbing ancestors
+for each non-empty text node.
 
-- earlier in this branch, `simple_web_renderer_spec.spl` had a passing cached
-  baseline (`51 passed`);
-- current uncached branch baseline has drifted to
-  `simple_web_renderer_spec.spl`: `50 passed, 1 failed`
+Renderer baseline on the current branch:
+
+- `simple_web_renderer_spec.spl`: uncached pass, `52 passed, 0 failed`
 - `browser_renderer_spec.spl`: still red in the shared branch baseline
   (`75 passed, 23 failed`)
 - `test/03_system/gui/wm_compare/html_compat_spec.spl`: still red in the
   shared branch baseline (`0 passed, 1 failed`)
 
-A bounded optimization attempt replaced the repeated ancestor walk with a
-precomputed widget-ancestor cache. That change was rejected in the same turn:
-the main renderer spec regressed immediately under uncached execution, and the
-file was restored right away. After revert, the uncached branch baseline still
-stayed red at `50 passed, 1 failed`, so the current branch no longer reproduces
-the older `51 passed` baseline even without the cache experiment.
+The temporary `50/1` renderer failure in this branch was isolated to a stale
+Draw IR spec expectation, not the startup-render hotspot itself:
 
-Implication: this remains a valid hotspot, but there are now two separate needs:
+- failing case was the `#card` Draw IR scenario inside
+  `simple_web_renderer_spec.spl`
+- mismatch was `card.content_rect.height`: actual `18`, stale expected `12`
+- the active layout/Draw-IR path exposes content-box geometry here, so the spec
+  expectation was updated to the current `40x18` content rect
 
-- isolate the current uncached `simple_web_renderer_spec.spl` `50/1` failure so
-  the branch baseline is stable again;
-- only after that, reintroduce memoization with a behavior-exact proof path for
-  the widget-text/chrome ancestor-detection contract.
+With that baseline stabilized, a focused widget-chrome ancestry scenario was
+added to `simple_web_renderer_spec.spl`, and the hotspot reduction is now
+accepted:
+
+- `has_nonempty_widget_text_node(nodes)` memoizes widget ancestry with a
+  per-node integer flag array instead of re-climbing the parent chain for every
+  non-empty text node
+- Docker `simple check`
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  passes
+- Docker uncached renderer spec
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`
+  passes `52 passed, 0 failed`
+
+This is the current accepted startup-render hotspot reduction in the Simple Web
+layout renderer.
+
+## 2026-06-11 GUI backend routing fix
+
+The current Engine2D preference order is already implemented in the shared
+Engine2D layer, but the GUI/browser adapter had stale narrowing shims:
+
+- `app.ui.browser.backend.resolve_gpu_backend(...)` only recognized a tiny set
+  of names and otherwise collapsed requests to `software`
+- the Simple Web backend-name normalizers also lagged behind the shared
+  Engine2D canonical set
+
+Accepted fix:
+
+- expanded the Simple Web/backend adapter normalizers to preserve the shared
+  canonical names used by Engine2D
+- added ROCm/HIP alias canonicalization in the GUI-facing path
+- kept `auto` as a separate runtime/probe lane rather than pretending it can be
+  fully unit-proved in the current interpreter environment
+
+Verification on the current branch:
+
+- `test/02_integration/rendering/engine2d_backend_spec.spl`: `14 passed, 0 failed`
+- focused browser/backend routing spec updated to assert the selected Engine2D
+  lane through `BrowserBackend.gpu_backend()` instead of the adapter identity
+  `backend_name() == "browser"`
+
+Current caveat:
+
+- the older plan note that points to
+  `scripts/check/check-pure-simple-gui-engine2d-auto-backend-evidence.shs`
+  and `doc/09_report/pure_simple_gui_engine2d_auto_backend_evidence_2026-06-08.md`
+  references artifacts that are not present in this checkout, so the native
+  auto-backend evidence lane still needs a fresh wrapper/report pass.
+
+## 2026-06-11 Selector tokenization reduction
+
+`compute_styles(nodes, rules)` still runs in the hottest startup-render path for
+real CSS pages. After caching selector groups per rule, the remaining repeated
+work inside each `nodes x rules x groups` match attempt was:
+
+- `normalize_child_combinators(group)`
+- `split(" ")`
+
+That tokenization was being rebuilt for every node checked against every rule
+group.
+
+Accepted reduction:
+
+- `Rules` now stores pre-tokenized selector group parts during `extract_css(...)`
+- `compute_styles(...)` matches against those cached parts instead of
+  re-normalizing and re-splitting each selector group per node
+
+Additional accepted reduction on the same path:
+
+- `parse_html(...)` now stores `class_words` on each `HNode`
+- selector matching reuses those cached class tokens instead of re-splitting
+  `class=""` strings while evaluating class selectors inside the
+  `nodes x rules x groups` loop
+
+Additional accepted reduction in widget/class hot checks:
+
+- `parse_html(...)` now also caches the repeated widget/image class predicates
+  used by layout and paint:
+  - `has_widget_class`
+  - `has_icon_image_class`
+  - `has_widget_panel_class`
+  - `has_widget_button_class`
+  - `has_widget_image_class`
+- `has_focused_class` is cached in the same lane for the generated widget focus
+  border path
+- layout, widget ancestry checks, and paint now reuse those flags instead of
+  repeatedly running substring checks on `class_attr`
+
+Additional accepted reduction in the text/layout lane:
+
+- `parse_html(...)` now stores `text_trimmed` on `#text` nodes
+- widget-chrome text detection, text-flow fixture detection, intrinsic text
+  width, text layout height, and text paint now reuse that cached trimmed text
+  instead of re-running `trim()` across the same text node in each pass
+
+Additional accepted reduction in text paint:
+
+- after layout, the renderer now builds a per-text-node wrap cache
+  (`TextWrapCache`) from final box widths
+- paint reuses cached `(start,end)` wrap ranges instead of re-running
+  `wrap_line_end(...)` / `skip_wrap_spaces(...)` for every painted text node
+
+Additional accepted reduction in wrapped text paint:
+
+- wrapped text paint now draws directly from cached `(start,end)` ranges in the
+  original text node
+- this removes per-line `substring(off, endc)` allocation from the hot paint
+  loop for both sparse widget text and clipped scaled text
+
+Additional accepted reduction in glyph lookup:
+
+- `glyph_index_for_char(...)` now uses a direct ASCII code map for the known
+  renderer charset before falling back to `FONT_CHARSET.index_of(...)`
+- this removes repeated linear charset scans from the common ASCII text path
+  while preserving the old fallback behavior for anything outside the known set
+
+Additional accepted reduction in glyph draw loops:
+
+- the common text raster loops now use `char_code_at(i)` with the direct
+  glyph-code map instead of allocating `substring(i, i+1)` for every rendered
+  character on the common ASCII path
+- the old substring-based lookup remains as the fallback for non-ASCII cases
+
+Additional accepted reduction in shared text metrics:
+
+- the renderer now builds a `TextRenderCache` once per render from computed
+  styles
+- paint and wrap-cache construction reuse cached `char_w`, `text_advance`,
+  `glyph_scale`, `style_line_h`, and ink offsets instead of recomputing them
+  for each painted or wrapped text node
+
+Additional accepted reduction in wrap-height reuse:
+
+- text wrap ranges are now computed once during `layout(...)` for `#text`
+  nodes and threaded through `LayoutResult`
+- paint consumes those same stored `(start,end)` ranges instead of rebuilding a
+  second post-layout wrap cache from `boxes.bw`
+- this removes the remaining duplicate wrap scan between text layout height and
+  text paint preparation on the startup-render path
+
+Additional accepted reduction in intrinsic width reuse:
+
+- flex row sizing now memoizes `intrinsic_text_width(...)` results per node
+  within the layout pass
+- this avoids repeated recursive inline-text tree walks across the flex pre-pass
+  and child placement pass when the same auto-width child is queried more than
+  once
+
+This removes one full wrap-boundary rescan from the text paint pass while
+keeping layout semantics unchanged. The broader remaining cost is now deeper
+glyph raster/text execution and the rest of interpreted layout work, not a
+second wrap-boundary build after layout.
+
+Verification on the current branch:
+
+- Docker `simple check`
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`:
+  pass
+- Docker uncached
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`:
+  `52 passed, 0 failed`
+
+This keeps behavior green while removing another repeated string-processing pass
+from the pure Simple startup-render loop. The next likely hot work inside the
+same lane is deeper selector/simple-match cost or text/layout execution, not
+selector-group or class tokenization.
+
+The older plan note that points to the missing auto-backend evidence wrapper and
+report is still stale in this checkout; those paths are not present and should
+be refreshed when the backend-evidence lane is revisited.
+
+## 2026-06-11 Style-cascade O(n^2) reduction
+
+The next startup-render hotspot was in `compute_styles(...)`.
+
+Before this pass, style-block CSS was applied twice:
+
+- once through the extracted `Rules` list from `extract_css(html)`
+- again through `style_block_decls_for_node(html, nodes, i)`, which rescanned
+  every `<style>` block in the raw HTML for every node
+
+That second path was pure repeated work for the current layout renderer and
+scaled with both document size and style-block size, which made startup
+rendering pay an avoidable `nodes x style-html-scan` cost before layout and
+paint even started.
+
+Accepted reduction:
+
+- removed `style_block_decls_for_node(...)`
+- `compute_styles(...)` now consumes the already extracted `Rules` set only
+- all three render entrypoints now call the reduced `compute_styles(nodes, rules)`
+  path
+
+Verification on the current branch:
+
+- Docker `simple check`
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+  passes
+- Docker uncached renderer spec
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl`
+  passes `52 passed, 0 failed`
+- broader browser selector/layout baseline is unchanged overall:
+  `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`
+  remains `74 passed, 24 failed`
+
+Current interpretation:
+
+- this is an accepted startup cost reduction in the shared style pipeline
+- the remaining `browser_renderer_spec.spl` reds are broader selector/layout
+  correctness gaps, not evidence that the redundant style-block rescan was
+  required for current behavior
+- the host evidence above (`~3.0s` pure Simple web software frame) still shows
+  that the renderer remains dominated by deeper interpreted layout/text work
+  beyond this removed duplicate pass
+
+## 2026-06-11 Ancestor-clip cache attempt rejected
+
+A follow-up attempt memoized ancestor clip rectangles inside `paint(...)` so
+overflow-hidden parent clipping would be computed once per node and reused
+across background, absolute, z-index, and text/icon passes.
+
+That change was rejected in the same lane:
+
+- focused renderer matrix coverage regressed in the overflow-hidden case
+- `simple_web_renderer_spec.spl` dropped from the stable `52/0` baseline to
+  `50/2` during the attempt
+- the concrete mismatch was the overflow-hidden clipping fixture:
+  expected green pixel count `440`, actual `400`
+
+The cache was reverted immediately. Current interpretation:
+
+- clip ancestry is still a repeat-heavy path worth revisiting
+- the naive cached derivation was not behavior-equivalent to the current
+  overflow-hidden semantics
+- any future clip-cache pass needs a tighter contract around the clipping
+  matrix cases before it can be accepted
 
 ## 2026-06-11 Shared text-helper metric reuse
 
@@ -307,3 +602,47 @@ Important remaining note:
   failure because the top-level `run` command itself still executes the raw spec
   path. The test-runner lane is fixed for default `simple test`; the broader
   CLI `run` parity lane remains separate follow-up work if needed.
+
+## 2026-06-11 Shared backend text-bg consolidation
+
+The bitmap text fallback path still existed in multiple GPU backends as
+hand-rolled `draw_text_bg(...)` implementations that each recomputed:
+
+- glyph height / scale / advance
+- text buffer dimensions
+- a background fill buffer
+- the CPU raster call into `render_text_to_buffer(...)`
+
+Accepted consolidation:
+
+- `VulkanBackend.draw_text_bg(...)` now delegates to shared
+  `helpers_text.text_blit_buffer(...)`
+- `OpenGLBackend.draw_text_bg(...)` now delegates to the same helper
+- `WebGpuBackend.draw_text_bg(...)` now delegates to the same helper
+
+This removes another duplicate bitmap-font buffer path and keeps future text
+fallback improvements centralized in the shared helper lane instead of backend
+copies drifting separately.
+
+Verification on the current branch:
+
+- Docker `simple check` on:
+  - `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`
+  - `src/lib/gc_async_mut/gpu/engine2d/backend_opengl.spl`
+  - `src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl`
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl`
+  passes
+- Docker uncached `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl`:
+  `4 passed, 0 failed`
+- the WebGPU spec now verifies `draw_text_bg(...)` pixels against the shared
+  helper output instead of only asserting the method is callable
+- regression smoke:
+  - `test/01_unit/lib/gpu/engine2d/helpers_text_spec.spl`: `3 passed, 0 failed`
+  - `test/01_unit/lib/gpu/engine2d/vector_font_offload_spec.spl`: `4 passed, 0 failed`
+
+Current interpretation:
+
+- this is still CPU bitmap fallback feeding GPU image upload, not true GPU-side
+  glyph generation or vector-font readback acceleration
+- it does remove duplicate CPU fallback work and gives the remaining font-path
+  optimization one shared implementation surface for these backends

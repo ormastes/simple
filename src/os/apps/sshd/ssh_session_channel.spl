@@ -5,15 +5,13 @@
 #           plus shell/PTY forwarding helpers.
 
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
+use os.apps.sshd.ssh_hex.{format_hex_width}
 use os.apps.sshd.ssh_packet.{ssh_get_u32, ssh_get_text}
 use os.apps.sshd.ssh_transport.{SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_KEXINIT}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust}
-use os.apps.sshd.ssh_pty.{SshPty}
-use os.apps.shell.shell_app.{ShellApp}
+use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _bytes_to_hex, _read_u32_stable, _read_text_field_fast, _text_equals_bytes, _build_channel_open_confirmation_stable, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable}
 use os.kernel.log.klog_api.{log_info}
-use std.format.{format_hex}
-
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn serial_println(msg: text)
 
@@ -48,7 +46,7 @@ impl SshSession:
                 return
 
             val msg_type = _u8_at(payload, 0)
-            serial_println("[sshd-session] interactive msg_type=0x{format_hex(msg_type.to_u64(), 1)} len={payload.len()} seq_c2s={self.cipher.seq_c2s}")
+            serial_println("[sshd-session] interactive msg_type=0x{format_hex_width(msg_type.to_u64(), 2)} len={payload.len()} seq_c2s={self.cipher.seq_c2s}")
 
             if msg_type == 90:
                 serial_println("[sshd-session] dispatch channel_open")
@@ -136,7 +134,7 @@ impl SshSession:
             self.send_packet(fail)
 
     me _handle_channel_data(payload: [u8]):
-        """Handle SSH_MSG_CHANNEL_DATA — forward to PTY."""
+        """Handle SSH_MSG_CHANNEL_DATA — forward to the headless remote shell."""
         val r = ssh_parse_channel_data(payload)
         if r.is_err():
             return
@@ -148,14 +146,12 @@ impl SshSession:
         # Consume local window
         self.channels.consume_local_window(recipient, data.len().to_u32())
 
-        # Forward data to PTY master_write (user input to shell)
+        # Forward data to the built-in remote shell.
         if val shell = self.shell:
             val text = rt_string_from_byte_array(data)
             if not shell.feed_remote_input(text):
                 self.state = SessionState.Closed
             self._forward_shell_output()
-        elif val pty = self.pty:
-            pty.master_write(data)
 
         # Send window adjust if local window is getting low
         val ch = self.channels.find(recipient)
@@ -207,11 +203,6 @@ impl SshSession:
             val close = _build_channel_close_stable(remote_id)
             self.send_packet(close)
             self.channels.close(recipient)
-
-        # Close PTY if this was the last channel
-        if val pty = self.pty:
-            pty.close()
-            self.pty = nil
 
         self.channels.remove_closed()
 
@@ -286,8 +277,7 @@ impl SshSession:
             if off + 8 <= payload.len():
                 val new_cols = _read_u32_stable(payload, off)
                 val new_rows = _read_u32_stable(payload, off + 4)
-                if val pty = self.pty:
-                    pty.resize(new_cols, new_rows)
+                pass_dn
             # window-change never wants reply per RFC
 
         else:
@@ -327,26 +317,16 @@ impl SshSession:
             # Skip pixel width and height
             pos = pos + 8
 
-        # Create PTY
-        val r_pty = SshPty.create(term_type, cols, rows)
-        if r_pty.is_ok():
-            val pty = r_pty.unwrap()
-            self.pty = pty
+        # Headless live SSH keeps the PTY request state without creating a hosted PTY.
+        var i: u64 = 0
+        while i < self.channels.channels.len():
+            if self.channels.channels[i].local_id == local_id:
+                self.channels.channels[i].pty_requested = true
+            i = i + 1
 
-            # Mark channel as PTY-enabled
-            var i: u64 = 0
-            while i < self.channels.channels.len():
-                if self.channels.channels[i].local_id == local_id:
-                    self.channels.channels[i].pty_requested = true
-                i = i + 1
-
-            if want_reply:
-                val success = _build_channel_success_stable(remote_id)
-                self.send_packet(success)
-        else:
-            if want_reply:
-                val fail = _build_channel_failure_stable(remote_id)
-                self.send_packet(fail)
+        if want_reply:
+            val success = _build_channel_success_stable(remote_id)
+            self.send_packet(success)
 
     me _handle_shell_request(local_id: u32, remote_id: u32, want_reply: bool):
         """Handle shell channel request — launch interactive shell."""
@@ -360,13 +340,6 @@ impl SshSession:
         if want_reply:
             val success = _build_channel_success_stable(remote_id)
             self.send_packet(success)
-
-        # If no PTY was requested, create a default one
-        if self.pty == nil:
-            val r_pty = SshPty.create("vt100", 80, 24)
-            if r_pty.is_ok():
-                val pty = r_pty.unwrap()
-                self.pty = pty
 
         self._ensure_shell_started(true)
         self._forward_shell_output()
@@ -408,7 +381,7 @@ impl SshSession:
         """Create the shared SSH shell instance once per authenticated session."""
         if self.shell != nil:
             return
-        var shell = ShellApp.new()
+        var shell = SshRemoteShell.new()
         if show_prompt:
             shell.show_prompt()
         self.shell = shell
@@ -456,9 +429,5 @@ impl SshSession:
             i = i + 1
 
     me _forward_pty_output():
-        """Check for shell output and forward it as CHANNEL_DATA."""
-        if val pty = self.pty:
-            if pty.master_has_data():
-                val output = pty.master_read(4096)
-                if output.len() > 0:
-                    self._send_shell_output(output)
+        """Headless live SSH does not source output from a PTY."""
+        pass_dn

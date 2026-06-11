@@ -1,6 +1,6 @@
 # Backend Matrix Browser Specification
 
-> 1. Err
+> <details>
 
 <!-- sdn-diagram:id=backend_matrix_browser_spec.arch -->
 <details class="sdn-source">
@@ -30,7 +30,7 @@ backend_matrix_browser_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,15 +43,12 @@ backend_matrix_browser_spec -> app
 
 #### renders through the shared web API without a document shell
 
-1. Err
+- Err
    - Expected: e equals ``
-
-2. Ok
-
-3. Err
+- Ok
+- Err
    - Expected: e equals ``
-
-4. Ok
+- Ok
    - Expected: html contains `widget-button`
    - Expected: html contains `widget-statusbar`
    - Expected: html does not contain `<html>`
@@ -61,7 +58,7 @@ backend_matrix_browser_spec -> app
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -89,6 +86,24 @@ match tree_result:
 
 </details>
 
+#### keeps canonical Engine2D backend selection visible through the browser adapter
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(BrowserBackend.create(64, 48, "cuda").unwrap().gpu_backend()).to_equal("cuda")
+expect(BrowserBackend.create(64, 48, "hip").unwrap().gpu_backend()).to_equal("rocm")
+expect(BrowserBackend.create(64, 48, "opencl").unwrap().gpu_backend()).to_equal("opencl")
+expect(BrowserBackend.create(64, 48, "vulkan").unwrap().gpu_backend()).to_equal("vulkan")
+expect(BrowserBackend.create(64, 48, "simd_cpu").unwrap().gpu_backend()).to_equal("cpu_simd")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -108,8 +123,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

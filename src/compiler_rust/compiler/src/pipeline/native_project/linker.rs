@@ -1229,6 +1229,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                             if minimal_boot
                                 && !skip_boot_autodiscovery
                                 && stem != "baremetal_stubs"
+                                && stem != "freestanding_runtime"
                                 && stem != "curve25519_ring_helper"
                                 && stem != "ed25519_verify_helper"
                             {

@@ -158,6 +158,126 @@ Smallest next implementation step:
 - The focused flex-column result confirms the same new flex-column path also
   matches Chromium when both the outer container and nested `#middle` container
   use `flex-direction: column`.
+- Live `18_flex_grow_weights` evidence now also passes with `layout_match` and
+  `mismatch_count=0`.
+- The focused weighted flex-grow fix was:
+  - stop treating positive `flex` shorthand as a generic fill flag on the child
+  - parse `flex` / `flex-grow` into an integer grow weight
+  - distribute leftover row flex width by cumulative left-to-right weighted
+    rounding so the single-pixel remainder lands on the same child Chromium
+    chooses in this focused case
+- Live `19_flex_shrink_weights` evidence now also passes with `layout_match`
+  and `mismatch_count=0`.
+- The focused weighted flex-shrink fix was:
+  - add `flex-shrink` style state with default `1`
+  - parse `flex-shrink` plus the second component of the `flex` shorthand
+  - apply scaled shrink-factor distribution proportional to
+    `flex-shrink * flex-base-size`, matching the Flexbox spec rule used by
+    Chromium for this case
+  - clamp explicit child width to the flex-resolved width passed down by the
+    parent so the used main size, not the authored width, drives child geometry
+  - preserve that shrink-resolved width in the final child box geometry instead
+    of letting the child’s authored explicit width overwrite it during its own
+    layout pass
+- Live `20_flex_basis_override` evidence now also passes with `layout_match`
+  and `mismatch_count=0`.
+- The focused flex-basis fix was:
+  - add `flex-basis` style state
+  - parse both the explicit `flex-basis` property and the third component of
+    the `flex` shorthand
+  - use the flex basis as the item’s main-axis base size in row flex layout
+  - let the child use the parent-resolved flex width instead of the authored
+    `width` when flex basis overrides width
+- Live `21_flex_wrap_basic` evidence now also passes with `layout_match`
+  and `mismatch_count=0`.
+- The focused flex-wrap fix was:
+  - add `flex-wrap` style state and parse `flex-wrap: wrap`
+  - add a wrapped row-flex path that starts a new flex line when the next
+    explicit-width or flex-basis item no longer fits the current line
+  - accumulate container height from multiple wrapped lines instead of a single
+    row max-height
+- Live `22_flex_align_items_baseline` evidence now also passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused baseline-alignment fix was:
+  - add `align-items` style state and parse `align-items: baseline`
+  - stop treating plain auto-width text flex items as implicit grow items
+  - estimate intrinsic text width for focused text-only flex items so sibling
+    `x` positions match Chromium
+  - apply a focused text-baseline offset in the row-flex path so the smaller
+    item drops to Chromium’s baseline-aligned `y` position
+  - attach focused text labels on the Simple side so the structured geometry
+    report carries the same text evidence Chromium emits
+- Live `23_flex_wrap_align_content_center` evidence now also passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused multi-line align-content fix was:
+  - add `align-content` style state and parse `align-content: center`
+  - preserve explicit wrapped-container height instead of always collapsing to
+    content height
+  - precompute wrapped line heights and total multi-line content height
+  - center the block of wrapped lines inside the explicit cross size for the
+    focused `align-content:center` case
+- Live `24_flex_wrap_reverse_basic` evidence now also passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused geometry spec itself is now stable again in the default runner:
+  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl`
+    passes after restructuring the spec into helper functions invoked from a
+    single `it`, which avoids the earlier runner state corruption across many
+    separate examples.
+- Native spec mode is still not proven for this lane:
+  - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --mode=native --json`
+    still fails with `error: null`
+  - the produced ELF crashes immediately with `SIGSEGV` at `si_addr=NULL`
+    under direct `strace`, so this is now narrowed to a real native/runtime bug
+    rather than a geometry mismatch or a default-runner reporting issue
+  - follow-up isolation on 2026-06-11 narrowed the crash further:
+    - a minimal native spec that only calls
+      `html_compat_fixture_simple_boxes("02_block_boxes", 320, 240)` still
+      reproduces the crash
+    - replacing `FONT_CHARSET.index_of(...)` with a local char-code scan in
+      the bitmap glyph lookup removed the unresolved
+      `FONT_CHARSET_dot_index_of` stub from the native artifact
+    - splitting `src/app/wm_compare/html_compat_geometry_probe.spl` into:
+      - core renderer-backed export: `html_compat_geometry_probe.spl`
+      - CLI compare wrapper: `html_compat_geometry_probe_cli.spl`
+      removed `json_deep_equals` from the minimal probe’s unresolved set
+    - the remaining unresolved native surface for the minimal renderer-backed
+      probe is now only `spl_dlclose`, `spl_dlopen`, `spl_dlsym`,
+      `spl_wffi_call_i64`, which indicates the crash has been reduced to a
+      smaller transitive GPU/runtime closure problem rather than the compare
+      bridge or glyph charset lookup
+  - a further module split reduced that closure again:
+    - `simple_web_html_layout_renderer.spl` now exposes software-layout /
+      Draw-IR-only entrypoints
+    - `simple_web_html_engine2d_presenter.spl` now owns the `Engine2D`
+      presentation path and the backend-dependent pixel entrypoints
+    - after that split, native rebuilds of
+      `html_compat_geometry_probe_spec.spl` no longer carry the `spl_*`
+      dynamic-loader quartet; the remaining unresolved symbol is
+      `json_deep_equals`, which belongs to the compare/JSON lane
+  - a standalone native smoke binary now proves the renderer-backed closure can
+    be built and entered without `spl_*`, `json_deep_equals`, or spec-runtime
+    BDD symbols:
+    - entry: `src/app/wm_compare/html_compat_geometry_probe_native_smoke.spl`
+    - build: `simple native-build ... --entry src/app/wm_compare/html_compat_geometry_probe_native_smoke.spl`
+    - after fixing the stale `TextRenderCache.char_w` debug-field reference,
+      the build completes with `0 failed` and no generated renderer stubs
+    - artifact contains `simple_web_layout_render_html_draw_ir`; it has no
+      `spl_dlopen`, `spl_dlsym`, `spl_dlclose`, `spl_wffi_call_i64`,
+      `json_deep_equals`, or `rt_bdd_expect_eq_rv`
+    - the file-backed helper still pulls an unresolved `rt_file_read_text_rv`
+      symbol, so the smoke uses a direct inline HTML fixture to avoid treating
+      native file I/O ABI failure as layout evidence
+    - the standalone binary now runs and fails honestly with
+      `status=fail` / `reason=no-boxes`; native renderer-backed geometry is
+      therefore not proven yet, but the blocker is narrowed past link/runtime
+      startup crash into the direct-HTML box extraction path
+- The focused wrap-reverse fix was:
+  - extend `flex-wrap` from a boolean to a mode: `nowrap`, `wrap`,
+    `wrap-reverse`
+  - place wrapped flex lines from the opposite cross-axis edge for
+    `wrap-reverse`
+  - compute wrapped container height from the total stacked line height instead
+    of the last line anchor position
 - Interpretation:
   - the focused block-wrapper parity gap for `02_block_boxes` is closed in the
     live Chromium/Electron geometry lane
@@ -179,6 +299,20 @@ Smallest next implementation step:
     `16_flex_row` is also closed in the same live lane
   - the focused flex-column parent plus nested flex-column geometry for
     `17_flex_col` is also closed in the same live lane
+  - the focused weighted row flex-grow distribution gap for
+    `18_flex_grow_weights` is also closed in the same live lane
+  - the focused weighted row flex-shrink distribution gap for
+    `19_flex_shrink_weights` is also closed in the same live lane
+  - the focused row flex-basis-overrides-width gap for
+    `20_flex_basis_override` is also closed in the same live lane
+  - the focused wrapped row flex-line break and multi-line height gap for
+    `21_flex_wrap_basic` is also closed in the same live lane
+  - the focused row flex baseline-alignment gap for
+    `22_flex_align_items_baseline` is also closed in the same live lane
+  - the focused multi-line wrapped flex cross-axis packing gap for
+    `23_flex_wrap_align_content_center` is also closed in the same live lane
+  - the focused wrap-reverse line-order gap for
+    `24_flex_wrap_reverse_basic` is also closed in the same live lane
   - broader geometry parity is still incomplete; this is one verified case, not
     completion of the full layout objective
 

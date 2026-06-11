@@ -14,18 +14,17 @@
 
 use os.apps.sshd.ssh_packet.{SshPacket, SshTextResult, SshStringResult, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex}
-use os.apps.sshd.ssh_kex.{HostKeySet, HostCertificateSet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob, ssh_build_ecdsa_p256_host_key_blob, host_key_set_advertised_algorithms, ecdsa_p256_public_point_from_pkcs8}
+use os.apps.sshd.ssh_kex.{ssh_kex_generate_private_key, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, ssh_sign_exchange_hash, ssh_build_ed25519_host_key_blob, ssh_build_ecdsa_p256_host_key_blob, host_key_set_advertised_algorithms, ecdsa_p256_public_point_from_pkcs8}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY}
 use os.apps.sshd.ssh_cipher.{SshCipher, SshCtrPacketResult, SshCtrDecryptResult, ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm, ssh_encrypt_packet_aes_ctr_etm, ssh_decrypt_packet_aes_ctr_etm}
 use os.apps.sshd.ssh_mac.{ssh_mac_len}
 use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, SSH_MSG_USERAUTH_PK_OK, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, ssh_build_userauth_info_request, ssh_parse_userauth_info_response}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_open_failure, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
-use os.apps.sshd.ssh_pty.{SshPty}
-use os.apps.shell.shell_app.{ShellApp}
-use os.kernel.loader.app_registry.{app_registry_cached_bytes, app_registry_fat32_alias, app_registry_root_alias}
+use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.kernel.log.klog_api.{log_info, log_raw_println}
+use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_version_text, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
-use std.format.{format_hex}
 
 # Pull in helpers and split impl blocks
 use os.apps.sshd.ssh_session_helpers.{RECV_BUF_SIZE, PlainPacketHeader, _SshTextField, _AuthRequestFast, _u8_at, _slice_range, _zeroed_32_bytes, _copy_bytes_stable, _copy_prefix_stable, _password_only_auth_failure_payload, _build_plain_packet_header, _zero_padding_bytes, _copy_range_stable, _push_u32_be_stable, _build_channel_open_confirmation_stable, _build_channel_success_stable, _build_channel_failure_stable, _build_channel_eof_stable, _build_channel_close_stable, _build_channel_exit_status_stable, _read_u32_stable, _read_text_field_fast, _parse_kexinit_fast, _is_ssh_userauth_service_request, _text_equals_bytes, _payload_text_field_equals_bytes, _payload_field_is_ssh_connection, _payload_field_is_none, _payload_field_is_password, _parse_auth_request_fast, _bytes_to_hex, _ed25519_public_key_from_seed, ssh_validate_kex_payload, ssh_validate_kex_ecdh_init_payload, ssh_validate_newkeys_payload, _build_host_key_blob_for_algo, _build_publickey_signed_data, _unwrap_ssh_signature, _extract_ed25519_pubkey}
@@ -35,22 +34,12 @@ export use os.apps.sshd.ssh_session_channel.*
 
 extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
 extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
-extern fn rt_ed25519_verify(message: [u8], pubkey: [u8], signature: [u8]) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
-extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
-extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
-extern fn rt_net_recv_ssh_plain_packet_payload(sock_fd: i64) -> [u8]
-extern fn rt_net_recv_version_text(sock_fd: i64) -> text
-extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_thread_sleep(ms: i64) -> i64
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
 extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
 extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
-extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
-extern fn rt_ssh_aes128_gcm_encrypt_packet(key: [u8], iv: [u8], seq: i64, payload: [u8]) -> [u8]
-extern fn rt_ssh_aes128_gcm_decrypt_packet(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
 extern fn rt_ssh_userauth_password_only_failure_payload() -> [u8]
 extern fn serial_println(msg: text)
 
@@ -88,8 +77,7 @@ class SshSession:
     user_db: SshUserDb
     session_id: [u8]
     authenticated_user: text
-    pty: SshPty?
-    shell: ShellApp?
+    shell: SshRemoteShell?
     recv_buf: [u8]           # Accumulated received data
     send_seq: u32
     recv_seq: u32
@@ -144,7 +132,7 @@ impl SshSession:
             rsa_sha2_512_cert: nil
         ), [])
 
-    static fn new_with_host_materials(socket_fd: i64, user_db: SshUserDb, host_keys: HostKeySet, host_certs: HostCertificateSet, host_ed25519_public: [u8]) -> SshSession:
+    pub static fn new_with_host_materials(socket_fd: i64, user_db: SshUserDb, host_keys: HostKeySet, host_certs: HostCertificateSet, host_ed25519_public: [u8]) -> SshSession:
         """Create a new SSH session with a full HostKeySet."""
         SshSession(
             socket_fd: socket_fd,
@@ -154,7 +142,6 @@ impl SshSession:
             user_db: user_db,
             session_id: [],
             authenticated_user: "",
-            pty: nil,
             shell: nil,
             recv_buf: [],
             send_seq: 0,
@@ -183,7 +170,7 @@ impl SshSession:
             active_remote_channel_id: 0
         )
 
-    me run():
+    pub me run():
         """Main session loop. Drives the SSH protocol state machine."""
         log_info("[app.sshd] " + "[sshd-session] start")
         if not self.do_version_exchange():
@@ -257,8 +244,9 @@ impl SshSession:
             if self.negotiated_cipher_s2c == "aes256-gcm@openssh.com":
                 encrypted = ssh_encrypt_packet_aes_gcm(stable_payload, self.cipher.seq_s2c, self.enc_key_s2c, self.iv_s2c)
             elif self.negotiated_cipher_s2c == "aes128-gcm@openssh.com":
-                encrypted = rt_ssh_aes128_gcm_encrypt_packet(self.enc_key_s2c, self.iv_s2c, self.cipher.seq_s2c.to_i64(), stable_payload)
-                serial_println("[sshd-session] send encrypted len={encrypted.len()} seq={self.cipher.seq_s2c} packet={_bytes_to_hex(encrypted)}")
+                serial_println("[sshd-session] aes128-gcm s2c unsupported on freestanding lane")
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher")
+                return
             elif self.negotiated_cipher_s2c == "aes256-ctr":
                 val ctr_packet = ssh_encrypt_packet_aes_ctr_etm(stable_payload, self.cipher.seq_s2c, self.enc_key_s2c, self.ctr_counter_s2c, self.negotiated_mac_s2c, self.mac_key_s2c)
                 if ctr_packet.is_err():
@@ -403,14 +391,8 @@ impl SshSession:
                     serial_println("[sshd-session] recv decrypt fail aes256-gcm seq={self.cipher.seq_c2s}")
                     return []
             else:
-                val payload = rt_ssh_aes128_gcm_decrypt_packet(self.enc_key_c2s, self.iv_c2s, self.cipher.seq_c2s.to_i64(), enc_packet)
-                if payload.len() > 0:
-                    self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
-                    self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
-                    return payload
-                else:
-                    serial_println("[sshd-session] recv decrypt fail aes128-gcm seq={self.cipher.seq_c2s} packet_len={enc_packet.len()}")
-                    return []
+                serial_println("[sshd-session] aes128-gcm c2s unsupported on freestanding lane seq={self.cipher.seq_c2s} packet_len={enc_packet.len()}")
+                return []
 
         else:
             return []
@@ -433,10 +415,8 @@ impl SshSession:
         """Receive raw bytes from the TCP socket."""
         rt_net_recv_bytes(self.socket_fd as i64, max as i64)
 
-    me close():
+    pub me close():
         """Clean up session resources."""
-        if val pty = self.pty:
-            pty.close()
         rt_net_close(self.socket_fd as i64)
         self.state = SessionState.Closed
 
@@ -446,87 +426,18 @@ impl SshSession:
 
 pub fn ssh_shell_boot_output_for_test() -> text:
     """Create a fresh SSH-backed shell and return its initial banner/prompt."""
-    var shell = ShellApp.new()
+    var shell = SshRemoteShell.new()
     shell.show_prompt()
     shell.take_remote_output()
 
 pub fn ssh_shell_roundtrip_output_for_test(input: text) -> text:
     """Run transport text through a fresh shell and return the emitted output."""
-    var shell = ShellApp.new()
+    var shell = SshRemoteShell.new()
     shell.show_prompt()
     var output = shell.take_remote_output()
     val _running = shell.feed_remote_input(input)
     output = "{output}{shell.take_remote_output()}"
     output
-
-fn _ssh_shell_command_token(command_line: text) -> text:
-    val trimmed = command_line.trim()
-    if trimmed == "":
-        return ""
-    val parts = trimmed.split(" ")
-    if parts.len() == 0:
-        return ""
-    parts[0]
-
-fn _ssh_shell_candidate_launchable(path: text) -> bool:
-    app_registry_cached_bytes(path).len() > 4
-
-fn _ssh_shell_resolve_launch_path(command: text) -> text:
-    if command.starts_with("/"):
-        if _ssh_shell_candidate_launchable(command):
-            return command
-        return ""
-    val usr_bin = "/usr/bin/{command}"
-    if _ssh_shell_candidate_launchable(usr_bin):
-        return usr_bin
-    val sys_apps = "/sys/apps/{command}"
-    if _ssh_shell_candidate_launchable(sys_apps):
-        return sys_apps
-    val bin_path = "/bin/{command}"
-    if _ssh_shell_candidate_launchable(bin_path):
-        return bin_path
-    ""
-
-pub fn ssh_shell_launch_report_for_test(command_line: text) -> SshShellLaunchReport:
-    """Resolve an SSH shell/exec command through the shell filesystem launch path."""
-    val command = _ssh_shell_command_token(command_line)
-    if command == "":
-        return SshShellLaunchReport(
-            command_line: command_line,
-            command: "",
-            resolved_path: "",
-            fat32_alias: "",
-            root_alias: "",
-            launchable: false,
-            smf_backed: false,
-            shell_exec_path: false
-        )
-    val path = _ssh_shell_resolve_launch_path(command)
-    if path == "":
-        return SshShellLaunchReport(
-            command_line: command_line,
-            command: command,
-            resolved_path: "",
-            fat32_alias: "",
-            root_alias: "",
-            launchable: false,
-            smf_backed: false,
-            shell_exec_path: true
-        )
-    val fat32 = app_registry_fat32_alias(path)
-    val root = app_registry_root_alias(path)
-    val fat32_text = if fat32 == nil: "" else: fat32.unwrap()
-    val root_text = if root == nil: "" else: root.unwrap()
-    SshShellLaunchReport(
-        command_line: command_line,
-        command: command,
-        resolved_path: path,
-        fat32_alias: fat32_text,
-        root_alias: root_text,
-        launchable: true,
-        smf_backed: fat32_text.ends_with(".SMF"),
-        shell_exec_path: true
-    )
 
 pub fn ssh_validate_kex_payload_for_test(expected_type: u32, payload: [u8], strict_kex: bool) -> Result<(), text>:
     ssh_validate_kex_payload(expected_type, payload, strict_kex)

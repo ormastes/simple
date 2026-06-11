@@ -1354,6 +1354,15 @@ pub extern "C" fn rt_tuple_new(len: u64) -> RuntimeValue {
 /// Get an element from a tuple
 #[no_mangle]
 pub extern "C" fn rt_tuple_get(tuple: RuntimeValue, index: u64) -> RuntimeValue {
+    // Lenient typing lets array literals flow into tuple-typed slots
+    // (e.g. `return [a, b, c]` from a function declared `-> (A, B, C)`),
+    // so statically-tuple-typed indexing must tolerate a runtime Array.
+    // Without this fallback it returned NIL and callers dereferenced nil
+    // (stage4 `desugar_module` SIGSEGV destructuring
+    // `desugar_async_function(func)`).
+    if tuple.heap_type() == Some(HeapObjectType::Array) {
+        return rt_array_get(tuple, index as i64);
+    }
     let tup = as_typed_ptr!(tuple, HeapObjectType::Tuple, RuntimeTuple, RuntimeValue::NIL);
     unsafe {
         if index >= (*tup).len {
@@ -2190,6 +2199,18 @@ pub extern "C" fn rt_to_string(value: RuntimeValue) -> RuntimeValue {
 // ============================================================================
 // Generic collection operations
 // ============================================================================
+
+/// Normalize a for-loop iterable for index-based iteration.
+/// Dicts become an array of (key, value) tuples (matching interpreter
+/// dict-iteration semantics); every other value passes through unchanged.
+/// Compiled `for item in <expr>` loops call this before taking the length.
+#[no_mangle]
+pub extern "C" fn rt_for_iterable(collection: RuntimeValue) -> RuntimeValue {
+    match collection.heap_type() {
+        Some(HeapObjectType::Dict) => super::dict::rt_dict_entries(collection),
+        _ => collection,
+    }
+}
 
 /// Index into a collection (array, tuple, string, dict)
 /// Returns NIL if out of bounds or wrong type

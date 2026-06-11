@@ -865,14 +865,14 @@ fn validate_concurrency_api_node(
     errors: &mut Vec<CheckError>,
 ) {
     match item {
-        Node::Function(function) => validate_concurrency_api_block(file_path, &function.body, imported, errors),
+        Node::Function(function) => validate_concurrency_api_block(file_path, &function.body, ctx, errors),
         Node::Let(stmt) => {
             if let Some(value) = &stmt.value {
                 validate_concurrency_api_expr(file_path, value, ctx, errors);
             }
         }
-        Node::Const(stmt) => validate_concurrency_api_expr(file_path, &stmt.value, imported, errors),
-        Node::Static(stmt) => validate_concurrency_api_expr(file_path, &stmt.value, imported, errors),
+        Node::Const(stmt) => validate_concurrency_api_expr(file_path, &stmt.value, ctx, errors),
+        Node::Static(stmt) => validate_concurrency_api_expr(file_path, &stmt.value, ctx, errors),
         Node::Assignment(stmt) => {
             validate_concurrency_api_expr(file_path, &stmt.target, ctx, errors);
             validate_concurrency_api_expr(file_path, &stmt.value, ctx, errors);
@@ -882,7 +882,7 @@ fn validate_concurrency_api_node(
                 validate_concurrency_api_expr(file_path, value, ctx, errors);
             }
         }
-        Node::Expression(expr) => validate_concurrency_api_expr(file_path, expr, imported, errors),
+        Node::Expression(expr) => validate_concurrency_api_expr(file_path, expr, ctx, errors),
         Node::If(stmt) => {
             validate_concurrency_api_expr(file_path, &stmt.condition, ctx, errors);
             validate_concurrency_api_block(file_path, &stmt.then_block, ctx, errors);
@@ -902,7 +902,7 @@ fn validate_concurrency_api_node(
             validate_concurrency_api_expr(file_path, &stmt.condition, ctx, errors);
             validate_concurrency_api_block(file_path, &stmt.body, ctx, errors);
         }
-        Node::Loop(stmt) => validate_concurrency_api_block(file_path, &stmt.body, imported, errors),
+        Node::Loop(stmt) => validate_concurrency_api_block(file_path, &stmt.body, ctx, errors),
         Node::Skip(stmt) => {
             if let simple_parser::ast::SkipBody::Block(block) = &stmt.body {
                 validate_concurrency_api_block(file_path, block, ctx, errors);
@@ -964,7 +964,7 @@ fn validate_concurrency_api_expr(
         | Expr::ExistsCheck(operand)
         | Expr::UnwrapOrReturn(operand)
         | Expr::CastOrReturn { expr: operand, .. }
-        | Expr::ContractOld(operand) => validate_concurrency_api_expr(file_path, operand, imported, errors),
+        | Expr::ContractOld(operand) => validate_concurrency_api_expr(file_path, operand, ctx, errors),
         Expr::If {
             condition,
             then_branch,
