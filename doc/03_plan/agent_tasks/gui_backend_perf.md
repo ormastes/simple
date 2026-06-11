@@ -176,6 +176,10 @@ Updated: 2026-06-11
 - this commit -- visual-tag scan allocation removal:
   `_find_next_visual_tag` and direct-child close checks now use a bounded
   multi-character scanner instead of allocating HTML tails before `index_of`.
+- this commit -- CSS selector scan allocation removal:
+  `_last_rule_hex_color` and style-block selector detection now find selectors
+  and `</style>` directly in the original HTML buffer instead of allocating
+  search tails for every rule scan.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
