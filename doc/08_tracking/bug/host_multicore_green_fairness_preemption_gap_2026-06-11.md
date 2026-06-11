@@ -110,6 +110,10 @@ Related active host-side blocker:
 - `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
   now records the lower param-array path as closed, so it is no longer the
   active blocker underneath the worker-pool stepper path.
+- `doc/08_tracking/bug/multicore_green_worker_callback_registry_native_blocker_2026-06-11.md`
+  now records the former worker callback-registry blocker as closed. The newer
+  lower blocker is the helper handle-array return path in
+  `doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records the newer evidence split: the checked-in `bin/release/simple` binary
   is stale for this lane, while current-source rebuilt `release` and `debug`

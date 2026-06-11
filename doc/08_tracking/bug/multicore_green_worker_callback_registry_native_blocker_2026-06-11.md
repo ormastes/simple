@@ -1,13 +1,13 @@
 # Multicore Green Worker Callback Registry Native Blocker
 
 Date: 2026-06-11
-Status: open
+Status: closed
 Owner: multicore-green lane
 
 ## Summary
 
-The current hosted-native blocker beneath the resumable-stepper lane is smaller
-than the full queue/requeue design.
+This was the hosted-native blocker beneath the resumable-stepper lane before
+the array-concat lowering fix landed in current source.
 
 A `multicore_green` worker that only:
 
@@ -16,7 +16,7 @@ A `multicore_green` worker that only:
 - invokes the returned callback
 - joins and returns the completed value
 
-still crashes on current-source native.
+used to crash on current-source native.
 
 Current minimal probe:
 
@@ -39,7 +39,7 @@ fn main() -> i64:
     0
 ```
 
-Observed native output:
+Historical native output:
 
 ```text
 before
@@ -48,16 +48,15 @@ EXIT=139
 
 ## Why This Matters
 
-This proves the remaining hosted-native fairness lane does not need channel
-traffic or resumable queue re-enqueue to reproduce the crash. The lower bad
-edge is already present when a pool worker crosses:
+This proved the hosted-native fairness lane did not need channel traffic or
+resumable queue re-enqueue to reproduce the crash. The lower bad edge was:
 
 - callback-id registry lookup
 - function-valued callback retrieval
 - callback invocation inside the worker closure
 
-That makes this a better lower blocker than the older full resumable-stepper
-note when investigating the current Rust seed/runtime boundary.
+That made this a better lower blocker than the older full resumable-stepper
+note while this bug was still active.
 
 ## Relationship To Other Blockers
 
@@ -65,9 +64,11 @@ note when investigating the current Rust seed/runtime boundary.
 - `doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md`
 - `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
 
-The lower function-valued param-array blocker is now closed. The larger
-resumable-stepper native blocker remains open above this smaller callback
-registry worker boundary.
+The callback-registry worker boundary is now closed. The larger
+resumable-stepper native blocker remains open above a different lower
+boundary:
+
+- `doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`
 
 ## Executable Evidence
 

@@ -1,6 +1,6 @@
-# Multicore Green Worker Callback Registry Native Blocker
+# Multicore Green Worker Callback Registry Native Regression
 
-> This SSpec pins a smaller hosted-native blocker beneath the resumable-stepper lane. A `multicore_green` worker that only looks up a callback id in a global registry and invokes that callback still crashes on current-source native.
+> This SSpec keeps the now-closed worker callback-registry boundary executable. A `multicore_green` worker that only looks up a callback id in a global registry and invokes that callback must stay green on current-source native.
 
 <!-- sdn-diagram:id=multicore_green_worker_callback_registry_native_blocker_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ multicore_green_worker_callback_registry_native_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Multicore Green Worker Callback Registry Native Blocker
+# Multicore Green Worker Callback Registry Native Regression
 
-This SSpec pins a smaller hosted-native blocker beneath the resumable-stepper lane. A `multicore_green` worker that only looks up a callback id in a global registry and invokes that callback still crashes on current-source native.
+This SSpec keeps the now-closed worker callback-registry boundary executable. A `multicore_green` worker that only looks up a callback id in a global registry and invokes that callback must stay green on current-source native.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins a smaller hosted-native blocker beneath the resumable-stepper la
 |-------|-------|
 | Feature IDs | #multicore-green-worker-callback-registry-native-blocker |
 | Category | Runtime / Native / Concurrency |
-| Status | Blocked |
+| Status | Regression |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,9 +53,9 @@ This SSpec pins a smaller hosted-native blocker beneath the resumable-stepper la
 
 ## Overview
 
-This SSpec pins a smaller hosted-native blocker beneath the resumable-stepper
-lane. A `multicore_green` worker that only looks up a callback id in a global
-registry and invokes that callback still crashes on current-source native.
+This SSpec keeps the now-closed worker callback-registry boundary executable.
+A `multicore_green` worker that only looks up a callback id in a global
+registry and invokes that callback must stay green on current-source native.
 
 ## Requirements
 
@@ -81,9 +81,9 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ## Scenarios
 
-### multicore green worker callback registry native blocker
+### multicore green worker callback registry native regression
 
-#### keeps the smaller hosted native crash boundary explicit
+#### keeps the smaller hosted native callback worker path green
 
 - Write the worker callback registry probe source
    - Expected: write_code equals `0`
@@ -91,16 +91,16 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
    - Expected: check_code equals `0`
 - Hosted native compile succeeds before the runtime crash boundary
    - Expected: compile_code equals `0`
-- The native probe still crashes before completing the worker callback
+- The native probe now completes the worker callback
    - Expected: native_code equals `0`
-- The tracker records the same smaller blocker
+- The tracker records the boundary as closed
    - Expected: blocker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -118,18 +118,19 @@ val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH +
 expect(compile_code).to_equal(0)
 expect(compile_out).to_contain("Compiled")
 
-step("The native probe still crashes before completing the worker callback")
+step("The native probe now completes the worker callback")
 val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/mcg_worker_callback_registry.out 2>&1; code=$?; cat /tmp/mcg_worker_callback_registry.out; echo EXIT=$code'")
 expect(native_code).to_equal(0)
 expect(native_out).to_contain("before")
-expect(native_out).to_contain("EXIT=139")
+expect(native_out).to_contain("after=7")
+expect(native_out).to_contain("EXIT=0")
 
-step("The tracker records the same smaller blocker")
+step("The tracker records the boundary as closed")
 val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/multicore_green_worker_callback_registry_native_blocker_2026-06-11.md")
 expect(blocker_code).to_equal(0)
-expect(blocker).to_contain("Status: open")
+expect(blocker).to_contain("Status: closed")
 expect(blocker).to_contain("global registry")
-expect(blocker).to_contain("EXIT=139")
+expect(blocker).to_contain("Historical native output")
 ```
 
 </details>

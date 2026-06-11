@@ -47,6 +47,29 @@ fn test_lower_binary_op() {
 }
 
 #[test]
+fn test_lower_array_add_to_runtime_concat() {
+    let mir = compile_to_mir(
+        "fn append(callbacks: [fn() -> i64], cb: fn() -> i64) -> [fn() -> i64]:\n    return callbacks + [cb]\n",
+    )
+    .unwrap();
+
+    let func = &mir.functions[0];
+    let entry = func.block(BlockId(0)).unwrap();
+
+    assert!(entry.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::Call {
+            target,
+            ..
+        } if target.name() == "rt_array_concat"
+    )));
+    assert!(!entry
+        .instructions
+        .iter()
+        .any(|i| matches!(i, MirInst::BinOp { op: BinOp::Add, .. })));
+}
+
+#[test]
 fn test_lower_bitfield_field_read_write() {
     let mir = compile_to_mir(
         r#"

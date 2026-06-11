@@ -1,7 +1,7 @@
 //! Operator expression lowering: Binary, Unary, Cast.
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{BinOp, HirExpr, TypeId, UnaryOp};
+use crate::hir::{BinOp, HirExpr, HirType, TypeId, UnaryOp};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
@@ -96,6 +96,15 @@ impl<'a> MirLowerer<'a> {
             // ANY-typed operands (untyped fn params) do not reach here for Add —
             // they are handled above. Sub/Mul always emit BinOp.
             let is_string_add = op == BinOp::Add && (left.ty == TypeId::STRING || right.ty == TypeId::STRING);
+            let is_array_add = op == BinOp::Add
+                && self
+                    .type_registry
+                    .and_then(|tr| tr.get(left.ty))
+                    .is_some_and(|ty| matches!(ty, HirType::Array { .. }))
+                && self
+                    .type_registry
+                    .and_then(|tr| tr.get(right.ty))
+                    .is_some_and(|ty| matches!(ty, HirType::Array { .. }));
             if is_string_add {
                 // Convert non-string side to string via rt_to_string if needed
                 let left_str = if left.ty != TypeId::STRING && left.ty != TypeId::ANY {
@@ -133,6 +142,17 @@ impl<'a> MirLowerer<'a> {
                         dest: Some(dest),
                         target: crate::mir::CallTarget::from_name("rt_string_concat"),
                         args: vec![left_str, right_str],
+                    });
+                    dest
+                })
+            } else if is_array_add {
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::CallTarget::from_name("rt_array_concat"),
+                        args: vec![left_reg, right_reg],
                     });
                     dest
                 })
