@@ -48,6 +48,17 @@ Current hosted fairness/yield boundary now also includes:
   because raw OS-thread yield does not hand queued multicore-green work to the
   same worker
 
+Current hosted runtime mechanism behind that gap is now explicit:
+
+- `src/runtime/runtime_pool.c` runs each accepted task through
+  `rt_pool_worker_main -> task->entry(task->closure_ptr)` and does not return
+  to `rt_pool_pop_task(...)` until that closure returns
+- so the hosted pool has work stealing and bounded worker ownership, but not
+  resumable task slices on the host lane
+- this means host fairness cannot come from plain OS-thread yield alone; it
+  needs compiler-inserted safepoints, runtime-managed preemption, or a model
+  that breaks long work into requeueable slices
+
 Current hosted fairness/preemption gap coverage now includes:
 
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`

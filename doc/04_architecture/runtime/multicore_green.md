@@ -126,6 +126,10 @@ Hosted runtime-pool path:
 - Profile rows print `queue_model=work_stealing` only when the hosted runtime
   pool reports per-worker queues with stealing. The model is still guarded by
   positive runtime-pool handles so reports do not overclaim inline fallback.
+- Current hosted fairness boundary is stricter than plain OS-thread yield:
+  `rt_pool_worker_main` pops one task and runs `task->entry(task->closure_ptr)`
+  to completion before it returns to queue selection, so a tight CPU loop does
+  not become requeueable just because it calls `thread_yield()`.
 
 Cooperative path:
 
@@ -228,9 +232,9 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 
 Future roadmap work remains explicit: expanding blocking coverage beyond the
 current green-channel wake pass, and wiring final IDT/APIC-owned queue state
-plus actual compiler insertion/poll-placement before claiming tight-loop
-fairness comparable to Go. The final AP ring/user handoff proof itself is now
-closed by the opt-in live gate.
+plus actual compiler insertion/poll-placement or another resumable task-slice
+mechanism before claiming tight-loop fairness comparable to Go. The final AP
+ring/user handoff proof itself is now closed by the opt-in live gate.
 
 ## Known Gaps
 

@@ -71,6 +71,13 @@ blocking-compensation path now has executable regression coverage, but it is
 still short of Go's full scheduler model because final preemption/fairness
 claims are not complete across every path.
 
+The current host-side reason is concrete: the runtime pool pops one closure and
+runs it to return before that worker looks at queued work again. That means raw
+`thread_yield()` inside a multicore-green task is still only an OS-thread hint,
+not a Go-like task preemption point. The remaining host gap is therefore
+compiler/runtime safepoints or another resumable task-slice mechanism, not a
+missing plain thread-yield primitive.
+
 ## SimpleOS State
 
 SimpleOS now has scheduler-facing green-carrier coverage for the same lane:

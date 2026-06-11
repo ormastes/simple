@@ -180,4 +180,7 @@ Repository guards:
   opt-in live gate tracked in
   `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
 - Preemption strategy: compiler-inserted yields, runtime safepoints, or an
-  explicit cooperative-only guarantee until later.
+  explicit resumable task-slice model. Current hosted runtime-pool workers run
+  each popped closure to return before selecting another queued task, so raw
+  `thread_yield()` inside that closure is not enough to provide Go-like
+  fairness on the host lane.

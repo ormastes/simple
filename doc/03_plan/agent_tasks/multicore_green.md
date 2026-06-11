@@ -208,6 +208,10 @@ Deliverables:
   `multicore_green_spawn` task is still insufficient, so the remaining host
   gap is automatic preemption, compiler-inserted yield points, or a deeper
   task-splitting model rather than a missing OS-thread yield primitive;
+- updated architecture/design/research text that names the exact hosted
+  mechanism: runtime-pool workers execute one popped closure to return before
+  selecting another queued task, so fairness work must target resumable task
+  slices or safepoints rather than only thread primitives;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:
