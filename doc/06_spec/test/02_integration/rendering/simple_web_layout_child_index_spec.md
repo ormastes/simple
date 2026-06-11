@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -124,6 +124,24 @@ val html = "<html><head><style>" +
     "</style></head><body><div id=\"plain\">row</div></body></html>"
 val height = simple_web_layout_debug_style_by_id(html, "plain", "height")
 expect(height).to_equal("9")
+```
+
+</details>
+
+#### keeps spaced duplicate class tokens stable with parse-time trim
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>" +
+    ".target.marker{height:19px}.missing{height:23px}" +
+    "</style></head><body><div id=\"target\" class=\" target  marker target \">row</div></body></html>"
+val height = simple_web_layout_debug_style_by_id(html, "target", "height")
+expect(height).to_equal("19")
 ```
 
 </details>
@@ -319,8 +337,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

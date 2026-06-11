@@ -762,3 +762,14 @@ dev-done
   spec 4 remaining static opportunities; the renderer count rises because the
   one-time preprocessing loop is explicit, while runtime matching avoids
   repeated trim work.
+- impl: Moved class-token trimming into HTML parse. `parse_html(...)` now stores
+  trimmed `class_words`, and style candidate lookup plus duplicate-class
+  suppression reuse those tokens instead of trimming class words during every
+  style pass.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` now passes 13/13, including a spaced
+  duplicate class-token selector oracle. Generated manual refreshed under
+  `doc/06_spec`. Docker optimizer scans completed: renderer 754 and focused
+  spec 4 remaining static opportunities; the renderer count rises because the
+  one-time parse loop is explicit, while style matching avoids repeated class
+  token trim work.

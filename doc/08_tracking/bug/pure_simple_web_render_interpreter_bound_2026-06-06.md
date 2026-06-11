@@ -1171,3 +1171,27 @@ Verification:
   opportunities. The renderer static count rises because the one-time
   preprocessing loop is now explicit; runtime selector matching avoids repeated
   trimming of the same selector parts.
+
+## 2026-06-11 Class token pretrim
+
+HTML parsing already split `class` attributes into `class_words`, but style
+candidate lookup still trimmed each class token and trimmed previous tokens
+again while suppressing duplicate class buckets for every style pass.
+
+`parse_html(...)` now stores trimmed `class_words` once. Style candidate lookup
+and duplicate-class suppression reuse those parsed tokens directly, preserving
+spaced duplicate class behavior while avoiding repeated class-token trim work
+during selector matching.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `13 passed, 0 failed`
+- `bin/simple spipe-docgen test/02_integration/rendering/simple_web_layout_child_index_spec.spl --output doc/06_spec`
+  regenerated the mirrored manual.
+- Docker optimizer scans: renderer `754` and focused spec `4` remaining static
+  opportunities. The renderer static count rises because the one-time
+  parse-time normalization loop is explicit; style matching avoids repeated
+  trimming of the same class tokens.
