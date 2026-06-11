@@ -27,7 +27,7 @@ opencl_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,7 +41,7 @@ opencl_session_contract_spec -> std
 #### reports OpenCL kind and unavailable without an injected ICD FFI
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -59,9 +59,9 @@ expect(session.is_valid()).to_equal(false)
 #### fails closed when initializing or launching without OpenCL FFI
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -91,21 +91,21 @@ expect(session.fill_kernel(64, 64, 4096)).to_equal(1)
 expect(session.copy_kernel(64, 64, 4096)).to_equal(1)
 expect(session.alpha_blend_kernel(64, 64, 4096)).to_equal(1)
 expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
+expect(session.bitmap_glyph_raster_kernel(64, 64, 4096)).to_equal(1)
 ```
 
 </details>
 
 #### shutdown is safe on an uninitialized session
 
-1. var session = OpenClSession create
-
-2. session shutdown
+- var session = OpenClSession create
+- session shutdown
    - Expected: session.is_valid() is false
    - Expected: session.ref_count equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -122,16 +122,14 @@ expect(session.ref_count).to_equal(0)
 
 #### retains and releases shared OpenCL sessions like CUDA sessions
 
-1. var session = OpenClSession create
+- var session = OpenClSession create
    - Expected: retained.ref_count equals `2`
    - Expected: session.is_valid() is true
-
-2. session release
+- session release
    - Expected: session.ref_count equals `1`
    - Expected: session.context equals `2`
    - Expected: session.queue equals `3`
-
-3. session release
+- session release
    - Expected: session.ref_count equals `0`
    - Expected: session.is_valid() is false
    - Expected: session.platform equals `0`
@@ -142,7 +140,7 @@ expect(session.ref_count).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -181,7 +179,7 @@ expect(session.kernel_cache).to_equal(0)
 
 #### fails closed for OpenCL session buffer and kernel argument operations without valid handles
 
-1. var session = OpenClSession create with ffi
+- var session = OpenClSession create with ffi
    - Expected: session.alloc(16) equals `0`
    - Expected: session.write_buffer(1, 1, 16) is false
    - Expected: session.read_buffer(1, 1, 16) is false
@@ -221,7 +219,7 @@ expect(session.kernel_cache).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -274,24 +272,19 @@ expect(session.generation).to_equal(generation_before)
 
 #### validates generated fill packed args before submitting OpenCL work
 
-1. var session = OpenClSession create with ffi
-
-2. rt ptr write i64
-
-3. rt ptr write i64
-
-4. rt ptr write i64
-
-5. rt ptr write i64
+- var session = OpenClSession create with ffi
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
    - Expected: session.fill_kernel(8, 4, args) equals `1`
    - Expected: missing_args.success is false
    - Expected: missing_args.reason equals `missing-generated-2d-args-pointer`
-
-6. rt free
+- rt free
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -316,9 +309,58 @@ rt_free(args, 32)
 
 </details>
 
+#### routes generated bitmap glyph raster through typed OpenCL packed args
+
+- var session = OpenClSession create with ffi
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+- rt ptr write i64
+   - Expected: provenance.operation equals `GENERATED_2D_BITMAP_GLYPH_RASTER`
+   - Expected: provenance.launch_api equals `clEnqueueNDRangeKernel`
+   - Expected: provenance.entry_name equals `simple_2d_bitmap_glyph_raster_u32`
+   - Expected: session.bitmap_glyph_raster_kernel(9, 4, args) equals `1`
+- rt free
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = OpenClSession.create_with_ffi(OpenClFfi.create_static())
+session.queue = 1
+session.program = 2
+val args = rt_alloc(56)
+rt_ptr_write_i64(args, 0, 1111)
+rt_ptr_write_i64(args, 8, 2222)
+rt_ptr_write_i64(args, 16, 8)
+rt_ptr_write_i64(args, 24, 4)
+rt_ptr_write_i64(args, 32, 2)
+rt_ptr_write_i64(args, 40, 12)
+rt_ptr_write_i64(args, 48, 0xffaabbcc as i64)
+
+val provenance = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, args)
+
+expect(provenance.operation).to_equal(GENERATED_2D_BITMAP_GLYPH_RASTER)
+expect(provenance.launch_api).to_equal("clEnqueueNDRangeKernel")
+expect(provenance.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+expect(provenance.diagnostic_text()).to_contain("op=bitmap_glyph_raster")
+expect(session.bitmap_glyph_raster_kernel(9, 4, args)).to_equal(1)
+
+rt_free(args, 56)
+```
+
+</details>
+
 #### reports shared generated 2D runtime provenance as typed OpenCL unavailable states
 
-1. var session = OpenClSession create
+- var session = OpenClSession create
    - Expected: missing_runtime.ready is false
    - Expected: missing_runtime.typed_status equals `opencl-runtime-or-queue-unavailable`
    - Expected: missing_program.typed_status equals `opencl-runtime-or-queue-unavailable`
@@ -326,7 +368,7 @@ rt_free(args, 32)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -350,9 +392,8 @@ expect(missing_runtime.diagnostic_text()).to_contain("artifact=simple_2d_optimiz
 
 #### cleans up through injected OpenCL FFI release hooks
 
-1. var session = OpenClSession create with ffi
-
-2. session release
+- var session = OpenClSession create with ffi
+- session release
    - Expected: session.ref_count equals `0`
    - Expected: session.is_valid() is false
    - Expected: session.context equals `0`
@@ -362,7 +403,7 @@ expect(missing_runtime.diagnostic_text()).to_contain("artifact=simple_2d_optimiz
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -408,8 +449,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

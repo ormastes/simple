@@ -43,7 +43,7 @@ generated_kernel_dispatch_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -58,6 +58,7 @@ expect(dispatch.kernel_entry(GENERATED_2D_FILL)).to_equal("simple_2d_fill_u32")
 expect(dispatch.artifact_suffix(GENERATED_2D_FILL)).to_equal("simple_2d_fill_u32.ptx")
 expect(dispatch.kernel_entry(GENERATED_2D_BITMAP_GLYPH_RASTER)).to_equal("simple_2d_bitmap_glyph_raster_u32")
 expect(dispatch.artifact_suffix(GENERATED_2D_BITMAP_GLYPH_RASTER)).to_equal("simple_2d_bitmap_glyph_raster_u32.ptx")
+expect(dispatch.required_entries()).to_contain("simple_2d_bitmap_glyph_raster_u32")
 expect(dispatch.module_artifact_name()).to_equal("simple_2d_optimization.ptx")
 ```
 
@@ -68,7 +69,7 @@ expect(dispatch.module_artifact_name()).to_equal("simple_2d_optimization.ptx")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -82,6 +83,7 @@ expect(dispatch.binary_format).to_equal("hsaco")
 expect(dispatch.kernel_entry(GENERATED_2D_ALPHA)).to_equal("simple_2d_alpha_u32")
 expect(dispatch.artifact_suffix(GENERATED_2D_ALPHA)).to_equal("simple_2d_alpha_u32.hsaco")
 expect(dispatch.required_entries()).to_contain("simple_2d_scroll_u32")
+expect(dispatch.required_entries()).to_contain("simple_2d_bitmap_glyph_raster_u32")
 ```
 
 </details>
@@ -156,7 +158,7 @@ expect(provider.active).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -166,6 +168,7 @@ expect(plan.dispatch_ready).to_equal(true)
 expect(plan.entry_name).to_equal("simple_2d_fill_u32")
 expect(plan.artifact_name).to_equal("simple_2d_optimization.ptx")
 expect(plan.required_entries).to_contain("simple_2d_copy_u32")
+expect(plan.required_entries).to_contain("simple_2d_bitmap_glyph_raster_u32")
 expect(plan.launch_api).to_equal("rt_cuda_launch_kernel")
 expect(plan.grid_x).to_equal(1200)
 expect(plan.block_x).to_equal(256)

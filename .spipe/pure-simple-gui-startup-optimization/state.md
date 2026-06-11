@@ -586,3 +586,18 @@ dev-done
   compute spec 43, generated 2D contract spec 0, HIP contract spec 0, OpenCL
   contract spec 90, OpenCL facade spec 29, and ROCm session contract spec 2
   remaining static opportunities.
+- impl: Added OpenCL generated bitmap glyph raster launch binding.
+  `OpenClSession.launch_generated_2d(...)` now routes
+  `bitmap_glyph_raster` through a typed packed-args binder that reads
+  glyph-bits, destination, width, height, glyph count, font size, and color,
+  validates dimensions, binds all seven OpenCL kernel args, and submits through
+  the generated launch plan. `generated_kernel_dispatch.spl` also lists
+  `simple_2d_bitmap_glyph_raster_u32` in module-wide required entries.
+- verify: Focused generated-dispatch and OpenCL session checks pass. Specs
+  pass: generated-kernel dispatch 23/23 and OpenCL session contract 9/9.
+  Generated manuals were refreshed under `doc/06_spec`. This proves OpenCL
+  argument binding and fail-closed validation, not readback-verified GPU glyph
+  pixels.
+- verify: Optimizer scans completed for this slice. Counts: generated kernel
+  dispatch 105, OpenCL session 152, generated dispatch spec 0, and OpenCL
+  session contract spec 0 remaining static opportunities.

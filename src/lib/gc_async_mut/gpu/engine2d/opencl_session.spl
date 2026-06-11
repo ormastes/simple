@@ -4,7 +4,7 @@
 
 use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
 use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{
-    GENERATED_2D_ALPHA, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_SCROLL,
+    GENERATED_2D_ALPHA, GENERATED_2D_BITMAP_GLYPH_RASTER, GENERATED_2D_COPY, GENERATED_2D_FILL, GENERATED_2D_SCROLL,
     Generated2DSessionRuntimeProvenance,
     generated_2d_launch_plan,
     generated_2d_session_launch_gate,
@@ -189,6 +189,8 @@ class OpenClSession:
             return 1
         if op == GENERATED_2D_FILL:
             return self._launch_generated_fill_u32(gate.plan.entry_name, args_ptr, width, height, gate.plan.grid_x, gate.plan.grid_y, gate.plan.block_x, gate.plan.block_y)
+        if op == GENERATED_2D_BITMAP_GLYPH_RASTER:
+            return self._launch_generated_bitmap_glyph_raster_u32(gate.plan.entry_name, args_ptr, width, height, gate.plan.grid_x, gate.plan.grid_y, gate.plan.block_x, gate.plan.block_y)
         self.launch_kernel(gate.plan.entry_name, gate.plan.grid_x, gate.plan.grid_y, gate.plan.block_x, gate.plan.block_y)
 
     me launch_generated_2d_evidence(op: text, width: i64, height: i64, args_ptr: i64) -> OpenClSessionEvidence:
@@ -264,6 +266,41 @@ class OpenClSession:
         else:
             1
 
+    me _launch_generated_bitmap_glyph_raster_u32(entry_name: text, args_ptr: i64, width: i64, height: i64, grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> i64:
+        if self.ffi == nil or self.queue == 0 or self.program == 0 or args_ptr == 0 or width <= 0 or height <= 0:
+            return 1
+        val glyph_bits = rt_ptr_read_i64(args_ptr, 0)
+        val dst = rt_ptr_read_i64(args_ptr, 8)
+        val arg_width = rt_ptr_read_i64(args_ptr, 16)
+        val arg_height = rt_ptr_read_i64(args_ptr, 24)
+        val glyph_count = rt_ptr_read_i64(args_ptr, 32)
+        val font_size = rt_ptr_read_i64(args_ptr, 40)
+        val color = rt_ptr_read_i64(args_ptr, 48)
+        if glyph_bits == 0 or dst == 0 or arg_width != width or arg_height != height or glyph_count <= 0 or font_size <= 0:
+            return 1
+        val kernel = self.ffi.create_kernel(self.program, entry_name)
+        if kernel == 0:
+            return 1
+        self._cache_kernel(kernel)
+        if not self.set_kernel_arg_buffer(kernel, 0, glyph_bits):
+            return 1
+        if not self.set_kernel_arg_buffer(kernel, 1, dst):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 2, width):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 3, height):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 4, glyph_count):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 5, font_size):
+            return 1
+        if not self.set_kernel_arg_i64(kernel, 6, color):
+            return 1
+        if self.ffi.enqueue_ndrange(self.queue, kernel, grid_x, grid_y, 1, block_x, block_y, 1):
+            0
+        else:
+            1
+
     me launch_rect_filled_u32(dst: i64, surface_width: i64, surface_height: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> i64:
         self._launch_rect_u32("simple_2d_rect_filled_u32", dst, surface_width, surface_height, x, y, w, h, color)
 
@@ -304,6 +341,9 @@ class OpenClSession:
 
     me scroll_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
         self.launch_generated_2d(GENERATED_2D_SCROLL, width, height, args_ptr)
+
+    me bitmap_glyph_raster_kernel(width: i64, height: i64, args_ptr: i64) -> i64:
+        self.launch_generated_2d(GENERATED_2D_BITMAP_GLYPH_RASTER, width, height, args_ptr)
 
     me alloc(size: i64) -> i64:
         if self.ffi == nil or self.context == 0 or size <= 0:
