@@ -80,8 +80,10 @@ SimpleOS now has scheduler-facing green-carrier coverage for the same lane:
 - final AP ring/user hardware handoff remains a separate opt-in live lane with
   explicit final markers
 
-So SimpleOS support exists, but it is still tracked as an in-progress lane for
-full Go-like runtime completeness.
+So SimpleOS support exists. The remaining incompleteness for full Go-like
+runtime parity is no longer the final AP ring/user proof; it is the broader
+blocking-integration and fairness/preemption story across the host and
+SimpleOS lanes.
 
 ## Current Comparison
 
