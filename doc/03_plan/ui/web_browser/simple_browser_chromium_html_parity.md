@@ -8,7 +8,7 @@ Current state as of 2026-06-11:
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
   layers `10..17`, flex rows `18..26`, absolute positioning fixture `27`, and
   display-contents fixture `28`, box-sizing fixture `29`, and min/max-width
-  fixture `30`.
+  fixture `30`, and flex cross-axis centering fixture `31`.
 - The newer focused fixture lane described in some earlier progress notes
   (`146+`, client-rect/box-model parity rows, no-cheat guard summaries) is not
   present in the current worktree and must not be treated as current evidence.
@@ -205,8 +205,12 @@ Open gaps tied to the active browser objective:
   - result: `layout_match`, `mismatch_count=0`
   - focused result: records Chrome's min/max width constraints for explicit
     and auto-width blocks; widths clamp to `90`, `80`, and `100` CSS pixels
+- The same live geometry lane now passes for `31_flex_align_items_center`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's `align-items:center` cross-axis offsets
+    for row-flex children with heights `20`, `40`, and `28`
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=27`, `pass_count=27`, `fail_count=0`, and
+    now reports `fixture_count=28`, `pass_count=28`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`

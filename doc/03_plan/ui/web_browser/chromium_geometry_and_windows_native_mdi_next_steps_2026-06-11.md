@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 27 labeled fixtures through `30_min_max_width_basic` with exact
+  now covers 28 labeled fixtures through `31_flex_align_items_center` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -277,6 +277,15 @@ Smallest next implementation step:
     `height=80`
   - the result confirms Simple matches this focused CSS width-constraint case
     without blur, tolerance, resolution scaling, or copied Chromium pixels
+- Live `31_flex_align_items_center` evidence now passes with `layout_match`
+  and `mismatch_count=0`.
+- The focused fixture-31 result records Chromium row-flex cross-axis centering:
+  - the explicit flex container border box is `x=16`, `y=16`, `width=220`,
+    `height=80`
+  - child heights `20`, `40`, and `28` are centered at `y=46`, `y=36`, and
+    `y=42` respectively
+  - the result confirms Simple matches this focused `align-items:center` case
+    without blur, tolerance, resolution scaling, or copied Chromium pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -300,12 +309,13 @@ Smallest next implementation step:
 - Chrome headless manifest evidence now includes
   `25_flex_justify_space_between`, `26_flex_gap_basic`,
   `27_absolute_position_basic`, `28_display_contents_basic`, and
-  `29_box_sizing_border_box`, and `30_min_max_width_basic`:
+  `29_box_sizing_border_box`, `30_min_max_width_basic`, and
+  `31_flex_align_items_center`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `30` in its default manifest, excluding only
+    covers fixtures `02` through `31` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `27` fixtures, `27` passes, `0` failures, and
+    reports `28` fixtures, `28` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
@@ -313,10 +323,6 @@ Smallest next implementation step:
   - `html_compat_spec.spl` now guards the wrapper/capture source against
     geometry acceptance through `argb_json`, pixelmatch, resize/scale/blur,
     canvas, threshold, or image-smoothing shortcuts
-- Next focused Chromium structural fixture candidate:
-  `30_flex_align_items_center` or the next free fixture number if fixture 30
-  is already occupied. This should exercise `align-items:center` cross-axis
-  centering for row flex containers, which is not yet covered by the manifest.
 - Live `24_flex_wrap_reverse_basic` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused geometry spec itself is now stable again in the default runner:

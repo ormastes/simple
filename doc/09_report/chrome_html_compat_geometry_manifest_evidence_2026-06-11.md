@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 27
-- pass count: 27
+- fixtures: 28
+- pass count: 28
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_manifest_full`
@@ -50,6 +50,7 @@ pixels, or text antialiasing normalization.
 | `28_display_contents_basic` | pass | 0 | `build/chrome_manifest_full/28_display_contents_basic_chrome_geometry.json` | `build/chrome_manifest_full/28_display_contents_basic_structural_report.sdn` |
 | `29_box_sizing_border_box` | pass | 0 | `build/chrome_manifest_full/29_box_sizing_border_box_chrome_geometry.json` | `build/chrome_manifest_full/29_box_sizing_border_box_structural_report.sdn` |
 | `30_min_max_width_basic` | pass | 0 | `build/chrome_manifest_full/30_min_max_width_basic_chrome_geometry.json` | `build/chrome_manifest_full/30_min_max_width_basic_structural_report.sdn` |
+| `31_flex_align_items_center` | pass | 0 | `build/chrome_manifest_full/31_flex_align_items_center_chrome_geometry.json` | `build/chrome_manifest_full/31_flex_align_items_center_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -86,3 +87,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `28_display_contents_basic` | 0 | 0.000 | `` |
 | `29_box_sizing_border_box` | 0 | 0.000 | `` |
 | `30_min_max_width_basic` | 0 | 0.000 | `` |
+| `31_flex_align_items_center` | 0 | 0.000 | `` |
