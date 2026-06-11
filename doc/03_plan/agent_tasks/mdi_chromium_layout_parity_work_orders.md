@@ -49,8 +49,13 @@ Prove and harden the requested GUI stack:
   pointer/text input forwarding, MDI titlebar drag focus/move commands,
   traffic-light close/minimize/maximize commands, and title-command input
   routing through `test/02_integration/app/ui.web/wm_bridge_test.spl`.
-  This is not a substitute for the remaining live QEMU/browser click/drag
-  proof.
+- Live Chromium browser evidence now runs through
+  `scripts/check/check-wm-browser-event-routing-evidence.shs`: it loads the real
+  `src/app/ui.web/wm.js`, opens an MDI window through the Electron IPC path,
+  simulates titlebar drag, traffic-light maximize, title-command Enter, body
+  text input, and body pointer down/up, then asserts the emitted `window_cmd`
+  and `input_event` frames. This is not a substitute for the remaining SimpleOS
+  QEMU framebuffer click/drag proof.
 - Windows and macOS live evidence is host-gated today:
   `test/03_system/gui/windows_native_mdi_evidence_spec.spl` reports
   `requires-windows` off Windows, and

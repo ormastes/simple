@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/wm_browser_event_routing_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/wm_browser_event_routing_evidence_$(date -u +%F).md}"
+OUT="$BUILD_DIR/wm-event-check.out"
+RESULT_JSON="$BUILD_DIR/wm-event-check.json"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT" "$RESULT_JSON" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+fail() {
+    reason="$1"
+    {
+        echo "wm_browser_event_routing_status=fail"
+        echo "wm_browser_event_routing_reason=$reason"
+        echo "wm_browser_event_routing_result_path=$RESULT_JSON"
+        echo "wm_browser_event_routing_blur_or_tolerance_used=false"
+    } >"$BUILD_DIR/evidence.env"
+    {
+        echo "# WM Browser Event Routing Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- blur/tolerance used: false"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$BUILD_DIR/evidence.env"
+        if [ -s "$OUT" ]; then
+            echo
+            echo "## Probe Output"
+            sed 's/^/- /' "$OUT"
+        fi
+    } >"$REPORT_PATH"
+    cat "$BUILD_DIR/evidence.env"
+    exit 1
+}
+
+for cmd in node npm; do
+    command -v "$cmd" >/dev/null 2>&1 || fail "missing-command:$cmd"
+done
+
+RUNNER="npx electron --no-sandbox --disable-gpu"
+if [ -z "${DISPLAY:-}" ]; then
+    command -v xvfb-run >/dev/null 2>&1 || fail "missing-command:xvfb-run"
+    RUNNER="xvfb-run -a --server-args=\"-screen 0 1280x720x24\" $RUNNER"
+fi
+
+set +e
+ELECTRON_DISABLE_SANDBOX=1 sh -c "$RUNNER tools/web-render-backend/wm_event_check.js" >"$OUT" 2>&1
+code=$?
+set -e
+
+line="$(sed -n 's/^WM_EVENT_CHECK //p' "$OUT" | tail -n 1)"
+if [ "$line" = "" ]; then
+    fail "missing-wm-event-check-json"
+fi
+printf '%s\n' "$line" >"$RESULT_JSON"
+
+field() {
+    node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); console.log(String(p[process.argv[2]] ?? ''))" "$RESULT_JSON" "$1"
+}
+
+pass="$(field pass)"
+ready="$(field ready)"
+wm_found="$(field wm_found)"
+window_cmd_count="$(field window_cmd_count)"
+input_event_count="$(field input_event_count)"
+focus_count="$(field focus_count)"
+move_count="$(field move_count)"
+maximize_count="$(field maximize_count)"
+title_command_count="$(field title_command_count)"
+text_input_count="$(field text_input_count)"
+pointer_down_count="$(field pointer_down_count)"
+pointer_up_count="$(field pointer_up_count)"
+
+status=pass
+reason=pass
+if [ "$code" -ne 0 ]; then
+    status=fail
+    reason=probe-exit-$code
+elif [ "$pass" != "true" ]; then
+    status=fail
+    reason=probe-reported-fail
+fi
+
+{
+    echo "wm_browser_event_routing_status=$status"
+    echo "wm_browser_event_routing_reason=$reason"
+    echo "wm_browser_event_routing_result_path=$RESULT_JSON"
+    echo "wm_browser_event_routing_ready=$ready"
+    echo "wm_browser_event_routing_wm_found=$wm_found"
+    echo "wm_browser_event_routing_window_cmd_count=$window_cmd_count"
+    echo "wm_browser_event_routing_input_event_count=$input_event_count"
+    echo "wm_browser_event_routing_focus_count=$focus_count"
+    echo "wm_browser_event_routing_move_count=$move_count"
+    echo "wm_browser_event_routing_maximize_count=$maximize_count"
+    echo "wm_browser_event_routing_title_command_count=$title_command_count"
+    echo "wm_browser_event_routing_text_input_count=$text_input_count"
+    echo "wm_browser_event_routing_pointer_down_count=$pointer_down_count"
+    echo "wm_browser_event_routing_pointer_up_count=$pointer_up_count"
+    echo "wm_browser_event_routing_blur_or_tolerance_used=false"
+    echo "wm_browser_event_routing_exit_code=$code"
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# WM Browser Event Routing Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- window commands: $window_cmd_count"
+    echo "- input events: $input_event_count"
+    echo "- blur/tolerance used: false"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+    echo
+    echo "## Probe Output"
+    sed 's/^/- /' "$OUT"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]
