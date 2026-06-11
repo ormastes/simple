@@ -59,12 +59,12 @@ expect(warnings[0].message).to_contain("imports GC family")
 
 </details>
 
-#### does not warn when gc async imports no-gc
+#### warns when gc async imports no-gc (symmetric rule)
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -72,7 +72,9 @@ val warnings = check_gc_boundary_imports(
     "std.gc_async_mut.gpu",
     ["std.nogc_sync_mut.fs"]
 )
-expect(warnings.len()).to_equal(0)
+expect(warnings.len()).to_equal(1)
+expect(warnings[0].message).to_contain("gc module")
+expect(warnings[0].message).to_contain("imports no-gc family")
 ```
 
 </details>
@@ -149,7 +151,7 @@ val warnings = check_gc_boundary_imports(
 )
 val messages = format_family_warnings(warnings)
 expect(messages.len()).to_equal(1)
-expect(messages[0]).to_contain("gc-boundary")
+expect(messages[0]).to_contain("gc_boundary_crossing")
 ```
 
 </details>
