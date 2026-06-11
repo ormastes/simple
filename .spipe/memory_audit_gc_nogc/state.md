@@ -22,9 +22,19 @@ Verify that nogc-mode code paths never reach GC allocation at runtime, audit the
 - Vendored/third-party sources excluded from audit scope.
 
 ## Phase
-implement
+verify-done
+
+## AC Status
+- AC-1 ✅ research_nogc_verify.md — VERDICT: nogc naming-only at runtime (no GC exists; gc=allocate-and-leak; byte-identical binaries); violations recorded in doc/08_tracking/bug/*2026-06-11.md
+- AC-2 ✅ research_spec_triage.md — 9 pass / 2 fail / 2 hollow; gc_boundary_check_spec fixed (13/13), alloc_checker_spec de-hollowed (28/28), memory_capabilities 2 failures = product bugs (bug doc filed, left failing deliberately); gc_safety + alloc_inference hollowness recorded in consolidated bug doc
+- AC-3 ✅ t5/t6 audit reports; 3 fixes landed (cuda_session leak, noalloc harness alloc, boundary alias detection); remaining findings in gc_nogc_memory_audit_findings_2026-06-11.md
+- AC-4 ✅ doc/01_research/runtime/memory_tooling/memory_inspection_tooling.md (+tldr) — 3-tier rec: compile-time @nogc enforcement (0 overhead), MI_DEBUG_FULL+memtrack debug flavor (0 in prod), MI_GUARDED sampling (~0-1% always-on); cited overhead table
+- AC-5 ✅ 2 waves × parallel Sonnet agents (disjoint scopes); every deliverable reviewed by orchestrator (diffs read, specs re-run independently, assert_true negative-tested) before path-scoped jj commits
 
 ## Log
 - dev: Created state file with 5 acceptance criteria (type: code-quality)
 - research: 4 parallel agents done. Artifacts: research_nogc_verify.md (VERDICT: nogc naming-only at runtime; no GC exists, gc=allocate-and-leak; lint blind spots; bugs B1 array-push coredump, B3 stub-fallback exit 0), research_local_machinery.md (memtrack/lsan/noalloc_checker infra map), research_web_memory_tooling.md (cited overhead table; top-3: D-style @nogc enforcement, MI_DEBUG_FULL build flavor, MI_GUARDED sampling), research_spec_triage.md (9 pass / 2 fail / 2 hollow).
 - implement: launching parallel Sonnet wave T1-T6 (disjoint scopes), orchestrator reviews + commits.
+- review(wave1): T1 boundary spec 9/9 re-verified, assertions strengthened — ACCEPT. T7 alloc_checker 28/28 re-verified, no hollow patterns, assert_true negative-tested (fails on false) — ACCEPT. T2 no-cover-up (2 product bugs left failing) — ACCEPT. T3 docs 198+58 lines w/ diagram — ACCEPT. T5/T6 audits — ACCEPT. Committed qzmrrsvu.
+- implement(wave2, sec): F1 cuda_session unload-before-overwrite (7/7 contract spec), F2 noalloc harness heap-free (lint OK, no "{ left), F3 GC_ALIAS_MANIFEST alias-evasion detection (13/13). All diffs reviewed + specs re-run by orchestrator. Committed mrmtxwsz (sec).
+- verify: 4 bug docs filed (array-push coredump; memory_capabilities crashes; stub-fallback exit 0; consolidated audit findings). AC-1..AC-5 all satisfied.
