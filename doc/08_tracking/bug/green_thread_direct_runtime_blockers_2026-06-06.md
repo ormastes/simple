@@ -18,6 +18,10 @@ separate from the cooperative queue semantics:
 - SMF mutable globals previously segfaulted even for a minimal counter.
   Fixed on 2026-06-09 by preserving BSS sections in linked SMF output and
   resolving local data symbols against their loaded section base.
+- SMF function-valued globals and global function-valued arrays previously
+  segfaulted because the SMF execution path reached `spl_main` without first
+  running `__module_init`. Fixed on 2026-06-11 by running the SMF module init
+  function before entry calls.
 
 ## Impact
 
@@ -69,16 +73,13 @@ Local function-valued arrays, function-valued globals, and global
 function-valued arrays are now native-covered by the callback regression script.
 Function-valued globals and global function-valued arrays are also covered by
 direct `simple run` checks in that script. SMF function-valued
-global/global-array storage remains open and is not required for the current
-eager-result cooperative queue.
+global/global-array storage now has matching regression coverage.
 
 The cross-language harness now reports Simple OS-thread and Simple cooperative
 green rows separately. A 20-worker OS-thread fanout smoke compiles and runs
 through unrolled `thread_spawn` fork-join handles. `thread_spawn_with_args`
 native probes now pass the focused explicit-argument ABI smoke, so it is no
-longer part of this blocker list. The remaining direct-run blocker is SMF
-function-valued global and global-array storage/codegen; that is a
-runtime/compiler issue, not a public API change request.
+longer part of this blocker list.
 
 ## Multicore Green SMF Status
 
@@ -96,11 +97,10 @@ which requires `wrapper_smf_pool_pass=true`; the historical blocker remains in
 
 SMF mutable-global regression evidence is now covered by
 `test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl`.
-The still-open SMF function-valued global/global-array crash path is now pinned
-by
-`test/03_system/feature/usage/cooperative_green_smf_function_global_blocker_spec.spl`,
-which keeps both minimal SMF fixtures compiling and requires their current
-runtime crash path to stay explicit until the loader/codegen fix lands.
+SMF function-valued global/global-array regression evidence is now covered by
+`test/03_system/feature/usage/cooperative_green_smf_function_global_regression_spec.spl`,
+which keeps both minimal SMF fixtures compiling and requires their pass markers
+after the SMF `__module_init` execution fix.
 Cooperative-green queue rows are still not M:N CPU-parallel evidence; keep them
 classified separately from native and SMF `multicore_green_spawn` evidence.
 
@@ -111,24 +111,23 @@ Temporary local repro files were created under `build/tmp/` while investigating:
 - `global_array_append_smoke.spl`
 - `global_usize_smoke.spl`
 
-## Current Open Repro
+## Closed Repro
 
 Verified again on 2026-06-11 with
-`src/compiler_rust/target/debug/simple compile ... -o fixture.smf` followed by
-`src/compiler_rust/target/debug/simple fixture.smf`:
+`build/cargo-isolated/debug/simple compile ... -o fixture.smf` followed by
+`build/cargo-isolated/debug/simple fixture.smf`:
 
-- function-valued global slot SMF fixture -> compile succeeds, runtime exits
-  `139`
-- global function-valued array SMF fixture -> compile succeeds, runtime exits
-  `139`
+- function-valued global slot SMF fixture -> prints
+  `function_global_smf_pass=true`
+- global function-valued array SMF fixture -> prints
+  `global_function_array_smf_pass=true`
 
-The focused blocker spec above keeps that current crash boundary executable.
+The focused regression spec above keeps that fixed path executable.
 
-## Required Fix
+## Follow-Up
 
-Fix SMF handling for function-valued globals and global function-valued arrays,
-then switch or add a perf harness green row for delayed `green_spawn(fn)`
-closure execution timing. Keep
+Switch or add a perf harness green row for delayed `green_spawn(fn)` closure
+execution timing. Keep
 `test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
 passing so the fixed callback and direct-run function-global paths do not
 regress.

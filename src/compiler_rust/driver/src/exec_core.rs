@@ -425,6 +425,7 @@ impl ExecCore {
 
     /// Execute a loaded module and collect GC afterward
     fn execute_and_gc(&self, module: &LoadedModule) -> Result<i32, String> {
+        run_module_init(module)?;
         let exit = run_main(module)?;
         self.collect_gc();
         Ok(exit)
@@ -866,4 +867,13 @@ pub fn run_main(module: &LoadedModule) -> Result<i32, String> {
     type MainFn = extern "C" fn() -> i32;
     let main: MainFn = module.entry_point().ok_or("no main entry found")?;
     Ok(main())
+}
+
+fn run_module_init(module: &LoadedModule) -> Result<(), String> {
+    type InitFn = extern "C" fn();
+    let Some(init) = module.get_function::<InitFn>("__module_init") else {
+        return Ok(());
+    };
+    init();
+    Ok(())
 }

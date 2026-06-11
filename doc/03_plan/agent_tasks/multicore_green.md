@@ -13,11 +13,11 @@ Date: 2026-06-06
 - Cooperative-green SMF mutable-global crash evidence is now closed by
   `test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl`
   and the mirrored manual under `doc/06_spec`.
-- The remaining direct SMF blocker in this lane is function-valued global and
-  global-array storage/codegen, tracked in
-  `doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md` and
-  pinned by
-  `test/03_system/feature/usage/cooperative_green_smf_function_global_blocker_spec.spl`.
+- The direct SMF function-valued global/global-array blocker in this lane is
+  now closed. Historical tracking remains in
+  `doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md`,
+  and positive regression coverage now lives in
+  `test/03_system/feature/usage/cooperative_green_smf_function_global_regression_spec.spl`.
 - SimpleOS green-carrier hosted, live, and final AP ring/user handoff evidence
   is current in
   `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`; the final

@@ -1,16 +1,16 @@
-# Cooperative Green SMF Function-Global Blocker
+# Cooperative Green SMF Function-Global Regression
 
-> This SSpec keeps the remaining SMF function-valued storage blocker explicit. Minimal SMF fixtures with a function-valued global slot or a global function-valued array still compile, but the SMF runtime currently crashes when the fixture executes.
+> This SSpec keeps SMF function-valued global storage covered after the runtime fix that restored `__module_init` execution before SMF entry calls. Minimal SMF fixtures with a function-valued global slot or a global function-valued array must both compile and run successfully.
 
-<!-- sdn-diagram:id=cooperative_green_smf_function_global_blocker_spec.arch -->
+<!-- sdn-diagram:id=cooperative_green_smf_function_global_regression_spec.arch -->
 <details class="sdn-source">
 <summary>SDN source</summary>
 
-```sdn id=cooperative_green_smf_function_global_blocker_spec.arch hash=sha256:auto render=ascii
+```sdn id=cooperative_green_smf_function_global_regression_spec.arch hash=sha256:auto render=ascii
 @layout dag
 @direction LR
 
-cooperative_green_smf_function_global_blocker_spec -> std
+cooperative_green_smf_function_global_regression_spec -> std
 ```
 
 </details>
@@ -18,7 +18,7 @@ cooperative_green_smf_function_global_blocker_spec -> std
 <details class="sdn-ascii" open>
 <summary>Diagram</summary>
 
-```ascii generated-from=cooperative_green_smf_function_global_blocker_spec.arch hash=sha256:auto
+```ascii generated-from=cooperative_green_smf_function_global_regression_spec.arch hash=sha256:auto
 # run: simple md-diagram-update
 ```
 
@@ -32,9 +32,9 @@ cooperative_green_smf_function_global_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Cooperative Green SMF Function-Global Blocker
+# Cooperative Green SMF Function-Global Regression
 
-This SSpec keeps the remaining SMF function-valued storage blocker explicit. Minimal SMF fixtures with a function-valued global slot or a global function-valued array still compile, but the SMF runtime currently crashes when the fixture executes.
+This SSpec keeps SMF function-valued global storage covered after the runtime fix that restored `__module_init` execution before SMF entry calls. Minimal SMF fixtures with a function-valued global slot or a global function-valued array must both compile and run successfully.
 
 ## At a Glance
 
@@ -42,21 +42,21 @@ This SSpec keeps the remaining SMF function-valued storage blocker explicit. Min
 |-------|-------|
 | Feature IDs | #green-cooperative-smf-function-global |
 | Category | Runtime / SMF / Concurrency |
-| Status | Known Blocker |
+| Status | Regression Coverage |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
-| Source | `test/03_system/feature/usage/cooperative_green_smf_function_global_blocker_spec.spl` |
+| Source | `test/03_system/feature/usage/cooperative_green_smf_function_global_regression_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-This SSpec keeps the remaining SMF function-valued storage blocker explicit.
-Minimal SMF fixtures with a function-valued global slot or a global
-function-valued array still compile, but the SMF runtime currently crashes when
-the fixture executes.
+This SSpec keeps SMF function-valued global storage covered after the runtime
+fix that restored `__module_init` execution before SMF entry calls. Minimal SMF
+fixtures with a function-valued global slot or a global function-valued array
+must both compile and run successfully.
 
 ## Requirements
 
@@ -76,26 +76,24 @@ the fixture executes.
 
 ## Syntax
 
-Run the blocker contract:
+Run the regression contract:
 
 ```sh
-./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/cooperative_green_smf_function_global_blocker_spec.spl --mode=interpreter --clean
+./src/compiler_rust/target/debug/simple test test/03_system/feature/usage/cooperative_green_smf_function_global_regression_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples
 
-- The function-valued global-slot fixture must compile to SMF.
-- The global function-array fixture must compile to SMF.
-- Running either SMF artifact currently exits nonzero through the old crash
-  path instead of returning the pass marker.
-- When this blocker is fixed, this spec should be converted from blocker
-  evidence into a positive regression test.
+- The function-valued global-slot fixture must compile to SMF and print its pass marker.
+- The global function-array fixture must compile to SMF and print its pass marker.
+- The regression closes the historical crash path where SMF skipped `__module_init`
+  before entering `spl_main`.
 
 ## Scenarios
 
-### Cooperative green SMF function-global blocker
+### Cooperative green SMF function-global regression
 
-#### keeps the current SMF function-valued global crash reproducible
+#### runs SMF function-valued globals and global arrays after module init
 
 - Write the minimal function-valued SMF fixtures
    - Expected: mkdir_code equals `0`
@@ -105,8 +103,10 @@ Run the blocker contract:
    - Expected: compile_global_code equals `0`
 - Compile the global function-array fixture to SMF
    - Expected: compile_array_code equals `0`
-- Run the function-valued global-slot SMF and keep the crash explicit
-- Run the global function-array SMF and keep the crash explicit
+- Run the function-valued global-slot SMF and verify the pass marker
+   - Expected: run_global_code equals `0`
+- Run the global function-array SMF and verify the pass marker
+   - Expected: run_array_code equals `0`
 
 
 <details>
@@ -133,15 +133,15 @@ val (compile_array_out, compile_array_code) = shell(SIMPLE_BIN + " compile " + G
 expect(compile_array_out).to_contain("Compiled")
 expect(compile_array_code).to_equal(0)
 
-step("Run the function-valued global-slot SMF and keep the crash explicit")
+step("Run the function-valued global-slot SMF and verify the pass marker")
 val (run_global_out, run_global_code) = shell("timeout 20s " + SIMPLE_BIN + " " + FUNCTION_GLOBAL_SMF)
-expect(run_global_out.contains("function_global_smf_pass=true")).to_be(false)
-expect(run_global_code).to_be_greater_than(0)
+expect(run_global_out).to_contain("function_global_smf_pass=true")
+expect(run_global_code).to_equal(0)
 
-step("Run the global function-array SMF and keep the crash explicit")
+step("Run the global function-array SMF and verify the pass marker")
 val (run_array_out, run_array_code) = shell("timeout 20s " + SIMPLE_BIN + " " + GLOBAL_ARRAY_SMF)
-expect(run_array_out.contains("global_function_array_smf_pass=true")).to_be(false)
-expect(run_array_code).to_be_greater_than(0)
+expect(run_array_out).to_contain("global_function_array_smf_pass=true")
+expect(run_array_code).to_equal(0)
 ```
 
 </details>
