@@ -21,9 +21,12 @@ Current state as of 2026-06-11:
   out:
   `SIMPLE_LIB=src bin/simple run src/app/wm_compare/html_compat.spl --only=18_flex_grow_weights`
   exits `2` with `timed out after 20000 ms while rendering source B in child process`.
-  Do not treat the checked-in fixture-18 pixel row as live end-to-end proof
-  until that timeout is fixed or replaced with a renderer path that still
-  executes pure Simple layout/raster logic instead of copying Chromium pixels.
+  Direct worker execution renders fixture 18 in about `0.65s`, and the parent
+  harness passes in about `2.3s` when `SIMPLE_BINARY` points to the active
+  compiler, so the remaining blocker is automatic child-runtime discovery in
+  isolated/checker environments. Do not treat the checked-in fixture-18 pixel
+  row as portable live end-to-end proof until that runtime-selection issue is
+  fixed without bypassing pure Simple layout/raster logic.
 - Text input/titlebar-related fixtures that do exist in the current lane are
   `04_button`, `05_text_input`, `06_card_panel`, and `07_scrollable_list`.
 
@@ -67,8 +70,10 @@ Open gaps tied to the active browser objective:
   completion requires browser-like font metrics, raster, and antialiasing
   rather than tolerance or copied browser pixels.
 - Pixel fixture `18_flex_grow_weights` has checked-in exact PPMs and report
-  metadata, but the fresh live harness run currently times out before producing
-  source-B pixels. This is tracked separately as
+  metadata, and it passes the live parent harness when `SIMPLE_BINARY` is set
+  to the active compiler. The same run currently times out when automatic child
+  runtime discovery falls through in clean/isolated worktrees. This is tracked
+  separately as
   `doc/08_tracking/bug/html_compat_fixture18_live_source_b_timeout_2026-06-11.md`.
 - Existing `05_text_input` bitmap baseline is still non-accepted evidence in
   `test/09_baselines/html_compat/05_text_input/report.sdn`, so input visual
