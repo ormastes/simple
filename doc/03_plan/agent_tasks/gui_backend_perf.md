@@ -126,6 +126,9 @@ Updated: 2026-06-11
 - this commit -- repeated hex color tail allocation removal: `_last_hex_color_after`
   now parses colors from the original HTML buffer after each marker match instead
   of allocating an extra post-marker tail substring before looking for `#`.
+- this commit -- body marker scan reuse: `_html_background_color` now caches
+  the first `<body` index and reuses it for body-gated background checks and tag
+  extraction, avoiding repeated whole-HTML scans for the same marker.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
