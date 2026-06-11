@@ -153,6 +153,10 @@ Updated: 2026-06-11
   `_resolve_current_color` now locates `#` directly in the original declaration
   buffer after a standalone `color:` token instead of allocating a post-token
   tail before parsing the hex color.
+- this commit -- `:not(...)` close-scan allocation removal:
+  `_not_selector_rejects_first_block` now finds the closing `)` in the original
+  HTML buffer before extracting selector options, avoiding a post-marker tail
+  allocation in the heuristic selector path.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
