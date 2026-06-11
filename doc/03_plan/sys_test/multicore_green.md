@@ -63,8 +63,8 @@
     requirements, research, architecture, design, tracking, and reports;
   - refreshed multicore-green agent-plan current-state text;
   - refreshed Go-vs-Simple research wording so the remaining parity gap is
-    explicitly blocking integration and fairness/preemption, not final hardware
-    handoff proof.
+    explicitly hosted fairness/preemption, not final hardware handoff proof or
+    the already-covered blocking-compensation path.
 - The workspace remains dirty outside the multicore-green lane because other
   sessions are active in this checkout; future sync work must keep those files
   out of multicore-green commits unless the user explicitly asks for an

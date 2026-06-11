@@ -473,6 +473,8 @@ static int g_pool_started = 0;
 static int g_pool_worker_count = 0;
 static int g_pool_configured_worker_count = 0;
 static int g_pool_next_worker = 0;
+static int g_pool_busy_workers = 0;
+static int g_pool_pending_tasks = 0;
 
 #ifdef SPL_THREAD_PTHREAD
 static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -570,6 +572,10 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
         int victim = (worker_id + offset) % count;
         task = rt_pool_queue_pop_head(&g_pool_queues[victim]);
     }
+    if (task != NULL) {
+        if (g_pool_pending_tasks > 0) g_pool_pending_tasks--;
+        g_pool_busy_workers++;
+    }
     pthread_mutex_unlock(&g_pool_lock);
     return task;
 #else
@@ -583,6 +589,10 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
         int victim = (worker_id + offset) % count;
         task = rt_pool_queue_pop_head(&g_pool_queues[victim]);
     }
+    if (task != NULL) {
+        if (g_pool_pending_tasks > 0) g_pool_pending_tasks--;
+        g_pool_busy_workers++;
+    }
     LeaveCriticalSection(&g_pool_lock);
     return task;
 #endif
@@ -590,12 +600,18 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
 
 static void rt_pool_complete_task(RtPoolTask* task, int64_t result) {
 #ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    if (g_pool_busy_workers > 0) g_pool_busy_workers--;
+    pthread_mutex_unlock(&g_pool_lock);
     pthread_mutex_lock(&task->lock);
     task->result = result;
     task->done = 1;
     pthread_cond_broadcast(&task->done_cond);
     pthread_mutex_unlock(&task->lock);
 #else
+    EnterCriticalSection(&g_pool_lock);
+    if (g_pool_busy_workers > 0) g_pool_busy_workers--;
+    LeaveCriticalSection(&g_pool_lock);
     EnterCriticalSection(&task->lock);
     task->result = result;
     task->done = 1;
@@ -672,6 +688,51 @@ static void rt_pool_start(void) {
 #endif
 }
 
+static int rt_pool_maybe_spawn_compensation_worker(void) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    int should_spawn =
+        g_pool_started &&
+        g_pool_pending_tasks > 0 &&
+        g_pool_busy_workers >= g_pool_worker_count &&
+        g_pool_worker_count < RT_POOL_MAX_WORKERS;
+    int worker_id = g_pool_worker_count;
+    pthread_mutex_unlock(&g_pool_lock);
+
+    if (!should_spawn) return 0;
+    if (!rt_pool_spawn_worker(worker_id)) return 0;
+
+    pthread_mutex_lock(&g_pool_lock);
+    if (g_pool_worker_count == worker_id) {
+        g_pool_worker_count++;
+    }
+    int spawned = g_pool_worker_count > worker_id ? 1 : 0;
+    pthread_mutex_unlock(&g_pool_lock);
+    return spawned;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    int should_spawn =
+        g_pool_started &&
+        g_pool_pending_tasks > 0 &&
+        g_pool_busy_workers >= g_pool_worker_count &&
+        g_pool_worker_count < RT_POOL_MAX_WORKERS;
+    int worker_id = g_pool_worker_count;
+    LeaveCriticalSection(&g_pool_lock);
+
+    if (!should_spawn) return 0;
+    if (!rt_pool_spawn_worker(worker_id)) return 0;
+
+    EnterCriticalSection(&g_pool_lock);
+    if (g_pool_worker_count == worker_id) {
+        g_pool_worker_count++;
+    }
+    int spawned = g_pool_worker_count > worker_id ? 1 : 0;
+    LeaveCriticalSection(&g_pool_lock);
+    return spawned;
+#endif
+}
+
 int64_t rt_pool_set_parallelism(int64_t workers) {
     int requested = rt_pool_clamp_worker_count(workers);
 #ifdef SPL_THREAD_PTHREAD
@@ -744,16 +805,20 @@ static void rt_pool_push_task(RtPoolTask* task) {
     int target = g_pool_next_worker % count;
     g_pool_next_worker = (g_pool_next_worker + 1) % count;
     rt_pool_queue_push_tail(&g_pool_queues[target], task);
+    g_pool_pending_tasks++;
     pthread_cond_signal(&g_pool_not_empty);
     pthread_mutex_unlock(&g_pool_lock);
+    rt_pool_maybe_spawn_compensation_worker();
 #else
     EnterCriticalSection(&g_pool_lock);
     int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
     int target = g_pool_next_worker % count;
     g_pool_next_worker = (g_pool_next_worker + 1) % count;
     rt_pool_queue_push_tail(&g_pool_queues[target], task);
+    g_pool_pending_tasks++;
     WakeConditionVariable(&g_pool_not_empty);
     LeaveCriticalSection(&g_pool_lock);
+    rt_pool_maybe_spawn_compensation_worker();
 #endif
 }
 

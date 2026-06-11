@@ -26,7 +26,7 @@ OS threads. The important properties for this lane are:
 
 - bounded parallelism through `GOMAXPROCS`
 - worker ownership of runnable work rather than one-OS-thread-per-task
-- blocking integration so one blocked task does not collapse the whole runtime
+- blocking compensation so one blocked task does not collapse the whole runtime
 - work stealing so runnable work can move between workers
 - preemption so tight CPU loops do not monopolize a worker forever
 
@@ -66,9 +66,10 @@ This is a green-thread API, but it is not a Go-style CPU-parallel scheduler.
 - requires `queue_model=work_stealing` evidence before a profile row can be
   treated as M:N evidence
 
-This is enough for bounded CPU-parallel profile comparisons, but it is still
-short of Go's full scheduler model because blocking integration and final
-preemption/fairness claims are not complete across every path.
+This is enough for bounded CPU-parallel profile comparisons, and the hosted
+blocking-compensation path now has executable regression coverage, but it is
+still short of Go's full scheduler model because final preemption/fairness
+claims are not complete across every path.
 
 ## SimpleOS State
 
@@ -83,9 +84,9 @@ SimpleOS now has scheduler-facing green-carrier coverage for the same lane:
   explicit final markers
 
 So SimpleOS support exists. The remaining incompleteness for full Go-like
-runtime parity is no longer the final AP ring/user proof; it is the broader
-blocking-integration and fairness/preemption story across the host and
-SimpleOS lanes.
+runtime parity is no longer the final AP ring/user proof or the hosted
+blocking-compensation path; it is the broader fairness/preemption story across
+the host and SimpleOS lanes.
 
 ## Current Comparison
 
@@ -123,8 +124,8 @@ The current Simple answer to "Go-like M:N CPU parallelism" is
 `cooperative_green_spawn` remains important and supported, but only as the
 single-carrier logical queue surface.
 
-The remaining gap versus Go is not naming or basic task submission anymore. It
-is completing and proving the deeper scheduler properties consistently across
-the host runtime and SimpleOS lanes: blocking integration and
-fairness/preemption. The SimpleOS final AP ring/user hardware handoff evidence
+The remaining gap versus Go is not naming, basic task submission, or hosted
+blocking compensation anymore. It is completing and proving the deeper
+scheduler fairness/preemption properties consistently across the host runtime
+and SimpleOS lanes. The SimpleOS final AP ring/user hardware handoff evidence
 itself is now closed by the opt-in live QEMU marker-triplet gate.

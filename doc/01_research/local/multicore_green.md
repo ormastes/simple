@@ -16,8 +16,10 @@
 - `green_carrier_fixed_spawn_cpu` and `green_carrier_fixed_run_task` provide a freestanding-safe fixed-slot carrier path for live SimpleOS guests. This keeps the public hosted carrier API unchanged while avoiding heap/text state that can stop tiny x86_64 QEMU probes before serial readback.
 - The real `Scheduler` now owns a separate green execution lane through `apply_green_scheduler_intent`, so logical green task ids do not collide with normal OS `TaskId` state.
 - SMP/AP/IPI support exists under `src/os/kernel/smp/`; `percpu.spl` now updates per-CPU entries through whole-entry replacement so interpreter-mode specs can exercise SMP state changes without indexed-field assignment failures.
-- A full scheduler-aware multicore green runtime still needs blocking syscall
-  boundaries and broader fairness/preemption completion. The SimpleOS final AP
+- A full scheduler-aware multicore green runtime still needs broader
+  fairness/preemption completion. Hosted blocking compensation now has direct
+  executable coverage; the remaining scheduler gap is fairness under sustained
+  loop load and a host-side yield/preemption contract. The SimpleOS final AP
   ring/user hardware context-switch handoff itself is now closed by the opt-in
   live QEMU marker-triplet lane; the current QEMU proof also covers AP startup
   plus scheduler-visible CPU1 green dispatch.

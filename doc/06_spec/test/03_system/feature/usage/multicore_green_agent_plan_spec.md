@@ -109,7 +109,8 @@ Failed: 0
   any Simple row can be described as Go-like M:N CPU parallelism.
 - The agent plan must keep a lane for host fairness and blocking work.
 - The host fairness lane owns the dedicated hosted parity-gap tracker until
-  host-side blocking integration and fairness/preemption are actually closed.
+  hosted fairness/preemption is actually closed and the blocking-compensation
+  regression remains covered.
 - The agent plan must keep a lane for SimpleOS green carrier evidence.
 - The SimpleOS lane owns hosted scheduler specs, opt-in QEMU AP evidence, and
   the separately gated final AP ring/user handoff proof.

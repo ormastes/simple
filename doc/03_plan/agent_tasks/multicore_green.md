@@ -200,8 +200,8 @@ Primary paths:
 Deliverables:
 
 - dedicated tracking for the remaining hosted multicore-green parity gap;
-- executable proof that host-side blocking integration and fairness/preemption
-  are still open until stronger evidence lands;
+- executable proof that hosted blocking compensation stays fixed while
+  fairness/preemption remains open until stronger evidence lands;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:

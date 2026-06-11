@@ -1,6 +1,6 @@
-# Multicore Green Blocking Compensation Gap
+# Multicore Green Blocking Compensation Regression
 
-> This SSpec pins the current hosted blocking-integration gap for `multicore_green_spawn`. When the runtime pool is saturated with blocking work, an additional quick task must currently remain pending instead of making progress through compensation threads or a comparable host-side mechanism.
+> This SSpec keeps the hosted blocking-compensation fix green for `multicore_green_spawn`. When the runtime pool is saturated with blocking work, an additional quick task must still complete through the hosted compensation-worker path on both source-run and standalone native artifacts.
 
 <!-- sdn-diagram:id=multicore_green_blocking_compensation_gap_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ multicore_green_blocking_compensation_gap_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Multicore Green Blocking Compensation Gap
+# Multicore Green Blocking Compensation Regression
 
-This SSpec pins the current hosted blocking-integration gap for `multicore_green_spawn`. When the runtime pool is saturated with blocking work, an additional quick task must currently remain pending instead of making progress through compensation threads or a comparable host-side mechanism.
+This SSpec keeps the hosted blocking-compensation fix green for `multicore_green_spawn`. When the runtime pool is saturated with blocking work, an additional quick task must still complete through the hosted compensation-worker path on both source-run and standalone native artifacts.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the current hosted blocking-integration gap for `multicore_green
 |-------|-------|
 | Feature IDs | #multicore-green-blocking-compensation-gap |
 | Category | Runtime / Hosted / Multicore Green |
-| Status | Blocked |
+| Status | Implemented |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,10 +53,10 @@ This SSpec pins the current hosted blocking-integration gap for `multicore_green
 
 ## Overview
 
-This SSpec pins the current hosted blocking-integration gap for
+This SSpec keeps the hosted blocking-compensation fix green for
 `multicore_green_spawn`. When the runtime pool is saturated with blocking work,
-an additional quick task must currently remain pending instead of making
-progress through compensation threads or a comparable host-side mechanism.
+an additional quick task must still complete through the hosted
+compensation-worker path on both source-run and standalone native artifacts.
 
 ## Requirements
 
@@ -77,14 +77,14 @@ progress through compensation threads or a comparable host-side mechanism.
 ## Syntax
 
 ```sh
-bin/release/simple test test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl --mode=interpreter --clean
+src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl --mode=interpreter --clean
 ```
 
 ## Scenarios
 
-### multicore green blocking compensation gap
+### multicore green blocking compensation regression
 
-#### keeps the blocked quick-task gap explicit across source-run and native artifacts
+#### keeps the hosted quick-task compensation path green across source-run and native artifacts
 
 - Prepare the native output directory for the checked-in blocking-gap fixture
    - Expected: mkdir_code equals `0`
@@ -115,13 +115,13 @@ expect(native_compile_code).to_equal(0)
 
 step("Run the fixture through the hosted source path")
 val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
-expect(interp_out).to_contain("quick_done_while_blocked=false")
+expect(interp_out).to_contain("quick_done_while_blocked=true")
 expect(interp_out).to_contain("total=10")
 expect(interp_code).to_equal(0)
 
 step("Run the fixture through the hosted standalone native path")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
-expect(native_out).to_contain("quick_done_while_blocked=false")
+expect(native_out).to_contain("quick_done_while_blocked=true")
 expect(native_out).to_contain("total=10")
 expect(native_code).to_equal(0)
 ```

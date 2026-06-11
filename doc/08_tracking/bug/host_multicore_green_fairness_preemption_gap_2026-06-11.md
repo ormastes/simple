@@ -18,7 +18,6 @@ not enough for full Go-like scheduler parity on the host runtime.
 The remaining host-side gap is the same one called out in the selected
 requirements, research, and architecture docs:
 
-- blocking integration is not yet proven end to end for hosted multicore green
 - fairness/preemption is not yet proven end to end for hosted multicore green
 
 ## Why This Is Still Open
@@ -32,18 +31,18 @@ Current hosted multicore-green evidence proves:
 
 Current hosted multicore-green evidence does not yet prove:
 
-- one blocked logical task does not collapse worker progress across the pool
 - long-running CPU work is preempted or yield-forced with a host-side contract
 - host fairness semantics comparable to Go's scheduler under sustained loop load
 
-Current negative hosted evidence now also includes:
+Current hosted blocking-compensation evidence now includes:
 
 - `test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl`
-  proves that with hosted pool parallelism pinned to `2`, two sleeping tasks
-  keep a third quick task pending for at least the first 30ms window on both
-  source-run and standalone native paths
-- the current hosted runtime therefore has no executable evidence yet for
-  blocking compensation analogous to Go's scheduler behavior
+  keeps the hosted compensation-worker fix covered: with hosted pool
+  parallelism pinned to `2`, two sleeping tasks still allow a third quick task
+  to complete within the first 30ms window on both source-run and standalone
+  native paths
+- blocking compensation now has executable hosted coverage; the remaining host
+  parity gap is fairness/preemption
 
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
@@ -69,9 +68,8 @@ These do not yet close the hosted-runtime parity claim.
 ## Exit Criteria
 
 This gap can close only when the hosted multicore-green lane has executable
-evidence for both:
+evidence for:
 
-- blocking integration across the bounded worker pool
 - fairness/preemption or an equivalent enforced host-side yield contract
 
 That evidence must be tied into the canonical multicore-green feature tracking
