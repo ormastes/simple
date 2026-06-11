@@ -45,6 +45,12 @@ Prove and harden the requested GUI stack:
   reports, but full titlebar/input/drag event proof is still partial:
   `test/03_system/gui/wm_input_qemu_smoke_spec.spl` contains the right markers
   but can route through a linker-blocker branch on some hosts.
+- Browser-side source-contract evidence now covers canonical widget
+  pointer/text input forwarding, MDI titlebar drag focus/move commands,
+  traffic-light close/minimize/maximize commands, and title-command input
+  routing through `test/02_integration/app/ui.web/wm_bridge_test.spl`.
+  This is not a substitute for the remaining live QEMU/browser click/drag
+  proof.
 - Windows and macOS live evidence is host-gated today:
   `test/03_system/gui/windows_native_mdi_evidence_spec.spl` reports
   `requires-windows` off Windows, and
