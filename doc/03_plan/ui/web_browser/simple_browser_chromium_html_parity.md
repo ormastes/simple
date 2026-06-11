@@ -4,15 +4,17 @@ Feature: `simple_browser_chromium_html_parity`
 
 Current state as of 2026-06-11:
 
-- The authoritative current harness in this worktree is still the older
-  `src/app/wm_compare/html_compat.spl` catalog covering fixtures
-  `00..07` and CSS layers `10..17`.
+- The authoritative current pixel harness in this worktree is
+  `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
+  layers `10..17`, and flex rows `18..24`.
 - The newer focused fixture lane described in some earlier progress notes
   (`146+`, client-rect/box-model parity rows, no-cheat guard summaries) is not
   present in the current worktree and must not be treated as current evidence.
 - Current checked-in parity scope is still a mixed bitmap/golden lane. It is
   useful for regression pressure, but it is not yet broad Chromium layout-engine
-  parity.
+  parity. Exact Chrome/Simple pixel rows now exist for flex fixtures 18, 19,
+  20, 21, 23, and 24; fixture 22 remains blocked by text glyph raster/default
+  font differences.
 - Text input/titlebar-related fixtures that do exist in the current lane are
   `04_button`, `05_text_input`, `06_card_panel`, and `07_scrollable_list`.
 
@@ -29,6 +31,11 @@ Manual/focused parity checks:
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=05_text_input`
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=06_card_panel`
 - `bin/simple run src/app/wm_compare/html_compat.spl --only=07_scrollable_list`
+- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=19_flex_shrink_weights --update-baseline --simple-timeout-ms=1000`
+- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=20_flex_basis_override --update-baseline --simple-timeout-ms=1000`
+- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=21_flex_wrap_basic --update-baseline --simple-timeout-ms=1000`
+- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=23_flex_wrap_align_content_center --update-baseline --simple-timeout-ms=1000`
+- `SIMPLE_BINARY=<release-simple> bin/simple run src/app/wm_compare/html_compat.spl --only=24_flex_wrap_reverse_basic --update-baseline --simple-timeout-ms=1000`
 
 Regression checks:
 
@@ -41,6 +48,14 @@ Open gaps tied to the active browser objective:
 - No current checked-in focused fixture lane for deeper flex/grid/LayoutNG-style
   geometry comparison.
 - No current direct Chromium layout extraction/access path in this worktree.
+- Pixel rows for `19_flex_shrink_weights`, `20_flex_basis_override`,
+  `21_flex_wrap_basic`, `23_flex_wrap_align_content_center`, and
+  `24_flex_wrap_reverse_basic` now write real Chrome and Simple P6 PPMs through
+  live Chromium capture plus the Simple software layout renderer and compare
+  byte-identical. Fixture `22_flex_align_items_baseline` writes both PPMs but
+  remains uncommitted as an accepted row because the text glyph area differs by
+  507 pixels; exact completion requires browser-like font metrics, raster, and
+  antialiasing rather than tolerance or copied browser pixels.
 - Existing `05_text_input` bitmap baseline is still non-accepted evidence in
   `test/09_baselines/html_compat/05_text_input/report.sdn`, so input visual
   parity remains incomplete.

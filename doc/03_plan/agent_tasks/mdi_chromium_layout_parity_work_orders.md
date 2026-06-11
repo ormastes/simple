@@ -208,7 +208,12 @@ Prove and harden the requested GUI stack:
   renderer worker path and binary P6 PPM serialization; with `SIMPLE_BINARY`
   set to the current release runtime, the non-skip fixture-18 run writes
   `simple.ppm`, records `RESULT: EXACT match`, and the Chrome/Simple PPMs are
-  byte-identical. Remaining pixel-baseline work is fixtures 19-24.
+  byte-identical. The same real capture path now records exact, byte-identical
+  Chrome/Simple PPM rows for fixtures 19, 20, 21, 23, and 24. Fixture 22 remains
+  blocked honestly: it writes both PPMs but differs by 507 pixels inside the
+  text glyph bounding box, so exact text pixel parity still requires a real
+  browser-like font metric/raster/antialiasing path rather than tolerance or
+  copied browser pixels.
   Tracked in
   `doc/08_tracking/bug/html_compat_flex_pixel_baselines_missing_2026-06-11.md`.
 - Famous-site corpus div geometry evidence (2026-06-11):
