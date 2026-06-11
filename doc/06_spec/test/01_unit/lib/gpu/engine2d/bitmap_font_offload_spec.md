@@ -27,7 +27,7 @@ bitmap_font_offload_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -114,6 +114,51 @@ expect(evidence.reason).to_equal("runtime-not-ready")
 
 </details>
 
+#### marks bitmap glyph raster production ready only after checksum-matched readback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val matched = bitmap_glyph_raster_readback_evidence("cuda", 8, 4, 4096, 0, 77, true, true, true, 1234, 1234)
+
+expect(matched.gpu_glyph_rasterized).to_equal(true)
+expect(matched.production_ready).to_equal(true)
+expect(matched.execution.device_executed).to_equal(true)
+expect(matched.status_code).to_equal("gpu-glyph-raster-readback-matched")
+expect(matched.reason).to_equal("bitmap-glyph-raster-gpu-readback-matched")
+expect(matched.diagnostic_text()).to_contain("op=bitmap_glyph_raster")
+```
+
+</details>
+
+#### keeps bitmap glyph raster incomplete without readback or checksum match
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val no_readback = bitmap_glyph_raster_readback_evidence("cuda", 8, 4, 4096, 0, 77, true, true, false, 1234, 1234)
+val mismatch = bitmap_glyph_raster_readback_evidence("cuda", 8, 4, 4096, 0, 77, true, true, true, 1234, 999)
+val not_submitted = bitmap_glyph_raster_readback_evidence("cuda", 8, 4, 0, 0, 77, true, true, true, 1234, 1234)
+
+expect(no_readback.gpu_glyph_rasterized).to_equal(false)
+expect(no_readback.production_ready).to_equal(false)
+expect(no_readback.status_code).to_equal("gpu-glyph-raster-readback-unavailable")
+expect(mismatch.gpu_glyph_rasterized).to_equal(false)
+expect(mismatch.status_code).to_equal("gpu-glyph-raster-readback-mismatch")
+expect(not_submitted.gpu_glyph_rasterized).to_equal(false)
+expect(not_submitted.status_code).to_equal("gpu-glyph-raster-not-submitted")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -133,8 +178,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

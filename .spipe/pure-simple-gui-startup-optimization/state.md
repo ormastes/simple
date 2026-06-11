@@ -612,3 +612,15 @@ dev-done
   glyph pixels.
 - verify: Optimizer scans completed for this slice. Counts: ROCm session 38
   and ROCm session contract spec 2 remaining static opportunities.
+- impl: Added bitmap glyph raster readback evidence.
+  `bitmap_glyph_raster_readback_evidence(...)` composes the generated
+  `bitmap_glyph_raster` execution request, submit result, and checksum readback
+  evidence. It marks bitmap glyph rasterization production-ready only when the
+  generated kernel submitted and returned a checksum matching the expected
+  glyph pixels.
+- verify: Focused bitmap-font offload check passes and bitmap-font offload spec
+  now passes 5/5. Generated manual was refreshed under `doc/06_spec`. This adds
+  a strict proof boundary for real device runs; it does not by itself provide a
+  hardware readback sample on this host.
+- verify: Optimizer scans completed for this slice. Counts: bitmap-font offload
+  14 and bitmap-font offload spec 0 remaining static opportunities.

@@ -4,7 +4,16 @@
 # copy/upload lanes where available. This wrapper makes that state explicit so
 # GPU copy evidence is not mistaken for GPU-side glyph rasterization.
 
-use std.gpu.engine2d.generated_kernel_dispatch.{Generated2DOperationProvenance, generated_2d_operation_provenance}
+use std.gpu.engine2d.generated_kernel_dispatch.{
+    GENERATED_2D_BITMAP_GLYPH_RASTER,
+    Generated2DOperationProvenance,
+    Generated2DKernelExecutionEvidence,
+    Generated2DKernelSubmitResult,
+    generated_2d_execution_evidence,
+    generated_2d_execution_request,
+    generated_2d_operation_provenance,
+    generated_2d_submit_result
+}
 
 class BitmapFontOffloadEvidence:
     backend_name: text
@@ -46,6 +55,39 @@ class BitmapFontOffloadEvidence:
     fn diagnostic_text() -> text:
         "BitmapFontOffloadEvidence[backend={self.backend_name} size={self.width}x{self.height} generated_ready={self.generated_ready.to_text()} cpu_glyph_preprocess={self.cpu_glyph_preprocess_required.to_text()} gpu_copy_upload_ready={self.gpu_copy_upload_ready.to_text()} gpu_glyph_raster_plan_ready={self.gpu_glyph_raster_plan_ready.to_text()} gpu_glyph_rasterized={self.gpu_glyph_rasterized.to_text()} production_ready={self.production_ready.to_text()} status={self.status_code} reason={self.reason} generated={self.generated.diagnostic_text()} raster_generated={self.glyph_raster_generated.diagnostic_text()}]"
 
+class BitmapGlyphRasterReadbackEvidence:
+    backend_name: text
+    width: i64
+    height: i64
+    args_ptr: i64
+    submit: Generated2DKernelSubmitResult
+    execution: Generated2DKernelExecutionEvidence
+    gpu_glyph_rasterized: bool
+    production_ready: bool
+    status_code: text
+    reason: text
+
+    static fn create(backend: text, width: i64, height: i64, args_ptr: i64, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64, runtime_available: bool, backend_submit_ok: bool, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> BitmapGlyphRasterReadbackEvidence:
+        val request = generated_2d_execution_request(backend, GENERATED_2D_BITMAP_GLYPH_RASTER, width, height, module_or_queue_handle, kernel_or_pipeline_handle, args_ptr)
+        val submit = generated_2d_submit_result(request, runtime_available, backend_submit_ok)
+        val execution = generated_2d_execution_evidence(submit, readback_available, expected_checksum, actual_checksum)
+        val ready = execution.device_executed
+        BitmapGlyphRasterReadbackEvidence(
+            backend_name: backend,
+            width: width,
+            height: height,
+            args_ptr: args_ptr,
+            submit: submit,
+            execution: execution,
+            gpu_glyph_rasterized: ready,
+            production_ready: ready,
+            status_code: _bitmap_glyph_raster_readback_status(execution),
+            reason: _bitmap_glyph_raster_readback_reason(execution)
+        )
+
+    fn diagnostic_text() -> text:
+        "BitmapGlyphRasterReadbackEvidence[backend={self.backend_name} size={self.width}x{self.height} args={self.args_ptr} gpu_glyph_rasterized={self.gpu_glyph_rasterized.to_text()} production_ready={self.production_ready.to_text()} status={self.status_code} reason={self.reason} execution={self.execution.summary()}]"
+
 fn _bitmap_font_offload_status(generated: Generated2DOperationProvenance, raster_generated: Generated2DOperationProvenance, copy_ready: bool, raster_plan_ready: bool) -> text:
     if not generated.ready:
         return generated.typed_status
@@ -72,5 +114,18 @@ fn _bitmap_font_offload_reason(generated: Generated2DOperationProvenance, raster
         return "bitmap-font-glyphs-rasterized-on-cpu"
     "bitmap-font-generated-copy-missing"
 
+fn _bitmap_glyph_raster_readback_status(execution: Generated2DKernelExecutionEvidence) -> text:
+    if execution.device_executed:
+        return "gpu-glyph-raster-readback-matched"
+    "gpu-glyph-raster-" + execution.status_code
+
+fn _bitmap_glyph_raster_readback_reason(execution: Generated2DKernelExecutionEvidence) -> text:
+    if execution.device_executed:
+        return "bitmap-glyph-raster-gpu-readback-matched"
+    execution.reason
+
 fn bitmap_font_offload_evidence(backend: text, width: i64, height: i64, runtime_ready: bool, module_ready: bool, args_ptr: i64) -> BitmapFontOffloadEvidence:
     BitmapFontOffloadEvidence.create(backend, width, height, runtime_ready, module_ready, args_ptr)
+
+fn bitmap_glyph_raster_readback_evidence(backend: text, width: i64, height: i64, args_ptr: i64, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64, runtime_available: bool, backend_submit_ok: bool, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> BitmapGlyphRasterReadbackEvidence:
+    BitmapGlyphRasterReadbackEvidence.create(backend, width, height, args_ptr, module_or_queue_handle, kernel_or_pipeline_handle, runtime_available, backend_submit_ok, readback_available, expected_checksum, actual_checksum)
