@@ -20,6 +20,9 @@ boundary is a helper that:
 
 That helper still crashes on current-source native with `EXIT=139`.
 
+That hosted helper symptom now sits above the smaller generic seed blocker in
+`doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md`.
+
 ## Current Minimal Probe
 
 ```simple
@@ -63,10 +66,12 @@ crash” or “channels crash”.
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
 - `doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md`
 - `doc/08_tracking/bug/multicore_green_worker_callback_registry_native_blocker_2026-06-11.md`
+- `doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md`
 
 The older worker-callback registry blocker is now closed. The higher
 resumable-stepper blocker remains open above this narrower helper
-handle-array-plus-return boundary.
+handle-array-plus-return boundary. The newer lower helper-print-return blocker
+now sits beneath this hosted symptom.
 
 ## Executable Evidence
 
