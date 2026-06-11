@@ -36,6 +36,15 @@ Current hosted multicore-green evidence does not yet prove:
 - long-running CPU work is preempted or yield-forced with a host-side contract
 - host fairness semantics comparable to Go's scheduler under sustained loop load
 
+Current negative hosted evidence now also includes:
+
+- `test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl`
+  proves that with hosted pool parallelism pinned to `2`, two sleeping tasks
+  keep a third quick task pending for at least the first 30ms window on both
+  source-run and standalone native paths
+- the current hosted runtime therefore has no executable evidence yet for
+  blocking compensation analogous to Go's scheduler behavior
+
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
 lane has equivalent fairness/preemption guarantees.
