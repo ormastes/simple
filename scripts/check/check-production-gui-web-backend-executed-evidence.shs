@@ -38,9 +38,34 @@ cat >"$EVIDENCE_SRC" <<'SIMPLE'
 use app.wm_compare.production_gui_web_renderer_parity.{run_backend_executed_gui_widget_scene_parity}
 
 fn main():
+    val sample_count: i64 = 3
     val report = run_backend_executed_gui_widget_scene_parity(16, 16)
     val metal_ok = if report.metal_resolved_backend == "metal": report.metal_gpu_frame_complete and report.metal_gpu_readback_pixel_count == 16 * 16 else: true
-    print "production_gui_backend_status=" + (if report.exact_backend_parity and report.cpu_simd_total_hits > 0 and metal_ok: "pass" else: "fail")
+    var all_samples_pass = report.exact_backend_parity and report.cpu_simd_total_hits > 0 and metal_ok and report.timing_budget_status == "pass"
+    var min_total_elapsed_us = report.total_elapsed_us
+    var max_total_elapsed_us = report.total_elapsed_us
+    var sum_total_elapsed_us = report.total_elapsed_us
+    var min_total_pixels_per_second = report.total_pixels_per_second
+    var max_total_pixels_per_second = report.total_pixels_per_second
+    var sum_total_pixels_per_second = report.total_pixels_per_second
+    var sample_idx: i64 = 1
+    while sample_idx < sample_count:
+        val sample = run_backend_executed_gui_widget_scene_parity(16, 16)
+        val sample_metal_ok = if sample.metal_resolved_backend == "metal": sample.metal_gpu_frame_complete and sample.metal_gpu_readback_pixel_count == 16 * 16 else: true
+        if not (sample.exact_backend_parity and sample.cpu_simd_total_hits > 0 and sample_metal_ok and sample.timing_budget_status == "pass"):
+            all_samples_pass = false
+        if sample.total_elapsed_us < min_total_elapsed_us:
+            min_total_elapsed_us = sample.total_elapsed_us
+        if sample.total_elapsed_us > max_total_elapsed_us:
+            max_total_elapsed_us = sample.total_elapsed_us
+        if sample.total_pixels_per_second < min_total_pixels_per_second:
+            min_total_pixels_per_second = sample.total_pixels_per_second
+        if sample.total_pixels_per_second > max_total_pixels_per_second:
+            max_total_pixels_per_second = sample.total_pixels_per_second
+        sum_total_elapsed_us = sum_total_elapsed_us + sample.total_elapsed_us
+        sum_total_pixels_per_second = sum_total_pixels_per_second + sample.total_pixels_per_second
+        sample_idx = sample_idx + 1
+    print "production_gui_backend_status=" + (if all_samples_pass: "pass" else: "fail")
     print "production_gui_backend_width=" + report.width.to_text()
     print "production_gui_backend_height=" + report.height.to_text()
     print "production_gui_backend_software_resolved=" + report.software_resolved_backend
@@ -83,6 +108,13 @@ fn main():
     print "production_gui_backend_timing_budget_us=" + report.timing_budget_us.to_text()
     print "production_gui_backend_timing_budget_status=" + report.timing_budget_status
     print "production_gui_backend_timing_budget_reason=" + report.timing_budget_reason
+    print "production_gui_backend_sample_count=" + sample_count.to_text()
+    print "production_gui_backend_total_elapsed_us_min=" + min_total_elapsed_us.to_text()
+    print "production_gui_backend_total_elapsed_us_avg=" + (sum_total_elapsed_us / sample_count).to_text()
+    print "production_gui_backend_total_elapsed_us_max=" + max_total_elapsed_us.to_text()
+    print "production_gui_backend_total_pixels_per_second_min=" + min_total_pixels_per_second.to_text()
+    print "production_gui_backend_total_pixels_per_second_avg=" + (sum_total_pixels_per_second / sample_count).to_text()
+    print "production_gui_backend_total_pixels_per_second_max=" + max_total_pixels_per_second.to_text()
 SIMPLE
 
 if [ ! -x "$SIMPLE_BIN" ]; then
@@ -153,7 +185,14 @@ else
                 production_gui_backend_total_pixels_per_second \
                 production_gui_backend_timing_budget_us \
                 production_gui_backend_timing_budget_status \
-                production_gui_backend_timing_budget_reason
+                production_gui_backend_timing_budget_reason \
+                production_gui_backend_sample_count \
+                production_gui_backend_total_elapsed_us_min \
+                production_gui_backend_total_elapsed_us_avg \
+                production_gui_backend_total_elapsed_us_max \
+                production_gui_backend_total_pixels_per_second_min \
+                production_gui_backend_total_pixels_per_second_avg \
+                production_gui_backend_total_pixels_per_second_max
             do
                 echo "$key=$(field_of "$key")"
             done
@@ -189,6 +228,9 @@ status="$(field_of production_gui_backend_status "$ENV_PATH" 2>/dev/null || sed 
     echo "- Timing budget us: $(sed -n 's/^production_gui_backend_timing_budget_us=//p' "$ENV_PATH" | tail -n 1)"
     echo "- Timing budget status: $(sed -n 's/^production_gui_backend_timing_budget_status=//p' "$ENV_PATH" | tail -n 1)"
     echo "- Timing budget reason: $(sed -n 's/^production_gui_backend_timing_budget_reason=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Sample count: $(sed -n 's/^production_gui_backend_sample_count=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Total elapsed us min/avg/max: $(sed -n 's/^production_gui_backend_total_elapsed_us_min=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_total_elapsed_us_avg=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_total_elapsed_us_max=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- Total pixels/s min/avg/max: $(sed -n 's/^production_gui_backend_total_pixels_per_second_min=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_total_pixels_per_second_avg=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_total_pixels_per_second_max=//p' "$ENV_PATH" | tail -n 1)"
     echo "- First pixels (software/cpu_simd/metal/gpu): $(sed -n 's/^production_gui_backend_software_first_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_cpu_simd_first_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_metal_first_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_metal_gpu_first_pixel=//p' "$ENV_PATH" | tail -n 1)"
     echo "- Rect pixels (software/cpu_simd/metal/gpu): $(sed -n 's/^production_gui_backend_software_rect_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_cpu_simd_rect_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_metal_rect_pixel=//p' "$ENV_PATH" | tail -n 1) / $(sed -n 's/^production_gui_backend_metal_gpu_rect_pixel=//p' "$ENV_PATH" | tail -n 1)"
     echo "- blur/tolerance used: false"

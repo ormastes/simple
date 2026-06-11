@@ -44,6 +44,12 @@ Updated: 2026-06-11
   elapsed time. Evidence: `production_gui_web_renderer_parity_hardening_spec.spl`
   asserts positive throughput, and the backend evidence wrapper emits throughput
   fields for software, CPU SIMD, Metal, and total render paths.
+- this commit -- backend render sample aggregation: the backend-executed evidence
+  wrapper now runs three reduced-scene samples and emits min/avg/max total
+  elapsed time plus min/avg/max total throughput. Evidence:
+  `check-production-gui-web-backend-executed-evidence.shs` fails if any sample
+  loses exact parity, CPU SIMD execution, Metal readback requirements, or timing
+  budget status.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
@@ -53,7 +59,7 @@ Updated: 2026-06-11
 
 1. Collect and record additional startup/render evidence (timing + throughput + parity)
    - Run and archive the full production GUI web renderer parity evidence wrapper with
-     the new timing and throughput fields.
+     the new timing, throughput, and aggregate sample fields.
    - Add broader throughput thresholds after enough host-stable samples exist.
 2. Provide GPU/font offload proof
    - Demonstrate measured proof of real GPU/font offload path behavior or explicit typed unavailability.

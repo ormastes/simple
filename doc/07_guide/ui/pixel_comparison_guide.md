@@ -80,6 +80,10 @@ backend-executed reduced scene and 1000000 us for generated widget rendering.
 Use the matching `*_pixels_per_second` fields for cross-resolution comparisons;
 raw elapsed microseconds are useful for a fixed fixture, while throughput is the
 stable signal when scene dimensions change.
+The backend-executed wrapper records three samples by default and emits
+`total_elapsed_us_min/avg/max` plus `total_pixels_per_second_min/avg/max`; use
+those aggregate fields for regression triage before comparing individual sample
+rows.
 
 The generated-GUI matrix intentionally records
 `text_normalization_pixels=269` for the fixture-specific text antialiasing
