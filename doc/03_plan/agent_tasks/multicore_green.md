@@ -16,9 +16,13 @@ Date: 2026-06-06
 - The remaining direct SMF blocker in this lane is function-valued global and
   global-array storage/codegen, tracked in
   `doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md`.
-- SimpleOS green-carrier live and final handoff evidence remains tracked
-  separately through the hosted specs and
-  `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`.
+- SimpleOS green-carrier hosted, live, and final AP ring/user handoff evidence
+  is current in
+  `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`; the final
+  handoff lane is closed by the opt-in
+  `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` marker triplet proof and
+  remains separately gated so readiness markers cannot be mistaken for final
+  hardware proof.
 
 ## Coordination Contract
 
@@ -236,3 +240,21 @@ Each agent reports:
 - optimizer output for touched `.spl` files;
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 - unresolved blockers or files intentionally left untouched.
+
+## Current Sync Status (2026-06-11)
+
+- `origin/main` currently contains `1318e56068`
+  (`docs: close simpleos green handoff status drift`) below the newer unrelated
+  tip `fb197d30a1`.
+- The multicore-green lane already synced:
+  - Docker auto-binary selection preferring `bin/simple` / `bin/release/simple`
+    while leaving `src/compiler_rust/target/debug/simple` as an explicit
+    regression override;
+  - the fixed generated `fanout_stress_multicore_green.spl` source shape;
+  - refreshed Go-vs-Simple research and SimpleOS evidence docs;
+  - closure-aligned architecture, design, tracker, and report text for the
+    final SimpleOS AP ring/user handoff lane.
+- The shared workspace remains dirty outside this lane because other sessions
+  are active in the checkout; future multicore-green syncs must keep unrelated
+  files out of lane commits unless the user explicitly asks for an integration
+  commit.
