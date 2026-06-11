@@ -88,11 +88,9 @@ replacement test framework.
 
 #### executes a Draw IR batch through the Simple2D advanced interface with embedding offsets
 
-1. var engine = Engine2D create with backend
-
-2. engine clear
-
-3. draw ir rect
+- var engine = Engine2D create with backend
+- engine clear
+- draw ir rect
    - Expected: semantic.check_exists("body").unwrap() is true
    - Expected: semantic.check_visible("body").unwrap() is true
    - Expected: body.kind equals `rect`
@@ -103,12 +101,11 @@ replacement test framework.
    - Expected: result.rendered_command_count equals `1`
    - Expected: result.skipped_command_count equals `0`
    - Expected: result.pixels[8 * 32 + 6] equals `RED`
-
-4. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -144,24 +141,20 @@ engine.shutdown()
 
 #### executes a composed Draw IR scene in batch order
 
-1. var engine = Engine2D create with backend
-
-2. engine clear
-
-3. draw ir rect
-
-4. draw ir rect
+- var engine = Engine2D create with backend
+- engine clear
+- draw ir rect
+- draw ir rect
    - Expected: result.unit_id equals `wm-composite`
    - Expected: result.rendered_command_count equals `2`
    - Expected: result.skipped_command_count equals `0`
    - Expected: result.pixels[1 * 32 + 1] equals `RED`
    - Expected: result.pixels[8 * 32 + 7] equals `GREEN`
-
-5. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -191,18 +184,16 @@ engine.shutdown()
 
 #### reports unsupported Draw IR commands without rendering them
 
-1. var engine = Engine2D create with backend
-
-2. engine clear
+- var engine = Engine2D create with backend
+- engine clear
    - Expected: result.rendered_command_count equals `0`
    - Expected: result.skipped_command_count equals `1`
    - Expected: result.pixels[1 * 16 + 1] equals `BG`
-
-3. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

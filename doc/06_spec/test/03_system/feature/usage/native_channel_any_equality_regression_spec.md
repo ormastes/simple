@@ -91,18 +91,21 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/native_c
    - Expected: write_code equals `0`
 - Source-run now keeps integer equality after recv()
    - Expected: run_code equals `0`
+   - Expected: run_out equals ``
 - Hosted native compile still succeeds
    - Expected: compile_code equals `0`
 - The standalone native probe now exits cleanly on the direct channel path
    - Expected: native_code equals `0`
-- The remaining multicore-green channel blocker doc points higher at the pool-worker path
+   - Expected: native_out equals ``
+- The tracker records direct channel equality as green and the remaining blocker above the pool-worker path
    - Expected: tracker_code equals `0`
+   - Expected: tracker_out equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,10 +115,9 @@ expect(write_out).to_equal("")
 expect(write_code).to_equal(0)
 
 step("Source-run now keeps integer equality after recv()")
-val (run_out, run_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
+val (run_out, run_code) = shell("sh -c '" + SIMPLE_BIN + " run " + SOURCE_PATH + " > /tmp/native_channel_any_eq_source.out 2>&1 && grep -q 7 /tmp/native_channel_any_eq_source.out && grep -q true /tmp/native_channel_any_eq_source.out'")
 expect(run_code).to_equal(0)
-expect(run_out).to_contain("7")
-expect(run_out).to_contain("true")
+expect(run_out).to_equal("")
 
 step("Hosted native compile still succeeds")
 val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
@@ -123,16 +125,14 @@ expect(compile_code).to_equal(0)
 expect(compile_out).to_contain("Compiled")
 
 step("The standalone native probe now exits cleanly on the direct channel path")
-val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/native_channel_any_eq.out 2>&1; code=$?; cat /tmp/native_channel_any_eq.out; echo EXIT=$code'")
+val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " > /tmp/native_channel_any_eq.out 2>&1 && grep -q 7 /tmp/native_channel_any_eq.out && grep -q true /tmp/native_channel_any_eq.out'")
 expect(native_code).to_equal(0)
-expect(native_out).to_contain("true")
-expect(native_out).to_contain("EXIT=0")
+expect(native_out).to_equal("")
 
-step("The remaining multicore-green channel blocker doc points higher at the pool-worker path")
-val (tracker_out, tracker_code) = shell("cat doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md")
+step("The tracker records direct channel equality as green and the remaining blocker above the pool-worker path")
+val (tracker_out, tracker_code) = shell("sh -c 'grep -q \"direct main-thread\" doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md && grep -q \"now green again\" doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md && grep -q \"hosted pool worker sends payloads\" doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md'")
 expect(tracker_code).to_equal(0)
-expect(tracker_out).to_contain("direct main-thread")
-expect(tracker_out).to_contain("still fails once a pool worker")
+expect(tracker_out).to_equal("")
 ```
 
 </details>

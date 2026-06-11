@@ -1,6 +1,6 @@
 # Graphics Backend Acceleration Specification
 
-> 1. var st = AccelProbeStatus available
+> <details>
 
 <!-- sdn-diagram:id=graphics_backend_acceleration_spec.arch -->
 <details class="sdn-source">
@@ -42,7 +42,7 @@ graphics_backend_acceleration_spec
 
 #### available status has correct code
 
-1. var st = AccelProbeStatus available
+- var st = AccelProbeStatus available
    - Expected: st.code equals `available`
 
 
@@ -61,7 +61,7 @@ expect(st.code).to_equal("available")
 
 #### unavailable status is not available
 
-1. var st = AccelProbeStatus unavailable
+- var st = AccelProbeStatus unavailable
    - Expected: st.is_available() == false is true
 
 
@@ -80,7 +80,7 @@ expect(st.is_available() == false).to_equal(true)
 
 #### fallback status has fallback code
 
-1. var st = AccelProbeStatus fallback
+- var st = AccelProbeStatus fallback
    - Expected: st.code equals `fallback`
 
 
@@ -101,7 +101,7 @@ expect(st.code).to_equal("fallback")
 
 #### create returns a result with empty device and none shader format
 
-1. var r = AccelProbeResult create
+- var r = AccelProbeResult create
    - Expected: r.device_name equals ``
    - Expected: r.shader_format equals `none`
 
@@ -122,7 +122,7 @@ expect(r.shader_format).to_equal("none")
 
 #### with_device sets device name and shader format
 
-1. var r = AccelProbeResult with device
+- var r = AccelProbeResult with device
    - Expected: r.device_name equals `AMD GPU`
    - Expected: r.shader_format equals `spirv`
 
@@ -143,7 +143,7 @@ expect(r.shader_format).to_equal("spirv")
 
 #### is_usable reflects status availability
 
-1. var r = AccelProbeResult create
+- var r = AccelProbeResult create
    - Expected: r.is_usable() is true
 
 
@@ -162,8 +162,8 @@ expect(r.is_usable()).to_equal(true)
 
 #### summary includes backend name and status code
 
-1. var r = AccelProbeResult create
-2. var s = r summary
+- var r = AccelProbeResult create
+- var s = r summary
 
 
 <details>
@@ -184,8 +184,8 @@ expect(s).to_contain("cuda")
 
 #### rejects GLSL shader format
 
-1. var fac = StrictAccelFactory permissive
-2. var r = AccelProbeResult with device
+- var fac = StrictAccelFactory permissive
+- var r = AccelProbeResult with device
    - Expected: fac.is_admitted(r) == false is true
 
 
@@ -205,8 +205,8 @@ expect(fac.is_admitted(r) == false).to_equal(true)
 
 #### admits SPIR-V shader format in permissive mode
 
-1. var fac = StrictAccelFactory permissive
-2. var r = AccelProbeResult with device
+- var fac = StrictAccelFactory permissive
+- var r = AccelProbeResult with device
    - Expected: fac.is_admitted(r) is true
 
 
@@ -226,8 +226,8 @@ expect(fac.is_admitted(r)).to_equal(true)
 
 #### strict mode rejects wrong backend name
 
-1. var fac = StrictAccelFactory create
-2. var r = AccelProbeResult with device
+- var fac = StrictAccelFactory create
+- var r = AccelProbeResult with device
    - Expected: fac.is_admitted(r) == false is true
 
 
@@ -247,9 +247,9 @@ expect(fac.is_admitted(r) == false).to_equal(true)
 
 #### rejection reason mentions GLSL for glsl format
 
-1. var fac = StrictAccelFactory permissive
-2. var r = AccelProbeResult with device
-3. var reason = fac rejection reason
+- var fac = StrictAccelFactory permissive
+- var r = AccelProbeResult with device
+- var reason = fac rejection reason
 
 
 <details>
@@ -271,7 +271,7 @@ expect(reason).to_contain("GLSL")
 
 #### starts uninitialized with invalid pipeline
 
-1. var b = VulkanAccelBackend create
+- var b = VulkanAccelBackend create
    - Expected: b.initialized == false is true
    - Expected: b.pipeline.is_valid() == false is true
 
@@ -292,8 +292,8 @@ expect(b.pipeline.is_valid() == false).to_equal(true)
 
 #### init makes backend ready with valid SPIR-V pipeline
 
-1. var b = VulkanAccelBackend create
-2. var b2 = b init
+- var b = VulkanAccelBackend create
+- var b2 = b init
    - Expected: b2.is_ready() is true
    - Expected: b2.pipeline.shader_is_spirv() is true
 
@@ -315,7 +315,7 @@ expect(b2.pipeline.shader_is_spirv()).to_equal(true)
 
 #### name is vulkan-accel
 
-1. var b = VulkanAccelBackend create
+- var b = VulkanAccelBackend create
    - Expected: b.name() equals `vulkan-accel`
 
 
@@ -334,8 +334,8 @@ expect(b.name()).to_equal("vulkan-accel")
 
 #### readback_buf_size equals width times height times 4 after init
 
-1. var b = VulkanAccelBackend create
-2. var b2 = b init
+- var b = VulkanAccelBackend create
+- var b2 = b init
    - Expected: b2.readback_buf_size equals `256`
 
 
@@ -357,9 +357,9 @@ expect(b2.readback_buf_size).to_equal(256)
 
 #### dispatch_fill returns a dispatch with non-zero grid
 
-1. var b = CudaAccelBackend create
-2. var b2 = b init
-3. var d = b2 dispatch fill
+- var b = CudaAccelBackend create
+- var b2 = b init
+- var d = b2 dispatch fill
    - Expected: d.grid_x > 0 is true
 
 
@@ -380,10 +380,10 @@ expect(d.grid_x > 0).to_equal(true)
 
 #### mark_complete transitions dispatch to completed
 
-1. var b = CudaAccelBackend create
-2. var b2 = b init
-3. var d = b2 dispatch fill
-4. var d2 = d mark complete
+- var b = CudaAccelBackend create
+- var b2 = b init
+- var d = b2 dispatch fill
+- var d2 = d mark complete
    - Expected: d2.is_complete() is true
 
 
@@ -405,8 +405,8 @@ expect(d2.is_complete()).to_equal(true)
 
 #### readback_size equals width times height times 4
 
-1. var b = CudaAccelBackend create
-2. var b2 = b init
+- var b = CudaAccelBackend create
+- var b2 = b init
    - Expected: b2.readback_size() equals `1024`
 
 
@@ -428,8 +428,8 @@ expect(b2.readback_size()).to_equal(1024)
 
 #### without platform init leaves backend not ready
 
-1. var b = MetalAccelBackend create
-2. var b2 = b init
+- var b = MetalAccelBackend create
+- var b2 = b init
    - Expected: b2.is_ready() == false is true
 
 
@@ -449,9 +449,9 @@ expect(b2.is_ready() == false).to_equal(true)
 
 #### with platform enabled init makes backend ready
 
-1. var b = MetalAccelBackend create
-2. var b2 = b with platform
-3. var b3 = b2 init
+- var b = MetalAccelBackend create
+- var b2 = b with platform
+- var b3 = b2 init
    - Expected: b3.is_ready() is true
 
 
@@ -472,10 +472,10 @@ expect(b3.is_ready()).to_equal(true)
 
 #### submit fails when backend not initialized
 
-1. var b = MetalAccelBackend create
-2. var cmdbuf = b make command buffer
-3. var cmdbuf2 = cmdbuf commit
-4. var result = b submit
+- var b = MetalAccelBackend create
+- var cmdbuf = b make command buffer
+- var cmdbuf2 = cmdbuf commit
+- var result = b submit
    - Expected: result.is_ok() == false is true
 
 
@@ -497,12 +497,12 @@ expect(result.is_ok() == false).to_equal(true)
 
 #### submit succeeds when initialized and command buffer committed
 
-1. var b = MetalAccelBackend create
-2. var b2 = b with platform
-3. var b3 = b2 init
-4. var cmdbuf = b3 make command buffer
-5. var cmdbuf2 = cmdbuf commit
-6. var result = b3 submit
+- var b = MetalAccelBackend create
+- var b2 = b with platform
+- var b3 = b2 init
+- var cmdbuf = b3 make command buffer
+- var cmdbuf2 = cmdbuf commit
+- var result = b3 submit
    - Expected: result.is_ok() is true
 
 
@@ -526,11 +526,11 @@ expect(result.is_ok()).to_equal(true)
 
 #### submit fails when command buffer not committed
 
-1. var b = MetalAccelBackend create
-2. var b2 = b with platform
-3. var b3 = b2 init
-4. var cmdbuf = b3 make command buffer
-5. var result = b3 submit
+- var b = MetalAccelBackend create
+- var b2 = b with platform
+- var b3 = b2 init
+- var cmdbuf = b3 make command buffer
+- var result = b3 submit
    - Expected: result.is_ok() == false is true
 
 
@@ -553,7 +553,7 @@ expect(result.is_ok() == false).to_equal(true)
 
 #### pipeline thread_groups_for returns zero when not valid
 
-1. var p = MetalAccelPipeline unavailable
+- var p = MetalAccelPipeline unavailable
    - Expected: p.thread_groups_for(1024) equals `0`
 
 
