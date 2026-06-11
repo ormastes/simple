@@ -36,8 +36,10 @@ SimpleOS scheduler work distinct and verifiable.
   context-switch handoff. Final AP ring/user handoff evidence is claimable only
   when the live QEMU lane observes `HW_HANDOFF_PASS=true`,
   `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP
-  ring/user path. The final handoff blocker is tracked in
-  `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
+  ring/user path. The final handoff blocker record is
+  `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`,
+  which is now closed while the opt-in live gate remains the required proof
+  boundary for future claims.
 - REQ-MCG-008: The roadmap must track blocking integration, work stealing or
   per-worker queues, hosted `multicore_green_set_parallelism` /
   `multicore_green_parallelism` evidence as the initial Go `GOMAXPROCS`-like
