@@ -305,16 +305,12 @@ pub(crate) fn evaluate_expr(
                     Ok(Value::Nil)
                 }
                 _ => {
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::AWAIT_FAILED)
-                        .with_help("await can only be used on Future or Actor values");
-                    Err(CompileError::semantic_with_context(
-                        format!(
-                            "await failed: requires a Future or Actor handle, got {}",
-                            val.type_name()
-                        ),
-                        ctx,
-                    ))
+                    // Eager-async semantics: the interpreter evaluates async fn
+                    // bodies eagerly, so `await f()` receives the already-resolved
+                    // value (or a Simple-level Promise object). await_value extracts
+                    // resolved Promises and passes plain values through unchanged —
+                    // erroring here broke every direct `await async_fn()` call.
+                    crate::interpreter::async_support::await_value(val)
                 }
             }
         }

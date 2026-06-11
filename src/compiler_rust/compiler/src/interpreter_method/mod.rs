@@ -7,7 +7,7 @@ mod special;
 use super::{
     eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env,
     exec_function_with_values, find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods,
-    BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, TRAIT_IMPLS,
+    BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, TRAIT_IMPLS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
@@ -723,8 +723,14 @@ pub(crate) fn evaluate_method_call(
                 }
             }
 
-            // Methods defined directly in the enum body (or merged from impl blocks)
-            if let Some(enum_def) = enums.get(enum_name) {
+            // Methods defined directly in the enum body (or merged from impl blocks).
+            // Try the local `enums` map first, then fall back to GLOBAL_ENUMS so
+            // that methods on cross-module enums stored as struct fields are found.
+            let enum_def_opt = enums
+                .get(enum_name)
+                .cloned()
+                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+            if let Some(enum_def) = enum_def_opt {
                 for m in &enum_def.methods {
                     if m.name == method {
                         // For enum methods, we pass self as a special context

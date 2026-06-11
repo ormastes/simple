@@ -1,9 +1,13 @@
 # BUG: array push loop inside fn main + len() dumps core (native AND interpreter)
 
-Status: OPEN
+Status: FIXED (verified 2026-06-11)
 
 **Date:** 2026-06-11
-**Status:** OPEN
+**Status:** FIXED — no longer reproduces in interpreter (`bin/simple run` → 100)
+nor native (`bin/simple compile --native` → 100, exit 0); resolved by the
+x=x.push() store-miscompile family (0bf222e322) + stage4 chain fixes
+(2eae3b46c8). Pinned by regression spec
+`test/01_unit/compiler/interpreter/array_push_loop_local_len_spec.spl` (3/3).
 **Severity:** High (memory-safety crash, both execution modes)
 **Found by:** memory_audit_gc_nogc nogc verification (.spipe/memory_audit_gc_nogc/research_nogc_verify.md §7 B1)
 

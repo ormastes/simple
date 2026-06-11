@@ -1,6 +1,23 @@
 # Async/Await Interpreter Crashes - 2026-06-11
 
-Status: open (triaged 2026-06-11)
+Status: partially-fixed (2026-06-11) — await value corruption FIXED; generator/actor desugar scope + deep Promise/FutureValue reconcile still open
+
+**Fixed 2026-06-11:** the SIGSEGV had already become silent corruption
+(`await f()` always yielded 3 = NIL bit pattern in JIT mode; a semantic error
+in interpreter mode). Root causes fixed:
+- `rt_future_await` (runtime/src/value/async_gen.rs): non-Future input now
+  returns the value itself (eager-async identity), not NIL.
+- Interpreter `Expr::Await` (compiler/src/interpreter/expr.rs): non-Future/
+  non-Actor values route through `await_value` (Promise extract + passthrough)
+  instead of erroring.
+`await f()` now returns the body value in BOTH default-JIT and forced
+interpreter modes. Regression spec:
+`test/01_unit/compiler/interpreter/async_await_eager_value_spec.spl` (3/3).
+
+**Still open:** yield/generator + actor desugar HIR scope visibility; the
+deeper Promise-vs-FutureValue representation reconcile; real `Future<T>` inner
+type propagation (HIR still hardcodes I64 for await — masked by eager
+semantics, wrong once futures become lazy).
 
 ## Summary
 

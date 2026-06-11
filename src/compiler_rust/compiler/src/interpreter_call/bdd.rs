@@ -800,11 +800,21 @@ pub(super) fn eval_bdd_builtin(
                 return Ok(Some(Value::Bool(matched)));
             }
             // General `expect <expr>` / method-form receiver path.
-            // Do NOT eagerly mark failure here — the `.to_*()` matcher chain
-            // in interpreter_method/mod.rs is authoritative and will set or
-            // clear BDD_EXPECT_FAILED based on the actual comparison result.
-            // Eagerly marking Bool(false) here caused `expect(false).to_equal(false)`
-            // to fail even though the assertion passes.
+            // Do NOT eagerly mark failure for plain identifiers/literals — the
+            // `.to_*()` matcher chain in interpreter_method/mod.rs is
+            // authoritative and will set or clear BDD_EXPECT_FAILED based on
+            // the actual comparison result.  Eagerly marking Bool(false) here
+            // caused `expect(false).to_equal(false)` to fail even though the
+            // assertion passes.
+            //
+            // EXCEPTION: `expect(<call expr>)` with no matcher chain is a
+            // hollow false-green — the call result is returned but never
+            // checked.  For `Expr::Call` / `Expr::MethodCall` nodes we eagerly
+            // check truthiness so `expect(always_fails())` with no chain
+            // actually fails.  A downstream `.to_*()` chain is safe: it always
+            // overwrites BDD_EXPECT_FAILED with its own result, so pre-marking
+            // here is harmless for chained forms.
+            let is_call_expr = matches!(arg_expr, Expr::Call { .. } | Expr::MethodCall { .. });
             let value = eval_arg(
                 args,
                 0,
@@ -815,6 +825,15 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
+            if is_call_expr && !value.truthy() {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some(format!(
+                        "expected call result to be truthy, got {}",
+                        value.to_display_string(),
+                    ));
+                });
+            }
             Ok(Some(value))
         }
         "shared_examples" => {

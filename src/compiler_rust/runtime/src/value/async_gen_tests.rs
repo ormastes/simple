@@ -170,11 +170,12 @@ fn test_future_nil_body_func() {
 
 #[test]
 fn test_future_invalid_value() {
-    // Try to await a non-future value
+    // Awaiting a non-future is the identity (eager-async semantics): the value
+    // is already resolved. Returning NIL here was the silent-corruption bug
+    // where `await f()` yielded the NIL bit pattern instead of f's result.
     let not_a_future = RuntimeValue::from_int(42);
 
     let result = rt_future_await(not_a_future);
 
-    // Should return NIL for invalid input
-    assert!(result.is_nil());
+    assert_eq!(result.as_int(), 42);
 }

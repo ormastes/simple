@@ -77,7 +77,11 @@ pub extern "C" fn rt_future_new(body_func: u64, ctx: RuntimeValue) -> RuntimeVal
 #[no_mangle]
 pub extern "C" fn rt_future_await(future: RuntimeValue) -> RuntimeValue {
     let Some(f) = get_typed_ptr_mut::<RuntimeFuture>(future, HeapObjectType::Future) else {
-        return RuntimeValue::NIL;
+        // Eager-async semantics: async fn calls may already have produced their
+        // resolved value (no Future wrapper). Awaiting a non-Future is the
+        // identity, NOT NIL — returning NIL here made `await f()` silently
+        // yield the NIL bit pattern (printed as 3) for every eager call.
+        return future;
     };
     unsafe {
         // If already ready, return the result immediately
