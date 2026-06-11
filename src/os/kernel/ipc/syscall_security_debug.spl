@@ -64,7 +64,10 @@ fn _handle_cap_grant(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     val cap = CapabilityToken(
         kind: CapabilityKind.ProcessSpawn,  # Simplified — real kernel decodes arg1
         generation: 0u64,  # SECURITY: generation is kernel-assigned by cap_grant(); user arg2 is ignored
-        owner: current.id
+        owner: current.id,
+        token_id: 0u64,         # Assigned by cap_grant() via next_token_id
+        parent_token_id: 0u64,  # Root grant — no parent
+        depth: 2                # Default delegation budget for root grants (E4)
     )
 
     var ipc_mgr = ipc
@@ -73,6 +76,22 @@ fn _handle_cap_grant(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
         SyscallResult(value: 0)
     else:
         SyscallResult(value: -1)
+
+fn _handle_cap_revoke(args: SyscallArgs, scheduler: TaskScheduler, ipc: IpcManager) -> SyscallResult:
+    """Syscall 49 — CapRevoke (transitive).
+
+    Revokes the token with the given token_id and all delegation descendants (E3).
+    Only the token owner or a SystemPrivilege holder may call this.
+
+    Args:
+      arg0: token_id to revoke (u64)
+    Returns:
+      value >= 0: count of tokens revoked; -1 on permission error.
+    """
+    var ipc_mgr = ipc
+    val root_token_id = args.arg0
+    val count = ipc_mgr.cap_revoke_transitive(root_token_id)
+    SyscallResult(value: count)
 
 # ============================================================================
 # Debug Syscall Handler

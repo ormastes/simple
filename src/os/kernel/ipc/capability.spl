@@ -49,16 +49,21 @@ class CapabilityManager:
     Capability transfer between tasks uses generation counters:
     revoking a token bumps the generation, immediately invalidating
     all copies held by other tasks.
+
+    E3/E4 (2026-06-11): every token carries a token_id + parent_token_id for
+    transitive revocation lineage, and a depth budget for delegation depth enforcement.
     """
     records: [TaskCapRecord]
     next_generation: u64            # Global generation counter for tokens
+    next_token_id: u64              # Monotone token provenance counter (E3)
 
 impl CapabilityManager:
     static fn new() -> CapabilityManager:
         """Create an empty capability manager."""
         CapabilityManager(
             records: [],
-            next_generation: 1
+            next_generation: 1,
+            next_token_id: 1
         )
 
     # -- Checking ------------------------------------------------------------
@@ -100,14 +105,21 @@ impl CapabilityManager:
     # -- Granting / Revoking -------------------------------------------------
 
     me grant(from: TaskId, to: TaskId, cap: CapabilityToken) -> bool:
-        """Grant a capability from one task to another.
+        """Grant (delegate) a capability from one task to another.
 
-        The granting task must hold a capability of the same kind.
-        A new token is created with a fresh generation for the target.
+        E3: the child token receives token_id = next_token_id and
+            parent_token_id = cap.token_id so the lineage can be walked
+            by revoke_transitive().
+        E4: delegation requires cap.depth > 0; child gets depth = cap.depth - 1.
+            A zero-depth token cannot be delegated further (deny, not clamp).
         """
         # Verify the source task holds this capability
         val has_cap = self.check(from, cap.kind)
         if not has_cap:
+            return false
+
+        # E4: depth guard — deny delegation when budget is exhausted
+        if cap.depth <= 0:
             return false
 
         # spm-winfs-llm-suite AC-3: second gate — hierarchical privilege via
@@ -118,11 +130,16 @@ impl CapabilityManager:
         if not has_priv:
             return false
 
-        # Create a new token for the target
+        # Create a new token for the target (E3: provenance; E4: depth-1)
+        val child_tid = self.next_token_id
+        self.next_token_id = self.next_token_id + 1
         val new_token = CapabilityToken(
             kind: cap.kind,
             generation: self.next_generation,
-            owner: to.id
+            owner: to.id,
+            token_id: child_tid,
+            parent_token_id: cap.token_id,
+            depth: cap.depth - 1
         )
         self.next_generation = self.next_generation + 1
 
@@ -132,18 +149,22 @@ impl CapabilityManager:
         while idx < self.records.len():
             var rec = self.records[idx]
             if rec.task_id.id == to.id:
-                rec.caps.caps.push(new_token)
+                # Build a new caps list with the token appended (arrays are value types)
+                var new_caps_list: [CapabilityToken] = []
+                for existing_tok in rec.caps.caps:
+                    new_caps_list.push(existing_tok)
+                new_caps_list.push(new_token)
+                rec.caps.caps = new_caps_list
                 self.records[idx] = rec
                 return true
             idx = idx + 1
         false
 
     me revoke(cap: CapabilityToken) -> bool:
-        """Revoke a capability token.
+        """Revoke a capability token (owner-level, direct).
 
-        Removes the token from the owning task's capability set.
-        Because tokens carry generation counters, any stale copies
-        held elsewhere are automatically invalid.
+        Removes the token from the owning task's capability set only.
+        Use revoke_transitive() to also revoke all derived descendants.
         """
         val owner_id = TaskId(id: cap.owner)
         var idx = 0
@@ -167,6 +188,57 @@ impl CapabilityManager:
                 return true
             idx = idx + 1
         false
+
+    me revoke_transitive(root_token_id: u64) -> i64:
+        """Revoke a token AND all tokens in its delegation ancestry (E3).
+
+        Walks every record and removes any token whose token_id equals
+        root_token_id OR whose ancestry chain (via parent_token_id links)
+        includes root_token_id.  Uses an iterative worklist — no recursion.
+
+        Returns the count of tokens revoked across all records.
+        """
+        # Build the worklist of token_ids to revoke, starting with the root.
+        var worklist: [u64] = []
+        worklist.push(root_token_id)
+        var revoked_count: i64 = 0
+
+        # Process until no more descendants are discovered.
+        var wi = 0
+        while wi < worklist.len():
+            val current_id = worklist[wi]
+            wi = wi + 1
+
+            # Walk all records and remove tokens matching current_id; collect children.
+            var ri = 0
+            while ri < self.records.len():
+                var rec = self.records[ri]
+                var kept: [CapabilityToken] = []
+                for tok in rec.caps.caps:
+                    if tok.token_id == current_id:
+                        # This token is in the revocation set — collect its children
+                        # (any token whose parent_token_id == current_id will be
+                        #  caught when current_id's children are processed in later
+                        #  worklist iterations).
+                        revoked_count = revoked_count + 1
+                        # Schedule children: any token with parent = current_id
+                        # will be found in the next pass; we enqueue current_id's
+                        # own token_id so children are caught automatically above.
+                    else:
+                        kept.push(tok)
+                        # Enqueue child token_ids discovered in this pass
+                        if tok.parent_token_id == current_id:
+                            var already = false
+                            for wid in worklist:
+                                if wid == tok.token_id:
+                                    already = true
+                            if not already:
+                                worklist.push(tok.token_id)
+                rec.caps.caps = kept
+                self.records[ri] = rec
+                ri = ri + 1
+
+        revoked_count
 
     # -- Pledge / Unveil (Monotonic Restriction) -----------------------------
 
@@ -254,16 +326,21 @@ impl CapabilityManager:
         # full=true: unpledged full-trust set; full=false: empty pledged set
         var cap_tokens: [CapabilityToken] = []
         if full:
-            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: ""), generation: self.next_generation, owner: task.id))
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: ""), generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
             self.next_generation = self.next_generation + 1
-            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: ""), generation: self.next_generation, owner: task.id))
+            self.next_token_id = self.next_token_id + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: ""), generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
             self.next_generation = self.next_generation + 1
-            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileCreate(path_prefix: ""), generation: self.next_generation, owner: task.id))
+            self.next_token_id = self.next_token_id + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileCreate(path_prefix: ""), generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
             self.next_generation = self.next_generation + 1
-            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileExec(path_prefix: ""), generation: self.next_generation, owner: task.id))
+            self.next_token_id = self.next_token_id + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileExec(path_prefix: ""), generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
             self.next_generation = self.next_generation + 1
-            cap_tokens.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: self.next_generation, owner: task.id))
+            self.next_token_id = self.next_token_id + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
             self.next_generation = self.next_generation + 1
+            self.next_token_id = self.next_token_id + 1
         var caps = CapabilitySet(caps: cap_tokens, is_pledged: not full)
         val record = TaskCapRecord(
             task_id: task,
@@ -365,20 +442,30 @@ impl CapabilityManager:
         self.records.push(record)
 
 fn capability_set_from_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text) -> CapabilitySet:
-    """Map generated sandbox capability handles into kernel capabilities."""
+    """Map generated sandbox capability handles into kernel capabilities.
+
+    Sandbox-lowered tokens are root grants (parent_token_id=0, depth=2).
+    token_id is assigned sequentially starting at 1 within this function;
+    these tokens are not managed by the CapabilityManager token counter so
+    they use a local counter (sufficient for static sandbox grants).
+    """
     var caps: [CapabilityToken] = []
     var generation = 1u64
+    var local_tid = 1u64
     if sandbox_lowering_sdn.contains("ReadFile") or sandbox_lowering_sdn.contains("ReadDir"):
-        caps.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: generation, owner: task.id))
+        caps.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
         generation = generation + 1
+        local_tid = local_tid + 1
     if sandbox_lowering_sdn.contains("WriteFile") or sandbox_lowering_sdn.contains("WriteDir"):
-        caps.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: "/"), generation: generation, owner: task.id))
+        caps.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: "/"), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
         generation = generation + 1
+        local_tid = local_tid + 1
     if sandbox_lowering_sdn.contains("ProcessSpawner") or sandbox_lowering_sdn.contains("ProcessSpawn"):
-        caps.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: generation, owner: task.id))
+        caps.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
         generation = generation + 1
+        local_tid = local_tid + 1
     if sandbox_lowering_sdn.contains("NetworkEndpoint"):
-        caps.push(CapabilityToken(kind: CapabilityKind.NetConnect(port: 0u16), generation: generation, owner: task.id))
+        caps.push(CapabilityToken(kind: CapabilityKind.NetConnect(port: 0u16), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
         generation = generation + 1
     CapabilitySet(caps: caps, is_pledged: true)
 
