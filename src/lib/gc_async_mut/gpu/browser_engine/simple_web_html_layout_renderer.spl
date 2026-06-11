@@ -1299,6 +1299,35 @@ fn count_css_rules(html: text) -> i32:
         pos = close + 1
     count
 
+fn flatten_at_blocks(css: text) -> text:
+    # Replace @layer/@media wrapper blocks with their inner content
+    var out = ""
+    var cp = 0
+    val css_len = css.len()
+    var guard = 0
+    while cp < css_len and guard < 200:
+        guard = guard + 1
+        val brace = find_from(css, "{", cp)
+        if brace < 0:
+            out = out + css.substring(cp, css_len)
+            break
+        val sel_raw = css.substring(cp, brace).trim()
+        if sel_raw.starts_with("@"):
+            val endb = css_find_block_end(css, brace)
+            if endb >= 0:
+                val inner = css.substring(brace + 1, endb)
+                out = out + flatten_at_blocks(inner)
+                cp = endb + 1
+            else:
+                break
+        else:
+            val endb = css_find_block_end(css, brace)
+            if endb < 0:
+                break
+            out = out + css.substring(cp, endb + 1)
+            cp = endb + 1
+    out
+
 fn extract_css(html: text) -> Rules:
     val rule_count = count_css_rules(html)
     var group_parts: [[[text]]] = [[[]]; rule_count]
@@ -1317,7 +1346,8 @@ fn extract_css(html: text) -> Rules:
         val close = find_from(html, "</style", open)
         if close < 0:
             break
-        val css = html.substring(open + 1, close)
+        val css_raw = html.substring(open + 1, close)
+        val css = flatten_at_blocks(css_raw)
         # split into "selector { decls }" chunks
         # @-wrapper blocks (@layer, @supports, @media) are skipped at the outer
         # brace level — their inner rules are parsed as if the wrapper were absent.
@@ -2230,7 +2260,7 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
         i = i + 1
     merge_sorted_rule_lists_unique_count(lists, list_count)
 
-# Returns the 1-based position of node idx among siblings with same tag (for nth-child/first-child etc)
+# Returns the 1-based position of node idx among element siblings (CSS nth-child counts elements only)
 fn node_child_index_of_parent(nodes: [HNode], idx: i32) -> i32:
     val parent = nodes[idx].parent
     if parent < 0:
@@ -2240,7 +2270,7 @@ fn node_child_index_of_parent(nodes: [HNode], idx: i32) -> i32:
     var ni = 0
     while ni < node_count:
         val nd = nodes[ni]
-        if nd.parent == parent:
+        if nd.parent == parent and nd.tag != "#text" and nd.tag != "#root":
             pos = pos + 1
             if ni == idx:
                 return pos
@@ -2255,7 +2285,8 @@ fn node_sibling_count_of_parent(nodes: [HNode], idx: i32) -> i32:
     var count = 0
     var ni = 0
     while ni < node_count:
-        if nodes[ni].parent == parent:
+        val nd = nodes[ni]
+        if nd.parent == parent and nd.tag != "#text" and nd.tag != "#root":
             count = count + 1
         ni = ni + 1
     count
