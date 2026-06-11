@@ -192,7 +192,6 @@ host runtime lane.
 Primary paths:
 
 - `doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md`
-- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
 - `test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl`
 - `doc/01_research/lib/threading/go_vs_simple_threads.md`
 - `doc/04_architecture/runtime/multicore_green.md`
@@ -201,29 +200,14 @@ Primary paths:
 Deliverables:
 
 - dedicated tracking for the remaining hosted multicore-green parity gap;
-- executable proof that hosted blocking compensation stays fixed, hosted
-  bounded parallelism stays fixed, and a one-worker tight loop still keeps the
-  fairness/preemption gap explicit until stronger evidence lands;
-- executable proof that raw `thread_yield()` inside a one-worker
-  `multicore_green_spawn` task is still insufficient, so the remaining host
-  gap is automatic preemption, compiler-inserted yield points, or a deeper
-  task-splitting model rather than a missing OS-thread yield primitive;
-- updated architecture/design/research text that names the exact hosted
-  mechanism: runtime-pool workers execute one popped closure to return before
-  selecting another queued task, so fairness work must target resumable task
-  slices or safepoints rather than only thread primitives;
-- updated architecture/design/tracker text that pins the concrete next seams:
-  `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` loop lowering,
-  `src/compiler_rust/compiler/src/interpreter_control.rs` loop execution, and
-  `src/compiler_rust/runtime/src/executor.rs` blocking markers;
-- updated research/tracker text that pins the best existing resumable-body
-  seed for host fairness work: `mir/generator.rs`, `mir/async_sm.rs`, and
-  `mir/state_machine_utils.rs`;
+- executable proof that hosted blocking compensation stays fixed while
+  fairness/preemption remains open until stronger evidence lands;
+- executable blocker coverage for the best explicit resumable host-fairness
+  path, including the current callback-id resumable-stepper native crash;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:
 
-- `bin/release/simple test test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl --mode=interpreter --clean`
 - `bin/release/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean`
 - `bin/release/simple test test/03_system/feature/usage/multicore_green_tracking_spec.spl --mode=interpreter --clean`
 - `bin/release/simple lint doc/08_tracking/feature/feature_db.sdn`

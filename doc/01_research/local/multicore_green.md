@@ -48,15 +48,11 @@
 - `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` verifies the opt-in live SimpleOS/QEMU lane. The forced run on 2026-06-06 used `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 --clean`, built the x86_64 guest probe, observed `[smp] AP reached 64-bit entry`, and observed `[green-carrier-qemu] PASS=true` after CPU1 fixed-slot green dispatch.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl` verifies fanout/fanin checksum parity between Simple OS threads, cooperative green, and multicore green while keeping runtime-pool evidence separate from inline fallback.
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` verifies the checked-in Docker contract report numerically: Simple OS-thread and multicore-green native rows must remain within bounded ratios of Go goroutine and C pthread rows, Go must beat one-pthread-per-task C in the isolated large-fanout stress row with `GOMAXPROCS` pinned to `CPU_WORKERS`, and cooperative green must stay classified as current-carrier, non-M:N work.
-- 2026-06-11 host-fairness follow-up: the next substantive host lane is no
-  longer "add plain yield." The compiler already has reusable resumable-body
-  machinery in `src/compiler_rust/compiler/src/mir/generator.rs`,
-  `src/compiler_rust/compiler/src/mir/async_sm.rs`, and
-  `src/compiler_rust/compiler/src/mir/state_machine_utils.rs`. Hosted
-  `multicore_green` fairness work should prefer reusing that dispatcher/resume
-  shape or an equivalent compiler-inserted safepoint path through
-  `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`, rather than
-  inventing a third unrelated loop-execution model.
+- `test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl`
+  now pins the best hosted fairness experiment beyond plain `fn() -> i64`
+  tasks: a callback-id resumable-stepper scheduler over the same worker pool.
+  The generated probe type-checks and compiles, but hosted native still dies
+  with `EXIT=139` before the first completion returns.
 - `test/03_system/feature/usage/cooperative_green_smf_function_global_regression_spec.spl` keeps SMF function-valued global/global-array storage covered after the SMF `__module_init` execution fix: both minimal SMF fixtures compile and run successfully, so delayed `green_spawn(fn)` storage is no longer blocked on this path.
 - `test/03_system/feature/usage/cooperative_green_compiled_handle_array_blocker_spec.spl` now keeps regression coverage on the direct compiled cooperative-green function-spawn path: interpreter, SMF, and standalone native workloads that store multiple `GreenThreadHandle` values returned from `cooperative_green_spawn(worker)` all pass again, so the profile lane can stay on the real function-spawn surface instead of the older precomputed-result workaround.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` verifies the pure Simple green-channel park/unpark/backpressure contract needed before scheduler-integrated channel wakeup.

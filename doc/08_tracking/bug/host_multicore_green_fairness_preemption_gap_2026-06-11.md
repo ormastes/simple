@@ -34,6 +34,18 @@ Current hosted multicore-green evidence does not yet prove:
 - long-running CPU work is preempted or yield-forced with a host-side contract
 - host fairness semantics comparable to Go's scheduler under sustained loop load
 
+Current best explicit host-fairness experiment now also has executable blocker
+coverage:
+
+- `test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl`
+  writes a generated resumable-stepper probe that:
+  - uses the existing hosted `multicore_green` worker pool
+  - keeps work items scalar by queueing only callback ids and indexes
+  - still crashes in the hosted native binary before returning the first
+    completion
+- `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
+  is the narrowed blocker record for that path
+
 Current hosted blocking-compensation evidence now includes:
 
 - `test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl`
@@ -64,6 +76,10 @@ Related active host-side blocker:
   That experiment narrowed the next host-runtime boundary again: the native
   captured-closure/state path for repeated pool-task requeue still ends in
   `exit=139`, so explicit sliced-task support is not ready to claim yet.
+- `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
+  records the newer callback-id resumable-stepper prototype. That path removes
+  function-valued queue items, but a single completed stepper still segfaults
+  in hosted native with `EXIT=139`.
 
 ## Current Evidence Boundary
 
