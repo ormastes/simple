@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -244,6 +244,27 @@ expect(_pixel_at(pixels, 24, 2, 2)).to_equal(0xff22c55eu32)
 
 </details>
 
+#### keeps already sorted positive z-index paint order stable
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>" +
+    "html,body{margin:0;padding:0;background-color:#ffffff}" +
+    "#low{position:absolute;left:0;top:0;width:12px;height:12px;background-color:#ef4444;z-index:1}" +
+    "#mid{position:absolute;left:0;top:0;width:12px;height:12px;background-color:#3b82f6;z-index:2}" +
+    "#high{position:absolute;left:0;top:0;width:12px;height:12px;background-color:#22c55e;z-index:3}" +
+    "</style></head><body><div id=\"low\"></div><div id=\"mid\"></div><div id=\"high\"></div></body></html>"
+val pixels = simple_web_layout_render_html_software_pixels(html, 24, 24)
+expect(_pixel_at(pixels, 24, 2, 2)).to_equal(0xff22c55eu32)
+```
+
+</details>
+
 #### emits Draw IR commands for visible HTML boxes
 
 <details>
@@ -280,8 +301,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

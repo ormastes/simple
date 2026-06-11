@@ -674,6 +674,16 @@ dev-done
   45 and helpers-text spec 16 remaining static opportunities; the static count
   rises because the common-path loop is split out, but runtime scale-one bitmap
   text avoids the nested scaled-pixel loops.
+- impl: Added a positive z-index paint-order fast path in the Simple Web
+  renderer. Already nondecreasing positive z-index nodes now append directly to
+  the paint-order list, while out-of-order values still use the existing stable
+  insertion path. This avoids the O(k^2) scan/shift shape for common sorted
+  z-index startup fixtures without changing paint order.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` now passes 11/11, including both
+  out-of-order and already sorted positive z-index paint oracles. Generated
+  manual refreshed under `doc/06_spec`. Docker optimizer scans completed:
+  renderer 748 and focused spec 4 remaining static opportunities.
 - impl: Added checksum-gated vector font glyph readback evidence.
   `vector_font_glyph_readback_evidence(...)` now derives the expected checksum
   from returned vector glyph alpha pixels and requires both GPU-returned glyph

@@ -12,9 +12,9 @@
 
 ---
 
-## Standard Library (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Helpers Text Specification](test/01_unit/lib/gpu/engine2d/helpers_text_spec.md) | Auto-generated | N/A | 7 | 0% | 0 lines |
+| [Simple Web Layout Child Index Specification](test/02_integration/rendering/simple_web_layout_child_index_spec.md) | Auto-generated | N/A | 11 | 0% | 0 lines |
 

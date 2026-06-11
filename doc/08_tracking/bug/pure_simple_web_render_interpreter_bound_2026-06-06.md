@@ -1102,3 +1102,24 @@ Verification:
   passes.
 - `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
   `6 passed, 0 failed`
+
+## 2026-06-11 Positive z-index append fast path
+
+The positive z-index paint pass still built the paint order with insertion sort
+for every positive absolute-positioned node. Common startup fixtures and
+generated UI trees often emit positive z-index layers in nondecreasing order,
+so the scan/shift work is unnecessary in that case.
+
+The renderer now appends directly when the next positive z-index is greater
+than or equal to the last appended z-index. If a later node is out of order, the
+existing stable insertion path still runs. Equal z-index values remain stable in
+document order.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `11 passed, 0 failed`
+- The focused spec covers both an out-of-order positive z-index fixture and an
+  already sorted fixture; both keep the top pixel green.
