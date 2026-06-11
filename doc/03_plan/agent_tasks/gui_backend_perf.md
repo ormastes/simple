@@ -90,6 +90,10 @@ Updated: 2026-06-11
   `:has(> .badge)` fast path instead of calling a missing `class_has` helper.
   This restores the focused Engine2D renderer spec as usable regression
   coverage for later startup/render optimizations.
+- this commit -- RGB token allocation removal: `_css_rgb_color` now parses the
+  first three RGB components into scalar slots instead of pushing each token
+  into a temporary array. This removes per-call dynamic array allocation/copy
+  work from CSS color parsing in the heuristic Engine2D startup path.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
