@@ -168,13 +168,15 @@ Prove and harden the requested GUI stack:
   `test/03_system/gui/wm_compare/structural_layout_report_spec.spl` now checks
   `build_site_corpus_div_geometry_report` for `site_0_google` and
   two bounded six-row summary chunks for the first twelve deterministic corpus
-  rows against stored Chrome metrics. The detailed report compares the
-  generated div border-box `x=8`, `y=8`, `width=120`, `height=40`, background
-  `rgb(37, 99, 235)`, and fixture text against Simple Draw IR. The bounded
-  summaries currently report `offset=0 selected=6 matched=6 mismatched=0
-  missing_metrics=0` and `offset=6 selected=6 matched=6 mismatched=0
-  missing_metrics=0`. This is intentionally bounded corpus evidence, not full
-  famous-site corpus geometry coverage and not text raster parity.
+  rows against stored Chrome metrics. The full-corpus wrapper
+  `scripts/check/check-famous-site-corpus-div-geometry-chunks.shs` now runs the
+  same exact div geometry comparison across all 132 deterministic corpus rows
+  in 22 separate six-row Simple processes. The full report is
+  `doc/09_report/famous_site_corpus_div_geometry_chunks_2026-06-11.md` and
+  records `status=pass`, `corpus_count=132`, `chunk_count=22`,
+  `pass_count=22`, `fail_count=0`, `blur_or_tolerance_used=false`. This is full
+  deterministic corpus div-box evidence, not live-site coverage and not text
+  raster parity.
 
 ## Agent A: MDI Render And Event Evidence
 
@@ -254,9 +256,10 @@ Small tasks:
    extend equivalent exact geometry/style evidence to larger famous-site corpus
    rows and unresolved browser text/font raster behavior.
 5. DONE (2026-06-11): add focused famous-site corpus structural-box evidence
-   for the generated `site_0_google` div and first-twelve-row bounded summaries
-   using stored Chrome metrics and Simple Draw IR. Remaining work is to emit
-   and compare per-row corpus geometry artifacts for the wider corpus.
+   for the generated `site_0_google` div, fast first-twelve-row SSpec chunks,
+   and a full deterministic corpus chunk wrapper using stored Chrome metrics
+   and Simple Draw IR. Remaining work is live-site coverage, richer DOM shapes,
+   and text/font raster parity.
 
 Exit gate:
 
@@ -325,9 +328,10 @@ Exit gate:
   Local probes on 2026-06-11 showed
   `build_site_corpus_div_geometry_summary(7, 160, 120)`, larger limits, and
   unbounded `limit=0` can segfault under `simple run`, while row 6 passes
-  individually and two separate six-row chunks pass in SSpec. Continue with
-  bounded chunks or fix the repeated-render/string aggregation runtime crash
-  before promoting a full-corpus single-call gate.
+  individually, two separate six-row chunks pass in SSpec, and the chunked
+  wrapper covers all 132 rows by using separate Simple processes. Fix the
+  repeated-render/string aggregation runtime crash before promoting a
+  full-corpus single-call gate.
 - SimpleOS QEMU framebuffer click/drag proof is not achieved yet. The standalone
   QMP wrapper now rebuilds the WM target from source, boots QEMU, and verifies
   all WM/MDI/Web readiness markers, but host-injected HMP mouse drag produces

@@ -10,8 +10,9 @@ bounded six-row chunks exactly, but larger single-call summaries can segfault
 under `simple run`.
 
 This is a runtime/evidence aggregation blocker, not a known geometry mismatch.
-`site_6_wikipedia` matched individually, and two six-row chunks covering rows
-0-11 passed under SSpec.
+`site_6_wikipedia` matched individually, two six-row chunks covering rows 0-11
+passed under SSpec, and the chunked wrapper covers all 132 rows by running each
+six-row chunk in a separate Simple process.
 
 ## Reproduction
 
@@ -35,8 +36,10 @@ The same worktree showed `build_site_corpus_div_geometry_report` for
 
 ## Current Workaround
 
-Use `build_site_corpus_div_geometry_summary_range(offset, 6, 160, 120)` in
-bounded chunks. The current executable spec covers offsets `0` and `6`.
+Use `scripts/check/check-famous-site-corpus-div-geometry-chunks.shs`, which
+runs `site_corpus_div_geometry_summary_cli.spl` in separate bounded chunks.
+The current executable spec covers offsets `0` and `6` as a fast regression
+check.
 
 ## Required Fix
 
