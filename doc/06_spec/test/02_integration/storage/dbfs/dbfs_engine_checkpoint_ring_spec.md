@@ -63,10 +63,10 @@ _Ring slot survives simulated remount._
 
 #### ring slot written before remount is readable after
 
-1. ring write slot
-2. ring flush
-3. ring close
-   - Expected: got.gen equals `5`
+- ring write slot
+- ring flush
+- ring close
+   - Expected: got.slot_gen equals `5`
    - Expected: got.clean is true
 
 
@@ -78,13 +78,13 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ring = CheckpointRing.new_persistent()
-val slot = RingSlot(gen: 5, clean: true, btree_root_page: 100)
+val slot = RingSlot(slot_gen: 5, clean: true, btree_root_page: 100)
 ring.write_slot(0, slot).unwrap()
 ring.flush().unwrap()
 ring.close().unwrap()
 val ring2 = CheckpointRing.reopen()
 val got = ring2.read_slot(0).unwrap()
-expect(got.gen).to_equal(5)
+expect(got.slot_gen).to_equal(5)
 expect(got.clean).to_equal(true)
 ```
 
@@ -92,10 +92,10 @@ expect(got.clean).to_equal(true)
 
 #### highest ring slot survives remount
 
-1. btree root page:
-2. ring flush
-3. ring close
-   - Expected: slot.gen equals `RING_SIZE`
+- btree root page:
+- ring flush
+- ring close
+   - Expected: slot.slot_gen equals `RING_SIZE`
 
 
 <details>
@@ -107,7 +107,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val ring = CheckpointRing.new_persistent()
 CheckpointRing.persist_slot(RING_SIZE - 1, RingSlot(
-    gen: RING_SIZE,
+    slot_gen: RING_SIZE,
     clean: true,
     btree_root_page: (RING_SIZE - 1) * 8
 ))
@@ -115,7 +115,7 @@ ring.flush().unwrap()
 ring.close().unwrap()
 val ring2 = CheckpointRing.reopen()
 val slot = ring2.read_slot(RING_SIZE - 1).unwrap()
-expect(slot.gen).to_equal(RING_SIZE)
+expect(slot.slot_gen).to_equal(RING_SIZE)
 ```
 
 </details>
@@ -125,12 +125,12 @@ _Remount picks the slot with highest gen and clean=true._
 
 #### current_slot returns slot with highest gen and clean=true
 
-1. ring write slot
-2. ring write slot
-3. ring write slot
-4. ring flush
-5. ring close
-   - Expected: best.gen equals `5`
+- ring write slot
+- ring write slot
+- ring write slot
+- ring flush
+- ring close
+   - Expected: best.slot_gen equals `5`
 
 
 <details>
@@ -141,25 +141,25 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ring = CheckpointRing.new_persistent()
-ring.write_slot(0, RingSlot(gen: 3, clean: true, btree_root_page: 30)).unwrap()
-ring.write_slot(1, RingSlot(gen: 5, clean: true, btree_root_page: 50)).unwrap()
-ring.write_slot(2, RingSlot(gen: 4, clean: false, btree_root_page: 40)).unwrap()
+ring.write_slot(0, RingSlot(slot_gen: 3, clean: true, btree_root_page: 30)).unwrap()
+ring.write_slot(1, RingSlot(slot_gen: 5, clean: true, btree_root_page: 50)).unwrap()
+ring.write_slot(2, RingSlot(slot_gen: 4, clean: false, btree_root_page: 40)).unwrap()
 ring.flush().unwrap()
 ring.close().unwrap()
 val ring2 = CheckpointRing.reopen()
 val best = ring2.current_slot().unwrap()
-expect(best.gen).to_equal(5)
+expect(best.slot_gen).to_equal(5)
 ```
 
 </details>
 
 #### dirty slots are not selected as current
 
-1. ring write slot
-2. ring write slot
-3. ring flush
-4. ring close
-   - Expected: best.gen equals `2`
+- ring write slot
+- ring write slot
+- ring flush
+- ring close
+   - Expected: best.slot_gen equals `2`
 
 
 <details>
@@ -170,13 +170,13 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ring = CheckpointRing.new_persistent()
-ring.write_slot(0, RingSlot(gen: 10, clean: false, btree_root_page: 10)).unwrap()
-ring.write_slot(1, RingSlot(gen: 2, clean: true, btree_root_page: 20)).unwrap()
+ring.write_slot(0, RingSlot(slot_gen: 10, clean: false, btree_root_page: 10)).unwrap()
+ring.write_slot(1, RingSlot(slot_gen: 2, clean: true, btree_root_page: 20)).unwrap()
 ring.flush().unwrap()
 ring.close().unwrap()
 val ring2 = CheckpointRing.reopen()
 val best = ring2.current_slot().unwrap()
-expect(best.gen).to_equal(2)
+expect(best.slot_gen).to_equal(2)
 ```
 
 </details>
@@ -186,8 +186,8 @@ _Ring writes must target META_DURABLE arena._
 
 #### ring write uses META_DURABLE storage class
 
-1. ring write slot
-2. ring flush
+- ring write slot
+- ring flush
    - Expected: sc equals `StorageClass.MetaDurable`
 
 
@@ -199,7 +199,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ring = CheckpointRing.new_persistent()
-ring.write_slot(0, RingSlot(gen: 1, clean: true, btree_root_page: 0)).unwrap()
+ring.write_slot(0, RingSlot(slot_gen: 1, clean: true, btree_root_page: 0)).unwrap()
 ring.flush().unwrap()
 val sc = ring.last_write_storage_class()
 expect(sc).to_equal(StorageClass.MetaDurable)
@@ -226,15 +226,15 @@ _When callback is registered, writes go through the callback path._
 
 #### callback path persists slots across reopen
 
-1. ring clear persist callback
-2. ring register persist callback
+- ring clear persist callback
+- ring register persist callback
    - Expected: ring_is_callback_registered() is true
-3. ring write slot
-4. ring flush
-5. ring close
+- ring write slot
+- ring flush
+- ring close
    - Expected: ring_cb_slot_count() equals `1`
-   - Expected: got.gen equals `7`
-6. ring clear persist callback
+   - Expected: got.slot_gen equals `7`
+- ring clear persist callback
 
 
 <details>
@@ -248,13 +248,13 @@ ring_clear_persist_callback()
 ring_register_persist_callback("arena:META_DURABLE")
 expect(ring_is_callback_registered()).to_equal(true)
 val ring = CheckpointRing.new_persistent()
-ring.write_slot(0, RingSlot(gen: 7, clean: true, btree_root_page: 70)).unwrap()
+ring.write_slot(0, RingSlot(slot_gen: 7, clean: true, btree_root_page: 70)).unwrap()
 ring.flush().unwrap()
 ring.close().unwrap()
 expect(ring_cb_slot_count()).to_equal(1)
 val ring2 = CheckpointRing.reopen()
 val got = ring2.read_slot(0).unwrap()
-expect(got.gen).to_equal(7)
+expect(got.slot_gen).to_equal(7)
 ring_clear_persist_callback()
 ```
 
@@ -262,9 +262,9 @@ ring_clear_persist_callback()
 
 #### callback registration is clearable
 
-1. ring register persist callback
+- ring register persist callback
    - Expected: ring_is_callback_registered() is true
-2. ring clear persist callback
+- ring clear persist callback
    - Expected: ring_is_callback_registered() is false
 
 

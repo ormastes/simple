@@ -1,6 +1,6 @@
 # Dbfs Ring Diag Specification
 
-> 1. ring write slot
+> <details>
 
 <!-- sdn-diagram:id=dbfs_ring_diag_spec.arch -->
 <details class="sdn-source">
@@ -40,8 +40,8 @@ dbfs_ring_diag_spec -> std
 
 #### single write_slot then read_slot works
 
-1. ring write slot
-   - Expected: slot.gen equals `42`
+- ring write slot
+   - Expected: slot.slot_gen equals `42`
 
 
 <details>
@@ -52,9 +52,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ring = CheckpointRing.new_persistent()
-ring.write_slot(0, RingSlot(gen: 42, clean: true, btree_root_page: 100)).unwrap()
+ring.write_slot(0, RingSlot(slot_gen: 42, clean: true, btree_root_page: 100)).unwrap()
 val slot = ring.read_slot(0).unwrap()
-expect(slot.gen).to_equal(42)
+expect(slot.slot_gen).to_equal(42)
 ```
 
 </details>
@@ -64,7 +64,7 @@ expect(slot.gen).to_equal(42)
 
 #### loop persist_slot 5 times then current_store reflects all entries
 
-1.  persist 5 slots
+-  persist 5 slots
    - Expected: store.len() equals `5`
 
 
@@ -88,9 +88,9 @@ expect(store.len()).to_equal(5)
 
 #### two separate writes then read_slot 1 works
 
-1. ring write slot
-2. ring write slot
-   - Expected: s1.gen equals `11`
+- ring write slot
+- ring write slot
+   - Expected: s1.slot_gen equals `11`
 
 
 <details>
@@ -101,18 +101,18 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ring = CheckpointRing.new_persistent()
-ring.write_slot(0, RingSlot(gen: 10, clean: true, btree_root_page: 0)).unwrap()
-ring.write_slot(1, RingSlot(gen: 11, clean: true, btree_root_page: 1)).unwrap()
+ring.write_slot(0, RingSlot(slot_gen: 10, clean: true, btree_root_page: 0)).unwrap()
+ring.write_slot(1, RingSlot(slot_gen: 11, clean: true, btree_root_page: 1)).unwrap()
 val s1 = ring.read_slot(1).unwrap()
-expect(s1.gen).to_equal(11)
+expect(s1.slot_gen).to_equal(11)
 ```
 
 </details>
 
 #### current_store has entries after writes
 
-1. ring write slot
-2. ring write slot
+- ring write slot
+- ring write slot
    - Expected: store.len() >= 2 is true
 
 
@@ -124,8 +124,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ring = CheckpointRing.new_persistent()
-ring.write_slot(0, RingSlot(gen: 1, clean: true, btree_root_page: 0)).unwrap()
-ring.write_slot(1, RingSlot(gen: 2, clean: true, btree_root_page: 1)).unwrap()
+ring.write_slot(0, RingSlot(slot_gen: 1, clean: true, btree_root_page: 0)).unwrap()
+ring.write_slot(1, RingSlot(slot_gen: 2, clean: true, btree_root_page: 1)).unwrap()
 val store = ring.current_store()
 expect(store.len() >= 2).to_equal(true)
 ```
@@ -134,10 +134,10 @@ expect(store.len() >= 2).to_equal(true)
 
 #### flush then reopen: read slot 0
 
-1. ring write slot
-2. ring flush
-3. ring close
-   - Expected: s.gen equals `7`
+- ring write slot
+- ring flush
+- ring close
+   - Expected: s.slot_gen equals `7`
 
 
 <details>
@@ -148,22 +148,22 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ring = CheckpointRing.new_persistent()
-ring.write_slot(0, RingSlot(gen: 7, clean: true, btree_root_page: 70)).unwrap()
+ring.write_slot(0, RingSlot(slot_gen: 7, clean: true, btree_root_page: 70)).unwrap()
 ring.flush().unwrap()
 ring.close().unwrap()
 val ring2 = CheckpointRing.reopen()
 val s = ring2.read_slot(0).unwrap()
-expect(s.gen).to_equal(7)
+expect(s.slot_gen).to_equal(7)
 ```
 
 </details>
 
 #### persisting the highest slot then reopen sees that slot
 
-1. btree root page:
-2. ring flush
-3. ring close
-   - Expected: slot.gen equals `RING_SIZE`
+- btree root page:
+- ring flush
+- ring close
+   - Expected: slot.slot_gen equals `RING_SIZE`
 
 
 <details>
@@ -175,7 +175,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val ring = CheckpointRing.new_persistent()
 CheckpointRing.persist_slot(RING_SIZE - 1, RingSlot(
-    gen: RING_SIZE,
+    slot_gen: RING_SIZE,
     clean: true,
     btree_root_page: (RING_SIZE - 1) * 8
 ))
@@ -183,7 +183,7 @@ ring.flush().unwrap()
 ring.close().unwrap()
 val ring2 = CheckpointRing.reopen()
 val slot = ring2.read_slot(RING_SIZE - 1).unwrap()
-expect(slot.gen).to_equal(RING_SIZE)
+expect(slot.slot_gen).to_equal(RING_SIZE)
 ```
 
 </details>

@@ -61,9 +61,9 @@ _Old root must remain visible until new checkpoint completes._
 
 #### old root is readable before new checkpoint commits
 
-1. ckpt publish
-   - Expected: current.gen equals `1`
-2. pending abort
+- ckpt publish
+   - Expected: current.slot_gen equals `1`
+- pending abort
 
 
 <details>
@@ -74,13 +74,13 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ckpt = DbfsCheckpoint.new()
-val root1 = CheckpointRoot(btree_root: PageId(1), gen: 1)
+val root1 = CheckpointRoot(btree_root: PageId(1), slot_gen: 1)
 ckpt.publish(root1).unwrap()
-val root2 = CheckpointRoot(btree_root: PageId(2), gen: 2)
+val root2 = CheckpointRoot(btree_root: PageId(2), slot_gen: 2)
 # Simulate: begin new checkpoint but do NOT commit yet
 val pending = ckpt.begin_publish(root2)
 val current = ckpt.current_root().unwrap()
-expect(current.gen).to_equal(1)
+expect(current.slot_gen).to_equal(1)
 pending.abort()
 ```
 
@@ -88,9 +88,9 @@ pending.abort()
 
 #### new root is visible after commit
 
-1. ckpt publish
-2. ckpt publish
-   - Expected: current.gen equals `2`
+- ckpt publish
+- ckpt publish
+   - Expected: current.slot_gen equals `2`
 
 
 <details>
@@ -101,10 +101,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ckpt = DbfsCheckpoint.new()
-ckpt.publish(CheckpointRoot(btree_root: PageId(1), gen: 1)).unwrap()
-ckpt.publish(CheckpointRoot(btree_root: PageId(2), gen: 2)).unwrap()
+ckpt.publish(CheckpointRoot(btree_root: PageId(1), slot_gen: 1)).unwrap()
+ckpt.publish(CheckpointRoot(btree_root: PageId(2), slot_gen: 2)).unwrap()
 val current = ckpt.current_root().unwrap()
-expect(current.gen).to_equal(2)
+expect(current.slot_gen).to_equal(2)
 ```
 
 </details>
@@ -114,7 +114,7 @@ _Ring retains published entries until the configured ring size is exceeded._
 
 #### ring retains last 4 entries after 5 publishes
 
-1.  publish 5 roots to ring
+-  publish 5 roots to ring
    - Expected: entries.len() >= 4 is true
 
 
@@ -137,7 +137,7 @@ expect(entries.len() >= 4).to_equal(true)
 
 #### ring entries still include the latest published generation after 5 publishes
 
-1.  publish 5 roots to ring
+-  publish 5 roots to ring
    - Expected: found_latest is true
 
 
@@ -163,7 +163,7 @@ _Checkpoint writes must target META_DURABLE arena._
 
 #### checkpoint write uses META_DURABLE storage class
 
-1. ckpt publish
+- ckpt publish
    - Expected: storage_class equals `StorageClass.MetaDurable`
 
 
@@ -175,7 +175,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ckpt = DbfsCheckpoint.new()
-ckpt.publish(CheckpointRoot(btree_root: PageId(1), gen: 1)).unwrap()
+ckpt.publish(CheckpointRoot(btree_root: PageId(1), slot_gen: 1)).unwrap()
 val storage_class = ckpt.last_write_storage_class()
 expect(storage_class).to_equal(StorageClass.MetaDurable)
 ```
@@ -187,9 +187,9 @@ _Aborting a publish leaves ring intact._
 
 #### ring is unchanged when publish is aborted
 
-1. ckpt publish
-2. pending abort
-   - Expected: current.gen equals `1`
+- ckpt publish
+- pending abort
+   - Expected: current.slot_gen equals `1`
 
 
 <details>
@@ -200,11 +200,11 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ckpt = DbfsCheckpoint.new()
-ckpt.publish(CheckpointRoot(btree_root: PageId(1), gen: 1)).unwrap()
-val pending = ckpt.begin_publish(CheckpointRoot(btree_root: PageId(2), gen: 2))
+ckpt.publish(CheckpointRoot(btree_root: PageId(1), slot_gen: 1)).unwrap()
+val pending = ckpt.begin_publish(CheckpointRoot(btree_root: PageId(2), slot_gen: 2))
 pending.abort()
 val current = ckpt.current_root().unwrap()
-expect(current.gen).to_equal(1)
+expect(current.slot_gen).to_equal(1)
 ```
 
 </details>

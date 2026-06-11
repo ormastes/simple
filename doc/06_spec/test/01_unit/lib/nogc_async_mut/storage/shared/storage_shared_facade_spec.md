@@ -1,6 +1,6 @@
 # Storage Shared Facade Specification
 
-> 1. var wal = SharedWal new
+> <details>
 
 <!-- sdn-diagram:id=storage_shared_facade_spec.arch -->
 <details class="sdn-source">
@@ -40,13 +40,13 @@ storage_shared_facade_spec -> std
 
 #### re-exports wal and btree primitives
 
-1. var wal = SharedWal new
+- var wal = SharedWal new
    - Expected: lsn.value equals `1`
    - Expected: wal.read_record(Lsn(value: 1)).unwrap().payload equals `payload`
    - Expected: wal.flush_wal().is_ok() is true
    - Expected: wal.get_durable_lsn().value equals `1`
    - Expected: WAL_RECORD_COMMIT equals `3`
-2. var tree = BTree<text> new
+- var tree = BTree<text> new
    - Expected: tree.insert(BTreeKey(a: 1, b: 2), "value").is_ok() is true
    - Expected: found equals `value`
 
@@ -76,21 +76,21 @@ expect(found).to_equal("value")
 
 #### re-exports checkpoint ring and intent log persistence helpers
 
-1. ring clear persist callback
-2. ring register persist callback
+- ring clear persist callback
+- ring register persist callback
    - Expected: ring_is_callback_registered() is true
    - Expected: ring_persist_callback_tag() equals `facade-ring`
-3. var ring = SharedCheckpointRing new with size
-   - Expected: ring.write_slot(0, RingSlot(gen: 2, clean: true, btree_root_page: 99)).is_ok() is true
+- var ring = SharedCheckpointRing new with size
+   - Expected: ring.write_slot(0, RingSlot(slot_gen: 2, clean: true, btree_root_page: 99)).is_ok() is true
    - Expected: ring_cb_slot_count() equals `1`
    - Expected: ring.latest_clean().unwrap().btree_root_page equals `99`
-4. intent clear persist callback
-5. intent register persist callback
+- intent clear persist callback
+- intent register persist callback
    - Expected: intent_is_callback_registered() is true
    - Expected: intent_persist_callback_tag() equals `facade-intent`
-6. var log = SharedIntentLog new persistent
+- var log = SharedIntentLog new persistent
    - Expected: log.append(IntentLogRecord(txn_id: 1, lsn: 5, committed: true)).is_ok() is true
-7. log set head
+- log set head
    - Expected: log.flush().is_ok() is true
    - Expected: intent_cb_record_count() equals `1`
    - Expected: log.head_pointer().tail_lsn equals `5`
@@ -108,7 +108,7 @@ ring_register_persist_callback("facade-ring")
 expect(ring_is_callback_registered()).to_equal(true)
 expect(ring_persist_callback_tag()).to_equal("facade-ring")
 var ring = SharedCheckpointRing.new_with_size(4)
-expect(ring.write_slot(0, RingSlot(gen: 2, clean: true, btree_root_page: 99)).is_ok()).to_equal(true)
+expect(ring.write_slot(0, RingSlot(slot_gen: 2, clean: true, btree_root_page: 99)).is_ok()).to_equal(true)
 expect(ring_cb_slot_count()).to_equal(1)
 expect(ring.latest_clean().unwrap().btree_root_page).to_equal(99)
 
