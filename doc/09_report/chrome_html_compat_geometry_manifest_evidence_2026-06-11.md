@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 32
-- pass count: 32
+- fixtures: 33
+- pass count: 33
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_manifest_full`
@@ -55,6 +55,7 @@ pixels, or text antialiasing normalization.
 | `33_flex_justify_flex_end` | pass | 0 | `build/chrome_manifest_full/33_flex_justify_flex_end_chrome_geometry.json` | `build/chrome_manifest_full/33_flex_justify_flex_end_structural_report.sdn` |
 | `34_flex_justify_center` | pass | 0 | `build/chrome_manifest_full/34_flex_justify_center_chrome_geometry.json` | `build/chrome_manifest_full/34_flex_justify_center_structural_report.sdn` |
 | `35_flex_align_items_stretch` | pass | 0 | `build/chrome_manifest_full/35_flex_align_items_stretch_chrome_geometry.json` | `build/chrome_manifest_full/35_flex_align_items_stretch_structural_report.sdn` |
+| `36_flex_align_self_flex_end` | pass | 0 | `build/chrome_manifest_full/36_flex_align_self_flex_end_chrome_geometry.json` | `build/chrome_manifest_full/36_flex_align_self_flex_end_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -96,3 +97,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `33_flex_justify_flex_end` | 0 | 0.000 | `` |
 | `34_flex_justify_center` | 0 | 0.000 | `` |
 | `35_flex_align_items_stretch` | 0 | 0.000 | `` |
+| `36_flex_align_self_flex_end` | 0 | 0.000 | `` |
