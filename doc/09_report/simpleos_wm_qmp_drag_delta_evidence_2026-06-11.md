@@ -1,36 +1,22 @@
 # SimpleOS WM QMP Drag Delta Evidence
 
-- status: unavailable
-- reason: wm-qmp-launch-failed
-- launcher status: 
-- launcher reason: 
-- launcher target: 
-- launcher entry: 
-- qmp socket: -
-- marker state: -
+- status: fail
+- reason: qmp-drag-delta-not-proven
+- launcher status: pass
+- launcher reason: pass
+- launcher target: wm-simple-web
+- launcher entry: examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl
+- qmp socket: /tmp/simpleos_desktop_qmp_607029_1781166636570903873.sock
+- marker state: probe:true wm:true engine:true web:true mdi:true top:true taskbar:true html:true
 - changed bytes: 0
 - source region changed pixels: 0
 - target region changed pixels: 0
-- before sha256: -
-- after sha256: -
-- before ppm: build/simpleos_wm_qmp_drag_delta_evidence/before-drag.ppm (0 bytes)
-- after ppm: build/simpleos_wm_qmp_drag_delta_evidence/after-drag.ppm (0 bytes)
-- serial log: - (0 bytes)
-- stderr log: - (0 bytes)
-
-Follow-up on 2026-06-11:
-
-- Restored historical `gui_entry_engine2d.spl` and `wm_input_test_entry.spl`
-  entries type-check with the current compiler inside the isolated repair
-  worktree. They were not committed to the superproject because current
-  `origin/main` records `examples/09_embedded/simple_os` as a gitlink.
-- The focused launcher still exits `139` before structured launcher fields are
-  emitted; `launch.out` contains only `Segmentation fault (core dumped)`.
-- Direct source rebuild is still not available. The target metadata names
-  `examples/09_embedded/simple_os/arch/x86_64/linker.ld`, which is absent. Using
-  the current `src/os/kernel/arch/x86_64/linker.ld` instead reaches the linker
-  but fails on unresolved freestanding runtime symbols including
-  `rt_string_new`, `rt_port_outb`, `serial_println`, and `rt_mmio_read_u32`.
+- before sha256: 5fcc2dc196224169bc9a044e57bd2faa88f4ff3dddf415f6d4b44e805d2d1f8f
+- after sha256: 5fcc2dc196224169bc9a044e57bd2faa88f4ff3dddf415f6d4b44e805d2d1f8f
+- before ppm: build/simpleos_wm_qmp_drag_delta_evidence/before-drag.ppm (2359312 bytes)
+- after ppm: build/simpleos_wm_qmp_drag_delta_evidence/after-drag.ppm (2359312 bytes)
+- serial log: build/os/simpleos_desktop_qmp_607029_1781166636570903873.log (1300 bytes)
+- stderr log: build/os/simpleos_desktop_qmp_607029_1781166636570903873.log.stderr (50 bytes)
 
 This wrapper launches the exact WM + Simple Web + Engine2D target in a
 separate QEMU process, captures the BGA framebuffer with QMP

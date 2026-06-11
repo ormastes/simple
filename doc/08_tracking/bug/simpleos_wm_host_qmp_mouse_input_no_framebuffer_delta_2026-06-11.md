@@ -9,10 +9,11 @@ The WM + Simple Web + Engine2D QEMU target boots and renders the expected MDI
 scene, but host-injected QMP/HMP mouse movement does not currently move the WM
 surface or change the framebuffer.
 
-Update: stricter evidence now refuses to launch this lane when the source entry
-is missing. Resolve
-`doc/08_tracking/bug/simpleos_wm_qmp_source_target_missing_2026-06-11.md`
-before re-checking host pointer delivery.
+Update: the source-entry blocker is resolved when the `simple_os` submodule is
+initialized and the wrapper propagates `SIMPLE_BINARY`. The current wrapper
+builds the WM target from source, launches it through QMP, verifies the
+WM/Engine2D/Simple Web/MDI marker set, and still observes no framebuffer change
+after host-injected mouse events.
 
 ## Evidence
 
@@ -41,12 +42,17 @@ qemu_wm_drag_delta_target_region_changed=0
 The before/after framebuffer hashes were identical, so this is not a claimed
 pass and does not prove host-QMP click/drag handling.
 
-Later stricter result:
+Latest strict result:
 
 ```text
-qemu_wm_drag_delta_status=unavailable
-qemu_wm_drag_delta_reason=wm-simple-web-source-missing
+qemu_wm_drag_delta_status=fail
+qemu_wm_drag_delta_reason=qmp-drag-delta-not-proven
+qemu_wm_drag_delta_launcher_status=pass
 qemu_wm_drag_delta_launcher_entry=examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl
+qemu_wm_drag_delta_marker_state=probe:true wm:true engine:true web:true mdi:true top:true taskbar:true html:true
+qemu_wm_drag_delta_changed_bytes=0
+qemu_wm_drag_delta_source_region_changed=0
+qemu_wm_drag_delta_target_region_changed=0
 ```
 
 ## Likely Cause

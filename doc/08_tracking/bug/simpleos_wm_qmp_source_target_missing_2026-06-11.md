@@ -1,19 +1,18 @@
-# SimpleOS WM QMP Source Target Is Not Rebuildable
+# SimpleOS WM QMP Source Target Requires Initialized Submodule
 
 Date: 2026-06-11
-Status: Open
+Status: Resolved
 
 ## Summary
 
 `get_wm_simple_web_check_target()` points at
-`examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl`. Historical
-copies of that entry and `wm_input_test_entry.spl` were found and restored only
-inside the isolated repair worktree, and both type-check with the current
-compiler. They cannot be committed directly from the superproject because
-current `origin/main` records `examples/09_embedded/simple_os` as a gitlink. The
-target is still not rebuildable from source: the configured example-local
-`linker.ld` is absent in the repair worktree, and substituting the current kernel
-x86_64 linker script exposes unresolved freestanding runtime symbols.
+`examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl`. That path is
+inside the `examples/09_embedded/simple_os` submodule, not the superproject tree.
+When the submodule is initialized at the pinned commit
+`988ecf4314201ef6570fbf465a97fcfa2dccec30`, the entry source, companion
+`wm_input_test_entry.spl`, and `arch/x86_64/linker.ld` are present. The WM target
+now rebuilds from source when the wrapper propagates the actual compiler through
+`SIMPLE_BINARY`.
 
 ## Evidence
 
@@ -37,28 +36,20 @@ qemu_wm_drag_delta_launcher_target=wm-simple-web
 qemu_wm_drag_delta_launcher_entry=examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl
 ```
 
-Observed result after restoring the historical entries:
+Observed result after initializing the submodule and propagating `SIMPLE_BINARY`:
 
 ```text
-Checking examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl... OK
-Checking examples/09_embedded/simple_os/arch/x86_64/wm_input_test_entry.spl... OK
-Checking src/app/test/simpleos_desktop_qmp_launch.spl... OK
-qemu_wm_drag_delta_status=unavailable
-qemu_wm_drag_delta_reason=wm-qmp-launch-failed
-qemu_wm_drag_delta_launcher_exit_code=139
+[build][x86_64] phase=native-build OK
+qemu_wm_drag_delta_launcher_status=pass
+qemu_wm_drag_delta_launcher_entry=examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl
 ```
 
-Direct native-build with the target's configured linker script fails because the
-file does not exist. Direct native-build with
-`src/os/kernel/arch/x86_64/linker.ld` fails later on unresolved symbols including
-`rt_string_new`, `rt_port_outb`, `serial_println`, and `rt_mmio_read_u32`.
+## Resolution
 
-## Required Fix
+Use an initialized `examples/09_embedded/simple_os` submodule and run
+`scripts/check/check-simpleos-wm-qmp-drag-delta-evidence.shs` with `SIMPLE_BIN`
+set to the real compiler. The wrapper now exports `SIMPLE_BINARY=$SIMPLE_BIN` so
+the nested native build does not fall back to missing `bin/simple`.
 
-Restore or replace the full rebuildable WM + Simple Web + Engine2D x86_64 target:
-entry source, linker script, and freestanding runtime bindings. Keep
-`get_wm_simple_web_check_target()` aligned with those files. After the target
-rebuilds from source, rerun the QMP drag-delta wrapper. Only then can the host
-pointer delivery bug be re-evaluated without relying on stale ELF output.
-
-Do not bypass this by accepting a prebuilt ELF as release evidence.
+The remaining failure is tracked separately in
+`doc/08_tracking/bug/simpleos_wm_host_qmp_mouse_input_no_framebuffer_delta_2026-06-11.md`.

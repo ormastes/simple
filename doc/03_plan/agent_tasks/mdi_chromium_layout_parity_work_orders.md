@@ -72,23 +72,18 @@ Prove and harden the requested GUI stack:
   a drag-region-specific movement signature, so later work should tighten it
   after the runner path executes reliably.
 - `scripts/check/check-simpleos-wm-qmp-drag-delta-evidence.shs` is the current
-  standalone live wrapper for the same host-QMP path. It launches
-  `src/app/test/simpleos_desktop_qmp_launch.spl` with
-  `SIMPLEOS_DESKTOP_QMP_TARGET=wm-simple-web`, verifies the MDI/WM/Web marker
-  set, captures before/after BGA frames with QMP `pmemsave`, injects HMP mouse
-  drag events, and requires both global byte deltas and source/destination
-  drag-region deltas. The first 2026-06-11 local run was intentionally failing:
-  launcher status was `pass`, all marker state fields were true, but
-  `changed_bytes=0`, so host-QMP mouse input was not yet wired into the guest WM
-  event path. A stricter rerun refused the target earlier with
-  `qemu_wm_drag_delta_reason=wm-simple-web-source-missing`. Historical
-  `gui_entry_engine2d.spl` and `wm_input_test_entry.spl` entries type-check in
-  the isolated repair lane, but they were not committed to the superproject
-  because current `origin/main` records `examples/09_embedded/simple_os` as a
-  gitlink. The source target is still not rebuildable: the configured
-  example-local `linker.ld` is absent, the current kernel linker exposes
-  unresolved freestanding symbols, and the focused launcher exits `139` before
-  structured QMP fields are emitted.
+  standalone live wrapper for the same host-QMP path. It runs the root-level
+  `simpleos_desktop_qmp_launch_root.spl` launcher because the same launcher shape
+  is path-sensitive under `src/app/test` and exits `139` there. With the
+  `examples/09_embedded/simple_os` submodule initialized and `SIMPLE_BINARY`
+  propagated from `SIMPLE_BIN`, the wrapper rebuilds
+  `gui_entry_engine2d.spl`, launches QEMU, verifies the MDI/WM/Web marker set,
+  captures before/after BGA frames with QMP `pmemsave`, injects HMP mouse drag
+  events, and requires both global byte deltas and source/destination
+  drag-region deltas. The current 2026-06-11 result is intentionally failing:
+  launcher status is `pass`, all marker state fields are true, but
+  `changed_bytes=0`, so host-QMP mouse input is still not wired into the guest WM
+  event path.
   Bugs:
   `doc/08_tracking/bug/simpleos_wm_qmp_source_target_missing_2026-06-11.md` and
   `doc/08_tracking/bug/simpleos_wm_host_qmp_mouse_input_no_framebuffer_delta_2026-06-11.md`.
@@ -269,16 +264,11 @@ Exit gate:
 
 - Full Chrome text pixel parity is not achieved. The known blocker is generic
   browser-font metric, baseline, shaping, and antialiasing parity.
-- SimpleOS QEMU framebuffer click/drag proof is not achieved yet. The new
-  drag-delta assertion is fail-closed, but the current focused runner exits
-  before executing the scenario (`total_listed=0` on both modified and baseline
-  copies), so the next work item is to fix that route or add an equivalent
-  standalone QMP evidence wrapper.
-- The standalone QMP evidence wrapper now rejects stale WM evidence before QEMU
-  launch. Historical WM entry sources type-check again, but source rebuild still
-  fails because the linker script/runtime binding set is incomplete and the
-  focused launcher exits `139`; the next implementation task is to restore the
-  full rebuildable target, then re-run the wrapper and address real host pointer
-  delivery if the framebuffer still reports no drag delta.
+- SimpleOS QEMU framebuffer click/drag proof is not achieved yet. The standalone
+  QMP wrapper now rebuilds the WM target from source, boots QEMU, and verifies
+  all WM/MDI/Web readiness markers, but host-injected HMP mouse drag produces
+  `changed_bytes=0` and identical before/after framebuffer hashes. The next
+  implementation task is to wire a real host pointer device/event path into the
+  SimpleOS WM and make the wrapper pass without relaxing the byte/region gates.
 - macOS and Windows live platform evidence is not proven from this Linux host;
   host-specific rows must not be promoted without real capture artifacts.
