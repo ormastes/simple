@@ -186,6 +186,9 @@ Updated: 2026-06-11
 - this commit -- currentColor resolver scan allocation removal:
   `_resolve_current_color` now scans the lowercase declaration buffer directly
   for `color:` instead of allocating a search tail on each loop iteration.
+- this commit -- CSS var lookup tail allocation removal:
+  `_first_var_color_after` now scans from a caller-supplied offset and finds
+  `var(...)` directly in the original HTML buffer, removing style-tail slices.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
