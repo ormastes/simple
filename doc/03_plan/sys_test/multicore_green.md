@@ -44,10 +44,10 @@
 - `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` checks that `doc/03_plan/agent_tasks/multicore_green.md` uses meaningful parallel-agent lane names instead of `Agent A`/`Agent B` labels, and keeps each lane tied to deliverables and acceptance evidence.
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the remaining hosted fairness/preemption gap explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths.
 - `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so the remaining host gap is deeper than a missing OS-thread yield primitive.
-- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_blocker_spec.spl`
-  now pins the smaller hosted-native blocker beneath the callback-id
-  resumable-stepper lane: a pool worker that sends a plain struct payload
-  through a channel still segfaults in the standalone native artifact.
+- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_regression_spec.spl`
+  now keeps the earlier smaller hosted-native blocker closed: a pool worker
+  can send a plain struct payload through a channel and the standalone native
+  artifact returns `value=7`, `EXIT=0`.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records that the checked-in `bin/release/simple` binary has drifted from the
   current-source rebuilt `release` and `debug` compilers for the

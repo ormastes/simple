@@ -1,28 +1,26 @@
 # Multicore Green Channel Struct Send Native Blocker
 
 Date: 2026-06-11
-Status: open
+Status: closed
 Owner: multicore-green lane
 
 ## Summary
 
-The current lower native blocker beneath the hosted `multicore_green`
-resumable-stepper fairness experiment is smaller than callback-id steppers:
+The earlier lower native blocker beneath the hosted `multicore_green`
+resumable-stepper fairness experiment was smaller than callback-id steppers:
 
 - the direct main-thread `channel_new() -> send(7) -> recv() -> == 7` path is
   green in current-source debug/native evidence
 - the direct helper `Channel(_id: id).id()` path is also green again in
   current-source native evidence
-- a `multicore_green` worker still sends a plain struct payload through a
-  channel
+- a `multicore_green` worker sends a plain struct payload through a channel
 - the main thread receives the payload and reaches the print path
-- the standalone native binary still ends with `EXIT=139`
+- the standalone native binary now exits cleanly with the expected value
 
-That means the remaining active native blocker is no longer plain channel
-roundtrip equality or helper-side `Channel.id()` dispatch. It still appears
-once a hosted pool worker sends payloads back through the channel path, even
-without callback lookup, stepper arrays, requeue logic, or `StepResult`
-indirect calls.
+That means this lower boundary is no longer the active native blocker. Plain
+channel roundtrip equality, helper-side `Channel.id()` dispatch, and the
+smaller pool-worker struct-send path are all green again on current-source
+native. The active hosted native blocker is back on the resumable-stepper lane.
 
 ## Minimal Boundary
 
@@ -39,7 +37,7 @@ Current reduced probe:
   - `h.join()`
   - `println("value={completion.value}")`
 
-Observed behavior:
+Current verified behavior:
 
 ```text
 direct main-thread channel int equality: source-run passes
@@ -48,23 +46,22 @@ direct helper Channel.id(): source-run passes
 direct helper Channel.id(): native run EXIT=0
 type-check: passes
 native compile: passes
-native run: prints value={completion.value}
-native run: EXIT=139
+native run: prints value=7
+native run: EXIT=0
 ```
 
 ## Why This Matters
 
-The hosted fairness lane should not blame resumable steppers first when a
-smaller pool-plus-struct-channel path is already crashing in current-source
-native artifacts.
+The hosted fairness lane no longer needs to blame this smaller pool-plus-struct
+path for the remaining native crash.
 
-Until this lower bug is fixed:
+The callback-id resumable-stepper experiment remains blocked, but that blocker
+is now higher and narrower than this path:
 
-- the callback-id resumable-stepper experiment remains partially blocked by a
-  more basic hosted-native pool/channel payload path
-- the remaining host-side Go-like M:N gap is still entangled with native pool
-  result transport correctness
+- the lower hosted-native pool/channel payload transport path is fixed
+- the remaining host-side Go-like M:N gap stays on the resumable-stepper
+  native crash path
 
 ## Executable Evidence
 
-- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_blocker_spec.spl`
+- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_regression_spec.spl`
