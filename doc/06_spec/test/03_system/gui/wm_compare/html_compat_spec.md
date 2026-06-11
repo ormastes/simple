@@ -28,7 +28,7 @@ html_compat_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -46,12 +46,12 @@ html_compat_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val catalog = build_catalog()
-expect(catalog.len()).to_equal(23)
+expect(catalog.len()).to_equal(16)
 expect(_catalog_has("00_text_only")).to_equal(true)
 expect(_catalog_has("01_inline_text")).to_equal(true)
 expect(_catalog_has("02_block_boxes")).to_equal(true)
@@ -68,13 +68,6 @@ expect(_catalog_has("14_border")).to_equal(true)
 expect(_catalog_has("15_background")).to_equal(true)
 expect(_catalog_has("16_flex_row")).to_equal(true)
 expect(_catalog_has("17_flex_col")).to_equal(true)
-expect(_catalog_has("18_flex_grow_weights")).to_equal(true)
-expect(_catalog_has("19_flex_shrink_weights")).to_equal(true)
-expect(_catalog_has("20_flex_basis_override")).to_equal(true)
-expect(_catalog_has("21_flex_wrap_basic")).to_equal(true)
-expect(_catalog_has("22_flex_align_items_baseline")).to_equal(true)
-expect(_catalog_has("23_flex_wrap_align_content_center")).to_equal(true)
-expect(_catalog_has("24_flex_wrap_reverse_basic")).to_equal(true)
 ```
 
 </details>
@@ -441,6 +434,28 @@ expect(report).to_contain("acceptance_policy: (exact_required: true perceptual_d
 
 </details>
 
+#### Chromium flex geometry evidence reports
+
+#### records flex subpixel diagnostics without pixel tolerance
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = rt_file_read_text("doc/09_report/chrome_html_compat_geometry_flex_fraction_evidence_2026-06-11.md")
+expect(report).to_contain("- status: pass")
+expect(report).to_contain("- blur/tolerance used: false")
+expect(report).to_contain("## Subpixel Diagnostics")
+expect(report).to_contain("| `18_flex_grow_weights` | 2 | 0.328 | `grow_one,grow_two` |")
+expect(report).to_contain("| `22_flex_align_items_baseline` | 2 | 0.328 | `baseline_big,baseline_small` |")
+expect(report).to_contain("| `24_flex_wrap_reverse_basic` | pass | 0 |")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -460,8 +475,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
