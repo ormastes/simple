@@ -1,10 +1,66 @@
 # Cancellation - Cooperative Cancellation Tokens
 #
 # CancellationToken: hierarchical cancel propagation (parent -> child).
+#
+# Design: Simple structs are value types — storing children in the parent
+# and pushing cancel() to them would mutate copies, not the caller's vars.
+# Instead we use a module-level flat registry (64 slots) as the shared
+# mutable cell. Each token has an integer id; cancel() writes to the
+# registry; is_cancelled() walks the parent chain in the registry.
+#
 # Pure Simple state, cooperative (no OS signals).
 
 use nogc_async_mut.async.poll.{Poll}
 use nogc_async_mut.async.future.{Future}
+
+# ============================================================
+# Global token registry (module-level mutable state)
+# Up to 64 tokens; sufficient for cooperative single-carrier use.
+# ============================================================
+
+var _registry_cancelled: [bool] = [
+    false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false
+]
+
+var _registry_parent: [i64] = [
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1
+]
+
+var _next_token_id: i64 = 0
+
+fn _alloc_token_id() -> i64:
+    val id = _next_token_id
+    _next_token_id = _next_token_id + 1
+    id
+
+fn _token_is_cancelled_by_id(id: i64) -> bool:
+    """Check the registry chain: true if id or any ancestor is cancelled."""
+    if id < 0:
+        false
+    else:
+        val direct = _registry_cancelled[id]
+        if direct:
+            true
+        else:
+            val pid = _registry_parent[id]
+            if pid < 0:
+                false
+            else:
+                _token_is_cancelled_by_id(pid)
 
 # ============================================================
 # CancellationToken
@@ -13,83 +69,49 @@ use nogc_async_mut.async.future.{Future}
 class CancellationToken:
     """Cooperative cancellation token.
 
-    Create a root token with token_new(), then call child() to create
-    child tokens. Cancelling a parent propagates to all children.
+    Create a root token with token_new(), then call child() to get a
+    child. Cancelling a parent is visible to all children because
+    is_cancelled() walks the registry parent chain.
 
     Example:
-        var tok = token_new()
-        tok.cancel()
-        val cancelled = tok.is_cancelled()  # true
+        var parent = token_new()
+        var child = parent.child()
+        parent.cancel()
+        val c = child.is_cancelled()   # true
     """
-    cancelled: bool
-    # child token slots (fixed-size; extend as needed)
-    child0: CancellationToken?
-    child1: CancellationToken?
-    child2: CancellationToken?
-    child3: CancellationToken?
+    token_id: i64
+    parent_id: i64   # -1 if root
 
 fn token_new() -> CancellationToken:
     """Create a new root cancellation token (not cancelled)."""
-    CancellationToken(
-        cancelled: false,
-        child0: nil,
-        child1: nil,
-        child2: nil,
-        child3: nil
-    )
+    val id = _alloc_token_id()
+    _registry_cancelled[id] = false
+    _registry_parent[id] = -1
+    CancellationToken(token_id: id, parent_id: -1)
 
 impl CancellationToken:
     me cancel():
-        """Cancel this token and propagate to registered children."""
-        self.cancelled = true
-        if self.child0 != nil:
-            self.child0.cancel()
-        if self.child1 != nil:
-            self.child1.cancel()
-        if self.child2 != nil:
-            self.child2.cancel()
-        if self.child3 != nil:
-            self.child3.cancel()
+        """Cancel this token. All children see it via is_cancelled()."""
+        _registry_cancelled[self.token_id] = true
 
     fn is_cancelled() -> bool:
-        """Return true if this token has been cancelled."""
-        self.cancelled
-
-    me register_child(child: CancellationToken):
-        """Register a child token so cancel() propagates to it.
-
-        Up to 4 child slots are supported. Extra registrations are ignored.
-        """
-        if self.child0 == nil:
-            self.child0 = child
-        else if self.child1 == nil:
-            self.child1 = child
-        else if self.child2 == nil:
-            self.child2 = child
-        else if self.child3 == nil:
-            self.child3 = child
+        """Return true if this token or any ancestor has been cancelled."""
+        _token_is_cancelled_by_id(self.token_id)
 
     fn child() -> CancellationToken:
-        """Create a child token linked to this parent.
-
-        Cancelling the parent also cancels the returned child.
-        """
-        val c = token_new()
-        self.register_child(c)
-        c
+        """Create a child token whose is_cancelled() also reflects parent state."""
+        val cid = _alloc_token_id()
+        _registry_cancelled[cid] = false
+        _registry_parent[cid] = self.token_id
+        CancellationToken(token_id: cid, parent_id: self.token_id)
 
     fn guard_future() -> Future<bool>:
-        """Poll-once future that is Ready(true) when cancelled, Pending otherwise.
+        """Poll-once future: Ready(true) when cancelled, Pending otherwise.
 
         Use at suspension points to exit a cooperative async loop early.
-
-        Example:
-            val f = tok.guard_future()
-            val p = f.poll()
-            if p.is_ready():
-                # cancelled — stop work
         """
-        if self.cancelled:
+        val c = _token_is_cancelled_by_id(self.token_id)
+        if c:
             Future.from_value(true)
         else:
             Future.pending<bool>()
