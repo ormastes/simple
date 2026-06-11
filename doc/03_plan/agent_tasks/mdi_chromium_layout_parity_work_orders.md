@@ -28,7 +28,7 @@ Prove and harden the requested GUI stack:
 
 ## Current Evidence Snapshot
 
-- `origin/main` at `e570ff72e763` includes the latest pushed live browser event,
+- `origin/main` at `27140e03559d` includes the latest pushed live browser event,
   computed-style, QMP drag-gate, and multicore green follow-up evidence.
 - Generated-GUI Electron matrix is exact at `80x64`, `96x72`, `128x96`, and
   `160x120`.
@@ -50,16 +50,21 @@ Prove and harden the requested GUI stack:
   traffic-light close/minimize/maximize commands, and title-command input
   routing through `test/02_integration/app/ui.web/wm_bridge_test.spl`.
 - Pure Simple shared-MDI source evidence now covers the actual Terminal window
-  HTML emitted by `src/app/ui_shared_mdi/main.spl`:
-  `test/03_system/gui/ui_shared_mdi_titlebar_widget_spec.spl` imports
-  `shared_mdi_terminal_window_html()` and asserts the shared renderer source
-  contains the title text, titlebar widget slot, titlebar `Run` button
-  `data-simple-titlebar-widget="button"`, `data-action="mdi_terminal_action"`,
-  body `Run` button, body input `data-target-id="mdi_terminal_input"`,
-  `value="ready"`, and the CSS hook
+  HTML emitted by the side-effect-free helper
+  `src/app/ui_shared_mdi/terminal_window_html.spl`, which
+  `src/app/ui_shared_mdi/main.spl` consumes before opening the Terminal MDI
+  window. `test/03_system/gui/ui_shared_mdi_titlebar_widget_spec.spl` imports
+  `shared_mdi_terminal_window_html()` from that helper module and asserts the
+  shared renderer source contains the title text, titlebar widget slot,
+  titlebar `Run` button `data-simple-titlebar-widget="button"`,
+  `data-action="mdi_terminal_action"`, body `Run` button, body input
+  `data-target-id="mdi_terminal_input"`, `value="ready"`, and the CSS hook
   `.simple-titlebar-widget{background:rgb(18,58,52);border-color:rgb(52,211,153);color:rgb(236,254,255);}`.
-  This proves the shared MDI app source carries the requested button/input/CSS
-  hooks before host-shell rendering.
+  The focused JSON SSpec run now reports `success=true`, `passed=1`,
+  `failed=0`, and `error=null`; the previous process-exit annotation caused by
+  importing the app `main` module is gone. The generated manual includes
+  explicit steps for helper render, titlebar structure, button/input presence,
+  and CSS styling evidence.
 - Live Chromium browser evidence now runs through
   `scripts/check/check-wm-browser-event-routing-evidence.shs`: it loads the real
   `src/app/ui.web/wm.js`, opens an MDI window through the Electron IPC path,
