@@ -292,9 +292,10 @@ green-spawn closures are share-nothing — no module-level mutable `var` reads,
 no captured `var` writes; `thread_spawn` exempt). Both compilers implement the
 rules: the Rust seed in `driver/src/cli/check.rs`, the pure-Simple lints in
 `src/compiler/35.semantics/lint/concurrency_{api_misuse,share_nothing}.spl`
-wired into `src/app/cli/check.spl`. The self-hosted E-PAR-006 lane is blocked
-by the parser lambda-argument gap
-(`doc/08_tracking/bug/selfhosted_parser_lambda_gap_2026-06-11.md`). Fixtures:
+wired into `src/app/cli/check.spl`. The self-hosted E-PAR-006 lane is fully
+active — the parser lambda-argument gap (backslash lambda + block-in-parens) was
+fixed; see `doc/08_tracking/bug/selfhosted_parser_lambda_gap_2026-06-11.md` for
+the full fix record (remaining: superlinear parse perf at ~150+ lines). Fixtures:
 `test/fixtures/concurrency_api_misuse/` + system spec
 `test/03_system/feature/usage/concurrency_api_misuse_spec.spl`.
 

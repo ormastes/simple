@@ -41,7 +41,7 @@ backend_cuda_renderbackend_spec -> std
 #### reports the cuda backend name
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(backend.name()).to_equal("cuda")
 #### returns a typed probe result
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -75,7 +75,7 @@ expect(valid_status).to_equal(true)
 #### exports probe_cuda with the same typed result
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -94,7 +94,7 @@ expect(valid_status).to_equal(true)
 #### exports generated fill entry in CUDA PTX module source
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -112,17 +112,16 @@ expect(source).to_contain("param_height")
 
 #### does not claim initialized when init fails
 
-1. var backend = CudaBackend create
+- var backend = CudaBackend create
    - Expected: backend.width() equals `4`
    - Expected: backend.height() equals `4`
-
-2. backend shutdown
+- backend shutdown
    - Expected: backend.initialized is false
    - Expected: backend.owns_session is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -143,20 +142,18 @@ else:
 
 #### routes draw_text_bg through the shared text image path without CUDA hardware
 
-1. var backend = CudaBackend create
+- var backend = CudaBackend create
    - Expected: backend.mirror.init(4, 4) is true
-
-2. backend draw text bg
+- backend draw text bg
    - Expected: text_bg[0] equals `expected[0]`
    - Expected: text_bg[1] equals `expected[1]`
    - Expected: text_bg[2] equals `expected[2]`
    - Expected: text_bg[3] equals `expected[3]`
-
-3. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -180,21 +177,18 @@ backend.shutdown()
 
 #### routes foreground draw_text through transparent text image semantics without CUDA hardware
 
-1. var backend = CudaBackend create
+- var backend = CudaBackend create
    - Expected: backend.mirror.init(4, 4) is true
-
-2. backend mirror clear
-
-3. backend draw text
+- backend mirror clear
+- backend draw text
    - Expected: fg_count > 0 is true
    - Expected: bg_count > 0 is true
    - Expected: transparent_count > 0 is true
-
-4. backend shutdown
+- backend shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -231,9 +225,8 @@ backend.shutdown()
 
 #### rejects an invalid shared CUDA session with typed context diagnostics
 
-1. var backend = CudaBackend create
-
-2. var session = CudaSession create
+- var backend = CudaBackend create
+- var session = CudaSession create
    - Expected: ok is false
    - Expected: backend.initialized is false
    - Expected: backend.owns_session is false
@@ -244,7 +237,7 @@ backend.shutdown()
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -267,7 +260,7 @@ expect(backend.last_probe.status).to_equal(BackendStatus.Failed)
 #### reports CUDA 2D kernel readiness or the real kernel gap
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -299,7 +292,7 @@ else if probe.feature_gate == "cuda_2d_render":
 #### does not mark CUDA usable when the PTX self-test fails
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -320,7 +313,7 @@ if probe.feature_gate == "cuda_2d_render_self_test":
 #### strict Engine2D cuda creation returns typed cuda failure instead of fallback
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

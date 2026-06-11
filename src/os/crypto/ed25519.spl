@@ -18,7 +18,7 @@
 
 use os.crypto.ed25519_ops.{EdPoint, fe_neg, fe_is_negative, fe_pow2252m3, fe_sqrt, _fe_sqrt_m1, _ed25519_d, _ed25519_2d, _ed25519_base_point, ed_point_identity, ed_point_add, ed_point_double, ed_point_cselect, ed_scalar_mul, ed_point_encode, ed_point_decode}
 use os.crypto.ed25519_scalar.{sc_reduce, sc_muladd, _bytes_to_limbs32, _sc_sub_L}
-use os.crypto.dual_backend.{dual_backend_default_config, dual_backend_run_bytes}
+use os.crypto.dual_backend.{DualBackendMode, DualBackendPreference, dual_backend_choose_bytes, dual_backend_default_config}
 # Pure-Simple SHA-512 (FIPS 180-4) — drop-in replacement for the
 # baremetal C `rt_sha512_*` extern that has no interpreter dispatch.
 # Brings `rotr64` into scope transitively for the indexed sha512_bytes lib.
@@ -297,18 +297,43 @@ fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8
     serial_println("[ed25519] sign: done")
     sig
 
+fn ed25519_sign_live_runtime_only(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    _ed25519_sign_live_runtime(private_seed, public_key, message)
+
+fn ed25519_sign_live_pure_only(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    ed25519_sign(private_seed, public_key, message)
+
 fn ed25519_sign_live(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
-    dual_backend_run_bytes(
+    val config = dual_backend_default_config()
+    val inputs = [
+        "seed_len=" + private_seed.len().to_text(),
+        "pub_len=" + public_key.len().to_text(),
+        "msg_len=" + message.len().to_text()
+    ]
+    if config.mode == DualBackendMode.Normal:
+        if config.preference == DualBackendPreference.PureSimpleFirst:
+            val pure_output = ed25519_sign(private_seed, public_key, message)
+            if pure_output.len() > 0:
+                return pure_output
+            return _ed25519_sign_live_runtime(private_seed, public_key, message)
+        val runtime_output = _ed25519_sign_live_runtime(private_seed, public_key, message)
+        if runtime_output.len() > 0:
+            return runtime_output
+        return ed25519_sign(private_seed, public_key, message)
+
+    serial_println("[ed25519] dual-run runtime start")
+    val runtime_output = _ed25519_sign_live_runtime(private_seed, public_key, message)
+    serial_println("[ed25519] dual-run runtime done len={runtime_output.len()}")
+    serial_println("[ed25519] dual-run pure start")
+    val pure_output = ed25519_sign(private_seed, public_key, message)
+    serial_println("[ed25519] dual-run pure done len={pure_output.len()}")
+    dual_backend_choose_bytes(
         "ed25519",
         "sign_live",
-        dual_backend_default_config(),
-        [
-            "seed_len=" + private_seed.len().to_text(),
-            "pub_len=" + public_key.len().to_text(),
-            "msg_len=" + message.len().to_text()
-        ],
-        fn(): _ed25519_sign_live_runtime(private_seed, public_key, message),
-        fn(): ed25519_sign(private_seed, public_key, message)
+        config,
+        inputs,
+        runtime_output,
+        pure_output
     )
 
 fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:

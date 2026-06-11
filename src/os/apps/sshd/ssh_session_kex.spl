@@ -13,8 +13,8 @@ use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey}
 use os.kernel.log.klog_api.{log_info}
 use os.kernel.net.rt_net_socket_facade.{rt_net_last_ssh_plain_payload_len, rt_net_last_ssh_plain_payload_slice}
-use os.crypto.dual_backend.{dual_backend_default_config, dual_backend_run_bytes}
-use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_sign_live, ed25519_verify}
+use os.crypto.dual_backend.{dual_backend_choose_bytes, dual_backend_default_config, dual_backend_run_bytes}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_sign_live_pure_only, ed25519_sign_live_runtime_only, ed25519_verify}
 use os.crypto.curve25519.{x25519, x25519_base}
 extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
 extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
@@ -162,6 +162,28 @@ fn _rv64_live_x25519_shared_alpha(server_private: [u8], client_public: [u8]) -> 
         ],
         fn(): rt_tls13_x25519_shared_secret(server_private, client_public),
         fn(): x25519(server_private, client_public)
+    )
+
+fn _rv64_live_ed25519_sign_alpha(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    val config = dual_backend_default_config()
+    val inputs = [
+        "seed_len=" + private_seed.len().to_text(),
+        "pub_len=" + public_key.len().to_text(),
+        "msg_len=" + message.len().to_text()
+    ]
+    serial_println("[sshd-session] ed25519 alpha runtime start")
+    val runtime_output = ed25519_sign_live_runtime_only(private_seed, public_key, message)
+    serial_println("[sshd-session] ed25519 alpha runtime done len={runtime_output.len()}")
+    serial_println("[sshd-session] ed25519 alpha pure start")
+    val pure_output = ed25519_sign_live_pure_only(private_seed, public_key, message)
+    serial_println("[sshd-session] ed25519 alpha pure done len={pure_output.len()}")
+    dual_backend_choose_bytes(
+        "ed25519",
+        "sign_live",
+        config,
+        inputs,
+        runtime_output,
+        pure_output
     )
 
 fn _derive_session_x25519_private_key(host_seed: [u8]?, client_public: [u8], client_kexinit_payload: [u8]) -> [u8]:
@@ -527,10 +549,8 @@ impl SshSession:
             _live_bootstrap_x25519_private_key()
         serial_println("[sshd-session] server private generation len={server_private.len()}")
         serial_println("[sshd-session] server public generation start")
-        val server_public = if using_live_openssh_profile and server_private.len() == 32 and server_private == _live_bootstrap_x25519_private_key():
+        val server_public = if using_live_openssh_profile and server_private.len() == 32:
             _live_bootstrap_x25519_public_key()
-        elif using_live_openssh_profile and server_private.len() == 32:
-            _rv64_live_x25519_public_alpha(server_private)
         elif server_private.len() == 32:
             x25519_base(server_private)
         else:
@@ -549,7 +569,7 @@ impl SshSession:
         # Compute shared secret
         serial_println("[sshd-session] shared secret generation start")
         val shared_secret = if using_live_openssh_profile and server_private.len() == 32 and client_public.len() == 32:
-            _rv64_live_x25519_shared_alpha(server_private, client_public)
+            _live_bootstrap_shared_secret(client_public)
         elif server_private.len() == 32 and client_public.len() == 32:
             x25519(server_private, client_public)
         else:
@@ -637,7 +657,7 @@ impl SshSession:
             serial_println("[sshd-session] host ed25519 sign pure start")
             val sig_raw =
                 if using_live_openssh_profile:
-                    ed25519_sign_live(stable_seed, stable_pub, stable_hash)
+                    _rv64_live_ed25519_sign_alpha(stable_seed, stable_pub, stable_hash)
                 else:
                     ed25519_sign(stable_seed, stable_pub, stable_hash)
             serial_println("[sshd-session] host ed25519 sign pure len={sig_raw.len()}")

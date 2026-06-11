@@ -27,7 +27,7 @@ vulkan_icd_sffi_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -56,6 +56,22 @@ expect(result.dispatch_handle).to_be_greater_than(0)
 
 </details>
 
+#### create_instance leaf field is dlopen or structured
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = vk_icd_create_instance()
+val leaf_ok = result.leaf == "dlopen" or result.leaf == "structured"
+expect(leaf_ok).to_equal(true)
+```
+
+</details>
+
 #### create_device on valid instance returns is_ok=true
 
 <details>
@@ -69,6 +85,23 @@ val inst = vk_icd_create_instance()
 val dev = vk_icd_create_device(inst.instance_handle)
 expect(dev.is_ok).to_equal(true)
 expect(dev.device_handle).to_be_greater_than(0)
+```
+
+</details>
+
+#### create_device carries leaf evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val inst = vk_icd_create_instance()
+val dev = vk_icd_create_device(inst.instance_handle)
+val leaf_ok = dev.leaf == "dlopen" or dev.leaf == "structured"
+expect(leaf_ok).to_equal(true)
 ```
 
 </details>
@@ -91,7 +124,7 @@ expect(result.error).to_equal("invalid-instance")
 
 #### destroy_instance does not panic on valid result
 
-1. vk icd destroy instance
+- vk icd destroy instance
    - Expected: 1 equals `1`
 
 
@@ -125,6 +158,38 @@ expect(r1.instance_handle).to_not_equal(r2.instance_handle)
 
 </details>
 
+#### vk_icd_probe_leaf returns leaf=dlopen or leaf=structured
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val leaf = vk_icd_probe_leaf()
+val leaf_ok = leaf == "leaf=dlopen" or leaf == "leaf=structured"
+expect(leaf_ok).to_equal(true)
+```
+
+</details>
+
+#### vk_icd_probe_leaf result starts with leaf=
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val leaf = vk_icd_probe_leaf()
+val starts_ok = leaf.starts_with("leaf=")
+expect(starts_ok).to_equal(true)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -144,8 +209,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

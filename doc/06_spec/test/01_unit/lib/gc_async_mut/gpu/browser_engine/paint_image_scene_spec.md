@@ -1,6 +1,6 @@
 # Paint Image Scene Specification
 
-> 1. PaintCommand image
+> <details>
 
 <!-- sdn-diagram:id=paint_image_scene_spec.arch -->
 <details class="sdn-source">
@@ -40,7 +40,7 @@ paint_image_scene_spec -> std
 
 #### converts image paint commands into scene image commands
 
-1. PaintCommand image
+- PaintCommand image
    - Expected: scene.commands.len() equals `1`
    - Expected: scene.commands[0].kind equals `image`
    - Expected: scene.commands[0].x equals `4`
@@ -78,7 +78,7 @@ expect(scene.commands[0].pixels.len()).to_equal(4)
 
 #### skips image paint commands without source pixels
 
-1. PaintCommand image
+- PaintCommand image
    - Expected: scene.commands.len() equals `0`
 
 
