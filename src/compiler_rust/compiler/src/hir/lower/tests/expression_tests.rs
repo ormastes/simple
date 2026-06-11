@@ -511,3 +511,46 @@ fn test_lower_return_without_value() {
     let func = &module.functions[0];
     assert!(matches!(func.body[0], HirStmt::Return(None)));
 }
+
+/// B6 regression: HIR await must propagate the operand type, not hardcode I64.
+/// Simple async is EAGER — await on a non-Future is the identity, so the
+/// await expression type equals the operand type.
+#[test]
+fn test_await_expr_type_propagates_operand_type() {
+    // `await 3.14` — operand is f64; HIR result must be F64, not I64.
+    let module = parse_and_lower("fn test() -> i64:\n    let x = await 3.14\n    return 0\n").unwrap();
+
+    let func = &module.functions[0];
+    // The Let binding stores the await expression; check its inferred type.
+    if let HirStmt::Let { ty, value: Some(ref expr), .. } = func.body[0] {
+        assert_eq!(
+            expr.ty, TypeId::F64,
+            "await on f64 operand must produce F64 type, not I64 (B6 regression)"
+        );
+        // Also verify the let local got the right type
+        assert_eq!(ty, TypeId::F64, "let binding type must match await result type");
+        // Confirm the HIR kind is Await wrapping an f64 literal
+        assert!(
+            matches!(&expr.kind, HirExprKind::Await(inner) if inner.ty == TypeId::F64),
+            "HirExprKind::Await inner must be F64"
+        );
+    } else {
+        panic!("Expected Let statement with await expression");
+    }
+}
+
+/// B6 regression: await on a string operand must yield STRING type (not I64).
+#[test]
+fn test_await_expr_string_type_propagates() {
+    let module = parse_and_lower("fn test() -> i64:\n    let s = await \"hello\"\n    return 0\n").unwrap();
+
+    let func = &module.functions[0];
+    if let HirStmt::Let { value: Some(ref expr), .. } = func.body[0] {
+        assert_eq!(
+            expr.ty, TypeId::STRING,
+            "await on string operand must produce STRING type (B6 regression)"
+        );
+    } else {
+        panic!("Expected Let statement with await expression");
+    }
+}

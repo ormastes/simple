@@ -188,11 +188,15 @@ impl Lowerer {
             // Existence check: expr.? (is present/non-empty)
             Expr::ExistsCheck(inner) => self.lower_exists_check(inner, ctx),
             // Await expression: await expr
+            // Simple async is EAGER: await on a non-Future is the identity, so the
+            // result type equals the operand type. No Future<T> representation exists
+            // in the type system yet; when it does, extract T here.
             Expr::Await(inner) => {
                 let future_hir = Box::new(self.lower_expr(inner, ctx)?);
+                let operand_ty = future_hir.ty;
                 Ok(HirExpr {
                     kind: HirExprKind::Await(future_hir),
-                    ty: TypeId::I64,
+                    ty: operand_ty,
                 })
             }
             // Try expression: expr? - unwrap Result or propagate error

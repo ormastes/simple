@@ -1,6 +1,6 @@
 # Async/Await Interpreter Crashes - 2026-06-11
 
-Status: partially-fixed (2026-06-11) — B1/B2(await) VERIFIED FIXED; B3(generator/actor scope) + B5(Promise/FutureValue) + B6(HIR I64) remain OPEN (Rust-seed only); B4(spawn SIGABRT) VERIFIED FIXED via E6; coverage gap documented.
+Status: partially-fixed (2026-06-11) — B1/B2(await) VERIFIED FIXED; B3(generator/actor scope) + B5(Promise/FutureValue) remain OPEN (Rust-seed only); B4(spawn SIGABRT) VERIFIED FIXED via E6; B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
 
 **Fixed 2026-06-11 (commit 861e29bc99):** the SIGSEGV had already become silent
 corruption (`await f()` always yielded 3 = NIL bit pattern in JIT mode; a
@@ -24,7 +24,7 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 **Still open (all Rust-seed-rooted — do NOT fix in .spl):**
 - B3: yield/generator + actor desugar HIR scope visibility (see below).
 - B5: Promise-vs-FutureValue deep representation reconcile.
-- B6: HIR hardcodes I64 for await result type (masked by eager semantics).
+- ~~B6: HIR hardcodes I64 for await result type~~ → **FIXED IN SEED (S5 batch, pending redeploy):** `ty: TypeId::I64` replaced with `ty: operand_ty` (the inner expression's type). Rust tests: `test_await_expr_type_propagates_operand_type` + `test_await_expr_string_type_propagates` both green.
 
 ## Per-Item Triage Table (2026-06-11 audit)
 
@@ -36,7 +36,7 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 | B3b | `actor` desugar class not visible in HIR scope | (c) Rust-seed | OPEN | root-cause note below |
 | B4 | `spawn fn()` closure SIGABRTs (exit 132) at cleanup | (a) Fixed | VERIFIED FIXED | E6 in green_thread_direct_runtime_blockers_2026-06-06.md |
 | B5 | Promise vs FutureValue unreconciled in MIR executor | (c) Rust-seed | OPEN | root-cause note below |
-| B6 | HIR hardcodes `TypeId::I64` for await result type | (c) Rust-seed | OPEN | root-cause note below |
+| B6 | HIR hardcodes `TypeId::I64` for await result type | (c) Rust-seed | FIXED IN SEED — pending redeploy | S5 batch: `ty: operand_ty`; tests green |
 | C1 | Coverage gap: 7 specs are single-skip placeholders | (b)/(c) mixed | DOCUMENTED | see Coverage section below |
 | C2 | `async_integration_spec` has 21 hollow `expect(1).to_equal(1)` tests | (b) | DOCUMENTED | vacuous; needs real assertions when B3/B5 resolved |
 
@@ -99,22 +99,36 @@ Fix required: unify the two representations or add a conversion shim so that
 change only. File: `src/compiler_rust/compiler/src/value_async.rs` +
 `src/compiler_rust/runtime/src/value/async_gen.rs`.
 
-### B6 — HIR Hardcodes I64 for Await Result Type (Rust-seed)
+### B6 — HIR Hardcodes I64 for Await Result Type (Rust-seed) — FIXED IN SEED
 
-`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs` lines ~193-200:
+**Fixed (S5 seed batch, 2026-06-11, pending redeploy).**
+
+`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs` — was:
 ```rust
 Expr::Await(inner) => {
     let future_hir = Box::new(self.lower_expr(inner, ctx)?);
     Ok(HirExpr {
         kind: HirExprKind::Await(future_hir),
-        ty: TypeId::I64,   // ← hardcoded, ignores Future<T> inner type
+        ty: TypeId::I64,   // ← was hardcoded, ignores operand type
     })
 }
 ```
-This is currently masked by eager-async semantics (the value is passed through
-before type checking asserts on it), but will produce incorrect type information
-once futures become lazy. Fix: extract the inner type `T` from `Future<T>` and
-use it as the HIR expression type. Authorized Rust change only.
+Now fixed to:
+```rust
+Expr::Await(inner) => {
+    let future_hir = Box::new(self.lower_expr(inner, ctx)?);
+    let operand_ty = future_hir.ty;
+    Ok(HirExpr {
+        kind: HirExprKind::Await(future_hir),
+        ty: operand_ty,   // propagates operand type (eager-async identity)
+    })
+}
+```
+Simple async is EAGER: await on a non-Future is identity, so operand type is correct.
+When `Future<T>` representation is added to the type system, this site must be
+updated to extract `T` from the Future type. Regression tests added:
+`test_await_expr_type_propagates_operand_type` and `test_await_expr_string_type_propagates`
+in `hir/lower/tests/expression_tests.rs` (both green).
 
 ## Required Fix (prioritized)
 
@@ -123,7 +137,7 @@ use it as the HIR expression type. Authorized Rust change only.
 2. **(DONE)** Interpreter `Expr::Await` passthrough for non-Future values.
 3. **(OPEN — Rust)** Re-inject desugared declarations into HIR scope before lowering bodies (B3).
 4. **(OPEN — Rust)** Reconcile Promise vs FutureValue in the interpreter dispatch path (B5).
-5. **(OPEN — Rust)** Propagate the real `Future<T>` inner type for `await` (B6).
+5. **(FIXED IN SEED — pending redeploy)** Propagate the real operand type for `await` (B6): `ty: TypeId::I64` → `ty: operand_ty` in `hir/lower/expr/mod.rs`. When Future<T> representation is added, this site must extract T instead.
 
 ## Coverage Gap
 

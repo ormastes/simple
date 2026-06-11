@@ -221,7 +221,7 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                     .with_code("SPIPE006")
                     .with_file(path.display().to_string())
                     .with_label(line_span(source, idx), "")
-                    .with_help("Use expect(condition) instead of expect(condition).to_equal(true) or .to_be(true)"),
+                    .with_help("Use assert_true(condition) instead of expect(condition).to_equal(true) or .to_be(true)"),
             );
         }
     }
