@@ -161,6 +161,10 @@ Updated: 2026-06-11
   `_last_rule_hex_color` now finds `{` and `}` in the original HTML buffer
   after a selector match instead of allocating post-selector and post-brace
   tails before parsing the rule body.
+- this commit -- style-block selector brace tail allocation removal:
+  `_style_block_has_class_or_id_selector` now scans `{` and `}` within the CSS
+  slice directly instead of allocating per-rule brace and end tails while
+  checking for class or id selectors.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
