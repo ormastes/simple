@@ -123,6 +123,9 @@ Updated: 2026-06-11
   and `_second_hex_color_after` now locate `#` directly in the original HTML
   from the known offset, avoiding temporary tail substring allocation before
   parsing the same color.
+- this commit -- repeated hex color tail allocation removal: `_last_hex_color_after`
+  now parses colors from the original HTML buffer after each marker match instead
+  of allocating an extra post-marker tail substring before looking for `#`.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
