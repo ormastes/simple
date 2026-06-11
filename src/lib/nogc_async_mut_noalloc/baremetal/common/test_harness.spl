@@ -22,6 +22,17 @@ var g_stats_failed: i32 = 0
 var g_current_test: text = ""
 var g_initialized: bool = false
 
+# Print an i32 to COM1 serial port without heap allocation.
+# Writes decimal digits directly via outb(0x3F8, byte).
+fn log_raw_i32(n: i32):
+    if n < 0:
+        outb(0x3F8, 45)  # '-'
+        log_raw_i32(0 - n)
+        return
+    if n >= 10:
+        log_raw_i32(n / 10)
+    outb(0x3F8, (n % 10) + 48)  # '0'..'9'
+
 # Output a line via serial port (routed through the log library)
 fn output(s: text):
     log_raw_println(s)
@@ -42,17 +53,25 @@ fn test_start(name: text):
 # Mark current test as passed
 fn test_pass(name: text):
     g_stats_passed = g_stats_passed + 1
-    output("[PASS] {name}")
+    log_raw("[PASS] ")
+    log_raw_println(name)
 
 # Mark current test as failed
 # reason: positional baremetal test_harness API
 fn test_fail(name: text, message: text):
     g_stats_failed = g_stats_failed + 1
-    output("[FAIL] {name}: {message}")
+    log_raw("[FAIL] ")
+    log_raw(name)
+    log_raw(": ")
+    log_raw_println(message)
 
 # End test run and output summary
 fn test_end():
-    output("[TEST END] passed={g_stats_passed} failed={g_stats_failed}")
+    log_raw("[TEST END] passed=")
+    log_raw_i32(g_stats_passed)
+    log_raw(" failed=")
+    log_raw_i32(g_stats_failed)
+    log_raw_println("")
 
     # Exit QEMU with appropriate exit code
     # isa-debug-exit: writing to port 0xF4 exits QEMU
@@ -64,20 +83,35 @@ fn test_end():
 # Assert that a condition is true
 fn assert_true(condition: bool, message: text) -> bool:
     if not condition:
-        test_fail(g_current_test, "assertion failed: {message}")
+        log_raw("assertion failed: ")
+        test_fail(g_current_test, message)
         false
     else:
         true
 
 # Assert that a condition is false
 fn assert_false(condition: bool, message: text) -> bool:
-    assert_true(not condition, "expected false: {message}")
+    if condition:
+        log_raw("expected false: ")
+        test_fail(g_current_test, message)
+        false
+    else:
+        true
 
 # Assert equality for i32
 # reason: positional baremetal test_harness API
 fn assert_eq_i32(actual: i32, expected: i32, message: text) -> bool:
     if actual != expected:
-        test_fail(g_current_test, "{message}: expected {expected}, got {actual}")
+        log_raw("[FAIL] ")
+        log_raw(g_current_test)
+        log_raw(": ")
+        log_raw(message)
+        log_raw(": expected ")
+        log_raw_i32(expected)
+        log_raw(", got ")
+        log_raw_i32(actual)
+        log_raw_println("")
+        g_stats_failed = g_stats_failed + 1
         false
     else:
         true
@@ -86,7 +120,14 @@ fn assert_eq_i32(actual: i32, expected: i32, message: text) -> bool:
 # reason: positional baremetal test_harness API
 fn assert_ne_i32(actual: i32, expected: i32, message: text) -> bool:
     if actual == expected:
-        test_fail(g_current_test, "{message}: expected not equal to {expected}")
+        log_raw("[FAIL] ")
+        log_raw(g_current_test)
+        log_raw(": ")
+        log_raw(message)
+        log_raw(": expected not equal to ")
+        log_raw_i32(expected)
+        log_raw_println("")
+        g_stats_failed = g_stats_failed + 1
         false
     else:
         true

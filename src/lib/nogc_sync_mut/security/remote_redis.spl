@@ -4,7 +4,7 @@
 Concrete Redis-backed deployment store for remote `SecurityContext` sessions.
 """
 
-use std.io.types.{IoError}
+use std.io.types.{IoError, IoErrorKind}
 use std.nogc_sync_mut.redis.client.{RedisClient}
 use std.security.types.{RemoteSecuritySession, time_now_ms}
 
@@ -34,11 +34,22 @@ class RemoteSecurityRedisSessionStore:
 
 impl RemoteSecurityRedisSessionStore:
     fn make_key(session_id: text) -> text:
+        # Reject session IDs that contain characters which could break the Redis
+        # key namespace separator or protocol framing (newline, carriage return,
+        # space, or the pipe delimiter used in the payload encoding).
+        if session_id.contains("|") or session_id.contains("\n") or session_id.contains("\r") or session_id.contains(" "):
+            return ""
         "{self.namespace}:{session_id}"
 
     me save_session(session: RemoteSecuritySession) -> Result<(), IoError>:
         val key = self.make_key(session.session_id)
+        # make_key returns "" when session_id contains unsafe characters.
+        if key == "":
+            return Err(IoError.new(IoErrorKind.InvalidInput, "session_id contains unsafe characters"))
         val payload = remote_security_redis_encode_session(session)
+        # encode returns "" when id/user fields contain the pipe delimiter.
+        if payload == "":
+            return Err(IoError.new(IoErrorKind.InvalidInput, "session fields contain unsafe characters"))
         val ttl = remote_security_redis_session_ttl_seconds(session, time_now_ms(), self.tombstone_ttl_seconds)
         self.client.set_ex(key, payload, ttl)
 
@@ -90,6 +101,13 @@ impl RemoteSecurityRedisSessionStore:
         Ok(true)
 
 fn remote_security_redis_encode_session(session: RemoteSecuritySession) -> text:
+    # Guard: session_id and user_id must not contain the '|' delimiter or
+    # newlines — either would shift field positions on decode, enabling
+    # session confusion or capability injection.
+    if session.session_id.contains("|") or session.session_id.contains("\n") or session.session_id.contains("\r"):
+        return ""
+    if session.user_id.contains("|") or session.user_id.contains("\n") or session.user_id.contains("\r"):
+        return ""
     val revoked = if session.revoked: "true" else: "false"
     "session|{session.session_id}|{session.user_id}|{session.expires_at_ms}|{revoked}|{session.capabilities.join(\",\")}"
 

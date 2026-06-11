@@ -141,8 +141,9 @@ fn csrf_handler(request: HttpRequestData,
         log_csrf_violation(request, "missing CSRF cookie")
         return PhaseResult.Error(403, "CSRF validation failed")
 
-    # Double-submit: header and cookie must match
-    if header_token != cookie_token:
+    # Double-submit: header and cookie must match.
+    # Use constant-time comparison to prevent timing side-channel attacks.
+    if not constant_time_eq(header_token, cookie_token):
         log_csrf_violation(request, "token mismatch")
         return PhaseResult.Error(403, "CSRF validation failed")
 
@@ -167,6 +168,8 @@ fn get_cookie_value(headers: [(text, text)], cookie_name: text) -> text:
     """Extract a named cookie value from Cookie headers.
 
     Parses Cookie header format: "name1=value1; name2=value2"
+    Cookie values may themselves contain "=" (e.g. base64-encoded tokens),
+    so only split on the first "=" and join the rest as the value.
 
     Returns empty string if not found.
     """
@@ -174,12 +177,34 @@ fn get_cookie_value(headers: [(text, text)], cookie_name: text) -> text:
         if header.0.lower() == "cookie":
             val pairs = header.1.split("; ")
             for pair in pairs:
-                val parts = pair.split("=")
-                if parts.len() >= 2:
-                    val name = parts[0].trim()
+                val eq_pos = pair.index_of("=")
+                if eq_pos > 0:
+                    val name = pair.slice(0, eq_pos).trim()
                     if name == cookie_name:
-                        return parts[1].trim()
+                        return pair.slice(eq_pos + 1, pair.len()).trim()
     ""
+
+fn constant_time_eq(a: text, b: text) -> bool:
+    """Compare two strings in constant time to prevent timing attacks.
+
+    Always iterates over max(len(a), len(b)) characters regardless of
+    where a mismatch occurs. Returns true only if lengths and all bytes
+    are identical.
+    """
+    val len_a = a.len()
+    val len_b = b.len()
+    # Length comparison leaks length difference — that is acceptable for
+    # CSRF tokens because an attacker already knows the expected token length.
+    if len_a != len_b:
+        return false
+    var diff = 0
+    var i = 0
+    while i < len_a:
+        val ca = a.byte_at(i)
+        val cb = b.byte_at(i)
+        diff = diff or (ca xor cb)
+        i = i + 1
+    diff == 0
 
 # ============================================================================
 # Audit Logging

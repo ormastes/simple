@@ -92,13 +92,23 @@ fn cors_handler(request: HttpRequestData,
     if not is_origin_allowed(origin, config.allowed_origins):
         return PhaseResult.Error(403, "Origin not allowed")
 
+    # Wildcard + credentials is a spec violation and a security hole:
+    # browsers reject it, but we must not emit it regardless.
+    val uses_wildcard = is_wildcard_origin(config.allowed_origins)
+    if uses_wildcard and config.allow_credentials:
+        return PhaseResult.Error(403, "Origin not allowed")
+
+    # When the allowlist is wildcard-only, emit literal "*" rather than
+    # reflecting the request Origin — prevents credentialed reflection attacks.
+    val effective_origin = if uses_wildcard: "*" else: origin
+
     # Handle preflight OPTIONS
     if request.method == "OPTIONS":
-        return handle_preflight(origin, request, config)
+        return handle_preflight(effective_origin, request, config)
 
     # Normal CORS request — add response headers via Respond
     # The server layer reads these headers from the PhaseResult
-    val headers = build_cors_headers(origin, config)
+    val headers = build_cors_headers(effective_origin, config)
     PhaseResult.Respond(200, "OK", headers)
 
 # ============================================================================
@@ -155,11 +165,23 @@ fn build_cors_headers(origin: text, config: CorsConfig) -> text:
 # Origin Validation
 # ============================================================================
 
+fn is_wildcard_origin(allowed: [text]) -> bool:
+    """Return true if the allowlist contains only the wildcard entry "*"."""
+    for entry in allowed:
+        if entry == "*":
+            return true
+    false
+
 fn is_origin_allowed(origin: text, allowed: [text]) -> bool:
     """Check if an origin is in the allowlist.
 
-    Supports wildcard "*" to allow all origins.
+    Supports wildcard "*" to allow all origins (credentials must be
+    false when wildcard is used — enforced by the caller).
+    Rejects the "null" origin regardless of allowlist to prevent
+    sandboxed-iframe CSRF.
     """
+    if origin == "null":
+        return false
     for entry in allowed:
         if entry == "*":
             return true

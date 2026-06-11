@@ -51,7 +51,9 @@ impl AspectRegistry:
     me register(aspect: Aspect):
         self.aspects = self.aspects.push(aspect)
 
-    me unregister(name: text):
+    me unregister_unsafe(name: text):
+        # SECURITY: only call from trusted initialization code.
+        # Removing a registered aspect at runtime can silently disable security enforcement.
         self.aspects = self.aspects.filter(_.name != name)
 
     fn find_aspects(join_point: JoinPoint) -> [Aspect]:
@@ -76,10 +78,13 @@ impl AspectRegistry:
 fn time_now_ms() -> i64:
     time_now_unix_micros() / 1000
 
+impl AspectRegistry:
     me enable():
         self.enabled = true
 
-    me disable():
+    me disable_unsafe():
+        # SECURITY: disabling the registry suppresses ALL advice including security enforcement.
+        # Only call from trusted shutdown/test code.
         self.enabled = false
 
 struct LogAspects:
@@ -236,8 +241,12 @@ fn _glob_match(pattern: text, value: text) -> bool:
                 return false
             pos = seg.len()
         elif idx == parts.len() - 1:
-            # Last segment must anchor at end
+            # Last segment must anchor at end and must not overlap already-consumed position.
             if not value.ends_with(seg):
+                return false
+            val end_start = value.len() - seg.len()
+            if end_start < pos:
+                # The suffix overlaps the already-consumed prefix — reject to avoid false match.
                 return false
             pos = value.len()
         else:
@@ -254,6 +263,9 @@ var global_registry: AspectRegistry? = nil
 var global_weaver: AspectWeaver? = nil
 
 pub fn init_aop(config: AopConfig):
+    # SECURITY: only initialize once. Re-initialization would wipe all registered security aspects.
+    if global_registry.is_some():
+        return
     global_registry = Some(AspectRegistry.empty())
     global_weaver = Some(AspectWeaver.with_registry(global_registry.unwrap()))
 

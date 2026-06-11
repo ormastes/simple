@@ -219,20 +219,29 @@ class CapabilityStore:
 # Parse a capability string into a Capability enum value.
 #
 # Format: "kind:resource" (e.g., "read:users", "admin:*", "custom:name:scope").
-fn parse_capability(s: text) -> Capability:
+# Returns Err on malformed input or unknown kind — callers must treat Err as DENY.
+fn parse_capability(s: text) -> Result<Capability, text>:
     """
     Parses a "kind:resource" string into a Capability.
+    Returns Err on malformed or unrecognised input — never silently grants access.
 
     sdoctest:
         val c = parse_capability("read:users")
-        expect(c.to_string()).to_equal("read:users")
+        expect(c.is_ok()).to_equal(true)
+        expect(c.unwrap().to_string()).to_equal("read:users")
 
         val a = parse_capability("admin:*")
-        expect(a.to_string()).to_equal("admin:*")
+        expect(a.is_ok()).to_equal(true)
+
+        val bad = parse_capability("notakind:res")
+        expect(bad.is_err()).to_equal(true)
+
+        val short = parse_capability("read")
+        expect(short.is_err()).to_equal(true)
     """
     val parts = s.split(":")
     if parts.len() < 2:
-        return Capability.Custom(name: s, scope: "*")
+        return Err("malformed capability string (missing ':'): {s}")
 
     val kind = parts[0]
     val resource = if parts.len() == 2:
@@ -242,23 +251,24 @@ fn parse_capability(s: text) -> Capability:
         parts.slice(1, parts.len()).join(":")
 
     match kind:
-        "read": Capability.Read(resource: resource)
-        "write": Capability.Write(resource: resource)
-        "execute": Capability.Execute(resource: resource)
-        "admin": Capability.Admin(scope: resource)
-        "network": Capability.Network(endpoint: resource)
-        "filesystem": Capability.FileSystem(path: resource)
-        "database": Capability.Database(table: resource)
+        "read": Ok(Capability.Read(resource: resource))
+        "write": Ok(Capability.Write(resource: resource))
+        "execute": Ok(Capability.Execute(resource: resource))
+        "admin": Ok(Capability.Admin(scope: resource))
+        "network": Ok(Capability.Network(endpoint: resource))
+        "filesystem": Ok(Capability.FileSystem(path: resource))
+        "database": Ok(Capability.Database(table: resource))
         "custom":
             val custom_parts = resource.split(":")
             if custom_parts.len() >= 2:
-                Capability.Custom(name: custom_parts[0], scope: custom_parts.slice(1, custom_parts.len()).join(":"))
+                Ok(Capability.Custom(name: custom_parts[0], scope: custom_parts.slice(1, custom_parts.len()).join(":")))
             else:
-                Capability.Custom(name: resource, scope: "*")
-        _: Capability.Custom(name: kind, scope: resource)
+                Ok(Capability.Custom(name: resource, scope: "*"))
+        _: Err("unknown capability kind: {kind}")
 
 fn _capability_path_allowed(scope: text, path: text) -> bool:
-    scope == "*" or path == scope or path.starts_with(scope)
+    # Require separator after scope prefix to prevent "/data" matching "/data-evil".
+    scope == "*" or path == scope or path.starts_with(scope + "/")
 
 # Narrowed read handle for sandboxed or plugin code.
 #

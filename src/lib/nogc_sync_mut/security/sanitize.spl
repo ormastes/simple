@@ -29,14 +29,20 @@ fn sanitize_attribute(input: text) -> text:
     result = result.replace("`", "&#96;")
     result
 
-## Sanitize a URL — reject dangerous schemes, validate structure.
+## Sanitize a URL — allowlist safe schemes, reject all others.
 fn sanitize_url(input: text) -> Result<text, text>:
     """
-    Validates URL schemes — rejects javascript:, data:, vbscript:, blob:.
+    Validates URL schemes via allowlist — only http, https, /, # are accepted.
+    Rejects javascript:, data:, vbscript:, blob:, ftp:, gopher:, file:, and
+    any other scheme not explicitly permitted.
 
     sdoctest:
         expect(sanitize_url("https://example.com").is_ok()).to_equal(true)
         expect(sanitize_url("javascript:alert(1)").is_err()).to_equal(true)
+        expect(sanitize_url("ftp://files.example.com").is_err()).to_equal(true)
+        expect(sanitize_url("gopher:evil").is_err()).to_equal(true)
+        expect(sanitize_url("/relative/path").is_ok()).to_equal(true)
+        expect(sanitize_url("#anchor").is_ok()).to_equal(true)
     """
     val trimmed = input.trim()
 
@@ -45,25 +51,17 @@ fn sanitize_url(input: text) -> Result<text, text>:
 
     val lower = trimmed.lower()
 
-    # Reject dangerous schemes
-    if (lower.starts_with("javascript:") or
-        lower.starts_with("data:") or
-        lower.starts_with("vbscript:") or
-        lower.starts_with("blob:")):
-        return Err("dangerous URL scheme: {lower.split(\":\").first()}")
-
-    # Allow safe schemes
-    if (lower.starts_with("http://") or
-        lower.starts_with("https://") or
-        lower.starts_with("/") or
-        lower.starts_with("#") or
-        lower.starts_with("mailto:")):
+    # Allowlist: only safe, scheme-explicit or path-relative forms.
+    # /path and #anchor have no scheme — allow directly.
+    if lower.starts_with("/") or lower.starts_with("#"):
         return Ok(trimmed)
 
-    # Relative URLs are allowed
-    if not lower.contains("://"):
+    # Allow http:// and https:// (absolute URLs with safe schemes).
+    if lower.starts_with("http://") or lower.starts_with("https://"):
         return Ok(trimmed)
 
+    # Everything else — including bare scheme-like strings without ://,
+    # ftp:, gopher:, file:, javascript:, data:, vbscript:, blob:, etc. — is rejected.
     Err("unsupported URL scheme")
 
 ## Sanitize an identifier for use in SQL/SDN — whitelist alphanumeric + underscore.
@@ -109,25 +107,34 @@ fn validate_content_type(header: text, expected: text) -> bool:
 fn is_path_traversal(path: text) -> bool:
     """
     Detects path traversal patterns including encoded variants.
+    Normalizes to lowercase before checking encoded variants to catch mixed-case
+    encodings like %2E%2e.
 
     sdoctest:
         expect(is_path_traversal("../etc/passwd")).to_equal(true)
-        expect(is_path_traversal("/home/user/file.txt")).to_equal(false)
+        expect(is_path_traversal("safe/file.txt")).to_equal(false)
     """
     # Direct traversal patterns
     if path.contains(".."):
         return true
 
-    # URL-encoded traversal
-    if path.contains("%2e%2e") or path.contains("%2E%2E"):
+    # Null byte injection (check before lower() to catch raw \0)
+    if path.contains("\0"):
+        return true
+
+    val lower = path.lower()
+
+    # URL-encoded traversal — normalize to lowercase first to catch mixed-case
+    # variants like %2E%2e, %2e%2E, etc.
+    if lower.contains("%2e%2e"):
         return true
 
     # Double URL-encoded
-    if path.contains("%252e%252e"):
+    if lower.contains("%252e%252e"):
         return true
 
-    # Null byte injection
-    if path.contains("\0") or path.contains("%00"):
+    # Null byte percent-encoded
+    if lower.contains("%00"):
         return true
 
     # Backslash traversal (Windows)
@@ -136,17 +143,26 @@ fn is_path_traversal(path: text) -> bool:
 
     false
 
-## Sanitize a file path — reject traversal, null bytes, and normalize.
+## Sanitize a file path — reject traversal, absolute paths, null bytes.
 fn sanitize_path(input: text) -> Result<text, text>:
     if input == "":
         return Err("empty path")
 
+    # Reject absolute paths — they allow escaping the intended root entirely.
+    if input.starts_with("/") or input.starts_with("\\"):
+        return Err("absolute path not allowed")
+
+    # Reject Windows drive-letter absolute paths (e.g. C:\, C:/)
+    if input.len() >= 3:
+        val drive = input.char_at(0)
+        val colon = input.char_at(1)
+        val sep   = input.char_at(2)
+        if colon == ':' and (sep == '\\' or sep == '/'):
+            if (drive >= 'a' and drive <= 'z') or (drive >= 'A' and drive <= 'Z'):
+                return Err("absolute path not allowed")
+
     if is_path_traversal(input):
         return Err("path traversal detected")
-
-    # Reject null bytes
-    if input.contains("\0") or input.contains("%00"):
-        return Err("null byte in path")
 
     # Reject overly long paths
     if input.len() > 4096:

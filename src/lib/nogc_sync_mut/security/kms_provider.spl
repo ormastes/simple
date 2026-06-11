@@ -125,7 +125,10 @@ impl HostedKmsKeyProvider:
             "  active: {self.active_key_id}"
         ]
         for key_id in self.key_handles.keys():
-            lines.push("  key_handle|{key_id}|{self.key_handles[key_id]}")
+            # Redact handle value in diagnostic output — key handle material
+            # must not appear in logs or exported config text.
+            val present = if self.key_handles[key_id] != "": "set" else: "unset"
+            lines.push("  key_handle|{key_id}|{present}")
         lines.join("\n")
 
 fn hosted_kms_default_config(endpoint: text) -> HostedKmsHttpConfig:
@@ -184,8 +187,33 @@ fn hosted_kms_build_request(config: HostedKmsHttpConfig, operation: text, key_id
         tls_profile: config.tls_profile
     )
 
+fn _json_escape(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c == "\"":
+            out = out + "\\\""
+        else if c == "\\":
+            out = out + "\\\\"
+        else if c == "\n":
+            out = out + "\\n"
+        else if c == "\r":
+            out = out + "\\r"
+        else if c == "\t":
+            out = out + "\\t"
+        else:
+            out = out + c
+        i = i + 1
+    out
+
 fn hosted_kms_json_body(operation: text, key_id: text, key_handle: text, payload: text, signature: text) -> text:
-    "{\"operation\":\"{operation}\",\"key_id\":\"{key_id}\",\"key_handle\":\"{key_handle}\",\"payload\":\"{payload}\",\"signature\":\"{signature}\"}"
+    val op = _json_escape(operation)
+    val kid = _json_escape(key_id)
+    val kh = _json_escape(key_handle)
+    val pl = _json_escape(payload)
+    val sig = _json_escape(signature)
+    "{\"operation\":\"{op}\",\"key_id\":\"{kid}\",\"key_handle\":\"{kh}\",\"payload\":\"{pl}\",\"signature\":\"{sig}\"}"
 
 fn hosted_kms_request_key(request: HostedKmsHttpRequest) -> text:
     "{request.method} {request.url} {request.body}"
