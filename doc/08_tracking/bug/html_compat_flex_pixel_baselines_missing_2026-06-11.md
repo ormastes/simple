@@ -66,6 +66,12 @@ interpreter text-P3 fallback, and the harness resolves `SIMPLE_BINARY` /
   Times New Roman text with `font-size/line-height` of `32px/32px` for `A` and
   `16px/16px` for `B`, so the remaining delta belongs to glyph/text
   compositing rather than flex baseline box layout.
+- The Chromium/Electron geometry schema now records computed style metadata on
+  each captured box (`display`, `align-items`, `font-size`, `line-height`,
+  `font-family`, `font-weight`, and `color`). This makes the fixture-22 text
+  stack visible in checked structural evidence while preserving the honest
+  status: exact pixel parity is still blocked by glyph rasterization and
+  antialiasing, not by box geometry.
 - Existing structural pass:
   `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
   records `pass_count=21`, `fail_count=0`, and `blur_or_tolerance_used=false`.

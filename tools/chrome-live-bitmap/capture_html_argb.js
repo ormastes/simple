@@ -364,6 +364,13 @@ function geometryExpression() {
             borderRight: px(style.borderRightWidth),
             borderBottom: px(style.borderBottomWidth),
             backgroundColor: style.backgroundColor,
+            color: style.color,
+            display: style.display,
+            alignItems: style.alignItems,
+            fontSize: style.fontSize,
+            lineHeight: style.lineHeight,
+            fontFamily: style.fontFamily,
+            fontWeight: style.fontWeight,
             text
           };
         })

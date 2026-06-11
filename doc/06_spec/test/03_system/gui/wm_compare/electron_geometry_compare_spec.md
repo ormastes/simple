@@ -91,6 +91,13 @@ expect(boxes[1].y).to_equal(68)
    - Expected: boxes[0].border_right equals `3`
    - Expected: boxes[0].border_bottom equals `4`
    - Expected: boxes[0].background_color equals `rgb(10, 20, 30)`
+   - Expected: boxes[0].color equals `rgb(0, 0, 0)`
+   - Expected: boxes[0].display equals `flex`
+   - Expected: boxes[0].align_items equals `baseline`
+   - Expected: boxes[0].font_size equals `32px`
+   - Expected: boxes[0].line_height equals `32px`
+   - Expected: boxes[0].font_family equals `Times New Roman`
+   - Expected: boxes[0].font_weight equals `400`
    - Expected: boxes[0].text equals `Hello`
    - Expected: boxes[1].background_color equals ``
 
@@ -98,12 +105,12 @@ expect(boxes[1].y).to_equal(68)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Parse Chrome headless geometry with computed style box fields")
-val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"box\",\"tag\":\"div\",\"x\":7,\"y\":9,\"width\":33,\"height\":17,\"paddingLeft\":4,\"paddingTop\":5,\"paddingRight\":6,\"paddingBottom\":7,\"borderLeft\":1,\"borderTop\":2,\"borderRight\":3,\"borderBottom\":4,\"backgroundColor\":\"rgb(10, 20, 30)\",\"text\":\"Hello\"},{\"index\":1,\"label\":\"transparent\",\"tag\":\"div\",\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"backgroundColor\":\"rgba(0, 0, 0, 0)\",\"text\":\"\"}]}"
+val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"box\",\"tag\":\"div\",\"x\":7,\"y\":9,\"width\":33,\"height\":17,\"paddingLeft\":4,\"paddingTop\":5,\"paddingRight\":6,\"paddingBottom\":7,\"borderLeft\":1,\"borderTop\":2,\"borderRight\":3,\"borderBottom\":4,\"backgroundColor\":\"rgb(10, 20, 30)\",\"color\":\"rgb(0, 0, 0)\",\"display\":\"flex\",\"alignItems\":\"baseline\",\"fontSize\":\"32px\",\"lineHeight\":\"32px\",\"fontFamily\":\"Times New Roman\",\"fontWeight\":\"400\",\"text\":\"Hello\"},{\"index\":1,\"label\":\"transparent\",\"tag\":\"div\",\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"backgroundColor\":\"rgba(0, 0, 0, 0)\",\"text\":\"\"}]}"
 val boxes = electron_geometry_json_to_boxes(geometry_json)
 step("Check exact border-box, padding, border, background, and text fields")
 expect(boxes.len()).to_equal(2)
@@ -121,6 +128,13 @@ expect(boxes[0].border_top).to_equal(2)
 expect(boxes[0].border_right).to_equal(3)
 expect(boxes[0].border_bottom).to_equal(4)
 expect(boxes[0].background_color).to_equal("rgb(10, 20, 30)")
+expect(boxes[0].color).to_equal("rgb(0, 0, 0)")
+expect(boxes[0].display).to_equal("flex")
+expect(boxes[0].align_items).to_equal("baseline")
+expect(boxes[0].font_size).to_equal("32px")
+expect(boxes[0].line_height).to_equal("32px")
+expect(boxes[0].font_family).to_equal("Times New Roman")
+expect(boxes[0].font_weight).to_equal("400")
 expect(boxes[0].text).to_equal("Hello")
 expect(boxes[1].background_color).to_equal("")
 ```

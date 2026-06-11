@@ -135,6 +135,11 @@ Open gaps tied to the active browser objective:
     intrinsic width instead of implicit grow width, and apply a focused
     baseline offset for row-flex text items, plus focused text-label mapping on
     the Simple side
+  - evidence update: Chromium/Electron geometry capture now carries computed
+    text/style metadata (`display`, `align-items`, `font-size`,
+    `line-height`, `font-family`, `font-weight`, and `color`) in the structural
+    box report. This records the browser text stack behind the remaining
+    fixture-22 pixel blocker without treating font rasterization as solved.
 - The same live geometry lane now passes for `23_flex_wrap_align_content_center`:
   - result: `layout_match`, `mismatch_count=0`
   - focused fix: parse `align-content: center`, keep explicit multi-line flex
