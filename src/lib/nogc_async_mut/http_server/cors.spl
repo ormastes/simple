@@ -107,9 +107,10 @@ fn cors_handler(request: HttpRequestData,
         return handle_preflight(effective_origin, request, config)
 
     # Normal CORS request — add response headers via Respond
-    # The server layer reads these headers from the PhaseResult
-    val headers = build_cors_headers(effective_origin, config)
-    PhaseResult.Respond(200, "OK", headers)
+    # The server layer reads these headers from the PhaseResult.
+    # Empty body: middleware only injects headers, content phase fills the body.
+    val cors_headers = build_cors_headers(effective_origin, config)
+    PhaseResult.Respond(200, "OK", cors_headers, "")
 
 # ============================================================================
 # Preflight Handling
@@ -119,51 +120,51 @@ fn handle_preflight(origin: text, request: HttpRequestData,
                     config: CorsConfig) -> PhaseResult:
     """Handle a CORS preflight OPTIONS request.
 
-    Returns a 204 No Content response with full CORS headers.
+    Returns a 204 No Content response with full CORS headers in the headers slot.
     """
     val methods = join_list(config.allowed_methods, ", ")
-    val headers = join_list(config.allowed_headers, ", ")
+    val hdr_names = join_list(config.allowed_headers, ", ")
     val max_age = "{config.max_age_seconds}"
 
-    var body_parts: [text] = []
-    body_parts.push("Access-Control-Allow-Origin: {origin}\r\n")
+    var hdrs: [(text, text)] = []
+    hdrs.push(("Access-Control-Allow-Origin", origin))
     if origin != "*":
-        body_parts.push("Vary: Origin\r\n")
-    body_parts.push("Access-Control-Allow-Methods: {methods}\r\n")
-    body_parts.push("Access-Control-Allow-Headers: {headers}\r\n")
-    body_parts.push("Access-Control-Max-Age: {max_age}\r\n")
+        hdrs.push(("Vary", "Origin"))
+    hdrs.push(("Access-Control-Allow-Methods", methods))
+    hdrs.push(("Access-Control-Allow-Headers", hdr_names))
+    hdrs.push(("Access-Control-Max-Age", max_age))
 
     if config.allow_credentials:
-        body_parts.push("Access-Control-Allow-Credentials: true\r\n")
+        hdrs.push(("Access-Control-Allow-Credentials", "true"))
 
     if config.expose_headers.len() > 0:
         val exposed = join_list(config.expose_headers, ", ")
-        body_parts.push("Access-Control-Expose-Headers: {exposed}\r\n")
+        hdrs.push(("Access-Control-Expose-Headers", exposed))
 
-    PhaseResult.Respond(204, "No Content", body_parts.join(""))
+    PhaseResult.Respond(204, "No Content", hdrs, "")
 
 # ============================================================================
 # Header Building
 # ============================================================================
 
-fn build_cors_headers(origin: text, config: CorsConfig) -> text:
+fn build_cors_headers(origin: text, config: CorsConfig) -> [(text, text)]:
     """Build CORS response headers for a normal (non-preflight) request.
 
-    Returns headers as a string block for the response layer to parse.
+    Returns headers as a list of (name, value) pairs for the PhaseResult.Respond slot.
     """
-    var parts: [text] = []
-    parts.push("Access-Control-Allow-Origin: {origin}\r\n")
+    var parts: [(text, text)] = []
+    parts.push(("Access-Control-Allow-Origin", origin))
     if origin != "*":
-        parts.push("Vary: Origin\r\n")
+        parts.push(("Vary", "Origin"))
 
     if config.allow_credentials:
-        parts.push("Access-Control-Allow-Credentials: true\r\n")
+        parts.push(("Access-Control-Allow-Credentials", "true"))
 
     if config.expose_headers.len() > 0:
         val exposed = join_list(config.expose_headers, ", ")
-        parts.push("Access-Control-Expose-Headers: {exposed}\r\n")
+        parts.push(("Access-Control-Expose-Headers", exposed))
 
-    parts.join("")
+    parts
 
 # ============================================================================
 # Origin Validation
