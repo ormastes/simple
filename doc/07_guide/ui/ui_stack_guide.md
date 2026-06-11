@@ -308,6 +308,12 @@ Vulkan, OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU.
 `backend_default_priority_order()` is the automatic probe order and starts at
 Metal because baremetal and VirtIO GPU paths require a preinitialized host or
 platform framebuffer.
+Font offload uses the processing-lane helper
+`engine2d_font_offload_backend_order()` and
+`engine2d_backend_lane_preferred_font_offload_candidate(...)`: Metal first,
+then CUDA, ROCm/HIP, Qualcomm, Vulkan, DirectX, OpenCL, OpenGL, Intel, WebGPU,
+CPU SIMD, software, and CPU. Use this helper for vector and bitmap glyph
+offload selection instead of per-frame or per-glyph ad hoc probing.
 
 | Lane | App | Renders |
 |------|-----|---------|

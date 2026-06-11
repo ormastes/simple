@@ -5,7 +5,14 @@ Updated: 2026-06-11
 
 ## Completed (already pushed)
 
-- pending this slice -- production GUI web parity render path: replaced O(n^2)
+- pending this slice -- font offload backend selection: added
+  `engine2d_font_offload_backend_order()` and
+  `engine2d_backend_lane_preferred_font_offload_candidate(...)` so vector and
+  bitmap font offload use a stable processing-lane order: Metal, CUDA, ROCm/HIP,
+  Qualcomm, Vulkan, DirectX, OpenCL, OpenGL, Intel, WebGPU, CPU SIMD, software,
+  then CPU. Evidence: `backend_lane_spec.spl` now covers alias handling and
+  native GPU lanes before Vulkan.
+- `275a221f5d` -- production GUI web parity render path: replaced O(n^2)
   distinct-color scan with dictionary membership, reused deterministic parity
   reports, skipped Metal fallback rerender/compare on software hosts, and added
   a scoped fast path for the production parity common.ui widget fixture. Evidence:

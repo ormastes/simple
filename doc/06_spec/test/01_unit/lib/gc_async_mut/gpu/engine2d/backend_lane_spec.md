@@ -27,7 +27,7 @@ backend_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -170,6 +170,29 @@ expect(engine2d_backend_lane_preferred_candidate(["unknown"], false)).to_equal("
 
 </details>
 
+#### selects font offload backends with native GPU lanes before Vulkan
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val order = engine2d_font_offload_backend_order()
+
+expect(order[0]).to_equal("metal")
+expect(order[1]).to_equal("cuda")
+expect(order[2]).to_equal("rocm")
+expect(order[4]).to_equal("vulkan")
+expect(engine2d_backend_lane_preferred_font_offload_candidate(["vulkan", "amd-hip", "cpu"])).to_equal("rocm")
+expect(engine2d_backend_lane_preferred_font_offload_candidate(["opencl", "cpu_simd", "vulkan"])).to_equal("vulkan")
+expect(engine2d_backend_lane_preferred_font_offload_candidate(["software", "cpu"])).to_equal("software")
+expect(engine2d_backend_lane_preferred_font_offload_candidate(["unknown"])).to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -189,8 +212,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
