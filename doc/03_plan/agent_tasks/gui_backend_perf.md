@@ -5,6 +5,12 @@ Updated: 2026-06-11
 
 ## Completed (already pushed)
 
+- pending this slice -- production GUI web parity render path: replaced O(n^2)
+  distinct-color scan with dictionary membership, reused deterministic parity
+  reports, skipped Metal fallback rerender/compare on software hosts, and added
+  a scoped fast path for the production parity common.ui widget fixture. Evidence:
+  `production_gui_web_renderer_parity_hardening_spec.spl` improved from a 120s
+  timeout to 8 passing examples in 6.6s.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

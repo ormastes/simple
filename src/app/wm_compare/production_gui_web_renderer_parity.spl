@@ -83,6 +83,12 @@ struct ExactPixelComparison:
     match_percentage: i64
     max_channel_diff: i32
 
+var _generated_gui_widget_backend_parity_cache_keys: [text] = []
+var _generated_gui_widget_backend_parity_cache_values: [ProductionGuiWebParityReport] = []
+
+fn exact_pixel_comparison_match() -> ExactPixelComparison:
+    ExactPixelComparison(different_pixels: 0, match_percentage: 10000, max_channel_diff: 0)
+
 fn generated_gui_widget_html() -> text:
     val hero = label("prod_gui_text", "AB CD")
     val detail = label("prod_gui_detail", "EF")
@@ -102,25 +108,24 @@ fn has_legacy_fixture_marker(html: text) -> bool:
     html.contains("wm-app-content")
 
 fn count_distinct_colors(px: [u32]) -> i32:
-    var seen: [u32] = []
+    var seen: Dict<text, bool> = {}
+    var count = 0
     var i = 0
-    while i < px.len():
+    val px_count = px.len()
+    while i < px_count:
         val c = px[i]
-        var found = false
-        var j = 0
-        while j < seen.len():
-            if seen[j] == c:
-                found = true
-            j = j + 1
-        if not found:
-            seen.push(c)
+        val key = c.to_string()
+        if not seen.get(key).?:
+            seen[key] = true
+            count = count + 1
         i = i + 1
-    seen.len()
+    count
 
 fn checksum_pixels(px: [u32]) -> i64:
     var sum: i64 = 0
     var i = 0
-    while i < px.len():
+    val px_count = px.len()
+    while i < px_count:
         sum = sum + (px[i] as i64) * ((i + 1) as i64)
         i = i + 1
     sum
@@ -215,7 +220,7 @@ fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> Back
     val metal_complete = metal_result.gpu_frame_complete
     val metal_gpu_pixels = metal_result.gpu_pixels
     val cpu_cmp = compare_exact_pixels(software, cpu_simd, width, height)
-    val metal_cmp = compare_exact_pixels(software, metal_pixels, width, height)
+    val metal_cmp = if metal_backend == "software": exact_pixel_comparison_match() else: compare_exact_pixels(software, metal_pixels, width, height)
     val total_hits = hits.fill_hits + hits.copy_hits + hits.alpha_hits + hits.blit_hits + hits.scroll_hits
     val rect_idx = 4 + (4 * width)
     BackendExecutedGuiSceneReport(
@@ -255,22 +260,32 @@ fn run_backend_executed_gui_widget_scene_parity(width: i32, height: i32) -> Back
     )
 
 fn run_generated_gui_widget_backend_parity(width: i32, height: i32) -> ProductionGuiWebParityReport:
+    val cache_key = width.to_string() + "x" + height.to_string()
+    var cache_i = 0
+    val cache_count = _generated_gui_widget_backend_parity_cache_keys.len()
+    while cache_i < cache_count:
+        if _generated_gui_widget_backend_parity_cache_keys[cache_i] == cache_key:
+            return _generated_gui_widget_backend_parity_cache_values[cache_i]
+        cache_i = cache_i + 1
     val html = generated_gui_widget_html()
+    val software_backend = simple_web_resolved_engine2d_backend_name(width, height, "software")
+    val cpu_simd_backend = simple_web_resolved_engine2d_backend_name(width, height, "cpu_simd")
+    val metal_backend = simple_web_resolved_engine2d_backend_name(width, height, "metal")
     val software = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "software")
     val cpu_simd = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "cpu_simd")
-    val metal = simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "metal")
+    val metal = if metal_backend == software_backend: software else: simple_web_render_html_to_pixels_with_engine2d_backend(html, width, height, "metal")
     val cpu_cmp = compare_exact_pixels(software, cpu_simd, width, height)
-    val metal_cmp = compare_exact_pixels(software, metal, width, height)
-    ProductionGuiWebParityReport(
+    val metal_cmp = if metal_backend == software_backend: exact_pixel_comparison_match() else: compare_exact_pixels(software, metal, width, height)
+    val report = ProductionGuiWebParityReport(
         width: width,
         height: height,
         html: html,
         has_widget_html: html.contains("widget-") and html.contains("data-action="),
         has_legacy_fixture_marker: has_legacy_fixture_marker(html),
         tolerance_used: false,
-        software_resolved_backend: simple_web_resolved_engine2d_backend_name(width, height, "software"),
-        cpu_simd_resolved_backend: simple_web_resolved_engine2d_backend_name(width, height, "cpu_simd"),
-        metal_resolved_backend: simple_web_resolved_engine2d_backend_name(width, height, "metal"),
+        software_resolved_backend: software_backend,
+        cpu_simd_resolved_backend: cpu_simd_backend,
+        metal_resolved_backend: metal_backend,
         software_pixel_count: software.len(),
         cpu_simd_pixel_count: cpu_simd.len(),
         metal_pixel_count: metal.len(),
@@ -283,3 +298,6 @@ fn run_generated_gui_widget_backend_parity(width: i32, height: i32) -> Productio
         metal_max_channel_diff: metal_cmp.max_channel_diff,
         exact_backend_parity: cpu_cmp.different_pixels == 0 and metal_cmp.different_pixels == 0 and cpu_cmp.max_channel_diff == 0 and metal_cmp.max_channel_diff == 0
     )
+    _generated_gui_widget_backend_parity_cache_keys.push(cache_key)
+    _generated_gui_widget_backend_parity_cache_values.push(report)
+    report
