@@ -20,6 +20,8 @@ closed. The direct helper-side `Channel.id()` native fallback is also closed.
 The former lower blocker beneath this path is tracked separately in
 `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
 and is now closed.
+The current better lower blocker beneath this path is tracked separately in
+`doc/08_tracking/bug/multicore_green_worker_callback_registry_native_blocker_2026-06-11.md`.
 The earlier lower pool-plus-struct-send blocker in
 `doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md`
 is already closed. Historical loop-return tracking remains in
@@ -50,6 +52,7 @@ worker-pool blocker is:
   fixed and moved out of the critical path
 - the earlier loop/search helper-return path is now green
 - the lower function-valued local or parameter array path is now closed beneath it
+- the smaller worker callback-registry path is the active lower native boundary beneath it
 
 ## Why This Matters
 
