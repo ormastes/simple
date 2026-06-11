@@ -187,7 +187,9 @@ low-overhead queued work, but it is not a Go-goroutine equivalent. It does not
 run tasks in parallel and cannot preempt a long-running closure. The profile
 lane now uses the direct `cooperative_green_spawn` surface again after the
 compiled SMF/native cooperative regressions were closed in
-`doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md`.
+`doc/08_tracking/bug/green_thread_direct_runtime_blockers_2026-06-06.md`, and
+the green/cooperative SSpec runner mismatch is closed in
+`doc/08_tracking/bug/green_thread_spec_runner_mismatch_2026-06-11.md`.
 `cooperative_green_spawn_value` remains available when a caller already has a
 computed result instead of a closure. For Go-like CPU-parallel benchmarks, use
 `multicore_green_spawn` as the current profile row. Use the lower-level

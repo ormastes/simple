@@ -15,6 +15,10 @@ through `USER_CR3_READY=true`, and the closed final marker triplet
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 `USER_SYSCALL_PASS=true`.
 
+It also refreshes the hosted cooperative/multicore feature specs (`simpleos_cooperative_green_spec`
+and `simpleos_multicore_green_spec`) as current evidence after the green/cooperative
+SSpec-runner mismatch was closed.
+
 ## Verified Commands
 
 Commands below are the canonical repo-root checks for this lane. The hosted

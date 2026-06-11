@@ -139,6 +139,10 @@ use the same scheduler-width limit in current contract reports.
 Generated Simple concurrency workloads compute an expected checksum and exit
 nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
 bugs, or wrong joins are classified as failed rows instead of performance wins.
+The green/cooperative SSpec runner mismatch is closed (see
+`doc/08_tracking/bug/green_thread_spec_runner_mismatch_2026-06-11.md`), so these
+rows are interpreted against the closed-regression behavior rather than as an
+open runner issue.
 The multicore-green fanout sources use compact handle arrays and loop-captured
 closures, not generated numbered handle variables.
 They also fail closed before measuring work if the runtime reports

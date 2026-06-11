@@ -14,6 +14,9 @@
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
+- This artifact is historical relative to the green/cooperative SSpec-runner fix; current
+  green/multicore scheduler claims should be read from the latest contract and
+  SimpleOS evidence snapshots.
 - Supports `PROFILE_DOCKER_ISOLATION=1` to re-exec the same profile script in a Docker container with `--network=none`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs. Build `simple-cross-language-perf:latest` with `docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker` for contract-gated C/Go comparison evidence. Unless `PROFILE_DOCKER_SIMPLE_BINARY` is explicitly set, the container run prefers the release wrapper (`bin/simple` / `bin/release/simple`) and only falls back to `src/compiler_rust/target/debug/simple` when the release path is unavailable. The current debug binary still hits the Docker-native linker regression tracked in `doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md`, so auto mode must not prefer it.
 - Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
 - Go commands inherit `GOMAXPROCS=100`, defaulting to `CPU_WORKERS`, so Go goroutine rows and Simple multicore-green rows use the same scheduler-width limit unless the caller explicitly overrides it.
