@@ -259,8 +259,13 @@ Open gaps tied to the active browser objective:
   - result: `layout_match`, `mismatch_count=0`
   - focused result: records Chrome's column-flex gap distribution when
     `justify-content:space-between` adds 25px to each inter-item gap
+- The same live geometry lane now passes for `42_flex_column_gap_flex_end`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's column-flex end placement when `gap:10px`
+    contributes to the vertical run and `justify-content:flex-end` applies a
+    50px start offset
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=38`, `pass_count=38`, `fail_count=0`, and
+    now reports `fixture_count=39`, `pass_count=39`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
