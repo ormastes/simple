@@ -16,7 +16,8 @@ scheduler layered over the existing hosted `multicore_green` worker pool:
 That design type-checks and compiles to a hosted native binary, but the hosted
 native binary still segfaults before returning the first completion. The
 earlier helper-returned function-value blocker that sat below this path is now
-closed. The current lower blocker beneath this path is now tracked separately in
+closed. The direct helper-side `Channel.id()` native fallback is also closed.
+The current lower blocker beneath this path is now tracked separately in
 `doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md`.
 That lower pool-plus-struct-send blocker sits below the worker-pool stepper
 path itself. Historical loop-return tracking remains in

@@ -80,7 +80,7 @@ impl<'a> MirLowerer<'a> {
         matches!(registry.get(*ret), Some(HirType::Array { element, .. }) if *element == element_type)
     }
 
-    fn box_arg_for_any_param(&mut self, arg: VReg, arg_expr: &HirExpr) -> MirLowerResult<VReg> {
+    pub(super) fn box_arg_for_any_param(&mut self, arg: VReg, arg_expr: &HirExpr) -> MirLowerResult<VReg> {
         let arg_ty = arg_expr.ty;
         let needs_int_box = matches!(
             arg_ty,

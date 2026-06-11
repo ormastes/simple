@@ -296,16 +296,14 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             }
         }
 
-        // Method calls on arbitrary dynamic objects still need runtime dispatch,
-        // but typed `self.*` helpers are handled above and function-valued field
-        // calls now lower through MIR FieldGet + IndirectCall.
+        // Method calls now lower through the native MethodCallStatic /
+        // BuiltinMethod / extern-method paths. Keep walking receiver/args for
+        // genuinely unsupported nested constructs, but do not force blanket
+        // hybrid fallback just because a typed method is invoked.
         Expr::MethodCall { receiver, args, .. } => {
             analyze_expr(receiver, reasons);
             for arg in args {
                 analyze_expr(&arg.value, reasons);
-            }
-            if !matches!(receiver.as_ref(), Expr::Identifier(name) if name == "self") {
-                add_reason(reasons, FallbackReason::MethodCall);
             }
         }
 
@@ -825,11 +823,38 @@ mod tests {
     }
 
     #[test]
-    fn test_function_with_method_call_not_compilable() {
+    fn test_typed_method_call_compilable() {
         let results = parse_and_analyze("fn get_len(arr: i64):\n    return arr.len()\n");
         let status = results.get("get_len").unwrap();
-        assert!(!status.is_compilable());
-        assert!(status.reasons().contains(&FallbackReason::MethodCall));
+        assert!(
+            status.is_compilable(),
+            "typed method call should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_channel_helper_method_compilable() {
+        let results = parse_and_analyze(
+            r#"class Channel:
+    _id: i64
+
+    fn id() -> i64:
+        self._id
+
+fn helper(id: i64) -> i64:
+    val ch = Channel(_id: id)
+    if ch.id() != id:
+        return 81
+    42
+"#,
+        );
+        let status = results.get("helper").unwrap();
+        assert!(
+            status.is_compilable(),
+            "channel helper method should compile natively, got {:?}",
+            status.reasons()
+        );
     }
 
     #[test]

@@ -80,7 +80,9 @@ Related active host-side blocker:
 - `doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md`
   now records the smaller hosted-native blocker beneath that stepper path:
   a pool worker that sends a plain struct payload through a channel still ends
-  in `EXIT=139` even without callback-id stepper logic.
+  in `EXIT=139` even without callback-id stepper logic. The direct helper-side
+  `Channel.id()` native path beneath that blocker is now regression-covered and
+  green again.
 - `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`
   now records the closed standalone-native blocker that used to sit underneath
   that stepper path: returning a function value from inside a loop/search
