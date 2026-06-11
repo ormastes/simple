@@ -93,6 +93,38 @@ impl MirLowering:
                     return result.unwrap()
                 return receiver_local
 
+        if (method == "substring" or method == "slice") and receiver.type_.?:
+            match receiver.type_.unwrap().kind:
+                case Str:
+                    if args.len() == 1 or args.len() == 2:
+                        val receiver_local = self.lower_expr(receiver)
+                        var arg_operands: [MirOperand] = [mir_operand_copy(receiver_local)]
+                        for arg in args:
+                            val arg_local = self.lower_expr(arg.value)
+                            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+                        if args.len() == 1:
+                            val len_operand = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("spl_str_len"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                            ))
+                            var b_len = self.builder
+                            val len_result = b_len.emit_call(len_operand, [mir_operand_copy(receiver_local)], MirType.i64())
+                            self.builder = b_len
+                            if len_result.?:
+                                arg_operands = arg_operands.push(mir_operand_copy(len_result.unwrap()))
+                        val slice_operand = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("spl_str_slice"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                        ))
+                        var b_slice = self.builder
+                        val slice_result = b_slice.emit_call(slice_operand, arg_operands, MirType(kind: MirTypeKind.Opaque("str")))
+                        self.builder = b_slice
+                        if slice_result.?:
+                            return slice_result.unwrap()
+                        return receiver_local
+                case _:
+                    ()
+
         if self.is_mutating_method(method):
             match receiver.kind:
                 case Index(base, index):

@@ -2225,7 +2225,7 @@ impl LlvmBackend {
                     ("String" | "string", "contains")
                     | ("Array" | "array", "contains")
                     | ("Dict" | "dict", "contains") => Some("rt_contains"),
-                    ("String" | "string", "substring") => Some("rt_string_substring"),
+                    ("String" | "string", "substring") => Some("rt_slice"),
                     ("String" | "string", "split") => Some("rt_string_split"),
                     ("String" | "string" | "str" | "text", "trim") => Some("rt_string_trim"),
                     ("String" | "string" | "str" | "text", "trim_start") => Some("rt_string_trim_start"),
