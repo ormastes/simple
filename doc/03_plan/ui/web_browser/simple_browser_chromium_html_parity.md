@@ -248,3 +248,17 @@ Open gaps tied to the active browser objective:
     `STATUS: PASS` while preserving the honest production glyph/compositing
     divergence: `differentPixels=2717`, `computedDifferentPixels=2717`, and
     `chromeGlyphCompositingParity=false`
+- Shared MDI titlebar widget evidence now locks down the backend-neutral
+  titlebar control contract:
+  - `ui_shared_mdi_titlebar_widget_spec.spl` asserts the exact titlebar button
+    markup, including `class="simple-titlebar-widget"`,
+    `data-simple-titlebar-widget="button"`, the routed `data-action`, and
+    `type="button"` so the titlebar control cannot regress into an implicit
+    form submit or body-only button
+  - the same spec asserts the flex titlebar widget container CSS and the custom
+    titlebar widget color CSS used by the shared renderer source
+  - live Linux Electron evidence remains green through
+    `wm_browser_event_routing_evidence_spec.spl`, which passed `3/3` and
+    verifies titlebar drag/maximize routing, title command routing, titlebar
+    text input traffic, body input events, traffic-button computed styles, and
+    `blur_or_tolerance_used=false`

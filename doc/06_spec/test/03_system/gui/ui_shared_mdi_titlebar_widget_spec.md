@@ -50,7 +50,7 @@ ui_shared_mdi_titlebar_widget_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -66,11 +66,13 @@ expect(html).to_contain("simple-titlebar-widgets")
 step("Check the titlebar button, body button, and text input survive in the emitted HTML")
 expect(html).to_contain("data-simple-titlebar-widget=\"button\"")
 expect(html).to_contain("data-action=\"mdi_terminal_action\"")
+expect(html).to_contain("<button class=\"simple-titlebar-widget\" data-simple-titlebar-widget=\"button\" data-action=\"mdi_terminal_action\" type=\"button\">Run</button>")
 expect(html).to_contain("<button data-action=\"mdi_terminal_action\">Run</button>")
 expect(html).to_contain("data-target-id=\"mdi_terminal_input\"")
 expect(html).to_contain("value=\"ready\"")
 
 step("Check custom CSS can style the MDI titlebar widget")
+expect(html).to_contain(".simple-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto;}")
 expect(html).to_contain(".simple-titlebar-widget{background:rgb(18,58,52);border-color:rgb(52,211,153);color:rgb(236,254,255);}")
 ```
 
