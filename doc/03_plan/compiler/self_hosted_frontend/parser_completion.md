@@ -141,12 +141,21 @@ errors correctly; lazy_outline_equivalence 16/16.
 
 ---
 
-### M3 — G2: Indent tokens in expression continuations (fixes ~459 files)
+### M3 — G2: Indent tokens in expression continuations (fixes ~459 files) — DONE 2026-06-11
 
-**Files:** `src/compiler/10.frontend/core/parser_expr.spl`, `parser_primary.spl`  
-Skip/absorb `Indent` (and `Newline` at non-statement boundaries) inside infix, call-arg, and struct-literal field loops.  
-**Test:** Multi-line `return SomeStruct(\n    field: v,\n    ...)` → 0 errors.  
-**Docker:** `bin/simple check src/lib/common/animation/spring.spl`
+Landed in `9b95620a44` (local line) / grafted to origin. Approach (a): LEXER-level
+suppression, not the parser-level skip loops originally sketched here. The lexer
+(`core/lexer_struct.spl`) already suppressed Newline(180) inside parens; the gap
+was `handle_indentation()` emitting Indent(181)/Dedent(182) regardless of
+`paren_depth`. Fix: 4-line guard (lines ~493-527) — when `paren_depth > 0`, skip
+the indent-stack comparison and scan the next token directly; the indent stack is
+left untouched so block structure resumes correctly after the closing bracket.
+
+Verified: multiline call args, multiline struct literal (spring.spl form),
+parenthesized infix continuation all parse with `parser_has_errors()=false`;
+M1/M2 cases stay green; unclosed-paren control still errors;
+lazy_outline_equivalence 16/16. Import lists `use std.x.{aa,\n  bb}` still fail
+— that is G3 comma handling in `parser_decls_use.spl` (M4), not layout tokens.
 
 ---
 
