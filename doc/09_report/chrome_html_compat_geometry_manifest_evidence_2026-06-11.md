@@ -1,11 +1,11 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 33
-- pass count: 33
+- fixtures: 34
+- pass count: 34
 - fail count: 0
 - viewport: 320x240
-- build dir: `build/chrome_manifest_full`
+- build dir: `build/chrome_html_compat_geometry_manifest_evidence`
 - blur/tolerance used: false
 
 This wrapper captures real Chrome headless geometry for each listed
@@ -23,39 +23,40 @@ pixels, or text antialiasing normalization.
 
 | Fixture | Status | Mismatches | Geometry | Structural report |
 |---------|--------|-----------:|----------|-------------------|
-| `02_block_boxes` | pass | 0 | `build/chrome_manifest_full/02_block_boxes_chrome_geometry.json` | `build/chrome_manifest_full/02_block_boxes_structural_report.sdn` |
-| `03_list` | pass | 0 | `build/chrome_manifest_full/03_list_chrome_geometry.json` | `build/chrome_manifest_full/03_list_structural_report.sdn` |
-| `04_button` | pass | 0 | `build/chrome_manifest_full/04_button_chrome_geometry.json` | `build/chrome_manifest_full/04_button_structural_report.sdn` |
-| `05_text_input` | pass | 0 | `build/chrome_manifest_full/05_text_input_chrome_geometry.json` | `build/chrome_manifest_full/05_text_input_structural_report.sdn` |
-| `06_card_panel` | pass | 0 | `build/chrome_manifest_full/06_card_panel_chrome_geometry.json` | `build/chrome_manifest_full/06_card_panel_structural_report.sdn` |
-| `07_scrollable_list` | pass | 0 | `build/chrome_manifest_full/07_scrollable_list_chrome_geometry.json` | `build/chrome_manifest_full/07_scrollable_list_structural_report.sdn` |
-| `10_colors` | pass | 0 | `build/chrome_manifest_full/10_colors_chrome_geometry.json` | `build/chrome_manifest_full/10_colors_structural_report.sdn` |
-| `11_font_size` | pass | 0 | `build/chrome_manifest_full/11_font_size_chrome_geometry.json` | `build/chrome_manifest_full/11_font_size_structural_report.sdn` |
-| `12_padding` | pass | 0 | `build/chrome_manifest_full/12_padding_chrome_geometry.json` | `build/chrome_manifest_full/12_padding_structural_report.sdn` |
-| `13_margin` | pass | 0 | `build/chrome_manifest_full/13_margin_chrome_geometry.json` | `build/chrome_manifest_full/13_margin_structural_report.sdn` |
-| `14_border` | pass | 0 | `build/chrome_manifest_full/14_border_chrome_geometry.json` | `build/chrome_manifest_full/14_border_structural_report.sdn` |
-| `15_background` | pass | 0 | `build/chrome_manifest_full/15_background_chrome_geometry.json` | `build/chrome_manifest_full/15_background_structural_report.sdn` |
-| `16_flex_row` | pass | 0 | `build/chrome_manifest_full/16_flex_row_chrome_geometry.json` | `build/chrome_manifest_full/16_flex_row_structural_report.sdn` |
-| `17_flex_col` | pass | 0 | `build/chrome_manifest_full/17_flex_col_chrome_geometry.json` | `build/chrome_manifest_full/17_flex_col_structural_report.sdn` |
-| `18_flex_grow_weights` | pass | 0 | `build/chrome_manifest_full/18_flex_grow_weights_chrome_geometry.json` | `build/chrome_manifest_full/18_flex_grow_weights_structural_report.sdn` |
-| `19_flex_shrink_weights` | pass | 0 | `build/chrome_manifest_full/19_flex_shrink_weights_chrome_geometry.json` | `build/chrome_manifest_full/19_flex_shrink_weights_structural_report.sdn` |
-| `20_flex_basis_override` | pass | 0 | `build/chrome_manifest_full/20_flex_basis_override_chrome_geometry.json` | `build/chrome_manifest_full/20_flex_basis_override_structural_report.sdn` |
-| `21_flex_wrap_basic` | pass | 0 | `build/chrome_manifest_full/21_flex_wrap_basic_chrome_geometry.json` | `build/chrome_manifest_full/21_flex_wrap_basic_structural_report.sdn` |
-| `22_flex_align_items_baseline` | pass | 0 | `build/chrome_manifest_full/22_flex_align_items_baseline_chrome_geometry.json` | `build/chrome_manifest_full/22_flex_align_items_baseline_structural_report.sdn` |
-| `23_flex_wrap_align_content_center` | pass | 0 | `build/chrome_manifest_full/23_flex_wrap_align_content_center_chrome_geometry.json` | `build/chrome_manifest_full/23_flex_wrap_align_content_center_structural_report.sdn` |
-| `24_flex_wrap_reverse_basic` | pass | 0 | `build/chrome_manifest_full/24_flex_wrap_reverse_basic_chrome_geometry.json` | `build/chrome_manifest_full/24_flex_wrap_reverse_basic_structural_report.sdn` |
-| `25_flex_justify_space_between` | pass | 0 | `build/chrome_manifest_full/25_flex_justify_space_between_chrome_geometry.json` | `build/chrome_manifest_full/25_flex_justify_space_between_structural_report.sdn` |
-| `26_flex_gap_basic` | pass | 0 | `build/chrome_manifest_full/26_flex_gap_basic_chrome_geometry.json` | `build/chrome_manifest_full/26_flex_gap_basic_structural_report.sdn` |
-| `27_absolute_position_basic` | pass | 0 | `build/chrome_manifest_full/27_absolute_position_basic_chrome_geometry.json` | `build/chrome_manifest_full/27_absolute_position_basic_structural_report.sdn` |
-| `28_display_contents_basic` | pass | 0 | `build/chrome_manifest_full/28_display_contents_basic_chrome_geometry.json` | `build/chrome_manifest_full/28_display_contents_basic_structural_report.sdn` |
-| `29_box_sizing_border_box` | pass | 0 | `build/chrome_manifest_full/29_box_sizing_border_box_chrome_geometry.json` | `build/chrome_manifest_full/29_box_sizing_border_box_structural_report.sdn` |
-| `30_min_max_width_basic` | pass | 0 | `build/chrome_manifest_full/30_min_max_width_basic_chrome_geometry.json` | `build/chrome_manifest_full/30_min_max_width_basic_structural_report.sdn` |
-| `31_flex_align_items_center` | pass | 0 | `build/chrome_manifest_full/31_flex_align_items_center_chrome_geometry.json` | `build/chrome_manifest_full/31_flex_align_items_center_structural_report.sdn` |
-| `32_flex_align_items_flex_end` | pass | 0 | `build/chrome_manifest_full/32_flex_align_items_flex_end_chrome_geometry.json` | `build/chrome_manifest_full/32_flex_align_items_flex_end_structural_report.sdn` |
-| `33_flex_justify_flex_end` | pass | 0 | `build/chrome_manifest_full/33_flex_justify_flex_end_chrome_geometry.json` | `build/chrome_manifest_full/33_flex_justify_flex_end_structural_report.sdn` |
-| `34_flex_justify_center` | pass | 0 | `build/chrome_manifest_full/34_flex_justify_center_chrome_geometry.json` | `build/chrome_manifest_full/34_flex_justify_center_structural_report.sdn` |
-| `35_flex_align_items_stretch` | pass | 0 | `build/chrome_manifest_full/35_flex_align_items_stretch_chrome_geometry.json` | `build/chrome_manifest_full/35_flex_align_items_stretch_structural_report.sdn` |
-| `36_flex_align_self_flex_end` | pass | 0 | `build/chrome_manifest_full/36_flex_align_self_flex_end_chrome_geometry.json` | `build/chrome_manifest_full/36_flex_align_self_flex_end_structural_report.sdn` |
+| `02_block_boxes` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/02_block_boxes_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/02_block_boxes_structural_report.sdn` |
+| `03_list` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/03_list_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/03_list_structural_report.sdn` |
+| `04_button` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/04_button_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/04_button_structural_report.sdn` |
+| `05_text_input` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/05_text_input_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/05_text_input_structural_report.sdn` |
+| `06_card_panel` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/06_card_panel_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/06_card_panel_structural_report.sdn` |
+| `07_scrollable_list` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/07_scrollable_list_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/07_scrollable_list_structural_report.sdn` |
+| `10_colors` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/10_colors_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/10_colors_structural_report.sdn` |
+| `11_font_size` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/11_font_size_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/11_font_size_structural_report.sdn` |
+| `12_padding` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/12_padding_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/12_padding_structural_report.sdn` |
+| `13_margin` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/13_margin_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/13_margin_structural_report.sdn` |
+| `14_border` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/14_border_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/14_border_structural_report.sdn` |
+| `15_background` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/15_background_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/15_background_structural_report.sdn` |
+| `16_flex_row` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/16_flex_row_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/16_flex_row_structural_report.sdn` |
+| `17_flex_col` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/17_flex_col_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/17_flex_col_structural_report.sdn` |
+| `18_flex_grow_weights` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/18_flex_grow_weights_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/18_flex_grow_weights_structural_report.sdn` |
+| `19_flex_shrink_weights` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/19_flex_shrink_weights_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/19_flex_shrink_weights_structural_report.sdn` |
+| `20_flex_basis_override` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/20_flex_basis_override_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/20_flex_basis_override_structural_report.sdn` |
+| `21_flex_wrap_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/21_flex_wrap_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/21_flex_wrap_basic_structural_report.sdn` |
+| `22_flex_align_items_baseline` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/22_flex_align_items_baseline_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/22_flex_align_items_baseline_structural_report.sdn` |
+| `23_flex_wrap_align_content_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/23_flex_wrap_align_content_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/23_flex_wrap_align_content_center_structural_report.sdn` |
+| `24_flex_wrap_reverse_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/24_flex_wrap_reverse_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/24_flex_wrap_reverse_basic_structural_report.sdn` |
+| `25_flex_justify_space_between` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/25_flex_justify_space_between_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/25_flex_justify_space_between_structural_report.sdn` |
+| `26_flex_gap_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/26_flex_gap_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/26_flex_gap_basic_structural_report.sdn` |
+| `27_absolute_position_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/27_absolute_position_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/27_absolute_position_basic_structural_report.sdn` |
+| `28_display_contents_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/28_display_contents_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/28_display_contents_basic_structural_report.sdn` |
+| `29_box_sizing_border_box` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/29_box_sizing_border_box_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/29_box_sizing_border_box_structural_report.sdn` |
+| `30_min_max_width_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/30_min_max_width_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/30_min_max_width_basic_structural_report.sdn` |
+| `31_flex_align_items_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/31_flex_align_items_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/31_flex_align_items_center_structural_report.sdn` |
+| `32_flex_align_items_flex_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/32_flex_align_items_flex_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/32_flex_align_items_flex_end_structural_report.sdn` |
+| `33_flex_justify_flex_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/33_flex_justify_flex_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/33_flex_justify_flex_end_structural_report.sdn` |
+| `34_flex_justify_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/34_flex_justify_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/34_flex_justify_center_structural_report.sdn` |
+| `35_flex_align_items_stretch` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/35_flex_align_items_stretch_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/35_flex_align_items_stretch_structural_report.sdn` |
+| `36_flex_align_self_flex_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/36_flex_align_self_flex_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/36_flex_align_self_flex_end_structural_report.sdn` |
+| `37_flex_gap_justify_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/37_flex_gap_justify_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/37_flex_gap_justify_center_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -98,3 +99,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `34_flex_justify_center` | 0 | 0.000 | `` |
 | `35_flex_align_items_stretch` | 0 | 0.000 | `` |
 | `36_flex_align_self_flex_end` | 0 | 0.000 | `` |
+| `37_flex_gap_justify_center` | 0 | 0.000 | `` |

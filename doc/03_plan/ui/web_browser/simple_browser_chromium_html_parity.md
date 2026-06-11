@@ -10,8 +10,9 @@ Current state as of 2026-06-11:
   display-contents fixture `28`, box-sizing fixture `29`, min/max-width
   fixture `30`, flex cross-axis centering fixture `31`, flex cross-axis
   end-alignment fixture `32`, flex main-axis end-alignment fixture `33`, flex
-  main-axis centering fixture `34`, flex cross-axis stretch fixture `35`, and
-  per-item flex cross-axis alignment fixture `36`.
+  main-axis centering fixture `34`, flex cross-axis stretch fixture `35`,
+  per-item flex cross-axis alignment fixture `36`, and centered flex gap
+  fixture `37`.
 - The newer focused fixture lane described in some earlier progress notes
   (`146+`, client-rect/box-model parity rows, no-cheat guard summaries) is not
   present in the current worktree and must not be treated as current evidence.
@@ -232,8 +233,12 @@ Open gaps tied to the active browser objective:
   - result: `layout_match`, `mismatch_count=0`
   - focused result: records Chrome's `align-self:flex-end` override for one
     row-flex child inside a parent using `align-items:flex-start`
+- The same live geometry lane now passes for `37_flex_gap_justify_center`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's centered row-flex run when `gap:12px`
+    contributes to the run width
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    now reports `fixture_count=33`, `pass_count=33`, `fail_count=0`, and
+    now reports `fixture_count=34`, `pass_count=34`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
