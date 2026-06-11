@@ -44,6 +44,15 @@ Current hosted blocking-compensation evidence now includes:
 - blocking compensation now has executable hosted coverage; the remaining host
   parity gap is fairness/preemption
 
+Current hosted parallelism-boundary evidence also includes:
+
+- `test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.spl`
+  proves that after the compensation-worker change, a requested hosted
+  parallelism of `2` can still grow to `3` under pure CPU saturation after the
+  worker pool is fully occupied
+- that means the current hosted runtime still does not match a Go-like bounded
+  `GOMAXPROCS`-style execution cap for CPU-bound work
+
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
 lane has equivalent fairness/preemption guarantees.
