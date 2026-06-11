@@ -1,7 +1,7 @@
 # Green Thread Direct Runtime Blockers
 
 Date: 2026-06-06
-Status: likely-fixed (triaged 2026-06-11, multiple items fixed 2026-06-08/09 per body)
+Status: closed (E6 cooperative deferral landed 2026-06-11)
 
 ## Summary
 
@@ -166,9 +166,16 @@ The focused regression spec above keeps that fixed path executable.
 
 ## Follow-Up
 
-Switch or add a perf harness green row for delayed `green_spawn(fn)` closure
-execution timing. Keep
-`test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
+E6 (2026-06-11): `green_spawn(fn)` now stores the closure in a `fn() -> i64`
+class field (GreenTask.thunk) and defers execution to `green_run_one` /
+`green_run_all`. The struct-field approach was used (callable-field runtime
+blocker was already closed). Per-task death reason is recorded in
+`GreenTask.has_error` / `GreenTask.error_reason`. Spec:
+`test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
+(5 tests, all pass). Existing green_thread_spec.spl (5), cooperative_green_spec.spl (3),
+green_channel_spec.spl (4), multicore_green_spec.spl (1) all still pass.
+
+Keep `test/05_perf/profile_scripts/native_function_value_callback_regression_test.shs`
 passing so the fixed callback, SMF import/classification path, standalone
 native cooperative-green init path, and direct-run function-global paths do not
 regress. The profile harness can now keep its compiled cooperative-green rows
