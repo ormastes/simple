@@ -128,9 +128,10 @@ The Simple web renderer has two code paths:
   path for real GPU-returned vector glyph pixels. `bitmap_font_offload.spl`
   records the current bitmap-font path as CPU glyph preprocessing plus optional
   GPU copy/upload, plus the typed `bitmap_glyph_raster` generated-kernel launch
-  plan. The portable compiler emitter and the OpenCL/HIP Engine2D source strings
-  now export `simple_2d_bitmap_glyph_raster_u32`; OpenCL binds the packed
-  glyph/destination/size/color arguments and HIP preflights the same packed
+  plan. The portable compiler emitter and the CUDA/OpenCL/HIP Engine2D paths
+  expose `simple_2d_bitmap_glyph_raster_u32`; CUDA routes the generated
+  operation through `bitmap_glyph_raster_kernel(...)`, OpenCL binds the packed
+  glyph/destination/size/color arguments, and HIP preflights the same packed
   shape before launch. `bitmap_glyph_raster_expected_pixels(...)` maps the
   glyph mask to the expected color/zero output and
   `bitmap_glyph_raster_checksum(...)` derives the expected checksum used by

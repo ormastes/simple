@@ -635,3 +635,13 @@ dev-done
 - verify: Optimizer scans completed for this slice in Docker. Counts:
   bitmap-font offload 26 and bitmap-font offload spec 5 remaining static
   opportunities.
+- impl: Added CUDA session routing for generated bitmap glyph raster.
+  `CudaSession.bitmap_glyph_raster_kernel(...)` now mirrors the OpenCL/ROCm
+  helper surface and routes `GENERATED_2D_BITMAP_GLYPH_RASTER` through the
+  shared generated 2D launch gate.
+- verify: Focused CUDA session check passes and CUDA session contract spec now
+  passes 8/8. Generated manual was refreshed under `doc/06_spec`. This proves
+  CUDA session routing/provenance for the bitmap glyph raster operation, not
+  readback-verified GPU glyph pixels.
+- verify: Optimizer scans completed for this slice in Docker. Counts: CUDA
+  session 23 and CUDA session contract spec 0 remaining static opportunities.

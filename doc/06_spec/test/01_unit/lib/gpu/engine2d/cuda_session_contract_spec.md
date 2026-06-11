@@ -27,7 +27,7 @@ cuda_session_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -61,7 +61,7 @@ expect(session.is_valid()).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -73,6 +73,7 @@ expect(session.fill_kernel(64, 64, 4096)).to_equal(1)
 expect(session.copy_kernel(64, 64, 4096)).to_equal(1)
 expect(session.alpha_blend_kernel(64, 64, 4096)).to_equal(1)
 expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
+expect(session.bitmap_glyph_raster_kernel(64, 64, 4096)).to_equal(1)
 ```
 
 </details>
@@ -208,6 +209,44 @@ expect(missing_args.diagnostic_text()).to_contain("CudaSessionEvidence")
 
 </details>
 
+#### routes generated bitmap glyph raster through the CUDA session helper
+
+- var session = CudaSession create
+   - Expected: missing_runtime.operation equals `GENERATED_2D_BITMAP_GLYPH_RASTER`
+   - Expected: missing_runtime.entry_name equals `simple_2d_bitmap_glyph_raster_u32`
+   - Expected: missing_runtime.typed_status equals `cuda-runtime-unavailable`
+   - Expected: missing_module.typed_status equals `cuda-module-unavailable`
+   - Expected: missing_args.typed_status equals `args-unavailable`
+   - Expected: session.bitmap_glyph_raster_kernel(9, 4, 4096) equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = CudaSession.create()
+val missing_runtime = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, 4096)
+session.is_initialized = true
+session.ctx = 7
+val missing_module = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, 4096)
+session.module_cache = 11
+val missing_args = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, 0)
+
+expect(missing_runtime.operation).to_equal(GENERATED_2D_BITMAP_GLYPH_RASTER)
+expect(missing_runtime.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+expect(missing_runtime.typed_status).to_equal("cuda-runtime-unavailable")
+expect(missing_module.typed_status).to_equal("cuda-module-unavailable")
+expect(missing_args.typed_status).to_equal("args-unavailable")
+expect(missing_args.diagnostic_text()).to_contain("op=bitmap_glyph_raster")
+session.module_cache = 0
+expect(session.bitmap_glyph_raster_kernel(9, 4, 4096)).to_equal(1)
+```
+
+</details>
+
 #### shutdown is safe on an uninitialized session
 
 - var session = CudaSession create
@@ -251,8 +290,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
