@@ -40,6 +40,9 @@ symbol_kind_spec
 
 #### converts File to string
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -49,12 +52,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case File: "file"
 val kind = "file"
-expect(kind == "file")
+assert_true(kind == "file")
 ```
 
 </details>
 
 #### converts Module to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -65,12 +71,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Module: "module"
 val kind = "module"
-expect(kind == "module")
+assert_true(kind == "module")
 ```
 
 </details>
 
 #### converts Namespace to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -81,12 +90,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Namespace: "namespace"
 val kind = "namespace"
-expect(kind == "namespace")
+assert_true(kind == "namespace")
 ```
 
 </details>
 
 #### converts Package to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -97,12 +109,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Package: "package"
 val kind = "package"
-expect(kind == "package")
+assert_true(kind == "package")
 ```
 
 </details>
 
 #### converts Class to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -113,12 +128,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Class: "class"
 val kind = "class"
-expect(kind == "class")
+assert_true(kind == "class")
 ```
 
 </details>
 
 #### converts Method to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -129,12 +147,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Method: "method"
 val kind = "method"
-expect(kind == "method")
+assert_true(kind == "method")
 ```
 
 </details>
 
 #### converts Property to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -145,12 +166,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Property: "property"
 val kind = "property"
-expect(kind == "property")
+assert_true(kind == "property")
 ```
 
 </details>
 
 #### converts Field to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -161,12 +185,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Field: "field"
 val kind = "field"
-expect(kind == "field")
+assert_true(kind == "field")
 ```
 
 </details>
 
 #### converts Constructor to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -177,12 +204,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Constructor: "constructor"
 val kind = "constructor"
-expect(kind == "constructor")
+assert_true(kind == "constructor")
 ```
 
 </details>
 
 #### converts Enum to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -193,12 +223,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Enum: "enum"
 val kind = "enum"
-expect(kind == "enum")
+assert_true(kind == "enum")
 ```
 
 </details>
 
 #### converts Interface to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -209,12 +242,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Interface: "interface"
 val kind = "interface"
-expect(kind == "interface")
+assert_true(kind == "interface")
 ```
 
 </details>
 
 #### converts Function to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -225,12 +261,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Function: "function"
 val kind = "function"
-expect(kind == "function")
+assert_true(kind == "function")
 ```
 
 </details>
 
 #### converts Variable to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -241,12 +280,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Variable: "variable"
 val kind = "variable"
-expect(kind == "variable")
+assert_true(kind == "variable")
 ```
 
 </details>
 
 #### converts Constant to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -257,12 +299,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Constant: "constant"
 val kind = "constant"
-expect(kind == "constant")
+assert_true(kind == "constant")
 ```
 
 </details>
 
 #### converts text to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -273,12 +318,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case text: "string"
 val kind = "string"
-expect(kind == "string")
+assert_true(kind == "string")
 ```
 
 </details>
 
 #### converts Number to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -289,12 +337,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Number: "number"
 val kind = "number"
-expect(kind == "number")
+assert_true(kind == "number")
 ```
 
 </details>
 
 #### converts Boolean to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -305,12 +356,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Boolean: "boolean"
 val kind = "boolean"
-expect(kind == "boolean")
+assert_true(kind == "boolean")
 ```
 
 </details>
 
 #### converts Array to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -321,12 +375,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Array: "array"
 val kind = "array"
-expect(kind == "array")
+assert_true(kind == "array")
 ```
 
 </details>
 
 #### converts Object to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -337,12 +394,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Object: "object"
 val kind = "object"
-expect(kind == "object")
+assert_true(kind == "object")
 ```
 
 </details>
 
 #### converts Key to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -353,12 +413,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Key: "key"
 val kind = "key"
-expect(kind == "key")
+assert_true(kind == "key")
 ```
 
 </details>
 
 #### converts Null to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -369,12 +432,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Null: "null"
 val kind = "null"
-expect(kind == "null")
+assert_true(kind == "null")
 ```
 
 </details>
 
 #### converts EnumMember to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -385,12 +451,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case EnumMember: "enum-member"
 val kind = "enum-member"
-expect(kind == "enum-member")
+assert_true(kind == "enum-member")
 ```
 
 </details>
 
 #### converts Struct to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -401,12 +470,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Struct: "struct"
 val kind = "struct"
-expect(kind == "struct")
+assert_true(kind == "struct")
 ```
 
 </details>
 
 #### converts Event to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -417,12 +489,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Event: "event"
 val kind = "event"
-expect(kind == "event")
+assert_true(kind == "event")
 ```
 
 </details>
 
 #### converts Operator to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -433,12 +508,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Operator: "operator"
 val kind = "operator"
-expect(kind == "operator")
+assert_true(kind == "operator")
 ```
 
 </details>
 
 #### converts TypeParameter to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -449,7 +527,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case TypeParameter: "type-parameter"
 val kind = "type-parameter"
-expect(kind == "type-parameter")
+assert_true(kind == "type-parameter")
 ```
 
 </details>
@@ -457,6 +535,9 @@ expect(kind == "type-parameter")
 ### SymbolKind description
 
 #### describes File
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -467,12 +548,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case File: "File symbol"
 val desc = "File symbol"
-expect(desc == "File symbol")
+assert_true(desc == "File symbol")
 ```
 
 </details>
 
 #### describes Module
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -483,12 +567,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Module: "Module definition"
 val desc = "Module definition"
-expect(desc == "Module definition")
+assert_true(desc == "Module definition")
 ```
 
 </details>
 
 #### describes Namespace
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -499,12 +586,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Namespace: "Namespace"
 val desc = "Namespace"
-expect(desc == "Namespace")
+assert_true(desc == "Namespace")
 ```
 
 </details>
 
 #### describes Package
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -515,12 +605,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Package: "Package"
 val desc = "Package"
-expect(desc == "Package")
+assert_true(desc == "Package")
 ```
 
 </details>
 
 #### describes Class
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -531,12 +624,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Class: "Class definition"
 val desc = "Class definition"
-expect(desc == "Class definition")
+assert_true(desc == "Class definition")
 ```
 
 </details>
 
 #### describes Method
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -547,12 +643,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Method: "Method/member function"
 val desc = "Method/member function"
-expect(desc == "Method/member function")
+assert_true(desc == "Method/member function")
 ```
 
 </details>
 
 #### describes Property
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -563,12 +662,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Property: "Property"
 val desc = "Property"
-expect(desc == "Property")
+assert_true(desc == "Property")
 ```
 
 </details>
 
 #### describes Field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -579,12 +681,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Field: "Field/member variable"
 val desc = "Field/member variable"
-expect(desc == "Field/member variable")
+assert_true(desc == "Field/member variable")
 ```
 
 </details>
 
 #### describes Constructor
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -595,12 +700,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Constructor: "Constructor"
 val desc = "Constructor"
-expect(desc == "Constructor")
+assert_true(desc == "Constructor")
 ```
 
 </details>
 
 #### describes Enum
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -611,12 +719,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Enum: "Enumeration type"
 val desc = "Enumeration type"
-expect(desc == "Enumeration type")
+assert_true(desc == "Enumeration type")
 ```
 
 </details>
 
 #### describes Interface
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -627,12 +738,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Interface: "Interface/trait"
 val desc = "Interface/trait"
-expect(desc == "Interface/trait")
+assert_true(desc == "Interface/trait")
 ```
 
 </details>
 
 #### describes Function
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -643,12 +757,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Function: "Function"
 val desc = "Function"
-expect(desc == "Function")
+assert_true(desc == "Function")
 ```
 
 </details>
 
 #### describes Variable
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -659,12 +776,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Variable: "Variable"
 val desc = "Variable"
-expect(desc == "Variable")
+assert_true(desc == "Variable")
 ```
 
 </details>
 
 #### describes Constant
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -675,12 +795,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Constant: "Constant"
 val desc = "Constant"
-expect(desc == "Constant")
+assert_true(desc == "Constant")
 ```
 
 </details>
 
 #### describes text
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -691,12 +814,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case text: "text literal"
 val desc = "text literal"
-expect(desc == "text literal")
+assert_true(desc == "text literal")
 ```
 
 </details>
 
 #### describes Number
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -707,12 +833,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Number: "Number literal"
 val desc = "Number literal"
-expect(desc == "Number literal")
+assert_true(desc == "Number literal")
 ```
 
 </details>
 
 #### describes Boolean
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -723,12 +852,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Boolean: "Boolean literal"
 val desc = "Boolean literal"
-expect(desc == "Boolean literal")
+assert_true(desc == "Boolean literal")
 ```
 
 </details>
 
 #### describes Array
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -739,12 +871,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Array: "Array"
 val desc = "Array"
-expect(desc == "Array")
+assert_true(desc == "Array")
 ```
 
 </details>
 
 #### describes Object
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -755,12 +890,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Object: "Object"
 val desc = "Object"
-expect(desc == "Object")
+assert_true(desc == "Object")
 ```
 
 </details>
 
 #### describes Key
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -771,12 +909,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Key: "Object key"
 val desc = "Object key"
-expect(desc == "Object key")
+assert_true(desc == "Object key")
 ```
 
 </details>
 
 #### describes Null
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -787,12 +928,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Null: "Null value"
 val desc = "Null value"
-expect(desc == "Null value")
+assert_true(desc == "Null value")
 ```
 
 </details>
 
 #### describes EnumMember
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -803,12 +947,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case EnumMember: "Enum variant/member"
 val desc = "Enum variant/member"
-expect(desc == "Enum variant/member")
+assert_true(desc == "Enum variant/member")
 ```
 
 </details>
 
 #### describes Struct
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -819,12 +966,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Struct: "Struct type"
 val desc = "Struct type"
-expect(desc == "Struct type")
+assert_true(desc == "Struct type")
 ```
 
 </details>
 
 #### describes Event
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -835,12 +985,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Event: "Event"
 val desc = "Event"
-expect(desc == "Event")
+assert_true(desc == "Event")
 ```
 
 </details>
 
 #### describes Operator
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -851,12 +1004,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Operator: "Operator"
 val desc = "Operator"
-expect(desc == "Operator")
+assert_true(desc == "Operator")
 ```
 
 </details>
 
 #### describes TypeParameter
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -867,7 +1023,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case TypeParameter: "Type parameter/generic"
 val desc = "Type parameter/generic"
-expect(desc == "Type parameter/generic")
+assert_true(desc == "Type parameter/generic")
 ```
 
 </details>
@@ -875,6 +1031,9 @@ expect(desc == "Type parameter/generic")
 ### SymbolKind is_type_definition
 
 #### returns true for Class
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -885,12 +1044,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Class: true
 val is_type = true
-expect(is_type)
+assert_true(is_type)
 ```
 
 </details>
 
 #### returns true for Enum
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -901,12 +1063,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Enum: true
 val is_type = true
-expect(is_type)
+assert_true(is_type)
 ```
 
 </details>
 
 #### returns true for Interface
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -917,12 +1082,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Interface: true
 val is_type = true
-expect(is_type)
+assert_true(is_type)
 ```
 
 </details>
 
 #### returns true for Struct
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -933,12 +1101,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Struct: true
 val is_type = true
-expect(is_type)
+assert_true(is_type)
 ```
 
 </details>
 
 #### returns false for other kinds
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -949,7 +1120,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_type = false
-expect(not is_type)
+assert_false(is_type)
 ```
 
 </details>
@@ -957,6 +1128,9 @@ expect(not is_type)
 ### SymbolKind is_callable
 
 #### returns true for Method
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -967,12 +1141,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Method: true
 val is_callable = true
-expect(is_callable)
+assert_true(is_callable)
 ```
 
 </details>
 
 #### returns true for Function
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -983,12 +1160,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Function: true
 val is_callable = true
-expect(is_callable)
+assert_true(is_callable)
 ```
 
 </details>
 
 #### returns true for Constructor
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -999,12 +1179,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Constructor: true
 val is_callable = true
-expect(is_callable)
+assert_true(is_callable)
 ```
 
 </details>
 
 #### returns false for other kinds
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1015,7 +1198,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_callable = false
-expect(not is_callable)
+assert_false(is_callable)
 ```
 
 </details>
@@ -1023,6 +1206,9 @@ expect(not is_callable)
 ### SymbolKind is_container
 
 #### returns true for File
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1033,12 +1219,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case File: true
 val is_container = true
-expect(is_container)
+assert_true(is_container)
 ```
 
 </details>
 
 #### returns true for Module
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1049,12 +1238,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Module: true
 val is_container = true
-expect(is_container)
+assert_true(is_container)
 ```
 
 </details>
 
 #### returns true for Namespace
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1065,12 +1257,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Namespace: true
 val is_container = true
-expect(is_container)
+assert_true(is_container)
 ```
 
 </details>
 
 #### returns true for Package
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1081,12 +1276,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Package: true
 val is_container = true
-expect(is_container)
+assert_true(is_container)
 ```
 
 </details>
 
 #### returns true for Class
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1097,12 +1295,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Class: true
 val is_container = true
-expect(is_container)
+assert_true(is_container)
 ```
 
 </details>
 
 #### returns true for Enum
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1113,12 +1314,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Enum: true
 val is_container = true
-expect(is_container)
+assert_true(is_container)
 ```
 
 </details>
 
 #### returns true for Interface
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1129,12 +1333,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Interface: true
 val is_container = true
-expect(is_container)
+assert_true(is_container)
 ```
 
 </details>
 
 #### returns true for Struct
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1145,12 +1352,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Struct: true
 val is_container = true
-expect(is_container)
+assert_true(is_container)
 ```
 
 </details>
 
 #### returns false for other kinds
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1161,7 +1371,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_container = false
-expect(not is_container)
+assert_false(is_container)
 ```
 
 </details>
@@ -1169,6 +1379,9 @@ expect(not is_container)
 ### SymbolKind is_literal
 
 #### returns true for text
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1179,12 +1392,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case text: true
 val is_literal = true
-expect(is_literal)
+assert_true(is_literal)
 ```
 
 </details>
 
 #### returns true for Number
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1195,12 +1411,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Number: true
 val is_literal = true
-expect(is_literal)
+assert_true(is_literal)
 ```
 
 </details>
 
 #### returns true for Boolean
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1211,12 +1430,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Boolean: true
 val is_literal = true
-expect(is_literal)
+assert_true(is_literal)
 ```
 
 </details>
 
 #### returns true for Null
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1227,12 +1449,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Null: true
 val is_literal = true
-expect(is_literal)
+assert_true(is_literal)
 ```
 
 </details>
 
 #### returns false for other kinds
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1243,7 +1468,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_literal = false
-expect(not is_literal)
+assert_false(is_literal)
 ```
 
 </details>
@@ -1251,6 +1476,9 @@ expect(not is_literal)
 ### SymbolKind summary
 
 #### categorizes as type
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1261,12 +1489,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: if self.is_type_definition() (true)
 val category = "type"
-expect(category == "type")
+assert_true(category == "type")
 ```
 
 </details>
 
 #### categorizes as callable
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1277,12 +1508,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: elif self.is_callable() (true)
 val category = "callable"
-expect(category == "callable")
+assert_true(category == "callable")
 ```
 
 </details>
 
 #### categorizes as container
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1293,12 +1527,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: elif self.is_container() (true)
 val category = "container"
-expect(category == "container")
+assert_true(category == "container")
 ```
 
 </details>
 
 #### categorizes as literal
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1309,12 +1546,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: elif self.is_literal() (true)
 val category = "literal"
-expect(category == "literal")
+assert_true(category == "literal")
 ```
 
 </details>
 
 #### categorizes as value
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1325,7 +1565,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: else (default case)
 val category = "value"
-expect(category == "value")
+assert_true(category == "value")
 ```
 
 </details>

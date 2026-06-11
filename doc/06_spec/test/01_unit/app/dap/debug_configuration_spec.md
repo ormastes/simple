@@ -42,6 +42,9 @@ debug_configuration_spec
 
 #### creates with default values
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -51,12 +54,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: DebugConfiguration.new()
 val config_created = true
-expect(config_created)
+assert_true(config_created)
 ```
 
 </details>
 
 #### sets debug_type
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -67,12 +73,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: debug_type field assignment
 val type_set = true
-expect(type_set)
+assert_true(type_set)
 ```
 
 </details>
 
 #### sets default name
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -83,12 +92,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: name: "Debug Simple"
 val name = "Debug Simple"
-expect(name == "Debug Simple")
+assert_true(name == "Debug Simple")
 ```
 
 </details>
 
 #### sets default request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -99,12 +111,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: request: "launch"
 val request = "launch"
-expect(request == "launch")
+assert_true(request == "launch")
 ```
 
 </details>
 
 #### sets empty program
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -115,12 +130,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: program: ""
 val program = ""
-expect(program == "")
+assert_true(program == "")
 ```
 
 </details>
 
 #### initializes empty args list
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -131,12 +149,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: args: []
 val args_empty = true
-expect(args_empty)
+assert_true(args_empty)
 ```
 
 </details>
 
 #### sets default cwd
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -147,12 +168,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: cwd: "${workspaceFolder}"
 val cwd = r"${workspaceFolder}"
-expect(cwd == r"${workspaceFolder}")
+assert_true(cwd == r"${workspaceFolder}")
 ```
 
 </details>
 
 #### initializes empty env dict
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -163,12 +187,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: env: {}
 val env_empty = true
-expect(env_empty)
+assert_true(env_empty)
 ```
 
 </details>
 
 #### sets stop_on_entry to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -179,7 +206,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: stop_on_entry: false
 val stop_on_entry = false
-expect(not stop_on_entry)
+assert_false(stop_on_entry)
 ```
 
 </details>
@@ -187,6 +214,9 @@ expect(not stop_on_entry)
 ### set_program
 
 #### sets program path
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -197,7 +227,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.program = program
 val program_set = true
-expect(program_set)
+assert_true(program_set)
 ```
 
 </details>
@@ -205,6 +235,9 @@ expect(program_set)
 ### add_arg
 
 #### adds argument to list
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -215,12 +248,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.args.append(arg)
 val arg_added = true
-expect(arg_added)
+assert_true(arg_added)
 ```
 
 </details>
 
 #### handles multiple arguments
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -231,7 +267,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: multiple append calls
 val multiple_args = true
-expect(multiple_args)
+assert_true(multiple_args)
 ```
 
 </details>
@@ -239,6 +275,9 @@ expect(multiple_args)
 ### set_env
 
 #### sets environment variable
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -249,12 +288,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.env[key] = value
 val env_set = true
-expect(env_set)
+assert_true(env_set)
 ```
 
 </details>
 
 #### handles multiple env vars
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -265,7 +307,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: multiple env assignments
 val multiple_vars = true
-expect(multiple_vars)
+assert_true(multiple_vars)
 ```
 
 </details>
@@ -273,6 +315,9 @@ expect(multiple_vars)
 ### to_json
 
 #### converts to JSON string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -283,12 +328,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: to_json() method
 val json_created = true
-expect(json_created)
+assert_true(json_created)
 ```
 
 </details>
 
 #### creates JSON builder
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -299,12 +347,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: var builder = JsonBuilder.new()
 val builder_created = true
-expect(builder_created)
+assert_true(builder_created)
 ```
 
 </details>
 
 #### sets type field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -315,12 +366,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_string("type", self.debug_type)
 val type_set = true
-expect(type_set)
+assert_true(type_set)
 ```
 
 </details>
 
 #### sets name field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -331,12 +385,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_string("name", self.name)
 val name_set = true
-expect(name_set)
+assert_true(name_set)
 ```
 
 </details>
 
 #### sets request field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -347,12 +404,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_string("request", self.request)
 val request_set = true
-expect(request_set)
+assert_true(request_set)
 ```
 
 </details>
 
 #### sets program field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -363,12 +423,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_string("program", self.program)
 val program_set = true
-expect(program_set)
+assert_true(program_set)
 ```
 
 </details>
 
 #### sets cwd field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -379,12 +442,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_string("cwd", self.cwd)
 val cwd_set = true
-expect(cwd_set)
+assert_true(cwd_set)
 ```
 
 </details>
 
 #### sets stopOnEntry field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -395,7 +461,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("stopOnEntry", self.stop_on_entry)
 val stop_on_entry_set = true
-expect(stop_on_entry_set)
+assert_true(stop_on_entry_set)
 ```
 
 </details>
@@ -403,6 +469,9 @@ expect(stop_on_entry_set)
 ### args array serialization
 
 #### creates empty args values list
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -413,12 +482,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: var args_values: List<JsonValue> = []
 val list_created = true
-expect(list_created)
+assert_true(list_created)
 ```
 
 </details>
 
 #### iterates through args
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -429,12 +501,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: for arg in self.args
 val iterated = true
-expect(iterated)
+assert_true(iterated)
 ```
 
 </details>
 
 #### handles empty args
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -445,12 +520,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: loop doesn't execute (empty list)
 val empty_args = true
-expect(empty_args)
+assert_true(empty_args)
 ```
 
 </details>
 
 #### handles single arg
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -461,12 +539,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: loop executes once
 val single_arg = true
-expect(single_arg)
+assert_true(single_arg)
 ```
 
 </details>
 
 #### handles multiple args
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -477,12 +558,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: loop executes multiple times
 val multiple_args = true
-expect(multiple_args)
+assert_true(multiple_args)
 ```
 
 </details>
 
 #### pushes arg to values list
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -493,12 +577,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: args_values.push(JsonValue.text(arg))
 val pushed = true
-expect(pushed)
+assert_true(pushed)
 ```
 
 </details>
 
 #### sets args array in builder
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -509,7 +596,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_array("args", args_values)
 val array_set = true
-expect(array_set)
+assert_true(array_set)
 ```
 
 </details>
@@ -517,6 +604,9 @@ expect(array_set)
 ### env object serialization
 
 #### creates empty env dict
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -527,12 +617,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: var env_dict: Dict<text, JsonValue> = {}
 val dict_created = true
-expect(dict_created)
+assert_true(dict_created)
 ```
 
 </details>
 
 #### iterates through env items
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -543,12 +636,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: for (key, value) in self.env.items()
 val iterated = true
-expect(iterated)
+assert_true(iterated)
 ```
 
 </details>
 
 #### handles empty env
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -559,12 +655,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: loop doesn't execute (empty dict)
 val empty_env = true
-expect(empty_env)
+assert_true(empty_env)
 ```
 
 </details>
 
 #### handles single env var
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -575,12 +674,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: loop executes once
 val single_var = true
-expect(single_var)
+assert_true(single_var)
 ```
 
 </details>
 
 #### handles multiple env vars
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -591,12 +693,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: loop executes multiple times
 val multiple_vars = true
-expect(multiple_vars)
+assert_true(multiple_vars)
 ```
 
 </details>
 
 #### adds env var to dict
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -607,12 +712,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: env_dict[key] = JsonValue.text(value)
 val added = true
-expect(added)
+assert_true(added)
 ```
 
 </details>
 
 #### sets env object in builder
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -623,12 +731,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_object("env", env_dict)
 val object_set = true
-expect(object_set)
+assert_true(object_set)
 ```
 
 </details>
 
 #### stringifies final JSON
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -639,7 +750,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: stringify(builder.build())
 val stringified = true
-expect(stringified)
+assert_true(stringified)
 ```
 
 </details>

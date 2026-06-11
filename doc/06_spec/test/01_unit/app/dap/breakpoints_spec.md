@@ -40,6 +40,9 @@ breakpoints_spec
 
 #### creates breakpoint entry
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -48,12 +51,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Create breakpoint entry at source location
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### adds condition to breakpoint
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -63,12 +69,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Add condition expression to breakpoint
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### adds hit condition to breakpoint
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -78,12 +87,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Add hit count condition to breakpoint
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### increments hit count
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -93,7 +105,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Increment hit counter when breakpoint hit
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -101,6 +113,9 @@ expect(true)
 ### BreakpointStore
 
 #### adds breakpoints
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -110,12 +125,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Add breakpoints to store
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### removes breakpoints
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -125,12 +143,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Remove breakpoints from store
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### finds breakpoints by location
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -140,12 +161,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Query breakpoints at specific location
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### generates unique IDs
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -155,12 +179,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Generate unique breakpoint identifiers
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### clears all breakpoints
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -170,7 +197,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Clear all breakpoints in store
-expect(true)
+assert_true(true)
 ```
 
 </details>

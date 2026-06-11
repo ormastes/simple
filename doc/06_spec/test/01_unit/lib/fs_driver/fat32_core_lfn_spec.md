@@ -1,6 +1,6 @@
 # Fat32 Core Lfn Specification
 
-> 1. var driver =  mounted lfn driver
+> <details>
 
 <!-- sdn-diagram:id=fat32_core_lfn_spec.arch -->
 <details class="sdn-source">
@@ -40,7 +40,7 @@ fat32_core_lfn_spec -> std
 
 #### lists a single-slot LFN instead of the backing 8.3 alias
 
-1. var driver =  mounted lfn driver
+- var driver =  mounted lfn driver
    - Expected: entries.is_ok() is true
    - Expected: listed.len() equals `1`
    - Expected: listed[0].name equals `browser_demo`
@@ -69,7 +69,7 @@ expect(listed[0].size).to_equal(12345)
 
 #### resolves the LFN case-insensitively through shared Fat32Core
 
-1. var driver =  mounted lfn driver
+- var driver =  mounted lfn driver
    - Expected: lower.is_ok() is true
    - Expected: upper.is_ok() is true
    - Expected: lower.unwrap().name equals `browser_demo`

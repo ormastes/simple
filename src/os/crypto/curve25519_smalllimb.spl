@@ -6,6 +6,7 @@
 # Shift operators are avoided in the byte/limb conversion hot path because the
 # current bootstrap can miscompile them for these mixed-width integer values.
 
+extern fn serial_println(msg: text)
 
 fn _curve_debug(msg: text):
     nil
@@ -14,6 +15,18 @@ val MASK26: u64 = 0x3FFFFFF
 val MASK25: u64 = 0x1FFFFFF
 val BASE26: u64 = 0x4000000
 val BASE25: u64 = 0x2000000
+
+struct X25519Swap4:
+    x2: [u64]
+    x3: [u64]
+    z2: [u64]
+    z3: [u64]
+
+struct X25519Step4:
+    x2: [u64]
+    z2: [u64]
+    x3: [u64]
+    z3: [u64]
 
 fn _x25519_fe_zero() -> [u64]:
     [0,0,0,0,0,0,0,0,0,0]
@@ -43,87 +56,87 @@ fn _x25519_fe_carry(a: [u64]) -> [u64]:
     var h9 = a[9]
 
     var c: u64 = 0
-    c = h0 / BASE26
+    c = h0 >> 26
     h0 = h0 & MASK26
     h1 = h1 + c
 
-    c = h1 / BASE25
+    c = h1 >> 25
     h1 = h1 & MASK25
     h2 = h2 + c
 
-    c = h2 / BASE26
+    c = h2 >> 26
     h2 = h2 & MASK26
     h3 = h3 + c
 
-    c = h3 / BASE25
+    c = h3 >> 25
     h3 = h3 & MASK25
     h4 = h4 + c
 
-    c = h4 / BASE26
+    c = h4 >> 26
     h4 = h4 & MASK26
     h5 = h5 + c
 
-    c = h5 / BASE25
+    c = h5 >> 25
     h5 = h5 & MASK25
     h6 = h6 + c
 
-    c = h6 / BASE26
+    c = h6 >> 26
     h6 = h6 & MASK26
     h7 = h7 + c
 
-    c = h7 / BASE25
+    c = h7 >> 25
     h7 = h7 & MASK25
     h8 = h8 + c
 
-    c = h8 / BASE26
+    c = h8 >> 26
     h8 = h8 & MASK26
     h9 = h9 + c
 
-    c = h9 / BASE25
+    c = h9 >> 25
     h9 = h9 & MASK25
     h0 = h0 + c * 19
 
-    c = h0 / BASE26
+    c = h0 >> 26
     h0 = h0 & MASK26
     h1 = h1 + c
 
-    c = h1 / BASE25
+    c = h1 >> 25
     h1 = h1 & MASK25
     h2 = h2 + c
 
-    c = h2 / BASE26
+    c = h2 >> 26
     h2 = h2 & MASK26
     h3 = h3 + c
 
-    c = h3 / BASE25
+    c = h3 >> 25
     h3 = h3 & MASK25
     h4 = h4 + c
 
-    c = h4 / BASE26
+    c = h4 >> 26
     h4 = h4 & MASK26
     h5 = h5 + c
 
-    c = h5 / BASE25
+    c = h5 >> 25
     h5 = h5 & MASK25
     h6 = h6 + c
 
-    c = h6 / BASE26
+    c = h6 >> 26
     h6 = h6 & MASK26
     h7 = h7 + c
 
-    c = h7 / BASE25
+    c = h7 >> 25
     h7 = h7 & MASK25
     h8 = h8 + c
 
-    c = h8 / BASE26
+    c = h8 >> 26
     h8 = h8 & MASK26
     h9 = h9 + c
 
-    c = h9 / BASE25
+    c = h9 >> 25
     h9 = h9 & MASK25
     h0 = h0 + c * 19
 
-    c = h0 / BASE26
+    c = h0 >> 26
     h0 = h0 & MASK26
     h1 = h1 + c
 
@@ -134,6 +147,12 @@ fn _x25519_fe_add(a: [u64], b: [u64]) -> [u64]:
         a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4],
         a[5] + b[5], a[6] + b[6], a[7] + b[7], a[8] + b[8], a[9] + b[9]
     ])
+
+fn _x25519_fe_add_raw(a: [u64], b: [u64]) -> [u64]:
+    [
+        a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4],
+        a[5] + b[5], a[6] + b[6], a[7] + b[7], a[8] + b[8], a[9] + b[9]
+    ]
 
 fn _x25519_fe_neg(a: [u64]) -> [u64]:
     _x25519_fe_sub(_x25519_fe_zero(), a)
@@ -152,11 +171,31 @@ fn _x25519_fe_sub(a: [u64], b: [u64]) -> [u64]:
         a[9] + 67108862 - b[9]
     ])
 
+fn _x25519_fe_sub_raw(a: [u64], b: [u64]) -> [u64]:
+    [
+        a[0] + 134217690 - b[0],
+        a[1] + 67108862 - b[1],
+        a[2] + 134217726 - b[2],
+        a[3] + 67108862 - b[3],
+        a[4] + 134217726 - b[4],
+        a[5] + 67108862 - b[5],
+        a[6] + 134217726 - b[6],
+        a[7] + 67108862 - b[7],
+        a[8] + 134217726 - b[8],
+        a[9] + 67108862 - b[9]
+    ]
+
 fn _x25519_fe_mul_scalar(a: [u64], s: u64) -> [u64]:
     _x25519_fe_carry([
         a[0] * s, a[1] * s, a[2] * s, a[3] * s, a[4] * s,
         a[5] * s, a[6] * s, a[7] * s, a[8] * s, a[9] * s
     ])
+
+fn _x25519_fe_mul_scalar_raw(a: [u64], s: u64) -> [u64]:
+    [
+        a[0] * s, a[1] * s, a[2] * s, a[3] * s, a[4] * s,
+        a[5] * s, a[6] * s, a[7] * s, a[8] * s, a[9] * s
+    ]
 
 fn _x25519_fe_mul(a: [u64], b: [u64]) -> [u64]:
     val f0 = a[0]
@@ -208,10 +247,242 @@ fn _x25519_fe_mul(a: [u64], b: [u64]) -> [u64]:
     val h8 = f0 * g8 + f1_2 * g7 + f2 * g6 + f3_2 * g5 + f4 * g4 + f5_2 * g3 + f6 * g2 + f7_2 * g1 + f8 * g0 + f9_2 * g9_19
     val h9 = f0 * g9 + f1 * g8 + f2 * g7 + f3 * g6 + f4 * g5 + f5 * g4 + f6 * g3 + f7 * g2 + f8 * g1 + f9 * g0
 
-    _x25519_fe_carry([h0, h1, h2, h3, h4, h5, h6, h7, h8, h9])
+    var r0 = h0
+    var r1 = h1
+    var r2 = h2
+    var r3 = h3
+    var r4 = h4
+    var r5 = h5
+    var r6 = h6
+    var r7 = h7
+    var r8 = h8
+    var r9 = h9
+
+    var c: u64 = 0
+    c = r0 >> 26
+    r0 = r0 & MASK26
+    r1 = r1 + c
+
+    c = r1 >> 25
+    r1 = r1 & MASK25
+    r2 = r2 + c
+
+    c = r2 >> 26
+    r2 = r2 & MASK26
+    r3 = r3 + c
+
+    c = r3 >> 25
+    r3 = r3 & MASK25
+    r4 = r4 + c
+
+    c = r4 >> 26
+    r4 = r4 & MASK26
+    r5 = r5 + c
+
+    c = r5 >> 25
+    r5 = r5 & MASK25
+    r6 = r6 + c
+
+    c = r6 >> 26
+    r6 = r6 & MASK26
+    r7 = r7 + c
+
+    c = r7 >> 25
+    r7 = r7 & MASK25
+    r8 = r8 + c
+
+    c = r8 >> 26
+    r8 = r8 & MASK26
+    r9 = r9 + c
+
+    c = r9 >> 25
+    r9 = r9 & MASK25
+    r0 = r0 + c * 19
+
+    c = r0 >> 26
+    r0 = r0 & MASK26
+    r1 = r1 + c
+
+    c = r1 >> 25
+    r1 = r1 & MASK25
+    r2 = r2 + c
+
+    c = r2 >> 26
+    r2 = r2 & MASK26
+    r3 = r3 + c
+
+    c = r3 >> 25
+    r3 = r3 & MASK25
+    r4 = r4 + c
+
+    c = r4 >> 26
+    r4 = r4 & MASK26
+    r5 = r5 + c
+
+    c = r5 >> 25
+    r5 = r5 & MASK25
+    r6 = r6 + c
+
+    c = r6 >> 26
+    r6 = r6 & MASK26
+    r7 = r7 + c
+
+    c = r7 >> 25
+    r7 = r7 & MASK25
+    r8 = r8 + c
+
+    c = r8 >> 26
+    r8 = r8 & MASK26
+    r9 = r9 + c
+
+    c = r9 >> 25
+    r9 = r9 & MASK25
+    r0 = r0 + c * 19
+
+    c = r0 >> 26
+    r0 = r0 & MASK26
+    r1 = r1 + c
+
+    [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]
 
 fn _x25519_fe_sq(a: [u64]) -> [u64]:
-    _x25519_fe_mul(a, a)
+    val f0 = a[0]
+    val f1 = a[1]
+    val f2 = a[2]
+    val f3 = a[3]
+    val f4 = a[4]
+    val f5 = a[5]
+    val f6 = a[6]
+    val f7 = a[7]
+    val f8 = a[8]
+    val f9 = a[9]
+
+    val f0_2 = f0 * 2
+    val f1_2 = f1 * 2
+    val f2_2 = f2 * 2
+    val f3_2 = f3 * 2
+    val f4_2 = f4 * 2
+    val f5_2 = f5 * 2
+    val f6_2 = f6 * 2
+    val f7_2 = f7 * 2
+    val f8_2 = f8 * 2
+    val f9_2 = f9 * 2
+
+    val f5_38 = f5 * 38
+    val f6_19 = f6 * 19
+    val f7_38 = f7 * 38
+    val f8_19 = f8 * 19
+    val f9_19 = f9 * 19
+    val f9_38 = f9 * 38
+
+    val h0 = f0 * f0 + f1_2 * f9_38 + f2_2 * f8_19 + f3_2 * f7_38 + f4_2 * f6_19 + f5 * f5_38
+    val h1 = f0_2 * f1 + f2 * f9_38 + f3_2 * f8_19 + f4 * f7_38 + f5_2 * f6_19
+    val h2 = f0_2 * f2 + f1 * f1 + f3_2 * f9_38 + f4_2 * f8_19 + f5_2 * f7_38 + f6 * f6_19
+    val h3 = f0_2 * f3 + f1_2 * f2 + f4 * f9_38 + f5_2 * f8_19 + f6 * f7_38
+    val h4 = f0_2 * f4 + f1_2 * f3 + f2 * f2 + f5_2 * f9_38 + f6_2 * f8_19 + f7 * f7_38
+    val h5 = f0_2 * f5 + f1_2 * f4 + f2_2 * f3 + f6 * f9_38 + f7_2 * f8_19
+    val h6 = f0_2 * f6 + f1_2 * f5 + f2_2 * f4 + f3 * f3 + f7_2 * f9_38 + f8 * f8_19
+    val h7 = f0_2 * f7 + f1_2 * f6 + f2_2 * f5 + f3_2 * f4 + f8 * f9_38
+    val h8 = f0_2 * f8 + f1_2 * f7 + f2_2 * f6 + f3_2 * f5 + f4 * f4 + f9 * f9_19
+    val h9 = f0_2 * f9 + f1_2 * f8 + f2_2 * f7 + f3_2 * f6 + f4_2 * f5
+
+    var r0 = h0
+    var r1 = h1
+    var r2 = h2
+    var r3 = h3
+    var r4 = h4
+    var r5 = h5
+    var r6 = h6
+    var r7 = h7
+    var r8 = h8
+    var r9 = h9
+
+    var c: u64 = 0
+    c = r0 >> 26
+    r0 = r0 & MASK26
+    r1 = r1 + c
+
+    c = r1 >> 25
+    r1 = r1 & MASK25
+    r2 = r2 + c
+
+    c = r2 >> 26
+    r2 = r2 & MASK26
+    r3 = r3 + c
+
+    c = r3 >> 25
+    r3 = r3 & MASK25
+    r4 = r4 + c
+
+    c = r4 >> 26
+    r4 = r4 & MASK26
+    r5 = r5 + c
+
+    c = r5 >> 25
+    r5 = r5 & MASK25
+    r6 = r6 + c
+
+    c = r6 >> 26
+    r6 = r6 & MASK26
+    r7 = r7 + c
+
+    c = r7 >> 25
+    r7 = r7 & MASK25
+    r8 = r8 + c
+
+    c = r8 >> 26
+    r8 = r8 & MASK26
+    r9 = r9 + c
+
+    c = r9 >> 25
+    r9 = r9 & MASK25
+    r0 = r0 + c * 19
+
+    c = r0 >> 26
+    r0 = r0 & MASK26
+    r1 = r1 + c
+
+    c = r1 >> 25
+    r1 = r1 & MASK25
+    r2 = r2 + c
+
+    c = r2 >> 26
+    r2 = r2 & MASK26
+    r3 = r3 + c
+
+    c = r3 >> 25
+    r3 = r3 & MASK25
+    r4 = r4 + c
+
+    c = r4 >> 26
+    r4 = r4 & MASK26
+    r5 = r5 + c
+
+    c = r5 >> 25
+    r5 = r5 & MASK25
+    r6 = r6 + c
+
+    c = r6 >> 26
+    r6 = r6 & MASK26
+    r7 = r7 + c
+
+    c = r7 >> 25
+    r7 = r7 & MASK25
+    r8 = r8 + c
+
+    c = r8 >> 26
+    r8 = r8 & MASK26
+    r9 = r9 + c
+
+    c = r9 >> 25
+    r9 = r9 & MASK25
+    r0 = r0 + c * 19
+
+    c = r0 >> 26
+    r0 = r0 & MASK26
+    r1 = r1 + c
+
+    [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]
 
 fn _x25519_fe_from_bytes(b: [u8]) -> [u64]:
     [
@@ -362,40 +633,40 @@ fn _x25519_fe_invert(z: [u64]) -> [u64]:
 
     _x25519_fe_mul(t, z11)
 
-fn fe_cswap(a: [u64], b: [u64], swap: i64) -> [list]:
+fn fe_cswap(a: [u64], b: [u64], swap: i64) -> X25519Swap4:
     if swap == 0:
-        return [a, b]
-    [b, a]
+        return X25519Swap4(x2: a, x3: b, z2: [], z3: [])
+    X25519Swap4(x2: b, x3: a, z2: [], z3: [])
 
-fn _cswap_pair(x1: [u64], x2: [u64], z1: [u64], z2: [u64], swap: i64) -> [list]:
+fn _cswap_pair(x1: [u64], x2: [u64], z1: [u64], z2: [u64], swap: i64) -> X25519Swap4:
     if swap == 0:
-        return [x1, x2, z1, z2]
-    [x2, x1, z2, z1]
+        return X25519Swap4(x2: x1, x3: x2, z2: z1, z3: z2)
+    X25519Swap4(x2: x2, x3: x1, z2: z2, z3: z1)
 
-fn _ladder_step(x2: [u64], z2: [u64], x3: [u64], z3: [u64], x1: [u64]) -> [list]:
-    val a = _x25519_fe_add(x2, z2)
+fn _ladder_step(x2: [u64], z2: [u64], x3: [u64], z3: [u64], x1: [u64]) -> X25519Step4:
+    val a = _x25519_fe_add_raw(x2, z2)
     val aa = _x25519_fe_sq(a)
-    val b = _x25519_fe_sub(x2, z2)
+    val b = _x25519_fe_sub_raw(x2, z2)
     val bb = _x25519_fe_sq(b)
-    val e = _x25519_fe_sub(aa, bb)
-    val c = _x25519_fe_add(x3, z3)
-    val d = _x25519_fe_sub(x3, z3)
+    val e = _x25519_fe_sub_raw(aa, bb)
+    val c = _x25519_fe_add_raw(x3, z3)
+    val d = _x25519_fe_sub_raw(x3, z3)
     val da = _x25519_fe_mul(d, a)
     val cb = _x25519_fe_mul(c, b)
 
-    val sum_dc = _x25519_fe_add(da, cb)
+    val sum_dc = _x25519_fe_add_raw(da, cb)
     val new_x3 = _x25519_fe_sq(sum_dc)
 
-    val diff_dc = _x25519_fe_sub(da, cb)
+    val diff_dc = _x25519_fe_sub_raw(da, cb)
     val diff_sq = _x25519_fe_sq(diff_dc)
     val new_z3 = _x25519_fe_mul(x1, diff_sq)
 
     val new_x2 = _x25519_fe_mul(aa, bb)
-    val a24_e = _x25519_fe_mul_scalar(e, 121665)
-    val aa_plus = _x25519_fe_add(aa, a24_e)
+    val a24_e = _x25519_fe_mul_scalar_raw(e, 121665)
+    val aa_plus = _x25519_fe_add_raw(aa, a24_e)
     val new_z2 = _x25519_fe_mul(e, aa_plus)
 
-    [new_x2, new_z2, new_x3, new_z3]
+    X25519Step4(x2: new_x2, z2: new_z2, x3: new_x3, z3: new_z3)
 
 fn _clamp_scalar(scalar: [u8]) -> [u8]:
     _curve_debug("_clamp_scalar start len={scalar.len()}")
@@ -432,8 +703,19 @@ fn _bit_div(bit_idx: i64) -> i64:
     elif bit_idx == 6: 64
     else: 128
 
+fn _bit_mask(bit_idx: i64) -> u8:
+    if bit_idx == 0: 0x01
+    elif bit_idx == 1: 0x02
+    elif bit_idx == 2: 0x04
+    elif bit_idx == 3: 0x08
+    elif bit_idx == 4: 0x10
+    elif bit_idx == 5: 0x20
+    elif bit_idx == 6: 0x40
+    else: 0x80
+
 fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
     _curve_debug("x25519_smalllimb start")
+    serial_println("[x25519-small] start")
     val k = _clamp_scalar(scalar)
     _curve_debug("after clamp")
     val u = _x25519_fe_from_bytes(_mask_u_coord(u_coord))
@@ -443,40 +725,169 @@ fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
     var z_2 = _x25519_fe_zero()
     var x_3 = u
     var z_3 = _x25519_fe_one()
-
     var prev_bit: i64 = 0
     var bit_pos: i64 = 254
     while bit_pos >= 0:
         val byte_idx = bit_pos / 8
         val bit_idx = bit_pos % 8
-        val k_bit: i64 = (k[byte_idx].to_i64() / _bit_div(bit_idx)) & 1
+        if bit_pos == 254:
+            serial_println("[x25519-small] iter254 enter")
+        elif bit_pos == 253:
+            serial_println("[x25519-small] iter253 enter")
+        val k_bit: i64 =
+            if (k[byte_idx] & _bit_mask(bit_idx)) != 0:
+                1
+            else:
+                0
         val swap_bit = k_bit ^ prev_bit
         prev_bit = k_bit
 
-        val swapped = _cswap_pair(x_2, x_3, z_2, z_3, swap_bit)
-        x_2 = swapped[0]
-        x_3 = swapped[1]
-        z_2 = swapped[2]
-        z_3 = swapped[3]
+        if swap_bit != 0:
+            val swap_x = x_2
+            x_2 = x_3
+            x_3 = swap_x
+            val swap_z = z_2
+            z_2 = z_3
+            z_3 = swap_z
+        if bit_pos == 254:
+            serial_println("[x25519-small] iter254 swap done")
+        elif bit_pos == 253:
+            serial_println("[x25519-small] iter253 swap done")
 
-        val step = _ladder_step(x_2, z_2, x_3, z_3, u)
-        x_2 = step[0]
-        z_2 = step[1]
-        x_3 = step[2]
-        z_3 = step[3]
+        val a = [
+            x_2[0] + z_2[0], x_2[1] + z_2[1], x_2[2] + z_2[2], x_2[3] + z_2[3], x_2[4] + z_2[4],
+            x_2[5] + z_2[5], x_2[6] + z_2[6], x_2[7] + z_2[7], x_2[8] + z_2[8], x_2[9] + z_2[9]
+        ]
+        val aa = _x25519_fe_sq(a)
+        val b = [
+            x_2[0] + 134217690 - z_2[0],
+            x_2[1] + 67108862 - z_2[1],
+            x_2[2] + 134217726 - z_2[2],
+            x_2[3] + 67108862 - z_2[3],
+            x_2[4] + 134217726 - z_2[4],
+            x_2[5] + 67108862 - z_2[5],
+            x_2[6] + 134217726 - z_2[6],
+            x_2[7] + 67108862 - z_2[7],
+            x_2[8] + 134217726 - z_2[8],
+            x_2[9] + 67108862 - z_2[9]
+        ]
+        val bb = _x25519_fe_sq(b)
+        val e = [
+            aa[0] + 134217690 - bb[0],
+            aa[1] + 67108862 - bb[1],
+            aa[2] + 134217726 - bb[2],
+            aa[3] + 67108862 - bb[3],
+            aa[4] + 134217726 - bb[4],
+            aa[5] + 67108862 - bb[5],
+            aa[6] + 134217726 - bb[6],
+            aa[7] + 67108862 - bb[7],
+            aa[8] + 134217726 - bb[8],
+            aa[9] + 67108862 - bb[9]
+        ]
+        val c = [
+            x_3[0] + z_3[0], x_3[1] + z_3[1], x_3[2] + z_3[2], x_3[3] + z_3[3], x_3[4] + z_3[4],
+            x_3[5] + z_3[5], x_3[6] + z_3[6], x_3[7] + z_3[7], x_3[8] + z_3[8], x_3[9] + z_3[9]
+        ]
+        val d = [
+            x_3[0] + 134217690 - z_3[0],
+            x_3[1] + 67108862 - z_3[1],
+            x_3[2] + 134217726 - z_3[2],
+            x_3[3] + 67108862 - z_3[3],
+            x_3[4] + 134217726 - z_3[4],
+            x_3[5] + 67108862 - z_3[5],
+            x_3[6] + 134217726 - z_3[6],
+            x_3[7] + 67108862 - z_3[7],
+            x_3[8] + 134217726 - z_3[8],
+            x_3[9] + 67108862 - z_3[9]
+        ]
+        val da = _x25519_fe_mul(d, a)
+        val cb = _x25519_fe_mul(c, b)
+
+        val sum_dc = [
+            da[0] + cb[0], da[1] + cb[1], da[2] + cb[2], da[3] + cb[3], da[4] + cb[4],
+            da[5] + cb[5], da[6] + cb[6], da[7] + cb[7], da[8] + cb[8], da[9] + cb[9]
+        ]
+        val new_x3 = _x25519_fe_sq(sum_dc)
+
+        val diff_dc = [
+            da[0] + 134217690 - cb[0],
+            da[1] + 67108862 - cb[1],
+            da[2] + 134217726 - cb[2],
+            da[3] + 67108862 - cb[3],
+            da[4] + 134217726 - cb[4],
+            da[5] + 67108862 - cb[5],
+            da[6] + 134217726 - cb[6],
+            da[7] + 67108862 - cb[7],
+            da[8] + 134217726 - cb[8],
+            da[9] + 67108862 - cb[9]
+        ]
+        val diff_sq = _x25519_fe_sq(diff_dc)
+        val new_z3 = _x25519_fe_mul(u, diff_sq)
+
+        val new_x2 = _x25519_fe_mul(aa, bb)
+        val a24_e = _x25519_fe_mul_scalar_raw(e, 121665)
+        val aa_plus = [
+            aa[0] + a24_e[0], aa[1] + a24_e[1], aa[2] + a24_e[2], aa[3] + a24_e[3], aa[4] + a24_e[4],
+            aa[5] + a24_e[5], aa[6] + a24_e[6], aa[7] + a24_e[7], aa[8] + a24_e[8], aa[9] + a24_e[9]
+        ]
+        val new_z2 = _x25519_fe_mul(e, aa_plus)
+
+        x_2 = new_x2
+        z_2 = new_z2
+        x_3 = new_x3
+        z_3 = new_z3
+        if bit_pos == 254:
+            serial_println("[x25519-small] iter254 step done")
+            serial_println("[x25519-small] iter254 post-assign")
+        elif bit_pos == 253:
+            serial_println("[x25519-small] iter253 step done")
+        elif bit_pos == 252:
+            serial_println("[x25519-small] iter252 step done")
+        elif bit_pos == 251:
+            serial_println("[x25519-small] iter251 step done")
+        elif bit_pos == 250:
+            serial_println("[x25519-small] iter250 step done")
+        elif bit_pos == 249:
+            serial_println("[x25519-small] iter249 step done")
+        elif bit_pos == 248:
+            serial_println("[x25519-small] iter248 step done")
+        elif bit_pos == 244:
+            serial_println("[x25519-small] iter244 step done")
 
         if bit_pos == 0:
-            val final_swapped = _cswap_pair(x_2, x_3, z_2, z_3, prev_bit)
-            x_2 = final_swapped[0]
-            x_3 = final_swapped[1]
-            z_2 = final_swapped[2]
-            z_3 = final_swapped[3]
+            if prev_bit != 0:
+                val swap_x = x_2
+                x_2 = x_3
+                x_3 = swap_x
+                val swap_z = z_2
+                z_2 = z_3
+                z_3 = swap_z
 
+            serial_println("[x25519-small] ladder done")
+            serial_println("[x25519-small] invert start")
             val z_inv = _x25519_fe_invert(z_2)
+            serial_println("[x25519-small] invert done")
             val result = _x25519_fe_mul(x_2, z_inv)
+            serial_println("[x25519-small] mul done")
             return _x25519_fe_to_bytes(result)
 
+        if bit_pos == 254:
+            serial_println("[x25519-small] iter254 pre-decrement")
         bit_pos = bit_pos - 1
+        if bit_pos == 253:
+            serial_println("[x25519-small] iter253 ready")
+        elif bit_pos == 252:
+            serial_println("[x25519-small] iter252 ready")
+        elif bit_pos == 251:
+            serial_println("[x25519-small] iter251 ready")
+        elif bit_pos == 250:
+            serial_println("[x25519-small] iter250 ready")
+        elif bit_pos == 249:
+            serial_println("[x25519-small] iter249 ready")
+        elif bit_pos == 248:
+            serial_println("[x25519-small] iter248 ready")
+        elif bit_pos == 244:
+            serial_println("[x25519-small] iter244 ready")
 
     val z_inv = _x25519_fe_invert(z_2)
     val result = _x25519_fe_mul(x_2, z_inv)

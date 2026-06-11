@@ -72,6 +72,9 @@ expect(single.label).to_equal("only")
 
 #### parses empty struct
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -80,7 +83,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val empty = ParserDeclEmpty(marker: true)
-expect(empty.marker)
+assert_true(empty.marker)
 ```
 
 </details>
@@ -154,6 +157,9 @@ expect(ParserDeclColor.Red.label()).to_equal("red")
 
 #### parses enum comparison
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -161,7 +167,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(ParserDeclColor.Green == ParserDeclColor.Green)
+assert_true(ParserDeclColor.Green == ParserDeclColor.Green)
 ```
 
 </details>
@@ -247,8 +253,8 @@ expect(counter.current()).to_equal(2)
 
 #### parses class with methods
 
-1. var counter = ParserDeclCounter
-2. counter bump
+- var counter = ParserDeclCounter
+- counter bump
    - Expected: counter.current() equals `3`
 
 
@@ -559,7 +565,7 @@ expect(x).to_equal(42)
 
 #### parses let with destructuring
 
-1. let
+- let
    - Expected: a + b equals `3`
 
 

@@ -83,6 +83,9 @@ is printed as a log message.
 
 #### emits a REQC001 warning
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -92,7 +95,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val ws = collect_pass_warning("")
 expect(ws.len()).to_be_greater_than(0)
-expect(has_warning_for_code(ws, "REQC001"))
+assert_true(has_warning_for_code(ws, "REQC001"))
 ```
 
 </details>
@@ -116,6 +119,9 @@ expect(ws[0]).to_contain("pass_*")
 
 #### still emits a REQC001 warning
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -125,7 +131,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val ws = collect_pass_warning("")
 expect(ws.len()).to_equal(1)
-expect(has_warning_for_code(ws, "REQC001"))
+assert_true(has_warning_for_code(ws, "REQC001"))
 ```
 
 </details>
@@ -149,7 +155,7 @@ expect(ws.len()).to_equal(0)
 
 #### stores the comment in the AST node expr_s_val
 
-1. expr reset
+- expr reset
    - Expected: expr_get_tag(e) equals `40`
    - Expected: expr_get_str(e) equals `implement later`
 
@@ -173,7 +179,7 @@ expect(expr_get_str(e)).to_equal("implement later")
 
 #### comment string is non-empty
 
-1. expr reset
+- expr reset
    - Expected: expr_get_str(e) equals `migration pending`
    - Expected: ws.len() equals `0`
 
@@ -200,6 +206,9 @@ expect(ws.len()).to_equal(0)
 
 #### emits a REQC001 warning
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -209,7 +218,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val ws = collect_pass_warning("")
 expect(ws.len()).to_be_greater_than(0)
-expect(has_warning_for_code(ws, "REQC001"))
+assert_true(has_warning_for_code(ws, "REQC001"))
 ```
 
 </details>
@@ -233,7 +242,7 @@ expect(ws.len()).to_equal(0)
 
 #### stores the comment in the AST node expr_s_val
 
-1. expr reset
+- expr reset
    - Expected: expr_get_tag(e) equals `41`
    - Expected: expr_get_str(e) equals `intentional no-op: event handler not needed here`
 
@@ -259,6 +268,9 @@ expect(expr_get_str(e)).to_equal("intentional no-op: event handler not needed he
 
 #### emits a REQC001 warning
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -268,7 +280,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val ws = collect_pass_warning("")
 expect(ws.len()).to_be_greater_than(0)
-expect(has_warning_for_code(ws, "REQC001"))
+assert_true(has_warning_for_code(ws, "REQC001"))
 ```
 
 </details>
@@ -292,7 +304,7 @@ expect(ws.len()).to_equal(0)
 
 #### stores the comment in the AST node
 
-1. expr reset
+- expr reset
    - Expected: expr_get_tag(e) equals `43`
    - Expected: expr_get_str(e) equals `stub: will add retry logic in v2`
 
@@ -318,6 +330,9 @@ expect(expr_get_str(e)).to_equal("stub: will add retry logic in v2")
 
 #### does not produce a debug log entry
 
+- assert false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -326,7 +341,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val should_log = debug_log_check(false, "some reason")
-expect(not should_log)
+assert_false(should_log)
 ```
 
 </details>
@@ -334,6 +349,9 @@ expect(not should_log)
 #### when debug mode is enabled and comment is empty
 
 #### does not produce a debug log entry (no comment to log)
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -343,7 +361,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val should_log = debug_log_check(true, "")
-expect(not should_log)
+assert_false(should_log)
 ```
 
 </details>
@@ -351,6 +369,9 @@ expect(not should_log)
 #### when debug mode is enabled and comment is present
 
 #### produces a debug log entry
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -360,7 +381,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val should_log = debug_log_check(true, "implement after refactor")
-expect(should_log)
+assert_true(should_log)
 ```
 
 </details>

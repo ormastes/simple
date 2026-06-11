@@ -40,6 +40,9 @@ protocol_spec
 
 #### creates source with path
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -48,12 +51,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Source represents debugged source code file
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates source with name
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -63,7 +69,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Source can be created with display name
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -71,6 +77,9 @@ expect(true)
 ### SourceBreakpoint
 
 #### creates source breakpoint
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -80,12 +89,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Source breakpoint at specific line
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates source breakpoint with condition
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -95,7 +107,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Source breakpoint with conditional break expression
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -103,6 +115,9 @@ expect(true)
 ### Breakpoint
 
 #### creates verified breakpoint
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -112,12 +127,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Verified breakpoint set in debuggee
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates unverified breakpoint
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -127,7 +145,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Unverified breakpoint waiting for source
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -135,6 +153,9 @@ expect(true)
 ### StackFrame
 
 #### creates stack frame
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -144,12 +165,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Stack frame in call stack
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates stack frame with module
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -159,7 +183,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Stack frame with module information
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -167,6 +191,9 @@ expect(true)
 ### Scope
 
 #### creates local scope
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -176,12 +203,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Local variable scope
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates arguments scope
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -191,12 +221,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Function arguments scope
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates global scope
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -206,7 +239,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Global variable scope
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -214,6 +247,9 @@ expect(true)
 ### Variable
 
 #### creates simple variable
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -223,12 +259,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Simple scalar variable
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates variable with children
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -238,7 +277,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Complex variable with child variables
-expect(true)
+assert_true(true)
 ```
 
 </details>

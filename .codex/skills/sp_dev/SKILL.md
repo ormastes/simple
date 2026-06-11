@@ -69,6 +69,30 @@ perf script. Do not rewrite Simple features in C/Rust to claim C-level speed; if
 parity is blocked by runtime/compiler behavior, record a measured blocker under
 `doc/08_tracking/bug/`.
 
+For runtime-vs-pure-Simple algorithm work, use the shared dual-backend mode
+names consistently in specs, docs, and code:
+
+- `alpha` = current default, run both and stop on diff
+- `beta` = run both and log a critical diff report
+- `normal` = run only the preferred implementation
+
+Prefer helper names that expose those mode names directly:
+
+- `dual_backend_alpha_default_mode()`
+- `dual_backend_beta_default_mode()`
+- `dual_backend_normal_pure_simple_mode()`
+
+Keep the legacy `assert/critical/pure_simple` helper names only as temporary
+compatibility aliases. New wrappers, examples, and docs should use the
+`alpha/beta/normal` helper names.
+
+When a task introduces a new runtime/pure wrapper, update the shared guide at
+`doc/07_guide/os/crypto_dual_backend.md` and prefer an explicit
+`DualBackendConfig` dependency-injection entrypoint plus a default-config
+convenience wrapper. If `normal` mode is meant to avoid dual execution on the
+hot path, use the `dual_backend_run_*` lambda-based helpers rather than
+precomputing both outputs before comparison.
+
 For UI, GUI, MDI/window-manager, Draw IR, Simple 2D, or Engine2D backend-lane
 work, keep the stack architecture current in
 `doc/04_architecture/ui/simple_gui_stack.md` and its TLDR companion. If the work

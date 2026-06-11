@@ -346,3 +346,37 @@ fn main() -> i64:
 "#;
     assert_eq!(compile_with_coverage(code), 42);
 }
+
+#[test]
+fn bare_len_uses_rt_len_not_name_suffix_binding() {
+    // Regression (2026-06-11, stage4 site 11): bare `.len()` on a receiver
+    // whose static type is lost (for-loop binder) must lower to the rt_len
+    // tag-dispatch builtin, NOT name-suffix bind to whatever unique
+    // `Type_dot_len` method happens to be linked (Box.len -> 42 here;
+    // std ListIter.len in the stage4 CLI closure, which segfaulted
+    // `stage4 lint`). Arrays drive the untyped binder; the static runtime
+    // symbol registry must be populated for the loader to resolve rt_array_*.
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+class Box:
+    n: i64
+    fn len() -> i64:
+        42
+
+fn box_len(b: Box) -> i64:
+    b.len()
+
+fn main() -> i64:
+    val rows = [[1, 2], [3]]
+    var total = 0
+    for row in rows:
+        total = total + row.len()
+    total
+"#;
+    // Pre-fix this returned 84 (Box.len()==42 per row); rt_len gives 2+1.
+    // NOTE: box_len is a decoy keeping a linkable Box_dot_len in func_ids; it
+    // is not called because this harness skips typecheck, so even its typed
+    // receiver would reach codegen as a bare `len`. The full pipeline
+    // qualifies typed receivers (verified via native-build e2e repro).
+    assert_eq!(compile_and_run(code), 3);
+}

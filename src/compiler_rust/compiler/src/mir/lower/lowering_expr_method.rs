@@ -6,6 +6,26 @@ use crate::hir::{DispatchMode, HirExpr, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
+    fn box_method_args_for_any_params(
+        &mut self,
+        func_name: &str,
+        args: &[HirExpr],
+        arg_regs: &mut [VReg],
+    ) -> MirLowerResult<()> {
+        let params = self.function_param_types.get(func_name).cloned().unwrap_or_default();
+        if params.is_empty() {
+            return Ok(());
+        }
+        for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
+            if params.get(i).copied() == Some(TypeId::ANY) {
+                if let Some(arg_expr) = args.get(i) {
+                    *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn builtin_method_receiver_name(&self, ty: TypeId) -> Option<&'static str> {
         if let Some(name) = builtin_type_name(ty) {
             return Some(name);
@@ -181,10 +201,21 @@ impl<'a> MirLowerer<'a> {
                     _ => None,
                 });
             if let Some((field_index, field_ty)) = field_hit {
-                let is_callable_field =
-                    field_ty == TypeId::ANY || matches!(registry.get(field_ty), Some(HirType::Function { .. }));
+                let field_signature = match registry.get(field_ty) {
+                    Some(HirType::Function { params, ret }) => Some((params.clone(), *ret)),
+                    _ => None,
+                };
+                let is_callable_field = field_ty == TypeId::ANY || field_signature.is_some();
                 if is_callable_field {
-                    let arg_count = args.len();
+                    let (param_types, return_type) =
+                        field_signature.unwrap_or_else(|| (vec![TypeId::ANY; args.len()], TypeId::ANY));
+                    for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
+                        if param_types.get(i).copied() == Some(TypeId::ANY) {
+                            if let Some(arg_expr) = args.get(i) {
+                                *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
+                            }
+                        }
+                    }
                     return self.with_func(|func, current_block| {
                         let fval = func.new_vreg();
                         let dest = func.new_vreg();
@@ -198,8 +229,8 @@ impl<'a> MirLowerer<'a> {
                         block.instructions.push(MirInst::IndirectCall {
                             dest: Some(dest),
                             callee: fval,
-                            param_types: vec![TypeId::ANY; arg_count],
-                            return_type: TypeId::ANY,
+                            param_types,
+                            return_type,
                             args: arg_regs.clone(),
                             effect: crate::mir::effects::Effect::Io,
                         });
@@ -541,6 +572,7 @@ impl<'a> MirLowerer<'a> {
                     })?;
                     Ok(dest)
                 } else {
+                    self.box_method_args_for_any_params(&func_name, args, &mut arg_regs)?;
                     // Fallback: not a registered trait method — use static dispatch
                     let dest = self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
@@ -565,6 +597,7 @@ impl<'a> MirLowerer<'a> {
                 }
             }
             DispatchMode::Static => {
+                self.box_method_args_for_any_params(&func_name, args, &mut arg_regs)?;
                 let dest = self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();

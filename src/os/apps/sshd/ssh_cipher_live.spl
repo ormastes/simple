@@ -1,0 +1,144 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSH Cipher Layer — live-safe AES-256-GCM only.
+
+use os.crypto.aes_gcm.{aes256_gcm_encrypt, aes256_gcm_decrypt, AesGcmResult}
+use os.apps.sshd.ssh_packet.{ssh_get_u32}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+val GCM_TAG_LEN: u64 = 16
+
+class SshCipher:
+    seq_c2s: u32
+    seq_s2c: u32
+    active: bool
+
+impl SshCipher:
+
+    static fn new() -> SshCipher:
+        SshCipher(
+            seq_c2s: 0,
+            seq_s2c: 0,
+            active: false
+        )
+
+    me activate(start_c2s_seq: u32, start_s2c_seq: u32):
+        self.seq_c2s = start_c2s_seq
+        self.seq_s2c = start_s2c_seq
+        self.active = true
+
+fn _u8_at(data: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _push_byte(arr: [u8], byte_val: u8) -> [u8]:
+    var out = arr
+    out.push(byte_val)
+    out
+
+fn _make_nonce(iv: [u8], seq: u32) -> [u8]:
+    var counter: [u8] = []
+    counter.push(0)
+    counter.push(0)
+    counter.push(0)
+    counter.push(0)
+    counter.push(0)
+    counter.push(0)
+    counter.push(0)
+    counter.push(0)
+    counter.push(((seq >> 24) & 0xFF).to_u8())
+    counter.push(((seq >> 16) & 0xFF).to_u8())
+    counter.push(((seq >> 8) & 0xFF).to_u8())
+    counter.push((seq & 0xFF).to_u8())
+
+    var nonce: [u8] = []
+    var i: u64 = 0
+    while i < 12:
+        nonce.push(_u8_at(iv, i) ^ _u8_at(counter, i))
+        i = i + 1
+    nonce
+
+fn ssh_encrypt_packet_aes_gcm(payload: [u8], seq_s2c: u32, enc_key_s2c: [u8], iv_s2c: [u8]) -> [u8]:
+    var padding_len: u64 = 4
+    while ((1 + payload.len() + padding_len) % 16) != 0:
+        padding_len = padding_len + 1
+    val packet_length: u64 = 1 + payload.len() + padding_len
+    var aad: [u8] = []
+    aad = _push_byte(aad, ((packet_length >> 24) & 0xFF).to_u8())
+    aad = _push_byte(aad, ((packet_length >> 16) & 0xFF).to_u8())
+    aad = _push_byte(aad, ((packet_length >> 8) & 0xFF).to_u8())
+    aad = _push_byte(aad, (packet_length & 0xFF).to_u8())
+
+    var body: [u8] = []
+    body = _push_byte(body, padding_len.to_u8())
+    var i: u64 = 0
+    while i < payload.len():
+        body = _push_byte(body, _u8_at(payload, i))
+        i = i + 1
+    i = 0
+    while i < padding_len:
+        body = _push_byte(body, 0)
+        i = i + 1
+
+    val nonce = _make_nonce(iv_s2c, seq_s2c)
+    val encrypted_with_tag = aes256_gcm_encrypt(enc_key_s2c, nonce, body, aad)
+
+    var result: [u8] = []
+    i = 0
+    while i < aad.len():
+        result = _push_byte(result, _u8_at(aad, i))
+        i = i + 1
+    i = 0
+    while i < encrypted_with_tag.len():
+        result = _push_byte(result, _u8_at(encrypted_with_tag, i))
+        i = i + 1
+    result
+
+fn ssh_decrypt_packet_aes_gcm(data: [u8], seq_c2s: u32, enc_key_c2s: [u8], iv_c2s: [u8]) -> Result<[u8], text>:
+    if data.len() < 4 + GCM_TAG_LEN:
+        return Err("encrypted packet too short")
+
+    var aad: [u8] = []
+    var i: u64 = 0
+    while i < 4:
+        aad.push(data[i])
+        i = i + 1
+
+    val ct_with_tag_len = data.len() - 4
+    if ct_with_tag_len < GCM_TAG_LEN:
+        return Err("no ciphertext in encrypted packet")
+    val ct_len = ct_with_tag_len - GCM_TAG_LEN
+
+    var ciphertext: [u8] = []
+    i = 0
+    while i < ct_len:
+        ciphertext.push(data[4 + i])
+        i = i + 1
+
+    var tag: [u8] = []
+    i = 0
+    while i < GCM_TAG_LEN:
+        tag.push(data[4 + ct_len + i])
+        i = i + 1
+
+    val nonce = _make_nonce(iv_c2s, seq_c2s)
+    val result = aes256_gcm_decrypt(enc_key_c2s, nonce, ciphertext, aad, tag)
+
+    match result:
+        AesGcmResult.Ok(plaintext):
+            if plaintext.len() < 1:
+                return Err("decrypted body empty")
+            val padding_len = plaintext[0].to_u64()
+            if 1 + padding_len > plaintext.len():
+                return Err("invalid padding in decrypted packet")
+            val payload_len = plaintext.len() - 1 - padding_len
+            var payload: [u8] = []
+            i = 0
+            while i < payload_len:
+                payload.push(plaintext[1 + i])
+                i = i + 1
+            Ok(payload)
+        AesGcmResult.Err(msg):
+            Err("GCM decryption failed: {msg}")
+
+export SshCipher
+export ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm

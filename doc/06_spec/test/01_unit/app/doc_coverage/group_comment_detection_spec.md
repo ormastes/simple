@@ -214,6 +214,9 @@ expect(group.var_names[1]).to_equal("names")
 
 #### detects comment immediately before group
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -226,12 +229,15 @@ val groups = detect_variable_groups("test.spl", source)
 
 expect(groups.len()).to_equal(1)
 val group = groups[0]
-expect(group.has_group_comment == true)
+assert_true(group.has_group_comment == true)
 ```
 
 </details>
 
 #### detects comment 2 lines before group
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -245,12 +251,15 @@ val groups = detect_variable_groups("test.spl", source)
 
 expect(groups.len()).to_equal(1)
 val group = groups[0]
-expect(group.has_group_comment == true)
+assert_true(group.has_group_comment == true)
 ```
 
 </details>
 
 #### marks group without comment
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -264,12 +273,15 @@ val groups = detect_variable_groups("test.spl", source)
 
 expect(groups.len()).to_equal(1)
 val group = groups[0]
-expect(group.has_group_comment == false)
+assert_true(group.has_group_comment == false)
 ```
 
 </details>
 
 #### does not detect comment too far before
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -283,7 +295,7 @@ val groups = detect_variable_groups("test.spl", source)
 
 expect(groups.len()).to_equal(1)
 val group = groups[0]
-expect(group.has_group_comment == false)
+assert_true(group.has_group_comment == false)
 ```
 
 </details>
@@ -494,6 +506,12 @@ expect(suggestion).to_equal("# Group of 2 related variables")
 
 #### emits warnings for groups without comments
 
+- assert true
+- assert true
+- assert true
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -516,10 +534,10 @@ val warnings = emit_group_comment_warnings(groups)
 expect(warnings.len()).to_equal(2)
 val first = warnings[0]
 val second = warnings[1]
-expect(first.contains("test.spl:10") == true)
-expect(first.contains("Group of 3 variables") == true)
-expect(second.contains("Suggestion:") == true)
-expect(second.contains("Counter variables") == true)
+assert_true(first.contains("test.spl:10") == true)
+assert_true(first.contains("Group of 3 variables") == true)
+assert_true(second.contains("Suggestion:") == true)
+assert_true(second.contains("Counter variables") == true)
 ```
 
 </details>
@@ -552,6 +570,9 @@ expect(warnings.len()).to_equal(0)
 
 #### formats variable names in warnings
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -572,7 +593,7 @@ val groups = [group]
 val warnings = emit_group_comment_warnings(groups)
 
 val msg = warnings[0]
-expect(msg.contains("x, y") == true)
+assert_true(msg.contains("x, y") == true)
 ```
 
 </details>

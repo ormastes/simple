@@ -18,11 +18,16 @@
 
 use os.crypto.ed25519_ops.{EdPoint, fe_neg, fe_is_negative, fe_pow2252m3, fe_sqrt, _fe_sqrt_m1, _ed25519_d, _ed25519_2d, _ed25519_base_point, ed_point_identity, ed_point_add, ed_point_double, ed_point_cselect, ed_scalar_mul, ed_point_encode, ed_point_decode}
 use os.crypto.ed25519_scalar.{sc_reduce, sc_muladd, _bytes_to_limbs32, _sc_sub_L}
+use os.crypto.dual_backend.{dual_backend_default_config, dual_backend_run_bytes}
 # Pure-Simple SHA-512 (FIPS 180-4) — drop-in replacement for the
 # baremetal C `rt_sha512_*` extern that has no interpreter dispatch.
 # Brings `rotr64` into scope transitively for the indexed sha512_bytes lib.
 use std.crypto.sha512.{sha512_bytes}
 use std.crypto.types.{rotr64}
+extern fn serial_println(msg: text)
+extern fn rt_tls13_sha512_full(data: [u8]) -> [u8]
+extern fn rt_ed25519_sc_reduce_64(data: [u8]) -> [u8]
+extern fn rt_ed25519_sc_muladd(a: [u8], b: [u8], c: [u8]) -> [u8]
 
 # ============================================================================
 # Ed25519 Scalar Clamping
@@ -82,6 +87,21 @@ fn _sha512_modl(data: [u8]) -> [u8]:
     val hash = _sha512_u8(data)
     sc_reduce(hash)
 
+fn _sha512_u8_live(data: [u8]) -> [u8]:
+    rt_tls13_sha512_full(data)
+
+fn _sha512_modl_live(data: [u8]) -> [u8]:
+    serial_println("[ed25519] live modl: sha512 start")
+    val hash = _sha512_u8_live(data)
+    serial_println("[ed25519] live modl: sha512 done")
+    serial_println("[ed25519] live modl: reduce start")
+    val reduced = rt_ed25519_sc_reduce_64(hash)
+    serial_println("[ed25519] live modl: reduce done")
+    reduced
+
+fn _sc_muladd_live(a: [u8], b: [u8], c: [u8]) -> [u8]:
+    rt_ed25519_sc_muladd(a, b, c)
+
 # ============================================================================
 # Pure-Simple [u8] indexing helper
 # ============================================================================
@@ -140,7 +160,9 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
       S = (r + k * a) mod L
       signature = encode(R) || S
     """
+    serial_println("[ed25519] sign: seed sha512 start")
     val h = _sha512_u8(private_seed)
+    serial_println("[ed25519] sign: seed sha512 done")
     val a = _ed25519_clamp(h)
     # NOTE(constant-time): `a` is the secret scalar. `ed_scalar_mul` is
     # constant-time as of 2026-05-01 (always-add-and-select), so timing does
@@ -164,11 +186,16 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     while i < message.len():
         prefix_msg.push(message[i])
         i = i + 1
+    serial_println("[ed25519] sign: nonce hash start")
     val r = _sha512_modl(prefix_msg)
+    serial_println("[ed25519] sign: nonce hash done")
 
     # R = r * B; encoded R = ed_point_encode(R)
+    serial_println("[ed25519] sign: R scalar mul start")
     val big_r = ed_scalar_mul(r, _ed25519_base_point())
+    serial_println("[ed25519] sign: R scalar mul done")
     val r_enc = ed_point_encode(big_r)
+    serial_println("[ed25519] sign: R encode done")
 
     # k = SHA-512(R_enc || A || M) mod L
     var k_input: [u8] = []
@@ -184,10 +211,14 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     while i < message.len():
         k_input.push(message[i])
         i = i + 1
+    serial_println("[ed25519] sign: challenge hash start")
     val k = _sha512_modl(k_input)
+    serial_println("[ed25519] sign: challenge hash done")
 
     # S = (r + k * a) mod L  (sc_muladd computes (a*b + c) mod L)
+    serial_println("[ed25519] sign: S muladd start")
     val s = sc_muladd(k, a, r)
+    serial_println("[ed25519] sign: S muladd done")
 
     # signature = R_enc (32) || S (32)
     var sig: [u8] = []
@@ -199,7 +230,86 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     while i < s.len():
         sig.push(s[i])
         i = i + 1
+    serial_println("[ed25519] sign: done")
     sig
+
+fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    serial_println("[ed25519] sign: seed sha512 start")
+    val h = _sha512_u8_live(private_seed)
+    serial_println("[ed25519] sign: seed sha512 done")
+    val a = _ed25519_clamp(h)
+
+    var prefix: [u8] = []
+    var i: u64 = 32
+    while i < 64:
+        prefix.push(h[i])
+        i = i + 1
+
+    var prefix_msg: [u8] = []
+    i = 0
+    while i < prefix.len():
+        prefix_msg.push(prefix[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        prefix_msg.push(message[i])
+        i = i + 1
+    serial_println("[ed25519] sign: nonce hash start")
+    val r = _sha512_modl_live(prefix_msg)
+    serial_println("[ed25519] sign: nonce hash done")
+
+    serial_println("[ed25519] sign: R scalar mul start")
+    val big_r = ed_scalar_mul(r, _ed25519_base_point())
+    serial_println("[ed25519] sign: R scalar mul done")
+    val r_enc = ed_point_encode(big_r)
+    serial_println("[ed25519] sign: R encode done")
+
+    var k_input: [u8] = []
+    i = 0
+    while i < r_enc.len():
+        k_input.push(r_enc[i])
+        i = i + 1
+    i = 0
+    while i < public_key.len():
+        k_input.push(public_key[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        k_input.push(message[i])
+        i = i + 1
+    serial_println("[ed25519] sign: challenge hash start")
+    val k = _sha512_modl_live(k_input)
+    serial_println("[ed25519] sign: challenge hash done")
+
+    serial_println("[ed25519] sign: S muladd start")
+    val s = _sc_muladd_live(k, a, r)
+    serial_println("[ed25519] sign: S muladd done")
+
+    var sig: [u8] = []
+    i = 0
+    while i < r_enc.len():
+        sig.push(r_enc[i])
+        i = i + 1
+    i = 0
+    while i < s.len():
+        sig.push(s[i])
+        i = i + 1
+    serial_println("[ed25519] sign: done")
+    sig
+
+fn ed25519_sign_live(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    dual_backend_run_bytes(
+        "ed25519",
+        "sign_live",
+        dual_backend_default_config(),
+        [
+            "seed_len=" + private_seed.len().to_text(),
+            "pub_len=" + public_key.len().to_text(),
+            "msg_len=" + message.len().to_text()
+        ],
+        fn(): _ed25519_sign_live_runtime(private_seed, public_key, message),
+        fn(): ed25519_sign(private_seed, public_key, message)
+    )
 
 fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
     """Verify an Ed25519 signature. Returns true on success.

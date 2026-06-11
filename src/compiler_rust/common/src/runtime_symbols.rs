@@ -389,6 +389,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_dict_clear",
     "rt_dict_keys",
     "rt_dict_values",
+    // for-in iteration over dicts/arrays (cranelift for-loop lowering)
+    "rt_dict_entries",
+    "rt_for_iterable",
     // Fast DB operations (runtime_db.c)
     "rt_db_table_create",
     "rt_db_table_destroy",

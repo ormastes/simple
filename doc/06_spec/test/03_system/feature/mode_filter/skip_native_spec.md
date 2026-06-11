@@ -56,6 +56,9 @@ Tests that skip native compilation via `skip-marker-removed_mode: native`, runni
 
 #### works in interpreted modes
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -65,7 +68,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var interpreted_body_ran = false
 interpreted_body_ran = true
-expect(interpreted_body_ran)
+assert_true(interpreted_body_ran)
 ```
 
 </details>

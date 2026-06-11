@@ -113,7 +113,7 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
-    fn box_args_for_any_params(
+    pub(super) fn box_args_for_any_params(
         &mut self,
         callee: &HirExpr,
         args: &[HirExpr],

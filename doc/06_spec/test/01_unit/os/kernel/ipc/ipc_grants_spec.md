@@ -65,7 +65,7 @@ _Tests for grant issuance and id monotonicity._
 
 #### issues first grant with id 1
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: gid equals `1`
 
 
@@ -85,7 +85,7 @@ expect(gid).to_equal(1)
 
 #### issues monotonically increasing ids
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: gid1 equals `1`
    - Expected: gid2 equals `2`
    - Expected: gid3 equals `3`
@@ -111,7 +111,7 @@ expect(gid3).to_equal(3)
 
 #### newly issued grant fields are correct
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: g.grantor equals `10`
    - Expected: g.grantee equals `20`
    - Expected: g.vaddr equals `0x5000`
@@ -144,7 +144,7 @@ _Tests for grant revocation._
 
 #### revoke returns true for a valid grant
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: ok is true
 
 
@@ -165,8 +165,8 @@ expect(ok).to_equal(true)
 
 #### revoked grant is no longer findable
 
-1. var tbl = GrantTable new
-2. tbl cap revoke
+- var tbl = GrantTable new
+- tbl cap revoke
 
 
 <details>
@@ -187,8 +187,8 @@ expect(found).to_be_nil()
 
 #### revoke returns false for already-revoked grant
 
-1. var tbl = GrantTable new
-2. tbl cap revoke
+- var tbl = GrantTable new
+- tbl cap revoke
    - Expected: ok2 is false
 
 
@@ -210,7 +210,7 @@ expect(ok2).to_equal(false)
 
 #### revoke returns false for unknown grant_id
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: ok is false
 
 
@@ -233,7 +233,7 @@ _Tests for bounds-checked read through a grant._
 
 #### succeeds for in-bounds read on GRANT_R grant
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: rc equals `0`
 
 
@@ -254,7 +254,7 @@ expect(rc).to_equal(0)
 
 #### fails with -1 when offset+len exceeds grant length
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: rc equals `-1`
 
 
@@ -275,7 +275,7 @@ expect(rc).to_equal(-1)
 
 #### fails with -1 when grant does not permit read
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: rc equals `-1`
 
 
@@ -296,8 +296,8 @@ expect(rc).to_equal(-1)
 
 #### fails with -1 for a revoked grant
 
-1. var tbl = GrantTable new
-2. tbl cap revoke
+- var tbl = GrantTable new
+- tbl cap revoke
    - Expected: rc equals `-1`
 
 
@@ -319,7 +319,7 @@ expect(rc).to_equal(-1)
 
 #### fails with -1 when grantee does not match
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: rc equals `-1`
 
 
@@ -343,7 +343,7 @@ _Tests for bounds-checked write through a grant._
 
 #### succeeds for in-bounds write on GRANT_W grant
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: rc equals `0`
 
 
@@ -364,7 +364,7 @@ expect(rc).to_equal(0)
 
 #### fails with -1 when dst_off+len exceeds grant length
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: rc equals `-1`
 
 
@@ -385,7 +385,7 @@ expect(rc).to_equal(-1)
 
 #### fails with -1 for GRANT_R grant
 
-1. var tbl = GrantTable new
+- var tbl = GrantTable new
    - Expected: rc equals `-1`
 
 
@@ -406,8 +406,8 @@ expect(rc).to_equal(-1)
 
 #### fails with -1 for a revoked grant
 
-1. var tbl = GrantTable new
-2. tbl cap revoke
+- var tbl = GrantTable new
+- tbl cap revoke
    - Expected: rc equals `-1`
 
 
@@ -432,10 +432,10 @@ _Tests exercising the VMA-walk validation path in safecopy_from._
 
 #### succeeds when grantor vmspace has readable VMA covering the range
 
-1. var tbl = GrantTable new
-2. var space = ProcessVmSpace
-3. space areas push
-4. register task vmspace
+- var tbl = GrantTable new
+- var space = ProcessVmSpace
+- space areas push
+- register task vmspace
    - Expected: rc equals `0`
 
 
@@ -463,10 +463,10 @@ expect(rc).to_equal(0)
 
 #### returns -1 (EFAULT) when grantor vmspace has no VMA covering the source
 
-1. var tbl = GrantTable new
-2. var space = ProcessVmSpace
-3. space areas push
-4. register task vmspace
+- var tbl = GrantTable new
+- var space = ProcessVmSpace
+- space areas push
+- register task vmspace
    - Expected: rc equals `-1`
 
 
@@ -494,10 +494,10 @@ expect(rc).to_equal(-1)
 
 #### returns -1 (EFAULT) when source VMA lacks VMA_READ flag
 
-1. var tbl = GrantTable new
-2. var space = ProcessVmSpace
-3. space areas push
-4. register task vmspace
+- var tbl = GrantTable new
+- var space = ProcessVmSpace
+- space areas push
+- register task vmspace
    - Expected: rc equals `-1`
 
 
@@ -527,10 +527,10 @@ _Tests exercising the VMA-walk validation path in safecopy_to._
 
 #### succeeds when grantor vmspace has writable VMA covering the range
 
-1. var tbl = GrantTable new
-2. var space = ProcessVmSpace
-3. space areas push
-4. register task vmspace
+- var tbl = GrantTable new
+- var space = ProcessVmSpace
+- space areas push
+- register task vmspace
    - Expected: rc equals `0`
 
 
@@ -556,10 +556,10 @@ expect(rc).to_equal(0)
 
 #### returns -1 (EFAULT) when destination VMA lacks VMA_WRITE flag
 
-1. var tbl = GrantTable new
-2. var space = ProcessVmSpace
-3. space areas push
-4. register task vmspace
+- var tbl = GrantTable new
+- var space = ProcessVmSpace
+- space areas push
+- register task vmspace
    - Expected: rc equals `-1`
 
 

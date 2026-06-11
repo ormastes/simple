@@ -40,6 +40,9 @@ no_paren_spec
 
 #### list.len works without parens
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -48,12 +51,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val list = [1, 2, 3]
-expect(list.len == 3)
+assert_true(list.len == 3)
 ```
 
 </details>
 
 #### string.len works without parens
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -63,14 +69,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val str = "hello"
-expect(str.len == 5)
+assert_true(str.len == 5)
 ```
 
 </details>
 
 #### comparison with no-paren method call
 
-1. fail
+- assert true
+- fail
 
 
 <details>
@@ -82,7 +89,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val items = [1, 2, 3, 4, 5]
 if items.len > 3:
-    expect(true)
+    assert_true(true)
 else:
     fail("items.len should be greater than 3")
 ```
@@ -90,6 +97,9 @@ else:
 </details>
 
 #### works in nested expressions
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -100,7 +110,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val data = [[1, 2], [3, 4, 5]]
 val total = data[0].len + data[1].len
-expect(total == 5)
+assert_true(total == 5)
 ```
 
 </details>

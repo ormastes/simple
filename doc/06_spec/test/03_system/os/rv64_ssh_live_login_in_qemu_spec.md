@@ -175,7 +175,7 @@ val scenario = scenario_rv64_ssh()
 expect(scenario.name).to_equal("rv64-ssh")
 expect(scenario.arch).to_equal(Architecture.Riscv64)
 expect(scenario.qemu_extra.contains("user,id=n0,hostfwd=tcp::2222-:22")).to_equal(true)
-expect(scenario.qemu_extra.contains("virtio-net-device,netdev=n0")).to_equal(true)
+expect(scenario.qemu_extra.contains("virtio-net-pci,netdev=n0,disable-modern=on,disable-legacy=off")).to_equal(true)
 expect(scenario.description.contains("SSH daemon")).to_equal(true)
 ```
 
@@ -209,7 +209,7 @@ expect(cmd.contains("user,id=n0,hostfwd=tcp::2222-:22")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -221,7 +221,8 @@ expect(entry.contains("rv64_network_init()")).to_equal(true)
 expect(entry.contains("SshDaemon.new(22)")).to_equal(true)
 expect(entry.contains("daemon.start()")).to_equal(true)
 expect(entry.contains("production-daemon-starting arch=riscv64")).to_equal(true)
-expect((entry.index_of("extern fn rt_") ?? -1) == -1).to_equal(true)
+expect(entry.contains("extern fn rt_riscv_")).to_equal(true)
+expect(entry.contains("extern fn rt_net_")).to_equal(false)
 ```
 
 </details>
@@ -256,15 +257,16 @@ expect(contract.contains("SSH daemon listening on port 22")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 if _rv64_ssh_live_enabled():
     val scenario = scenario_rv64_ssh()
     val target = get_riscv64_ssh_live_target()
-    val build_status = if build_os_with_backend(target, "cranelift"): "built" else: "build failed"
-    expect(build_status).to_equal("built")
+    if not build_os(target):
+        expect("build failed").to_equal("built")
+        return
     val ok = test_scenario(scenario, 900000u64)
     val run_status = if ok: "TEST PASSED" else: "TEST FAILED"
     expect(run_status).to_equal("TEST PASSED")

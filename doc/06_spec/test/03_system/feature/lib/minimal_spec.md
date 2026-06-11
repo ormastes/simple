@@ -58,6 +58,9 @@ system with lightweight standard library dependencies.
 
 #### calls helper
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -67,7 +70,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val result = test_file_exists("test/03_system/feature/lib/minimal_spec.spl")
 print "Result: {result}"
-expect(result)
+assert_true(result)
 ```
 
 </details>

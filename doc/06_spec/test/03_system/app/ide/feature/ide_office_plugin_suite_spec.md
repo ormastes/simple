@@ -99,7 +99,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
 #### registers markdown slides sheets dashboard and database capabilities
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -118,7 +118,7 @@ expect(ids).to_contain("db-admin")
 #### points each capability at an existing implementation owner
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -140,7 +140,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 #### reports GUI and TUI feature checks through the IDE product surface
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -161,7 +161,7 @@ expect(tui_report).to_contain("slides: app.office.slides")
 #### keeps the feature-check manual surface complete and ordered
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -185,7 +185,7 @@ expect(lines[16]).to_start_with("  plugin-manifest:")
 #### keeps the TUI feature-check layout within terminal width and captures it
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -208,7 +208,7 @@ expect(_capture_file_state(capture)).to_equal("matched")
 #### keeps GUI and TUI feature-check probes in parity except launch mode
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -231,8 +231,12 @@ expect(tui_lines[16]).to_equal(gui_lines[16])
 
 #### checks slide rendering outline and page design through existing office modules
 
+- assert true
+- assert true
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -246,8 +250,8 @@ expect(probe.thumbnail).to_contain("Slide 2:")
 expect(probe.canvas_widget_count).to_be_greater_than(1)
 expect(probe.outline_line_count).to_equal(2)
 expect(probe.design_count).to_equal(2)
-expect(probe.has_css_like_design)
-expect(probe.has_outline_transform)
+assert_true(probe.has_css_like_design)
+assert_true(probe.has_outline_transform)
 expect(summary).to_contain("transform=true")
 ```
 
@@ -255,9 +259,8 @@ expect(summary).to_contain("transform=true")
 
 #### checks slide constructor helpers used by IDE presentation previews
 
-1. kind: SlideElementKind TextBox
-
-2. kind: SlideElementKind TextBox
+- kind: SlideElementKind TextBox
+- kind: SlideElementKind TextBox
    - Expected: slide_layout_display_name(base.layout) equals `Title + Content`
    - Expected: slide_layout_short_name(base.layout) equals `Content`
    - Expected: base.elements.len() equals `1`
@@ -266,7 +269,7 @@ expect(summary).to_contain("transform=true")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -300,8 +303,11 @@ expect(next.background).to_equal("#FFFFFF")
 
 #### checks spreadsheet compatibility through existing sheet and formula modules
 
+- assert true
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -313,7 +319,7 @@ expect(compat.owner_module).to_equal("app.office.sheets")
 expect(compat.compatible_formats.join(",")).to_contain("xlsx")
 expect(compat.compatible_formats.join(",")).to_contain("tabular")
 expect(compat.sample_range).to_equal("A1:C1")
-expect(compat.formula_evaluator_ok)
+assert_true(compat.formula_evaluator_ok)
 expect(summary).to_contain("formula=5")
 expect(summary).to_contain("evaluator=true")
 ```
@@ -323,7 +329,7 @@ expect(summary).to_contain("evaluator=true")
 #### checks shared Office numeric parsing used by sheet and planner surfaces
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -342,7 +348,7 @@ expect(office_pow10_i64(3)).to_equal(1000)
 #### checks DB admin targets through existing editor and portal DB ownership
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -364,8 +370,12 @@ expect(summary).to_contain("page-size=4096")
 
 #### checks agent dashboard integration through existing editor MCP tools
 
+- assert true
+- assert true
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -375,8 +385,8 @@ val surface = ide_agent_dashboard_surface()
 val summary = ide_agent_dashboard_summary()
 expect(surface.owner_module).to_equal("app.editor.mcp_tools")
 expect(surface.tool_count).to_be_greater_than(10)
-expect(surface.has_lsp_tools)
-expect(surface.has_wiki_tools)
+assert_true(surface.has_lsp_tools)
+assert_true(surface.has_wiki_tools)
 expect(surface.modes.join(",")).to_contain("combined-live")
 expect(summary).to_contain("modes=3")
 ```
@@ -385,8 +395,12 @@ expect(summary).to_contain("modes=3")
 
 #### checks markdown rendering through the shared editor renderer and preview pane
 
+- assert true
+- assert true
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -398,8 +412,8 @@ expect(probe.owner_module).to_equal("std.editor.render.md_renderer")
 expect(probe.block_count).to_be_greater_than(2)
 expect(probe.rendered_line_count).to_be_greater_than(2)
 expect(probe.preview_line_count).to_be_greater_than(2)
-expect(probe.contains_heading)
-expect(probe.contains_table)
+assert_true(probe.contains_heading)
+assert_true(probe.contains_table)
 expect(summary).to_contain("preview=")
 ```
 
@@ -408,7 +422,7 @@ expect(summary).to_contain("preview=")
 #### checks TUI GUI and SDL launch modes through the shared editor launch contract
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -428,8 +442,14 @@ expect(summary).to_contain("gui=gui")
 
 #### checks TUI preview and outline panels through shared editor render helpers
 
+- assert true
+- assert true
+- assert true
+- assert true
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -439,10 +459,10 @@ val sanity = ide_tui_sanity()
 val summary = ide_tui_sanity_summary()
 expect(sanity.preview_line_count).to_be_greater_than(2)
 expect(sanity.outline_line_count).to_equal(2)
-expect(sanity.renders_markdown_preview)
-expect(sanity.renders_table_preview)
-expect(sanity.renders_slide_outline)
-expect(sanity.renders_outline_style)
+assert_true(sanity.renders_markdown_preview)
+assert_true(sanity.renders_table_preview)
+assert_true(sanity.renders_slide_outline)
+assert_true(sanity.renders_outline_style)
 expect(summary).to_contain("slide-outline=true")
 ```
 
@@ -450,8 +470,14 @@ expect(summary).to_contain("slide-outline=true")
 
 #### checks GUI rendering through the shared editor backend
 
+- assert true
+- assert true
+- assert true
+- assert true
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -460,10 +486,10 @@ Reproduction: this block contains the complete executable scenario source.
 val sanity = ide_gui_sanity()
 val summary = ide_gui_sanity_summary()
 expect(sanity.theme).to_equal("dark")
-expect(sanity.renders_markdown)
-expect(sanity.renders_presentation)
-expect(sanity.renders_sheet)
-expect(sanity.has_backend_config)
+assert_true(sanity.renders_markdown)
+assert_true(sanity.renders_presentation)
+assert_true(sanity.renders_sheet)
+assert_true(sanity.has_backend_config)
 expect(summary).to_contain("ppt=true")
 ```
 
@@ -472,7 +498,7 @@ expect(summary).to_contain("ppt=true")
 #### exports IDE app support through the existing plugin manifest registry
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -1,6 +1,6 @@
 # Lean Basic Specification
 
-> 1. var emit = emitter LeanEmitter new
+> <details>
 
 <!-- sdn-diagram:id=lean_basic_spec.arch -->
 <details class="sdn-source">
@@ -42,12 +42,12 @@ lean_basic_spec -> verification
 
 #### emits indented lines
 
-1. var emit = emitter LeanEmitter new
-2. emit emit line
-3. emit indent
-4. emit emit line
-5. emit emit line
-6. emit dedent
+- var emit = emitter LeanEmitter new
+- emit emit line
+- emit indent
+- emit emit line
+- emit emit line
+- emit dedent
 
 
 <details>
@@ -74,9 +74,9 @@ expect(output).to_contain("  y : Bool")
 
 #### renders structure and theorem helpers
 
-1. var emit = emitter LeanEmitter new
-2. emit emit structure data
-3. emit emit theorem data
+- var emit = emitter LeanEmitter new
+- emit emit structure data
+- emit emit theorem data
 
 
 <details>

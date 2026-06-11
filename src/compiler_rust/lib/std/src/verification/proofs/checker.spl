@@ -2,7 +2,8 @@
 #
 # Invokes Lean 4 to check proofs and reports results.
 
-use verification.proofs.obligations as ob
+use verification.proofs.obligations.{ObligationSet, generate_theorem_stubs}
+use std.nogc_sync_mut.io.{file_read_text}
 
 # SFFI for process execution and file operations
 @extern("runtime", "rt_process_run")
@@ -21,8 +22,8 @@ enum LeanResult:
 
     fn is_success(self) -> bool:
         match self:
-            case Success: return True
-            case _: return False
+            case Success: return true
+            case _: return false
 
     fn to_string(self) -> text:
         match self:
@@ -62,12 +63,35 @@ class FileCheckResult:
         return FileCheckResult(file_path, result, [], [])
 
     fn with_error(error: text) -> FileCheckResult:
-        new_errors = self.errors.append(error)
+        val new_errors = self.errors + [error]
         return FileCheckResult(self.file_path, self.result, new_errors, self.warnings)
 
     fn with_warning(warning: text) -> FileCheckResult:
-        new_warnings = self.warnings.append(warning)
+        val new_warnings = self.warnings + [warning]
         return FileCheckResult(self.file_path, self.result, self.errors, new_warnings)
+
+    # Alias for result field — spec uses .status
+    fn status() -> LeanResult:
+        self.result
+
+    # Count sorry occurrences in error messages
+    fn sorry_count() -> i32:
+        var count = 0
+        for e in self.errors:
+            if e.contains("sorry"):
+                count = count + 1
+        count
+
+    # Return error message text (first error, or from result)
+    fn error_message() -> text:
+        match self.result:
+            case LeanResult.TypeError(m): m
+            case LeanResult.ProofError(m): m
+            case _:
+                if self.errors.len() > 0:
+                    self.errors[0]
+                else:
+                    ""
 
 # Batch check result
 class BatchCheckResult:
@@ -78,7 +102,7 @@ class BatchCheckResult:
         return BatchCheckResult([], 0)
 
     fn add_result(result: FileCheckResult) -> BatchCheckResult:
-        new_results = self.file_results.append(result)
+        val new_results = self.file_results + [result]
         return BatchCheckResult(new_results, self.total_time_ms)
 
     fn with_time(time_ms: i32) -> BatchCheckResult:
@@ -111,7 +135,29 @@ class ProofChecker:
         # Invoke Lean via subprocess
         val cmd = self.config.lean_path
         val args = "--run {file_path}"
-        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+        val proc_result = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        # Guard: if Lean is not installed, proc_result is nil — fall back to static sorry scan
+        if proc_result is nil:
+            val content = file_read_text(file_path)
+            if content.contains("sorry"):
+                var fr = FileCheckResult.create(file_path, LeanResult.ProofError("sorry found in proof"))
+                fr = fr.with_error("sorry")
+                return fr
+            return FileCheckResult.create(file_path, LeanResult.NotFound)
+
+        val exit_code = proc_result[0]
+        val stdout = proc_result[1]
+        val stderr = proc_result[2]
+
+        # Lean not found (exit 127) — fall back to static sorry scan
+        if exit_code == 127:
+            val content = file_read_text(file_path)
+            if content.contains("sorry"):
+                var fr = FileCheckResult.create(file_path, LeanResult.ProofError("sorry found in proof"))
+                fr = fr.with_error("sorry")
+                return fr
+            return FileCheckResult.create(file_path, LeanResult.NotFound)
 
         val result = if exit_code == 0:
             LeanResult.Success
@@ -119,12 +165,15 @@ class ProofChecker:
             LeanResult.TypeError(stderr)
         elif stderr.contains("failed to prove") or stderr.contains("proof"):
             LeanResult.ProofError(stderr)
-        elif stderr.contains("not found") or exit_code == 127:
+        elif stderr.contains("not found"):
             LeanResult.NotFound
         else:
             LeanResult.ProofError(stderr)
 
-        return FileCheckResult.create(file_path, result)
+        var file_result = FileCheckResult.create(file_path, result)
+        if stderr.len() > 0:
+            file_result = file_result.with_error(stderr)
+        return file_result
 
     fn check_files(file_paths: List<text>) -> BatchCheckResult:
         result = BatchCheckResult.create()
@@ -133,9 +182,9 @@ class ProofChecker:
             result = result.add_result(file_result)
         return result
 
-    fn check_obligations(obligations: ob.ObligationSet) -> BatchCheckResult:
+    fn check_obligations(obligations: ObligationSet) -> BatchCheckResult:
         # Generate theorem file
-        content = ob.generate_theorem_stubs(obligations)
+        content = generate_theorem_stubs(obligations)
 
         # Write to temp file
         temp_file = "/tmp/proof_obligations_" + obligations.module_name + ".lean"
@@ -160,31 +209,31 @@ class ProofChecker:
         return self.check_files(files)
 
 # Status reporting
-class ProofStatus:
+class ProofStatusReport:
     module_name: text
-    obligations: ob.ObligationSet
+    obligations: ObligationSet
     check_result: Option<BatchCheckResult>
 
-    fn create(module_name: text, obligations: ob.ObligationSet) -> ProofStatus:
-        return ProofStatus(module_name, obligations, None)
+    fn create(module_name: text, obligations: ObligationSet) -> ProofStatusReport:
+        return ProofStatusReport(module_name, obligations, nil)
 
-    fn with_check_result(result: BatchCheckResult) -> ProofStatus:
-        return ProofStatus(self.module_name, self.obligations, result)
+    fn with_check_result(result: BatchCheckResult) -> ProofStatusReport:
+        return ProofStatusReport(self.module_name, self.obligations, result)
 
     fn report() -> text:
-        lines = []
-        lines.append("=== Proof Status: " + self.module_name + " ===")
-        lines.append("")
-        lines.append(self.obligations.summary())
-        lines.append("")
+        var lines: List<text> = []
+        lines = lines + ["=== Proof Status: " + self.module_name + " ==="]
+        lines = lines + [""]
+        lines = lines + [self.obligations.summary()]
+        lines = lines + [""]
 
-        if self.check_result is not None:
-            lines.append(self.check_result.summary())
+        if self.check_result is not nil:
+            lines = lines + [self.check_result.summary()]
 
-        lines.append("")
-        lines.append("Obligations by status:")
-        counts = self.obligations.count_by_status()
+        lines = lines + [""]
+        lines = lines + ["Obligations by status:"]
+        val counts = self.obligations.count_by_status()
         for (status, count) in counts.items():
-            lines.append("  " + status + ": " + str(count))
+            lines = lines + ["  " + status + ": " + count.to_text()]
 
-        return "\n".join(lines)
+        return lines.join("\n")

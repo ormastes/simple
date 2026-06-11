@@ -12,7 +12,6 @@ use verification.lean.emitter.{LeanEmitter}
 use verification.lean.types
 use verification.lean.expressions.{translate_contract_expr}
 use verification.lean.naming
-use verification.lean.functions
 use verification.lean.traits
 use verification.lean.memory_safety
 use verification.lean.verification_checker
@@ -59,7 +58,8 @@ class LeanFunction:
         LeanFunction(name, [], "Unit", "sorry", false, nil)
 
     me add_param(name: text, ty: text) -> LeanFunction:
-        self.params = self.params + [(name, ty)]
+        val p: (text, text) = (name, ty)
+        self.params.push(p)
         self
 
     me with_return_type(ty: text) -> LeanFunction:
@@ -89,12 +89,26 @@ class LeanTheorem:
         LeanTheorem(name, [], statement, nil)
 
     me add_param(name: text, ty: text) -> LeanTheorem:
-        self.params = self.params + [(name, ty)]
+        val p: (text, text) = (name, ty)
+        self.params.push(p)
         self
 
     me with_proof(proof: text) -> LeanTheorem:
         self.proof = Some(proof)
         self
+
+    # Returns proof text or "sorry" if none
+    fn proof_text() -> text:
+        match self.proof:
+            case Some(p): p
+            case _: "sorry"
+
+    fn to_lean() -> text:
+        var sig = "theorem {self.name}"
+        for (pname, ptype) in self.params:
+            sig = sig + " ({pname} : {ptype})"
+        sig = sig + " :\n  {self.statement} := by\n  {self.proof_text()}"
+        sig
 
 # Lean structure (for Simple classes)
 class LeanStructure:
@@ -106,7 +120,8 @@ class LeanStructure:
         LeanStructure(name, [], [])
 
     me add_field(name: text, ty: text) -> LeanStructure:
-        self.fields = self.fields + [(name, ty)]
+        val p: (text, text) = (name, ty)
+        self.fields.push(p)
         self
 
     me derive(trait_name: text) -> LeanStructure:
@@ -123,7 +138,8 @@ class LeanInductive:
         LeanInductive(name, [], [])
 
     me add_constructor(name: text, params: List<text>) -> LeanInductive:
-        self.constructors = self.constructors + [(name, params)]
+        val p: (text, List<text>) = (name, params)
+        self.constructors.push(p)
         self
 
     me with_deriving(trait_names: List<text>) -> LeanInductive:
@@ -439,9 +455,16 @@ class LeanCodegen:
                         lean_block_content = lean_block_content + body_line + "\n"
                 lean_block_content = lean_block_content + "\n"
 
+        # Emit import lines at the top of the output
+        var import_header = ""
+        for imp in sorted_imports:
+            import_header = import_header + "import {imp}\n"
+        if sorted_imports.len() > 0:
+            import_header = import_header + "\n"
+
         # Find "end " in raw_output and insert structured content before it
         val lines = self.raw_output.split("\n")
-        var result = ""
+        var result = import_header
         var found_end = false
         var inserted_types = false
         for line in lines:
@@ -590,6 +613,66 @@ fn generate_module(module_name: text, output_dir: text) -> LeanCodegen:
 # =============================================================================
 # Helper Functions for Regeneration Scripts
 # =============================================================================
+
+# Build an enum/inductive type for regeneration scripts.
+# Defined here (same module as LeanInductive) to avoid cross-module me-method dispatch.
+fn build_enum(name: text, variants: List<(text, List<(text, text)>)>) -> LeanInductive:
+    var ind = LeanInductive.new(name)
+    for (var_name, vparams) in variants:
+        var param_types: List<text> = []
+        for (pname, ptype) in vparams:
+            param_types = param_types + [ptype]
+        ind = ind.add_constructor(var_name, param_types)
+    ind
+
+# Build an enum with deriving clause.
+fn build_enum_with_deriving(name: text, variants: List<(text, List<(text, text)>)>, derives: List<text>) -> LeanInductive:
+    var ind = build_enum(name, variants)
+    for d in derives:
+        ind.deriving = ind.deriving + [d]
+    ind
+
+# Build a class/structure for regeneration scripts.
+# Defined here (same module as LeanStructure) to avoid cross-module me-method dispatch.
+fn build_class(name: text, fields: List<(text, text)>) -> LeanStructure:
+    var s = LeanStructure.new(name)
+    for (fname, ftype) in fields:
+        s = s.add_field(fname, ftype)
+    s
+
+# Build a class/structure with deriving clause.
+fn build_class_with_deriving(name: text, fields: List<(text, text)>, derives: List<text>) -> LeanStructure:
+    var s = build_class(name, fields)
+    for d in derives:
+        s.deriving = s.deriving + [d]
+    s
+
+# Build a function for regeneration scripts.
+# Defined here (same module as LeanFunction) to avoid cross-module me-method dispatch.
+fn build_function(name: text, params: List<(text, text)>, ret_type: text, body: text) -> LeanFunction:
+    var func = LeanFunction.new(name)
+    for (pname, ptype) in params:
+        func = func.add_param(pname, ptype)
+    func = func.with_return_type(ret_type)
+    func = func.with_body(body)
+    func
+
+# Build a theorem for regeneration scripts.
+# Defined here (same module as LeanTheorem) to avoid cross-module me-method dispatch.
+fn build_theorem(name: text, params: List<(text, text)>, statement: text, proof: text) -> LeanTheorem:
+    LeanTheorem(name, params, statement, Some(proof))
+
+# Build a theorem with implicit and explicit parameters.
+# Defined here (same module as LeanTheorem) to avoid cross-module me-method dispatch.
+fn build_theorem_implicit(name: text, impl_params: List<(text, text)>, expl_params: List<(text, text)>, statement: text, proof_lines: List<text>) -> LeanTheorem:
+    val proof = proof_lines.join("\n")
+    var thm = LeanTheorem.new(name, statement)
+    for (pname, ptype) in impl_params:
+        thm = thm.add_param(pname, ptype)
+    for (pname, ptype) in expl_params:
+        thm = thm.add_param(pname, ptype)
+    thm = thm.with_proof(proof)
+    thm
 
 # Create a simple type representation
 fn cg_make_simple_type(name: text) -> text:

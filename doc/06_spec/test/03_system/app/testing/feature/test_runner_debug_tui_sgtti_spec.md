@@ -109,7 +109,7 @@ group: gui_session target=headless tests=1 priority=2
 #### renders session debug mode as a TUI capture
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -134,8 +134,14 @@ expect(capture).to_contain("group: gui_session target=headless tests=1")
 
 #### exposes the debug TUI as SGTTI queryable visible state
 
+- assert true
+- assert true
+- assert true
+   - Expected: driver.get_elements().unwrap().len() equals `model.lines.len() + 1`
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -149,9 +155,9 @@ val driver = SgttiTestDriver.new(snapshot)
 expect(snapshot.access.mode).to_equal("tui")
 expect(snapshot.sources[0].source_kind).to_equal("in_process_tui")
 expect(snapshot.sources[0].capabilities).to_contain("query_text")
-expect(driver.check_text("root", "Test Runner Debug").unwrap())
-expect(driver.check_text("line_8", "qemu_vm").unwrap())
-expect(driver.check_text("line_9", "gui_session").unwrap())
+assert_true(driver.check_text("root", "Test Runner Debug").unwrap())
+assert_true(driver.check_text("line_8", "qemu_vm").unwrap())
+assert_true(driver.check_text("line_9", "gui_session").unwrap())
 expect(driver.get_elements().unwrap().len()).to_equal(model.lines.len() + 1)
 ```
 
@@ -159,8 +165,15 @@ expect(driver.get_elements().unwrap().len()).to_equal(model.lines.len() + 1)
 
 #### keeps session-debug parser help and schedule summary aligned
 
+- assert true
+- assert true
+- assert true
+   - Expected: options.session_kind equals `qemu_vm`
+   - Expected: help_code equals `0`
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -173,9 +186,9 @@ val summary = test_runner_debug_tui_summary(model)
 val schedule_text = test_runner_debug_tui_schedule_text(schedule)
 val (help_out, help_err, help_code) = _run_test_runner_help()
 
-expect(options.session_debug)
-expect(options.session_share)
-expect(options.session_daemon)
+assert_true(options.session_debug)
+assert_true(options.session_share)
+assert_true(options.session_daemon)
 expect(options.session_kind).to_equal("qemu_vm")
 expect(summary).to_contain("debug=true")
 expect(schedule_text).to_contain("Session Schedule:")
@@ -188,7 +201,7 @@ expect(help_out).to_contain("--session-debug")
 #### keeps SGTTI and debug TUI construction out of the normal runner entrypoint
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

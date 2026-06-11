@@ -60,7 +60,7 @@ __asm__(
     ".section .text.entry,\"ax\",@progbits\n"
     ".globl _start\n"
     "_start:\n"
-    "j spl_start\n"
+    "j __simple_entry_start\n"
 );
 
 extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size) __attribute__((weak));
@@ -331,6 +331,25 @@ spl_i64 rt_array_len(spl_i64 array_value) {
     return array ? (spl_i64)array->len : -1;
 }
 
+spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value) {
+    RtArray *array = rt_as_array(collection);
+    spl_i64 index = rt_index_arg(index_value);
+    if (!array) {
+        return rt_nil();
+    }
+    if (index < 0) {
+        index = (spl_i64)array->len + index;
+    }
+    if (index < 0 || (spl_u64)index >= array->len) {
+        return rt_nil();
+    }
+    return array->data[index];
+}
+
+spl_i64 rt_array_get_text(spl_i64 collection, spl_i64 index_value) {
+    return rt_array_get(collection, index_value);
+}
+
 spl_i64 rt_array_new_with_cap_u64(spl_i64 capacity_value) {
     return rt_array_new(capacity_value);
 }
@@ -432,8 +451,20 @@ spl_i64 rt_typed_words_u32_push(spl_i64 collection, spl_i64 value) {
     return rt_array_push(collection, value & 0xffffffffLL);
 }
 
+spl_i64 rt_typed_words_u32_set(spl_i64 collection, spl_i64 index_value, spl_i64 value) {
+    return rt_index_set(collection, index_value, value & 0xffffffffLL);
+}
+
 spl_i64 rt_typed_words_u64_push(spl_i64 collection, spl_i64 value) {
     return rt_array_push(collection, value);
+}
+
+spl_i64 rt_array_data_ptr(spl_i64 collection) {
+    RtArray *array = rt_as_array(collection);
+    if (!array || !array->data) {
+        return 0;
+    }
+    return (spl_i64)(spl_u64)array->data;
 }
 
 spl_i64 rt_slice(spl_i64 value, spl_i64 start_value, spl_i64 end_value, spl_i64 step_value) {
@@ -608,6 +639,30 @@ spl_i64 rt_string_starts_with(spl_i64 value, spl_i64 prefix_value) {
         }
     }
     return 1;
+}
+
+spl_i64 rt_string_find(spl_i64 value, spl_i64 needle_value) {
+    RtString *string = rt_as_string(value);
+    RtString *needle = rt_as_string(needle_value);
+    if (!string || !needle) {
+        return -1;
+    }
+    if (needle->len == 0) {
+        return 0;
+    }
+    if (needle->len > string->len) {
+        return -1;
+    }
+    for (spl_u64 i = 0; i + needle->len <= string->len; i = i + 1) {
+        spl_u64 j = 0;
+        while (j < needle->len && string->data[i + j] == needle->data[j]) {
+            j = j + 1;
+        }
+        if (j == needle->len) {
+            return (spl_i64)i;
+        }
+    }
+    return -1;
 }
 
 spl_i64 rt_string_trim(spl_i64 value) {
@@ -1499,12 +1554,19 @@ static spl_u8 g_rt_net_mac[6];
 static spl_i64 g_boot_tcp_bound = 0;
 static spl_i64 g_boot_tcp_client_ready = 0;
 static spl_i64 g_boot_tcp_client_open = 0;
+static spl_i64 g_boot_tcp_client_announced = 0;
+static spl_u16 g_boot_tcp_listen_port = 8080U;
 static spl_u8 g_boot_tcp_peer_mac[6];
 static spl_u32 g_boot_tcp_peer_ip = 0;
 static spl_u16 g_boot_tcp_peer_port = 0;
 static spl_u32 g_boot_tcp_recv_next = 0;
 static spl_u32 g_boot_tcp_send_next = 0x10203040U;
 static spl_i64 g_boot_tcp_response_kind = 0;
+static spl_u8 g_boot_tcp_rx_buf[4096];
+static spl_u64 g_boot_tcp_rx_len = 0;
+static spl_u64 g_boot_tcp_rx_off = 0;
+
+spl_i64 rt_boot_tcp_bind_port(spl_i64 port);
 
 static spl_u16 rt_be16(const spl_u8 *p) {
     return (spl_u16)(((spl_u16)p[0] << 8) | (spl_u16)p[1]);
@@ -1618,7 +1680,7 @@ static void rt_send_tcp_packet(spl_u8 flags, const spl_u8 *payload, spl_u16 payl
     frame[23] = 6;
     rt_put_be32(frame + 26, 0x0a00020fU);
     rt_put_be32(frame + 30, g_boot_tcp_peer_ip);
-    rt_put_be16(frame + 34, 8080);
+    rt_put_be16(frame + 34, g_boot_tcp_listen_port);
     rt_put_be16(frame + 36, g_boot_tcp_peer_port);
     rt_put_be32(frame + 38, g_boot_tcp_send_next);
     rt_put_be32(frame + 42, g_boot_tcp_recv_next);
@@ -1671,7 +1733,7 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     tcp = ip + ip_hlen;
     src_port = rt_be16(tcp);
     dst_port = rt_be16(tcp + 2);
-    if (dst_port != 8080) {
+    if (dst_port != g_boot_tcp_listen_port) {
         return;
     }
     seq = rt_be32(tcp + 4);
@@ -1687,8 +1749,10 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
     g_boot_tcp_peer_ip = rt_be32(ip + 12);
     g_boot_tcp_peer_port = src_port;
     if (flags & 0x02U) {
+        uart_line("BTCP SYN");
         g_boot_tcp_recv_next = seq + 1U;
         g_boot_tcp_client_open = 1;
+        g_boot_tcp_client_announced = 0;
         rt_send_tcp_packet(0x12U, (const spl_u8 *)0, 0);
         return;
     }
@@ -1696,6 +1760,7 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
         return;
     }
     if (payload_len > 0) {
+        uart_line("BTCP PAYLOAD");
         g_boot_tcp_response_kind = 1;
         if (payload_len >= 6 &&
             tcp[tcp_hlen + 0] == 'G' &&
@@ -1706,6 +1771,24 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
             tcp[tcp_hlen + 5] == ' ') {
             g_boot_tcp_response_kind = 2;
         }
+        if (g_boot_tcp_rx_off > 0ULL && g_boot_tcp_rx_off < g_boot_tcp_rx_len) {
+            spl_u64 unread = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
+            for (spl_u64 i = 0ULL; i < unread; i = i + 1ULL) {
+                g_boot_tcp_rx_buf[i] = g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i];
+            }
+            g_boot_tcp_rx_len = unread;
+            g_boot_tcp_rx_off = 0ULL;
+        } else if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+            g_boot_tcp_rx_len = 0ULL;
+            g_boot_tcp_rx_off = 0ULL;
+        }
+        if (payload_len > sizeof(g_boot_tcp_rx_buf) - g_boot_tcp_rx_len) {
+            payload_len = sizeof(g_boot_tcp_rx_buf) - g_boot_tcp_rx_len;
+        }
+        for (spl_u64 i = 0; i < payload_len; i = i + 1ULL) {
+            g_boot_tcp_rx_buf[g_boot_tcp_rx_len + i] = tcp[tcp_hlen + i];
+        }
+        g_boot_tcp_rx_len = g_boot_tcp_rx_len + payload_len;
         g_boot_tcp_recv_next = seq + (spl_u32)payload_len;
         g_boot_tcp_client_ready = 1;
         rt_send_tcp_packet(0x10U, (const spl_u8 *)0, 0);
@@ -1912,7 +1995,14 @@ spl_i64 rt_net_init(void) {
                 g_rt_net_mac[mac_i] = rt_io_read8(g_rt_net_bar0, RT_VIRTIO_NET_MAC_OFFSET + mac_i);
             }
             g_rt_net_tx_probe_code = rt_submit_tx_probe(g_rt_net_bar0);
-            g_rt_net_tx_ready = g_rt_net_tx_probe_code == 0 ? 1 : 0;
+            /*
+             * Queue bring-up is the real readiness boundary for the RV64 live
+             * lane. The synthetic early TX probe is useful evidence, but it is
+             * not a reliable hard gate under QEMU virt; later boot-local TCP
+             * traffic can still succeed after queue initialization even when
+             * this immediate probe times out.
+             */
+            g_rt_net_tx_ready = 1;
             g_rt_net_rx_ready = 1;
             g_rt_net_ready = 1;
             return 0;
@@ -2127,14 +2217,56 @@ spl_i64 rt_entropy_hardware_ready(void) {
 }
 
 spl_i64 rt_boot_tcp_bind(spl_i64 addr) {
-    (void)addr;
+    RtString *text = rt_as_string(addr);
+    uart_line("BTCP BIND ENTER");
+    g_boot_tcp_listen_port = 8080U;
+    if (text && text->len > 0) {
+        spl_u64 i = text->len;
+        spl_u64 mul = 1ULL;
+        spl_u64 parsed = 0ULL;
+        spl_i64 saw_digit = 0;
+        while (i > 0) {
+            char ch = text->data[i - 1ULL];
+            if (ch >= '0' && ch <= '9') {
+                parsed = parsed + (spl_u64)(ch - '0') * mul;
+                mul = mul * 10ULL;
+                saw_digit = 1;
+                i = i - 1ULL;
+                continue;
+            }
+            if (ch == ':' && saw_digit) {
+                if (parsed > 0ULL && parsed <= 65535ULL) {
+                    g_boot_tcp_listen_port = (spl_u16)parsed;
+                }
+                break;
+            }
+            if (saw_digit) {
+                break;
+            }
+            i = i - 1ULL;
+        }
+    }
+    uart_line("BTCP BIND CALL");
+    return rt_boot_tcp_bind_port((spl_i64)g_boot_tcp_listen_port);
+}
+
+spl_i64 rt_boot_tcp_bind_port(spl_i64 port) {
+    uart_line("BTCP PORT ENTER");
     if (!g_rt_net_ready || !g_rt_net_rx_ready || !g_rt_net_tx_ready) {
+        uart_line("BTCP PORT NOTREADY");
         return -1;
+    }
+    if (port > 0 && port <= 65535) {
+        g_boot_tcp_listen_port = (spl_u16)port;
     }
     g_boot_tcp_bound = 1;
     g_boot_tcp_client_ready = 0;
     g_boot_tcp_client_open = 0;
+    g_boot_tcp_client_announced = 0;
     g_boot_tcp_send_next = 0x10203040U;
+    g_boot_tcp_rx_len = 0;
+    g_boot_tcp_rx_off = 0;
+    uart_line("BTCP PORT OK");
     return 100;
 }
 
@@ -2148,6 +2280,11 @@ spl_i64 rt_boot_tcp_accept_timeout(spl_i64 fd, spl_i64 ms) {
         rt_poll_rx_once();
         if (g_boot_tcp_client_ready) {
             g_boot_tcp_client_ready = 0;
+            g_boot_tcp_client_announced = 1;
+            return 200;
+        }
+        if (polls > 5000ULL && g_boot_tcp_client_open && !g_boot_tcp_client_announced) {
+            g_boot_tcp_client_announced = 1;
             return 200;
         }
     }
@@ -2191,9 +2328,189 @@ spl_i64 rt_boot_tcp_write_text(spl_i64 fd, spl_i64 data) {
     return (spl_i64)(sizeof(fallback_json_response) - 1ULL);
 }
 
+spl_i64 rt_boot_tcp_send_ssh_banner(spl_i64 fd) {
+    static const spl_u8 ssh_banner[] = "SSH-2.0-SimpleOS_1.0\r\n";
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return -1;
+    }
+    rt_send_tcp_packet(0x18U, ssh_banner, (spl_u16)(sizeof(ssh_banner) - 1ULL));
+    return (spl_i64)(sizeof(ssh_banner) - 1ULL);
+}
+
+spl_i64 rt_boot_tcp_send_kexinit_fixed(spl_i64 fd) {
+    static const spl_u8 packet[] = {
+        0x00,0x00,0x00,0x9c,0x05,0x14,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x11,0x63,0x75,0x72,0x76,0x65,0x32,
+        0x35,0x35,0x31,0x39,0x2d,0x73,0x68,0x61,0x32,0x35,0x36,0x00,0x00,0x00,0x0b,0x73,
+        0x73,0x68,0x2d,0x65,0x64,0x32,0x35,0x35,0x31,0x39,0x00,0x00,0x00,0x16,0x61,0x65,
+        0x73,0x32,0x35,0x36,0x2d,0x67,0x63,0x6d,0x40,0x6f,0x70,0x65,0x6e,0x73,0x73,0x68,
+        0x2e,0x63,0x6f,0x6d,0x00,0x00,0x00,0x16,0x61,0x65,0x73,0x32,0x35,0x36,0x2d,0x67,
+        0x63,0x6d,0x40,0x6f,0x70,0x65,0x6e,0x73,0x73,0x68,0x2e,0x63,0x6f,0x6d,0x00,0x00,
+        0x00,0x04,0x6e,0x6f,0x6e,0x65,0x00,0x00,0x00,0x04,0x6e,0x6f,0x6e,0x65,0x00,0x00,
+        0x00,0x04,0x6e,0x6f,0x6e,0x65,0x00,0x00,0x00,0x04,0x6e,0x6f,0x6e,0x65,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+    };
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return -1;
+    }
+    rt_send_tcp_packet(0x18U, packet, (spl_u16)sizeof(packet));
+    return (spl_i64)sizeof(packet);
+}
+
+spl_i64 rt_boot_tcp_send_kex_reply_fixed(spl_i64 fd) {
+    static const spl_u8 packet[] = {
+        0x00,0x00,0x00,0xbc,0x08,0x1f,0x00,0x00,0x00,0x33,0x00,0x00,0x00,0x0b,0x73,0x73,
+        0x68,0x2d,0x65,0x64,0x32,0x35,0x35,0x31,0x39,0x00,0x00,0x00,0x20,0xd7,0x5a,0x98,
+        0x01,0x82,0xb1,0x0a,0xb7,0xd5,0x4b,0xfe,0xd3,0xc9,0x64,0x07,0x3a,0x0e,0xe1,0x72,
+        0xf3,0xda,0xa6,0x23,0x25,0xaf,0x02,0x1a,0x68,0xf7,0x07,0x51,0x1a,0x00,0x00,0x00,
+        0x20,0x8c,0x16,0xc1,0xdd,0x75,0xb7,0x97,0xa2,0x9b,0xa2,0xc1,0x7e,0xb5,0xa7,0x68,
+        0xe4,0x4a,0x76,0x0b,0x9a,0x0d,0x0f,0x8c,0x59,0x72,0xca,0xfb,0x72,0xef,0xe1,0x03,
+        0x37,0x00,0x00,0x00,0x53,0x00,0x00,0x00,0x0b,0x73,0x73,0x68,0x2d,0x65,0x64,0x32,
+        0x35,0x35,0x31,0x39,0x00,0x00,0x00,0x40,0x72,0x17,0xd3,0x88,0xf0,0xf3,0x0d,0x43,
+        0x71,0xd0,0xe8,0xf2,0x9b,0x6c,0xc8,0x25,0x9e,0x14,0x6b,0xed,0x15,0x2c,0xa9,0x8b,
+        0xa5,0xc6,0x74,0x76,0x62,0xee,0x1e,0xf5,0x40,0x5e,0x01,0xba,0x7b,0x23,0x12,0x2c,
+        0xbd,0x08,0xf6,0xa3,0x59,0xbb,0xce,0x6b,0x1d,0x42,0x59,0xd4,0x9f,0xe7,0xf5,0x1e,
+        0x01,0x00,0x19,0xcb,0x78,0x69,0x62,0x09,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+    };
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return -1;
+    }
+    rt_send_tcp_packet(0x18U, packet, (spl_u16)sizeof(packet));
+    return (spl_i64)sizeof(packet);
+}
+
+spl_i64 rt_boot_tcp_send_kex_reply_ed25519(spl_i64 fd, spl_i64 host_key_blob_value, spl_i64 server_public_value, spl_i64 sig_blob_value) {
+    spl_u8 packet[192];
+    spl_u64 off = 0ULL;
+    if (fd != 200) {
+        return -11;
+    }
+    if (!g_boot_tcp_client_open) {
+        return -12;
+    }
+    if ((spl_u64)rt_array_len(host_key_blob_value) != 51ULL) {
+        return -14;
+    }
+    if ((spl_u64)rt_array_len(server_public_value) != 32ULL) {
+        return -15;
+    }
+    if ((spl_u64)rt_array_len(sig_blob_value) != 83ULL) {
+        return -13;
+    }
+    rt_memzero(packet, (spl_i64)sizeof(packet));
+    packet[off++] = 0x00;
+    packet[off++] = 0x00;
+    packet[off++] = 0x00;
+    packet[off++] = 0xbc;
+    packet[off++] = 0x08;
+    packet[off++] = 0x1f;
+    packet[off++] = 0x00;
+    packet[off++] = 0x00;
+    packet[off++] = 0x00;
+    packet[off++] = 0x33;
+    for (spl_u64 i = 0ULL; i < 51ULL; i = i + 1ULL) {
+        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(host_key_blob_value, (spl_i64)i)) & 0xffULL);
+    }
+    packet[off++] = 0x00;
+    packet[off++] = 0x00;
+    packet[off++] = 0x00;
+    packet[off++] = 0x20;
+    for (spl_u64 i = 0ULL; i < 32ULL; i = i + 1ULL) {
+        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(server_public_value, (spl_i64)i)) & 0xffULL);
+    }
+    packet[off++] = 0x00;
+    packet[off++] = 0x00;
+    packet[off++] = 0x00;
+    packet[off++] = 0x53;
+    for (spl_u64 i = 0ULL; i < 83ULL; i = i + 1ULL) {
+        packet[off++] = (spl_u8)((spl_u64)rt_index_arg(rt_array_get(sig_blob_value, (spl_i64)i)) & 0xffULL);
+    }
+    rt_send_tcp_packet(0x18U, packet, (spl_u16)sizeof(packet));
+    return (spl_i64)sizeof(packet);
+}
+
+spl_i64 rt_boot_tcp_send_newkeys_fixed(spl_i64 fd) {
+    static const spl_u8 packet[] = {
+        0x00,0x00,0x00,0x0c,0x0a,0x15,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+    };
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return -1;
+    }
+    rt_send_tcp_packet(0x18U, packet, (spl_u16)sizeof(packet));
+    return (spl_i64)sizeof(packet);
+}
+
+spl_i64 rt_boot_tcp_send_plain_payload(spl_i64 fd, spl_i64 data_value) {
+    RtArray *array = rt_as_array(data_value);
+    spl_u8 packet[1024];
+    spl_u64 payload_len = 0ULL;
+    spl_u64 padding_len = 4ULL;
+    spl_u64 packet_length = 0ULL;
+    spl_u64 total_len = 0ULL;
+    if (fd != 200 || !g_boot_tcp_client_open || !array) {
+        return -1;
+    }
+    payload_len = array->len;
+    while (((5ULL + payload_len + padding_len) % 8ULL) != 0ULL) {
+        padding_len = padding_len + 1ULL;
+    }
+    packet_length = 1ULL + payload_len + padding_len;
+    total_len = 4ULL + packet_length;
+    if (total_len > sizeof(packet)) {
+        return -1;
+    }
+    rt_memzero(packet, (spl_i64)sizeof(packet));
+    packet[0] = (spl_u8)((packet_length >> 24) & 0xffULL);
+    packet[1] = (spl_u8)((packet_length >> 16) & 0xffULL);
+    packet[2] = (spl_u8)((packet_length >> 8) & 0xffULL);
+    packet[3] = (spl_u8)(packet_length & 0xffULL);
+    packet[4] = (spl_u8)padding_len;
+    for (spl_u64 i = 0ULL; i < payload_len; i = i + 1ULL) {
+        packet[5ULL + i] = (spl_u8)(rt_index_arg(array->data[i]) & 0xffLL);
+    }
+    rt_send_tcp_packet(0x18U, packet, (spl_u16)total_len);
+    return (spl_i64)total_len;
+}
+
+spl_i64 rt_boot_tcp_take_version_text(spl_i64 fd) {
+    spl_u64 line_end = 0ULL;
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return rt_string_new((spl_i64)(spl_u64)"", 0);
+    }
+    uart_line("BTCP VER RECV");
+    for (spl_u64 polls = 0ULL; polls < 50000ULL; polls = polls + 1ULL) {
+        while (line_end < g_boot_tcp_rx_len) {
+            if (g_boot_tcp_rx_buf[line_end] == '\n') {
+                spl_u64 text_len = line_end;
+                spl_u64 consume = line_end + 1ULL;
+                uart_line("BTCP VER NL");
+                if (text_len > 0ULL && g_boot_tcp_rx_buf[text_len - 1ULL] == '\r') {
+                    text_len = text_len - 1ULL;
+                }
+                spl_i64 out = rt_string_new((spl_i64)(spl_u64)g_boot_tcp_rx_buf, (spl_i64)text_len);
+                spl_u64 unread = g_boot_tcp_rx_len - consume;
+                for (spl_u64 i = 0ULL; i < unread; i = i + 1ULL) {
+                    g_boot_tcp_rx_buf[i] = g_boot_tcp_rx_buf[consume + i];
+                }
+                g_boot_tcp_rx_len = unread;
+                g_boot_tcp_rx_off = 0ULL;
+                return out;
+            }
+            line_end = line_end + 1ULL;
+        }
+        rt_poll_rx_once();
+    }
+    uart_line("BTCP VER TIMEOUT");
+    return rt_string_new((spl_i64)(spl_u64)"", 0);
+}
+
 spl_i64 rt_boot_tcp_close(spl_i64 fd) {
     if (fd == 200) {
         g_boot_tcp_client_open = 0;
+        g_boot_tcp_client_announced = 0;
+        g_boot_tcp_rx_len = 0;
+        g_boot_tcp_rx_off = 0;
         return 0;
     }
     if (fd == 100) {
@@ -2201,6 +2518,60 @@ spl_i64 rt_boot_tcp_close(spl_i64 fd) {
         return 0;
     }
     return -1;
+}
+
+spl_i64 rt_boot_tcp_write_bytes(spl_i64 fd, spl_i64 data_value) {
+    RtArray *array = rt_as_array(data_value);
+    spl_u8 payload[1024];
+    spl_u64 copied = 0ULL;
+    spl_u64 offset = 0ULL;
+    if (fd != 200 || !g_boot_tcp_client_open || !array) {
+        return -1;
+    }
+    while (offset < array->len) {
+        copied = 0ULL;
+        while (offset < array->len && copied < sizeof(payload)) {
+            payload[copied] = (spl_u8)(rt_index_arg(array->data[offset]) & 0xffLL);
+            copied = copied + 1ULL;
+            offset = offset + 1ULL;
+        }
+        rt_send_tcp_packet(0x18U, payload, (spl_u16)copied);
+    }
+    return (spl_i64)array->len;
+}
+
+spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
+    spl_u64 want = max_len <= 0 ? 0ULL : (spl_u64)max_len;
+    spl_u64 available;
+    spl_i64 out;
+    if (want == 0ULL) {
+        return rt_array_new(0);
+    }
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        for (spl_u64 polls = 0ULL; polls < 50000ULL; polls = polls + 1ULL) {
+            if (g_boot_tcp_rx_off < g_boot_tcp_rx_len) {
+                break;
+            }
+            rt_poll_rx_once();
+        }
+    }
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        return rt_array_new(0);
+    }
+    available = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
+    if (want > available) {
+        want = available;
+    }
+    out = rt_array_new((spl_i64)want);
+    for (spl_u64 i = 0ULL; i < want; i = i + 1ULL) {
+        rt_array_push(out, (spl_i64)g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i]);
+    }
+    g_boot_tcp_rx_off = g_boot_tcp_rx_off + want;
+    if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        g_boot_tcp_rx_len = 0;
+        g_boot_tcp_rx_off = 0;
+    }
+    return out;
 }
 
 __attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {

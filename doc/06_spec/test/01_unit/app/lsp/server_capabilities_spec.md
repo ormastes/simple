@@ -42,6 +42,9 @@ server_capabilities_spec
 
 #### creates with all capabilities disabled
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -51,12 +54,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: ServerCapabilities.new() defaults
 val all_disabled = true
-expect(all_disabled)
+assert_true(all_disabled)
 ```
 
 </details>
 
 #### sets completion_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -67,12 +73,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: completion_provider: false
 val completion_false = false
-expect(not completion_false)
+assert_false(completion_false)
 ```
 
 </details>
 
 #### sets hover_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -83,12 +92,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: hover_provider: false
 val hover_false = false
-expect(not hover_false)
+assert_false(hover_false)
 ```
 
 </details>
 
 #### sets definition_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -99,12 +111,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: definition_provider: false
 val definition_false = false
-expect(not definition_false)
+assert_false(definition_false)
 ```
 
 </details>
 
 #### sets references_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -115,12 +130,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: references_provider: false
 val references_false = false
-expect(not references_false)
+assert_false(references_false)
 ```
 
 </details>
 
 #### sets document_symbol_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -131,12 +149,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: document_symbol_provider: false
 val symbol_false = false
-expect(not symbol_false)
+assert_false(symbol_false)
 ```
 
 </details>
 
 #### sets workspace_symbol_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -147,12 +168,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: workspace_symbol_provider: false
 val workspace_false = false
-expect(not workspace_false)
+assert_false(workspace_false)
 ```
 
 </details>
 
 #### sets code_action_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -163,12 +187,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: code_action_provider: false
 val action_false = false
-expect(not action_false)
+assert_false(action_false)
 ```
 
 </details>
 
 #### sets document_formatting_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -179,12 +206,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: document_formatting_provider: false
 val formatting_false = false
-expect(not formatting_false)
+assert_false(formatting_false)
 ```
 
 </details>
 
 #### sets rename_provider to false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -195,7 +225,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: rename_provider: false
 val rename_false = false
-expect(not rename_false)
+assert_false(rename_false)
 ```
 
 </details>
@@ -203,6 +233,9 @@ expect(not rename_false)
 ### Enable Individual Capabilities
 
 #### enables completion
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -213,12 +246,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: enable_completion sets to true
 val enabled = true
-expect(enabled)
+assert_true(enabled)
 ```
 
 </details>
 
 #### enables hover
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -229,12 +265,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: enable_hover sets to true
 val enabled = true
-expect(enabled)
+assert_true(enabled)
 ```
 
 </details>
 
 #### enables definition
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -245,12 +284,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: enable_definition sets to true
 val enabled = true
-expect(enabled)
+assert_true(enabled)
 ```
 
 </details>
 
 #### enables references
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -261,12 +303,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: enable_references sets to true
 val enabled = true
-expect(enabled)
+assert_true(enabled)
 ```
 
 </details>
 
 #### enables symbols
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -277,12 +322,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: enable_symbols sets to true
 val enabled = true
-expect(enabled)
+assert_true(enabled)
 ```
 
 </details>
 
 #### enables formatting
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -293,7 +341,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: enable_formatting sets to true
 val enabled = true
-expect(enabled)
+assert_true(enabled)
 ```
 
 </details>
@@ -301,6 +349,9 @@ expect(enabled)
 ### Enable All Capabilities
 
 #### enables all capabilities at once
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -311,12 +362,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: enable_all method
 val all_enabled = true
-expect(all_enabled)
+assert_true(all_enabled)
 ```
 
 </details>
 
 #### sets all 9 capability flags to true
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -327,7 +381,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: all 9 assignments in enable_all
 val count = 9
-expect(count == 9)
+assert_true(count == 9)
 ```
 
 </details>
@@ -335,6 +389,9 @@ expect(count == 9)
 ### JSON Serialization
 
 #### converts capabilities to JSON
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -345,12 +402,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: to_json() method
 val json_created = true
-expect(json_created)
+assert_true(json_created)
 ```
 
 </details>
 
 #### creates JSON builder for serialization
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -361,7 +421,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: var builder = JsonBuilder.new()
 val builder_created = true
-expect(builder_created)
+assert_true(builder_created)
 ```
 
 </details>
@@ -369,6 +429,9 @@ expect(builder_created)
 ### Completion Provider JSON
 
 #### checks if completion_provider is true
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -379,12 +442,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: if self.completion_provider (true case)
 val completion_true = true
-expect(completion_true)
+assert_true(completion_true)
 ```
 
 </details>
 
 #### skips completion when false
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -395,12 +461,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: if self.completion_provider (false case)
 val completion_false = false
-expect(not completion_false)
+assert_false(completion_false)
 ```
 
 </details>
 
 #### creates completion options dict
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -411,12 +480,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: var completion_opts: Dict<text, JsonValue> = {}
 val opts_created = true
-expect(opts_created)
+assert_true(opts_created)
 ```
 
 </details>
 
 #### sets resolveProvider in completion options
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -427,12 +499,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: completion_opts["resolveProvider"] = JsonValue.bool(true)
 val resolve_set = true
-expect(resolve_set)
+assert_true(resolve_set)
 ```
 
 </details>
 
 #### adds completion object to builder
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -443,7 +518,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_object("completionProvider", completion_opts)
 val object_added = true
-expect(object_added)
+assert_true(object_added)
 ```
 
 </details>
@@ -451,6 +526,9 @@ expect(object_added)
 ### Other Provider JSON Fields
 
 #### sets hoverProvider
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -461,12 +539,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("hoverProvider", self.hover_provider)
 val hover_set = true
-expect(hover_set)
+assert_true(hover_set)
 ```
 
 </details>
 
 #### sets definitionProvider
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -477,12 +558,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("definitionProvider", self.definition_provider)
 val definition_set = true
-expect(definition_set)
+assert_true(definition_set)
 ```
 
 </details>
 
 #### sets referencesProvider
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -493,12 +577,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("referencesProvider", self.references_provider)
 val references_set = true
-expect(references_set)
+assert_true(references_set)
 ```
 
 </details>
 
 #### sets documentSymbolProvider
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -509,12 +596,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("documentSymbolProvider", self.document_symbol_provider)
 val symbol_set = true
-expect(symbol_set)
+assert_true(symbol_set)
 ```
 
 </details>
 
 #### sets workspaceSymbolProvider
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -525,12 +615,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("workspaceSymbolProvider", self.workspace_symbol_provider)
 val workspace_set = true
-expect(workspace_set)
+assert_true(workspace_set)
 ```
 
 </details>
 
 #### sets codeActionProvider
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -541,12 +634,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("codeActionProvider", self.code_action_provider)
 val action_set = true
-expect(action_set)
+assert_true(action_set)
 ```
 
 </details>
 
 #### sets documentFormattingProvider
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -557,12 +653,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("documentFormattingProvider", self.document_formatting_provider)
 val formatting_set = true
-expect(formatting_set)
+assert_true(formatting_set)
 ```
 
 </details>
 
 #### sets renameProvider
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -573,7 +672,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_bool("renameProvider", self.rename_provider)
 val rename_set = true
-expect(rename_set)
+assert_true(rename_set)
 ```
 
 </details>
@@ -581,6 +680,9 @@ expect(rename_set)
 ### Text Document Sync JSON
 
 #### creates sync options dict
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -591,12 +693,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: var sync_opts: Dict<text, JsonValue> = {}
 val sync_opts_created = true
-expect(sync_opts_created)
+assert_true(sync_opts_created)
 ```
 
 </details>
 
 #### sets openClose in sync options
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -607,12 +712,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: sync_opts["openClose"] = JsonValue.bool(true)
 val open_close_set = true
-expect(open_close_set)
+assert_true(open_close_set)
 ```
 
 </details>
 
 #### sets change to incremental (2)
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -623,12 +731,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: sync_opts["change"] = JsonValue.Integer(2)
 val change_set = 2
-expect(change_set == 2)
+assert_true(change_set == 2)
 ```
 
 </details>
 
 #### adds textDocumentSync object
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -639,12 +750,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: builder.set_object("textDocumentSync", sync_opts)
 val sync_added = true
-expect(sync_added)
+assert_true(sync_added)
 ```
 
 </details>
 
 #### stringifies final JSON
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -655,7 +769,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: stringify(builder.build())
 val stringified = true
-expect(stringified)
+assert_true(stringified)
 ```
 
 </details>

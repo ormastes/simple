@@ -56,6 +56,13 @@ expect true
 
 #### maps executable memory and runs a tiny function
 
+- assert true
+   - Expected: written equals `code.len() as i64`
+- assert true
+   - Expected: result equals `42`
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -67,19 +74,19 @@ Reproduction: this block contains the complete executable scenario source.
 val code: [u8] = [184, 42, 0, 0, 0, 195]
 
 val addr = native_alloc_exec_memory(code.len() as i64)
-expect(addr > 0)
+assert_true(addr > 0)
 
 val written = native_write_exec_memory(addr, code, 0)
 expect(written).to_equal(code.len() as i64)
 
 val made_exec = native_make_executable(addr, code.len() as i64)
-expect(made_exec)
+assert_true(made_exec)
 
 val result = native_call_function_0(addr)
 expect(result).to_equal(42)
 
 val freed = native_free_exec_memory(addr, code.len() as i64)
-expect(freed)
+assert_true(freed)
 ```
 
 </details>

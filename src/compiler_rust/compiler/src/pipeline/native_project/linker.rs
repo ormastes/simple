@@ -1231,6 +1231,9 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                                 && stem != "baremetal_stubs"
                                 && stem != "freestanding_runtime"
                                 && stem != "curve25519_ring_helper"
+                                && stem != "ed25519_scalar_helper"
+                                && stem != "ed25519_sha512_helper"
+                                && stem != "tls13_sha256_helper"
                                 && stem != "ed25519_verify_helper"
                             {
                                 continue;
@@ -1246,13 +1249,16 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                                     .arg(&out)
                                     .arg(&path)
                                     .arg(format!("--target={}", triple));
-                                if triple.contains("x86_64") {
+                                if stem == "curve25519_ring_helper"
+                                    || stem == "ed25519_scalar_helper"
+                                    || stem == "ed25519_verify_helper"
+                                    || triple.contains("x86_64")
+                                {
                                     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                                     let ring_include = cwd.join("src/compiler_rust/vendor/ring/include");
                                     let ring_root = cwd.join("src/compiler_rust/vendor/ring");
                                     let ring_pregenerated = cwd.join("src/compiler_rust/vendor/ring/pregenerated");
                                     c_cmd
-                                        .arg("-mno-red-zone")
                                         .arg("-DOPENSSL_NO_ASM")
                                         .arg("-DRING_CORE_NOSTDLIBINC")
                                         .arg("-I")
@@ -1261,6 +1267,9 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                                         .arg(ring_root)
                                         .arg("-I")
                                         .arg(ring_pregenerated);
+                                    if triple.contains("x86_64") {
+                                        c_cmd.arg("-mno-red-zone");
+                                    }
                                 }
                                 if !march.is_empty() {
                                     c_cmd.args([march, mabi, "-mcmodel=medany"]);
@@ -1466,57 +1475,112 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
             }
         }
 
-        // Scan for mangled _start -> create defsym alias.
+        let has_explicit_start = object_paths.iter().any(|obj| {
+            Self::cached_global_symbols(&mut symbol_cache, obj)
+                .map(|symbols| symbols.iter().any(|sym| sym == "_start" || sym.ends_with("___start")))
+                .unwrap_or(false)
+        });
+        if has_explicit_start {
+            let entry_flag = if use_direct_lld.is_some() {
+                "--entry=_start"
+            } else {
+                "-Wl,--entry=_start"
+            };
+            cmd.arg(entry_flag);
+        }
+
+        // Scan for mangled entry symbols -> create defsym aliases.
         {
             let has_boot = !boot_objects.is_empty();
-            let mut best_start: Option<String> = None;
-            let mut fallback_start: Option<String> = None;
+            let mut best_raw_start: Option<String> = None;
+            let mut fallback_raw_start: Option<String> = None;
+            let mut best_spl_start: Option<String> = None;
+            let mut fallback_spl_start: Option<String> = None;
 
             if let Some(ref entry) = self.entry_file {
                 let entry_str = entry.to_string_lossy();
                 let stem = entry_str.trim_start_matches('/').trim_end_matches(".spl");
                 let mangled_stem = stem.replace('/', "__");
-                let candidates = [
-                    format!("{}___start", mangled_stem),
-                    format!("{}__spl_start", mangled_stem),
-                ];
+                let raw_start_candidate = format!("{}___start", mangled_stem);
+                let spl_start_candidate = format!("{}__spl_start", mangled_stem);
                 'entry_search: for obj in object_paths {
                     for sym in Self::cached_global_symbols(&mut symbol_cache, obj)? {
-                        if candidates.iter().any(|candidate| candidate == sym) {
-                            best_start = Some(sym.to_string());
+                        if *sym == raw_start_candidate {
+                            best_raw_start = Some(sym.to_string());
+                        } else if *sym == spl_start_candidate {
+                            best_spl_start = Some(sym.to_string());
+                        }
+                        if best_raw_start.is_some() && best_spl_start.is_some() {
                             break 'entry_search;
                         }
                     }
                 }
             }
 
-            if best_start.is_none() {
+            if best_raw_start.is_none() || best_spl_start.is_none() {
                 for obj in object_paths {
                     for sym in Self::cached_global_symbols(&mut symbol_cache, obj)? {
-                        if (sym.ends_with("___start") || sym.ends_with("__spl_start"))
-                            && sym != "_start"
-                            && sym != "spl_start"
-                        {
+                        if sym.ends_with("___start") && sym != "_start" && sym != "spl_start" {
                             let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
                             if neg_match {
                                 continue;
                             }
                             let pos_match = arch_filters.iter().any(|f| sym.contains(f));
                             if pos_match {
-                                best_start = Some(sym.to_string());
-                            } else if fallback_start.is_none() {
-                                fallback_start = Some(sym.to_string());
+                                if best_raw_start.is_none() {
+                                    best_raw_start = Some(sym.to_string());
+                                }
+                            } else if fallback_raw_start.is_none() {
+                                fallback_raw_start = Some(sym.to_string());
+                            }
+                        } else if sym.ends_with("__spl_start") && sym != "_start" && sym != "spl_start" {
+                            let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
+                            if neg_match {
+                                continue;
+                            }
+                            let pos_match = arch_filters.iter().any(|f| sym.contains(f));
+                            if pos_match {
+                                if best_spl_start.is_none() {
+                                    best_spl_start = Some(sym.to_string());
+                                }
+                            } else if fallback_spl_start.is_none() {
+                                fallback_spl_start = Some(sym.to_string());
                             }
                         }
                     }
                 }
             }
-            if let Some(sym) = best_start.or(fallback_start) {
-                let alias = if has_boot { "spl_start" } else { "_start" };
+            let raw_start_alias = best_raw_start.clone().or(fallback_raw_start.clone());
+            let spl_start_alias = best_spl_start.clone().or(fallback_spl_start.clone());
+
+            if let Some(sym) = raw_start_alias.clone() {
                 if use_direct_lld.is_some() {
-                    cmd.arg(format!("--defsym={}={}", alias, sym));
+                    cmd.arg(format!("--defsym=_start={}", sym));
                 } else {
-                    cmd.arg(format!("-Wl,--defsym={}={}", alias, sym));
+                    cmd.arg(format!("-Wl,--defsym=_start={}", sym));
+                }
+            }
+            if let Some(sym) = raw_start_alias.clone().or(spl_start_alias.clone()) {
+                if use_direct_lld.is_some() {
+                    cmd.arg(format!("--defsym=__simple_entry_start={}", sym));
+                } else {
+                    cmd.arg(format!("-Wl,--defsym=__simple_entry_start={}", sym));
+                }
+            }
+            if let Some(sym) = spl_start_alias {
+                if use_direct_lld.is_some() {
+                    cmd.arg(format!("--defsym=spl_start={}", sym));
+                } else {
+                    cmd.arg(format!("-Wl,--defsym=spl_start={}", sym));
+                }
+            } else if !has_boot {
+                // No boot support object depends on raw spl_start in this case.
+                // Leave the alias unset when only _start is needed.
+            } else if let Some(sym) = raw_start_alias {
+                if use_direct_lld.is_some() {
+                    cmd.arg(format!("--defsym=spl_start={}", sym));
+                } else {
+                    cmd.arg(format!("-Wl,--defsym=spl_start={}", sym));
                 }
             }
         }

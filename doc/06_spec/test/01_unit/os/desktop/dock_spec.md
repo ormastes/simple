@@ -40,6 +40,9 @@ dock_spec
 
 #### creates with screen dimensions
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -50,7 +53,7 @@ Reproduction: this block contains the complete executable scenario source.
 val dock = _make_test_dock()
 expect(dock.screen_width).to_equal(1024)
 expect(dock.screen_height).to_equal(768)
-expect(dock.visible)
+assert_true(dock.visible)
 ```
 
 </details>
@@ -72,6 +75,9 @@ expect(dock.selected_index).to_equal(0)
 
 #### has auto_hide enabled
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -80,7 +86,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val dock = _make_test_dock()
-expect(dock.auto_hide)
+assert_true(dock.auto_hide)
 ```
 
 </details>
@@ -120,6 +126,10 @@ expect(dock.items[0].icon_char).to_equal(">")
 
 #### all items are pinned
 
+- assert true
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -128,14 +138,18 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val dock = _make_test_dock()
-expect(dock.items[0].is_pinned)
-expect(dock.items[4].is_pinned)
+assert_true(dock.items[0].is_pinned)
+assert_true(dock.items[4].is_pinned)
 ```
 
 </details>
 
 #### no items are running
 
+- assert false
+   - Expected: dock.items[0].window_id equals `-1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -144,7 +158,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val dock = _make_test_dock()
-expect(not dock.items[0].is_running)
+assert_false(dock.items[0].is_running)
 expect(dock.items[0].window_id).to_equal(-1)
 ```
 
@@ -154,8 +168,8 @@ expect(dock.items[0].window_id).to_equal(-1)
 
 #### adds a pinned item
 
-1. var dock =  make test dock
-2. dock add pinned
+- var dock =  make test dock
+- dock add pinned
    - Expected: dock.items.len() equals `before + 1`
 
 
@@ -176,8 +190,10 @@ expect(dock.items.len()).to_equal(before + 1)
 
 #### new pinned item is not running
 
-1. var dock =  make test dock
-2. dock add pinned
+- var dock =  make test dock
+- dock add pinned
+- assert true
+- assert false
 
 
 <details>
@@ -190,8 +206,8 @@ Reproduction: this block contains the complete executable scenario source.
 var dock = _make_test_dock()
 dock.add_pinned("Browser", "B")
 val last = dock.items[dock.items.len() - 1]
-expect(last.is_pinned)
-expect(not last.is_running)
+assert_true(last.is_pinned)
+assert_false(last.is_running)
 ```
 
 </details>
@@ -200,8 +216,9 @@ expect(not last.is_running)
 
 #### marks existing pinned item as running
 
-1. var dock =  make test dock
-2. dock add running
+- var dock =  make test dock
+- dock add running
+- assert true
    - Expected: dock.items[0].window_id equals `42`
 
 
@@ -214,7 +231,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var dock = _make_test_dock()
 dock.add_running("Terminal", ">", 42)
-expect(dock.items[0].is_running)
+assert_true(dock.items[0].is_running)
 expect(dock.items[0].window_id).to_equal(42)
 ```
 
@@ -222,8 +239,8 @@ expect(dock.items[0].window_id).to_equal(42)
 
 #### adds new unpinned running item
 
-1. var dock =  make test dock
-2. dock add running
+- var dock =  make test dock
+- dock add running
    - Expected: dock.items.len() equals `before + 1`
 
 
@@ -246,9 +263,10 @@ expect(dock.items.len()).to_equal(before + 1)
 
 #### marks pinned item as not running
 
-1. var dock =  make test dock
-2. dock add running
-3. dock remove running
+- var dock =  make test dock
+- dock add running
+- dock remove running
+- assert false
    - Expected: dock.items[0].window_id equals `-1`
 
 
@@ -262,7 +280,7 @@ Reproduction: this block contains the complete executable scenario source.
 var dock = _make_test_dock()
 dock.add_running("Terminal", ">", 42)
 dock.remove_running(42)
-expect(not dock.items[0].is_running)
+assert_false(dock.items[0].is_running)
 expect(dock.items[0].window_id).to_equal(-1)
 ```
 
@@ -270,10 +288,10 @@ expect(dock.items[0].window_id).to_equal(-1)
 
 #### removes unpinned running item entirely
 
-1. var dock =  make test dock
-2. dock add running
+- var dock =  make test dock
+- dock add running
    - Expected: dock.items.len() equals `before + 1`
-3. dock remove running
+- dock remove running
    - Expected: dock.items.len() equals `before`
 
 
@@ -298,9 +316,9 @@ expect(dock.items.len()).to_equal(before)
 
 #### select_next advances index
 
-1. var dock =  make test dock
+- var dock =  make test dock
    - Expected: dock.selected_index equals `0`
-2. dock select next
+- dock select next
    - Expected: dock.selected_index equals `1`
 
 
@@ -321,8 +339,8 @@ expect(dock.selected_index).to_equal(1)
 
 #### select_next wraps around
 
-1. var dock =  make test dock
-2. dock select next
+- var dock =  make test dock
+- dock select next
    - Expected: dock.selected_index equals `0`
 
 
@@ -345,8 +363,8 @@ expect(dock.selected_index).to_equal(0)
 
 #### select_prev wraps to end
 
-1. var dock =  make test dock
-2. dock select prev
+- var dock =  make test dock
+- dock select prev
    - Expected: dock.selected_index equals `dock.items.len() - 1`
 
 
@@ -366,7 +384,7 @@ expect(dock.selected_index).to_equal(dock.items.len() - 1)
 
 #### get_selected returns current item
 
-1. var dock =  make test dock
+- var dock =  make test dock
    - Expected: selected.app_name equals `Terminal`
 
 
@@ -388,9 +406,11 @@ expect(selected.app_name).to_equal("Terminal")
 
 #### show makes visible
 
-1. var dock =  make test dock
-2. dock hide
-3. dock show
+- var dock =  make test dock
+- dock hide
+- assert false
+- dock show
+- assert true
 
 
 <details>
@@ -402,17 +422,18 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var dock = _make_test_dock()
 dock.hide()
-expect(not dock.visible)
+assert_false(dock.visible)
 dock.show()
-expect(dock.visible)
+assert_true(dock.visible)
 ```
 
 </details>
 
 #### hide makes invisible
 
-1. var dock =  make test dock
-2. dock hide
+- var dock =  make test dock
+- dock hide
+- assert false
 
 
 <details>
@@ -424,16 +445,19 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var dock = _make_test_dock()
 dock.hide()
-expect(not dock.visible)
+assert_false(dock.visible)
 ```
 
 </details>
 
 #### toggle flips visibility
 
-1. var dock =  make test dock
-2. dock toggle
-3. dock toggle
+- var dock =  make test dock
+- assert true
+- dock toggle
+- assert false
+- dock toggle
+- assert true
 
 
 <details>
@@ -444,11 +468,11 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var dock = _make_test_dock()
-expect(dock.visible)
+assert_true(dock.visible)
 dock.toggle()
-expect(not dock.visible)
+assert_false(dock.visible)
 dock.toggle()
-expect(dock.visible)
+assert_true(dock.visible)
 ```
 
 </details>
@@ -456,6 +480,9 @@ expect(dock.visible)
 ### AppSwitcher
 
 #### creates hidden
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -465,15 +492,16 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val switcher = _make_test_switcher()
-expect(not switcher.is_visible())
+assert_false(switcher.is_visible())
 ```
 
 </details>
 
 #### show displays cards
 
-1. var switcher =  make test switcher
-2. switcher show
+- var switcher =  make test switcher
+- switcher show
+- assert true
    - Expected: switcher.cards.len() equals `3`
 
 
@@ -486,7 +514,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var switcher = _make_test_switcher()
 switcher.show([1, 2, 3], ["A", "B", "C"])
-expect(switcher.is_visible())
+assert_true(switcher.is_visible())
 expect(switcher.cards.len()).to_equal(3)
 ```
 
@@ -494,10 +522,10 @@ expect(switcher.cards.len()).to_equal(3)
 
 #### select_next advances
 
-1. var switcher =  make test switcher
-2. switcher show
+- var switcher =  make test switcher
+- switcher show
    - Expected: switcher.selected_index equals `0`
-3. switcher select next
+- switcher select next
    - Expected: switcher.selected_index equals `1`
 
 
@@ -519,10 +547,10 @@ expect(switcher.selected_index).to_equal(1)
 
 #### get_selected_window_id returns correct id
 
-1. var switcher =  make test switcher
-2. switcher show
+- var switcher =  make test switcher
+- switcher show
    - Expected: switcher.get_selected_window_id() equals `10`
-3. switcher select next
+- switcher select next
    - Expected: switcher.get_selected_window_id() equals `20`
 
 
@@ -559,9 +587,10 @@ expect(switcher.get_selected_window_id()).to_equal(-1)
 
 #### hide clears cards
 
-1. var switcher =  make test switcher
-2. switcher show
-3. switcher hide
+- var switcher =  make test switcher
+- switcher show
+- switcher hide
+- assert false
    - Expected: switcher.cards.len() equals `0`
 
 
@@ -575,7 +604,7 @@ Reproduction: this block contains the complete executable scenario source.
 var switcher = _make_test_switcher()
 switcher.show([1, 2], ["A", "B"])
 switcher.hide()
-expect(not switcher.is_visible())
+assert_false(switcher.is_visible())
 expect(switcher.cards.len()).to_equal(0)
 ```
 
@@ -583,8 +612,8 @@ expect(switcher.cards.len()).to_equal(0)
 
 #### close_selected removes card
 
-1. var switcher =  make test switcher
-2. switcher show
+- var switcher =  make test switcher
+- switcher show
    - Expected: closed equals `10`
    - Expected: switcher.cards.len() equals `2`
 
@@ -609,6 +638,11 @@ expect(switcher.cards.len()).to_equal(2)
 
 #### creates empty and hidden
 
+- assert false
+   - Expected: nc.notifications.len() equals `0`
+   - Expected: nc.unread_count() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -617,7 +651,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val nc = _make_test_nc()
-expect(not nc.is_visible())
+assert_false(nc.is_visible())
 expect(nc.notifications.len()).to_equal(0)
 expect(nc.unread_count()).to_equal(0)
 ```
@@ -626,8 +660,8 @@ expect(nc.unread_count()).to_equal(0)
 
 #### push adds notification
 
-1. var nc =  make test nc
-2. nc push
+- var nc =  make test nc
+- nc push
    - Expected: nc.notifications.len() equals `1`
    - Expected: nc.unread_count() equals `1`
 
@@ -649,9 +683,9 @@ expect(nc.unread_count()).to_equal(1)
 
 #### push adds newest first
 
-1. var nc =  make test nc
-2. nc push
-3. nc push
+- var nc =  make test nc
+- nc push
+- nc push
    - Expected: nc.notifications[0].title equals `Second`
    - Expected: nc.notifications[1].title equals `First`
 
@@ -674,10 +708,10 @@ expect(nc.notifications[1].title).to_equal("First")
 
 #### dismiss removes by id
 
-1. var nc =  make test nc
-2. nc push
-3. nc push
-4. nc dismiss
+- var nc =  make test nc
+- nc push
+- nc push
+- nc dismiss
    - Expected: nc.notifications.len() equals `1`
    - Expected: nc.notifications[0].title equals `Title2`
 
@@ -702,12 +736,12 @@ expect(nc.notifications[0].title).to_equal("Title2")
 
 #### clear_all removes everything
 
-1. var nc =  make test nc
-2. nc push
-3. nc push
-4. nc push
+- var nc =  make test nc
+- nc push
+- nc push
+- nc push
    - Expected: nc.notifications.len() equals `3`
-5. nc clear all
+- nc clear all
    - Expected: nc.notifications.len() equals `0`
    - Expected: nc.unread_count() equals `0`
 
@@ -733,9 +767,9 @@ expect(nc.unread_count()).to_equal(0)
 
 #### unread_count tracks unread
 
-1. var nc =  make test nc
-2. nc push
-3. nc push
+- var nc =  make test nc
+- nc push
+- nc push
    - Expected: nc.unread_count() equals `2`
 
 
@@ -756,9 +790,11 @@ expect(nc.unread_count()).to_equal(2)
 
 #### toggle flips visibility
 
-1. var nc =  make test nc
-2. nc toggle
-3. nc toggle
+- var nc =  make test nc
+- nc toggle
+- assert true
+- nc toggle
+- assert false
 
 
 <details>
@@ -770,9 +806,9 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 var nc = _make_test_nc()
 nc.toggle()
-expect(nc.is_visible())
+assert_true(nc.is_visible())
 nc.toggle()
-expect(not nc.is_visible())
+assert_false(nc.is_visible())
 ```
 
 </details>

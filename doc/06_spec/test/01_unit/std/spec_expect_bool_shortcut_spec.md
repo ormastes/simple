@@ -57,8 +57,10 @@ Verifies concise boolean assertions:
 
 #### accepts bare expect for true boolean expressions
 
-1. check
-2. check msg
+- assert true
+- assert true
+- check
+- check msg
 
 
 <details>
@@ -68,9 +70,9 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(true)
+assert_true(true)
 val condition = 2 + 2 == 4
-expect(condition)
+assert_true(condition)
 check(condition)
 check_msg(condition, "condition should be true")
 ```
@@ -79,9 +81,9 @@ check_msg(condition, "condition should be true")
 
 #### accepts expect_not for false boolean expressions
 
-1. expect not
-2. expect not
-3. expect not
+- expect not
+- expect not
+- expect not
 
 
 <details>

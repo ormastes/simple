@@ -43,6 +43,12 @@ inline_comment_coverage_spec -> std
 
 #### creates a result with default values
 
+- assert true
+- assert true
+- assert true
+   - Expected: result.warning_level equals `none`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -55,9 +61,9 @@ expect(result.item_name).to_equal("test_fn")
 expect(result.item_kind).to_equal("function")
 expect(result.file_path).to_equal("test.spl")
 expect(result.line).to_equal(10)
-expect(result.has_inline_comment == false)
-expect(result.has_docstring == false)
-expect(result.has_sdoctest == false)
+assert_true(result.has_inline_comment == false)
+assert_true(result.has_docstring == false)
+assert_true(result.has_sdoctest == false)
 expect(result.warning_level).to_equal("none")
 ```
 
@@ -67,11 +73,12 @@ expect(result.warning_level).to_equal("none")
 
 #### analyzes file with documented function
 
-1. file write
-2. files push
+- file write
+- files push
    - Expected: first.item_name equals `documented_function`
    - Expected: first.item_kind equals `function`
-3. file delete
+- assert true
+- file delete
 
 
 <details>
@@ -96,7 +103,7 @@ expect(results.len()).to_be_greater_than(0)
 val first = results[0]
 expect(first.item_name).to_equal("documented_function")
 expect(first.item_kind).to_equal("function")
-expect(first.has_inline_comment == true)
+assert_true(first.has_inline_comment == true)
 
 # Cleanup
 file_delete(test_file)
@@ -106,10 +113,11 @@ file_delete(test_file)
 
 #### analyzes file with undocumented function
 
-1. file write
-2. files push
+- file write
+- files push
    - Expected: first.item_name equals `undocumented_function`
-3. file delete
+- assert true
+- file delete
 
 
 <details>
@@ -131,7 +139,7 @@ expect(results.len()).to_be_greater_than(0)
 
 val first = results[0]
 expect(first.item_name).to_equal("undocumented_function")
-expect(first.has_inline_comment == false)
+assert_true(first.has_inline_comment == false)
 file_delete(test_file)
 ```
 
@@ -139,11 +147,12 @@ file_delete(test_file)
 
 #### analyzes file with docstring
 
-1. "fn with docstring
-2. file write
-3. files push
+- "fn with docstring
+- file write
+- files push
    - Expected: first.item_name equals `with_docstring`
-4. file delete
+- assert true
+- file delete
 
 
 <details>
@@ -170,7 +179,7 @@ expect(results.len()).to_be_greater_than(0)
 
 val first = results[0]
 expect(first.item_name).to_equal("with_docstring")
-expect(first.has_docstring == true)
+assert_true(first.has_docstring == true)
 
 file_delete(test_file)
 ```
@@ -179,11 +188,12 @@ file_delete(test_file)
 
 #### analyzes file with class declaration
 
-1. file write
-2. files push
+- file write
+- files push
    - Expected: first.item_name equals `TestClass`
    - Expected: first.item_kind equals `class`
-3. file delete
+- assert true
+- file delete
 
 
 <details>
@@ -206,7 +216,7 @@ expect(results.len()).to_be_greater_than(0)
 val first = results[0]
 expect(first.item_name).to_equal("TestClass")
 expect(first.item_kind).to_equal("class")
-expect(first.has_inline_comment == true)
+assert_true(first.has_inline_comment == true)
 
 file_delete(test_file)
 ```
@@ -215,11 +225,12 @@ file_delete(test_file)
 
 #### analyzes file with struct declaration
 
-1. file write
-2. files push
+- file write
+- files push
    - Expected: first.item_name equals `Point`
    - Expected: first.item_kind equals `struct`
-3. file delete
+- assert true
+- file delete
 
 
 <details>
@@ -242,7 +253,7 @@ expect(results.len()).to_be_greater_than(0)
 val first = results[0]
 expect(first.item_name).to_equal("Point")
 expect(first.item_kind).to_equal("struct")
-expect(first.has_inline_comment == true)
+assert_true(first.has_inline_comment == true)
 
 file_delete(test_file)
 ```
@@ -251,11 +262,12 @@ file_delete(test_file)
 
 #### analyzes file with enum declaration
 
-1. file write
-2. files push
+- file write
+- files push
    - Expected: first.item_name equals `Status`
    - Expected: first.item_kind equals `enum`
-3. file delete
+- assert true
+- file delete
 
 
 <details>
@@ -278,7 +290,7 @@ expect(results.len()).to_be_greater_than(0)
 val first = results[0]
 expect(first.item_name).to_equal("Status")
 expect(first.item_kind).to_equal("enum")
-expect(first.has_inline_comment == true)
+assert_true(first.has_inline_comment == true)
 
 file_delete(test_file)
 ```
@@ -287,7 +299,7 @@ file_delete(test_file)
 
 #### handles non-existent file
 
-1. files push
+- files push
    - Expected: results.len() equals `0`
 
 
@@ -309,12 +321,12 @@ expect(results.len()).to_equal(0)
 
 #### analyzes multiple items in one file
 
-1. "fn func1
-2. "fn func2
-3. file write
-4. files push
+- "fn func1
+- "fn func2
+- file write
+- files push
    - Expected: results.len() equals `3`
-5. file delete
+- file delete
 
 
 <details>
@@ -355,8 +367,8 @@ file_delete(test_file)
 
 #### generates warnings for missing docs
 
-1. var r1 = InlineCommentResult create
-2. results push
+- var r1 = InlineCommentResult create
+- results push
    - Expected: warnings.len() equals `1`
 
 
@@ -392,8 +404,8 @@ expect(warnings[0]).to_contain("undocumented_fn")
 
 #### does not generate warnings for documented items
 
-1. var r1 = InlineCommentResult create
-2. results push
+- var r1 = InlineCommentResult create
+- results push
    - Expected: warnings.len() equals `0`
 
 
@@ -429,10 +441,10 @@ expect(warnings.len()).to_equal(0)
 
 #### generates report with summary statistics
 
-1. var r1 = InlineCommentResult create
-2. results push
-3. var r2 = InlineCommentResult create
-4. results push
+- var r1 = InlineCommentResult create
+- results push
+- var r2 = InlineCommentResult create
+- results push
 
 
 <details>
@@ -483,10 +495,10 @@ expect(report).to_contain("With Neither:")
 
 #### includes details by warning level
 
-1. var r1 = InlineCommentResult create
-2. results push
-3. var r2 = InlineCommentResult create
-4. results push
+- var r1 = InlineCommentResult create
+- results push
+- var r2 = InlineCommentResult create
+- results push
 
 
 <details>
@@ -535,14 +547,14 @@ expect(report).to_contain("warn_fn")
 
 #### calculates percentages correctly
 
-1. var r1 = InlineCommentResult create
-2. results push
-3. var r2 = InlineCommentResult create
-4. results push
-5. var r3 = InlineCommentResult create
-6. results push
-7. var r4 = InlineCommentResult create
-8. results push
+- var r1 = InlineCommentResult create
+- results push
+- var r2 = InlineCommentResult create
+- results push
+- var r3 = InlineCommentResult create
+- results push
+- var r4 = InlineCommentResult create
+- results push
 
 
 <details>

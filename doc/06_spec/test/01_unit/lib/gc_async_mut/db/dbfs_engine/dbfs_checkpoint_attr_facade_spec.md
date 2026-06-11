@@ -1,6 +1,6 @@
 # Dbfs Checkpoint Attr Facade Specification
 
-> 1. var pager = DbfsPager new
+> <details>
 
 <!-- sdn-diagram:id=dbfs_checkpoint_attr_facade_spec.arch -->
 <details class="sdn-source">
@@ -40,24 +40,24 @@ dbfs_checkpoint_attr_facade_spec -> std
 
 #### re-exports pager, checkpoint, and attribute-index contracts
 
-1. var pager = DbfsPager new
-2. var data = PageData zeroed
-3. data set byte
-   - Expected: pager.write_page(page, data).is_ok() is true
+- var pager = DbfsPager new
+- var data = PageData zeroed
+- data set byte
+   - Expected: pager.write_page(page, data, 0, 0).is_ok() is true
    - Expected: pager.dirty_count() equals `1`
    - Expected: pager.flush_dirty().unwrap() equals `1`
    - Expected: pager.read_page(page).unwrap().byte_at(0) equals `0x41`
    - Expected: RING_SIZE >= 4 is true
-   - Expected: ring.write_slot(0, RingSlot(gen: 9, clean: true, btree_root_page: 44)).is_ok() is true
-   - Expected: ring.current_slot().unwrap().gen equals `9`
-4. var ckpt = DbfsCheckpoint new
-   - Expected: ckpt.publish(CheckpointRoot(btree_root: PageId(id: 7), gen: 7)).is_ok() is true
+   - Expected: ring.write_slot(0, RingSlot(slot_gen: 9, clean: true, btree_root_page: 44)).is_ok() is true
+   - Expected: ring.current_slot().unwrap().slot_gen equals `9`
+- var ckpt = DbfsCheckpoint new
+   - Expected: ckpt.publish(CheckpointRoot(btree_root: PageId(id: 7), slot_gen: 7)).is_ok() is true
    - Expected: ckpt.current_root().unwrap().btree_root.id equals `7`
-5. var inodes = InodeTable new
+- var inodes = InodeTable new
    - Expected: inodes.insert(a).is_ok() is true
    - Expected: inodes.insert(b).is_ok() is true
-6. var index = AttrIndexManager new
-7. index build from inodes
+- var index = AttrIndexManager new
+- index build from inodes
    - Expected: index.count() equals `2`
    - Expected: size_result.ino_ids.len() equals `1`
    - Expected: size_result.ino_ids[0] equals `10`
@@ -76,17 +76,17 @@ var pager = DbfsPager.new(2)
 val page = pager.alloc_page().unwrap()
 var data = PageData.zeroed()
 data.set_byte(0, 0x41)
-expect(pager.write_page(page, data).is_ok()).to_equal(true)
+expect(pager.write_page(page, data, 0, 0).is_ok()).to_equal(true)
 expect(pager.dirty_count()).to_equal(1)
 expect(pager.flush_dirty().unwrap()).to_equal(1)
 expect(pager.read_page(page).unwrap().byte_at(0)).to_equal(0x41)
 
 val ring = CheckpointRing.new_persistent()
 expect(RING_SIZE >= 4).to_equal(true)
-expect(ring.write_slot(0, RingSlot(gen: 9, clean: true, btree_root_page: 44)).is_ok()).to_equal(true)
-expect(ring.current_slot().unwrap().gen).to_equal(9)
+expect(ring.write_slot(0, RingSlot(slot_gen: 9, clean: true, btree_root_page: 44)).is_ok()).to_equal(true)
+expect(ring.current_slot().unwrap().slot_gen).to_equal(9)
 var ckpt = DbfsCheckpoint.new()
-expect(ckpt.publish(CheckpointRoot(btree_root: PageId(id: 7), gen: 7)).is_ok()).to_equal(true)
+expect(ckpt.publish(CheckpointRoot(btree_root: PageId(id: 7), slot_gen: 7)).is_ok()).to_equal(true)
 expect(ckpt.current_root().unwrap().btree_root.id).to_equal(7)
 
 var inodes = InodeTable.new()

@@ -1,6 +1,6 @@
 # Wm Action Applier Specification
 
-> 1. var compositor = Compositor with backends
+> <details>
 
 <!-- sdn-diagram:id=wm_action_applier_spec.arch -->
 <details class="sdn-source">
@@ -41,13 +41,14 @@ wm_action_applier_spec -> os
 
 #### creates windows through shared compositor logic
 
-1. var compositor = Compositor with backends
+- var compositor = Compositor with backends
+- assert true
    - Expected: compositor.surfaces.len() equals `1`
    - Expected: compositor.surfaces[0].app_id equals `app.test`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -57,7 +58,7 @@ var compositor = Compositor.with_backends(ApplierBackend(w: 200, h: 120), nil, 2
 val result = apply_wm_action_to_compositor(compositor, _action("create_window", 0))
 compositor = result.compositor
 val wid = result.window_id
-expect(wid > 0)
+assert_true(wid > 0)
 expect(compositor.surfaces.len()).to_equal(1)
 expect(compositor.surfaces[0].app_id).to_equal("app.test")
 ```
@@ -66,19 +67,22 @@ expect(compositor.surfaces[0].app_id).to_equal("app.test")
 
 #### creates web windows with a Simple Web render request surface
 
-1. var compositor = Compositor with backends
+- var compositor = Compositor with backends
+- assert true
    - Expected: compositor.surfaces.len() equals `1`
    - Expected: compositor.surfaces[0].title equals `Simple Browser`
    - Expected: compositor.surfaces[0].session.target equals `simple_web`
    - Expected: compositor.surfaces[0].session.surface_id equals `web_window_{result.window_id}`
    - Expected: compositor.surfaces[0].session.viewport_w equals `96`
    - Expected: compositor.surfaces[0].session.viewport_h equals `72`
+- assert true
    - Expected: req.target equals `simple_web`
    - Expected: req.surface_id equals `web_window_77`
+- assert true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -88,41 +92,39 @@ var compositor = Compositor.with_backends(ApplierBackend(w: 200, h: 120), nil, 2
 val action = WmAction(kind: "create_web_window", window_id: 0, title: "Simple Browser", x: 4, y: 6, width: 96, height: 72, content: "https://example.test", process_id: 700, app_id: "/host/browser", owner_port: 42, src_port: 0)
 val result = apply_wm_action_to_compositor(compositor, action)
 compositor = result.compositor
-expect(result.applied)
+assert_true(result.applied)
 expect(compositor.surfaces.len()).to_equal(1)
 expect(compositor.surfaces[0].title).to_equal("Simple Browser")
 expect(compositor.surfaces[0].session.target).to_equal("simple_web")
 expect(compositor.surfaces[0].session.surface_id).to_equal("web_window_{result.window_id}")
 expect(compositor.surfaces[0].session.viewport_w).to_equal(96)
 expect(compositor.surfaces[0].session.viewport_h).to_equal(72)
-expect(compositor.surfaces[0].session.wants_pixels)
+assert_true(compositor.surfaces[0].session.wants_pixels)
 expect(compositor.surfaces[0].session.body_html).to_contain("https://example.test")
 
 val req = wm_action_web_window_request(77, "Browser", "about:blank", 64, 48)
 expect(req.target).to_equal("simple_web")
 expect(req.surface_id).to_equal("web_window_77")
-expect(req.wants_pixels)
+assert_true(req.wants_pixels)
 ```
 
 </details>
 
 #### applies lifecycle changes through one helper
 
-1. var compositor = Compositor with backends
-
-2. compositor = apply wm action to compositor
-
-3. compositor = apply wm action to compositor
+- var compositor = Compositor with backends
+- compositor = apply wm action to compositor
+- compositor = apply wm action to compositor
    - Expected: compositor.surfaces[0].x equals `10`
    - Expected: compositor.surfaces[0].width equals `80`
-
-4. compositor = apply wm action to compositor
-
-5. compositor = apply wm action to compositor
+- compositor = apply wm action to compositor
+- assert false
+- compositor = apply wm action to compositor
+- assert true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -137,25 +139,29 @@ compositor = apply_wm_action_to_compositor(compositor, _action("resize", wid)).c
 expect(compositor.surfaces[0].x).to_equal(10)
 expect(compositor.surfaces[0].width).to_equal(80)
 compositor = apply_wm_action_to_compositor(compositor, _action("minimize", wid)).compositor
-expect(not compositor.surfaces[0].visible)
+assert_false(compositor.surfaces[0].visible)
 compositor = apply_wm_action_to_compositor(compositor, _action("restore", wid)).compositor
-expect(compositor.surfaces[0].visible)
+assert_true(compositor.surfaces[0].visible)
 ```
 
 </details>
 
 #### classifies shared lifecycle actions
 
+- assert true
+- assert false
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(wm_action_is_shared_lifecycle("resize"))
+assert_true(wm_action_is_shared_lifecycle("resize"))
 val none_is_lifecycle = wm_action_is_shared_lifecycle("none")
-expect(not none_is_lifecycle)
+assert_false(none_is_lifecycle)
 ```
 
 </details>
@@ -163,7 +169,7 @@ expect(not none_is_lifecycle)
 #### normalizes action app identity without changing lifecycle fields
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -183,14 +189,15 @@ expect(normalized.app_id).to_equal("launcher.app")
 
 #### builds remote update trees through shared compositor logic
 
-1. var compositor = Compositor with backends
+- var compositor = Compositor with backends
+- assert true
    - Expected: compositor.surfaces[0].session.root_id equals `remote_{created.window_id}`
    - Expected: tree.root_id equals `remote_44`
    - Expected: tree.title() equals `Window 44`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -201,7 +208,7 @@ val created = apply_wm_action_to_compositor(compositor, _action("create_window",
 compositor = created.compositor
 val updated = apply_wm_action_to_compositor(compositor, _action("update_tree", created.window_id))
 compositor = updated.compositor
-expect(updated.applied)
+assert_true(updated.applied)
 expect(compositor.surfaces[0].session.root_id).to_equal("remote_{created.window_id}")
 
 val tree = wm_action_remote_tree(44, "payload")
@@ -214,7 +221,7 @@ expect(tree.title()).to_equal("Window 44")
 #### builds shared lifecycle actions from host bridge requests
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -252,33 +259,31 @@ expect(restored.kind).to_equal("restore")
 
 #### applies lifecycle actions to host-neutral window state
 
-1. var result = apply wm action to lifecycle windows
+- var result = apply wm action to lifecycle windows
+- assert true
    - Expected: result.window_id equals `1`
    - Expected: result.next_window_id equals `2`
    - Expected: windows.len() equals `1`
-
-2. result = apply wm action to lifecycle windows
+- assert true
+- result = apply wm action to lifecycle windows
    - Expected: windows[0].x equals `40`
    - Expected: windows[0].y equals `50`
-
-3. result = apply wm action to lifecycle windows
+- result = apply wm action to lifecycle windows
    - Expected: windows[0].w equals `320`
    - Expected: windows[0].h equals `220`
-
-4. result = apply wm action to lifecycle windows
-
-5. result = apply wm action to lifecycle windows
+- result = apply wm action to lifecycle windows
+- assert true
+- result = apply wm action to lifecycle windows
    - Expected: windows[0].x equals `0`
    - Expected: windows[0].y equals `48`
    - Expected: windows[0].w equals `640`
    - Expected: windows[0].h equals `384`
-
-6. result = apply wm action to lifecycle windows
+- result = apply wm action to lifecycle windows
    - Expected: result.windows.len() equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -287,11 +292,11 @@ Reproduction: this block contains the complete executable scenario source.
 var windows: [WmLifecycleWindowState] = []
 var result = apply_wm_action_to_lifecycle_windows(windows, 1, 640, 480, _action("create_window", 0))
 windows = result.windows
-expect(result.applied)
+assert_true(result.applied)
 expect(result.window_id).to_equal(1)
 expect(result.next_window_id).to_equal(2)
 expect(windows.len()).to_equal(1)
-expect(windows[0].focused)
+assert_true(windows[0].focused)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, wm_move_action(1, 40, 50))
 windows = result.windows
@@ -305,7 +310,7 @@ expect(windows[0].h).to_equal(220)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, wm_focus_action(1))
 windows = result.windows
-expect(windows[0].focused)
+assert_true(windows[0].focused)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, _action("maximize", 1))
 windows = result.windows
@@ -322,33 +327,39 @@ expect(result.windows.len()).to_equal(0)
 
 #### keeps one focused top window across minimize restore maximize and destroy
 
-1. var result = apply wm action to lifecycle windows
-
-2. result = apply wm action to lifecycle windows
+- var result = apply wm action to lifecycle windows
+- result = apply wm action to lifecycle windows
    - Expected: windows[0].id equals `1`
+- assert false
    - Expected: windows[1].id equals `2`
-
-3. result = apply wm action to lifecycle windows
+- assert true
+- result = apply wm action to lifecycle windows
    - Expected: windows[0].id equals `2`
+- assert true
+- assert false
    - Expected: windows[1].id equals `1`
-
-4. result = apply wm action to lifecycle windows
+- assert true
+- result = apply wm action to lifecycle windows
    - Expected: windows[0].id equals `1`
+- assert false
    - Expected: windows[1].id equals `2`
-
-5. result = apply wm action to lifecycle windows
+- assert false
+- assert true
+- result = apply wm action to lifecycle windows
    - Expected: windows[0].id equals `2`
+- assert false
    - Expected: windows[1].id equals `1`
+- assert true
    - Expected: windows[1].x equals `0`
    - Expected: windows[1].y equals `48`
-
-6. result = apply wm action to lifecycle windows
+- result = apply wm action to lifecycle windows
    - Expected: windows.len() equals `1`
    - Expected: windows[0].id equals `2`
+- assert true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -360,32 +371,32 @@ windows = result.windows
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, _action("create_window", 0))
 windows = result.windows
 expect(windows[0].id).to_equal(1)
-expect(not windows[0].focused)
+assert_false(windows[0].focused)
 expect(windows[1].id).to_equal(2)
-expect(windows[1].focused)
+assert_true(windows[1].focused)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, _action("minimize", 2))
 windows = result.windows
 expect(windows[0].id).to_equal(2)
-expect(windows[0].minimized)
-expect(not windows[0].focused)
+assert_true(windows[0].minimized)
+assert_false(windows[0].focused)
 expect(windows[1].id).to_equal(1)
-expect(windows[1].focused)
+assert_true(windows[1].focused)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, _action("restore", 2))
 windows = result.windows
 expect(windows[0].id).to_equal(1)
-expect(not windows[0].focused)
+assert_false(windows[0].focused)
 expect(windows[1].id).to_equal(2)
-expect(not windows[1].minimized)
-expect(windows[1].focused)
+assert_false(windows[1].minimized)
+assert_true(windows[1].focused)
 
 result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, _action("maximize", 1))
 windows = result.windows
 expect(windows[0].id).to_equal(2)
-expect(not windows[0].focused)
+assert_false(windows[0].focused)
 expect(windows[1].id).to_equal(1)
-expect(windows[1].focused)
+assert_true(windows[1].focused)
 expect(windows[1].x).to_equal(0)
 expect(windows[1].y).to_equal(48)
 
@@ -393,15 +404,33 @@ result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 64
 windows = result.windows
 expect(windows.len()).to_equal(1)
 expect(windows[0].id).to_equal(2)
-expect(windows[0].focused)
+assert_true(windows[0].focused)
 ```
 
 </details>
 
 #### derives modern motion phases from lifecycle actions and window state
 
+- assert true
+   - Expected: contract.easing equals `cubic-bezier(.2,.8,.2,1)`
+   - Expected: contract.transform_origin equals `dock`
+   - Expected: contract.dock_origin_x equals `120`
+   - Expected: contract.dock_origin_y equals `248`
+   - Expected: opening.easing equals `cubic-bezier(.2,.8,.2,1)`
+   - Expected: opening.transform_origin equals `center`
+   - Expected: closing.easing equals `cubic-bezier(.4,0,.2,1)`
+   - Expected: closing.transform_origin equals `center`
+   - Expected: focused.easing equals `ease`
+   - Expected: focused.reduced_duration_ms equals `80`
+   - Expected: idle.easing equals `ease`
+   - Expected: idle.reduced_duration_ms equals `0`
+   - Expected: minimized_idle.class_name equals `wm-window-minimized`
+   - Expected: minimized_idle.duration_ms equals `0`
+   - Expected: minimized_idle.reduced_duration_ms equals `0`
+
+
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -426,7 +455,7 @@ val minimized_idle = wm_lifecycle_motion_contract("move", minimized)
 expect(contract.class_name).to_equal("wm-window-restoring")
 expect(contract.duration_ms).to_equal(240)
 expect(contract.reduced_duration_ms).to_equal(80)
-expect(contract.can_disable)
+assert_true(contract.can_disable)
 expect(contract.easing).to_equal("cubic-bezier(.2,.8,.2,1)")
 expect(contract.transform_origin).to_equal("dock")
 expect(contract.dock_origin_x).to_equal(120)
@@ -455,15 +484,14 @@ expect(summary).to_contain("can_disable=true")
 
 #### handles taskbar hit testing in host-neutral lifecycle state
 
-1. WmLifecycleWindowState
-
-2. WmLifecycleWindowState
+- WmLifecycleWindowState
+- WmLifecycleWindowState
    - Expected: wm_lifecycle_hit_taskbar(windows, 640, 480, first_x + (item_w / 2), dock_y + 16) equals `1`
    - Expected: wm_lifecycle_hit_taskbar(windows, 640, 480, first_x + (item_w / 2), dock_y - 1) equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -485,18 +513,21 @@ expect(wm_lifecycle_hit_taskbar(windows, 640, 480, first_x + (item_w / 2), dock_
 
 #### moves and resizes lifecycle windows from host-neutral pointer state
 
-1. WmLifecycleWindowState
+- WmLifecycleWindowState
    - Expected: moved.windows[0].x equals `0`
    - Expected: moved.windows[0].y equals `48`
    - Expected: grip.interaction.resize_window_id equals `7`
+- assert true
    - Expected: resized.windows[0].w equals `160`
    - Expected: resized.windows[0].h equals `120`
+- assert false
    - Expected: up.resize_window_id equals `0`
+- assert false
    - Expected: drag_up.drag_window_id equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -514,16 +545,16 @@ val probe = WmPointerInteractionState(dragging: false, drag_window_id: 0, drag_o
 val grip = wm_lifecycle_pointer_move(windows, 8, 640, 480, probe, 238, 228)
 expect(grip.interaction.resize_window_id).to_equal(7)
 val down = wm_lifecycle_left_button(grip.interaction, true)
-expect(down.resizing)
+assert_true(down.resizing)
 val resized = wm_lifecycle_pointer_move(windows, 8, 640, 480, down, 0, 0)
 expect(resized.windows[0].w).to_equal(160)
 expect(resized.windows[0].h).to_equal(120)
 val up = wm_lifecycle_left_button(resized.interaction, false)
-expect(not up.resizing)
+assert_false(up.resizing)
 expect(up.resize_window_id).to_equal(0)
 val dragging = WmPointerInteractionState(dragging: true, drag_window_id: 7, drag_offset_x: 60, drag_offset_y: 40, resizing: false, resize_window_id: 0, resize_start_x: 0, resize_start_y: 0, resize_start_w: 0, resize_start_h: 0)
 val drag_up = wm_lifecycle_left_button(dragging, false)
-expect(not drag_up.dragging)
+assert_false(drag_up.dragging)
 expect(drag_up.drag_window_id).to_equal(0)
 ```
 

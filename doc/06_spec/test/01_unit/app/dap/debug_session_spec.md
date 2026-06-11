@@ -42,6 +42,9 @@ debug_session_spec
 
 #### creates new session
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -51,12 +54,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: DebugSession.new()
 val session_created = true
-expect(session_created)
+assert_true(session_created)
 ```
 
 </details>
 
 #### initializes session_id to 0
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -67,12 +73,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: session_id: 0
 val session_id = 0
-expect(session_id == 0)
+assert_true(session_id == 0)
 ```
 
 </details>
 
 #### sets configuration
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -83,12 +92,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: configuration: config
 val config_set = true
-expect(config_set)
+assert_true(config_set)
 ```
 
 </details>
 
 #### initializes state to Stopped
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -99,7 +111,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: state: DebugState.Stopped
 val state = "stopped"
-expect(state == "stopped")
+assert_true(state == "stopped")
 ```
 
 </details>
@@ -107,6 +119,9 @@ expect(state == "stopped")
 ### start
 
 #### starts debug session
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -117,12 +132,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: start() method
 val session_started = true
-expect(session_started)
+assert_true(session_started)
 ```
 
 </details>
 
 #### converts config to JSON
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -133,12 +151,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: val config_json = self.configuration.to_json()
 val json_created = true
-expect(json_created)
+assert_true(json_created)
 ```
 
 </details>
 
 #### calls vscode_debug_start_session
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -149,12 +170,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_start_session(config_json)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
 
 #### updates session_id
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -165,12 +189,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.session_id = ...
 val id_updated = true
-expect(id_updated)
+assert_true(id_updated)
 ```
 
 </details>
 
 #### sets state to Running
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -181,7 +208,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.state = DebugState.Running
 val state = "running"
-expect(state == "running")
+assert_true(state == "running")
 ```
 
 </details>
@@ -189,6 +216,9 @@ expect(state == "running")
 ### continue_execution
 
 #### continues execution
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -199,12 +229,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: continue_execution() method
 val continued = true
-expect(continued)
+assert_true(continued)
 ```
 
 </details>
 
 #### calls vscode_debug_continue
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -215,12 +248,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_continue(self.session_id)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
 
 #### sets state to Running
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -231,7 +267,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.state = DebugState.Running
 val state = "running"
-expect(state == "running")
+assert_true(state == "running")
 ```
 
 </details>
@@ -239,6 +275,9 @@ expect(state == "running")
 ### step_over
 
 #### steps over current line
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -249,12 +288,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: step_over() method
 val stepped = true
-expect(stepped)
+assert_true(stepped)
 ```
 
 </details>
 
 #### calls vscode_debug_step_over
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -265,7 +307,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_step_over(self.session_id)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
@@ -273,6 +315,9 @@ expect(ffi_called)
 ### step_into
 
 #### steps into function
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -283,12 +328,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: step_into() method
 val stepped = true
-expect(stepped)
+assert_true(stepped)
 ```
 
 </details>
 
 #### calls vscode_debug_step_into
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -299,7 +347,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_step_into(self.session_id)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
@@ -307,6 +355,9 @@ expect(ffi_called)
 ### step_out
 
 #### steps out of function
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -317,12 +368,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: step_out() method
 val stepped = true
-expect(stepped)
+assert_true(stepped)
 ```
 
 </details>
 
 #### calls vscode_debug_step_out
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -333,7 +387,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_step_out(self.session_id)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
@@ -341,6 +395,9 @@ expect(ffi_called)
 ### pause
 
 #### pauses execution
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -351,12 +408,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: pause() method
 val paused = true
-expect(paused)
+assert_true(paused)
 ```
 
 </details>
 
 #### calls vscode_debug_pause
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -367,12 +427,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_pause(self.session_id)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
 
 #### sets state to Paused
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -383,7 +446,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.state = DebugState.Paused
 val state = "paused"
-expect(state == "paused")
+assert_true(state == "paused")
 ```
 
 </details>
@@ -391,6 +454,9 @@ expect(state == "paused")
 ### stop
 
 #### stops debug session
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -401,12 +467,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: stop() method
 val stopped = true
-expect(stopped)
+assert_true(stopped)
 ```
 
 </details>
 
 #### calls vscode_debug_stop
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -417,12 +486,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_stop(self.session_id)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
 
 #### sets state to Stopped
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -433,7 +505,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.state = DebugState.Stopped
 val state = "stopped"
-expect(state == "stopped")
+assert_true(state == "stopped")
 ```
 
 </details>
@@ -441,6 +513,9 @@ expect(state == "stopped")
 ### evaluate
 
 #### evaluates expression
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -451,12 +526,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: evaluate() method
 val evaluated = true
-expect(evaluated)
+assert_true(evaluated)
 ```
 
 </details>
 
 #### calls vscode_debug_evaluate
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -467,12 +545,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_evaluate(self.session_id, expression)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
 
 #### returns evaluation result
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -483,7 +564,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: return value from FFI
 val result_returned = true
-expect(result_returned)
+assert_true(result_returned)
 ```
 
 </details>
@@ -494,6 +575,9 @@ expect(result_returned)
 
 #### creates breakpoint
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -503,12 +587,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: Breakpoint.new()
 val bp_created = true
-expect(bp_created)
+assert_true(bp_created)
 ```
 
 </details>
 
 #### sets file field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -519,12 +606,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: file: file
 val file_set = true
-expect(file_set)
+assert_true(file_set)
 ```
 
 </details>
 
 #### sets line field
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -535,12 +625,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: line: line
 val line_set = true
-expect(line_set)
+assert_true(line_set)
 ```
 
 </details>
 
 #### initializes empty condition
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -551,12 +644,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: condition: ""
 val condition = ""
-expect(condition == "")
+assert_true(condition == "")
 ```
 
 </details>
 
 #### initializes hit_count to 0
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -567,12 +663,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: hit_count: 0
 val hit_count = 0
-expect(hit_count == 0)
+assert_true(hit_count == 0)
 ```
 
 </details>
 
 #### initializes enabled to true
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -583,12 +682,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: enabled: true
 val enabled = true
-expect(enabled)
+assert_true(enabled)
 ```
 
 </details>
 
 #### initializes breakpoint_id to 0
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -599,7 +701,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: breakpoint_id: 0
 val id = 0
-expect(id == 0)
+assert_true(id == 0)
 ```
 
 </details>
@@ -607,6 +709,9 @@ expect(id == 0)
 ### set_condition
 
 #### sets breakpoint condition
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -617,7 +722,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.condition = condition
 val condition_set = true
-expect(condition_set)
+assert_true(condition_set)
 ```
 
 </details>
@@ -625,6 +730,9 @@ expect(condition_set)
 ### set
 
 #### sets breakpoint
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -635,12 +743,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: set() method
 val bp_set = true
-expect(bp_set)
+assert_true(bp_set)
 ```
 
 </details>
 
 #### calls vscode_debug_set_breakpoint
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -651,12 +762,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: vscode_debug_set_breakpoint(self.file, self.line)
 val ffi_called = true
-expect(ffi_called)
+assert_true(ffi_called)
 ```
 
 </details>
 
 #### updates breakpoint_id
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -667,7 +781,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.breakpoint_id = ...
 val id_updated = true
-expect(id_updated)
+assert_true(id_updated)
 ```
 
 </details>
@@ -675,6 +789,9 @@ expect(id_updated)
 ### enable
 
 #### enables breakpoint
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -685,7 +802,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.enabled = true
 val enabled = true
-expect(enabled)
+assert_true(enabled)
 ```
 
 </details>
@@ -693,6 +810,9 @@ expect(enabled)
 ### disable
 
 #### disables breakpoint
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -703,7 +823,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.enabled = false
 val disabled = false
-expect(not disabled)
+assert_false(disabled)
 ```
 
 </details>
@@ -711,6 +831,9 @@ expect(not disabled)
 ### toggle
 
 #### toggles enabled state
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -721,7 +844,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: self.enabled = not self.enabled
 val toggled = true
-expect(toggled)
+assert_true(toggled)
 ```
 
 </details>

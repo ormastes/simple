@@ -129,7 +129,7 @@ expect(result).to_equal(10)
 
 #### evaluates right side lazily
 
-1. fn increment
+- fn increment
    - Expected: result equals `5`
    - Expected: counter equals `0`
 
@@ -156,7 +156,7 @@ expect(counter).to_equal(0)
 
 #### calls right side when None
 
-1. fn fallback value
+- fn fallback value
    - Expected: result equals `99`
 
 
@@ -183,10 +183,10 @@ expect(result).to_equal(99)
 
 #### unwraps Ok value
 
-1. fn get ok
-2. Ok
-3. fn use ok
-4. Ok
+- fn get ok
+- Ok
+- fn use ok
+- Ok
 
 
 <details>
@@ -213,10 +213,10 @@ match result:
 
 #### propagates Err
 
-1. fn get err
-2. Err
-3. fn use err
-4. Ok
+- fn get err
+- Err
+- fn use err
+- Ok
 
 
 <details>
@@ -245,10 +245,10 @@ match result:
 
 #### unwraps Some value
 
-1. fn get some
-2. Some
-3. fn use some
-4. Some
+- fn get some
+- Some
+- fn use some
+- Some
 
 
 <details>
@@ -275,9 +275,10 @@ match result:
 
 #### propagates None
 
-1. fn get none
-2. fn use none
-3. Some
+- fn get none
+- fn use none
+- Some
+- assert true
 
 
 <details>
@@ -299,7 +300,7 @@ var saw_none = false
 match result:
     case Some(_): fail("Expected None")
     case None: saw_none = true
-expect(saw_none)
+assert_true(saw_none)
 ```
 
 </details>
@@ -310,8 +311,8 @@ expect(saw_none)
 
 #### explicit if/else instead of ?? return
 
-1. fn parse value
-2. Ok
+- fn parse value
+- Ok
 
 
 <details>
@@ -341,8 +342,8 @@ match result:
 
 #### match instead of ? in for loop
 
-1. fn sum parsed
-2. Ok
+- fn sum parsed
+- Ok
 
 
 <details>
@@ -374,8 +375,8 @@ match result:
 
 #### explicit match for optional config
 
-1. fn parse timeout
-2. Ok
+- fn parse timeout
+- Ok
 
 
 <details>
@@ -406,11 +407,11 @@ match result:
 
 #### ? in if-expression body
 
-1. fn parse int result
-2. Ok
-3. fn parse optional
-4. Some
-5. Ok
+- fn parse int result
+- Ok
+- fn parse optional
+- Some
+- Ok
    - Expected: is_none is true
 
 
@@ -454,10 +455,10 @@ match r2:
 
 #### ? in for loop with Result
 
-1. fn parse int result
-2. Ok
-3. fn sum parsed
-4. Ok
+- fn parse int result
+- Ok
+- fn sum parsed
+- Ok
 
 
 <details>
@@ -500,8 +501,8 @@ match r2:
 
 #### ?? return Err pattern
 
-1. fn parse with default
-2. Ok
+- fn parse with default
+- Ok
 
 
 <details>

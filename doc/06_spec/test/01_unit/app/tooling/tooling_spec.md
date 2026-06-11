@@ -101,6 +101,9 @@ expect(true)
 
 #### detects Simple projects
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -109,12 +112,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Simple projects have .spl files and simple.sdn configs
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### detects multi-language projects
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -124,12 +130,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Multi-language detection checks for multiple manifest files
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### validates project configuration
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -139,7 +148,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Project configuration validation
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -147,6 +156,9 @@ expect(true)
 #### Incremental Compilation
 
 #### tracks file changes
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -156,12 +168,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # File change tracking monitors timestamps and hashes
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### detects file modifications
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -171,12 +186,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # File modification detection identifies updated files
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### identifies files needing recompilation
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -186,7 +204,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Identifies which files need recompilation based on dependencies
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -194,6 +212,9 @@ expect(true)
 #### Dependency Tracking
 
 #### builds dependency graph
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -203,12 +224,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Build dependency graph from import statements
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### detects circular dependencies
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -218,12 +242,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Circular dependency detection via cycle detection algorithm
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### computes topological order
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -233,7 +260,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Topological sort of dependencies for build order
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -241,6 +268,9 @@ expect(true)
 #### Error Aggregation
 
 #### collects errors from multiple languages
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -250,12 +280,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Collect errors from all language compilers
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### normalizes error formats
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -265,12 +298,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Convert different error formats to unified schema
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### groups errors by file
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -280,7 +316,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Group and organize errors by source file
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -288,6 +324,9 @@ expect(true)
 #### Test Runner
 
 #### creates test configuration
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -297,12 +336,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Initialize test runner configuration
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### configures parallel execution
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -312,12 +354,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Enable parallel test execution with worker pools
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates test result
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -327,12 +372,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Create test result tracking object
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### generates test summary
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -342,7 +390,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Generate human-readable test summary report
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -350,6 +398,9 @@ expect(true)
 #### Deployment Pipeline
 
 #### creates deployment pipeline
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -359,12 +410,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Create deployment pipeline with stages
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### adds pipeline stages
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -374,12 +428,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Add stages to deployment pipeline
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### executes pipeline stages
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -389,7 +446,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Execute pipeline stages in sequence
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -397,6 +454,9 @@ expect(true)
 #### Compilation Modes
 
 #### supports debug mode
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -406,12 +466,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Compile in debug mode with symbols
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### supports release mode
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -421,7 +484,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Compile in release mode with optimizations
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -429,6 +492,9 @@ expect(true)
 #### Language Support
 
 #### recognizes all supported languages
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -438,12 +504,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Recognize Simple, Rust, Python, JavaScript, TypeScript, Go, C, C++
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### converts language to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -453,7 +522,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Convert language enum to string representation
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -461,6 +530,9 @@ expect(true)
 #### Compilation Results
 
 #### creates successful compilation result
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -470,12 +542,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Create successful compilation result object
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### creates failed compilation result
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -485,7 +560,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Create failed compilation result with errors
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -493,6 +568,9 @@ expect(true)
 #### Integration
 
 #### builds multi-language project
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -502,12 +580,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Build entire multi-language project
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### runs multi-language tests
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -517,12 +598,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Run tests across multiple languages
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### deploys multi-language project
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -532,7 +616,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Deploy compiled multi-language artifacts
-expect(true)
+assert_true(true)
 ```
 
 </details>

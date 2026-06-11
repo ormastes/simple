@@ -40,6 +40,9 @@ server_spec
 
 #### has correct state values
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -48,12 +51,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Debugger states: stopped, running, disconnected
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### transitions correctly
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -63,7 +69,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # State transitions: stopped -> running, running -> stopped, etc.
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -71,6 +77,9 @@ expect(true)
 ### DapServer
 
 #### initializes with capabilities
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -80,12 +89,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # DAP server initializes with capabilities advertisement
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles launch request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -95,12 +107,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Launch request starts debugged program
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles attach request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -110,12 +125,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Attach request connects to running program
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles disconnect request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -125,12 +143,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Disconnect request terminates debug session
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles set breakpoints request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -140,12 +161,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Set breakpoints at specific locations
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles continue request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -155,12 +179,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Continue execution after breakpoint
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles step over request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -170,12 +197,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Step over current line (skip function calls)
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles step in request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -185,12 +215,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Step into function calls
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles step out request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -200,12 +233,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Step out of current function
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles stack trace request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -215,12 +251,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Get current call stack trace
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles scopes request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -230,12 +269,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Get variable scopes for stack frame
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles variables request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -245,12 +287,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Get variables in specific scope
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handles evaluate request
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -260,7 +305,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Evaluate expression in debug context
-expect(true)
+assert_true(true)
 ```
 
 </details>

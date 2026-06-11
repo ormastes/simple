@@ -40,6 +40,9 @@ adapter_unification_spec
 
 #### DapServer.new() creates with LocalAdapter
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -49,12 +52,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # DapServer.new() should create a server with a LocalAdapter
 # The adapter field replaces the old hook_context + remote_backend dual fields
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### DapServer.with_adapter() accepts any DebugAdapter
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -64,12 +70,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # with_adapter() is the generic constructor for any adapter type
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### DapServer.with_remote() wraps backend in RemoteAdapter
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -79,7 +88,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # with_remote() convenience creates a RemoteAdapter from RemoteRiscV32Backend
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -87,6 +96,9 @@ expect(true)
 ### AdapterCapabilities
 
 #### local adapter has max_watchpoints 1024
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -96,12 +108,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # LocalAdapter sets max_watchpoints to 1024 (software watchpoints, unbounded)
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### local adapter does not support registers
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -111,12 +126,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # LocalAdapter capabilities: supports_registers == false
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### local adapter supports reset, reload, clear_context
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -126,12 +144,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # LocalAdapter capabilities: can_reset, can_reload, can_clear_context all true
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### basic() capabilities default to all false
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -141,12 +162,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # AdapterCapabilities.basic() has all features disabled, max_watchpoints 0
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### full() capabilities have all features enabled
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -156,12 +180,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # AdapterCapabilities.full() has everything enabled, max_watchpoints 1024
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### with_watchpoints builder sets supports_watchpoints and max_watchpoints
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -171,12 +198,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # with_watchpoints(cap) sets supports_watchpoints: true and max_watchpoints: cap
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### with_reload builder sets can_reload
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -186,12 +216,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # with_reload() sets can_reload: true
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### with_clear_context builder sets can_clear_context
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -201,7 +234,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # with_clear_context() sets can_clear_context: true
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -209,6 +242,9 @@ expect(true)
 ### DebugAdapter trait methods
 
 #### set_breakpoint_rich passes through to adapter
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -219,12 +255,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # DapServer.handle_set_breakpoints uses adapter.set_breakpoint_rich()
 # instead of direct hook_context.add_breakpoint_with_options()
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handle_variables uses adapter.read_locals() for scope 1
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -234,12 +273,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Variables handler scope=1 calls self.adapter.read_locals()
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handle_variables uses adapter.read_globals() for scope 2
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -249,12 +291,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Variables handler scope=2 calls self.adapter.read_globals()
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handle_variables uses adapter.read_all_registers() for scope 3
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -264,12 +309,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Variables handler scope=3 calls self.adapter.read_all_registers()
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handle_variables uses adapter.list_children() for nested refs
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -279,12 +327,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Variables handler for refs > 3 calls self.adapter.list_children()
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handle_evaluate uses adapter.evaluate()
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -294,12 +345,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # Evaluate handler calls self.adapter.evaluate() for all backends
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handle_scopes checks adapter.capabilities().supports_registers
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -310,12 +364,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Scopes handler adds Registers scope based on adapter capabilities
 # not by matching on remote_backend
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### handle_set_data_breakpoints uses adapter.capabilities().max_watchpoints
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -326,7 +383,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Data breakpoint capacity comes from adapter capabilities
 # not from backend.watchpoint_capacity() or max_data_breakpoints field
-expect(true)
+assert_true(true)
 ```
 
 </details>
@@ -334,6 +391,9 @@ expect(true)
 ### VarInfo num_children
 
 #### VarInfo.of() defaults num_children to 0
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -343,12 +403,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # VarInfo.of(name, value, type_name) creates VarInfo with num_children: 0
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### VarInfo has num_children field for nested expansion
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -359,7 +422,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # num_children > 0 indicates the variable has child properties
 # used by list_children() for struct/array expansion
-expect(true)
+assert_true(true)
 ```
 
 </details>

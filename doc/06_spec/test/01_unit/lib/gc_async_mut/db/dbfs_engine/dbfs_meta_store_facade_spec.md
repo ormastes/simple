@@ -1,6 +1,6 @@
 # Dbfs Meta Store Facade Specification
 
-> 1. var store = MetaStore create
+> <details>
 
 <!-- sdn-diagram:id=dbfs_meta_store_facade_spec.arch -->
 <details class="sdn-source">
@@ -40,7 +40,7 @@ dbfs_meta_store_facade_spec -> std
 
 #### re-exports the hosted metadata journal backend
 
-1. var store = MetaStore create
+- var store = MetaStore create
    - Expected: store.write_inode(row) is true
    - Expected: entries.len() equals `1`
    - Expected: store.last_checkpoint_gen() equals `0`

@@ -58,6 +58,9 @@ Verifies enum definition, construction, and exhaustive pattern matching.
 
 #### defines simple enum with variants
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -66,15 +69,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c = Color.Red
-expect(c == Color.Red)
+assert_true(c == Color.Red)
 ```
 
 </details>
 
 #### constructs enum variants
 
-1.  : fail
-2.  : fail
+-  : fail
+-  : fail
 
 
 <details>
@@ -98,6 +101,9 @@ match s2:
 
 #### matches on enum variants
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -109,7 +115,7 @@ val s = ResultType.Success
 val result = match s:
     case ResultType.Success: "ok"
     case ResultType.Failure: "fail"
-expect(result == "ok")
+assert_true(result == "ok")
 ```
 
 </details>
@@ -117,6 +123,9 @@ expect(result == "ok")
 #### enums with associated values
 
 #### defines enum with tuple variants
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -126,7 +135,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val circle = Shape.Circle(10)
-expect(circle == Shape.Circle(10))
+assert_true(circle == Shape.Circle(10))
 ```
 
 </details>
@@ -150,6 +159,10 @@ pass
 
 #### extracts values from enum variant
 
+- assert true
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -160,13 +173,16 @@ Reproduction: this block contains the complete executable scenario source.
 val p = Point.Coord(3, 4)
 match p:
     case Point.Coord(x, y):
-        expect(x == 3)
-        expect(y == 4)
+        assert_true(x == 3)
+        assert_true(y == 4)
 ```
 
 </details>
 
 #### matches and binds enum values
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -179,7 +195,7 @@ val r = TestResult.Ok(42)
 val value = match r:
     case TestResult.Ok(n): n
     case TestResult.Err(e): 0
-expect(value == 42)
+assert_true(value == 42)
 ```
 
 </details>
@@ -187,6 +203,9 @@ expect(value == 42)
 #### enum pattern matching
 
 #### requires exhaustive pattern matching
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -201,12 +220,15 @@ val name = match c:
     case Color.Red: "red"
     case Color.Green: "green"
     case Color.Blue: "blue"
-expect(name == "red")
+assert_true(name == "red")
 ```
 
 </details>
 
 #### handles all enum variants in match
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -219,12 +241,15 @@ val s = Status.Active
 val is_active = match s:
     case Status.Active: true
     case Status.Inactive: false
-expect(is_active == true)
+assert_true(is_active == true)
 ```
 
 </details>
 
 #### supports wildcard patterns in match
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -237,14 +262,14 @@ val c = Color.Green
 val is_red = match c:
     case Color.Red: true
     case _: false
-expect(is_red == false)
+assert_true(is_red == false)
 ```
 
 </details>
 
 #### matches enum in conditional guards
 
-1. fail
+- fail
 
 
 <details>
@@ -268,6 +293,9 @@ match s:
 
 #### defines enum with enum variants
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -277,12 +305,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val msg = Message.Text("test")
 val container = Container.Value(msg)
-expect(container == Container.Value(Message.Text("test")))
+assert_true(container == Container.Value(Message.Text("test")))
 ```
 
 </details>
 
 #### matches nested enum variants
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -296,12 +327,16 @@ val result = match c:
     case Container.Empty: 0
     case Container.Value(Message.Number(n)): n
     case Container.Value(Message.Text(s)): 1
-expect(result == 42)
+assert_true(result == 42)
 ```
 
 </details>
 
 #### handles enum with generic variants
+
+- assert true
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -317,8 +352,8 @@ val tree = Tree.Node(10, 20)
 val is_node = match tree:
     case Tree.Leaf(n): false
     case Tree.Node(_, _): true
-expect(is_node == true)
-expect(tree == Tree.Node(10, 20))
+assert_true(is_node == true)
+assert_true(tree == Tree.Node(10, 20))
 ```
 
 </details>
@@ -327,7 +362,7 @@ expect(tree == Tree.Node(10, 20))
 
 #### calls methods on enum instances
 
-1.  : fail
+-  : fail
 
 
 <details>
@@ -349,6 +384,9 @@ match s:
 
 #### implements trait for enum
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -360,7 +398,7 @@ Reproduction: this block contains the complete executable scenario source.
 # Test basic enum equality which uses a trait
 val c1 = Color.Red
 val c2 = Color.Red
-expect(c1 == c2)
+assert_true(c1 == c2)
 ```
 
 </details>
@@ -388,6 +426,9 @@ pass
 
 #### creates Option variants
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -397,12 +438,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val some_val = Option.Some(42)
 val none_val = Option.None
-expect(some_val == Option.Some(42))
+assert_true(some_val == Option.Some(42))
 ```
 
 </details>
 
 #### matches on Option
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -415,12 +459,15 @@ val opt = Option.Some(10)
 val value = match opt:
     case Option.Some(n): n
     case Option.None: 0
-expect(value == 10)
+assert_true(value == 10)
 ```
 
 </details>
 
 #### creates Result variants
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -431,12 +478,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val ok_val = Result.Ok(42)
 val err_val = Result.Err("error")
-expect(ok_val == Result.Ok(42))
+assert_true(ok_val == Result.Ok(42))
 ```
 
 </details>
 
 #### matches on Result with error handling
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -449,7 +499,7 @@ val res = Result.Ok(100)
 val value = match res:
     case Result.Ok(n): n
     case Result.Err(e): 0
-expect(value == 100)
+assert_true(value == 100)
 ```
 
 </details>

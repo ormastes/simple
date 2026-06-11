@@ -78,7 +78,7 @@ expect(count_lint(source, "SPIPE002")).to_equal(1)
 
 #### flags placeholder pass helpers with rationale arguments inside examples
 
-1. "        pass " + "todo
+- "        pass " + "todo
    - Expected: count_lint(source, "SPIPE002") equals `1`
 
 
@@ -101,7 +101,7 @@ expect(count_lint(source, "SPIPE002")).to_equal(1)
 
 #### flags placeholder match-arm success assertions
 
-1. "        match run check
+- "        match run check
    - Expected: count_lint(source, "SPIPE003") equals `1`
 
 
@@ -146,7 +146,7 @@ expect(count_lint(source, "SPIPE004")).to_equal(1)
 
 #### flags examples with no real assertion
 
-1. "        run check
+- "        run check
    - Expected: count_lint(source, "SPIPE005") equals `1`
 
 
@@ -252,12 +252,12 @@ expect(count_lint(false_source, "SPIPE007")).to_equal(1)
 
 #### warns for is_equal boolean wrappers
 
-1. "        expect
-2. "        expect
+- "        expect
+- "        expect
    - Expected: count_lint(true_source, "SPIPE006") equals `1`
    - Expected: count_lint_with_level(true_source, "SPIPE006", LintLevel.Warn) equals `1`
    - Expected: count_lint_message_containing(true_source, "SPIPE006", "expect(bool) is called with a boolean matcher") equals `1`
-   - Expected: count_lint_message_containing(true_source, "SPIPE006", "use expect(condition)") equals `1`
+   - Expected: count_lint_message_containing(true_source, "SPIPE006", "use assert_true(condition)") equals `1`
    - Expected: count_lint(false_source, "SPIPE007") equals `1`
    - Expected: count_lint_with_level(false_source, "SPIPE007", LintLevel.Warn) equals `1`
    - Expected: count_lint_message_containing(false_source, "SPIPE007", "expect(bool) is called with a boolean matcher") equals `1`
@@ -283,7 +283,7 @@ val false_source =
 expect(count_lint(true_source, "SPIPE006")).to_equal(1)
 expect(count_lint_with_level(true_source, "SPIPE006", LintLevel.Warn)).to_equal(1)
 expect(count_lint_message_containing(true_source, "SPIPE006", "expect(bool) is called with a boolean matcher")).to_equal(1)
-expect(count_lint_message_containing(true_source, "SPIPE006", "use expect(condition)")).to_equal(1)
+expect(count_lint_message_containing(true_source, "SPIPE006", "use assert_true(condition)")).to_equal(1)
 expect(count_lint(false_source, "SPIPE007")).to_equal(1)
 expect(count_lint_with_level(false_source, "SPIPE007", LintLevel.Warn)).to_equal(1)
 expect(count_lint_message_containing(false_source, "SPIPE007", "expect(bool) is called with a boolean matcher")).to_equal(1)
@@ -294,8 +294,8 @@ expect(count_lint_message_containing(false_source, "SPIPE007", "use expect_not(c
 
 #### allows concise boolean assertions
 
-1. "        expect
-2. "        expect not
+- "        expect
+- "        expect not
    - Expected: total_spipe_quality_lints(source) equals `0`
 
 
@@ -321,8 +321,8 @@ expect(total_spipe_quality_lints(source)).to_equal(0)
 
 #### flags pass_todo in production code
 
-1. "fn not done
-2. "    pass " + "todo
+- "fn not done
+- "    pass " + "todo
    - Expected: count_lint_for_path("src/os/demo.spl", source, "STUB003") equals `1`
 
 
@@ -344,7 +344,7 @@ expect(count_lint_for_path("src/os/demo.spl", source, "STUB003")).to_equal(1)
 
 #### flags bare pass_todo in production code
 
-1. "fn not done
+- "fn not done
    - Expected: count_lint_for_path("src/os/demo.spl", source, "STUB003") equals `1`
 
 
@@ -385,7 +385,7 @@ expect(total_spipe_quality_lints(source)).to_equal(0)
 
 #### respects allow on spipe_placeholder_tests
 
-1. "@" + "allow
+- "@" + "allow
    - Expected: total_spipe_quality_lints(source) equals `0`
 
 

@@ -1,6 +1,6 @@
 # Lean Workflow Specification
 
-> 1. exit code: Some
+> <details>
 
 <!-- sdn-diagram:id=lean_workflow_spec.arch -->
 <details class="sdn-source">
@@ -10,7 +10,8 @@
 @layout dag
 @direction LR
 
-lean_workflow_spec
+lean_workflow_spec -> std
+lean_workflow_spec -> verification
 ```
 
 </details>
@@ -42,7 +43,7 @@ lean_workflow_spec
 
 #### flags unproven goals and formats them
 
-1. exit code: Some
+- exit code: Some
    - Expected: result.has_unproven() is true
    - Expected: result.is_fully_proven() is false
    - Expected: result.passed() is true
@@ -55,7 +56,7 @@ Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val result = runner.LeanCheckResult(
+val result = LeanCheckResult(
     file: "src/verification/demo.lean",
     success: true,
     stdout: "goals accomplished",
@@ -77,8 +78,8 @@ expect(result.format()).to_contain("Goals remaining (sorry): 2")
 
 #### aggregates pass/fail and unproven counts
 
-1. exit code: Some
-2. exit code: Some
+- exit code: Some
+- exit code: Some
    - Expected: summary.files_checked equals `2`
    - Expected: summary.files_passed equals `1`
    - Expected: summary.files_failed equals `1`
@@ -96,7 +97,7 @@ Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val ok = runner.LeanCheckResult(
+val ok = LeanCheckResult(
     file: "src/verification/ok.lean",
     success: true,
     stdout: "goals accomplished",
@@ -105,7 +106,7 @@ val ok = runner.LeanCheckResult(
     goals_remaining: 0,
     exit_code: Some(0)
 )
-val bad = runner.LeanCheckResult(
+val bad = LeanCheckResult(
     file: "src/verification/bad.lean",
     success: false,
     stdout: "",
@@ -115,7 +116,7 @@ val bad = runner.LeanCheckResult(
     exit_code: Some(1)
 )
 
-val summary = runner.VerificationSummary.from_results([ok, bad])
+val summary = VerificationSummary.from_results([ok, bad])
 expect(summary.files_checked).to_equal(2)
 expect(summary.files_passed).to_equal(1)
 expect(summary.files_failed).to_equal(1)
@@ -135,13 +136,13 @@ expect(summary.format()).to_contain("Unproven (sorry): 1")
 
 #### extracts obligations with stable identifiers
 
-1. var contract = contracts FunctionContract new
-2. contracts ContractExpr variable
-3. contracts ContractExpr int val
-4. contracts ContractExpr result
-5. contracts ContractExpr int val
-6. contracts ContractExpr variable
-7. contracts ContractExpr int val
+- var contract = FunctionContract new
+- ContractExpr variable
+- ContractExpr int val
+- ContractExpr result
+- ContractExpr int val
+- ContractExpr variable
+- ContractExpr int val
    - Expected: obls.len() equals `3`
    - Expected: obls[0].id equals `factorial_pre_0`
    - Expected: obls[1].id equals `factorial_post_0`
@@ -157,33 +158,33 @@ Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var contract = contracts.FunctionContract.new()
+var contract = FunctionContract.new()
 contract = contract.add_precondition(
-    contracts.ContractClause.new(
-        contracts.ContractExpr.ge(
-            contracts.ContractExpr.variable("n"),
-            contracts.ContractExpr.int_val(0)
+    ContractClause.new(
+        ContractExpr.ge(
+            ContractExpr.variable("n"),
+            ContractExpr.int_val(0)
         )
     )
 )
 contract = contract.add_postcondition(
-    contracts.ContractClause.new(
-        contracts.ContractExpr.gt(
-            contracts.ContractExpr.result(),
-            contracts.ContractExpr.int_val(0)
+    ContractClause.new(
+        ContractExpr.gt(
+            ContractExpr.result(),
+            ContractExpr.int_val(0)
         )
     )
 )
 contract = contract.add_invariant(
-    contracts.ContractClause.new(
-        contracts.ContractExpr.ge(
-            contracts.ContractExpr.variable("n"),
-            contracts.ContractExpr.int_val(0)
+    ContractClause.new(
+        ContractExpr.ge(
+            ContractExpr.variable("n"),
+            ContractExpr.int_val(0)
         )
     )
 )
 
-val obls = obligations.extract_from_contract("factorial", "math.spl", 42, contract)
+val obls = extract_from_contract("factorial", "math.spl", 42, contract)
 expect(obls.len()).to_equal(3)
 expect(obls[0].id).to_equal("factorial_pre_0")
 expect(obls[1].id).to_equal("factorial_post_0")
@@ -196,26 +197,33 @@ expect(obls[0].source_line).to_equal(42)
 
 #### preserves proof text when marked proven
 
+- var proven status = ob with status
+   - Expected: proven.status.to_string() equals `proven`
+   - Expected: theorem.name equals `demo_postcondition_0`
+   - Expected: theorem.proof_text() equals `rfl`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val ob = obligations.ProofObligation.create(
+val ob = ProofObligation.create(
     "demo_post_0",
     "demo_postcondition_0",
     "demo.spl",
     7,
     "True"
 )
-val proven = ob.with_status(obligations.ProofStatus.Proven).with_proof("rfl")
+var proven_status = ob.with_status(ProofStatus.Proven)
+val proven = proven_status.with_proof("rfl")
 val theorem = proven.to_lean_theorem()
 
 expect(proven.status.to_string()).to_equal("proven")
 expect(theorem.name).to_equal("demo_postcondition_0")
-expect(theorem.proof).to_equal("rfl")
+expect(theorem.proof_text()).to_equal("rfl")
 expect(theorem.to_lean()).to_contain("rfl")
 ```
 
@@ -232,7 +240,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val files = regen.regenerate_all()
+val files = regenerate_all()
 expect(files.len()).to_equal(15)
 expect(files.has("src/verification/memory_capabilities/src/MemoryCapabilities.lean")).to_equal(true)
 expect(files.has("src/verification/memory_model_drf/src/MemoryModelDRF.lean")).to_equal(true)
@@ -252,12 +260,12 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val temp_root = "/tmp/simple-lean-workflow-unit"
 val sample = {"src/verification/demo/src/Demo.lean": "theorem demo : True := by rfl"}
-val written = regen.write_regenerated_files(sample, temp_root)
+val written = write_regenerated_files(sample, temp_root)
 
 expect(written.len()).to_equal(1)
 expect(written[0]).to_start_with(temp_root)
-expect(fs.exist(written[0])).to_equal(true)
-expect(fs.read_text(written[0])).to_equal("theorem demo : True := by rfl")
+expect(file_exists(written[0])).to_equal(true)
+expect(file_read_text(written[0])).to_equal("theorem demo : True := by rfl")
 ```
 
 </details>
@@ -273,9 +281,9 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(obligations.ProofStatus.Pending.to_string()).to_equal("pending")
-expect(obligations.ProofStatus.Proven.to_string()).to_equal("proven")
-expect(obligations.ProofStatus.Admitted.to_string()).to_equal("admitted")
+expect(ProofStatus.Pending.to_string()).to_equal("pending")
+expect(ProofStatus.Proven.to_string()).to_equal("proven")
+expect(ProofStatus.Admitted.to_string()).to_equal("admitted")
 ```
 
 </details>
@@ -292,20 +300,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val temp_root = "/tmp/simple-lean-workflow-strict"
-val temp_path = "{temp_root}/Demo.lean"
-val written = regen.write_regenerated_files(
+val written = write_regenerated_files(
     {"src/verification/demo/src/Demo.lean": "theorem demo : True := by sorry"},
     temp_root
 )
 
 expect(written.len()).to_equal(1)
 
-val proof_checker = checker.ProofChecker.create()
-val result = proof_checker.check_file(temp_path)
+val proof_checker = ProofChecker.create()
+val result = proof_checker.check_file(written[0])
 
-expect(result.status).to_equal(checker.ProofStatus.Failed)
-expect(result.sorry_count).to_equal(1)
-expect(result.error_message).to_contain("sorry")
+val status_str = result.result.to_string()
+expect(status_str).to_contain("proof error")
+expect(result.sorry_count()).to_equal(1)
+expect(result.error_message()).to_contain("sorry")
 ```
 
 </details>
@@ -319,13 +327,13 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val validation = regen.validate_regeneration(
+val validation = validate_regeneration(
     {"src/verification/demo/src/Demo.lean": "theorem demo : True := by rfl"},
     "/tmp/simple-lean-workflow-missing"
 )
 
 expect(validation.has("src/verification/demo/src/Demo.lean")).to_equal(true)
-expect(validation.get("src/verification/demo/src/Demo.lean").?).to_equal(false)
+expect(validation["src/verification/demo/src/Demo.lean"]).to_equal("mismatch")
 ```
 
 </details>

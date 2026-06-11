@@ -57,6 +57,19 @@ Verifies that the OS-facing dock/taskbar layer exposes the same modern
 
 #### defines rounded translucent dock metrics with bounded motion controls
 
+- assert true
+- assert true
+- assert true
+   - Expected: metrics.icon_size_px equals `48`
+   - Expected: metrics.height_px equals `64`
+   - Expected: metrics.corner_radius_px equals `32`
+   - Expected: metrics.icon_radius_px equals `999`
+   - Expected: metrics.blur_radius_px equals `24`
+   - Expected: metrics.hover_lift_px equals `3`
+   - Expected: metrics.motion_ms equals `180`
+   - Expected: metrics.reduced_motion_ms equals `80`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -65,9 +78,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val metrics = modern_dock_metrics()
-expect(metrics.translucent)
-expect(metrics.round_icon_converter)
-expect(metrics.motion_can_disable)
+assert_true(metrics.translucent)
+assert_true(metrics.round_icon_converter)
+assert_true(metrics.motion_can_disable)
 expect(metrics.icon_size_px).to_equal(48)
 expect(metrics.height_px).to_equal(64)
 expect(metrics.corner_radius_px).to_equal(32)
@@ -124,6 +137,19 @@ expect(dock_item_modern_icon_kind(glyph)).to_equal("glyph-to-round")
 
 #### defines rounded translucent taskbar metrics and summarizes model counts
 
+- assert true
+- assert true
+- assert true
+- assert true
+   - Expected: contract.height_px equals `48`
+   - Expected: contract.icon_size_px equals `26`
+   - Expected: contract.corner_radius_px equals `999`
+   - Expected: contract.blur_radius_px equals `24`
+   - Expected: contract.hover_lift_px equals `3`
+   - Expected: contract.motion_ms equals `150`
+   - Expected: contract.reduced_motion_ms equals `80`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -132,10 +158,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val contract = modern_taskbar_shell_contract()
-expect(contract.translucent)
-expect(contract.rounded_taskbar)
-expect(contract.rounded_icons)
-expect(contract.motion_can_disable)
+assert_true(contract.translucent)
+assert_true(contract.rounded_taskbar)
+assert_true(contract.rounded_icons)
+assert_true(contract.motion_can_disable)
 expect(contract.height_px).to_equal(48)
 expect(contract.icon_size_px).to_equal(26)
 expect(contract.corner_radius_px).to_equal(999)
@@ -186,6 +212,18 @@ expect(running[1].get_prop("modern_minimized")).to_equal("true")
 
 #### defines portable modern desktop affordances for SimpleOS renderers
 
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+   - Expected: contract.reduced_motion_ms equals `80`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -194,15 +232,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val contract = modern_desktop_affordance_contract()
-expect(contract.command_palette)
-expect(contract.control_center)
-expect(contract.window_overview)
-expect(contract.desktop_widgets)
-expect(contract.snap_assist)
-expect(contract.motion_verbosity_controls)
-expect(contract.can_disable_motion)
-expect(contract.translucent_panels)
-expect(contract.rounded_controls)
+assert_true(contract.command_palette)
+assert_true(contract.control_center)
+assert_true(contract.window_overview)
+assert_true(contract.desktop_widgets)
+assert_true(contract.snap_assist)
+assert_true(contract.motion_verbosity_controls)
+assert_true(contract.can_disable_motion)
+assert_true(contract.translucent_panels)
+assert_true(contract.rounded_controls)
 expect(contract.reduced_motion_ms).to_equal(80)
 val summary = modern_desktop_affordance_summary()
 expect(summary).to_contain("modern_desktop_affordances")

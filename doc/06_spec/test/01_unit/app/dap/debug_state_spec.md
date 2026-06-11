@@ -40,6 +40,9 @@ debug_state_spec
 
 #### converts Stopped to string
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -49,12 +52,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Stopped: "stopped"
 val state = "stopped"
-expect(state == "stopped")
+assert_true(state == "stopped")
 ```
 
 </details>
 
 #### converts Running to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -65,12 +71,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Running: "running"
 val state = "running"
-expect(state == "running")
+assert_true(state == "running")
 ```
 
 </details>
 
 #### converts Paused to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -81,12 +90,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Paused: "paused"
 val state = "paused"
-expect(state == "paused")
+assert_true(state == "paused")
 ```
 
 </details>
 
 #### converts Terminated to string
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -97,7 +109,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Terminated: "terminated"
 val state = "terminated"
-expect(state == "terminated")
+assert_true(state == "terminated")
 ```
 
 </details>
@@ -105,6 +117,9 @@ expect(state == "terminated")
 ### DebugState description
 
 #### describes Stopped
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -115,12 +130,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Stopped: "Debugger stopped at breakpoint"
 val desc = "Debugger stopped at breakpoint"
-expect(desc == "Debugger stopped at breakpoint")
+assert_true(desc == "Debugger stopped at breakpoint")
 ```
 
 </details>
 
 #### describes Running
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -131,12 +149,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Running: "Program executing"
 val desc = "Program executing"
-expect(desc == "Program executing")
+assert_true(desc == "Program executing")
 ```
 
 </details>
 
 #### describes Paused
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -147,12 +168,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Paused: "Execution paused by user"
 val desc = "Execution paused by user"
-expect(desc == "Execution paused by user")
+assert_true(desc == "Execution paused by user")
 ```
 
 </details>
 
 #### describes Terminated
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -163,7 +187,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Terminated: "Program terminated"
 val desc = "Program terminated"
-expect(desc == "Program terminated")
+assert_true(desc == "Program terminated")
 ```
 
 </details>
@@ -171,6 +195,9 @@ expect(desc == "Program terminated")
 ### DebugState is_stopped
 
 #### returns true for Stopped
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -181,12 +208,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Stopped: true
 val is_stopped = true
-expect(is_stopped)
+assert_true(is_stopped)
 ```
 
 </details>
 
 #### returns false for other states
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -197,7 +227,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_stopped = false
-expect(not is_stopped)
+assert_false(is_stopped)
 ```
 
 </details>
@@ -205,6 +235,9 @@ expect(not is_stopped)
 ### DebugState is_running
 
 #### returns true for Running
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -215,12 +248,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Running: true
 val is_running = true
-expect(is_running)
+assert_true(is_running)
 ```
 
 </details>
 
 #### returns false for other states
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -231,7 +267,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_running = false
-expect(not is_running)
+assert_false(is_running)
 ```
 
 </details>
@@ -239,6 +275,9 @@ expect(not is_running)
 ### DebugState is_paused
 
 #### returns true for Paused
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -249,12 +288,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Paused: true
 val is_paused = true
-expect(is_paused)
+assert_true(is_paused)
 ```
 
 </details>
 
 #### returns false for other states
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -265,7 +307,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_paused = false
-expect(not is_paused)
+assert_false(is_paused)
 ```
 
 </details>
@@ -273,6 +315,9 @@ expect(not is_paused)
 ### DebugState is_terminated
 
 #### returns true for Terminated
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -283,12 +328,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Terminated: true
 val is_terminated = true
-expect(is_terminated)
+assert_true(is_terminated)
 ```
 
 </details>
 
 #### returns false for other states
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -299,7 +347,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_terminated = false
-expect(not is_terminated)
+assert_false(is_terminated)
 ```
 
 </details>
@@ -307,6 +355,9 @@ expect(not is_terminated)
 ### DebugState is_active
 
 #### returns false for Terminated
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -317,12 +368,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Terminated: false
 val is_active = false
-expect(not is_active)
+assert_false(is_active)
 ```
 
 </details>
 
 #### returns true for other states
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -333,7 +387,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: true
 val is_active = true
-expect(is_active)
+assert_true(is_active)
 ```
 
 </details>
@@ -341,6 +395,9 @@ expect(is_active)
 ### DebugState is_halted
 
 #### returns true for Stopped
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -351,12 +408,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Stopped: true
 val is_halted = true
-expect(is_halted)
+assert_true(is_halted)
 ```
 
 </details>
 
 #### returns true for Paused
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -367,12 +427,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case Paused: true
 val is_halted = true
-expect(is_halted)
+assert_true(is_halted)
 ```
 
 </details>
 
 #### returns false for other states
+
+- assert false
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -383,7 +446,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: case _: false
 val is_halted = false
-expect(not is_halted)
+assert_false(is_halted)
 ```
 
 </details>
@@ -391,6 +454,9 @@ expect(not is_halted)
 ### DebugState can_continue
 
 #### delegates to is_halted
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -401,7 +467,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: return self.is_halted()
 val can_continue = true
-expect(can_continue)
+assert_true(can_continue)
 ```
 
 </details>
@@ -409,6 +475,9 @@ expect(can_continue)
 ### DebugState summary
 
 #### categorizes as halted when active and halted
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -419,12 +488,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: if self.is_active() and self.is_halted()
 val status = "halted"
-expect(status == "halted")
+assert_true(status == "halted")
 ```
 
 </details>
 
 #### categorizes as executing when active and not halted
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -435,12 +507,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: if self.is_active() and not self.is_halted()
 val status = "executing"
-expect(status == "executing")
+assert_true(status == "executing")
 ```
 
 </details>
 
 #### categorizes as terminated when not active
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -451,7 +526,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: else (not active)
 val status = "terminated"
-expect(status == "terminated")
+assert_true(status == "terminated")
 ```
 
 </details>

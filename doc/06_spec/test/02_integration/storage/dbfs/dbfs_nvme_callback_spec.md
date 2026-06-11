@@ -1,6 +1,6 @@
 # Dbfs Nvme Callback Specification
 
-> 1. var dev =  make device
+> <details>
 
 <!-- sdn-diagram:id=dbfs_nvme_callback_spec.arch -->
 <details class="sdn-source">
@@ -41,17 +41,13 @@ dbfs_nvme_callback_spec -> os
 
 #### records persist through flush and survive reopen
 
-1. var dev =  make device
-
-2. intent register persist callback
-
-3. intent set block device
-
-4. var log = SharedIntentLog new persistent
+- var dev =  make device
+- intent register persist callback
+- intent set block device
+- var log = SharedIntentLog new persistent
    - Expected: r1.is_ok() is true
    - Expected: r2.is_ok() is true
-
-5. var reopened = SharedIntentLog reopen
+- var reopened = SharedIntentLog reopen
    - Expected: scanned.is_ok() is true
    - Expected: recs.len() as i64 equals `2`
    - Expected: recs[0].txn_id equals `100`
@@ -59,12 +55,11 @@ dbfs_nvme_callback_spec -> os
    - Expected: recs[0].committed is true
    - Expected: recs[1].txn_id equals `101`
    - Expected: recs[1].committed is false
-
-6. intent clear persist callback
+- intent clear persist callback
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -97,25 +92,20 @@ intent_clear_persist_callback()
 
 #### committed records filter correctly after device reopen
 
-1. var dev =  make device
-
-2. intent register persist callback
-
-3. intent set block device
-
-4. var log = SharedIntentLog new persistent
-
-5. var reopened = SharedIntentLog reopen
+- var dev =  make device
+- intent register persist callback
+- intent set block device
+- var log = SharedIntentLog new persistent
+- var reopened = SharedIntentLog reopen
    - Expected: committed.is_ok() is true
    - Expected: crecs.len() as i64 equals `2`
    - Expected: crecs[0].txn_id equals `200`
    - Expected: crecs[1].txn_id equals `202`
-
-6. intent clear persist callback
+- intent clear persist callback
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -146,30 +136,25 @@ intent_clear_persist_callback()
 
 #### ring slots persist through write and survive reopen
 
-1. var dev =  make device
-
-2. ring register persist callback
-
-3. ring set block device
-
-4. var ring = SharedCheckpointRing new with size
+- var dev =  make device
+- ring register persist callback
+- ring set block device
+- var ring = SharedCheckpointRing new with size
    - Expected: w1.is_ok() is true
    - Expected: w2.is_ok() is true
-
-5. var reopened = SharedCheckpointRing reopen
+- var reopened = SharedCheckpointRing reopen
    - Expected: s0.is_ok() is true
-   - Expected: slot0.gen equals `1`
+   - Expected: slot0.slot_gen equals `1`
    - Expected: slot0.clean is true
    - Expected: slot0.btree_root_page equals `42`
    - Expected: s1.is_ok() is true
-   - Expected: slot1.gen equals `2`
+   - Expected: slot1.slot_gen equals `2`
    - Expected: slot1.btree_root_page equals `84`
-
-6. ring clear persist callback
+- ring clear persist callback
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -179,22 +164,22 @@ var dev = _make_device("ring1")
 ring_register_persist_callback("arena:META_DURABLE")
 ring_set_block_device(dev, 32)
 var ring = SharedCheckpointRing.new_with_size(16)
-val w1 = ring.write_slot(0, RingSlot(gen: 1, clean: true, btree_root_page: 42))
+val w1 = ring.write_slot(0, RingSlot(slot_gen: 1, clean: true, btree_root_page: 42))
 expect(w1.is_ok()).to_equal(true)
-val w2 = ring.write_slot(1, RingSlot(gen: 2, clean: true, btree_root_page: 84))
+val w2 = ring.write_slot(1, RingSlot(slot_gen: 2, clean: true, btree_root_page: 84))
 expect(w2.is_ok()).to_equal(true)
 val _ = ring.close()
 var reopened = SharedCheckpointRing.reopen()
 val s0 = reopened.read_slot(0)
 expect(s0.is_ok()).to_equal(true)
 val slot0 = s0.unwrap()
-expect(slot0.gen).to_equal(1)
+expect(slot0.slot_gen).to_equal(1)
 expect(slot0.clean).to_equal(true)
 expect(slot0.btree_root_page).to_equal(42)
 val s1 = reopened.read_slot(1)
 expect(s1.is_ok()).to_equal(true)
 val slot1 = s1.unwrap()
-expect(slot1.gen).to_equal(2)
+expect(slot1.slot_gen).to_equal(2)
 expect(slot1.btree_root_page).to_equal(84)
 ring_clear_persist_callback()
 ```
@@ -203,25 +188,19 @@ ring_clear_persist_callback()
 
 #### latest_clean finds correct slot after device reopen
 
-1. var dev =  make device
-
-2. ring register persist callback
-
-3. ring set block device
-
-4. var ring = SharedCheckpointRing new with size
-
-5. var reopened = SharedCheckpointRing reopen
-   - Expected: s.gen equals `30`
+- var dev =  make device
+- ring register persist callback
+- ring set block device
+- var ring = SharedCheckpointRing new with size
+- var reopened = SharedCheckpointRing reopen
+   - Expected: s.slot_gen equals `30`
    - Expected: s.btree_root_page equals `300`
-
-6. fail
-
-7. ring clear persist callback
+- fail
+- ring clear persist callback
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -231,15 +210,15 @@ var dev = _make_device("ring2")
 ring_register_persist_callback("arena:META_DURABLE")
 ring_set_block_device(dev, 32)
 var ring = SharedCheckpointRing.new_with_size(16)
-val _ = ring.write_slot(0, RingSlot(gen: 10, clean: true, btree_root_page: 100))
-val _ = ring.write_slot(1, RingSlot(gen: 20, clean: false, btree_root_page: 200))
-val _ = ring.write_slot(2, RingSlot(gen: 30, clean: true, btree_root_page: 300))
+val _ = ring.write_slot(0, RingSlot(slot_gen: 10, clean: true, btree_root_page: 100))
+val _ = ring.write_slot(1, RingSlot(slot_gen: 20, clean: false, btree_root_page: 200))
+val _ = ring.write_slot(2, RingSlot(slot_gen: 30, clean: true, btree_root_page: 300))
 val _ = ring.close()
 var reopened = SharedCheckpointRing.reopen()
 val latest = reopened.latest_clean()
 match latest:
     case Some(s):
-        expect(s.gen).to_equal(30)
+        expect(s.slot_gen).to_equal(30)
         expect(s.btree_root_page).to_equal(300)
     case None:
         fail("checkpoint ring latest_clean returned None")

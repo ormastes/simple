@@ -42,6 +42,9 @@ helper_functions_spec
 
 #### creates new language server
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -51,12 +54,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: val server = WasmLanguageServer.new()
 val server_created = true
-expect(server_created)
+assert_true(server_created)
 ```
 
 </details>
 
 #### returns configured server instance
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -67,7 +73,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: return server
 val server_returned = true
-expect(server_returned)
+assert_true(server_returned)
 ```
 
 </details>
@@ -75,6 +81,9 @@ expect(server_returned)
 ### Capability Enablement
 
 #### enables completion capability
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -85,12 +94,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: server.capabilities.enable_completion()
 val completion_enabled = true
-expect(completion_enabled)
+assert_true(completion_enabled)
 ```
 
 </details>
 
 #### enables hover capability
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -101,12 +113,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: server.capabilities.enable_hover()
 val hover_enabled = true
-expect(hover_enabled)
+assert_true(hover_enabled)
 ```
 
 </details>
 
 #### enables definition capability
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -117,12 +132,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: server.capabilities.enable_definition()
 val definition_enabled = true
-expect(definition_enabled)
+assert_true(definition_enabled)
 ```
 
 </details>
 
 #### enables references capability
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -133,12 +151,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: server.capabilities.enable_references()
 val references_enabled = true
-expect(references_enabled)
+assert_true(references_enabled)
 ```
 
 </details>
 
 #### enables symbols capability
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -149,12 +170,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: server.capabilities.enable_symbols()
 val symbols_enabled = true
-expect(symbols_enabled)
+assert_true(symbols_enabled)
 ```
 
 </details>
 
 #### enables formatting capability
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -165,12 +189,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: server.capabilities.enable_formatting()
 val formatting_enabled = true
-expect(formatting_enabled)
+assert_true(formatting_enabled)
 ```
 
 </details>
 
 #### enables all 6 capabilities
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -181,7 +208,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: all enable_* calls
 val all_enabled = true
-expect(all_enabled)
+assert_true(all_enabled)
 ```
 
 </details>
@@ -192,6 +219,9 @@ expect(all_enabled)
 
 #### creates new language server
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -201,12 +231,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: val server = WasmLanguageServer.new()
 val server_created = true
-expect(server_created)
+assert_true(server_created)
 ```
 
 </details>
 
 #### returns minimal server instance
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -217,7 +250,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: return server
 val server_returned = true
-expect(server_returned)
+assert_true(server_returned)
 ```
 
 </details>
@@ -225,6 +258,9 @@ expect(server_returned)
 ### Limited Capabilities
 
 #### enables completion capability
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -235,12 +271,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: server.capabilities.enable_completion()
 val completion_enabled = true
-expect(completion_enabled)
+assert_true(completion_enabled)
 ```
 
 </details>
 
 #### enables hover capability
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -251,12 +290,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: server.capabilities.enable_hover()
 val hover_enabled = true
-expect(hover_enabled)
+assert_true(hover_enabled)
 ```
 
 </details>
 
 #### enables only 2 capabilities
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -267,7 +309,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: only 2 enable_* calls
 val limited = true
-expect(limited)
+assert_true(limited)
 ```
 
 </details>
@@ -275,6 +317,9 @@ expect(limited)
 ### Comparison
 
 #### minimal has fewer capabilities than full
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -285,12 +330,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: comparing 2 vs 6 capabilities
 val fewer_capabilities = 2 < 6
-expect(fewer_capabilities)
+assert_true(fewer_capabilities)
 ```
 
 </details>
 
 #### minimal includes completion
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -301,12 +349,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: both have completion
 val has_completion = true
-expect(has_completion)
+assert_true(has_completion)
 ```
 
 </details>
 
 #### minimal includes hover
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -317,12 +368,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: both have hover
 val has_hover = true
-expect(has_hover)
+assert_true(has_hover)
 ```
 
 </details>
 
 #### minimal excludes definition
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -333,12 +387,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: only full has definition
 val excludes_definition = true
-expect(excludes_definition)
+assert_true(excludes_definition)
 ```
 
 </details>
 
 #### minimal excludes references
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -349,12 +406,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: only full has references
 val excludes_references = true
-expect(excludes_references)
+assert_true(excludes_references)
 ```
 
 </details>
 
 #### minimal excludes symbols
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -365,12 +425,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: only full has symbols
 val excludes_symbols = true
-expect(excludes_symbols)
+assert_true(excludes_symbols)
 ```
 
 </details>
 
 #### minimal excludes formatting
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -381,7 +444,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Branch: only full has formatting
 val excludes_formatting = true
-expect(excludes_formatting)
+assert_true(excludes_formatting)
 ```
 
 </details>

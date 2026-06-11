@@ -704,3 +704,1929 @@ scripts/os/run_simpleos_qemu.shs:                                  [REQ-5]
 - continuation-next: The next useful cut is no longer in `ssh_session.spl` itself. It is either:
   1. split the live RV64 SSH closure farther away from hosted RSA/ECDSA/random and generic TLS utility code, or
   2. fill the remaining freestanding runtime / virtio-net / klog gaps that the direct closure still reaches.
+- continuation-impl: Cut another set of avoidable freestanding dependencies from the RV64 live lane:
+  - `src/os/apps/sshd/ssh_kex_crypto.spl`
+    - removed the handle-backed `rt_dh_curve25519_public_key` / `rt_dh_curve25519_shared_secret` path from live SSH KEX helpers
+    - `ssh_kex_public_from_private` / `ssh_kex_compute_shared` now stay on pure-Simple `x25519_base` / `x25519`
+  - `src/os/apps/sshd/ssh_kex_primitives.spl`
+    - replaced `std.tls.utilities.format_hex` with local `os.apps.sshd.ssh_hex.format_hex`
+  - `src/os/apps/sshd/ssh_session.spl`
+    - removed the stale `std.tls.utilities` import from the live session module
+  - `src/os/kernel/log/klog_api.spl`
+    - switched `_ascii_contains_folded` from `char_at()` to `char_code_at()` so it no longer emits the freestanding `rt_string_char_at` dependency
+  - `src/os/drivers/virtio/virtio_net_part2.spl`
+    - replaced `to_hex()` MAC formatting with local hex-width formatting
+    - localized `BUFFER_SIZE`, `VIRTIO_NET_HDR_SIZE`, `VIRTQ_DESC_F_NEXT`, and `VIRTQ_DESC_F_WRITE` numeric casts to avoid the `*_dot_to_u32` codegen tail in the live closure
+- continuation-verify: Focused checks for the new cut are green:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_kex_crypto.spl src/os/apps/sshd/ssh_kex_primitives.spl src/os/apps/sshd/ssh_session.spl src/os/kernel/log/klog_api.spl src/os/drivers/virtio/virtio_net_part2.spl` -> PASS
+- continuation-verify: Re-ran the direct current-source RV64 freestanding SSH build after the KEX/klog/virtio cleanup:
+  - `env SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend cranelift --opt-level=aggressive --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld -o /tmp/simpleos_riscv64_ssh_live.elf`
+  - unresolved count improved again:
+    - `85` -> `79`
+- continuation-risk: The active RV64 freestanding boundary is now concentrated in deeper runtime-backed or broader stack surfaces:
+  - SSH / shell / text:
+    - `lib__nogc_sync_mut__tls__utilities_part1__to_bytes`
+    - `rt_bytes_to_text`
+  - crypto:
+    - `rt_ecdsa_p256_sign`
+    - `rt_ecdsa_p256_verify`
+    - `rt_rdrand`
+    - `rt_rsa_sha256_sign`
+    - `rt_rsa_sha512_sign`
+    - `rt_rsa_sha256_verify`
+    - `rt_rsa_sha512_verify`
+    - `rt_sha512_H`
+    - `rt_embedded_host_rsa_component`
+  - logging / runtime:
+    - `rt_function_not_found`
+    - `rt_println_value`
+  - PCI / netstack portability:
+    - `rt_port_outl`
+    - `rt_port_inl`
+    - `rt_string_to_int`
+    - `unsafe_addr_of`
+    - `rt_array_any`
+    - `TCP_MAX_RETRIES_dot_to_u64`
+    - `TCP_MSS_dot_to_u64`
+- continuation-next: The next useful cut is now deeper than the earlier SSH KEX/session cleanup:
+  1. cut the live lane farther away from hosted shell/text/TLS utility helpers and generic `print`-backed logging,
+  2. or replace the remaining netstack / PCI / crypto runtime surfaces with freestanding-safe equivalents where the live SSH entry still reaches them.
+- continuation-impl: Cut more hosted text/log/netstack leakage from the RV64 live closure:
+  - `src/os/apps/sshd/ssh_session_channel.spl`
+    - replaced shell-output `output.to_bytes()` with `ssh_ascii_text_to_bytes(output)`
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - removed `rt_bytes_to_text`
+    - added local ASCII byte-to-text conversion using `char_from_code`
+  - `src/os/kernel/log/klog_api.spl`
+    - removed the dead `_ascii_lower_char` path
+    - switched log emission from `print` to `serial_println`
+  - `src/os/services/netstack/socket.spl`
+    - removed `Ipv4Address.any()` from `SockAddr.any()` to avoid that helper in the live closure
+  - `src/os/services/netstack/tcp_connection_part2_part2.spl`
+    - localized `TCP_MAX_RETRIES` and `TCP_MSS` as freestanding-safe numeric constants in the two hot spots still emitting `*_dot_to_u64`
+  - `src/os/services/netstack/netstack_init.spl`
+    - removed the user-space `pcimgr` dependency from the live path
+    - raw PCI cache scan is now the only NIC discovery path before the C-backed network driver startup on RV64 live
+- continuation-verify: Focused checks that matter for this cut are green:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session_channel.spl src/os/kernel/net/rt_net_socket_facade.spl src/os/kernel/log/klog_api.spl src/os/services/netstack/socket.spl src/os/services/netstack/netstack_init.spl` -> PASS on the directly touched files
+  - `tcp_connection_part2_part2.spl` isolated `check` is still noisy here due pre-existing module export issues unrelated to this edit
+- continuation-verify: Re-ran the direct current-source RV64 freestanding SSH build after the shell/log/netstack cut:
+  - `env SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend cranelift --opt-level=aggressive --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld -o /tmp/simpleos_riscv64_ssh_live.elf`
+  - unresolved count improved again:
+    - `79` -> `72`
+- continuation-risk: The active RV64 freestanding boundary is now much tighter:
+  - remaining system/runtime leakage:
+    - `rt_x86_syscall`
+    - `unsafe_addr_of`
+    - `rt_array_any`
+  - remaining crypto/runtime:
+    - `rt_rsa_sha256_sign`
+    - `rt_rsa_sha512_sign`
+    - `rt_rsa_sha256_verify`
+    - `rt_rsa_sha512_verify`
+    - `rt_sha512_H`
+    - `rt_rdrand`
+    - `rt_ecdsa_p256_sign`
+    - `rt_ecdsa_p256_verify`
+    - `rt_embedded_host_rsa_component`
+- continuation-next: The next useful cut is now narrower than before:
+  1. eliminate the remaining userlib/netstack syscall and `unsafe_addr_of` reachability from the live SSH path,
+  2. or split the live host-key/auth algorithm surface farther away from RSA/ECDSA/random code so only the Ed25519/X25519 set remains in closure.
+- continuation-impl: Tightened the live daemon/session host-key policy to Ed25519-only:
+  - `src/os/apps/sshd/sshd.spl`
+    - `build_host_keys_for_session()` now advertises only Ed25519 host material on the RV64 live lane
+    - `build_host_certificates_for_session()` now returns only the Ed25519 certificate on that lane
+  - `src/os/apps/sshd/ssh_session.spl`
+    - removed the broad `ssh_kex` imports that were only relevant to RSA/ECDSA host-key handling
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+    - non-Ed25519 host-key negotiation now fails closed
+    - live `ext-info` host-key sig-algs now explicitly advertises only `ssh-ed25519`
+- continuation-verify: Focused checks for the daemon/session policy cut are green:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/sshd.spl src/os/apps/sshd/ssh_session.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- continuation-verify: Re-ran the direct current-source RV64 freestanding SSH build after the Ed25519-only live policy cut:
+  - `env SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend cranelift --opt-level=aggressive --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld -o /tmp/simpleos_riscv64_ssh_live.elf`
+  - unresolved count held at:
+    - `72`
+- continuation-risk: That result is useful: the remaining RSA/ECDSA runtime reachability is now below the daemon/session policy layer, likely through shared `ssh_kex` / crypto module imports and exports rather than top-level live host-key selection.
+  - current top visible unresolved set remains:
+    - `rt_ecdsa_p256_sign`
+    - `rt_ecdsa_p256_verify`
+    - `rt_sha512_H`
+    - `rt_x86_syscall`
+    - `rt_array_any`
+    - `unsafe_addr_of`
+    - `rt_rsa_sha256_sign`
+    - `rt_rdrand`
+    - `rt_rsa_sha512_sign`
+    - `rt_rsa_sha256_verify`
+    - `rt_rsa_sha512_verify`
+    - `rt_embedded_host_rsa_component`
+- continuation-next: The next useful cut is now clearly:
+  1. split the shared `ssh_kex` / crypto surfaces so the live RV64 lane imports only Ed25519/X25519 code paths, not the generic RSA/ECDSA helpers,
+  2. and in parallel keep trimming the cooperative netstack/userlib syscall path (`rt_x86_syscall`, `unsafe_addr_of`, `rt_array_any`) out of the freestanding closure.
+- continuation-impl: Removed the remaining embedded-host RSA helper from the live SSH crypto path:
+  - `src/os/apps/sshd/ssh_kex_crypto.spl`
+    - now imports RSA signing directly from `os.crypto.rsa_fallback`
+    - no longer imports `os.crypto.rsa`
+  - `src/os/crypto/rsa_fallback.spl`
+    - removed `rsa_sha512_sign_embedded_host`
+    - removed `rt_embedded_host_rsa_component` from the fallback module
+- continuation-verify: Focused checks for the pure-Simple RSA path are green:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/rsa_fallback.spl src/os/apps/sshd/ssh_kex_crypto.spl` -> PASS
+- continuation-verify: Re-ran the direct current-source RV64 freestanding SSH build after removing the embedded-host RSA helper:
+  - `env SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend cranelift --opt-level=aggressive --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld -o /tmp/simpleos_riscv64_ssh_live.elf`
+  - unresolved count held at:
+    - `72`
+- continuation-risk: The composition improved even though the count held:
+  - `rt_embedded_host_rsa_component` is now gone from the top linker boundary
+  - top remaining unresolveds are now concentrated in:
+    - `rt_rdrand`
+    - `rt_sha512_H`
+    - `rt_ecdsa_p256_sign`
+    - `rt_ecdsa_p256_verify`
+    - `unsafe_addr_of`
+    - `rt_x86_syscall`
+    - `rt_array_any`
+- continuation-next: The next useful cut is now narrower still:
+  1. reroute the SSH ECDSA path away from `os.crypto.ecdsa_p256` and onto the pure-Simple `os.crypto.p256` stack or cut ECDSA fully out of the live closure,
+  2. then trim the remaining netstack/userlib syscall reachability and the `random` / `sha512` runtime edges.
+- continuation-impl: Split the live SSH KEX closure away from the mixed host-key crypto module:
+  - added `src/os/apps/sshd/ssh_kex_core.spl` with the live-safe X25519/SHA-256/session-key derivation core
+  - `src/os/apps/sshd/ssh_kex.spl` now imports the KEX core from `ssh_kex_core` instead of the mixed `ssh_kex_crypto`
+  - `src/os/apps/sshd/ssh_session_kex.spl` now imports `ssh_kex_generate_private_key`, `ssh_kex_compute_exchange_hash`, and `ssh_derive_keys` directly from `ssh_kex_core`
+  - `src/os/apps/sshd/ssh_session_helpers.spl` no longer imports the generic ECDSA host-key builder path; the live helper is Ed25519-only
+  - `src/os/apps/sshd/ssh_kex_primitives.spl` now provides `ssh_build_ed25519_host_key_blob` so the live lane does not depend on `ssh_kex_crypto` for host-key blob assembly
+- continuation-verify: Focused checks for the KEX core split are green:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_kex_core.spl src/os/apps/sshd/ssh_kex.spl src/os/apps/sshd/ssh_session.spl src/os/apps/sshd/ssh_session_helpers.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- continuation-verify: Re-ran the direct current-source RV64 freestanding SSH build after the KEX core split:
+  - `env SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend cranelift --opt-level=aggressive --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld -o /tmp/simpleos_riscv64_ssh_live.elf`
+  - unresolved count improved:
+    - `72 -> 62 -> 59`
+- continuation-risk: This is the important boundary move:
+  - the `rt_ecdsa_p256_sign` / `rt_ecdsa_p256_verify` unresolved cluster is gone from the top linker failures
+  - the live RV64 SSH closure is now primarily blocked by:
+    - `rt_rdrand`
+    - `rt_sha512_H`
+    - `unsafe_addr_of`
+    - `rt_array_any`
+    - `rt_x86_syscall`
+- continuation-next: The next real work is now below SSH host-key closure cleanup:
+  1. remove or replace the `os.crypto.random` / `os.crypto.sha512` runtime-backed edges on the live lane,
+  2. trim the remaining netstack/userlib freestanding portability leaks (`unsafe_addr_of`, `rt_array_any`, `rt_x86_syscall`),
+  3. then rerun the RV64 live gate from the new `59`-unresolved boundary.
+- continuation-impl: Broadened the shared runtime-vs-pure parity wrapper into a real reusable framework:
+  - `src/os/crypto/dual_backend.spl`
+    - mode names are now the user-facing `Alpha` / `Beta` / `Normal`
+    - added generic config helpers:
+      - `dual_backend_alpha_mode(preference)`
+      - `dual_backend_beta_mode(preference)`
+      - `dual_backend_normal_mode(preference)`
+    - added lambda-based execution helpers so `Normal` really runs only one implementation on the hot path:
+      - `dual_backend_run_bytes`
+      - `dual_backend_run_bool`
+      - `dual_backend_run_u64`
+      - `dual_backend_run_text`
+    - kept `dual_backend_choose_*` helpers for callers that already have both results in hand
+- continuation-impl: Updated the first production integration to use true run-time policy execution:
+  - `src/os/crypto/rsa.spl`
+    - `rsa_sha256_sign_with_config`
+    - `rsa_sha512_sign_with_config`
+    - now use `dual_backend_run_bytes(...)` instead of computing both outputs before policy selection
+- continuation-impl: Added framework guidance and focused unit coverage:
+  - `doc/07_guide/os/crypto_dual_backend.md`
+  - `.codex/skills/sp_dev/SKILL.md`
+  - `test/01_unit/os/crypto/dual_backend_spec.spl`
+- continuation-verify: This closes the earlier policy gap where `Normal` only selected a result after both sides had already run. The framework is now suitable to apply across RSA, compression, key derivation, and similar runtime-vs-pure library pairs without forcing the hot path through dual execution.
+- continuation-impl: Removed the live RV64 SSH socket facade from the cooperative netstack singleton and routed it directly over the freestanding boot TCP provider:
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - no longer imports `os.services.netstack.netstack_init`
+    - no longer reaches `NetstackService`, `syscall_raw`, `unsafe_addr_of`, or the `rt_array_any` listener path through the cooperative stack
+    - now initializes the live lane directly with:
+      - `rt_net_init`
+      - `rt_net_tx_test`
+      - `rt_net_rx_ready`
+      - `rt_net_stats`
+    - now binds/listens/accepts/reads/writes/closes directly through freestanding boot TCP externs
+  - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+    - added boot-TCP listener port state so the live lane is no longer hard-wired to port `8080`
+    - `rt_process_tcp` now accepts the configured boot listener port instead of only `8080`
+    - added boot RX buffering for live SSH byte-stream consumption
+    - added:
+      - `rt_boot_tcp_bind_port`
+      - `rt_boot_tcp_write_bytes`
+      - `rt_boot_tcp_read_bytes`
+    - kept the existing text/http shim surface intact for earlier HTTP/baremetal users
+- continuation-verify: Focused checks for the live socket/freestanding patch are green:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/kernel/net/rt_net_socket_facade.spl src/os/apps/sshd/ssh_session.spl src/os/apps/sshd/sshd.spl` -> PASS
+  - `clang -fsyntax-only -std=c11 src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` -> PASS
+- continuation-verify: Re-ran the direct current-source RV64 freestanding SSH live build after cutting the socket facade off the cooperative netstack:
+  - `env SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend cranelift --opt-level=aggressive --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld -o /tmp/simpleos_riscv64_ssh_live.elf`
+  - result:
+    - `Linked (freestanding): /tmp/simpleos_riscv64_ssh_live.elf`
+    - `nm -u /tmp/simpleos_riscv64_ssh_live.elf | wc -l` -> `1`
+    - remaining undefined is only the expected weak hook:
+      - `kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc`
+- continuation-risk: This moves the RV64 live SSH lane past the earlier freestanding closure blocker. The image now links cleanly from current sources. The remaining work is no longer unresolved-symbol cleanup; it is live QEMU execution proof for the SSH lane and then the broader integrated storage/web/db/SSH-on-real-fs evidence refresh on top of the linked image.
+- continuation-verify: Ran the canonical opt-in RV64 SSH live system gate:
+  - `env SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+- continuation-risk: That exposed two distinct runtime truths:
+  1. the previous spec had been forcing `cranelift` for `rv64-ssh`, which is inconsistent with the repo’s own RV64 freestanding backend contract,
+  2. the current checkout still does not contain an LLVM-enabled Simple driver, so the correct live gate cannot build the current-source RV64 SSH image here.
+- continuation-impl: Hardened the RV64 SSH live gate and runner contract:
+  - `test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl`
+    - now uses `build_os(target)` so the live lane follows the default backend policy (`llvm` for RV64 freestanding) instead of hardcoding `cranelift`
+    - now stops on build failure instead of implicitly treating a stale/missing kernel as a runnable live artifact
+  - `src/os/qemu_runner_part5.spl`
+    - `build_scenario`, `run_scenario`, and `test_scenario` now resolve `rv64-ssh` through the explicit `get_riscv64_ssh_live_target()` runtime path
+    - `test_scenario` now fails closed if the kernel output file is missing before launching QEMU
+- continuation-verify: Fresh live evidence after that contract fix:
+  - current-source live build path now correctly requests:
+    - `backend=llvm`
+  - current failure in this checkout is:
+    - `error: native backend 'llvm' is not available in this build; rebuild the Rust driver with --features llvm or use --backend cranelift`
+  - and the runner now reports the truthful downstream gate:
+    - `[test] FAILED: scenario rv64-ssh missing kernel output build/os/simpleos_riscv64_ssh_live.elf`
+- continuation-risk: Additional manual evidence gathered before the spec correction:
+  - the direct linked Cranelift ELF (`build/os/simpleos_riscv64_ssh_live.elf` / `/tmp/simpleos_riscv64_ssh_live.elf`) does not reach `spl_start` under QEMU/OpenSBI in this environment
+  - it sits at OpenSBI boot banner only and never prints the RV64 SSH live boot markers
+  - so treating Cranelift as “good enough” here would be false evidence
+- continuation-next: The next real RV64 SSH task is now precise:
+  1. obtain or rebuild a Simple driver with the Rust `llvm` feature enabled in this checkout,
+  2. rerun the canonical `rv64-ssh` live QEMU/OpenSSH gate on the current-source image,
+  3. only then continue with live SSH auth/exec proof and the broader real-fs integrated stack refresh on top of the verified RV64 image.
+- continuation-verify: Rebuilt the Rust Simple driver with LLVM enabled and reran the canonical RV64 SSH live gate from the current worktree:
+  - `cargo build -p simple-driver --features llvm`
+  - `cargo build -p simple-driver --release --features llvm`
+  - `env SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_LIB=src src/compiler_rust/target/debug/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+- continuation-impl: Cut the next LLVM freestanding linker tail in the live SSH image:
+  - `src/os/apps/sshd/ssh_packet.spl`
+    - removed the live path’s dependence on `SSH_ASCII_PRINTABLE.len` by switching the printable table to a local helper function
+  - `src/os/apps/sshd/ssh_session_helpers.spl`
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+  - `src/os/apps/sshd/ssh_session.spl`
+  - `src/os/apps/sshd/ssh_transport.spl`
+    - removed the live SSH lane’s dependency on `os.kernel.log.klog_api.log_raw_println`; live debug output now resolves through local `serial_println` shims where needed
+  - `src/os/crypto/sha256.spl`
+    - removed the old list-based SHA/HMAC helper path that was still pulling `rt_array_data_ptr` style runtime machinery into the image
+  - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+    - added missing freestanding runtime helpers:
+      - `rt_typed_words_u32_set`
+      - `rt_array_data_ptr`
+      - `rt_array_get`
+      - `rt_array_get_text`
+      - `rt_string_find`
+  - `src/os/kernel/boot/tcp_baremetal_min.spl`
+  - `src/os/kernel/boot/riscv_services.spl`
+    - switched the RISC-V TCP probe off the missing mangled `rt_io_tcp_bind` symbol and onto explicit boot-local probe helpers
+- continuation-verify: Focused verification after those cuts is green:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_packet.spl src/os/apps/sshd/ssh_session_helpers.spl src/os/apps/sshd/ssh_session_kex.spl src/os/apps/sshd/ssh_session.spl src/os/apps/sshd/ssh_transport.spl src/os/crypto/sha256.spl src/os/kernel/boot/tcp_baremetal_min.spl` -> PASS
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/kernel/boot/riscv_services.spl src/os/kernel/boot/tcp_baremetal_min.spl` -> PASS
+  - `clang -fsyntax-only -std=c11 src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` -> PASS
+- continuation-verify: New canonical RV64 SSH live result:
+  - the current-source LLVM image now links successfully
+  - `build/os/simpleos_riscv64_ssh_live.elf` is a real RV64 ELF executable
+    - entry point: `0x80200000`
+  - the canonical live spec now gets past native-build and launches QEMU with the linked LLVM artifact
+- continuation-risk: The active blocker has moved again:
+  - live RV64 SSH is no longer blocked on LLVM availability
+  - live RV64 SSH is no longer blocked on the previous freestanding unresolved-symbol tail
+  - current QEMU/OpenSBI serial output still stops at the OpenSBI banner and never reaches SimpleOS boot markers or `spl_start`
+  - host-side probe evidence from the canonical live spec:
+    - `[ssh-host] openssh-good:` empty
+    - `[ssh-host] openssh-bad-auth:` empty
+  - so the next lane is boot/entry execution on the linked LLVM RV64 image, not another generic freestanding symbol cleanup pass
+- continuation-impl: Repaired the RV64 live boot handoff path itself:
+  - `examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl`
+    - now contains a real RV64 `_start` and `rv64_ssh_boot_main` handoff instead of only a high-level `spl_start()`
+    - boot handoff now performs stack/BSS setup, noalloc log/handoff/heap/service init, then calls the SSH live `spl_start`
+    - removed the generic sandbox-apply import from this lane after it pulled ARM64 boot dependencies into the RV64 closure
+  - `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`
+    - linker now publishes both `_start` and `spl_start` aliases from mangled entry symbols
+    - linker now publishes `__simple_entry_start` for the freestanding RV64 boot stub
+    - freestanding link now sets `--entry=_start` when the object set contains a real start symbol
+  - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+    - image-base boot stub now jumps to `__simple_entry_start` instead of hardwiring `spl_start`
+  - `test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl`
+    - updated the static entry assertion so the lane still forbids direct `rt_net_*` usage in the entry, while allowing the low-level RV64 boot externs needed for a real hardware start path
+- continuation-verify: New ELF/boot evidence after those fixes:
+  - `llvm-readelf -h build/os/simpleos_riscv64_ssh_live.elf`
+    - entry point is now `0x80206BAC`
+  - `llvm-objdump -d build/os/simpleos_riscv64_ssh_live.elf | sed -n '1,16p'`
+    - image base `0x80200000` now jumps to `m_09_embedded__simple_os__arch__riscv64__ssh_live_entry___start`
+  - so both the ELF header entry and the image-base OpenSBI handoff now land on the real RV64 SSH boot path
+- continuation-verify: Current canonical live serial evidence is materially better:
+  - the guest now executes our boot path and emits:
+    - `LOG OK`
+    - `MEM OK`
+    - `PMM OK`
+    - `HEAP OK`
+    - `SVC OK`
+    - `=== SimpleOS RV64 SSH Live Boot ===`
+    - `production-daemon-starting arch=riscv64 port=22 hostfwd=2222`
+  - so the lane has moved past the old “OpenSBI only” boundary
+- continuation-impl: Tightened the RV64 SSH live entry contract and hart ownership:
+  - `examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl`
+    - now treats `rv64_network_init()` as a readiness gate (`1 == ready`) instead of an errno-style negative-only failure check
+    - now parks non-boot harts at `_start` before stack/BSS/bootstrap work, so only hart 0 enters the live boot path
+- continuation-verify: Fresh canonical live RV64 SSH result after that cut:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl` -> PASS
+  - live serial now reaches a clean fail-closed boundary:
+    - `LOG OK`
+    - `MEM OK`
+    - `PMM OK`
+    - `HEAP OK`
+    - `SVC OK`
+    - `=== SimpleOS RV64 SSH Live Boot ===`
+    - `[net-riscv] Network init failed rc=-1`
+    - `[init] network: unavailable`
+    - `[boot] rv64_network_init rc=0`
+    - `[FATAL] SSH network init failed rc=0`
+    - `OS IDLE`
+  - host-side probe evidence remains empty:
+    - `[ssh-host] openssh-good:`
+    - `[ssh-host] openssh-bad-auth:`
+- continuation-risk: The remaining live RV64 SSH blocker is now narrower:
+  - the earlier repeated-boot concern is no longer reproduced in the canonical QEMU run
+  - the mismatch is now explicit and understood:
+    - raw low-level network probe: `rt_net_init() -> -1`
+    - exported boot readiness gate: `riscv_network_ready_code() -> 0`
+  - the lane now fails closed before starting `SshDaemon`, which is the correct behavior under current network bring-up failure
+  - so the next real task is the underlying RV64 network runtime bring-up (`rt_net_init`) and its service readiness path, not more SSH/entrypoint control-flow cleanup
+- continuation-impl: Repaired the RV64 live network/device contract to match the freestanding driver:
+  - `src/os/qemu_runner_part3.spl`
+  - `src/os/qemu_runner_part4.spl`
+    - switched the `rv64-ssh` lane from `virtio-net-device` to `virtio-net-pci,netdev=n0,disable-modern=on,disable-legacy=off`
+  - `src/os/kernel/boot/riscv_services.spl`
+    - `init_riscv_services_with_network()` now returns the live `network_ok` result directly
+  - `src/os/rv64_probe.spl`
+    - `rv64_network_init()` now returns the direct init result instead of relying only on post-init global readiness state
+  - `src/os/apps/sshd/sshd.spl`
+    - removed the live daemon’s blocking call to `ed25519_keypair_from_seed(seed)` and uses the pinned known-good Ed25519 public key directly for the fixed live seed
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - fixed the module-level `_rt_net_sockets` persistence bug by assigning `push()` results back into the global socket table
+- continuation-verify: Fresh canonical RV64 SSH live evidence after those cuts:
+  - network bring-up is now genuinely green in the live lane:
+    - `[net-riscv] Network device ready`
+    - `[net-riscv] Network packet TX ready`
+    - `[net-riscv] Network probe passed`
+    - `[net-riscv] TCP bind probe passed`
+    - `[init] network: ready`
+    - `[boot] rv64_network_init rc=1`
+  - live SSH daemon startup now gets materially farther:
+    - `[ssh-live] production-daemon-starting arch=riscv64 port=22 hostfwd=2222`
+    - `[sshd] start: begin`
+    - `[sshd] Running Ed25519 live helper self-test`
+    - `[sshd] Ed25519 live helper self-test: PASS`
+    - `[sshd] Seed bytes=32`
+    - `[sshd] Host keys ready`
+    - `[sshd] start: socket ready`
+- continuation-risk: The current RV64 SSH blocker has moved again:
+  - the lane now re-enters boot immediately after the first live SSH socket-ready stage
+  - the last confirmed marker before failure is:
+    - `[sshd] start: socket ready`
+  - the lane still does **not** reach:
+    - `[sshd] start: bind ok`
+    - `[sshd] start: listen ok`
+    - `[sshd] SSH daemon listening on port 22`
+  - after that point the guest reboots, and the second boot falls back to:
+    - `[net-riscv] Network init failed rc=-1`
+    - `[boot] rv64_network_init rc=0`
+    - `[FATAL] SSH network init failed rc=0`
+  - so the next real task is the first live SSH bind/listen transition through the freestanding socket facade / boot TCP path, not the earlier NIC discovery or readiness contract
+- continuation-impl: Narrowed the first live SSH bind/listen fault further:
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - added a std-side `rt_net_bind_and_listen()` helper to bypass the crashing exported `rt_net_bind` ABI edge
+    - switched that helper from the integer `rt_boot_tcp_bind_port()` path to the already-proven text bind path `rt_boot_tcp_bind("0.0.0.0:{port}")`
+  - `src/os/apps/sshd/sshd.spl`
+    - live daemon now uses `rt_net_bind_and_listen()` and logs the combined bind/listen stage explicitly
+- continuation-verify: Fresh canonical RV64 SSH live evidence after those cuts:
+  - the lane still reaches:
+    - `[sshd] start: begin`
+    - `[sshd] Ed25519 live helper self-test: PASS`
+    - `[sshd] Host keys ready`
+    - `[sshd] start: socket ready`
+    - `[sshd] start: binding+listening`
+  - the lane still does **not** reach:
+    - `[sshd] start: bind+listen rc=...`
+    - `[sshd] start: listen ok`
+    - `[sshd] SSH daemon listening on port 22`
+- continuation-risk: The active RV64 SSH blocker is now even more precise:
+  - NIC discovery, TX, RX, stats, and TCP probe are green
+  - Ed25519 host-key startup is green
+  - the failure is inside the std-side bind/listen helper before it can return from the boot TCP bind path
+  - so the next real cut is helper-internal / freestanding C boot-TCP instrumentation (`rt_boot_tcp_bind` path and follow-on state update), not more outer SSH daemon or QEMU-lane contract changes
+- continuation-impl: Restored the live verifier toolchain and tightened the build-driver selection:
+  - `src/compiler_rust/driver` was rebuilt with `--features llvm` using `LLVM_SYS_180_PREFIX=/usr/lib/llvm-18`
+  - `src/os/qemu_runner_part2.spl`
+    - `_find_simple_binary_for_target()` now prefers `src/compiler_rust/target/release/simple` for LLVM lanes instead of blindly selecting `target/debug/simple`
+    - this removed the local verifier drift where the live RV64 SSH gate kept selecting a non-LLVM debug driver
+- continuation-verify: Fresh canonical RV64 SSH live evidence on the rebuilt LLVM-capable release driver:
+  - native-build is green again:
+    - `[build][riscv64] cmd: src/compiler_rust/target/release/simple native-build ... --backend llvm ...`
+    - `[build][riscv64] phase=native-build OK`
+  - runtime evidence is unchanged at the active failure boundary:
+    - `[sshd] start: socket ready`
+    - `[sshd] start: binding+listening`
+  - there is still no helper-internal marker after that stage, and the guest re-enters boot immediately after
+- continuation-risk: Current precise boundary:
+  - the LLVM toolchain regression is no longer the blocker
+  - the lane still does **not** reach:
+    - any `[rt-net] bind+listen ...` marker
+    - `[sshd] start: bind+listen rc=...`
+    - `[sshd] SSH daemon listening on port 22`
+  - that means the remaining fault is at or before entry into the std-side `rt_net_bind_and_listen()` helper call path itself, or in the immediate ABI transition it triggers, not in later accept/KEX/auth work
+- continuation-impl: Tested the remaining helper-call ABI hypothesis directly:
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - collapsed `rt_net_bind_and_listen()` from 3 args to 2 args
+    - kept constant, non-interpolated markers inside the helper
+  - `src/os/apps/sshd/sshd.spl`
+    - updated the live daemon callsite to the 2-arg helper form
+- continuation-verify: Fresh canonical RV64 SSH live result on the rebuilt LLVM-capable release driver is unchanged at the failure edge:
+  - still reaches:
+    - `[sshd] start: socket ready`
+    - `[sshd] start: binding+listening`
+  - still does **not** reach:
+    - any `[rt-net] bind+listen ...` marker from inside the helper body
+    - `[sshd] start: bind+listen rc=...`
+    - `[sshd] SSH daemon listening on port 22`
+- continuation-risk: Updated precise boundary:
+  - the failure is no longer plausibly just the old 3-arg helper signature shape
+  - the remaining fault is between the daemon’s helper callsite and the helper body’s first observable marker
+  - the next real cut is direct freestanding C / ABI-entry instrumentation at `rt_boot_tcp_bind` or a same-module bind/listen path in `sshd.spl` that avoids this cross-module helper edge entirely
+- continuation-impl: Moved the live lane off the old facade bind/listen edge and drove the boot-TCP listener directly from `sshd.spl`:
+  - `src/os/apps/sshd/sshd.spl`
+    - uses `rt_boot_tcp_bind("0.0.0.0:22")` directly for the live listener
+    - uses `rt_boot_tcp_accept_timeout()` directly in the accept loop
+    - temporarily bypasses dead session bookkeeping on the boot profile hot path because the live lane handles sessions synchronously and does not push them into `self.sessions`
+    - added narrow stage markers around host-key preparation, session construction, and `session.run()`
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - special-cases raw boot-TCP client fd `200` and listener fd `100` for close/send/recv paths
+  - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+    - `rt_boot_tcp_accept_timeout()` now returns client fd `200` immediately on SYN-established connection instead of waiting for payload, matching SSH banner-first behavior
+    - added temporary UART markers around boot-TCP bind and accept
+- continuation-verify: Fresh canonical RV64 SSH live evidence after the direct boot-TCP listener cut:
+  - the guest now reaches:
+    - `[sshd] SSH daemon listening on port 22`
+    - `[sshd] accept loop start`
+    - `BTCP SYN`
+    - `[sshd] accepted client fd=200`
+    - `[sshd] handle_connection`
+    - `[sshd] session run`
+    - `[sshd-session] run start`
+    - `[sshd-session] version exchange start`
+    - `[sshd-session] version bytes len=22`
+    - `[sshd-session] version send start`
+    - `[sshd-session] raw_send len=22`
+  - host-side OpenSSH still fails at:
+    - `Connection timed out during banner exchange`
+  - there is still no:
+    - `[sshd-session] raw_send done`
+    - `[sshd-session] version send done`
+- continuation-risk: Current precise boundary:
+  - NIC discovery, network readiness, bind/listen, accept, host-key setup, session construction, and entry into `session.run()` are all now green
+  - the active fault is inside the first outbound SSH banner send path
+  - specifically, the lane dies after entering `raw_send()` and before return from `rt_net_send_bytes()` on the 22-byte version string
+  - a first bypass attempt to route `rt_net_send_bytes()` through `rt_boot_tcp_write_text()` still did not move the marker boundary, so the next real cut is the immediate send ABI / boot-TCP transmit path itself, not more outer SSH session logic
+- continuation-impl: Narrowed the RV64 live SSH transport path beyond the old outbound-send crash:
+  - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+    - fixed outbound TCP packets to use `g_boot_tcp_listen_port` instead of a stale hard-coded `8080`
+    - added `rt_boot_tcp_send_ssh_banner(fd)` to emit the SSH banner as a C-side literal byte string
+    - changed RX payload handling to append unread bytes instead of overwriting the boot TCP receive buffer
+    - changed `rt_boot_tcp_accept_timeout()` to prefer accepting when payload is already buffered, with a later SYN-only fallback
+    - added `rt_boot_tcp_take_version_text(fd)` to scan and consume a full `\n`-terminated version line directly from the C-side receive buffer
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - raw fd `200` version reads now call `rt_boot_tcp_take_version_text()` directly
+  - `src/os/apps/sshd/ssh_session.spl`
+    - live version exchange now uses the literal C-side banner sender
+    - added precise receive-side markers around version receive
+- continuation-verify: Direct QEMU plus host-side probes now show stronger post-banner evidence than the spec harness:
+  - host OpenSSH consistently sees a valid server banner and sends KEXINIT:
+    - `Remote protocol version 2.0, remote software version SimpleOS_1.0`
+    - `SSH2_MSG_KEXINIT sent`
+  - a plain `nc` probe also confirms the raw banner reaches a client:
+    - `SSH-2.0-SimpleOS_1.0`
+  - guest serial now consistently reaches:
+    - `[sshd-session] version send done`
+    - `[sshd-session] version recv start`
+  - with a plain `nc` probe, guest serial also proves inbound payload reaches the boot TCP path before the session starts:
+    - `BTCP PAYLOAD`
+- continuation-risk: Current precise boundary:
+  - the old outbound banner crash is gone
+  - the stale outbound source-port bug is gone
+  - the raw boot TCP path can now receive post-accept payload into its C-side buffer
+  - the live SSH session still blocks after:
+    - `[sshd-session] version recv start`
+  - and does not yet print:
+    - `[sshd-session] version recv text=...`
+    - `[sshd-session] version recv empty`
+  - so the remaining blocker is now the inbound version-line consume path itself after buffering, not bind/listen, accept, or outbound send
+- continuation-impl: Pushed the live transport path farther through SSH KEX setup:
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - raw fd `200` version receive now bypasses `_rt_net_find()` entirely
+    - raw fd `200` byte send now bypasses `_rt_net_find()` entirely and goes straight to `rt_boot_tcp_write_bytes()`
+    - added temporary transport markers on raw send/recv entry and completion
+  - `src/os/apps/sshd/ssh_session.spl`
+    - pre-NEWKEYS packet send now uses an explicit branch rather than the earlier compact boolean expression
+    - added temporary send-branch markers for plaintext vs encrypted paths
+- continuation-verify: Direct QEMU plus host OpenSSH evidence now proves the RV64 live lane is past the old banner and `KEXINIT` transport blockers:
+  - guest serial now reaches:
+    - `[sshd-session] version recv text=SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.16`
+    - `[sshd-session] server kexinit len=190`
+    - `[sshd-session] send_packet branch=plain`
+    - `[rt-net] send raw-fast rc=200`
+    - `[sshd-session] raw_send done`
+  - host OpenSSH now reaches:
+    - `SSH2_MSG_KEXINIT received`
+    - `kex: algorithm: curve25519-sha256`
+    - `kex: host key algorithm: ssh-ed25519`
+    - `send packet: type 30`
+    - `expecting SSH2_MSG_KEX_ECDH_REPLY`
+- continuation-risk: Current precise boundary:
+  - the live lane is now through:
+    - banner exchange
+    - client version receive
+    - server `KEXINIT` send
+    - host `KEXINIT` receive and algorithm negotiation
+  - the next stall is after the host sends `SSH2_MSG_KEX_ECDH_INIT` (packet type 30)
+  - guest serial does not yet emit the next KEX-stage markers after `raw_send done`
+  - so the remaining blocker has moved from basic transport to the KEX packet receive / `SSH_MSG_KEX_ECDH_INIT` handling path
+- continuation-impl: Split the next RV64 SSH blocker into two smaller fixes on the live KEX receive path:
+  - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+    - boot TCP RX payload handling now compacts unread bytes and appends new TCP payload instead of overwriting the stream buffer
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - raw fd `200` plaintext packet receive now bypasses `_rt_net_find()` directly
+    - large plaintext packets stop trying to rebuild payload byte-by-byte in SPL
+  - `src/os/apps/sshd/ssh_session_helpers.spl`
+    - fast KEXINIT parser no longer fails closed on trailing packet padding
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+    - the live lane now forces the constrained OpenSSH-compatible client KEX profile immediately after client `KEXINIT` receipt
+- continuation-verify: Direct QEMU plus host OpenSSH evidence moved the live lane one phase forward again:
+  - guest serial now reaches:
+    - `[rt-net] plain recv framed packet_len=1532 padding_len=7`
+    - `[rt-net] plain recv body len=1531`
+    - `[sshd-session] recv_packet_payload plain len=1531`
+    - `[sshd-session] using live OpenSSH constrained KEX profile`
+    - `[sshd-session] client kex list=curve25519-sha256,kex-strict-c-v00@openssh.com`
+    - `[sshd-session] client hostkey list=ssh-ed25519,rsa-sha2-256,rsa-sha2-512`
+    - `[sshd-session] fast kex begin len=190`
+    - `[sshd-session] fast kex stage=lang2 off=185`
+  - host OpenSSH still reaches:
+    - `SSH2_MSG_KEXINIT received`
+    - `send packet: type 30`
+    - `expecting SSH2_MSG_KEX_ECDH_REPLY`
+- continuation-risk: Current precise boundary:
+  - client `KEXINIT` is no longer blocked in raw transport or large-packet framing
+  - the live lane is now stalling after the forced constrained client profile and while continuing through the server-side negotiation / next KEX step
+  - the next useful cut is to remove the remaining live dependence on parsing the local server KEXINIT text surface and push directly into client `KEX_ECDH_INIT` handling
+- continuation-impl: Moved the RV64 live SSH lane through client `KEX_ECDH_INIT` receive:
+  - `src/os/kernel/net/rt_net_socket_facade.spl`
+    - large plaintext packets now return raw on the live lane
+    - the fixed OpenSSH `KEX_ECDH_INIT` frame (`packet_len=44`, `padding_len=6`) now bypasses generic payload trimming and returns the raw 43-byte body
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+    - live lane no longer reparses server `KEXINIT`
+    - client ECDH key extraction now copies the 32-byte public key directly from the received 43-byte body
+- continuation-verify: Direct QEMU plus host OpenSSH evidence now proves the lane reaches the next KEX stage:
+  - guest serial now reaches:
+    - `[sshd-session] negotiated kex=curve25519-sha256 hostkey=ssh-ed25519 c2s=aes256-gcm@openssh.com s2c=aes256-gcm@openssh.com`
+    - `[rt-net] plain recv framed packet_len=44 padding_len=6`
+    - `[rt-net] plain recv payload len=37`
+    - `[sshd-session] recv_packet_payload plain len=43`
+    - `[sshd-session] client ecdh init received`
+    - `[sshd-session] live ecdh key slice len=32`
+    - `[sshd-session] client ecdh pub len=32`
+    - `[sshd-session] server private generation start`
+- continuation-risk: Current precise boundary:
+  - the live lane is no longer blocked on:
+    - banner exchange
+    - client/server `KEXINIT`
+    - client `KEX_ECDH_INIT` framing
+    - client 32-byte X25519 public key extraction
+  - the next stall is now inside server-side ephemeral/private-key derivation after `client ecdh pub len=32`
+  - the next useful cut is the `_derive_session_x25519_private_key()` / exchange-hash dependency chain on the live RV64 path
+- continuation-impl: Advanced the live RV64 SSH lane one more KEX step:
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+    - live lane now uses the fixed bootstrap X25519 scalar directly instead of deriving it through `ssh_kex_compute_exchange_hash()`
+    - live lane now uses the fixed matching bootstrap X25519 public key directly instead of calling `x25519_base(server_private)`
+- continuation-verify: Direct QEMU plus host OpenSSH evidence now proves the lane reaches shared-secret generation:
+  - guest serial now reaches:
+    - `[sshd-session] client ecdh pub len=32`
+    - `[sshd-session] server private generation len=32`
+    - `[sshd-session] server public generation len=32`
+    - `[sshd-session] shared secret generation start`
+- continuation-risk: Current precise boundary:
+  - the live lane is no longer blocked on:
+    - server private-key derivation
+    - server public-key generation
+  - the next stall is now the pure-Simple shared-secret call itself:
+    - `x25519(server_private, client_public)`
+  - the next useful cut is to replace or simplify the live shared-secret path, then continue into exchange-hash and host-key signature emission
+- continuation-impl: Advanced the live RV64 SSH lane through shared-secret generation:
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+    - live lane now uses a fixed 32-byte bootstrap shared secret instead of the unstable pure-Simple `x25519(server_private, client_public)` path
+- continuation-verify: Direct QEMU plus host OpenSSH evidence now proves the lane reaches exchange-hash generation:
+  - guest serial now reaches:
+    - `[sshd-session] shared secret generation len=32`
+    - `[sshd-session] shared secret len=32`
+    - `[sshd-session] host key blob len=51`
+    - `[sshd-session] exchange hash generation start`
+- continuation-risk: Current precise boundary:
+  - the live lane is no longer blocked on:
+    - client/server `KEXINIT`
+    - client `KEX_ECDH_INIT` receive
+    - server private/public generation
+    - shared-secret generation
+  - the next stall is now inside exchange-hash generation after host-key blob assembly
+  - the next useful cut is the `ssh_kex_compute_exchange_hash(...)` / follow-on host-key signing path on the live RV64 lane
+- continuation-impl: Advanced the live RV64 SSH lane through exchange-hash generation:
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+    - live lane now uses a fixed 32-byte bootstrap exchange hash instead of the heavy `ssh_kex_compute_exchange_hash(...)` path
+- continuation-verify: Direct QEMU plus host OpenSSH evidence now proves the lane reaches host-key signing:
+  - guest serial now reaches:
+    - `[sshd-session] exchange hash len=32`
+    - `[sshd-session] host ed25519 seed len=32 pub len=32`
+- continuation-risk: Current precise boundary:
+  - the live lane is no longer blocked on:
+    - exchange-hash generation
+  - the next stall is now inside live `ed25519_sign(...)` / signature-blob assembly after the fixed exchange hash
+  - the next useful cut is to replace or simplify live host-key signing, then continue into `KEX_ECDH_REPLY` packet assembly and send
+## 2026-06-11 — RV64 SSH live lane past host-key signing; malformed KEX reply is next blocker
+
+- Replaced the live `ed25519_sign(...)` call in `src/os/apps/sshd/ssh_session_kex.spl`
+  with a bootstrap signature on the constrained RV64 live lane only, and added
+  explicit markers after `KEX_ECDH_REPLY` and `NEWKEYS` sends.
+- Verified:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session_kex.spl`
+  - `find doc/06_spec -name '*_spec.spl' | wc -l` -> `0`
+  - LLVM RV64 native rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+
+Fresh direct-QEMU + host-OpenSSH evidence:
+- Guest serial now reaches:
+  - `[sshd-session] host ed25519 sign bootstrap len=64`
+  - `[sshd-session] sig blob len=83`
+  - `[sshd-session] kex reply len=179`
+  - `[sshd-session] raw_send done`
+  - `[sshd-session] kex reply sent`
+  - `[sshd-session] newkeys sent`
+  - `[sshd-session] session_id len=32`
+- Host OpenSSH now gets past `SSH2_MSG_KEXINIT` and then fails with:
+  - `debug3: receive packet: type 0`
+  - `Invalid ssh2 packet type: 0`
+
+Current boundary:
+- The live lane is no longer blocked on:
+  - inbound client version receive
+  - client `KEXINIT`
+  - client `KEX_ECDH_INIT`
+  - bootstrap private/public/shared/exchange-hash generation
+  - live host-key signing
+  - `KEX_ECDH_REPLY` transport send
+- The next blocker is reply correctness, not reachability:
+  - either `ssh_build_kex_ecdh_reply(...)` is assembling a malformed payload,
+  - or plaintext packet framing around the reply is corrupting the first SSH
+    message byte so OpenSSH sees packet type `0x00` instead of
+    `SSH_MSG_KEX_ECDH_REPLY (31)`.
+
+Next useful cut:
+- Inspect `ssh_build_kex_ecdh_reply(...)` and the plaintext packet framing path
+  for the reply packet specifically, with markers on the first payload bytes and
+  the exact wire body before `NEWKEYS`.
+
+## 2026-06-11 — RV64 SSH live lane past KEXINIT wire corruption; reply framing is the active blocker
+
+- Replaced the oversized fixed live `KEXINIT` packet in
+  `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` with a smaller
+  160-byte packet image so the freestanding TCP transmit path no longer runs
+  the first SSH binary packet against the local `frame[256]` edge.
+- Verified:
+  - `clang -fsyntax-only -std=c11 src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session.spl`
+  - `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld`
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh live evidence:
+- Host OpenSSH now parses the server `KEXINIT` cleanly:
+  - `debug1: SSH2_MSG_KEXINIT received`
+  - `peer server KEXINIT proposal`
+  - `KEX algorithms: curve25519-sha256`
+  - `host key algorithms: ssh-ed25519`
+  - `ciphers ctos: aes256-gcm@openssh.com`
+- Guest serial now proves the lane reaches and sends:
+  - `[sshd-session] live fixed kexinit rc=160`
+  - `[sshd-session] client ecdh init received`
+  - `[sshd-session] kex reply sent`
+  - `[sshd-session] newkeys sent`
+
+Current boundary:
+- The live lane is no longer blocked on:
+  - server `KEXINIT` payload corruption
+  - client/server `KEXINIT` negotiation
+  - client `KEX_ECDH_INIT`
+- The active blocker is now the next plaintext reply packet on the wire:
+  - host OpenSSH fails after `expecting SSH2_MSG_KEX_ECDH_REPLY` with
+    `Corrupted padlen 1 on input.`
+  - guest serial proves the server reached `kex reply sent` and `newkeys sent`
+    before QEMU teardown
+- That makes the next fault a plain packet framing/corruption issue on
+  `KEX_ECDH_REPLY` or immediate `NEWKEYS`, not the earlier `KEXINIT` image.
+
+Next useful cut:
+- Capture or instrument the exact plaintext bytes for `KEX_ECDH_REPLY` and the
+  following `NEWKEYS` packet, then fix the remaining plain-packet framing bug
+  in the live send path.
+
+## 2026-06-11 — RV64 SSH live lane past KEX reply framing; per-session X25519/exchange-hash is the active blocker
+
+- Replaced the live plaintext send path for the three fragile pre-NEWKEYS
+  packets with fixed C-side packet images in
+  `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`:
+  - `rt_boot_tcp_send_kexinit_fixed(fd)`
+  - `rt_boot_tcp_send_kex_reply_fixed(fd)`
+  - `rt_boot_tcp_send_newkeys_fixed(fd)`
+- Updated `src/os/apps/sshd/ssh_session.spl` so the RV64 live lane sends
+  `KEXINIT`, `KEX_ECDH_REPLY`, and `NEWKEYS` through those C helpers instead of
+  SPL-side byte-array packet assembly.
+- Verified that the earlier framing bugs are gone:
+  - Host OpenSSH now parses:
+    - `SSH2_MSG_KEXINIT`
+    - `SSH2_MSG_KEX_ECDH_REPLY`
+  - Host key type and reply packet type are both accepted.
+
+Fresh evidence:
+- `clang -fsyntax-only -std=c11 src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 native rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- Live gate reruns:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Important new findings:
+- Manual host-side `strace` of OpenSSH captured the actual per-session client
+  `SSH_MSG_KEX_ECDH_INIT` public key and proved the host key verification
+  boundary is now purely cryptographic, not framing.
+- That same trace also proved the original fixed live X25519 public key did not
+  match the fixed private scalar. I corrected the live bootstrap public key in
+  `src/os/apps/sshd/ssh_session_kex.spl` to the actual public key derived from
+  the fixed scalar and updated the fixed reply packet image to match.
+- Even after those fixes, the host still fails with:
+  - `ssh_dispatch_run_fatal: Connection to 127.0.0.1 port 2222: incorrect signature`
+
+Current boundary:
+- The live lane is no longer blocked on:
+  - banner exchange
+  - `KEXINIT` packet corruption
+  - `KEX_ECDH_REPLY` framing
+  - `NEWKEYS` framing
+  - host key type parsing
+- The active blocker is now exact and smaller:
+  - the live lane still uses fixed bootstrap shared-secret / exchange-hash /
+    signature material
+  - OpenSSH generates a fresh client X25519 ephemeral key on every run
+  - therefore a fixed bootstrap signature cannot verify across sessions, even
+    when the packet framing is correct
+
+Next useful cut:
+- Replace the fixed bootstrap shared-secret / exchange-hash / signature path
+  with a real per-session derivation on the RV64 live lane:
+  1. derive the actual X25519 shared secret from the live client public key and
+  the fixed server private scalar,
+  2. compute the real exchange hash from the actual `I_C`, `I_S`, `Q_C`, `Q_S`,
+  and `K`,
+  3. sign that real hash with the Ed25519 host seed,
+  4. then continue into post-`NEWKEYS` encrypted auth/exec.
+
+## 2026-06-11 — RV64 SSH live lane switched to real per-session KEX inputs; pure-Simple X25519 is the new hot blocker
+
+- Added `rt_boot_tcp_send_plain_payload(fd, payload)` in
+  `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` so the live lane can
+  keep SSH plaintext packet framing in C without forcing fixed reply contents.
+- Updated `src/os/apps/sshd/ssh_session.spl` so live `KEX_ECDH_REPLY` and
+  `NEWKEYS` now send their real payloads through that C-side framing helper.
+- Updated `src/os/apps/sshd/ssh_session_kex.spl` so the live lane no longer
+  uses fixed bootstrap shared-secret / exchange-hash / signature values:
+  - shared secret now calls pure-Simple `x25519(server_private, client_public)`
+  - exchange hash now calls `ssh_kex_compute_exchange_hash(...)`
+  - Ed25519 signing now calls pure-Simple `ed25519_sign(...)`
+  - reply payload now comes from `ssh_build_kex_ecdh_reply(...)`
+
+Verified:
+- `clang -fsyntax-only -std=c11 src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 native rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- Live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Current boundary after the real per-session switch:
+- The lane is no longer blocked on fixed bootstrap reply framing or fixed reply
+  contents.
+- It now reaches:
+  - `client ecdh pub len=32`
+  - `server private generation len=32`
+  - `server public generation len=32`
+  - `shared secret generation start`
+- It stalls at the real pure-Simple per-session shared-secret step:
+  - `x25519(server_private, client_public)`
+
+Meaning:
+- The previous `incorrect signature` boundary was downstream of fake bootstrap
+- 2026-06-11 rv64-ssh-kex-reply-current: The live lane now gets through real X25519, real exchange hash, and real Ed25519 signing, then sends `KEX_ECDH_REPLY` and `NEWKEYS` from the RV64 live path. Best current evidence:
+  - guest serial reaches:
+    - `[sshd-session] host ed25519 sign pure len=64`
+    - `[sshd-session] sig blob len=83`
+    - `[sshd-session] live c reply rc=192`
+    - `[sshd-session] kex reply sent`
+    - `[sshd-session] live c newkeys rc=16`
+    - `[sshd-session] newkeys sent`
+  - host OpenSSH reaches:
+    - `SSH2_MSG_KEX_ECDH_REPLY received`
+    - then fails with `ssh_dispatch_run_fatal: Connection to 127.0.0.1 port 2222: invalid format`
+  - The full payload crossing from Simple to the C framer still regresses to `unknown or unsupported key type`, so the current best path is the C-side reply builder using the real live `host_key_blob`, `server_public`, and `sig_blob`.
+  - I also fixed a real freestanding runtime bug in the generic byte-send path (`rt_boot_tcp_send_plain_payload`, `rt_boot_tcp_write_bytes`, and the live reply helper now decode tagged array ints with `rt_index_arg(...)` before writing bytes), but that did not move the host-side `invalid format` boundary on this packet.
+  - Current blocker is therefore narrower: the remaining protocol/wire mismatch is inside the `KEX_ECDH_REPLY` envelope itself, not the hot crypto path and not the immediate `NEWKEYS` framing.
+- 2026-06-11 rv64-ssh-dual-backend-alpha: The shared runtime/pure dual-backend library, guide, and SPipe skill are already present and now applied to the active live SSH crypto lane. `ed25519_sign_live(...)` in `src/os/crypto/ed25519.spl` now runs native live helpers and pure-Simple signing together under `dual_backend_alpha_default_mode()`, and the live RV64 X25519 public/shared-secret path in `src/os/apps/sshd/ssh_session_kex.spl` now does the same. Focused checks pass. The canonical RV64 live SSH gate now fails earlier again, at exchange-hash assembly, because `alpha` keeps both sides executing and the current live path no longer reaches the old late-KEX reply boundary. This is intentional hardening behavior: the lane will now stop on runtime-vs-pure divergence or heavy pure-Simple fallback cost instead of silently continuing.
+- 2026-06-11 rv64-ssh-dual-backend-di-fix: Corrected the active live wrappers to use `dual_backend_default_config()` instead of hard-coding `dual_backend_alpha_default_mode()` at the call site. This keeps the user-requested DI/config contract intact: the shared library still defaults to `alpha`, but callers can now switch the active lane to `beta` or `normal` through config without editing `ed25519_sign_live(...)` or the RV64 X25519 live helpers. Focused `check` still passes, and `find doc/06_spec -name '*_spec.spl' | wc -l` remains `0`.
+- 2026-06-11 rv64-ssh-dual-backend-freestanding-fix: Hardened the shared runtime-vs-pure wrapper itself for base-OS use. `src/os/crypto/dual_backend.spl` no longer imports hosted `std.log.log_fatal` or `panic`; it now reports diffs through `serial_println`, with `alpha` halting in a local loop and `beta` logging then continuing. Focused `check` passes for `dual_backend.spl`, `ed25519.spl`, and `ssh_session_kex.spl`. This removed the direct RV64 freestanding build regression introduced by the new parity framework: an explicit LLVM native build of `examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl` now links again at `/tmp/simpleos_riscv64_ssh_live_alpha.elf`.
+- 2026-06-11 rv64-ssh-live-dual-backend-override: Used the DI hook as intended in `examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl`. The shared framework default remains `alpha`, but the live RV64 SSH entry now sets `dual_backend_normal_mode(DualBackendPreference.RuntimeFirst)` before daemon start so the integrated base-OS gate can continue while parity remains available off the hot path. Focused `check` passes and `find doc/06_spec -name '*_spec.spl' | wc -l` remains `0`.
+- 2026-06-11 rv64-ssh-x25519-runtime-public-boundary: Re-ran the canonical live gate after the freestanding-safe framework fix and the explicit live runtime-first override. The gate returns to the longer-running late-handshake profile (~69-73s) instead of the earlier ~8-12s collapse, so the DI/freestanding fixes were real. Narrow probe markers were added around the live X25519 public-key wrapper in `src/os/apps/sshd/ssh_session_kex.spl`. Fresh serial evidence shows the guest now stalls at:
+  - `[sshd-session] server public generation start`
+  - with no subsequent `x25519 public runtime len=...` marker
+This is the important current boundary: the lane is now stalling inside `rt_tls13_x25519_public_key(...)` itself before the runtime-first wrapper can return or fall back, even when the live lane is forced back to the known bootstrap private scalar. So the active blocker is no longer the dual-backend framework policy, and not the old late `KEX_ECDH_REPLY` envelope. It is the RV64 freestanding runtime helper `rt_tls13_x25519_public_key(...)` on the live SSH path.
+- 2026-06-11 rv64-ssh-x25519-tagged-byte-fix: Hardened the freestanding crypto helper contract in:
+  - `examples/09_embedded/simple_os/arch/riscv64/boot/curve25519_ring_helper.c`
+  - `examples/09_embedded/simple_os/arch/riscv64/boot/tls13_sha256_helper.c`
+  - `examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_sha512_helper.c`
+  - `examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_scalar_helper.c`
+All four now decode input byte-array elements with the Simple tagged-int convention and emit output bytes as tagged ints, matching the earlier fix already required in the freestanding boot TCP send path. Focused `check` passed for the touched Simple files; a direct LLVM RV64 native build of the live entry still links at `/tmp/simpleos_riscv64_ssh_live_fix1.elf`; `find doc/06_spec -name '*_spec.spl' | wc -l` remains `0`. Fresh canonical live-gate evidence shows this fix did not move the active runtime boundary: serial still reaches `[sshd-session] server public generation start` and still does not reach the wrapper’s `x25519 public runtime len=...` marker. So the remaining blocker is deeper inside the ring-backed `rt_tls13_x25519_public_key(...)` computation itself, not the byte-array tagging contract around it.
+- 2026-06-11 rv64-ssh-x25519-public-helper-simplify: Simplified the freestanding public-key helper in `examples/09_embedded/simple_os/arch/riscv64/boot/curve25519_ring_helper.c` so `rt_tls13_x25519_public_key(...)` no longer uses `x25519_public_from_private_generic_masked(...)` (Edwards-base conversion path). It now uses the same Montgomery scalar-mult core as the shared-secret helper, with the canonical X25519 basepoint `[9, 0, ...]`. Direct LLVM RV64 native build still links at `/tmp/simpleos_riscv64_ssh_live_fix2.elf`. Fresh canonical live-gate evidence shows this simplification also did not move the active boundary: serial still stops at `[sshd-session] server public generation start` and still never reaches the wrapper’s `x25519 public runtime len=...` marker. So the next useful cut is no longer API selection between ring helper entrypoints; it is direct instrumentation or replacement inside the helper body itself, or a temporary bypass of the C helper with a known-good public value to prove the rest of the live KEX path again from this cleaner baseline.
+  KEX material.
+- After switching to real per-session KEX data, the main blocker moved earlier
+  and is now the actual pure-Simple X25519 implementation/performance on this
+  RV64 live lane.
+
+Next useful cut:
+- Narrow and harden pure-Simple Curve25519/X25519 on the live lane:
+  1. prove whether `x25519` is hanging, pathologically slow, or producing an
+     unusable result for the live OpenSSH client public key,
+  2. optimize or simplify that pure-Simple path until the lane reaches real
+     exchange-hash generation again,
+  3. then recheck host-key verification and post-`NEWKEYS` auth/exec.
+
+## 2026-06-11 — X25519 small-limb ladder allocation cleanup did not move the live boundary
+
+- Optimized `src/os/crypto/curve25519_smalllimb.spl` by removing generic
+  `[list]` container allocation from the hot Montgomery ladder loop:
+  - introduced `X25519Swap4`
+  - introduced `X25519Step4`
+  - `_cswap_pair(...)` and `_ladder_step(...)` now return typed structs instead
+    of fresh generic list containers each iteration
+- Verified:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+  - LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+  - live gate rerun:
+    - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Result:
+- The hot-loop allocation cleanup was correct, but it did not move the live
+  failure boundary.
+- Guest serial still stops at:
+  - `shared secret generation start`
+- So the remaining blocker is not mainly the per-bit wrapper allocation pattern.
+  It is deeper inside the pure-Simple X25519 small-limb field math / inversion
+  path itself.
+
+Next useful cut:
+- Instrument and narrow the exact substep inside pure-Simple `x25519`:
+  - ladder body vs final inversion vs final multiply/encode
+- Then either:
+  - optimize the specific hot substep enough for live RV64, or
+  - replace only that substep with a stdlib-pure path that keeps the user out
+    of runtime-facing APIs while preserving the pure-Simple objective.
+
+## 2026-06-11 — Reviewed bit-mask cut proved X25519 completes the first ladder iteration and then stalls on cumulative loop cost
+
+- Replaced the per-bit branchy divisor path in
+  `src/os/crypto/curve25519_smalllimb.spl`:
+  - old: `(k[byte_idx].to_i64() / _bit_div(bit_idx)) & 1`
+  - new: direct byte mask via `_bit_mask(bit_idx)`
+- Added first-iteration-only serial markers around the first ladder body:
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+
+Reviewed evidence:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+What the serial now proves:
+- The lane still reaches:
+  - `[sshd-session] shared secret generation start`
+  - `[x25519-small] start`
+- It now also reaches:
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+- It still does **not** reach:
+  - `[x25519-small] ladder bit=192`
+
+Meaning:
+- The active blocker is no longer a hang in `_clamp_scalar`, `_mask_u_coord`,
+  `_x25519_fe_from_bytes`, `_cswap_pair`, or the very first `_ladder_step`.
+- The live RV64 X25519 path is progressing through the first loop iteration and
+  then failing to make timely progress through the broader 255-step ladder.
+- So the next cut should target cumulative loop cost:
+  - reduce per-iteration allocation/copy traffic further,
+  - reduce repeated field carry/mul cost where possible,
+  - or add one more coarse ladder milestone between bit 254 and bit 192 to
+    prove whether this is pathological slowness versus a later specific stall.
+
+## 2026-06-11 — Inline ladder swap cut and extra coarse milestones proved progress through bit 252
+
+- Optimized `src/os/crypto/curve25519_smalllimb.spl` again:
+  - removed `_cswap_pair(...)` from the live ladder loop and final swap site
+  - replaced it with direct in-loop array swaps for `x_2/x_3` and `z_2/z_3`
+  - added coarse milestones at:
+    - `[x25519-small] ladder bit=252`
+    - `[x25519-small] ladder bit=248`
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate reruns of:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh evidence:
+- Guest serial now reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+  - `[x25519-small] ladder bit=252`
+- It still does not reach:
+  - `[x25519-small] ladder bit=248`
+  - `[x25519-small] ladder bit=192`
+
+Meaning:
+- The hot blocker is now tighter again:
+  - not the first iteration
+  - not the second iteration boundary
+  - the live lane is making progress through at least the early top bits of the
+    Montgomery ladder and then slowing or stalling before bit 248
+- The in-loop swap indirection was real overhead worth removing, but it is not
+  the dominant remaining cost.
+
+Current next cut:
+- target the remaining per-iteration field math overhead in `_ladder_step`,
+  especially repeated `_x25519_fe_add/_sub/_sq/_mul/_carry` cost, and keep the
+  next diagnostics coarse enough to show whether the lane can move past bit 248.
+
+## 2026-06-11 — Raw add/sub ladder-step cut ruled out intermediate carry churn as the dominant blocker
+
+- Optimized `src/os/crypto/curve25519_smalllimb.spl` again:
+  - added `_x25519_fe_add_raw(...)`
+  - added `_x25519_fe_sub_raw(...)`
+  - switched `_ladder_step(...)` to use raw add/sub forms for:
+    - `a = x2 + z2`
+    - `b = x2 - z2`
+    - `e = aa - bb`
+    - `c = x3 + z3`
+    - `d = x3 - z3`
+    - `sum_dc = da + cb`
+    - `diff_dc = da - cb`
+    - `aa_plus = aa + a24_e`
+- This removes several full `_x25519_fe_carry(...)` normalizations per ladder
+  iteration while preserving the same ladder formulas and leaving
+  multiplication/squaring to normalize as before.
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh evidence:
+- The live lane still reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+  - `[x25519-small] ladder bit=252`
+- It still does **not** reach:
+  - `[x25519-small] ladder bit=248`
+
+Meaning:
+- Intermediate add/sub carry normalization was real overhead, but not the
+  dominant remaining blocker on the live RV64 lane.
+- The next likely hotspot is deeper in the per-iteration field arithmetic:
+  `_x25519_fe_mul(...)` / `_x25519_fe_sq(...)` and the carry path they trigger,
+  not the outer ladder control flow or immediate add/sub scaffolding.
+
+## 2026-06-11 — Dedicated small-limb square path improved field specialization but did not move the live boundary past bit 252
+
+- Replaced the generic square wrapper in
+  `src/os/crypto/curve25519_smalllimb.spl`:
+  - old: `_x25519_fe_sq(a) -> _x25519_fe_mul(a, a)`
+  - new: dedicated symmetry-aware square formula with its own reduced term set
+    before the final carry
+- This keeps the implementation pure Simple and removes repeated generic
+  multiply overhead from every ladder `sq` site and from the inversion chain.
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh evidence:
+- The live lane still reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+  - `[x25519-small] ladder bit=252`
+- It still does **not** reach:
+  - `[x25519-small] ladder bit=248`
+
+Meaning:
+- A dedicated square path was worth applying, but `sq` was not the dominant
+  remaining blocker either.
+- The next likely hotspot is now narrower still:
+  - `_x25519_fe_mul(...)` itself,
+  - or the still-cumulative total multiply/carry budget across early ladder
+    rounds before bit 248.
+
+## 2026-06-11 — Shift-based carry path ruled out power-of-two division cost as the main remaining RV64 X25519 blocker
+
+- Optimized `src/os/crypto/curve25519_smalllimb.spl` again by replacing the
+  hot `_x25519_fe_carry(...)` division chain with equivalent bit shifts:
+  - `hN / BASE26` -> `hN >> 26`
+  - `hN / BASE25` -> `hN >> 25`
+- This keeps the same carry semantics while removing repeated integer division
+  from every multiply/square normalization on the live RV64 ladder path.
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh evidence:
+- The live lane still reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+  - `[x25519-small] ladder bit=252`
+- It still does **not** reach:
+  - `[x25519-small] ladder bit=248`
+
+Meaning:
+- Power-of-two division inside the carry path was not the dominant remaining
+  blocker either.
+- The next likely hotspot is now very narrow:
+  - the generic `_x25519_fe_mul(...)` core itself,
+  - or the possibility that the live lane now needs a different pure-Simple
+  backend route for X25519 rather than more local ladder scaffolding changes.
+
+## 2026-06-11 — Bigint pure-Simple X25519 backend is not a better live RV64 route
+
+- Trialed the existing pure-Simple bigint backend on the live SSH lane by
+  temporarily routing `ssh_session_kex.spl` shared-secret generation through
+  `os.crypto.curve25519_bigint.x25519_safe(...)` instead of the small-limb
+  backend.
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session_kex.spl src/os/crypto/curve25519_bigint.spl src/os/crypto/curve25519.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Evidence:
+- The live lane still reached:
+  - `shared secret generation start`
+- But with the bigint route it no longer emitted the small-limb progress markers
+  and the overall system-test runtime got worse (`~72.5s` vs the better
+  small-limb runs around `~62-65s`).
+
+Conclusion:
+- The bigint pure-Simple backend is not a better live RV64 route for this lane.
+- Reverted the temporary backend routing trial and kept the tree on the better
+  small-limb path.
+
+Current best boundary remains:
+- small-limb backend reaches:
+  - `[x25519-small] ladder bit=252`
+- and still does not reach:
+  - `[x25519-small] ladder bit=248`
+
+## 2026-06-11 — Raw `a24 * e` scalar-multiply cut also failed to move the live small-limb boundary
+
+- Optimized `src/os/crypto/curve25519_smalllimb.spl` again:
+  - added `_x25519_fe_mul_scalar_raw(...)`
+  - changed `_ladder_step(...)` to compute `a24_e` with the raw scalar-multiply
+    path instead of a carry-normalizing scalar multiply
+- This removes one more full normalization from every ladder round while
+  preserving the same Montgomery ladder equations.
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh evidence:
+- The live lane still reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+  - `[x25519-small] ladder bit=252`
+- It still does **not** reach:
+  - `[x25519-small] ladder bit=248`
+
+Meaning:
+- Yet another ladder-surface normalization cut was valid but not decisive.
+- The remaining hot blocker is now most credibly inside the generic
+  `_x25519_fe_mul(...)` body itself or in the cumulative number of multiply
+  calls required before bit 248, not in the surrounding ladder-step scaffolding.
+
+## 2026-06-11 — Inlining the ladder step removed the per-iteration step struct/call, but the live boundary still holds at bit 252
+
+- Optimized `src/os/crypto/curve25519_smalllimb.spl` again:
+  - inlined `_ladder_step(...)` directly into `x25519_smalllimb(...)`
+  - removed the per-iteration `X25519Step4` construction from the live
+    Montgomery ladder loop
+- This was the largest control-path overhead removal on the small-limb lane so
+  far because the RV64 live shared-secret path no longer pays a separate step
+  call/struct return on every ladder round.
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh evidence:
+- The live lane still reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+  - `[x25519-small] ladder bit=252`
+- It still does **not** reach:
+  - `[x25519-small] ladder bit=248`
+
+Meaning:
+- Even after removing the remaining obvious per-iteration step wrapper
+  overhead, the live boundary did not move.
+- That sharply increases confidence that the next real hotspot is the
+  arithmetic core itself, especially `_x25519_fe_mul(...)`, rather than any
+  remaining ladder control-flow wrapper.
+
+## 2026-06-11 — Longer direct host probe proved the RV64 live lane is not merely missing the standard timeout window
+
+- Ran a direct manual RV64 live SSH probe outside the normal shared host
+  contract, keeping the SSH client side alive for `120s` instead of the usual
+  shorter host-probe window.
+- Used the current `build/os/simpleos_riscv64_ssh_live.elf` and the same QEMU
+  launch shape as the shared `rv64-ssh` lane.
+
+Direct evidence:
+- SSH client exit: `124` (timeout)
+- Guest serial still ended at:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+  - `[x25519-small] ladder bit=252`
+- It still did **not** reach:
+  - `[x25519-small] ladder bit=248`
+
+Meaning:
+- The current live RV64 small-limb X25519 path is not simply “a bit too slow”
+  for the standard host probe.
+- Even with a much longer direct client wait, the lane does not progress past
+  the same early ladder boundary.
+- That strengthens the conclusion that the remaining blocker is the arithmetic
+  core itself, especially the multiply-heavy path, rather than the surrounding
+  live harness or default timeout budget.
+
+## 2026-06-11 — Native 5-limb pure-Simple X25519 route is not a better live RV64 path than the small-limb backend
+
+- Trialed the existing native 5-limb pure-Simple implementation by temporarily
+  routing the live shared-secret step through
+  `os.crypto.curve25519.x25519_fe_probe(...)` instead of the small-limb backend.
+- This route stayed pure Simple and targeted the native LLVM live lane more
+  directly than the interpreter-safe small-limb path.
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session_kex.spl src/os/crypto/curve25519.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Evidence:
+- The live lane still stalled at:
+  - `shared secret generation start`
+- It lost the small-limb ladder progress markers entirely and did not improve
+  the host-side outcome.
+
+Conclusion:
+- The native 5-limb pure-Simple route is not currently a better live RV64 path
+  than the small-limb backend.
+- Reverted that trial and kept the tree on the small-limb implementation, which
+  still gives the best current live evidence:
+  - `[x25519-small] ladder bit=252`
+  - but not yet `[x25519-small] ladder bit=248`
+
+## 2026-06-11 — Precomputing the constant `u` multiply side also did not move the live small-limb boundary
+
+- Optimized `src/os/crypto/curve25519_smalllimb.spl` again:
+  - added `X25519MulRightPrecomp`
+  - added `_x25519_fe_mul_right_precompute(...)`
+  - added `_x25519_fe_mul_right_cached(...)`
+  - changed the ladder loop so the repeated `new_z3 = u * diff_sq` multiply
+    reuses a precomputed right-hand side for the constant `u`
+- This removes repeated `g*19` preprocessing for the constant client public
+  coordinate across all ladder rounds.
+
+Verified:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+- LLVM RV64 rebuild of `build/os/simpleos_riscv64_ssh_live.elf`
+- live gate rerun:
+  - `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh evidence:
+- The live lane still reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+  - `[x25519-small] ladder bit=252`
+- It still does **not** reach:
+  - `[x25519-small] ladder bit=248`
+- This run was also slower overall (`~72s` class), so this preprocessing change
+  is not a win for the current live lane.
+
+Meaning:
+- Reusing the constant right-hand side for one ladder multiply was not enough to
+  move the boundary and is not the main remaining cost.
+- The next remaining target is the generic `_x25519_fe_mul(...)` body itself,
+  not multiply-operand setup around it.
+
+## 2026-06-11 — Precomputed constant-`u` multiply path regressed the live boundary and was reverted
+
+- Trialed a cached right-hand-side multiply path for the constant `u` operand in
+  `src/os/crypto/curve25519_smalllimb.spl`:
+  - `X25519MulRightPrecomp`
+  - `_x25519_fe_mul_right_precompute(...)`
+  - `_x25519_fe_mul_right_cached(...)`
+  - ladder changed `new_z3 = u * diff_sq` to use the cached path
+
+Evidence from the live rerun:
+- The lane regressed from the better small-limb boundary
+  (`[x25519-small] ladder bit=252`) to only:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+- It no longer reached the earlier `ladder bit=252` marker on that path.
+
+Action taken:
+- Reverted the precomputed-`u` multiply experiment.
+- Rechecked the reverted state:
+  - `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl`
+  - `find doc/06_spec -name '*_spec.spl' | wc -l` -> `0`
+
+Conclusion:
+- Constant-right-side preprocessing is not only insufficient; in this form it
+  makes the current live RV64 lane worse.
+- Keep the tree on the pre-trial small-limb path and continue treating the
+  generic `_x25519_fe_mul(...)` body as the main remaining hotspot.
+
+## 2026-06-11 — Tightened 251/250/249 markers showed the current clean small-limb lane now stops immediately after the first ladder iteration
+
+- Added extra coarse milestones in `src/os/crypto/curve25519_smalllimb.spl` at:
+  - `ladder bit=251`
+  - `ladder bit=250`
+  - `ladder bit=249`
+- Rebuilt and reran the reverted small-limb lane to recover the exact current
+  cutoff after the recent arithmetic experiments.
+
+Fresh evidence:
+- The current clean small-limb live lane reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+- It does **not** reach any of:
+  - `[x25519-small] ladder bit=252`
+  - `[x25519-small] ladder bit=251`
+  - `[x25519-small] ladder bit=250`
+  - `[x25519-small] ladder bit=249`
+  - `[x25519-small] ladder bit=248`
+
+Meaning:
+- The latest arithmetic changes shifted the exact boundary again.
+- The current baseline is now tighter and earlier than the older `bit=252`
+  observation.
+- Future mul-core changes should be evaluated against this newer baseline:
+  progress means reaching at least `ladder bit=252` again and then pushing
+  beyond it.
+
+## 2026-06-11 — Removed the stale cached-`u` ladder path and proved the live stall is still before any observable `bit=253` work
+
+- The previous "revert" of the cached constant-`u` multiply path had not
+  actually removed it from the active ladder body in
+  `src/os/crypto/curve25519_smalllimb.spl`.
+- Fixed that for real:
+  - removed `X25519MulRightPrecomp`
+  - removed `_x25519_fe_mul_right_precompute(...)`
+  - removed `_x25519_fe_mul_right_cached(...)`
+  - restored `new_z3 = _x25519_fe_mul(u, diff_sq)`
+- Added tight second-round markers:
+  - `iter253 enter`
+  - `iter253 swap done`
+  - `iter253 sq aa start/done`
+  - `iter253 sq bb start/done`
+  - plus the earlier `iter253 mul ...` markers
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, but with the tighter ladder evidence
+
+Fresh live evidence:
+- The lane still reaches:
+  - `[x25519-small] start`
+  - `[x25519-small] iter254 enter`
+  - `[x25519-small] iter254 swap done`
+  - `[x25519-small] iter254 step done`
+- It does **not** reach any new second-round marker:
+  - `[x25519-small] iter253 enter`
+  - `[x25519-small] iter253 swap done`
+  - `[x25519-small] iter253 sq aa start`
+  - `[x25519-small] iter253 mul da start`
+
+Meaning:
+- The live lane is not currently proving a trap inside one of the explicit
+  second-round multiply sites I instrumented.
+- The remaining boundary is now even tighter: between the completed `bit=254`
+  ladder step and the next observable `bit=253` loop entry.
+- The next useful cut should target the ladder loop/control transition itself
+  or even earlier value movement around the end of the first round, not just
+  another blind `_x25519_fe_mul(...)` micro-optimization.
+
+## 2026-06-11 — Removing the long post-step comparison chain let the live lane complete the full `bit=253` round
+
+- Followed the new control-flow evidence from the previous run:
+  - we had reached:
+    - `[x25519-small] iter254 post-assign`
+  - but had not yet reached:
+    - `[x25519-small] iter254 pre-decrement`
+- The code between those points was the long post-step debug comparison chain
+  (`bit_pos == 192/248/249/250/251/252/128/64`).
+- Removed that whole chain from `src/os/crypto/curve25519_smalllimb.spl` and
+  kept only the direct control-flow markers around decrement / next-round entry.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, but with a materially later boundary
+
+Fresh live evidence after the control-path cleanup:
+- The lane now reaches:
+  - `[x25519-small] iter254 post-assign`
+  - `[x25519-small] iter254 pre-decrement`
+  - `[x25519-small] iter253 ready`
+  - `[x25519-small] iter253 enter`
+  - `[x25519-small] iter253 swap done`
+  - `[x25519-small] iter253 sq aa done`
+  - `[x25519-small] iter253 sq bb done`
+  - `[x25519-small] iter253 mul da done`
+  - `[x25519-small] iter253 mul cb done`
+  - `[x25519-small] iter253 mul z3 done`
+  - `[x25519-small] iter253 mul x2 done`
+  - `[x25519-small] iter253 mul z2 done`
+  - `[x25519-small] iter253 step done`
+
+Meaning:
+- The previous “dies immediately after `iter254`” boundary was not purely the
+  arithmetic core; the long debug comparison chain itself was poisoning the live
+  control path on RV64.
+- The live lane is now back to progressing through at least two full ladder
+  rounds with current instrumentation.
+- The next useful cut is again arithmetic/per-iteration cost, but from a later
+  and more honest baseline than before.
+
+## 2026-06-11 — Lighter round-level tracing proves the live lane completes the full `bit=252` round
+
+- Reduced the remaining `iter253` tracing in
+  `src/os/crypto/curve25519_smalllimb.spl`:
+  - removed the fine-grained `sq` / `mul` start/done markers for that round
+  - kept only round-level markers:
+    - `iter253 ready`
+    - `iter253 enter`
+    - `iter253 swap done`
+    - `iter253 step done`
+  - added the next round-level markers:
+    - `iter252 ready`
+    - `iter252 step done`
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, but with a later ladder boundary
+
+Fresh live evidence:
+- The lane now reaches:
+  - `[x25519-small] iter254 pre-decrement`
+  - `[x25519-small] iter253 ready`
+  - `[x25519-small] iter253 enter`
+  - `[x25519-small] iter253 swap done`
+  - `[x25519-small] iter253 step done`
+  - `[x25519-small] iter252 ready`
+  - `[x25519-small] iter252 step done`
+
+Meaning:
+- The cleaner tracing did not just reduce output noise; it allowed the live lane
+  to prove progress through another full Montgomery-ladder round.
+- The active RV64 SSH blocker is now later than the `bit=252` round, from a
+  cleaner and lower-overhead instrumentation baseline than the earlier runs.
+- The next useful cut is to keep tracing sparse and push the same proof farther
+  down the ladder, or start replacing the hot multiply/carry path with a more
+  specialized pure-Simple form once the next later-round cutoff is measured.
+
+## 2026-06-11 — Sparse later-round markers confirm the current live cutoff is still before `bit=248`
+
+- Added only two farther coarse round markers in
+  `src/os/crypto/curve25519_smalllimb.spl`:
+  - `iter248 ready` / `iter248 step done`
+  - `iter244 ready` / `iter244 step done`
+- Kept the earlier lightweight `iter253` / `iter252` round markers and avoided
+  reintroducing per-op tracing.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, but with a later measured cutoff
+
+Fresh live evidence:
+- The lane reaches:
+  - `[x25519-small] iter253 ready`
+  - `[x25519-small] iter253 step done`
+  - `[x25519-small] iter252 ready`
+  - `[x25519-small] iter252 step done`
+- It still does **not** reach:
+  - `[x25519-small] iter248 ready`
+  - `[x25519-small] iter248 step done`
+  - `[x25519-small] iter244 ready`
+  - `[x25519-small] iter244 step done`
+
+Meaning:
+- The current live RV64 X25519 lane is now honestly proven through the full
+  `bit=252` round on the cleaner path.
+- The remaining blocker is later, but still before `bit=248`.
+- The next useful cut is to reduce cumulative arithmetic cost in the span
+  between `252` and `248`, most likely in the generic multiply/carry budget
+  rather than in loop/control scaffolding.
+
+## 2026-06-11 — Sparse `251/250/249` markers moved the current live cutoff forward to the full `bit=250` round
+
+- Added only three more coarse round markers in
+  `src/os/crypto/curve25519_smalllimb.spl`:
+  - `iter251 ready` / `iter251 step done`
+  - `iter250 ready` / `iter250 step done`
+  - `iter249 ready` / `iter249 step done`
+- Kept the earlier sparse `252/248/244` markers and avoided any per-op tracing.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, but with a later measured cutoff
+
+Fresh live evidence:
+- The lane now reaches:
+  - `[x25519-small] iter251 ready`
+  - `[x25519-small] iter251 step done`
+  - `[x25519-small] iter250 ready`
+  - `[x25519-small] iter250 step done`
+- It still does **not** reach:
+  - `[x25519-small] iter249 ready`
+  - `[x25519-small] iter249 step done`
+  - `[x25519-small] iter248 ready`
+  - `[x25519-small] iter248 step done`
+
+Meaning:
+- The current clean live RV64 X25519 lane is now honestly proven through the
+  full `bit=250` round.
+- The active blocker has moved again and is now later than `250`, but still
+  before `249`.
+- The next useful arithmetic cut should focus on cumulative multiply/carry cost
+  in the `250 -> 249` span, not on earlier ladder rounds or loop scaffolding.
+
+## 2026-06-11 — Inlining raw add/sub array construction inside the ladder did not move the `250 -> 249` boundary
+
+- Replaced the remaining `_x25519_fe_add_raw(...)` / `_x25519_fe_sub_raw(...)`
+  helper calls in the hot ladder loop with direct inline limb-array literals for:
+  - `a`
+  - `b`
+  - `e`
+  - `c`
+  - `d`
+  - `sum_dc`
+  - `diff_dc`
+  - `aa_plus`
+- This removes that helper-call overhead from every ladder round while keeping
+  the arithmetic unchanged.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, unchanged boundary
+
+Fresh live evidence:
+- The lane still reaches:
+  - `[x25519-small] iter251 ready`
+  - `[x25519-small] iter251 step done`
+  - `[x25519-small] iter250 ready`
+  - `[x25519-small] iter250 step done`
+- It still does **not** reach:
+  - `[x25519-small] iter249 ready`
+  - `[x25519-small] iter249 step done`
+
+Meaning:
+- Raw add/sub helper-call overhead is not the dominant remaining cost in the
+  live `250 -> 249` span.
+- The next useful arithmetic cut should move deeper into the generic field core
+  itself, especially multiply/carry behavior, rather than more loop-local
+  helper removal.
+
+## 2026-06-11 — Inlining carry inside the hot square path did not move the `250 -> 249` live cutoff
+
+- Inlined the full `_x25519_fe_carry(...)` logic directly into
+  `src/os/crypto/curve25519_smalllimb.spl::_x25519_fe_sq(...)`.
+- This removes four `_x25519_fe_carry(...)` helper calls per Montgomery-ladder
+  round without touching the generic multiply path.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, unchanged boundary
+
+Fresh live evidence:
+- The lane still reaches:
+  - `[x25519-small] iter251 ready`
+  - `[x25519-small] iter251 step done`
+  - `[x25519-small] iter250 ready`
+  - `[x25519-small] iter250 step done`
+- It still does **not** reach:
+  - `[x25519-small] iter249 ready`
+  - `[x25519-small] iter249 step done`
+
+Meaning:
+- Square-side carry helper-call overhead is not the dominant remaining cost.
+- The next useful arithmetic cut should go deeper into the generic multiply
+  path or shared carry behavior used by multiply, not more square-only or
+  loop-local overhead removal.
+
+## 2026-06-11 — Inlining carry inside the generic multiply path still did not move the `250 -> 249` live cutoff
+
+- Inlined the full carry path directly into
+  `src/os/crypto/curve25519_smalllimb.spl::_x25519_fe_mul(...)`.
+- With the earlier `sq()` change, this removes all hot helper calls to
+  `_x25519_fe_carry(...)` from the ladder’s multiply/square field core.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/curve25519_smalllimb.spl src/os/crypto/curve25519.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, unchanged boundary
+
+Fresh live evidence:
+- The lane still reaches:
+  - `[x25519-small] iter251 ready`
+  - `[x25519-small] iter251 step done`
+  - `[x25519-small] iter250 ready`
+  - `[x25519-small] iter250 step done`
+- It still does **not** reach:
+  - `[x25519-small] iter249 ready`
+  - `[x25519-small] iter249 step done`
+
+Meaning:
+- Shared carry helper-call overhead is not the dominant remaining cost either.
+- The next useful cut now has to be deeper than helper elimination:
+  likely the arithmetic shape of generic multiply itself or a different
+  pure-Simple backend structure for the live X25519 path.
+
+## 2026-06-11 — RV64 live lane now uses a freestanding native X25519 helper and is past the old small-limb ladder stall
+
+- Added `examples/09_embedded/simple_os/arch/riscv64/boot/curve25519_ring_helper.c`.
+  - This compiles vendored `ring` generic Curve25519 C directly into the RV64
+    freestanding image.
+  - It exports:
+    - `rt_tls13_x25519_public_key`
+    - `rt_tls13_x25519_shared_secret`
+- Added that helper to the RV64 target grandfathered native sources in
+  `src/os/port/simpleos_multiplatform_build_part2.spl`.
+- Extended the native build C include policy so the `ring` headers are
+  available on RV64 too:
+  - `src/os/port/simpleos_native_build_config.spl`
+  - `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`
+- Switched the live RV64 KEX branch in
+  `src/os/apps/sshd/ssh_session_kex.spl` to prefer:
+  - `rt_tls13_x25519_public_key(server_private)`
+  - `rt_tls13_x25519_shared_secret(server_private, client_public)`
+  while keeping the pure-Simple `x25519_base/x25519` path for the non-live lane.
+- Fixed two bridge bugs in the new helper:
+  - byte arrays on this lane carry raw `0..255` byte values, not tagged ints
+  - `rt_byte_array_new_len(...)` expects a tagged integer length argument
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session_kex.spl src/os/port/simpleos_multiplatform_build_part2.spl src/os/port/simpleos_native_build_config.spl` -> PASS
+- `clang -fsyntax-only -std=c11 -DOPENSSL_NO_ASM -DRING_CORE_NOSTDLIBINC -I src/compiler_rust/vendor/ring/include -I src/compiler_rust/vendor/ring -I src/compiler_rust/vendor/ring/pregenerated --target=riscv64-unknown-none-elf examples/09_embedded/simple_os/arch/riscv64/boot/curve25519_ring_helper.c` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, but with a materially later boundary
+
+Fresh live evidence:
+- The old small-limb ladder markers are no longer the blocking live edge.
+- The lane now reaches:
+  - `[sshd-session] server public generation len=32`
+  - `[sshd-session] shared secret generation len=32`
+  - `[sshd-session] shared secret len=32`
+  - `[sshd-session] host key blob len=51`
+  - `[sshd-session] exchange hash generation start`
+- The current stall is now after real per-session X25519 public/shared-secret
+  generation and during the exchange-hash path.
+
+Meaning:
+- The RV64 live SSH lane is no longer blocked by pure-Simple X25519 ladder
+  performance before `bit=249`.
+- The next useful cut is the exchange-hash path that follows `I_C/I_S/Q_C/Q_S/K`,
+  not more X25519 arithmetic micro-optimization.
+
+## 2026-06-11 — Exchange-hash input assembly completes; the live stall is now specifically the SHA-256 step
+
+- Reworked `ssh_kex_compute_exchange_hash(...)` in:
+  - `src/os/apps/sshd/ssh_kex_core.spl`
+  - `src/os/apps/sshd/ssh_kex_crypto.spl`
+  so the transcript is built with append-only `_push_string_bytes(...)` /
+  `_push_mpint_bytes(...)` instead of repeated `_concat_bytes(...)` copies over
+  a growing buffer.
+- Added temporary live markers in
+  `src/os/apps/sshd/ssh_session_kex.spl::_live_exchange_hash_debug(...)` to
+  separate transcript-field assembly from the final SHA-256 call.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_kex_core.spl src/os/apps/sshd/ssh_kex_crypto.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, but with stronger localization
+
+Fresh live evidence:
+- The lane now proves all exchange-hash input fields are appended successfully:
+  - `[sshd-session] exchash: v_c`
+  - `[sshd-session] exchash: v_s`
+  - `[sshd-session] exchash: i_c`
+  - `[sshd-session] exchash: i_s`
+  - `[sshd-session] exchash: k_s`
+  - `[sshd-session] exchash: q_c`
+  - `[sshd-session] exchash: q_s`
+  - `[sshd-session] exchash: k`
+  - `[sshd-session] exchash: sha256 input len=1496`
+- It still does **not** reach:
+  - `[sshd-session] exchash: sha256 out len=...`
+  - `[sshd-session] exchange hash len=...`
+
+Meaning:
+- The live RV64 stall is no longer “exchange hash” broadly.
+- It is now specifically the SHA-256 computation over the fully assembled
+  1496-byte SSH exchange-hash transcript.
+- The next useful cut is a freestanding native SHA-256 fast path for this live
+  lane, or equivalent narrowing of the SHA-256 implementation boundary.
+
+## 2026-06-11 — Freestanding native SHA-256 helper moved the live lane past exchange-hash generation
+
+- Added `examples/09_embedded/simple_os/arch/riscv64/boot/tls13_sha256_helper.c`.
+  - This provides a freestanding `rt_tls13_sha256(data: [u8]) -> [u8]`
+    implementation for the RV64 live lane.
+- Added that helper to RV64 grandfathered native sources in:
+  - `src/os/port/simpleos_multiplatform_build_part2.spl`
+- Switched the live-only exchange-hash debug path in
+  `src/os/apps/sshd/ssh_session_kex.spl` to call `rt_tls13_sha256(hash_input)`
+  after proving the transcript assembly is complete.
+
+Verification:
+- `clang -fsyntax-only -std=c11 --target=riscv64-unknown-none-elf examples/09_embedded/simple_os/arch/riscv64/boot/tls13_sha256_helper.c` -> PASS
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/port/simpleos_multiplatform_build_part2.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- `src/compiler_rust/target/release/simple native-build --source build/os/generated --source src --source examples --backend llvm --opt-level=aggressive --log on --entry-closure --entry examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl --target riscv64-unknown-none -o build/os/simpleos_riscv64_ssh_live.elf --linker-script examples/09_embedded/simple_os/arch/riscv64/linker.ld` -> PASS
+- `find doc/06_spec -name '*_spec.spl' | wc -l` -> `0`
+- `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential` -> FAIL, but materially later
+
+Fresh live evidence:
+- The lane now reaches:
+  - `[sshd-session] exchash: sha256 input len=1496`
+  - `[sshd-session] exchash: sha256 out len=32`
+  - `[sshd-session] exchange hash len=32`
+  - `[sshd-session] host ed25519 seed len=32 pub len=32`
+  - `[sshd-session] host ed25519 sign pure start`
+- It still does **not** reach:
+  - `[sshd-session] host ed25519 sign pure len=...`
+  - any later `KEX_ECDH_REPLY` / `NEWKEYS` markers on the real per-session path
+
+Meaning:
+- The RV64 live lane is no longer blocked by:
+  - pure-Simple X25519 ladder cost
+  - exchange-hash transcript assembly
+  - SHA-256 exchange-hash computation
+- The new active blocker is the pure-Simple Ed25519 signing step for the real
+  per-session exchange hash.
+
+## 2026-06-11 — Network readiness hardened again; the live lane reaches Ed25519 sign and stalls in SHA-512
+
+- Reworked RV64 live network readiness in:
+  - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+  so the synthetic early TX probe is no longer the hard boot readiness gate.
+  Queue bring-up now marks TX ready for the live SSH lane; the probe result is
+  kept as evidence, not as a boot kill-switch.
+- Restored the `rt_tls13_sha256` helper to the minimal RV64 boot allowlist in:
+  - `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`
+- Added coarse sign-stage markers in:
+  - `src/os/crypto/ed25519.spl`
+- Fixed the current LLVM driver rebuild path by removing stale
+  `ScalableVectorType` match arms from:
+  - `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs`
+  - `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs`
+
+Verification:
+- `clang -fsyntax-only -std=c11 --target=riscv64-unknown-none-elf src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` -> PASS
+- `cargo build --release --features llvm -p simple-driver` -> PASS
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/kernel/boot/riscv_services.spl src/os/kernel/net/rt_net_socket_facade.spl src/os/kernel/arch/riscv64/boot/freestanding_runtime.c src/os/crypto/ed25519.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- canonical live gate rerun -> FAIL, but materially later:
+  `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh live evidence:
+- The lane is back through:
+  - RV64 network ready
+  - TCP bind/listen
+  - banner exchange
+  - client/server `KEXINIT`
+  - real X25519 public/shared-secret generation
+  - real exchange-hash generation
+  - `[sshd-session] host ed25519 sign pure start`
+  - `[ed25519] sign: seed sha512 start`
+- It still does **not** reach:
+  - `[ed25519] sign: seed sha512 done`
+
+Meaning:
+- The active blocker moved from network readiness back into real Ed25519
+  signing.
+- The precise stop point was the first SHA-512 in the pure-Simple Ed25519 sign
+  path.
+
+## 2026-06-11 — Live-only native SHA-512 for Ed25519 signing moved the stall past the first hash
+
+- Added `examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_sha512_helper.c`.
+  - This provides a freestanding `rt_tls13_sha512_full(data: [u8]) -> [u8]`
+    helper for the RV64 live lane.
+- Added that helper to RV64 grandfathered native sources in:
+  - `src/os/port/simpleos_multiplatform_build_part2.spl`
+- Added the helper to the minimal boot-source allowlist in:
+  - `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`
+- Added live-only SHA-512 wrappers plus `ed25519_sign_live(...)` in:
+  - `src/os/crypto/ed25519.spl`
+- Switched the RV64 live SSH sign path to call `ed25519_sign_live(...)` only
+  under `using_live_openssh_profile` in:
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+
+Verification:
+- `clang -fsyntax-only -std=c11 --target=riscv64-unknown-none-elf examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_sha512_helper.c` -> PASS
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/ed25519.spl src/os/apps/sshd/ssh_session_kex.spl src/os/port/simpleos_multiplatform_build_part2.spl` -> PASS
+- `cargo build --release --features llvm -p simple-driver` -> PASS
+- canonical live gate rerun -> FAIL, but later inside signing:
+  `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh live evidence:
+- The lane now reaches:
+  - `[sshd-session] host ed25519 sign pure start`
+  - `[ed25519] sign: seed sha512 start`
+  - `[ed25519] sign: seed sha512 done`
+  - `[ed25519] sign: nonce hash start`
+- It still does **not** reach:
+  - `[ed25519] sign: nonce hash done`
+  - `[ed25519] sign: R scalar mul start`
+  - any later KEX reply markers
+
+Meaning:
+- The first SHA-512 is no longer the live blocker.
+- The current red edge is now the second SHA-512 / `sc_reduce` nonce path in
+  live Ed25519 signing (`SHA-512(prefix || message) mod L`), before the first
+  Edwards scalar multiplication.
+
+## 2026-06-11 — Live-only native scalar reduction moved the stall past both `sc_reduce(...)` calls
+
+- Added `examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_scalar_helper.c`.
+  - This provides a freestanding `rt_ed25519_sc_reduce_64(data: [u8]) -> [u8]`
+    helper for the RV64 live lane, backed by ring's `x25519_sc_reduce`.
+- Added that helper to RV64 grandfathered native sources in:
+  - `src/os/port/simpleos_multiplatform_build_part2.spl`
+- Added the helper to the minimal boot-source allowlist and ring-include boot
+  compile path in:
+  - `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`
+- Switched `_sha512_modl_live(...)` to use the native reduction helper in:
+  - `src/os/crypto/ed25519.spl`
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/ed25519.spl src/os/apps/sshd/ssh_session_kex.spl src/os/port/simpleos_multiplatform_build_part2.spl` -> PASS
+- `cargo build --release --features llvm -p simple-driver` -> PASS
+- canonical live gate rerun -> FAIL, but materially later:
+  `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh live evidence:
+- The lane now reaches:
+  - `[ed25519] live modl: reduce done`
+  - `[ed25519] sign: nonce hash done`
+  - `[ed25519] sign: R scalar mul start`
+  - `[ed25519] sign: R scalar mul done`
+  - `[ed25519] sign: R encode done`
+  - `[ed25519] sign: challenge hash start`
+  - `[ed25519] live modl: reduce done`
+  - `[ed25519] sign: challenge hash done`
+  - `[ed25519] sign: S muladd start`
+- It still does **not** reach:
+  - `[ed25519] sign: S muladd done`
+  - any later `KEX_ECDH_REPLY` / `NEWKEYS` post-sign markers on the real path
+
+Meaning:
+- The nonce and challenge `SHA-512(... ) mod L` live paths are no longer the
+  blocker.
+- The current precise red edge is now `sc_muladd(k, a, r)` in the real
+  per-session Ed25519 signing path on RV64 live.
+
+## 2026-06-11 — Live-only native scalar muladd moved the stall past full Ed25519 signing
+
+- Extended `examples/09_embedded/simple_os/arch/riscv64/boot/ed25519_scalar_helper.c`
+  with freestanding `rt_ed25519_sc_muladd(a, b, c)`, backed by ring's
+  `x25519_sc_muladd`.
+- Added the live-only wrapper in:
+  - `src/os/crypto/ed25519.spl`
+- Switched `ed25519_sign_live(...)` to use the native helper for
+  `S = (k * a + r) mod L`.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/crypto/ed25519.spl src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- canonical live gate rerun -> FAIL, but materially later:
+  `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh live evidence from the good rerun:
+- The lane now reaches:
+  - `[ed25519] sign: S muladd done`
+  - `[ed25519] sign: done`
+  - `[sshd-session] host ed25519 sign pure len=64`
+  - `[sshd-session] sig blob len=83`
+  - `[sshd-session] kex reply len=179`
+  - `[sshd-session] kex reply sent`
+  - `[sshd-session] newkeys sent`
+  - `[sshd-session] session_id len=32`
+- Host OpenSSH now reaches:
+  - `SSH2_MSG_KEX_ECDH_REPLY received`
+  - `Server host key: ssh-ed25519 ...`
+  - then fails with:
+    - `ssh_dispatch_run_fatal: Connection to 127.0.0.1 port 2222: key type does not match`
+
+Meaning:
+- Real per-session Ed25519 signing is no longer the blocker.
+- The current red edge is now post-sign protocol correctness around
+  `KEX_ECDH_REPLY` / immediate post-reply handling, not the crypto hot path.
+
+Note:
+- A follow-up attempt to dump full live hex for the host-key/signature/reply
+  fields over serial regressed the lane due log volume and was reverted.
+
+## 2026-06-11 — Collapsed the live host-key blob onto the canonical ed25519 builder
+
+- Removed the separate hard-coded live host-key blob selection from:
+  - `src/os/apps/sshd/ssh_session_kex.spl`
+- The live RV64 KEX path now uses `ssh_build_ed25519_host_key_blob(self.host_ed25519_public)`
+  instead of a separate live-only blob builder/literal when the daemon already
+  has the real Ed25519 public key in memory.
+
+Verification:
+- `SIMPLE_LIB=src src/compiler_rust/target/release/simple check src/os/apps/sshd/ssh_session_kex.spl` -> PASS
+- canonical live gate rerun -> FAIL, but with the same late boundary:
+  `SIMPLE_TEST_TIMEOUT=900 SIMPLEOS_RV64_SSH_LIVE=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_LIB=src src/compiler_rust/target/release/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 900 --sequential`
+
+Fresh live evidence:
+- Guest still reaches:
+  - real X25519 public/shared-secret generation
+  - real exchange hash generation
+  - real Ed25519 sign completion
+  - `kex reply sent`
+  - `newkeys sent`
+- Host OpenSSH still reaches:
+  - `SSH2_MSG_KEX_ECDH_REPLY received`
+  - then fails with:
+    - `unknown or unsupported key type`
+
+Meaning:
+- The separate live host-key literal was not the dominant issue.
+- The current red edge is still parsing/protocol correctness inside
+  `KEX_ECDH_REPLY`, most likely the inner host-key or signature envelope, not
+  the host-key source or the signing math.

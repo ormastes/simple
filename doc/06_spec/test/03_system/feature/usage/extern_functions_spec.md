@@ -85,6 +85,9 @@ val args = sys_get_args()           # returns program arguments
 
 #### calls and returns expected result
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -93,7 +96,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = rt_math_sqrt(16.0)
-expect(result == 4.0)
+assert_true(result == 4.0)
 ```
 
 </details>
@@ -101,6 +104,9 @@ expect(result == 4.0)
 #### when passing parameters to extern function
 
 #### receives all parameters correctly
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -110,12 +116,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = rt_math_pow(2.0, 3.0)
-expect(result == 8.0)
+assert_true(result == 8.0)
 ```
 
 </details>
 
 #### handles parameter type conversions
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -125,7 +134,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = rt_math_sqrt(25.0)
-expect(result == 5.0)
+assert_true(result == 5.0)
 ```
 
 </details>
@@ -136,6 +145,9 @@ expect(result == 5.0)
 
 #### returns primitive types correctly
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -144,12 +156,15 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = rt_math_sqrt(9.0)
-expect(result == 3.0)
+assert_true(result == 3.0)
 ```
 
 </details>
 
 #### returns composite types correctly
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -159,7 +174,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val args = sys_get_args()
-expect(args.len() >= 1)
+assert_true(args.len() >= 1)
 ```
 
 </details>
@@ -167,6 +182,9 @@ expect(args.len() >= 1)
 #### when extern function encounters errors
 
 #### propagates errors from extern function
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -178,7 +196,7 @@ Reproduction: this block contains the complete executable scenario source.
 # Test with NaN input (sqrt of negative number)
 val result = rt_math_sqrt(-1.0)
 # NaN is not equal to itself
-expect(result != result)
+assert_true(result != result)
 ```
 
 </details>
@@ -186,6 +204,9 @@ expect(result != result)
 ### External FFI Memory Safety
 
 #### properly manages memory across FFI boundary
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -197,12 +218,16 @@ Reproduction: this block contains the complete executable scenario source.
 # Test that list returned from FFI is valid
 val args = sys_get_args()
 val first = args[0]
-expect(first != "")
+assert_true(first != "")
 ```
 
 </details>
 
 #### prevents use-after-free in FFI calls
+
+- assert true
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -214,13 +239,17 @@ Reproduction: this block contains the complete executable scenario source.
 # Call FFI function multiple times to ensure memory is stable
 val r1 = rt_math_sqrt(16.0)
 val r2 = rt_math_sqrt(16.0)
-expect(r1 == r2)
-expect(r1 == 4.0)
+assert_true(r1 == r2)
+assert_true(r1 == 4.0)
 ```
 
 </details>
 
 #### handles string marshalling safely
+
+- assert true
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -231,9 +260,9 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Get args which involves string marshalling from Rust to Simple
 val args = sys_get_args()
-expect(args[0].len() > 0)
+assert_true(args[0].len() > 0)
 # Program name should be non-empty (index before .len() to avoid interpreter var corruption)
-expect(args.len() >= 1)
+assert_true(args.len() >= 1)
 ```
 
 </details>

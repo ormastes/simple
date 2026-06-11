@@ -41,7 +41,7 @@ web_render_api_spec -> common
 #### builds one full HTML shell for host web renderers
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -59,7 +59,7 @@ expect(html).to_contain("<script>console.log('x')</script>")
 #### preserves render_html body semantics separately from the full shell
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -75,7 +75,7 @@ expect(web_render_full_html(req)).to_contain("<div id=\"app\"><main><p>Body only
 #### builds the same render envelope for electron and tauri
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -96,7 +96,7 @@ expect(tauri_json).to_contain("\"html\"")
 #### represents pure simple pixels as an optional artifact
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -116,7 +116,7 @@ expect(artifact.binary_schema).to_equal("")
 #### carries binary artifact metadata through the common artifact contract
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -148,7 +148,7 @@ expect(with_binary.binary_command_count).to_equal(3)
 #### reports native host capabilities through the common API
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -169,7 +169,7 @@ expect(tui_web_artifact.capability_summary).to_equal("color")
 #### serializes host window commands through the common web render API
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -199,7 +199,7 @@ expect(json).to_contain("\"width\":640")
 #### serializes snapshot patch and input envelopes through the common API
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -251,7 +251,7 @@ expect(input_json).to_contain("\"button\":\"left\"")
 #### builds a complete transport bundle from the common web render API
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -273,7 +273,7 @@ expect(bundle.host_window_json).to_contain("\"action\":\"new_browser_window\"")
 #### normalizes UI events into common web render input envelopes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -296,7 +296,7 @@ expect(input.value).to_equal("Ada")
 #### declares generated WASM no-JavaScript render targets for mobile and WMs
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -316,7 +316,7 @@ expect(web_render_wasm_abi_for_target(WEB_RENDER_TARGET_SIMPLEOS_WM_WASM)).to_eq
 #### rejects JavaScript and ABI mismatches for generated WASM targets
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -337,7 +337,7 @@ expect(web_render_wasm_no_js_validation_error(valid, wrong_abi)).to_equal("wasm 
 #### carries generated WASM metadata without producing host IPC JavaScript
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -363,7 +363,7 @@ expect(artifact.capability_summary).to_contain("no_javascript")
 #### ties WASM html css metadata to 2D pixel artifact provenance
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -411,7 +411,7 @@ expect(rendered.engine2d_reason).to_contain("Engine2D")
 #### requires measured GUI and text timings to beat GTK on the same scene
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -456,7 +456,7 @@ expect(missing.reason).to_equal("missing-scene")
 #### requires vector font rendering evidence to be timed non-empty and deterministic
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -485,7 +485,7 @@ expect(missing_timing.reason).to_equal("missing-timing")
 #### records vector font compute evidence without claiming unavailable accelerators
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -524,7 +524,7 @@ expect(opencl_bad_status.reason).to_equal("opencl-not-proven")
 #### requires exact bitmap evidence without blur or tolerance for node and electron baselines
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

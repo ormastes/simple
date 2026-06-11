@@ -56,6 +56,9 @@ Status: Complete
 
 #### can call CallRecorder.new directly
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -64,14 +67,16 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val recorder = CallRecorder.new()
-expect(recorder.calls.len() == 0)
+assert_true(recorder.calls.len() == 0)
 ```
 
 </details>
 
 #### records calls on the local harness
 
-1. recorder record
+- recorder record
+- assert true
+- assert true
 
 
 <details>
@@ -83,8 +88,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val recorder = CallRecorder.new()
 recorder.record("ping")
-expect(recorder.calls.len() == 1)
-expect(recorder.calls[0] == "ping")
+assert_true(recorder.calls.len() == 1)
+assert_true(recorder.calls[0] == "ping")
 ```
 
 </details>

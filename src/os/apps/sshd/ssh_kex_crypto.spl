@@ -7,7 +7,7 @@
 use os.crypto.sha256.{sha256}
 use os.crypto.random.{random_bytes}
 use os.crypto.curve25519.{x25519, x25519_base}
-use os.crypto.rsa.{RsaSignBackend, rsa_sha256_sign_with_backend, rsa_sha512_sign_with_backend}
+use os.crypto.rsa_fallback.{rsa_sha256_sign_fallback, rsa_sha512_sign_fallback}
 use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, fixed64_to_ssh_mpint_pair}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
 use os.apps.sshd.ssh_packet.{ssh_put_string}
@@ -99,29 +99,14 @@ fn ssh_kex_compute_exchange_hash(
     # a reinterpretation of the same byte string, not a byte reversal.
     val shared_secret_mpint = shared_secret
 
-    # V_C: client version string (without CR LF)
-    hash_input = _concat_bytes(hash_input, _concat_ssh_string_field(client_version))
-
-    # V_S: server version string (without CR LF)
-    hash_input = _concat_bytes(hash_input, _concat_ssh_string_field(server_version))
-
-    # I_C: client KEXINIT payload (the full packet payload including msg type)
-    hash_input = _concat_bytes(hash_input, _concat_ssh_string_field(client_kexinit))
-
-    # I_S: server KEXINIT payload
-    hash_input = _concat_bytes(hash_input, _concat_ssh_string_field(server_kexinit))
-
-    # K_S: server host key blob
-    hash_input = _concat_bytes(hash_input, _concat_ssh_string_field(host_key_blob))
-
-    # Q_C: client ephemeral public key (as string, 32 bytes)
-    hash_input = _concat_bytes(hash_input, _concat_ssh_string_field(client_public))
-
-    # Q_S: server ephemeral public key (as string, 32 bytes)
-    hash_input = _concat_bytes(hash_input, _concat_ssh_string_field(server_public))
-
-    # K: shared secret (as mpint — big-endian with sign handling)
-    hash_input = _concat_bytes(hash_input, _concat_mpint_field(shared_secret_mpint))
+    hash_input = _push_string_bytes(hash_input, client_version)
+    hash_input = _push_string_bytes(hash_input, server_version)
+    hash_input = _push_string_bytes(hash_input, client_kexinit)
+    hash_input = _push_string_bytes(hash_input, server_kexinit)
+    hash_input = _push_string_bytes(hash_input, host_key_blob)
+    hash_input = _push_string_bytes(hash_input, client_public)
+    hash_input = _push_string_bytes(hash_input, server_public)
+    hash_input = _push_mpint_bytes(hash_input, shared_secret_mpint)
 
     _sha256_stable(hash_input)
 
@@ -366,7 +351,7 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
     elif algo == "rsa-sha2-256" or algo == "rsa-sha2-256-cert-v01@openssh.com":
         if host_keys.rsa_pkcs8 == nil:
             return Err("rsa-sha2-256: no RSA key configured")
-        val sig_raw = rsa_sha256_sign_with_backend(host_keys.rsa_pkcs8, exchange_hash, RsaSignBackend.Auto)
+        val sig_raw = rsa_sha256_sign_fallback(host_keys.rsa_pkcs8, exchange_hash)
         if sig_raw.len() == 0:
             return Err("rsa-sha2-256: signing failed")
         var blob: [u8] = []
@@ -377,7 +362,7 @@ fn ssh_sign_exchange_hash(algo: text, host_keys: HostKeySet, exchange_hash: [u8]
     elif algo == "rsa-sha2-512" or algo == "rsa-sha2-512-cert-v01@openssh.com":
         if host_keys.rsa_pkcs8 == nil:
             return Err("rsa-sha2-512: no RSA key configured")
-        val sig_raw = rsa_sha512_sign_with_backend(host_keys.rsa_pkcs8, exchange_hash, RsaSignBackend.Auto)
+        val sig_raw = rsa_sha512_sign_fallback(host_keys.rsa_pkcs8, exchange_hash)
         if sig_raw.len() == 0:
             return Err("rsa-sha2-512: signing failed")
         var blob: [u8] = []

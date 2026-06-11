@@ -14,8 +14,13 @@
 # Reference: RFC 8332 (RSA Key with SHA-256/SHA-512 for SSH)
 # Reference: RFC 3447 (PKCS#1 v2.2, RSASSA-PKCS1-v1_5)
 
-use std.nogc_sync_mut.io.signature_sffi.{rt_rsa_sha256_sign, rt_rsa_sha512_sign, rt_rsa_sha256_verify, rt_rsa_sha512_verify}
-use os.crypto.rsa_fallback.{rsa_sha256_sign_fallback, rsa_sha512_sign_fallback, rsa_sha512_sign_embedded_host}
+use os.crypto.rsa_fallback.{rsa_sha256_sign_fallback, rsa_sha512_sign_fallback}
+use os.crypto.dual_backend.{DualBackendConfig, dual_backend_default_config, dual_backend_run_bytes}
+
+extern fn rt_rsa_sha256_sign(pkcs8: [u8], message: [u8]) -> [u8]
+extern fn rt_rsa_sha512_sign(pkcs8: [u8], message: [u8]) -> [u8]
+extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
+extern fn rt_rsa_sha512_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
 
 enum RsaSignBackend:
     Auto
@@ -48,10 +53,6 @@ fn _rsa_sha512_sign_hosted(pkcs8: [u8], message: [u8]) -> [u8]:
     _unwrap_sig(rt_rsa_sha512_sign(pkcs8, message))
 
 fn _rsa_sha512_sign_pure_simple_auto(pkcs8: [u8], message: [u8]) -> [u8]:
-    if pkcs8.len() == 1216:
-        val embedded_sig = rsa_sha512_sign_embedded_host(message)
-        if embedded_sig.len() > 0:
-            return embedded_sig
     rsa_sha512_sign_fallback(pkcs8, message)
 
 # ============================================================================
@@ -74,7 +75,20 @@ fn rsa_sha256_sign(pkcs8: [u8], message: [u8]) -> [u8]:
     Deterministic: identical key + message always yields the same signature.
     PKCS#1 v1.5 padding is applied internally.
     """
-    rsa_sha256_sign_with_backend(pkcs8, message, RsaSignBackend.Auto)
+    rsa_sha256_sign_with_config(pkcs8, message, dual_backend_default_config())
+
+fn rsa_sha256_sign_with_config(pkcs8: [u8], message: [u8], config: DualBackendConfig) -> [u8]:
+    dual_backend_run_bytes(
+        "rsa",
+        "sha256_sign",
+        config,
+        [
+            "pkcs8_len=" + pkcs8.len().to_text(),
+            "msg_len=" + message.len().to_text()
+        ],
+        fn(): _rsa_sha256_sign_hosted(pkcs8, message),
+        fn(): rsa_sha256_sign_fallback(pkcs8, message)
+    )
 
 fn rsa_sha256_sign_with_backend(pkcs8: [u8], message: [u8], backend: RsaSignBackend) -> [u8]:
     """Sign with an explicitly selected RSA backend.
@@ -126,7 +140,20 @@ fn rsa_sha512_sign(pkcs8: [u8], message: [u8]) -> [u8]:
     Deterministic: identical key + message always yields the same signature.
     PKCS#1 v1.5 padding with SHA-512 digest is applied internally.
     """
-    rsa_sha512_sign_with_backend(pkcs8, message, RsaSignBackend.Auto)
+    rsa_sha512_sign_with_config(pkcs8, message, dual_backend_default_config())
+
+fn rsa_sha512_sign_with_config(pkcs8: [u8], message: [u8], config: DualBackendConfig) -> [u8]:
+    dual_backend_run_bytes(
+        "rsa",
+        "sha512_sign",
+        config,
+        [
+            "pkcs8_len=" + pkcs8.len().to_text(),
+            "msg_len=" + message.len().to_text()
+        ],
+        fn(): _rsa_sha512_sign_hosted(pkcs8, message),
+        fn(): _rsa_sha512_sign_pure_simple_auto(pkcs8, message)
+    )
 
 fn rsa_sha512_sign_with_backend(pkcs8: [u8], message: [u8], backend: RsaSignBackend) -> [u8]:
     """Sign with an explicitly selected RSA backend.

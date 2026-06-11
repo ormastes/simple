@@ -1,6 +1,6 @@
 # Map Specification
 
-> 1. expect m keys
+> <details>
 
 <!-- sdn-diagram:id=map_spec.arch -->
 <details class="sdn-source">
@@ -42,7 +42,7 @@ map_spec
 
 #### creates empty dict
 
-1. expect m keys
+- expect m keys
 
 
 <details>
@@ -95,7 +95,7 @@ expect m["count"] == 2
 
 #### contains_key returns true for existing keys
 
-1. expect m has
+- expect m has
 
 
 <details>
@@ -114,7 +114,7 @@ expect m.has("key")
 
 #### contains_key returns false for missing keys
 
-1. expect not m has
+- expect not m has
 
 
 <details>
@@ -132,9 +132,9 @@ expect not m.has("missing")
 
 #### len increases with insertions
 
-1. expect m keys
-2. expect m keys
-3. expect m keys
+- expect m keys
+- expect m keys
+- expect m keys
 
 
 <details>
@@ -156,8 +156,8 @@ expect m.keys().len() == 2
 
 #### len does not increase for updates
 
-1. expect m keys
-2. expect m keys
+- expect m keys
+- expect m keys
 
 
 <details>
@@ -180,7 +180,7 @@ expect m.keys().len() == 1
 
 #### keys returns all keys
 
-1. expect keys len
+- expect keys len
 
 
 <details>
@@ -202,7 +202,7 @@ expect keys.len() == 3
 
 #### empty dict returns empty key list
 
-1. expect m keys
+- expect m keys
 
 
 <details>

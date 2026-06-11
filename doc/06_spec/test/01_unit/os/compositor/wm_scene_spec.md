@@ -60,6 +60,9 @@ expect(scene.height).to_equal(H)
 
 #### AC-2: standard scene has a name
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -69,7 +72,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val scene = standard_wm_scene(W, H)
 val has_name = scene.name.len() > 0
-expect(has_name)
+assert_true(has_name)
 ```
 
 </details>
@@ -93,6 +96,9 @@ expect(scene.elements.len()).to_be_greater_than(0)
 
 #### AC-2: scene contains a desktop chrome element
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -105,12 +111,15 @@ var found = false
 for elem in scene.elements:
     if elem.kind == "desktop_chrome":
         found = true
-expect(found)
+assert_true(found)
 ```
 
 </details>
 
 #### AC-2: scene contains a window decoration element
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -124,12 +133,15 @@ var found = false
 for elem in scene.elements:
     if elem.kind == "decoration":
         found = true
-expect(found)
+assert_true(found)
 ```
 
 </details>
 
 #### AC-2: scene contains a glass panel element
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -143,12 +155,15 @@ var found = false
 for elem in scene.elements:
     if elem.kind == "glass_panel":
         found = true
-expect(found)
+assert_true(found)
 ```
 
 </details>
 
 #### AC-2: scene contains a text label element
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -162,12 +177,15 @@ var found = false
 for elem in scene.elements:
     if elem.kind == "text_label":
         found = true
-expect(found)
+assert_true(found)
 ```
 
 </details>
 
 #### AC-3: scene element positions are within bounds
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -183,7 +201,7 @@ for elem in scene.elements:
         all_in_bounds = false
     if elem.x + elem.w > W or elem.y + elem.h > H:
         all_in_bounds = false
-expect(all_in_bounds)
+assert_true(all_in_bounds)
 ```
 
 </details>
@@ -245,6 +263,9 @@ expect(pixels.len().to_i32()).to_equal(expected_len)
 
 #### AC-3: rendered pixels are non-zero (not all transparent)
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -258,7 +279,7 @@ var has_nonzero = false
 for p in pixels:
     if p != 0:
         has_nonzero = true
-expect(has_nonzero)
+assert_true(has_nonzero)
 ```
 
 </details>
@@ -306,6 +327,9 @@ expect(html.len()).to_be_greater_than(0)
 
 #### AC-2: HTML contains doctype or html tag
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -316,12 +340,15 @@ Reproduction: this block contains the complete executable scenario source.
 val scene = standard_wm_scene(W, H)
 val html = scene_to_html(scene)
 val has_html = html.contains("<html") or html.contains("<!DOCTYPE")
-expect(has_html)
+assert_true(has_html)
 ```
 
 </details>
 
 #### AC-2: HTML contains style information for glass panel
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -333,12 +360,15 @@ Reproduction: this block contains the complete executable scenario source.
 val scene = standard_wm_scene(W, H)
 val html = scene_to_html(scene)
 val has_style = html.contains("backdrop-filter") or html.contains("blur")
-expect(has_style)
+assert_true(has_style)
 ```
 
 </details>
 
 #### AC-2: HTML dimensions match scene dimensions
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -350,7 +380,7 @@ Reproduction: this block contains the complete executable scenario source.
 val scene = standard_wm_scene(W, H)
 val html = scene_to_html(scene)
 val has_width = html.contains("800")
-expect(has_width)
+assert_true(has_width)
 ```
 
 </details>
@@ -425,6 +455,9 @@ expect(html).to_contain("backdrop-filter:blur(24px)")
 
 #### AC-2: exposes a deterministic modern theme configuration for OS renderers
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -464,7 +497,7 @@ expect(config.window_layer_z).to_equal(20)
 expect(config.overlay_layer_z).to_equal(11000)
 expect(config.standard_motion_ms).to_equal(240)
 expect(config.reduced_motion_ms).to_equal(80)
-expect(config.can_disable_motion)
+assert_true(config.can_disable_motion)
 ```
 
 </details>
@@ -490,14 +523,14 @@ expect(wm_scene_icon_kind("terminal")).to_equal("glyph-to-round")
 
 #### projects shared GUI windows into pure Simple WM scene elements
 
-1. var manager = WindowManager new
-2. manager minimize window
-3. var registry = UiWindowSurfaceRegistry new
-4. registry bind with kind
+- var manager = WindowManager new
+- manager minimize window
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
    - Expected: scene.width equals `640`
    - Expected: scene.height equals `480`
    - Expected: scene.elements.len() equals `4`
-5. expect not
+- expect not
 
 
 <details>
@@ -529,9 +562,9 @@ expect_not(html.contains("Hidden"))
 
 #### projects shared command lane, clock, right icons, taskbar launchers, and windows into render elements
 
-1. var manager = WindowManager new
-2. var registry = UiWindowSurfaceRegistry new
-3. registry bind with kind
+- var manager = WindowManager new
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
    - Expected: elem.y equals `0`
    - Expected: elem.h equals `32`
    - Expected: elem.text equals `09:41`
@@ -575,10 +608,34 @@ expect_not(html.contains("Hidden"))
    - Expected: elem.text equals `Selection|Window|Screen|Capture`
    - Expected: elem.w equals `360`
    - Expected: elem.text equals `Command|Code|Link|Paste|Pin|Clear`
+- assert true
+- assert true
    - Expected: right_icons equals `2`
    - Expected: launchers equals `2`
    - Expected: running equals `1`
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
    - Expected: hot_corner_count equals `4`
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
 
 
 <details>
@@ -726,34 +783,34 @@ for elem in scene.elements:
         expect(elem.w).to_equal(360)
         expect(elem.text).to_equal("Command|Code|Link|Paste|Pin|Clear")
 
-expect(has_command)
-expect(has_clock)
+assert_true(has_command)
+assert_true(has_clock)
 expect(right_icons).to_equal(2)
 expect(launchers).to_equal(2)
 expect(running).to_equal(1)
-expect(has_window_bar)
-expect(has_widgets)
-expect(has_command_palette)
-expect(has_control_center)
-expect(has_overview)
-expect(has_snap_preview)
-expect(has_notification)
-expect(has_notification_center)
-expect(has_live_activity)
-expect(has_workspace_switcher)
-expect(has_shortcut_overlay)
-expect(has_app_launcher)
-expect(has_context_menu)
-expect(has_snap_layouts)
-expect(has_window_switcher)
-expect(has_quick_settings)
+assert_true(has_window_bar)
+assert_true(has_widgets)
+assert_true(has_command_palette)
+assert_true(has_control_center)
+assert_true(has_overview)
+assert_true(has_snap_preview)
+assert_true(has_notification)
+assert_true(has_notification_center)
+assert_true(has_live_activity)
+assert_true(has_workspace_switcher)
+assert_true(has_shortcut_overlay)
+assert_true(has_app_launcher)
+assert_true(has_context_menu)
+assert_true(has_snap_layouts)
+assert_true(has_window_switcher)
+assert_true(has_quick_settings)
 expect(hot_corner_count).to_equal(4)
-expect(has_resize_hud)
-expect(has_gesture_hints)
-expect(has_taskbar_preview)
-expect(has_stage_rail)
-expect(has_screen_capture)
-expect(has_clipboard_history)
+assert_true(has_resize_hud)
+assert_true(has_gesture_hints)
+assert_true(has_taskbar_preview)
+assert_true(has_stage_rail)
+assert_true(has_screen_capture)
+assert_true(has_clipboard_history)
 expect(html).to_contain("class='command-lane'")
 expect(html).to_contain("data-app='terminal'")
 expect(html).to_contain("data-window='win1'")
@@ -1188,8 +1245,8 @@ expect(html).to_contain("body[data-motion-mode='off'] .widget-gallery")
 
 #### keeps modern chromed affordances bounded on compact scenes
 
-1. var manager = WindowManager new
-2. var registry = UiWindowSurfaceRegistry new
+- var manager = WindowManager new
+- var registry = UiWindowSurfaceRegistry new
    - Expected: bounded_affordances equals `30`
 
 
@@ -1223,9 +1280,49 @@ expect(bounded_affordances).to_equal(30)
 
 #### reports visual quality metrics for rendered OS affordances
 
-1. var manager = WindowManager new
-2. var registry = UiWindowSurfaceRegistry new
-3. registry bind with kind
+- var manager = WindowManager new
+- var registry = UiWindowSurfaceRegistry new
+- registry bind with kind
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
    - Expected: report.glass_blur_px equals `24`
    - Expected: report.glass_saturation_pct equals `170`
    - Expected: report.glass_opacity_floor_x100 equals `6`
@@ -1256,9 +1353,11 @@ expect(bounded_affordances).to_equal(30)
    - Expected: report.max_widget_gallery_width_px equals `440`
    - Expected: report.min_overview_card_width_px equals `180`
    - Expected: report.min_touch_target_height_px equals `44`
+- assert true
    - Expected: report.layout_safe_area_px equals `16`
    - Expected: report.layout_panel_gap_px equals `12`
    - Expected: report.layout_min_touch_target_px equals `44`
+- assert true
    - Expected: report.reduced_motion_duration_ms equals `80`
 
 
@@ -1277,47 +1376,47 @@ val shared = shared_wm_scene_from_window_manager(manager, registry, 800, 600)
 val scene = shared_wm_scene_to_chromed_wm_scene(shared, _shared_taskbar(), 1000, "09:41", 2)
 val report = wm_scene_visual_quality_report(scene)
 
-expect(report.passed)
-expect(report.theme_configured)
-expect(report.round_scrollbars)
-expect(report.round_icon_converter)
-expect(report.titlebar_input_ready)
-expect(report.traffic_controls_ready)
-expect(report.animated_background_ready)
-expect(report.window_interaction_ready)
-expect(report.command_palette_ready)
-expect(report.theme_accent_controls_ready)
-expect(report.focus_depth_ready)
-expect(report.lifecycle_animation_ready)
-expect(report.taskbar_interaction_ready)
-expect(report.dock_magnification_ready)
-expect(report.notification_feedback_ready)
-expect(report.notification_center_ready)
-expect(report.live_activity_ready)
-expect(report.workspace_switcher_ready)
-expect(report.keyboard_shortcut_overlay_ready)
-expect(report.app_launcher_ready)
-expect(report.context_menu_ready)
-expect(report.snap_layouts_ready)
-expect(report.window_switcher_ready)
-expect(report.quick_settings_ready)
-expect(report.hot_corners_ready)
-expect(report.resize_hud_ready)
-expect(report.gesture_hints_ready)
-expect(report.taskbar_preview_ready)
-expect(report.stage_rail_ready)
-expect(report.screen_capture_ready)
-expect(report.clipboard_history_ready)
-expect(report.privacy_indicator_ready)
-expect(report.system_hud_ready)
-expect(report.wallpaper_picker_ready)
-expect(report.dock_stack_ready)
-expect(report.widget_gallery_ready)
-expect(report.color_checked)
+assert_true(report.passed)
+assert_true(report.theme_configured)
+assert_true(report.round_scrollbars)
+assert_true(report.round_icon_converter)
+assert_true(report.titlebar_input_ready)
+assert_true(report.traffic_controls_ready)
+assert_true(report.animated_background_ready)
+assert_true(report.window_interaction_ready)
+assert_true(report.command_palette_ready)
+assert_true(report.theme_accent_controls_ready)
+assert_true(report.focus_depth_ready)
+assert_true(report.lifecycle_animation_ready)
+assert_true(report.taskbar_interaction_ready)
+assert_true(report.dock_magnification_ready)
+assert_true(report.notification_feedback_ready)
+assert_true(report.notification_center_ready)
+assert_true(report.live_activity_ready)
+assert_true(report.workspace_switcher_ready)
+assert_true(report.keyboard_shortcut_overlay_ready)
+assert_true(report.app_launcher_ready)
+assert_true(report.context_menu_ready)
+assert_true(report.snap_layouts_ready)
+assert_true(report.window_switcher_ready)
+assert_true(report.quick_settings_ready)
+assert_true(report.hot_corners_ready)
+assert_true(report.resize_hud_ready)
+assert_true(report.gesture_hints_ready)
+assert_true(report.taskbar_preview_ready)
+assert_true(report.stage_rail_ready)
+assert_true(report.screen_capture_ready)
+assert_true(report.clipboard_history_ready)
+assert_true(report.privacy_indicator_ready)
+assert_true(report.system_hud_ready)
+assert_true(report.wallpaper_picker_ready)
+assert_true(report.dock_stack_ready)
+assert_true(report.widget_gallery_ready)
+assert_true(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
-expect(report.bounded_layout)
-expect(report.translucent_surfaces)
-expect(report.material_policy_ready)
+assert_true(report.bounded_layout)
+assert_true(report.translucent_surfaces)
+assert_true(report.material_policy_ready)
 expect(report.glass_blur_px).to_equal(24)
 expect(report.glass_saturation_pct).to_equal(170)
 expect(report.glass_opacity_floor_x100).to_equal(6)
@@ -1349,11 +1448,11 @@ expect(report.max_dock_stack_width_px).to_equal(340)
 expect(report.max_widget_gallery_width_px).to_equal(440)
 expect(report.min_overview_card_width_px).to_equal(180)
 expect(report.min_touch_target_height_px).to_equal(44)
-expect(report.layout_policy_ready)
+assert_true(report.layout_policy_ready)
 expect(report.layout_safe_area_px).to_equal(16)
 expect(report.layout_panel_gap_px).to_equal(12)
 expect(report.layout_min_touch_target_px).to_equal(44)
-expect(report.motion_can_disable)
+assert_true(report.motion_can_disable)
 expect(report.reduced_motion_duration_ms).to_equal(80)
 ```
 
@@ -1361,13 +1460,13 @@ expect(report.reduced_motion_duration_ms).to_equal(80)
 
 #### fails visual quality when rendered affordances are out of bounds
 
-1. SceneElement
-2. SceneElement
-3. SceneElement
-4. SceneElement
-5. SceneElement
-6. expect not
-7. expect not
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- expect not
+- expect not
    - Expected: report.max_control_center_width_px equals `340`
    - Expected: report.max_desktop_widget_width_px equals `280`
 
@@ -1403,8 +1502,8 @@ expect(report.max_desktop_widget_width_px).to_equal(280)
 
 #### fails visual quality without modern affordance motion controls
 
-1. expect not
-2. expect not
+- expect not
+- expect not
    - Expected: report.reduced_motion_duration_ms equals `0`
    - Expected: report.min_touch_target_height_px equals `0`
 
@@ -1429,13 +1528,13 @@ expect(report.min_touch_target_height_px).to_equal(0)
 
 #### fails visual quality when duplicate affordances hide a missing affordance kind
 
-1. SceneElement
-2. SceneElement
-3. SceneElement
-4. SceneElement
-5. SceneElement
-6. expect not
-7. expect not
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- expect not
+- expect not
    - Expected: report.reduced_motion_duration_ms equals `0`
 
 
@@ -1469,15 +1568,15 @@ expect(report.reduced_motion_duration_ms).to_equal(0)
 
 #### reports true max widths and actual overview width for malformed affordances
 
-1. SceneElement
-2. SceneElement
-3. SceneElement
-4. SceneElement
-5. SceneElement
-6. SceneElement
-7. SceneElement
-8. expect not
-9. expect not
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- expect not
+- expect not
    - Expected: report.max_control_center_width_px equals `340`
    - Expected: report.max_desktop_widget_width_px equals `280`
    - Expected: report.min_overview_card_width_px equals `120`
@@ -1517,14 +1616,14 @@ expect(report.min_overview_card_width_px).to_equal(120)
 
 #### fails visual quality when titlebar command chrome is missing
 
-1. SceneElement
-2. SceneElement
-3. SceneElement
-4. SceneElement
-5. SceneElement
-6. expect not
-7. expect not
-8. expect not
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- SceneElement
+- expect not
+- expect not
+- expect not
 
 
 <details>
@@ -1559,10 +1658,10 @@ expect_not(report.traffic_controls_ready)
 
 #### projects host-neutral lifecycle motion classes into inspectable HTML
 
-1. WmLifecycleWindowState
-2. WmLifecycleWindowState
+- WmLifecycleWindowState
+- WmLifecycleWindowState
    - Expected: opening_scene.name equals `lifecycle_motion_wm_scene`
-3. expect not
+- expect not
 
 
 <details>

@@ -99,6 +99,9 @@ simple test --list --show-tags
 
 #### detects it() as a regular test
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -112,12 +115,15 @@ Reproduction: this block contains the complete executable scenario source.
 # - is_slow: false
 # - is_skipped: false
 val verified = true
-expect(verified)
+assert_true(verified)
 ```
 
 </details>
 
 #### extracts test description from first argument
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -128,7 +134,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Description should be: "extracts test description from first argument"
 val description_extracted = true
-expect(description_extracted)
+assert_true(description_extracted)
 ```
 
 </details>
@@ -136,6 +142,9 @@ expect(description_extracted)
 #### slow tests
 
 #### slow_it creates tests with is_slow=true
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -146,7 +155,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Verify slow test detection in unit tests
 val slow_detection_works = true
-expect(slow_detection_works)
+assert_true(slow_detection_works)
 ```
 
 </details>
@@ -154,6 +163,9 @@ expect(slow_detection_works)
 #### disabled tests
 
 #### disabled_test creates tests with is_skipped=true
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -165,12 +177,15 @@ Reproduction: this block contains the complete executable scenario source.
 # Verify that disabled_test function exists and is recognized
 # Static analyzer marks these as is_skipped=true
 val disabled_detection_works = true
-expect(disabled_detection_works)
+assert_true(disabled_detection_works)
 ```
 
 </details>
 
 #### disabled is an alias for disabled_test
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -180,7 +195,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val disabled_alias_works = true
-expect(disabled_alias_works)
+assert_true(disabled_alias_works)
 ```
 
 </details>
@@ -191,6 +206,9 @@ expect(disabled_alias_works)
 
 #### detects describe blocks
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -199,7 +217,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val describe_works = true
-expect(describe_works)
+assert_true(describe_works)
 ```
 
 </details>
@@ -207,6 +225,9 @@ expect(describe_works)
 #### context blocks
 
 #### detects context blocks as groups
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -216,7 +237,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val context_works = true
-expect(context_works)
+assert_true(context_works)
 ```
 
 </details>
@@ -229,6 +250,9 @@ expect(context_works)
 
 #### supports deeply nested tests
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -238,7 +262,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Full path: TestMeta Grouping > nested groups > level 2 > level 3 > supports deeply nested tests
 val nesting_works = true
-expect(nesting_works)
+assert_true(nesting_works)
 ```
 
 </details>
@@ -246,6 +270,9 @@ expect(nesting_works)
 ### TestMeta Full Name
 
 #### builds full name from group path
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -256,7 +283,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # Expected full name: "TestMeta Full Name > builds full name from group path"
 val full_name_works = true
-expect(full_name_works)
+assert_true(full_name_works)
 ```
 
 </details>
@@ -264,6 +291,9 @@ expect(full_name_works)
 ### TestMeta Tag Extraction
 
 #### extracts tags from comments
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -274,12 +304,15 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # This test should have tags: integration, database
 val tags_work = true
-expect(tags_work)
+assert_true(tags_work)
 ```
 
 </details>
 
 #### inherits tags from parent groups
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -290,7 +323,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # This test should have tag: integration (from group)
 val inheritance_works = true
-expect(inheritance_works)
+assert_true(inheritance_works)
 ```
 
 </details>
@@ -298,6 +331,9 @@ expect(inheritance_works)
 ### TestMeta Performance
 
 #### extracts metadata efficiently
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -309,7 +345,7 @@ Reproduction: this block contains the complete executable scenario source.
 # Performance is verified through Rust unit tests and benchmarks
 # This test documents the expected behavior
 val is_efficient = true
-expect(is_efficient)
+assert_true(is_efficient)
 ```
 
 </details>

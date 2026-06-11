@@ -1,6 +1,6 @@
 # Dbfs Schema Facade Specification
 
-> 1. var inodes = InodeTable new
+> <details>
 
 <!-- sdn-diagram:id=dbfs_schema_facade_spec.arch -->
 <details class="sdn-source">
@@ -40,8 +40,8 @@ dbfs_schema_facade_spec -> std
 
 #### re-exports schema tables and file metadata helpers
 
-1. var inodes = InodeTable new
-2. var dentries = DentryTable new
+- var inodes = InodeTable new
+- var dentries = DentryTable new
    - Expected: inodes.insert(root).is_ok() is true
    - Expected: inodes.insert(file).is_ok() is true
    - Expected: dentries.insert(DentryRow(parent_ino: 1, name: "hello.txt", child_ino: 2, gen: 1)).is_ok() is true
@@ -51,7 +51,7 @@ dbfs_schema_facade_spec -> std
    - Expected: check_read(meta, 1000, 1000) is true
    - Expected: check_write(meta, 1000, 1000) is true
    - Expected: check_exec(meta, 1000, 1000) is false
-3. var cache = InodeHintsCache new
+- var cache = InodeHintsCache new
    - Expected: resolved.is_ok() is true
    - Expected: resolved.unwrap().ino_id equals `2`
    - Expected: batch_stat(1, "/", dentries, inodes).len() equals `1`

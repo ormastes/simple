@@ -151,6 +151,24 @@ fn method_call_qualified() {
     assert!(test_fn.blocks.iter().any(|b| !b.instructions.is_empty()));
 }
 
+#[test]
+fn function_typed_field_method_call_keeps_real_signature() {
+    let mir = compile_to_mir(
+        "class FnFieldRoute:\n    handler: fn(i32) -> i32\n\nfn plus_one(x: i32) -> i32:\n    x + 1\n\nfn test() -> i32:\n    val route = FnFieldRoute(handler: plus_one)\n    return route.handler(41)\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::FieldGet { .. })));
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::IndirectCall { param_types, return_type, .. }
+            if param_types == &vec![hir::TypeId::I32] && *return_type == hir::TypeId::I32
+    )));
+    assert!(
+        !has_inst(&mir, |i| matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".handler") || func_name == "handler")),
+        "function-typed field method call should lower as FieldGet + IndirectCall, not a named method dispatch"
+    );
+}
+
 // =============================================================================
 // Struct field access
 // =============================================================================

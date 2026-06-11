@@ -3,23 +3,25 @@
 # Regenerates the Lean verification artifacts tracked by the repo and
 # validates them against the checked-in/generated files on disk.
 
-use io.fs as fs
+use std.nogc_sync_mut.io.{file_exists, dir_create_all, file_write, file_read_text, shell}
+
+
 
 # Import individual regeneration modules
-use verification.regenerate.nogc_compile as regen_nogc
-use verification.regenerate.async_compile as regen_async
-use verification.regenerate.gc_manual_borrow as regen_gc
-use verification.regenerate.manual_pointer_borrow as regen_manual
-use verification.regenerate.module_resolution as regen_module
-use verification.regenerate.visibility_export as regen_visibility
-use verification.regenerate.macro_auto_import as regen_macro
-use verification.regenerate.type_inference as regen_type
-use verification.regenerate.generics as regen_generics
-use verification.regenerate.contracts as regen_contracts
-use verification.regenerate.memory_capabilities as regen_mem_cap
-use verification.regenerate.memory_model_drf as regen_drf
-use verification.regenerate.async_effect_inference as regen_effect
-use verification.regenerate.tensor_dimensions as regen_tensor
+use verification.regenerate.nogc_compile.{regenerate_nogc_compile}
+use verification.regenerate.async_compile.{regenerate_async_compile}
+use verification.regenerate.gc_manual_borrow.{regenerate_gc_manual_borrow}
+use verification.regenerate.manual_pointer_borrow.{regenerate_manual_pointer_borrow}
+use verification.regenerate.module_resolution.{regenerate_module_resolution}
+use verification.regenerate.visibility_export.{regenerate_visibility_export}
+use verification.regenerate.macro_auto_import.{regenerate_macro_auto_import}
+use verification.regenerate.type_inference.{regenerate_type_inference_compile}
+use verification.regenerate.generics.{regenerate_generics}
+use verification.regenerate.contracts.{regenerate_contracts}
+use verification.regenerate.memory_capabilities.{regenerate_memory_capabilities}
+use verification.regenerate.memory_model_drf.{regenerate_memory_model_drf}
+use verification.regenerate.async_effect_inference.{regenerate_async_effect_inference}
+use verification.regenerate.tensor_dimensions.{regenerate_tensor_dimensions, regenerate_tensor_memory}
 
 fn known_regenerated_files() -> [text]:
     [
@@ -43,35 +45,35 @@ fn known_regenerated_files() -> [text]:
 # Regenerate all Lean files
 fn regenerate_all() -> Dict<text, text>:
     print("  [1/15] regenerate_nogc_compile...")
-    r1 = regen_nogc.regenerate_nogc_compile()
+    r1 = regenerate_nogc_compile()
     print("  [2/15] regenerate_async_compile...")
-    r2 = regen_async.regenerate_async_compile()
+    r2 = regenerate_async_compile()
     print("  [3/15] regenerate_gc_manual_borrow...")
-    r3 = regen_gc.regenerate_gc_manual_borrow()
+    r3 = regenerate_gc_manual_borrow()
     print("  [4/15] regenerate_manual_pointer_borrow...")
-    r4 = regen_manual.regenerate_manual_pointer_borrow()
+    r4 = regenerate_manual_pointer_borrow()
     print("  [5/15] regenerate_module_resolution...")
-    r5 = regen_module.regenerate_module_resolution()
+    r5 = regenerate_module_resolution()
     print("  [6/15] regenerate_visibility_export...")
-    r6 = regen_visibility.regenerate_visibility_export()
+    r6 = regenerate_visibility_export()
     print("  [7/15] regenerate_macro_auto_import...")
-    r7 = regen_macro.regenerate_macro_auto_import()
+    r7 = regenerate_macro_auto_import()
     print("  [8/15] regenerate_type_inference_compile...")
-    r8 = regen_type.regenerate_type_inference_compile()
+    r8 = regenerate_type_inference_compile()
     print("  [9/15] regenerate_generics...")
-    r9 = regen_generics.regenerate_generics()
+    r9 = regenerate_generics()
     print("  [10/15] regenerate_contracts...")
-    r10 = regen_contracts.regenerate_contracts()
+    r10 = regenerate_contracts()
     print("  [11/15] regenerate_memory_capabilities...")
-    r11 = regen_mem_cap.regenerate_memory_capabilities()
+    r11 = regenerate_memory_capabilities()
     print("  [12/15] regenerate_memory_model_drf...")
-    r12 = regen_drf.regenerate_memory_model_drf()
+    r12 = regenerate_memory_model_drf()
     print("  [13/15] regenerate_async_effect_inference...")
-    r13 = regen_effect.regenerate_async_effect_inference()
+    r13 = regenerate_async_effect_inference()
     print("  [14/15] regenerate_tensor_dimensions...")
-    r14 = regen_tensor.regenerate_tensor_dimensions()
+    r14 = regenerate_tensor_dimensions()
     print("  [15/15] regenerate_tensor_memory...")
-    r15 = regen_tensor.regenerate_tensor_memory()
+    r15 = regenerate_tensor_memory()
     print("  Building result dict...")
     {
         "src/verification/nogc_compile/src/NogcCompile.lean": r1,
@@ -96,22 +98,26 @@ fn write_regenerated_files(files: Dict<text, text>, base_path: text = ".") -> Li
     var written = []
     for (path, content) in files.items():
         val full_path = base_path + "/" + path
-        val dir_path = "/".join(full_path.split("/")[:-1])
-        if not fs.exist(dir_path):
-            fs.create_dir_all(dir_path)
-        if fs.write_text(full_path, content):
-            written.append(full_path)
+        # Use shell mkdir for recursive dir creation (rt_dir_create_all is unimplemented in interpreter)
+        shell("mkdir -p \"$(dirname '" + full_path + "')\"")
+        file_write(full_path, content)
+        written = written + [full_path]
     written
 
 # Validate regenerated files match existing files on disk.
-fn validate_regeneration(files: Dict<text, text>, base_path: text = ".") -> Dict<text, bool>:
+# Returns Dict<text, text> with "match" or "mismatch" per file path.
+fn validate_regeneration(files: Dict<text, text>, base_path: text = ".") -> Dict<text, text>:
     var validation = {}
     for (path, content) in files.items():
         val full_path = base_path + "/" + path
-        if fs.exist(full_path):
-            validation[path] = fs.read_text(full_path) == content
+        if file_exists(full_path):
+            val disk = file_read_text(full_path)
+            if disk == content:
+                validation[path] = "match"
+            else:
+                validation[path] = "mismatch"
         else:
-            validation[path] = false
+            validation[path] = "mismatch"
     validation
 
 # Main entry point for CLI
@@ -128,10 +134,9 @@ fn main():
     val validation = validate_regeneration(files)
 
     var all_valid = true
-    for (path, valid) in validation.items():
-        val status = if valid: "OK" else "MISMATCH"
+    for (path, status) in validation.items():
         print("  {path}: {status}")
-        if not valid:
+        if status == "mismatch":
             all_valid = false
 
     if all_valid:

@@ -132,7 +132,7 @@ val loss_val = loss{ (w - target)^2 }
 # After loss{} exits, backward() has been called automatically.
 # The gradient of (w - target)^2 w.r.t. w is 2*(w - target) = 2*(2-5) = -6
 val grad = w.grad()
-expect(grad.?.to_equal(true))
+assert_true(grad.?.to_equal(true))
 expect(grad.item()).to_equal(-6.0)
 ```
 
@@ -142,9 +142,9 @@ expect(grad.item()).to_equal(-6.0)
 
 #### accumulates gradients across loss blocks
 
-1. loss{
+- loss{
    - Expected: grad1 equals `2.0`
-2. loss{
+- loss{
    - Expected: grad2 equals `4.0`
 
 
@@ -175,6 +175,10 @@ expect(grad2).to_equal(4.0)
 
 #### keeps detached values out of autograd and restores gradient tracking after escaped nograd
 
+- assert true
+   - Expected: restored.requires_grad() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -193,7 +197,7 @@ match outcome:
     case Err(msg):
         expect(msg).to_equal("nograd escape")
     case Ok(_):
-        expect(false)
+        assert_true(false)
 
 val restored = restore_w * restore_x
 expect(restored.requires_grad()).to_equal(true)
@@ -263,7 +267,7 @@ expect(tracked.requires_grad()).to_equal(true)
 
 #### only tracks gradient-enabled parts
 
-1.
+-
    - Expected: w.grad().item() equals `-2.0`
 
 
@@ -298,7 +302,7 @@ expect(w.grad().item()).to_equal(-2.0)
 
 #### resumes normal gradient behavior
 
-1. loss{
+- loss{
    - Expected: grad.item() equals `4.0`
 
 
@@ -320,7 +324,7 @@ loss{ (w - target)^2 }
 
 # grad = 2*(3-1) = 4.0
 val grad = w.grad()
-expect(grad.?.to_equal(true))
+assert_true(grad.?.to_equal(true))
 expect(grad.item()).to_equal(4.0)
 ```
 

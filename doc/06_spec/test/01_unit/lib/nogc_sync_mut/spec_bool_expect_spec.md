@@ -40,6 +40,9 @@ spec_bool_expect_spec -> std
 
 #### accepts bare positive boolean expectations
 
+- assert true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -47,14 +50,14 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(true)
+assert_true(true)
 ```
 
 </details>
 
 #### accepts bare negative boolean expectations
 
-1. expect not
+- expect not
 
 
 <details>

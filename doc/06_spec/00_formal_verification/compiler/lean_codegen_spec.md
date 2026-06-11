@@ -49,7 +49,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val opts = codegen.LeanCodegenOptions.new()
+val opts = LeanCodegenOptions.new()
 expect(opts.module_name).to_equal("Main")
 expect(opts.generate_stubs).to_equal(true)
 expect(opts.output_dir).to_equal("build/lean")
@@ -59,10 +59,10 @@ expect(opts.output_dir).to_equal("build/lean")
 
 #### updates module and output configuration
 
-1. var opts = codegen LeanCodegenOptions new
-2. opts = opts with module name
-3. opts = opts with output dir
-4. opts = opts with stubs
+- var opts = LeanCodegenOptions new
+- opts = opts with module name
+- opts = opts with output dir
+- opts = opts with stubs
    - Expected: opts.module_name equals `TestModule`
    - Expected: opts.output_dir equals `build/test-lean`
    - Expected: opts.generate_stubs is false
@@ -75,7 +75,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var opts = codegen.LeanCodegenOptions.new()
+var opts = LeanCodegenOptions.new()
 opts = opts.with_module_name("TestModule")
 opts = opts.with_output_dir("build/test-lean")
 opts = opts.with_stubs(false)
@@ -90,20 +90,20 @@ expect(opts.generate_stubs).to_equal(false)
 
 #### builds structured artifacts
 
-1. var structure = codegen LeanStructure new
-2. structure = structure add field
-3. structure = structure add field
-4. structure = structure derive
-5. var inductive = codegen LeanInductive new
-6. inductive = inductive add constructor
-7. inductive = inductive add constructor
-8. var func = codegen LeanFunction new
-9. func = func add param
-10. func = func with return type
-11. func = func with body
-12. var theorem = codegen LeanTheorem new
-13. theorem = theorem add param
-14. theorem = theorem with proof
+- var structure = LeanStructure new
+- structure = structure add field
+- structure = structure add field
+- structure = structure derive
+- var inductive = LeanInductive new
+- inductive = inductive add constructor
+- inductive = inductive add constructor
+- var func = LeanFunction new
+- func = func add param
+- func = func with return type
+- func = func with body
+- var theorem = LeanTheorem new
+- theorem = theorem add param
+- theorem = theorem with proof
    - Expected: structure.name equals `Point`
    - Expected: structure.fields.len() equals `2`
    - Expected: inductive.constructors.len() equals `2`
@@ -118,21 +118,21 @@ Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var structure = codegen.LeanStructure.new("Point")
+var structure = LeanStructure.new("Point")
 structure = structure.add_field("x", "Int")
 structure = structure.add_field("y", "Int")
 structure = structure.derive("Repr")
 
-var inductive = codegen.LeanInductive.new("Mode")
+var inductive = LeanInductive.new("Mode")
 inductive = inductive.add_constructor("Online", [])
 inductive = inductive.add_constructor("Offline", [])
 
-var func = codegen.LeanFunction.new("identity")
+var func = LeanFunction.new("identity")
 func = func.add_param("x", "Nat")
 func = func.with_return_type("Nat")
 func = func.with_body("x")
 
-var theorem = codegen.LeanTheorem.new("identity_refl", "identity x = x")
+var theorem = LeanTheorem.new("identity_refl", "identity x = x")
 theorem = theorem.add_param("x", "Nat")
 theorem = theorem.with_proof("rfl")
 
@@ -149,15 +149,15 @@ expect(theorem.proof).to_equal(Some("rfl"))
 
 #### emits proof-clean Lean for explicit proofs
 
-1. var opts = codegen LeanCodegenOptions new
-2. opts = opts with module name
-3. opts = opts with output dir
-4. opts = opts with stubs
-5. var gen = codegen LeanCodegen new
-6. gen = gen add structure
-7. gen = gen add inductive
-8. gen = gen add function
-9. gen = gen add theorem
+- var opts = LeanCodegenOptions new
+- opts = opts with module name
+- opts = opts with output dir
+- opts = opts with stubs
+- var cgen = LeanCodegen new
+- cgen = cgen add structure
+- cgen = cgen add inductive
+- cgen = cgen add function
+- cgen = cgen add theorem
    - Expected: output does not contain `sorry`
 
 
@@ -168,18 +168,18 @@ Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var opts = codegen.LeanCodegenOptions.new()
+var opts = LeanCodegenOptions.new()
 opts = opts.with_module_name("Demo")
 opts = opts.with_output_dir("build/lean-test")
 opts = opts.with_stubs(false)
 
-var gen = codegen.LeanCodegen.new(opts)
-gen = gen.add_structure(codegen.build_class("point", [("x", "Int"), ("y", "Int")]))
-gen = gen.add_inductive(codegen.build_enum_with_deriving("mode", [("online", []), ("offline", [])], ["Repr"]))
-gen = gen.add_function(codegen.build_function("identity", [("x", "Nat")], "Nat", "x"))
-gen = gen.add_theorem(codegen.build_theorem("identity_refl", [("x", "Nat")], "identity x = x", "rfl"))
+var cgen = LeanCodegen.new(opts)
+cgen = cgen.add_structure(build_class("point", [("x", "Int"), ("y", "Int")]))
+cgen = cgen.add_inductive(build_enum_with_deriving("mode", [("online", []), ("offline", [])], ["Repr"]))
+cgen = cgen.add_function(build_function("identity", [("x", "Nat")], "Nat", "x"))
+cgen = cgen.add_theorem(build_theorem("identity_refl", [("x", "Nat")], "identity x = x", "rfl"))
 
-val output = gen.emit()
+val output = cgen.emit()
 expect(output).to_contain("namespace Demo")
 expect(output).to_contain("structure Point where")
 expect(output).to_contain("inductive Mode where")
