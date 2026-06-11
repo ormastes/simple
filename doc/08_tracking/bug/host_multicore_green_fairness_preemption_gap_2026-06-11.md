@@ -74,6 +74,18 @@ Current compiler insertion seam is also explicit:
 - that MIR lowering layer is the narrowest existing place to insert a future
   host safepoint or compiler-yield call without inventing a second loop model
 
+Current reusable resumable-body machinery is also explicit:
+
+- `src/compiler_rust/compiler/src/mir/generator.rs`
+- `src/compiler_rust/compiler/src/mir/async_sm.rs`
+- `src/compiler_rust/compiler/src/mir/state_machine_utils.rs`
+
+Those files already rewrite one body into dispatcher/resume blocks around
+`Yield` and `Await`. They are the best current seed for any hosted
+multicore-green fairness experiment that needs resumable task slices, because
+the active gap is not "missing thread_yield" but "missing resumable execution
+state for a queued task that should let another task run before final return."
+
 Current hosted fairness/preemption gap coverage now includes:
 
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`

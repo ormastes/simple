@@ -78,6 +78,17 @@ not a Go-like task preemption point. The remaining host gap is therefore
 compiler/runtime safepoints or another resumable task-slice mechanism, not a
 missing plain thread-yield primitive.
 
+The strongest in-repo reuse path for that remaining gap is already present:
+
+- `src/compiler_rust/compiler/src/mir/generator.rs`
+- `src/compiler_rust/compiler/src/mir/async_sm.rs`
+- `src/compiler_rust/compiler/src/mir/state_machine_utils.rs`
+
+Those passes already split execution into dispatcher/resume blocks for yielded
+or awaited work. That makes them a better host-fairness seed than a bare
+`thread_yield()` call, because the missing property is resumability, not just
+OS-thread relinquish.
+
 ## SimpleOS State
 
 SimpleOS now has scheduler-facing green-carrier coverage for the same lane:

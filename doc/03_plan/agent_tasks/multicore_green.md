@@ -216,6 +216,9 @@ Deliverables:
   `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` loop lowering,
   `src/compiler_rust/compiler/src/interpreter_control.rs` loop execution, and
   `src/compiler_rust/runtime/src/executor.rs` blocking markers;
+- updated research/tracker text that pins the best existing resumable-body
+  seed for host fairness work: `mir/generator.rs`, `mir/async_sm.rs`, and
+  `mir/state_machine_utils.rs`;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:

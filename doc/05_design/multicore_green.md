@@ -191,3 +191,8 @@ Repository guards:
   owns the source-run `exec_while` / `exec_loop` / `exec_for` path. Any real
   host-side fairness contract has to patch one of those loop paths or make the
   runtime pool itself resumable.
+- The best existing resumable-body seed is not new scheduler code; it is the
+  current generator/async state-machine machinery in
+  `src/compiler_rust/compiler/src/mir/generator.rs`,
+  `src/compiler_rust/compiler/src/mir/async_sm.rs`, and
+  `src/compiler_rust/compiler/src/mir/state_machine_utils.rs`.
