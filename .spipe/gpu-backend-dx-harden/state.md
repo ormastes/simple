@@ -70,12 +70,25 @@ See doc/03_plan/ui/graphics/engine/gpu_backend_parallel_agent_plan_2026-06-11.md
   cuda_engine2d_mirror_only_readback_gap_2026-05-29.md — Processing-Lane Probe
   Hardening section added.
 
+- 2026-06-11: Agent A integration PUSHED as b54cea0085 (6 files; AC-1, AC-2
+  closed). Recovery: a concurrent conflict-resolve had deleted 10 spec files
+  and emptied 8 cuda/rocm sources on disk — all 18 restored (16 from
+  origin/main, 2 Vulkan specs from .jjconflict-side-1 of 86c62fb360).
+- 2026-06-11: Agent B COMPLETE — VulkanErrorKind+classify, initialized guards
+  on 12 draw/present methods, rt_vulkan_device_type + headless (lavapipe)
+  device selection, parity bug doc → fixed. PUSHED as 6ac82fcc6b (AC-3).
+  Follow-ups recorded in parity bug doc: VKSPIRV-001 real SPIR-V blobs;
+  rt_vulkan_init interpreter crash blocks full lavapipe e2e readback.
+- 2026-06-11: Agent D cycles 1-2 PUSHED as 6ff422d645 (9 browser_engine
+  rendering-path fixes from committed states d3e0039f1c + 17e907b835).
+
 ## Shared Edits Requested
-- helpers_availability.spl: add "directx" to the auto-detect probe list
-  (after vulkan, before opencl) so Engine2D.detect_best_backend() tries
-  DirectXBackend.init() when vulkan probe fails. Agent C owns mod.spl only;
-  helpers_availability.spl is shared — orchestrator should apply this after
-  all lanes land.
+- DONE (orchestrator, 2026-06-11): helpers_availability.spl "directx" added
+  after vulkan in both order lists, priority 5 (rest shifted +1), display
+  name, hardware flag, gate/diagnosis strings; engine.spl gained
+  DirectXBackend import + strict-create and probe_backend dispatch arms;
+  backend_order_spec updated to 13-entry order (4/4) — backend_directx_spec
+  18/18, graphics_backend_acceleration_spec 24/24 after the change.
 - Conflict-cleanup (Agent A): commit 86c62fb360 (conflict-resolve by another
   agent) dropped the following spec files from test/01_unit/lib/gc_async_mut/gpu/engine2d/
   — they are present in .jjconflict-side-1/ and should be restored:
