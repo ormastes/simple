@@ -6,16 +6,16 @@ Current state as of 2026-06-11:
 
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
-  layers `10..17`, and flex rows `18..24`.
+  layers `10..17`, and flex rows `18..25`.
 - The newer focused fixture lane described in some earlier progress notes
   (`146+`, client-rect/box-model parity rows, no-cheat guard summaries) is not
   present in the current worktree and must not be treated as current evidence.
 - Current checked-in parity scope is still a mixed bitmap/golden lane. It is
   useful for regression pressure, but it is not yet broad Chromium layout-engine
   parity. Exact Chrome/Simple pixel rows now exist for flex fixtures 18, 19,
-  20, 21, 23, and 24; fixture 22 remains blocked by text glyph raster/default
-  font differences.
-- Important live-run caveat: the current CLI catalog reports 23 fixtures and
+  20, 21, 23, 24, and 25; fixture 22 remains blocked by text glyph
+  raster/default font differences.
+- Important live-run caveat: the current CLI catalog reports 24 fixtures and
   `test/09_baselines/html_compat/18_flex_grow_weights/report.sdn` contains an
   exact checked-in row, but a fresh live source-B run on 2026-06-11 still times
   out:
@@ -286,3 +286,15 @@ Open gaps tied to the active browser objective:
     in both lanes, while Linux still reports only
     `macos_gui_live_window_evidence_status=skip` and
     `reason=requires-macos` for the live macOS window/capture evidence
+- Flex main-axis distribution now has a Chromium-captured fixture:
+  - added `25_flex_justify_space_between` to the HTML compatibility catalog
+    and structural geometry probe
+  - `simple_web_html_layout_renderer.spl` parses `justify-content` and applies
+    row-flex positive free-space distribution for `space-between`, `center`,
+    and end alignment when flex-grow/shrink are not consuming the line space
+  - live Electron geometry evidence for fixture 25 reports `layout_match` with
+    `mismatch_count=0`
+  - the fixture has real `chrome.ppm` captured via the existing Electron
+    `--update-baseline --skip-simple` path, and the follow-up Simple comparison
+    reports `RESULT: EXACT match`, `different_pixels=0`; no blur, tolerance,
+    copied Simple pixels, or resolution adjustment was used
