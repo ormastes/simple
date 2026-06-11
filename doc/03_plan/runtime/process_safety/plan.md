@@ -147,7 +147,7 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
              two halves together hang/crash). Expected to be the same
              for-loop binder miscompile family — re-validate after
              stage4 rebuild with fix (b).
-      7. [ ] Matrix re-run 2026-06-11 06:50 binary (post-fixes): 6/8
+      7. [x] Matrix re-run 2026-06-11 06:50 binary (post-fixes): 6/8
          green — (a) recursion guard and (c) stray `-c` output CONFIRMED
          FIXED; all 4 specs rc=0, `-c` prints exactly `2`. Remaining
          (11th-site cluster): `check text.spl` now rc=139 CORE DUMP
@@ -156,8 +156,55 @@ Background: `doc/07_guide/runtime/process_kill_safety.md` (session-killing
          then [flat-bridge] crash — seed passes the SAME tree (file
          unmodified since 06-04), so it is a stage4 parser/flat-bridge
          miscompile; and `lint text.spl` still hangs >240s (hypothesis
-         (d) refuted — not the for-loop binder family). Deploy remains
-         blocked; bin/simple stays the Rust seed.
+         (d) refuted — not the for-loop binder family). Fixed (commit
+         `80c417eb45`): (A) CoreLexer.scan_string triple-quote support;
+         (B) bare `.len()` name-suffix mis-binding in seed codegen.
+      8. [ ] Matrix run 3 (2026-06-11 09:59 binary, 11th-site fixes in):
+         still 6/8 — triple-quote site cleared, crash moved to
+         btree.spl. Root cause (12th-site cluster, commit `dec6a0d97a`):
+         stage4 check/lint run the LEAN bootstrap core parser +
+         flat_ast_bridge on full-language files. Four defects fixed:
+         (a) class-body loop had no `val`/`var` field branch and did not
+         advance on unparseable members — 3 errors × 1000 iterations ×
+         2 passes = 6008-error storms and 43s checks of 7-line files
+         (the "lint hang" was this slowness times the lint closure);
+         (b) `static fn new()` rejected — `new` keyword (211) not
+         accepted as a method name; (c) convert_decl_method_fn used a
+         19-slot positional `case Function(...)` destructure —
+         positional class matches silently no-match interpreted and
+         SIGSEGV compiled, so EVERY class with a method crashed
+         check/lint (bug doc
+         positional_class_match_wide_destructure_2026-06-11.md);
+         (d) raw OOB indexing of decl_is_async/decl_is_gpu_kernel —
+         OOB array reads SIGSEGV in cranelift binaries where the
+         interpreter returns 0 (bug doc
+         compiled_array_oob_read_segfault_2026-06-11.md). Parser fixes
+         verified interpreted (parse errors 0 on var/val/bare fields +
+         static fn new + me + fn).
+      9. [ ] Matrix run 4 (10:54 binary, 12th-site fixes in): still
+         6/8 — btree cleared, crash moved to di.spl (trait
+         signature-only methods; optional-body fix landed in
+         parser_decls_use.spl and verified interpreted). SCOPE
+         CONCLUSION from full-tree sweep (1855 src/lib files through
+         stage4 check, 8-way docker): ~330 files still hit lean-parser
+         gaps across 8+ construct classes (`&` operator lexed as Error,
+         multiline-expression Indent, AOP `on pc{...}` forms, extension
+         `fn (self: T)` params, tuple-field access after `.`,
+         match-else forms, ...), and `check` parses the whole import
+         closure (incl. src/compiler/00.common/**) through
+         parse_full_frontend → parse_and_build_module → lean core
+         parser + flat_ast_bridge — the SINGLE pipeline for all
+         self-hosted modes (frontend.spl comment confirms by design).
+         The two red matrix items (check_text, lint_text) therefore
+         measure self-hosted frontend LANGUAGE COVERAGE, not a fixable
+         crash chain: sites 1–12 were real crashes/miscompiles and are
+         fixed; what remains is a parser-completion project (weeks).
+         Deploy stays blocked under the 8/8 gate; bin/simple remains
+         the Rust seed. Options: (a) track lean-parser completion as
+         its own plan and keep the seed deployed; (b) interim: have
+         stage4 check/lint delegate to simple_binary_path() like
+         `test` does, making the matrix pass by delegation — decision
+         deferred to the user.
 - [ ] After next multi-day parallel-agent session: confirm no recurrence of
       the journal signature (`Activating special unit exit.target` on the
       user manager outside reboots).
