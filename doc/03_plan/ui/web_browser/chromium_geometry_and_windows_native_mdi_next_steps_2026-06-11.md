@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 47 labeled fixtures through `50_flex_row_justify_space_around` with exact
+  now covers 48 labeled fixtures through `51_flex_row_justify_space_evenly` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -509,6 +509,17 @@ Smallest next implementation step:
   - the Simple row-flex branch applies the same focused `space-around` start
     and gap distribution without blur, tolerance, resolution scaling, or
     copied Chromium pixels
+- Live `51_flex_row_justify_space_evenly` evidence now passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused fixture-51 result records Chromium row-flex main-axis
+  `justify-content:space-evenly` distribution:
+  - the explicit flex container border box is `x=16`, `y=16`, `width=130`,
+    `height=80`
+  - child widths `20`, `30`, and `20` leave 60px free; Chrome applies four
+    equal 15px spaces, placing children at `x=31`, `x=66`, and `x=111`
+  - the Simple row-flex branch applies the same focused `space-evenly` start
+    and gap distribution without blur, tolerance, resolution scaling, or
+    copied Chromium pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -546,12 +557,13 @@ Smallest next implementation step:
   `47_flex_column_align_self_center`, and
   `48_flex_column_align_self_stretch`, and
   `49_flex_column_justify_space_around`, and
-  `50_flex_row_justify_space_around`:
+  `50_flex_row_justify_space_around`, and
+  `51_flex_row_justify_space_evenly`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `50` in its default manifest, excluding only
+    covers fixtures `02` through `51` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `47` fixtures, `47` passes, `0` failures, and
+    reports `48` fixtures, `48` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
