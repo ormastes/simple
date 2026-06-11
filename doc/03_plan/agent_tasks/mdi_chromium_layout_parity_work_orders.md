@@ -82,8 +82,11 @@ Prove and harden the requested GUI stack:
   events, and requires both global byte deltas and source/destination
   drag-region deltas. The current 2026-06-11 result is intentionally failing:
   launcher status is `pass`, all marker state fields are true, but
-  `changed_bytes=0`, so host-QMP mouse input is still not wired into the guest WM
-  event path.
+  `changed_bytes=0`. A focused `simple_os` submodule attempt now initializes
+  PS/2 auxiliary mouse reporting inside `gui_entry_engine2d.spl` and waits for
+  real packets before re-rendering a dragged browser window. The guest reports
+  `[host-input] no-host-mouse-packets`, so host-QMP mouse input is still not
+  reaching the guest input path.
   Bugs:
   `doc/08_tracking/bug/simpleos_wm_qmp_source_target_missing_2026-06-11.md` and
   `doc/08_tracking/bug/simpleos_wm_host_qmp_mouse_input_no_framebuffer_delta_2026-06-11.md`.
@@ -267,8 +270,10 @@ Exit gate:
 - SimpleOS QEMU framebuffer click/drag proof is not achieved yet. The standalone
   QMP wrapper now rebuilds the WM target from source, boots QEMU, and verifies
   all WM/MDI/Web readiness markers, but host-injected HMP mouse drag produces
-  `changed_bytes=0` and identical before/after framebuffer hashes. The next
-  implementation task is to wire a real host pointer device/event path into the
-  SimpleOS WM and make the wrapper pass without relaxing the byte/region gates.
+  `changed_bytes=0` and identical before/after framebuffer hashes. The latest
+  guest-side PS/2 polling attempt reports no aux mouse packets, so the next
+  implementation task is to wire a supported QEMU pointer device/event path
+  into the SimpleOS WM and make the wrapper pass without relaxing the
+  byte/region gates.
 - macOS and Windows live platform evidence is not proven from this Linux host;
   host-specific rows must not be promoted without real capture artifacts.

@@ -53,14 +53,20 @@ qemu_wm_drag_delta_marker_state=probe:true wm:true engine:true web:true mdi:true
 qemu_wm_drag_delta_changed_bytes=0
 qemu_wm_drag_delta_source_region_changed=0
 qemu_wm_drag_delta_target_region_changed=0
+[host-input] ps2-mouse-ready
+[host-input] no-host-mouse-packets
 ```
 
 ## Likely Cause
 
 The existing `wm_input_qemu_smoke_spec.spl` covers guest-side synthetic WM
-input, not host-delivered QEMU pointer input. Current evidence does not show a
-SimpleOS PS/2, USB tablet, or equivalent host mouse event driver feeding the WM
-event path for `gui_entry_engine2d.spl`.
+input, not host-delivered QEMU pointer input. A focused `simple_os` submodule
+attempt now initializes PS/2 auxiliary mouse reporting inside
+`gui_entry_engine2d.spl` and waits for real packets before moving the browser
+window. QEMU HMP `mouse_move` / `mouse_button` and direct QMP
+`input-send-event` both return success on the host side, but the guest still
+reports no PS/2 aux packets. Adding a USB tablet device is diagnostic only until
+the guest has a USB HID/tablet input path.
 
 ## Required Fix
 
