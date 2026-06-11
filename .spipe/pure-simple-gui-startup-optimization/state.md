@@ -742,3 +742,12 @@ dev-done
   before claiming GPU-rendered glyph pixels.
 - verify: Optimizer scans completed for this slice in Docker. Counts: CUDA
   session 23 and CUDA session contract spec 0 remaining static opportunities.
+- impl: Folded positive z-index paint-order collection into the existing
+  absolute-position paint pass. Positive z nodes are collected while z<=0
+  absolute decorations are painted, removing the extra node-wide scan that ran
+  whenever positive z-index nodes existed while keeping the sorted append fast
+  path and stable insertion fallback.
+- verify: Focused renderer check passes and
+  `simple_web_layout_child_index_spec.spl` remains 11/11. Generated manual
+  refreshed under `doc/06_spec`. Docker optimizer scans completed: renderer
+  747 and focused spec 4 remaining static opportunities.

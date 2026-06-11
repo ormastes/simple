@@ -1123,3 +1123,26 @@ Verification:
   `11 passed, 0 failed`
 - The focused spec covers both an out-of-order positive z-index fixture and an
   already sorted fixture; both keep the top pixel green.
+
+## 2026-06-11 Positive z-index collection single pass
+
+After the append fast path, pages with any positive z-index node still paid a
+second full node scan to collect the positive absolute-position paint order.
+The renderer now collects those nodes during the existing absolute-position
+decoration pass, then reuses the collected order for the positive-z paint pass.
+
+The no-positive-z case still leaves the order buffer unallocated. Positive
+z-index nodes keep the same nondecreasing append fast path and stable
+out-of-order insertion fallback, so equal z-index values remain in document
+order.
+
+Verification:
+
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl test/02_integration/rendering/simple_web_layout_child_index_spec.spl`
+  passes.
+- `bin/simple test test/02_integration/rendering/simple_web_layout_child_index_spec.spl --no-cache`:
+  `11 passed, 0 failed`
+- `bin/simple spipe-docgen test/02_integration/rendering/simple_web_layout_child_index_spec.spl --output doc/06_spec`
+  regenerated the mirrored manual.
+- Docker optimizer scans: renderer `747` and focused spec `4` remaining static
+  opportunities.
