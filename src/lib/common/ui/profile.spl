@@ -48,8 +48,18 @@ struct Breakpoints:
     regular_max: i32
 
 fn default_breakpoints() -> Breakpoints:
-    """Pixel-based breakpoints for GUI backends (web, electron, tauri)."""
-    return Breakpoints(compact_max: 600, regular_max: 1200)
+    """Pixel-based width breakpoints for GUI backends — Material-aligned 600/840.
+    Rationale: 600px covers portrait phone → landscape phone boundary;
+    840px covers iPad landscape / WinUI expanded zone, aligning with
+    Android WindowSizeClass and iOS size-class conventions.
+    See doc/01_research/ui/responsive_layout/responsive_layout_platforms.md."""
+    return Breakpoints(compact_max: 600, regular_max: 840)
+
+fn height_breakpoints() -> Breakpoints:
+    """Pixel height classes for GUI backends (non-TUI).
+    480 = landscape-phone minimum usable height (compact vertical → rail instead of bottom bar);
+    900 = expanded vertical (full desktop with generous vertical space)."""
+    return Breakpoints(compact_max: 480, regular_max: 900)
 
 fn terminal_breakpoints() -> Breakpoints:
     """Character-column breakpoints for TUI backend."""
@@ -95,11 +105,18 @@ struct LayoutProfile:
     height: i32
 
 fn compute_profile(viewport: Viewport) -> LayoutProfile:
-    """Compute a full layout profile from viewport state."""
-    val bp = breakpoints_for_backend(viewport.active_backend)
+    """Compute a full layout profile from viewport state.
+    For TUI backends both axes use terminal breakpoints.
+    For GUI backends horizontal uses default_breakpoints() and
+    vertical uses height_breakpoints()."""
+    val h_bp = breakpoints_for_backend(viewport.active_backend)
+    val v_bp = if viewport.active_backend == "tui":
+        terminal_breakpoints()
+    else:
+        height_breakpoints()
     return LayoutProfile(
-        horizontal: classify(viewport.width, bp),
-        vertical: classify(viewport.height, bp),
+        horizontal: classify(viewport.width, h_bp),
+        vertical: classify(viewport.height, v_bp),
         orientation: detect_orientation(viewport.width, viewport.height),
         width: viewport.width,
         height: viewport.height
@@ -216,11 +233,18 @@ class ProfileResolver:
         )
 
     me update(viewport: Viewport):
-        """Recompute the layout profile from current viewport."""
+        """Recompute the layout profile from current viewport.
+        TUI backends use terminal breakpoints for both axes.
+        GUI backends use default_breakpoints() horizontally and
+        height_breakpoints() vertically."""
         self.breakpoints = breakpoints_for_backend(viewport.active_backend)
+        val v_bp = if viewport.active_backend == "tui":
+            terminal_breakpoints()
+        else:
+            height_breakpoints()
         self.current = LayoutProfile(
             horizontal: classify(viewport.width, self.breakpoints),
-            vertical: classify(viewport.height, self.breakpoints),
+            vertical: classify(viewport.height, v_bp),
             orientation: detect_orientation(viewport.width, viewport.height),
             width: viewport.width,
             height: viewport.height

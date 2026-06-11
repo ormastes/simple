@@ -9,6 +9,7 @@ use common.ui.ios_css.{generate_ios_css}
 use common.ui.glass_css.{generate_glass_css}
 use common.ui.glass.theme.{is_glass_theme, glass_dark, glass_light, glass_obsidian_dark, glass_obsidian_light}
 use common.ui.glass.tokens.{GlassColorTokens}
+use common.ui.profile.{Breakpoints, default_breakpoints}
 
 # =========================================================================
 # WM Traffic-Light Constants
@@ -2094,13 +2095,12 @@ fn generate_css(theme: text) -> text:
         result = "{result}.widget-panel:hover { box-shadow: 0 26px 66px rgba(0,0,0,0.26), 0 0 0 1px rgba(255,255,255,0.12), inset 0 1px 0 rgba(255,255,255,0.14); }\n"
         result = "{result}@media (prefers-reduced-motion: reduce) { .widget-panel { animation: none; } }\n"
 
-    # Responsive / multi-profile layout. Breakpoints mirror the planned
-    # LayoutProfile in common/ui/profile.spl (compact <= 600, regular <= 1200,
-    # expanded > 1200). The webview knows its real device width, so CSS @media
-    # selects the size class client-side — combined with the device-width
-    # viewport meta this makes the phone (compact) layout readable instead of a
-    # shrunk-down desktop page.
-    result = "{result}{responsive_css()}"
+    # Responsive / multi-profile layout. Breakpoints imported from
+    # common/ui/profile.spl (single source of truth). The webview knows its real
+    # device width, so CSS @media selects the size class client-side — combined
+    # with the device-width viewport meta this makes the phone (compact) layout
+    # readable instead of a shrunk-down desktop page.
+    result = "{result}{responsive_css(default_breakpoints())}"
 
     result = result.replace("{" + "wm_close" + "}", WM_TRAFFIC_CLOSE)
     result = result.replace("{" + "wm_min" + "}", WM_TRAFFIC_MIN)
@@ -2119,9 +2119,14 @@ fn _wm_css(theme: text) -> text:
     """Compatibility alias for WM CSS generation."""
     return build_modern_theme_css(theme)
 
-fn responsive_css() -> text:
-    """Responsive layout rules keyed off the planned LayoutProfile breakpoints
-    (common/ui/profile.spl: compact <= 600px, regular <= 1200px, expanded > 1200).
+fn responsive_css(bp: Breakpoints) -> text:
+    """Responsive layout rules derived from the LayoutProfile breakpoints imported
+    from common/ui/profile.spl (single source of truth — no hardcoded pixel values).
+
+    Boundary parity with classify(): dimension < compact_max → Compact;
+    dimension < regular_max → Regular; else Expanded.
+    CSS maps this exactly: Compact = max-width (compact_max-1)px;
+    Regular = min-width compact_max px .. max-width (regular_max-1)px.
 
     Compact (phone): single column, full-bleed panels, 16px base font (also
     stops iOS from zooming on input focus), 44px minimum touch targets, stacked
@@ -2130,8 +2135,11 @@ fn responsive_css() -> text:
     var r = ""
     val lb = "\u{007b}"
     val rb = "\u{007d}"
-    # --- Compact: phones (<= 600px) ---
-    r = "{r}@media (max-width: 600px) {lb} "
+    val compact_edge = bp.compact_max - 1
+    val compact_min = bp.compact_max
+    val regular_edge = bp.regular_max - 1
+    # --- Compact: phones (< compact_max) ---
+    r = "{r}@media (max-width: {compact_edge}px) {lb} "
     r = "{r}html { font-size: 16px; } "
     r = "{r}#app { padding: 14px 12px; gap: 12px; } "
     r = "{r}.layout-hbox { flex-direction: column; align-items: stretch; } "
@@ -2146,8 +2154,8 @@ fn responsive_css() -> text:
     r = "{r}.widget-statusbar { font-size: 13px; } "
     r = "{r}.widget-sidebar { display: none; } "
     r = "{r}{rb}\n"
-    # --- Regular: small tablets / split view (601-1200px) ---
-    r = "{r}@media (min-width: 601px) and (max-width: 1200px) {lb} "
+    # --- Regular: small tablets / split view (compact_max .. regular_max-1 px) ---
+    r = "{r}@media (min-width: {compact_min}px) and (max-width: {regular_edge}px) {lb} "
     r = "{r}.layout-grid { grid-template-columns: repeat(2, 1fr); } "
     r = "{r}.widget-button, input, select, textarea { min-height: 40px; } "
     r = "{r}{rb}\n"
