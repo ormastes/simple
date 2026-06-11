@@ -6,8 +6,12 @@
 - input events: 3
 - title text: Terminal
 - traffic buttons: 3
+- traffic button colors: close=rgb(239, 68, 68) minimize=rgb(234, 179, 8) maximize=rgb(34, 197, 94)
 - titlebar height: 34px
 - title input: input 144.562px x 24px
+- title command text: /tmp/project
+- body text input: Hello Simple
+- move payload: win1 native_event 86,86 expected 86,86
 - blur/tolerance used: false
 
 ## Raw Evidence
@@ -34,6 +38,7 @@
 - wm_browser_event_routing_titlebar_cursor=grab
 - wm_browser_event_routing_titlebar_background=rgb(229, 231, 235)
 - wm_browser_event_routing_title_color=rgb(17, 24, 39)
+- wm_browser_event_routing_title_font_weight=700
 - wm_browser_event_routing_title_input_min_width=142px
 - wm_browser_event_routing_title_input_width=144.562px
 - wm_browser_event_routing_title_input_width_px=144.562
@@ -43,6 +48,14 @@
 - wm_browser_event_routing_close_button_background=rgb(239, 68, 68)
 - wm_browser_event_routing_minimize_button_background=rgb(234, 179, 8)
 - wm_browser_event_routing_maximize_button_background=rgb(34, 197, 94)
+- wm_browser_event_routing_expected_move_x=86
+- wm_browser_event_routing_expected_move_y=86
+- wm_browser_event_routing_move_payload_x=86
+- wm_browser_event_routing_move_payload_y=86
+- wm_browser_event_routing_move_payload_source=native_event
+- wm_browser_event_routing_move_payload_window_id_hint=win1
+- wm_browser_event_routing_title_command_text=/tmp/project
+- wm_browser_event_routing_text_input_text=Hello Simple
 - wm_browser_event_routing_blur_or_tolerance_used=false
 - wm_browser_event_routing_exit_code=0
 

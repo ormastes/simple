@@ -57,9 +57,16 @@ Prove and harden the requested GUI stack:
   and `input_event` frames. The same live Chromium pass now also checks
   `getComputedStyle` evidence for title text, three traffic-light buttons,
   titlebar height/display/cursor/background, and title-command input
-  min-width/height/background/cursor. This is not a substitute for the remaining
-  SimpleOS QEMU framebuffer click/drag proof or the separate Linux-native host
-  backend semantic event+style proof.
+  min-width/height/background/cursor. The 2026-06-11 report now exposes the
+  actual routed payloads as evidence: `move_payload_window_id_hint=win1`,
+  `move_payload_source=native_event`, `move_payload_x=86`,
+  `move_payload_y=86`, `expected_move_x=86`, `expected_move_y=86`,
+  `title_command_text=/tmp/project`, and
+  `text_input_text=Hello Simple`, plus exact traffic-light colors
+  `rgb(239, 68, 68)`, `rgb(234, 179, 8)`, and `rgb(34, 197, 94)`.
+  This is not a substitute for the remaining SimpleOS QEMU framebuffer
+  click/drag proof or the separate Linux-native host backend semantic
+  event+style proof.
 - `test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` now contains a
   fail-closed QMP drag-delta gate: it captures the BGA framebuffer with
   `pmemsave`, injects deterministic HMP `mouse_move`/`mouse_button` events, then
