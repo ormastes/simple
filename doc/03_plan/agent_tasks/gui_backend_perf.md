@@ -278,6 +278,10 @@ Updated: 2026-06-11
   Window replace, close, minimize, and focus transitions now size destination
   arrays up front and fill them by index instead of push-growing during state
   rebuilds.
+- this commit -- Draw IR SDN allocation tightening:
+  Draw IR SDN serialization and parsing now pre-size line, batch, and command
+  arrays and hoist stable text lengths instead of repeatedly grow-copying
+  inspection payloads.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

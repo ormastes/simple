@@ -83,7 +83,8 @@ fn _draw_ir_sdn_parse_i32(value: text) -> i32:
         sign = -1
         i = 1
     var parsed = 0
-    while i < value.len():
+    val value_len = value.len()
+    while i < value_len:
         val digit = _draw_ir_sdn_digit(value[i])
         if digit < 0:
             return parsed * sign
@@ -94,7 +95,8 @@ fn _draw_ir_sdn_parse_i32(value: text) -> i32:
 fn _draw_ir_sdn_parse_u32(value: text) -> u32:
     var i = 0
     var parsed = 0u32
-    while i < value.len():
+    val value_len = value.len()
+    while i < value_len:
         val digit = _draw_ir_sdn_digit(value[i])
         if digit < 0:
             return parsed
@@ -113,7 +115,9 @@ fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
     line
 
 fn _draw_ir_sdn_emit_batch(batch: DrawIrBatch) -> text:
-    var lines: [text] = []
+    val command_count = batch.commands.len()
+    var lines: [text] = [""; command_count + 1]
+    var write_idx = 0
     var line = "\tbatch id={_draw_ir_sdn_escape(batch.batch_id)} backend={batch.backend_target}"
     line = line + " surface={_draw_ir_sdn_escape(batch.embedding.surface_id)} component={_draw_ir_sdn_escape(batch.embedding.component_id)}"
     line = line + " x={batch.embedding.x} y={batch.embedding.y} width={batch.embedding.width} height={batch.embedding.height}"
@@ -122,17 +126,24 @@ fn _draw_ir_sdn_emit_batch(batch: DrawIrBatch) -> text:
     line = line + " html_tag={_draw_ir_sdn_escape(batch.source.html_tag)} html_node_id={_draw_ir_sdn_escape(batch.source.html_node_id)}"
     line = line + " css_selector={_draw_ir_sdn_escape(batch.source.css_selector)} css_class={_draw_ir_sdn_escape(batch.source.css_class)}"
     line = line + " style_key={_draw_ir_sdn_escape(batch.source.style_key)} style_revision={_draw_ir_sdn_escape(batch.source.style_revision)}"
-    lines = lines.push(line)
+    lines[write_idx] = line
+    write_idx = write_idx + 1
     for command in batch.commands:
-        lines = lines.push(_draw_ir_sdn_emit_command(command))
+        lines[write_idx] = _draw_ir_sdn_emit_command(command)
+        write_idx = write_idx + 1
     lines.join("\n")
 
 fn draw_ir_to_sdn(composition: DrawIrComposition) -> text:
-    var lines: [text] = []
-    lines = lines.push("draw_ir schema={composition.schema}")
-    lines = lines.push("\tcomposition id={_draw_ir_sdn_escape(composition.composition_id)} scene_key={_draw_ir_sdn_escape(composition.scene_key)} backend={composition.backend_target}")
+    val batch_count = composition.batches.len()
+    var lines: [text] = [""; batch_count + 2]
+    var write_idx = 0
+    lines[write_idx] = "draw_ir schema={composition.schema}"
+    write_idx = write_idx + 1
+    lines[write_idx] = "\tcomposition id={_draw_ir_sdn_escape(composition.composition_id)} scene_key={_draw_ir_sdn_escape(composition.scene_key)} backend={composition.backend_target}"
+    write_idx = write_idx + 1
     for batch in composition.batches:
-        lines = lines.push(_draw_ir_sdn_emit_batch(batch))
+        lines[write_idx] = _draw_ir_sdn_emit_batch(batch)
+        write_idx = write_idx + 1
     lines.join("\n")
 
 fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
@@ -176,27 +187,66 @@ fn _draw_ir_sdn_batch_from_state(batch_line: text, commands: [DrawIrCommand]) ->
         _draw_ir_sdn_parse_source(batch_line)
     )
 
+fn _draw_ir_sdn_count_batches(lines: [text]) -> i32:
+    var count = 0
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line.starts_with("batch "):
+            count = count + 1
+    count
+
+fn _draw_ir_sdn_count_commands(lines: [text], start_idx: i32) -> i32:
+    var count = 0
+    var idx = start_idx
+    val line_count = lines.len()
+    while idx < line_count:
+        val line = lines[idx].trim()
+        if line.starts_with("batch "):
+            return count
+        if line.starts_with("command "):
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _draw_ir_sdn_parse_commands(lines: [text], start_idx: i32, command_count: i32) -> [DrawIrCommand]:
+    if command_count == 0:
+        return []
+    var commands: [DrawIrCommand] = [draw_ir_rect("", 0, 0, 0, 0, 0u32); command_count]
+    var write_idx = 0
+    var idx = start_idx
+    val line_count = lines.len()
+    while idx < line_count and write_idx < command_count:
+        val line = lines[idx].trim()
+        if line.starts_with("batch "):
+            return commands
+        if line.starts_with("command "):
+            commands[write_idx] = _draw_ir_sdn_parse_command(line)
+            write_idx = write_idx + 1
+        idx = idx + 1
+    commands
+
 fn sdn_to_draw_ir(source: text) -> DrawIrComposition:
     var composition_id = ""
     var scene_key = ""
     var backend_target = ""
-    var batches: [DrawIrBatch] = []
-    var batch_line = ""
-    var commands: [DrawIrCommand] = []
     val lines = source.split("\n")
-    for raw_line in lines:
-        val line = raw_line.trim()
+    val batch_count = _draw_ir_sdn_count_batches(lines)
+    var batches: [DrawIrBatch] = []
+    if batch_count > 0:
+        batches = [draw_ir_batch_with_source("", "", draw_ir_embedding_config("", "", 0, 0, 0, 0, 0, 0, false), [], draw_ir_source_info("", "", "", "", "", "", "", "")); batch_count]
+    var batch_idx = 0
+    var idx = 0
+    val line_count = lines.len()
+    while idx < line_count:
+        val line = lines[idx].trim()
         if line.starts_with("composition "):
             composition_id = _draw_ir_sdn_field(line, "id")
             scene_key = _draw_ir_sdn_field(line, "scene_key")
             backend_target = _draw_ir_sdn_field(line, "backend")
         elif line.starts_with("batch "):
-            if batch_line != "":
-                batches = batches.push(_draw_ir_sdn_batch_from_state(batch_line, commands))
-            batch_line = line
-            commands = []
-        elif line.starts_with("command "):
-            commands = commands.push(_draw_ir_sdn_parse_command(line))
-    if batch_line != "":
-        batches = batches.push(_draw_ir_sdn_batch_from_state(batch_line, commands))
+            val command_count = _draw_ir_sdn_count_commands(lines, idx + 1)
+            val commands = _draw_ir_sdn_parse_commands(lines, idx + 1, command_count)
+            batches[batch_idx] = _draw_ir_sdn_batch_from_state(line, commands)
+            batch_idx = batch_idx + 1
+        idx = idx + 1
     draw_ir_composition(composition_id, scene_key, backend_target, batches)
