@@ -45,8 +45,25 @@ Make the Simple GUI a production-grade cross-form-factor platform: one widget/sc
 - test/01_unit/lib/common/ui/adaptive_scaffold_spec.spl (AC-3: same items/content at 3 canonical viewports → bottom/rail/sidebar; landscape-phone → rail; resize re-selection via ProfileResolver; list_detail collapse)
 - test/01_unit/lib/common/ui/responsive_css_parity_spec.spl (AC-5: generated CSS breakpoints == default_breakpoints() values; custom bp reflected; no stale 1200 media query; tauri touch→DeviceClass)
 
+## Verification Report (phase 7)
+- AC-1 PASS: doc/01_research/ui/responsive_layout/responsive_layout_platforms.md (platform survey + adopted design).
+- AC-2 PASS: form_factor_spec 29/29 (independently re-run).
+- AC-3 PASS: adaptive_scaffold_spec 14/14; widget_draw_cmds_spec 13/13 (same tree → bottom/rail/sidebar at 390x844 / 700x1000 / 1440x900).
+- AC-4 PASS: responsive_showcase_metal_gui — gpu_frame_complete=true at all 3 viewports (phone 329160px, tablet 700000px, desktop 1296000px), read_pixels_gpu_only, software mirror refused. Vulkan lane: vulkan_strict_spec 18/18 (typed Unavailable fail-closed on no-Vulkan host; fixed pre-existing API drift by restoring BackendProbeResult.is_ok), engine2d_cpu_vulkan_parity_spec green.
+- AC-5 PASS: responsive_css_parity_spec 6/6 (media queries derived from default_breakpoints(), boundary-exact vs classify()); tauri_backend_spec 10/10 (device_class via shared detect_device_class).
+- AC-6 PASS: scripts/check/check-responsive-showcase-evidence.shs PASS (independently re-run): 3 nav patterns + 3 pairwise-different PPMs + metal gpu_frame_complete x3; specs live under test/01_unit/ so bin/simple test covers them.
+- Regression sweep test/01_unit/lib/common/ui/: all green except 2 PRE-EXISTING reds unrelated to feature (theme_package_spec — failing on unmodified HEAD per agent C; patch_stream_replay_test — missing rt_sqlite_open_memory extern). profile_spec now 54/54 (fixed pre-existing ProfileSet.resolve or-pattern early-return interpreter-bug site; bug doc: doc/08_tracking/bug/interp_match_or_pattern_early_return_swallowed_2026-06-13.md).
+- Guards: numbered-artifact-guard OK; workspace-root-guard 319 violations, ALL pre-existing (tools/*, var, scripts/doc), none from this feature's files.
+- Full `bin/simple build check` not run this pipeline (repo-wide pre-existing reds above + concurrent agents); targeted suites + evidence gates green.
+
+## Follow-ups (recorded, out of scope)
+- ListDetailScaffold back-stack wiring, SupportingPaneScaffold, container queries (deferred per research doc).
+- Mobile-first restructure of generate_css base styles (current: desktop-base + parameterized max/min-width blocks; thresholds single-sourced).
+- Gesture recognizers, high-DPI scale factor, foldables (pre-declared exclusions).
+- Fix interpreter or-pattern early-return bug, then revert profile.spl workaround (bug doc above).
+
 ## Phase
-spec (specs being written per slice, TDD inside each implementation agent)
+ship
 
 ## Log
 - dev: Created state file with 6 acceptance criteria (type: feature), 2026-06-12.
@@ -55,3 +72,5 @@ spec (specs being written per slice, TDD inside each implementation agent)
 - implement-C: responsive_css(bp) single-source breakpoints, boundary-exact media queries; parity spec green (6 tests).
 - implement-A: form_factor + breakpoints 600/840 + height classes 480/900; spec green (29 tests); swept existing specs: test/01_unit/app/ui/profile_spec.spl updated 2 classify boundary tests (1199→839, 1200→840); 3 pre-existing failures unrelated to breakpoint change remain.
 - implement-B: adaptive_nav_scaffold + list_detail_scaffold (spec 14 green); TauriBackend.device_class + platform_hint (spec 10 green).
+- implement-D: widget_draw_cmds bridge (spec 13 green); responsive showcase CPU+Metal apps; check script PASS (3 viewports, metal gpu_frame_complete=true x3).
+- verify: all 6 ACs PASS (specs 29+14+13+6+10 green, metal gpu_frame_complete x3, vulkan strict 18/18, gate PASS); 2 pre-existing reds documented; phase → ship (2026-06-13).
