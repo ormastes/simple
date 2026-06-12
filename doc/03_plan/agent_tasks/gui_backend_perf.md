@@ -270,6 +270,10 @@ Updated: 2026-06-11
 - this commit -- Backend screenshot sampled-color allocation tightening:
   Capture evidence now counts unique sampled colors with a fixed 256-entry
   buffer and hoisted pixel lengths instead of push-growing a sampled list.
+- this commit -- Shared WM scene allocation tightening:
+  Scene projection, visible-window filtering, dragging, and focus transitions
+  now fill exact-size window arrays instead of repeatedly grow-copying entries,
+  and pointer hit-testing hoists the window count out of the scan loop.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
