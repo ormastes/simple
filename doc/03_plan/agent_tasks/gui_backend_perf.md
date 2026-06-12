@@ -319,6 +319,9 @@ Updated: 2026-06-11
 - this commit -- browser script parser length hoisting:
   Script-tag collection now reuses the HTML length in the parser loop instead
   of recalculating it while scanning startup HTML for executable/denied scripts.
+- this commit -- browser script execution scan length hoisting:
+  Browser JS execution now reuses variable-store, HTML, and stdout line counts
+  inside startup script scanning and console replay loops.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
