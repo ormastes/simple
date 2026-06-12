@@ -165,10 +165,9 @@ Per-rule semantics extracted from check.rs:
   Exempt paths (ends_with check): src/lib/{nogc_async_mut,gc_async_mut,nogc_sync_mut,gc_sync_mut}/concurrent/multicore_green.spl
   Message: "<name> is an internal runtime-pool symbol and is not a public API"
 
-Remaining item: wire `check_concurrency_api_misuse` into the self-hosted lint
-runner so it runs at `bin/simple check` time (same gap as E-PAR-006 /
-`check_closure_capture`). The lint is exported and ready; only the runner
-call-site is missing.
+Closed item: `check_concurrency_api_misuse` is wired into the self-hosted lint
+runner and now runs at `bin/simple check` time. The separate remaining gap is
+the E-PAR-006 lambda-parser boundary described below.
 
 Update (wiring, 2026-06-11): `_concurrency_lint_errors` is now wired into
 `src/app/cli/check.spl::_check_path` (commit d3feeb84dd) — E-PAR-001..005 run
