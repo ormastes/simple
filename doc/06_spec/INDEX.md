@@ -7,14 +7,13 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 58
-- **Warnings:** 1
+- **Total Lines:** 165
 
 ---
 
-## Language / Concurrency (1 features)
+## Runtime Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Concurrency API Misuse System Contract](test/03_system/feature/usage/concurrency_api_misuse_spec.md) | Active | N/A | 6 | 40% | 58 lines |
+| [Multicore Green Feature Tracking Specification](test/03_system/feature/usage/multicore_green_tracking_spec.md) | Current | N/A | 8 | 60% | 165 lines |
 

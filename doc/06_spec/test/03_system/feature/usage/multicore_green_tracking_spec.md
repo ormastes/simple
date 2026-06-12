@@ -27,7 +27,7 @@ multicore_green_tracking_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,7 +106,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/multicore_green_tracking_spec.spl
 Multicore green tracking contract PASSED
 Files: 1
-Passed: 6
+Passed: 8
 Failed: 0
 ```
 
@@ -159,6 +159,8 @@ Failed: 0
 - The tracking row must summarize the approved API count, misuse fixture count,
   `task_spawn` wrong-surface fixture, and `multicore_green_spawn`
   wrong-surface fixture so public API coverage cannot silently shrink.
+- The tracking row and multicore-green plans must not contain merge-conflict
+  markers or mechanically merged fixture counts.
 - The tracking row must carry implementation links for cooperative green,
   multicore green, and the SimpleOS green carrier.
 - The tracking row must carry guide links for the compiler perf guide and
@@ -301,14 +303,14 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 - Verify SimpleOS green-carrier specs are linked
 - Verify profile stress specs are linked
 - Verify the public API contract summary remains explicit
+   - Expected: absent_in_text(row, "misuse_fixtures=611") equals `1`
 - Verify negative profile contract cases stay release-visible
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -343,10 +345,16 @@ expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/cooperative_gre
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_agent_plan_spec.md")
 step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
-expect(row).to_contain("misuse_fixtures=6")
+expect(row).to_contain("misuse_fixtures=11")
+expect(absent_in_text(row, "misuse_fixtures=611")).to_equal(1)
 expect(row).to_contain("task_spawn approved")
 expect(row).to_contain("task_spawn_wrong_surface_import.spl rejects OS-thread facade")
 expect(row).to_contain("multicore_green_wrong_surface_import.spl rejects OS-thread facade")
+expect(row).to_contain("multicore_green_sliced_wrong_surface_import.spl rejects OS-thread facade")
+expect(row).to_contain("multicore_green_sliced_wrong_arity.spl rejects wrong arity")
+expect(row).to_contain("multicore_green_sliced_bad_state_arg.spl rejects non-integer state")
+expect(row).to_contain("multicore_green_sliced_bad_step_arg.spl rejects non-function step")
+expect(row).to_contain("multicore_green_sliced_shared_var_capture.spl rejects shared mutable step state")
 step("Verify negative profile contract cases stay release-visible")
 expect(row).to_contain("large_simple_multicore_fanout_slower_than_c")
 expect(row).to_contain("simple_multicore_stress_slower_than_c")
@@ -359,6 +367,39 @@ expect(row).to_contain("hosted_sliced_fairness_marker_corrupt")
 expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
 expect(row).to_contain("go_scheduler_width_mismatch")
 expect(row).to_contain("numbered_concurrency_alias")
+```
+
+</details>
+
+#### keeps multicore-green tracking artifacts free of merge conflict markers
+
+- Read tracking and plan artifacts for the multicore-green lane
+- Verify conflict markers and merged fixture counts are absent
+   - Expected: absent_in_text(combined, "<<<<<<<") equals `1`
+   - Expected: absent_in_text(combined, ">>>>>>>") equals `1`
+   - Expected: absent_in_text(combined, "%%%%%%%") equals `1`
+   - Expected: absent_in_text(combined, "Conflict 1 of") equals `1`
+   - Expected: absent_in_text(combined, "misuse_fixtures=611") equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read tracking and plan artifacts for the multicore-green lane")
+val row = multicore_green_row(read_tracking_db())
+val agent_plan = rt_file_read_text("doc/03_plan/agent_tasks/multicore_green.md") ?? ""
+val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
+val combined = row + agent_plan + system_plan
+step("Verify conflict markers and merged fixture counts are absent")
+expect(absent_in_text(combined, "<<<<<<<")).to_equal(1)
+expect(absent_in_text(combined, ">>>>>>>")).to_equal(1)
+expect(absent_in_text(combined, "%%%%%%%")).to_equal(1)
+expect(absent_in_text(combined, "Conflict 1 of")).to_equal(1)
+expect(absent_in_text(combined, "misuse_fixtures=611")).to_equal(1)
 ```
 
 </details>
@@ -474,8 +515,8 @@ expect(absent_in_text(row, "SimpleOS final handoff are closed")).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

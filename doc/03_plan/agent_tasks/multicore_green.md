@@ -32,45 +32,14 @@ Date: 2026-06-06
   `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` marker triplet proof and
   remains separately gated so readiness markers cannot be mistaken for final
   hardware proof.
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1
 - Current source-built hosted-native fairness evidence is stricter than the
-  checked-in `bin/release/simple` binary for this lane: the helper-return
-  function-value probes, helper-side `Channel.id()` native path, the smaller
-  pool-worker struct-send path, the function-valued local or parameter array
-  path such as `val callbacks = [step_fn]`, inline lambda array literals such
-  as `val callbacks = [\: 7]`, the function-value loop-return path, the direct
-  by-value struct-array runtime shape, and the stale helper-side array-literal
-  hybrid fallback are now fixed on rebuilt debug binaries. The later
-  post-join array-return blocker is also closed: post-join `println` work
-  before returning a local result array now prints `result=7` with `EXIT=0`
-  in the regression spec and Docker-isolated rerun. This evidence remains
-  perf-sensitive because the host native compile/run SSpecs take about
-  60 seconds. The checked-in release binary remains tracked as stale evidence
-  in `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
-%%%%%%% Changes from base #1 to side #2
--- Current source-built hosted-native fairness evidence is stricter than the
--  checked-in `bin/release/simple` binary for this lane: the helper-return
--  function-value probes are now fixed on rebuilt debug binaries, while the
--  resumable-stepper native probe still crashes. A newer lower blocker beneath
--  that path is now pinned in
--  `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`,
--  and the checked-in release binary remains tracked as stale evidence in
--  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
-%%%%%%% Changes from base #2 to side #3
- - Current source-built hosted-native fairness evidence is stricter than the
-   checked-in `bin/release/simple` binary for this lane: the helper-return
-   function-value probes are now fixed on rebuilt debug binaries, and the lower
-   loop-return helper path beneath the resumable-stepper probe is now also
--  fixed. The remaining active native blocker for hosted fairness stays on the
-+  fixed. The stale helper-side array-literal hybrid fallback above the current
-+  struct-array runtime blocker is also closed on rebuilt debug binaries. The
-+  remaining active native blocker for hosted fairness stays on the
-   resumable-stepper path, while historical lower-bound tracking remains in
-   `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`,
-   and the checked-in release binary remains tracked as stale evidence in
-   `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
->>>>>>> Conflict 1 of 1 ends
+  checked-in `bin/release/simple` binary for this lane. Helper-return probes,
+  function-value loop-return, struct-array/runtime, and post-join array-return
+  regressions have focused current-source coverage, while the checked-in
+  release binary remains tracked as stale evidence in
+  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
+  until it is refreshed to match current source/runtime/compiler behavior.
+  These native compile/run SSpecs remain perf-sensitive at roughly one minute.
 
 ## Coordination Contract
 
