@@ -159,12 +159,26 @@ lazy_outline_equivalence 16/16. Import lists `use std.x.{aa,\n  bb}` still fail
 
 ---
 
-### M4 — G3+G7: Comma in import lists and call args (fixes ~198 files)
+### M4 — G3+G7: Comma in import lists and call args (fixes ~198 files) — ALREADY GREEN 2026-06-12
 
-**Files:** `src/compiler/10.frontend/core/parser_decls_use.spl`, `parser_expr.spl`  
-`use mod.{a, b, c}` — treat `,` as separator in `{...}` import body; same in call-arg parser.  
-**Test:** `"use std.foo.{bar, baz}"` and `"val r = f(a, b)"` → 0 errors each.  
-**Docker:** `bin/simple check src/lib/common/compress/gzip.spl`
+No parser change was needed. Investigation (2026-06-12) found:
+- The import-list loop in `parser_decls_use.spl:92-121` already consumes `,`(160)
+  and breaks on `}`(143)/`)`(141); the lexer's `paren_depth` already covers
+  `{`/`}` (`lexer_struct.spl:768-776`), so multiline `{...}` bodies suppress
+  Indent/Dedent post-M3. Call-arg commas were also already handled.
+- The earlier observed failure was a HARNESS BUG: Simple string literals
+  interpolate `{...}`, so `"use std.x.{aa,\n  bb}"` was mangled at runtime
+  before reaching parse_module. The original G3/G7 sweep counts (147+51 files)
+  likely came from REAL errors with a different root cause now fixed by M1-M3,
+  or from the same prelude poisoning — re-sweep will tell.
+
+**Harness protocol addition:** sources containing `{`/`}` must be built by
+concatenation (`val lb = "{"` … `"use std.x." + lb + "aa, bb" + rb`), never as
+direct literals. Template: `tmp/site12/m4_reverify.spl`.
+
+Verified (concat harness): single-line + multiline import lists, `g(1, 2, 3)`
+call args, struct-literal guard all `parser_has_errors()=false`; control TRUE;
+lazy_outline_equivalence 16/16.
 
 ---
 
