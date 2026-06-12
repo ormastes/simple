@@ -422,13 +422,14 @@ fn _web_render_count_tag(html: text, tag: text) -> i32:
     var count = 0
     var offset = 0i64
     val marker = "<" + tag
-    while offset < html.len():
-        val tail = html.substring(offset, html.len())
-        val found = tail.index_of(marker)
+    val html_len = html.len()
+    val marker_len = marker.len()
+    while offset < html_len:
+        val found = _web_render_find_marker_from(html, marker, offset)
         if found < 0:
             return count
         count = count + 1
-        offset = offset + found + marker.len()
+        offset = found + marker_len
     count
 
 fn _web_render_static_shell_command_count(req: WebRenderRequest) -> i32:
@@ -447,14 +448,30 @@ fn _web_render_count_marker_text(value: text, marker: text) -> i32:
         return 0
     var count = 0
     var offset = 0i64
-    while offset < value.len():
-        val tail = value.substring(offset, value.len())
-        val found = tail.index_of(marker)
+    val value_len = value.len()
+    val marker_len = marker.len()
+    while offset < value_len:
+        val found = _web_render_find_marker_from(value, marker, offset)
         if found < 0:
             return count
         count = count + 1
-        offset = offset + found + marker.len()
+        offset = found + marker_len
     count
+
+fn _web_render_find_marker_from(value: text, marker: text, start: i64) -> i64:
+    val value_len = value.len()
+    val marker_len = marker.len()
+    if marker_len == 0:
+        return start
+    val limit = value_len - marker_len
+    if limit < start:
+        return -1
+    var offset = start
+    while offset <= limit:
+        if value.substring(offset, offset + marker_len) == marker:
+            return offset
+        offset = offset + 1
+    -1
 
 fn _web_render_static_shell_style_rule_count(req: WebRenderRequest) -> i32:
     _web_render_count_marker_text(req.css, "{")
@@ -570,11 +587,13 @@ fn web_render_static_shell_binary_decode(encoded: text) -> WebRenderStaticShellB
 fn web_render_static_shell_commands(decoded: WebRenderStaticShellBinaryDecoded) -> [WebRenderStaticShellCommand]:
     if not decoded.valid:
         return []
-    var commands: [WebRenderStaticShellCommand] = []
     val width = if decoded.viewport_w > 0: decoded.viewport_w else: 1
     val height = if decoded.viewport_h > 0: decoded.viewport_h else: 1
-    commands.push(WebRenderStaticShellCommand(kind: "fill_rect", x: 0, y: 0, w: width, h: height, color: 0xFFFFFFFFu32))
-    val slots = if decoded.command_count > 1: decoded.command_count - 1 else: 0
+    val output_count = if decoded.command_count > 0: decoded.command_count else: 1
+    val base_command = WebRenderStaticShellCommand(kind: "fill_rect", x: 0, y: 0, w: width, h: height, color: 0xFFFFFFFFu32)
+    var commands: [WebRenderStaticShellCommand] = [base_command; output_count]
+    commands[0] = base_command
+    val slots = if output_count > 1: output_count - 1 else: 0
     val slot_h = if slots > 0 and height / (slots + 1) > 0: height / (slots + 1) else: 1
     var i = 0
     while i < slots:
@@ -583,7 +602,7 @@ fn web_render_static_shell_commands(decoded: WebRenderStaticShellBinaryDecoded) 
         val w = if width - (inset * 2) > 1: width - (inset * 2) else: 1
         val h = if slot_h > 2: slot_h - 2 else: 1
         val color = if i % 2 == 0: 0xFFE5E7EBu32 else: 0xFFD1D5DBu32
-        commands.push(WebRenderStaticShellCommand(kind: "fill_rect", x: inset, y: y, w: w, h: h, color: color))
+        commands[i + 1] = WebRenderStaticShellCommand(kind: "fill_rect", x: inset, y: y, w: w, h: h, color: color)
         i = i + 1
     commands
 

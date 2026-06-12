@@ -468,6 +468,10 @@ Updated: 2026-06-11
   AsyncWebServer broadcast pruning now writes surviving websocket clients and
   runtime adapters into count-sized arrays and compacts once only when a client
   disconnects, avoiding repeated push-growth during render broadcasts.
+- this commit -- static shell cache marker scan tightening:
+  Web render static-shell cache counting now scans markers in place instead of
+  allocating tail substrings per match, and retained shell command replay uses
+  exact-size command arrays instead of push-growth during hot cache reuse.
 
 ## Current remaining work
 
