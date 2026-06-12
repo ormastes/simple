@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 75
-- pass count: 75
+- fixtures: 76
+- pass count: 76
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -98,6 +98,7 @@ pixels, or text antialiasing normalization.
 | `76_flex_gap_justify_unsafe_center_no_shrink_overflow` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/76_flex_gap_justify_unsafe_center_no_shrink_overflow_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/76_flex_gap_justify_unsafe_center_no_shrink_overflow_structural_report.sdn` |
 | `77_flex_gap_justify_safe_center_no_shrink_overflow` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/77_flex_gap_justify_safe_center_no_shrink_overflow_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/77_flex_gap_justify_safe_center_no_shrink_overflow_structural_report.sdn` |
 | `78_flex_column_gap_justify_unsafe_center_no_shrink_overflow` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/78_flex_column_gap_justify_unsafe_center_no_shrink_overflow_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/78_flex_column_gap_justify_unsafe_center_no_shrink_overflow_structural_report.sdn` |
+| `79_flex_column_gap_justify_safe_center_no_shrink_overflow` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/79_flex_column_gap_justify_safe_center_no_shrink_overflow_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/79_flex_column_gap_justify_safe_center_no_shrink_overflow_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -182,3 +183,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `76_flex_gap_justify_unsafe_center_no_shrink_overflow` | 0 | 0.000 | `` |
 | `77_flex_gap_justify_safe_center_no_shrink_overflow` | 0 | 0.000 | `` |
 | `78_flex_column_gap_justify_unsafe_center_no_shrink_overflow` | 0 | 0.000 | `` |
+| `79_flex_column_gap_justify_safe_center_no_shrink_overflow` | 0 | 0.000 | `` |

@@ -609,6 +609,18 @@ fn decl_get(decls: text, prop: text) -> text:
         pos = pos + semi + 1
     found
 
+fn normalize_overflow_box_alignment(raw: text) -> text:
+    val value = raw.trim().lower()
+    if value == "safe center":
+        return "safe-center"
+    if value == "unsafe center":
+        return "unsafe-center"
+    if value.starts_with("safe "):
+        return value.substring(5, value.len()).trim()
+    if value.starts_with("unsafe "):
+        return value.substring(7, value.len()).trim()
+    value
+
 fn decl_last_pos(decls: text, prop: text) -> i32:
     var pos = 0
     var found = -1
@@ -928,8 +940,9 @@ fn apply_decls(st: Style, decls: text) -> Style:
             flex_wrap_v = flex_wrap_decl
     val justify_content_decl = decl_get(decls, "justify-content")
     if justify_content_decl.len() > 0:
-        if justify_content_decl == "space-between" or justify_content_decl == "space-around" or justify_content_decl == "space-evenly" or justify_content_decl == "center" or justify_content_decl == "flex-end" or justify_content_decl == "flex-start" or justify_content_decl == "start" or justify_content_decl == "end":
-            justify_content_v = justify_content_decl
+        val normalized_justify_content = normalize_overflow_box_alignment(justify_content_decl)
+        if normalized_justify_content == "space-between" or normalized_justify_content == "space-around" or normalized_justify_content == "space-evenly" or normalized_justify_content == "center" or normalized_justify_content == "safe-center" or normalized_justify_content == "unsafe-center" or normalized_justify_content == "flex-end" or normalized_justify_content == "flex-start" or normalized_justify_content == "start" or normalized_justify_content == "end":
+            justify_content_v = normalized_justify_content
     val ta = decl_get(decls, "text-align")
     if ta.len() > 0:
         text_align_v = ta
@@ -941,7 +954,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
         align_self_v = align_self_decl
     val align_content_decl = decl_get(decls, "align-content")
     if align_content_decl.len() > 0:
-        align_content_v = align_content_decl
+        align_content_v = normalize_overflow_box_alignment(align_content_decl)
     val fw = decl_get(decls, "font-weight")
     if fw.len() > 0:
         if fw == "bold" or fw == "700" or fw == "600" or fw == "800":
@@ -2400,6 +2413,7 @@ fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
         val candidates = _sort_candidates_by_specificity(candidates_raw, rules)
         val candidate_count = candidates.len()
         var candidate_i = 0
+        val candidate_count = candidates.len()
         while candidate_i < candidate_count:
             val r = candidates[candidate_i]
             if selector_matches_node_group_parts(nodes, i, rules.group_parts[r]):
@@ -3502,7 +3516,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             var align_content_gap_extra = 0
             var align_content_line_extra = 0
             var total_line_h_with_align = total_line_h
-            if st.align_content == "center" and explicit_content_h > total_line_h:
+            if (st.align_content == "center" or st.align_content == "safe-center" or st.align_content == "unsafe-center") and explicit_content_h > total_line_h:
                 align_content_offset = (explicit_content_h - total_line_h) / 2
             elif (st.align_content == "flex-end" or st.align_content == "end") and explicit_content_h > total_line_h:
                 align_content_offset = explicit_content_h - total_line_h
@@ -3601,7 +3615,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     base_w = iw * (0 - pcst.width_px) / 100
                 if base_w > 0:
                     sum_explicit = sum_explicit + base_w
-                    val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 1
+                    val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 0
                     shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
                 else:
                     val intrinsic = intrinsic_text_width(nodes, styles, child_index, ps, out_intrinsic_widths)
@@ -3610,7 +3624,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     if intrinsic_w > 0 and pcst.flex_grow == 0:
                         base_w = intrinsic_w
                         sum_explicit = sum_explicit + base_w
-                        val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 1
+                        val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 0
                         shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
                     else:
                         val grow = if pcst.flex_grow > 0: pcst.flex_grow else: 1
@@ -3620,6 +3634,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         var gaps_total = 0
         if nonabs_count > 1:
             gaps_total = st.column_gap_px * (nonabs_count - 1)
+        val main_free_space = iw - sum_explicit - gaps_total
         val shrink_deficit = if sum_explicit + gaps_total > iw: sum_explicit + gaps_total - iw else: 0
         var auto_avail = iw - sum_explicit - gaps_total
         if auto_avail < auto_weight:
@@ -3636,10 +3651,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             elif st.justify_content == "space-evenly" and nonabs_count > 0:
                 justify_start_offset = positive_free_space / (nonabs_count + 1)
                 justify_gap_extra = positive_free_space / (nonabs_count + 1)
-            elif st.justify_content == "center":
+            elif st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center":
                 justify_start_offset = positive_free_space / 2
             elif st.justify_content == "flex-end" or st.justify_content == "end":
                 justify_start_offset = positive_free_space
+        elif main_free_space < 0 and st.justify_content == "unsafe-center" and shrink_scaled_total == 0:
+            justify_start_offset = main_free_space / 2
         var cx = ix + justify_start_offset
         var max_child_h = 0
         var flex_child_count = 0
@@ -3690,7 +3707,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 var force_used_w = false
                 if shrink_deficit > 0 and shrink_scaled_total > 0 and (cst.width_px > 0 or cst.flex_basis_px > 0):
                     val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
-                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 1
+                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 0
                     val scaled_shrink = shrink_factor * base_w
                     val cumulative_shrink = (shrink_deficit * (shrink_scaled_used + scaled_shrink)) / shrink_scaled_total
                     remaining_w = base_w - (cumulative_shrink - shrink_width_assigned)
@@ -3722,7 +3739,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     remaining_w = cst.flex_basis_px
                 elif shrink_deficit > 0 and shrink_scaled_total > 0:
                     val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
-                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 1
+                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 0
                     val scaled_shrink = shrink_factor * base_w
                     val cumulative_shrink = (shrink_deficit * (shrink_scaled_used + scaled_shrink)) / shrink_scaled_total
                     remaining_w = base_w - (cumulative_shrink - shrink_width_assigned)
@@ -3811,7 +3828,8 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
         else:
             0
-        val col_positive_free_space = if col_container_main > col_run_h: col_container_main - col_run_h else: 0
+        val col_main_free_space = col_container_main - col_run_h
+        val col_positive_free_space = if col_main_free_space > 0: col_main_free_space else: 0
         var col_justify_start_offset = 0
         var col_justify_gap_extra = 0
         if col_positive_free_space > 0:
@@ -3823,10 +3841,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             elif st.justify_content == "space-evenly" and col_nonabs_count > 0:
                 col_justify_start_offset = col_positive_free_space / (col_nonabs_count + 1)
                 col_justify_gap_extra = col_positive_free_space / (col_nonabs_count + 1)
-            elif st.justify_content == "center":
+            elif st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center":
                 col_justify_start_offset = col_positive_free_space / 2
             elif st.justify_content == "flex-end" or st.justify_content == "end":
                 col_justify_start_offset = col_positive_free_space
+        elif col_main_free_space < 0 and st.justify_content == "unsafe-center":
+            col_justify_start_offset = col_main_free_space / 2
         var cy_flex = y + st.border_t + st.pad_t + col_justify_start_offset
         var flex_c = child_index.first_child[i]
         var flex_child_count_col = 0
