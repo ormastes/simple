@@ -301,6 +301,9 @@ Updated: 2026-06-11
   Semantic snapshot conversion, transport evidence matrices, and JSON list
   assembly now pre-size result arrays instead of repeatedly grow-copying
   semantic UI payloads.
+- this commit -- UI access source scan length hoisting:
+  Access-source envelope JSON escaping now reuses the stable input length
+  inside the scanner loop, matching the optimized patch/snapshot wire helpers.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
