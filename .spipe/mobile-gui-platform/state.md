@@ -54,3 +54,4 @@ spec (specs being written per slice, TDD inside each implementation agent)
 - design: API contract above; breakpoint migration 600/1200→600/840 approved by research rationale (iPad-landscape/WinUI expanded zone) (2026-06-12).
 - implement-C: responsive_css(bp) single-source breakpoints, boundary-exact media queries; parity spec green (6 tests).
 - implement-A: form_factor + breakpoints 600/840 + height classes 480/900; spec green (29 tests); swept existing specs: test/01_unit/app/ui/profile_spec.spl updated 2 classify boundary tests (1199→839, 1200→840); 3 pre-existing failures unrelated to breakpoint change remain.
+- implement-B: adaptive_nav_scaffold + list_detail_scaffold (spec 14 green); TauriBackend.device_class + platform_hint (spec 10 green).
