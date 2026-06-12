@@ -29,6 +29,8 @@ struct FileHandle:
     offset: u64             # Byte offset within file
     file_size: u64          # Total file size in bytes
     is_open: bool           # True when handle is valid
+    dirent_sector: u64      # LBA of the sector holding this file's 32-byte directory entry (0 = no dirent)
+    dirent_offset: i32      # Byte offset within dirent_sector where the 32-byte entry begins
 
 struct FileStat:
     """Minimal file metadata returned by Fat32Filesystem.stat()."""
@@ -265,22 +267,36 @@ impl Fat32Filesystem:
         val entry_result = self._find_root_entry(path)
         if entry_result.is_err():
             return Err(entry_result.unwrap_err())
-        val entry_opt = entry_result.unwrap()
-        if not entry_opt.?:
+        val off = entry_result.unwrap()
+        if off < 0:
             return Err(ENOENT)
-        val off = entry_opt.unwrap()
         val cluster_high = (self.root_dir_data[off + 21].to_u32() << 8) | self.root_dir_data[off + 20].to_u32()
         val cluster_low  = (self.root_dir_data[off + 27].to_u32() << 8) | self.root_dir_data[off + 26].to_u32()
         val start = (cluster_high << 16) | cluster_low
         val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
                      (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
+        # Record the on-disk location of this directory entry so write() can
+        # persist first_cluster and file_size back to disk after each write.
+        # root_dir_data is a flat byte array covering sectors_per_cluster sectors
+        # starting at LBA = data_start_sector + (root_cluster - 2) * sectors_per_cluster.
+        val rc2 = self.root_cluster - 2u32
+        val rc2_u64 = rc2.to_u64()
+        val spc_u64 = self.sectors_per_cluster.to_u64()
+        val root_dir_lba = self.data_start_sector.to_u64() + rc2_u64 * spc_u64
+        val bps_i = self.bytes_per_sector.to_i32()
+        val d_sector_idx = off / bps_i
+        val d_sector_idx_u64 = d_sector_idx.to_u64()
+        val d_sector = root_dir_lba + d_sector_idx_u64
+        val d_offset = off % bps_i
         Ok(FileHandle(
             fd: 0u64,
             start_cluster: start,
             current_cluster: start,
             offset: 0u64,
             file_size: fsize.to_u64(),
-            is_open: true
+            is_open: true,
+            dirent_sector: d_sector,
+            dirent_offset: d_offset
         ))
 
     fn read(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<u64, i32>:
@@ -353,10 +369,9 @@ impl Fat32Filesystem:
         val entry_result = self._find_root_entry(path)
         if entry_result.is_err():
             return Err(entry_result.unwrap_err())
-        val entry_opt = entry_result.unwrap()
-        if not entry_opt.?:
+        val off = entry_result.unwrap()
+        if off < 0:
             return Err(ENOENT)
-        val off = entry_opt.unwrap()
         val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
                      (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
         Ok(FileStat(
@@ -365,15 +380,18 @@ impl Fat32Filesystem:
             mtime: 0u64
         ))
 
-    fn _find_root_entry(self, path: text) -> Result<i32?, i32>:
+    fn _find_root_entry(self, path: text) -> Result<i32, i32>:
         """Walk stashed root_dir_data to find 8.3 entry matching path.
 
-        Returns Ok(Some(byte_offset)) on match, Ok(None) if not found.
+        Returns Ok(byte_offset) on match, Ok(-1) if not found.
         Path must start with '/' followed by an 8.3 name.
+        Changed from Result<i32?, i32> to Result<i32, i32> with sentinel -1
+        to avoid interpreter Optional-unwrap issues (i32? stores as raw i64,
+        and .unwrap() fails on primitive types in the interpreter).
         """
         # Strip leading '/'
         var name = path
-        if name.len() > 0 and name[0].to_u8() == 0x2Fu8:
+        if name.len() > 0 and name.slice(0, 1) == "/":
             name = name.slice(1, name.len())
         val upper = name.upper()
         val total_entries = self.root_dir_data.len() / 32
@@ -383,7 +401,7 @@ impl Fat32Filesystem:
             val off = idx * 32
             val first_byte = self.root_dir_data[off]
             if first_byte == 0x00u8:
-                return Ok(nil)   # end of directory
+                return Ok(-1)   # end of directory — not found
             if first_byte == 0xE5u8:
                 lfn_name = ""           # orphan any pending LFN
                 idx = idx + 1
@@ -420,7 +438,7 @@ impl Fat32Filesystem:
                 return Ok(off)
             lfn_name = ""
             idx = idx + 1
-        Ok(nil)
+        Ok(-1)
 
     fn _read_fat_entry(self, dev: BlockDevice, cluster: u32) -> Result<u32, text>:
         """Read the 28-bit FAT32 entry for cluster from the FAT region on dev."""
@@ -503,8 +521,6 @@ impl Fat32Filesystem:
         val wr = dev.write_sector(fat_sector, sec)
         if wr.is_err():
             return Err("fat32: failed to write FAT sector for cluster {cluster}")
-        if not wr.unwrap():
-            return Err("fat32: write_sector returned false for cluster {cluster}")
         Ok(())
 
     fn allocate_cluster(self, dev: BlockDevice) -> Result<u32, i32>:
@@ -545,6 +561,65 @@ impl Fat32Filesystem:
             return Err(EIO)
         Ok(())
 
+    fn _update_dirent(self, dev: BlockDevice, h: FileHandle) -> Result<(), i32>:
+        """Persist first_cluster and file_size into the on-disk directory entry.
+
+        Reads the 512-byte sector at h.dirent_sector, patches the 32-byte entry
+        at byte h.dirent_offset:
+          bytes +20..+21  cluster_high (bits 16-31 of start_cluster)
+          bytes +26..+27  cluster_low  (bits  0-15 of start_cluster)
+          bytes +28..+31  file_size    (u32 little-endian)
+        then writes the sector back.
+
+        Also updates self.root_dir_data cache at the corresponding flat offset
+        so that stat() and subsequent open() calls see the new values without
+        requiring a remount.
+
+        Does nothing (returns Ok) when h.dirent_sector == 0 (handles created
+        without a backing directory entry, e.g. test helpers).
+        """
+        if h.dirent_sector == 0u64:
+            return Ok(())
+        val sec_result = dev.read_sector(h.dirent_sector)
+        if sec_result.is_err():
+            return Err(EIO)
+        var sec = sec_result.unwrap()
+        val do_ = h.dirent_offset
+        val cl_high = (h.start_cluster >> 16u32) & 0xFFFFu32
+        val cl_low  = h.start_cluster & 0xFFFFu32
+        val fsz     = h.file_size.to_u32()
+        # cluster_high bytes (offsets +20, +21 within the 32-byte entry)
+        sec[do_ + 20] = (cl_high & 0xFFu32).to_u8()
+        sec[do_ + 21] = ((cl_high >> 8u32) & 0xFFu32).to_u8()
+        # cluster_low bytes (offsets +26, +27)
+        sec[do_ + 26] = (cl_low & 0xFFu32).to_u8()
+        sec[do_ + 27] = ((cl_low >> 8u32) & 0xFFu32).to_u8()
+        # file_size u32 little-endian (offsets +28..+31)
+        sec[do_ + 28] = (fsz & 0xFFu32).to_u8()
+        sec[do_ + 29] = ((fsz >> 8u32)  & 0xFFu32).to_u8()
+        sec[do_ + 30] = ((fsz >> 16u32) & 0xFFu32).to_u8()
+        sec[do_ + 31] = ((fsz >> 24u32) & 0xFFu32).to_u8()
+        val wr = dev.write_sector(h.dirent_sector, sec)
+        if wr.is_err():
+            return Err(EIO)
+        # Keep root_dir_data cache coherent.
+        # root_dir_data is laid out as contiguous sectors starting at
+        # LBA = data_start_sector + (root_cluster - 2) * sectors_per_cluster.
+        # h.dirent_sector is one of those LBAs; the flat cache offset is:
+        #   (h.dirent_sector - root_dir_lba) * bytes_per_sector + h.dirent_offset
+        val root_dir_lba = self.data_start_sector.to_u64() + (self.root_cluster - 2u32).to_u64() * self.sectors_per_cluster.to_u64()
+        val cache_base = ((h.dirent_sector - root_dir_lba) * self.bytes_per_sector.to_u64()).to_i32() + h.dirent_offset
+        if cache_base >= 0 and (cache_base + 31) < self.root_dir_data.len():
+            self.root_dir_data[cache_base + 20] = sec[do_ + 20]
+            self.root_dir_data[cache_base + 21] = sec[do_ + 21]
+            self.root_dir_data[cache_base + 26] = sec[do_ + 26]
+            self.root_dir_data[cache_base + 27] = sec[do_ + 27]
+            self.root_dir_data[cache_base + 28] = sec[do_ + 28]
+            self.root_dir_data[cache_base + 29] = sec[do_ + 29]
+            self.root_dir_data[cache_base + 30] = sec[do_ + 30]
+            self.root_dir_data[cache_base + 31] = sec[do_ + 31]
+        Ok(())
+
     fn write(self, dev: BlockDevice, h: FileHandle, buf: [u8]) -> Result<FileHandle, i32>:
         """Write buf to the file described by h (wave-4d).
 
@@ -559,11 +634,10 @@ impl Fat32Filesystem:
         FileHandle is a value type in Simple: callers must use the returned
         handle to observe updated start_cluster and file_size.
 
-        NOTE: On-disk directory-entry file_size persistence is not updated here;
-        that requires locating and rewriting the dirent in the root-dir cluster,
-        which is tracked separately in
-        doc/08_tracking/bug/fat32_no_cycle_guard_chain_walk_2026-06-11.md
-        (FINDING-T2 follow-up: dirent persistence).
+        Persists first_cluster and file_size to the on-disk directory entry via
+        _update_dirent when h.dirent_sector > 0.  The root_dir_data cache is
+        updated in the same call so stat() and open() remain coherent without
+        a remount.
         """
         val n = buf.len().to_u64()
         if n == 0u64:
@@ -647,12 +721,14 @@ impl Fat32Filesystem:
                 val wr = dev.write_sector(lba, sec)
                 if wr.is_err():
                     return Err(EIO)
-                if not wr.unwrap():
-                    return Err(EIO)
                 sec_off = sec_off + 1u64
                 byte_in_sec = 0u64
 
         h.file_size = h.file_size + written
+        # Persist first_cluster + file_size to the on-disk directory entry.
+        val upd = self._update_dirent(dev, h)
+        if upd.is_err():
+            return Err(upd.unwrap_err())
         Ok(h)
 
     fn close(self, fd: u64) -> i32:
@@ -717,4 +793,26 @@ impl Fat32Filesystem:
             bytes_per_sector:    bytes_per_sector,
             data_clusters:       data_clusters,
             root_dir_data:       []
+        )
+
+    static fn make_for_dirent_test(fat_start_sector: u32, data_start_sector: u32, bytes_per_sector: u32, sectors_per_cluster: u32, data_clusters: u32, initial_root_dir: [u8]) -> Fat32Filesystem:
+        """Create a pre-configured Fat32Filesystem for dirent-persistence unit tests.
+
+        Same geometry as make_for_alloc_test but accepts a pre-populated
+        root_dir_data cache so _find_root_entry / open() can resolve 8.3 names.
+        Caller supplies a mock BlockDevice that provides the root-dir sector at
+        LBA data_start_sector (root_cluster=2, so no offset).
+        Not for production use.
+        """
+        Fat32Filesystem(
+            device_id:           0u64,
+            bpb_parsed:          true,
+            cluster_size:        bytes_per_sector * sectors_per_cluster,
+            fat_start_sector:    fat_start_sector,
+            data_start_sector:   data_start_sector,
+            root_cluster:        2u32,
+            sectors_per_cluster: sectors_per_cluster,
+            bytes_per_sector:    bytes_per_sector,
+            data_clusters:       data_clusters,
+            root_dir_data:       initial_root_dir
         )

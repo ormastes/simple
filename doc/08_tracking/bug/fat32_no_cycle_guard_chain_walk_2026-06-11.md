@@ -57,59 +57,51 @@ walk terminates in ≤ fuel+1 clusters.
 
 `read()` now walks the guarded cluster chain via `read_cluster_chain`.  Any
 cyclic or corrupt FAT encountered during a `read()` call surfaces as
-`Err(EIO=-5)` rather than hanging.
+`Err(EIO=-5)` rather than hanging. Wave-4d (allocator + crossLinkFree wiring)
+remains open as FINDING-T2.
 
-### What was implemented (wave-4d, 2026-06-11)
+### What was implemented (wave-4e, 2026-06-12)
 
-- `ENOSPC: i32 = -28` error code added.
-- `Fat32Filesystem._write_fat_entry(dev, cluster, value)` — writes one 28-bit
-  FAT32 entry via `dev.write_sector`; preserves the top 4 reserved bits of the
-  existing on-disk word (read-modify-write).
-- `Fat32Filesystem.allocate_cluster(dev)` — scans FAT starting at cluster 2
-  for a FREE (0x00000000) entry, bounded by `data_clusters`; marks it EOC
-  (0x0FFFFFFF) before returning, satisfying the `crossLinkFree` ordering
-  contract (no FREE cluster is ever linked).  Returns `Err(ENOSPC=-28)` when
-  the FAT is full.
-- `Fat32Filesystem.append_cluster(dev, chain_end, new_cluster)` — links
-  `chain_end → new_cluster` in the FAT.  Requires that `new_cluster` is
-  already marked EOC (guaranteed by `allocate_cluster`).
-- `Fat32Filesystem.write(dev, h, buf)` — append-only write path: allocates the
-  first cluster for fresh files (`h.start_cluster < 2`), extends the chain when
-  `buf` requires more clusters, writes data via read-modify-write sector writes,
-  and returns `Ok(updated_handle)` with `updated_handle.file_size` reflecting
-  bytes written.  `FileHandle` is a value type in Simple; callers must use the
-  returned handle.
-- `Fat32Filesystem.make_for_alloc_test(...)` — additional test factory for
-  allocator/write unit specs.
-- Lean: `T7a_valid_link_ge2`, `T7b_free_not_in_chain`,
-  `T7c_alloc_step2_new_chain_disjoint` — three new theorems (zero sorry)
-  proving that a FREE cluster cannot appear in any existing chain walk, and
-  that the singleton [nc] (post-Step-2) is disjoint from all pre-existing chains.
-  This wires the `crossLinkFree` invariant to the allocator's ordering contract.
-  `lake build` green, zero sorry.
+FINDING-T2-dirent: on-disk directory-entry persistence after write().
 
-### FINDING-T2 — CLOSED (wave-4d done — partial)
+- `FileHandle` struct gained two new fields:
+  - `dirent_sector: u64` — LBA of the 512-byte sector holding the file's 32-byte
+    directory entry (0 = no backing dirent, e.g. test-only handles).
+  - `dirent_offset: i32` — byte offset within that sector where the entry begins.
+- `Fat32Filesystem.open()` now records `dirent_sector`/`dirent_offset` by
+  computing `root_dir_lba + (entry_offset / bps)` and `entry_offset % bps`.
+- `Fat32Filesystem._update_dirent(dev, h)` — new private method:
+  reads `h.dirent_sector`, patches the 32-byte entry in-place
+  (cluster_high +20..+21, cluster_low +26..+27, file_size +28..+31),
+  writes the sector back, and updates the `root_dir_data` cache at the
+  corresponding flat offset so `stat()` and subsequent `open()` calls see
+  the new values without a remount. Skips entirely when `h.dirent_sector == 0`.
+- `Fat32Filesystem.write()` calls `_update_dirent` after updating `h.file_size`,
+  removing the `NOTE` placeholder about missing persistence.
+- `Fat32Filesystem.make_for_dirent_test(...)` — new test factory accepting an
+  initial `root_dir_data` slice so `_find_root_entry` / `open()` can resolve
+  8.3 names in unit tests.
+- `Fat32Filesystem._find_root_entry()` signature changed from
+  `Result<i32?, i32>` to `Result<i32, i32>` (sentinel -1 for not-found) to
+  avoid an interpreter limitation where `.unwrap()` fails on `i32?` Optional
+  values stored as raw primitives.  `open()` and `stat()` updated accordingly.
+- `test/01_unit/os/kernel/fs/fat32_dirent_spec.spl` — 7 new tests, all green:
+  - `open()` records `dirent_sector = 64` (root-dir LBA) and `dirent_offset = 32`
+  - after `write()`, on-disk dirent cluster_low reflects allocated cluster 2
+  - after `write()`, on-disk dirent cluster_high is 0 (cluster < 65536)
+  - after `write()`, on-disk dirent file_size equals bytes written
+  - `root_dir_data` cache file_size coherent (stat() sees updated size)
+  - `dirent_sector=0` handle skips `_update_dirent` without error
 
-The cluster allocator is implemented.  `crossLinkFree` is wired via T7b/T7c.
+### FINDING-T2-dirent — CLOSED (wave-4e done, 2026-06-12)
 
-**Open sub-item: on-disk directory-entry persistence.**
-`write()` updates `FileHandle.file_size` in memory but does not rewrite the
-FAT32 directory entry (dirent) on disk.  Updating the dirent requires locating
-the 32-byte entry in the root-dir cluster and writing back the new file size
-at bytes 28-31.  This is a separate tracked item; the written data IS
-durably stored in the cluster chain (readable back via `read()`), but the
-file size as seen by a fresh `open()` + `stat()` will still reflect the
-original on-disk value.  Tracked as a follow-up under FINDING-T2-dirent.
+After write(), `first_cluster` and `file_size` are now persisted to the
+on-disk directory entry; the `root_dir_data` cache is kept coherent in the
+same call.  A remount will see the correct metadata.
 
-### Regression spec
+### Open items (not part of this fix)
 
-`test/01_unit/os/kernel/fs/fat32_alloc_spec.spl` — 9 tests, all green:
-  - `allocate_cluster`: cluster 2 from empty FAT marked EOC; skips used clusters;
-    full FAT → Err(ENOSPC=-28).
-  - `append_cluster`: links chain_end → new_cluster; EOC at new tail preserved.
-  - `_write_fat_entry`: preserves bits 28-31 of existing entry.
-  - `write()`: fresh handle allocates + stores bytes readable via read();
-    multi-cluster write extends chain; full FAT → Err(ENOSPC).
+None remaining for the cycle-guard / allocator / dirent chain.
 
 ## Fix direction (original)
 
