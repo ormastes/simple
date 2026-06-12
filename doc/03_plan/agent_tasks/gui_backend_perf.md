@@ -282,6 +282,10 @@ Updated: 2026-06-11
   Draw IR SDN serialization and parsing now pre-size line, batch, and command
   arrays and hoist stable text lengths instead of repeatedly grow-copying
   inspection payloads.
+- this commit -- UI patch wire scan length hoisting:
+  Patch JSON escaping, field extraction, numeric parsing, and bounded substring
+  search now reuse stable string lengths inside scanner loops instead of
+  dispatching repeated `.len()` calls.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
