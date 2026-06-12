@@ -15,6 +15,25 @@ use compiler.core.tokens.{keyword_lookup}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use std.string_core.{char_from_code}
 
+# Digit-value helpers for string escape decoding (\NNN octal, \xNN hex,
+# \u{...} unicode). Return -1 for non-digits so callers can stop consuming.
+fn lex_escape_hex_value(c: text) -> i64:
+    val lower: text = "0123456789abcdef"
+    val upper: text = "0123456789ABCDEF"
+    for k in 0..16:
+        if lower[k:k+1] == c:
+            return k
+        if upper[k:k+1] == c:
+            return k
+    return -1
+
+fn lex_escape_octal_value(c: text) -> i64:
+    val digits: text = "01234567"
+    for k in 0..8:
+        if digits[k:k+1] == c:
+            return k
+    return -1
+
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 
@@ -351,6 +370,7 @@ impl CoreLexer:
 
         var parts: [text] = []
         var done: bool = false
+        var has_nul: bool = false
 
         for i in 0..100000:
             if done:
@@ -380,8 +400,49 @@ impl CoreLexer:
                     parts.push("\"")
                 elif esc == "'":
                     parts.push("'")
-                elif esc == "0":
-                    parts.push("\0")
+                elif esc == "x":
+                    var hv: i64 = 0
+                    var hn: i64 = 0
+                    for j in 0..2:
+                        val hd: i64 = lex_escape_hex_value(self.peek())
+                        if hd >= 0:
+                            hv = hv * 16 + hd
+                            self.advance()
+                            hn = hn + 1
+                    if hn > 0:
+                        if hv == 0:
+                            has_nul = true
+                        parts.push(char_from_code(hv))
+                    else:
+                        parts.push("\\")
+                        parts.push("x")
+                elif esc == "u":
+                    if self.peek() == "{":
+                        self.advance()
+                        var uv: i64 = 0
+                        for j in 0..8:
+                            val ud: i64 = lex_escape_hex_value(self.peek())
+                            if ud >= 0:
+                                uv = uv * 16 + ud
+                                self.advance()
+                        if self.peek() == "}":
+                            self.advance()
+                        if uv == 0:
+                            has_nul = true
+                        parts.push(char_from_code(uv))
+                    else:
+                        parts.push("\\")
+                        parts.push("u")
+                elif lex_escape_octal_value(esc) >= 0:
+                    var ov: i64 = lex_escape_octal_value(esc)
+                    for j in 0..2:
+                        val od: i64 = lex_escape_octal_value(self.peek())
+                        if od >= 0:
+                            ov = ov * 8 + od
+                            self.advance()
+                    if ov == 0:
+                        has_nul = true
+                    parts.push(char_from_code(ov))
                 else:
                     parts.push("\\")
                     parts.push(esc)
@@ -391,8 +452,9 @@ impl CoreLexer:
 
         self.make_token(3, result, start_line, start_col)
         self.cur_text = result
-        val nul = char_from_code(0)
-        if result.contains(nul):
+        # has_nul flag, not contains(): NUL-bearing text breaks contains()
+        # (C-string truncation) — proven by rt_env_set panics on "\033" files.
+        if has_nul:
             rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "")
         else:
             rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", result)

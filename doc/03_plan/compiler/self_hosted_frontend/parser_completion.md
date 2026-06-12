@@ -300,6 +300,27 @@ Note: the flat_ast bridge OOBs on ANY fn in the in-memory harness context
 (plain `if` too) — pre-existing harness artifact, not the desugar; real
 check-path bridging validated via the docker in-process smoke instead.
 
+### M11b — G21: octal/hex/unicode string escapes + NUL-safe token bridge — DONE 2026-06-12
+
+Found by the post-G19 in-process smoke (check now progresses deep into
+src/app). Two issues:
+1. **NOT a parser gap — broken file:** `src/app/sdn/commands.spl` opened with
+   a lone-`#` block-comment header (invalid grammar — the SEED rejects it too,
+   E0002 at 5:1) plus a fused line `use app.ioimport std.process`. Repaired
+   the file (normal `#` line comments + split imports); seed check green.
+   Lone-`#` headers remain only in `src/compiler_rust/lib/std/src/sdn/*` (seed
+   lib, out of owned scope).
+2. **G21 lexer gap:** string scanner decoded `\033` as NUL+"33" (`\0` branch
+   ate the digit), then `rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", …)`
+   ABORTED the whole check (Rust env NUL panic) — the `result.contains(nul)`
+   guard provably fails on NUL-bearing text (C-string truncation). Fix in
+   `core/lexer_struct.spl`: full `\NNN` octal, `\xNN` hex, `\u{…}` unicode
+   decoding (seed parity probed: `"\033"`.len==1, `"\77"`==1, `"\x1b"`==1,
+   `"\u{1F600}"` ok) + `has_nul` flag replaces the broken contains() guard.
+   ~10 src files use `\033` (cli/formatting, tui/style, tui/terminal, …).
+   Verified: tmp/site12/g21_reverify.spl — all 4 escape forms green, control
+   TRUE, no abort.
+
 ### M11 — SIGSEGV / rc=139 crashes (29 files) — IN PROGRESS 2026-06-12 (re-sweep first)
 
 Approach revised: the 29 crash files' first-error signatures in the 2026-06-11
