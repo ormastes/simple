@@ -422,6 +422,10 @@ Updated: 2026-06-11
   Script extraction, module symbol suffix generation, brace scanning, and module
   cache lookup now reuse stable loop lengths; script extraction also caches the
   debug sentinel scan instead of rechecking the full HTML per loop.
+- this commit -- Browser session UI-access snapshot preallocation:
+  BrowserSession UI-access link extraction and snapshot node construction now
+  write into exact-size arrays, and inline tag stripping reuses the stable HTML
+  length while preserving the browser controls/link action contract.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

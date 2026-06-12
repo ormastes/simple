@@ -81,7 +81,8 @@ fn _browser_strip_inline_tags(html: text) -> text:
     var out = ""
     var in_tag = false
     var i = 0
-    while i < html.len():
+    val html_len = html.len()
+    while i < html_len:
         val ch = html.slice(i, i + 1)
         if ch == "<":
             in_tag = true
@@ -105,8 +106,34 @@ fn _browser_collapse_parent_segments(url: text) -> text:
         out = out.slice(0, previous_slash) + out.slice(marker + 3, out.len())
     out
 
+fn _browser_count_link_nodes(body_html: text) -> i32:
+    var count = 0
+    var rest = body_html
+    while true:
+        val start = rest.index_of("<a")
+        if start < 0:
+            return count
+        val after_start = rest.slice(start, rest.len())
+        val tag_end = after_start.index_of(">")
+        if tag_end < 0:
+            return count
+        val tag = after_start.slice(0, tag_end + 1)
+        val after_tag = after_start.slice(tag_end + 1, after_start.len())
+        val close = after_tag.index_of("</a>")
+        if close < 0:
+            return count
+        val href = _browser_extract_attr(tag, "href")
+        val label = _browser_strip_inline_tags(after_tag.slice(0, close))
+        if href != "" and label != "":
+            count = count + 1
+        rest = after_tag.slice(close + 4, after_tag.len())
+    count
+
 fn _browser_link_nodes(body_html: text, base_url: text) -> [UiAccessNode]:
-    var nodes: [UiAccessNode] = []
+    val link_count = _browser_count_link_nodes(body_html)
+    if link_count == 0:
+        return []
+    var nodes: [UiAccessNode] = [_browser_node("link_0", "link", "", true, false, ["click"], _browser_link_props("")); link_count]
     var rest = body_html
     var index = 0
     while true:
@@ -126,7 +153,7 @@ fn _browser_link_nodes(body_html: text, base_url: text) -> [UiAccessNode]:
         val label = _browser_strip_inline_tags(after_tag.slice(0, close))
         if href != "" and label != "":
             val resolved = _browser_collapse_parent_segments(resolve_relative_url(base_url, href))
-            nodes = nodes.push(_browser_node("link_{index}", "link", label, true, false, ["click"], _browser_link_props(resolved)))
+            nodes[index] = _browser_node("link_{index}", "link", label, true, false, ["click"], _browser_link_props(resolved))
             index = index + 1
         rest = after_tag.slice(close + 4, after_tag.len())
     nodes
@@ -152,16 +179,21 @@ impl BrowserSession:
             app_id: "simple-browser",
             root_canonical_id: ui_access_canonical_id(BROWSER_SESSION_SURFACE_ID, "root")
         )
-        var nodes: [UiAccessNode] = []
-        nodes = nodes.push(_browser_node("back", "button", "Back", self.can_go_back(), false, ["click"], _browser_control_props("back")))
-        nodes = nodes.push(_browser_node("forward", "button", "Forward", self.can_go_forward(), false, ["click"], _browser_control_props("forward")))
-        nodes = nodes.push(_browser_node("stop", "button", "Stop", self.is_loading, false, ["click"], _browser_control_props("stop")))
-        nodes = nodes.push(_browser_node("home", "button", "Home", true, false, ["click"], _browser_control_props("home")))
-        nodes = nodes.push(_browser_node("favorite", "button", "Favorite", true, self.is_favorite(self.current_url), ["click"], _browser_control_props("favorite")))
-        nodes = nodes.push(_browser_node("address", "textfield", self.current_url, true, false, ["set_value"], _browser_control_props("address")))
-        nodes = nodes.push(_browser_node("title", "label", self.current_title, true, false, [], _browser_control_props("title")))
-        for link_node in _browser_link_nodes(self.current_body_html, self.current_url):
-            nodes = nodes.push(link_node)
+        val link_nodes = _browser_link_nodes(self.current_body_html, self.current_url)
+        val fixed_count = 7
+        val node_count = fixed_count + link_nodes.len()
+        var nodes: [UiAccessNode] = [_browser_node("back", "button", "Back", self.can_go_back(), false, ["click"], _browser_control_props("back")); node_count]
+        nodes[1] = _browser_node("forward", "button", "Forward", self.can_go_forward(), false, ["click"], _browser_control_props("forward"))
+        nodes[2] = _browser_node("stop", "button", "Stop", self.is_loading, false, ["click"], _browser_control_props("stop"))
+        nodes[3] = _browser_node("home", "button", "Home", true, false, ["click"], _browser_control_props("home"))
+        nodes[4] = _browser_node("favorite", "button", "Favorite", true, self.is_favorite(self.current_url), ["click"], _browser_control_props("favorite"))
+        nodes[5] = _browser_node("address", "textfield", self.current_url, true, false, ["set_value"], _browser_control_props("address"))
+        nodes[6] = _browser_node("title", "label", self.current_title, true, false, [], _browser_control_props("title"))
+        var link_idx = 0
+        val link_count = link_nodes.len()
+        while link_idx < link_count:
+            nodes[fixed_count + link_idx] = link_nodes[link_idx]
+            link_idx = link_idx + 1
         UiAccessSnapshot(
             protocol_version: 1,
             snapshot_revision: 0,
