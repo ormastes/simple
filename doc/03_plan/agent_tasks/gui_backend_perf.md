@@ -347,6 +347,9 @@ Updated: 2026-06-11
   Browser selector `:not(...)` option scans and compound class-token scans now
   reuse stable split-list counts instead of dispatching `.len()` in loop
   conditions during fallback CSS selector matching.
+- this commit -- Engine2D compositor loop length hoisting:
+  Layer fills and compositor layer traversal now reuse stable pixel/layer counts
+  instead of dispatching `.len()` in framebuffer fill and blend traversal loops.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
