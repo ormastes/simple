@@ -101,7 +101,7 @@ Deliverables:
 
 - cross-language report with separate rows for Simple OS threads, cooperative
   green, multicore green, C pthreads, Go goroutines, RSS, artifact footprint,
-  and Simple-vs-Go-vs-C large fanout stress;
+  Simple-vs-Go-vs-C large fanout stress, and hosted sliced-fairness evidence;
 - numeric SPipe gate that rejects `fail`, `n/a`, and missing rows for required
   native evidence;
 - report text that clearly says cooperative green is not Go M:N;
@@ -110,6 +110,7 @@ Deliverables:
 Acceptance evidence:
 
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+- `src/compiler_rust/target/debug/simple run build/cross_lang_perf/hosted_sliced_fairness.spl --mode=interpreter`
 - `bin/release/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - report row proving Go beats C pthreads in isolated large fanout stress with
   Go `GOMAXPROCS` pinned to `CPU_WORKERS`.
@@ -219,6 +220,8 @@ Deliverables:
 - executable blocker coverage for the explicit resumable host-fairness path,
   including the scalar-state `multicore_green_spawn_sliced` source/native
   regression and historical closure of the earlier callback-id prototype;
+- profile/report visibility for the generated hosted sliced-fairness evidence
+  section without reclassifying ordinary closure scheduling as preemptive;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:

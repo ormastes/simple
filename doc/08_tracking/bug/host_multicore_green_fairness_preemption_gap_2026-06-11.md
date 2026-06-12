@@ -86,6 +86,12 @@ Current hosted fairness-gap evidence also includes:
   `multicore_green_spawn_sliced` task requeues itself between short slices, a
   later quick `multicore_green_spawn` finishes during the first observation
   window, and the pool width still reports `parallelism_after_join=1`.
+- `scripts/check/check-cross-language-perf.shs` now emits a separate
+  `Hosted Fairness Evidence` section with `Simple sliced (source)` and
+  `Simple sliced (native)` rows. The profile-report contract requires
+  `multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9`, so
+  this positive path remains visible without treating it as ordinary closure
+  preemption.
 
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool

@@ -111,6 +111,13 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Simple multicore green (native) |       14.237 | multicore_green stress fanout (pool_used=512/512, parallelism=64/64, queue_model=work_stealing) |
 | Go                     |        7.359 |          goroutine per stress task (M:N) |
 
+## Hosted Fairness Evidence
+
+| Runtime                |         Result |                                                     Evidence |
+|------------------------|----------------|------------------------------------------------------------|
+| Simple sliced (source) |           pass | multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9 |
+| Simple sliced (native) |           pass | multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9 |
+
 ## Parallel Artifact Footprint
 
 | Language               |         Binary |     Per-thread |                Notes |
@@ -151,6 +158,10 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 > `FANOUT_STRESS_WORKERS` workers and includes a Simple multicore-green native
 > row with `pool_used=N/N` evidence. It exists so the pthread-per-task baseline
 > cannot be mistaken for Go-style M:N scheduling when fanout grows.
+> The hosted fairness section separately checks `multicore_green_spawn_sliced`.
+> It is an explicit scalar-state fairness contract for long Pure Simple work
+> and is not counted as automatic preemption evidence for ordinary
+> `multicore_green_spawn` closures.
 >
 > **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
 > the OS-thread API. `thread_spawn_with_args` remains tracked separately by
