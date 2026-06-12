@@ -5,7 +5,7 @@
 # - parse_val_decl, parse_lazy_val_decl, parse_var_decl
 # - parse_class_body_method, parse_impl_decl, parse_ce_decl
 
-use compiler.core.tokens.{tok_kind_name}
+use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_IDENT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR, TOK_KW_LAZY, TOK_KW_STATIC, TOK_KW_ME}
 use compiler.core.tokens.{TOK_KW_USE, TOK_KW_EXPORT}
@@ -31,6 +31,17 @@ use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding
 use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block}
 
 # ===== Use/Export Declarations =====
+
+# G22: keyword tokens (cli, match, …) are valid module-path segments and
+# import-list names. A kind is a textual keyword iff its canonical name
+# round-trips through keyword_lookup; returns "" for non-keywords.
+fn use_kw_segment_text(kind: i64) -> text:
+    if kind == 6:
+        return ""
+    val kn: text = tok_kind_name(kind)
+    if keyword_lookup(kn) == kind:
+        return kn
+    return ""
 
 fn parse_use_decl() -> i64:
     parser_advance()
@@ -58,6 +69,13 @@ fn parse_use_decl() -> i64:
         else:
             module_path = par_text_get()
         parser_advance()
+    elif use_kw_segment_text(par_kind_get()) != "":
+        val kw0: text = use_kw_segment_text(par_kind_get())
+        if module_path != "":
+            module_path = module_path + kw0
+        else:
+            module_path = kw0
+        parser_advance()
     for i in 0..100:
         if par_kind_get() != 164:
             break
@@ -74,8 +92,13 @@ fn parse_use_decl() -> i64:
             if is_lazy == 1:
                 decl_set_lazy(wc_result)
             return wc_result
-        module_path = module_path + "." + par_text_get()
-        parser_expect(6)
+        val kw_seg: text = use_kw_segment_text(par_kind_get())
+        if kw_seg != "":
+            module_path = module_path + "." + kw_seg
+            parser_advance()
+        else:
+            module_path = module_path + "." + par_text_get()
+            parser_expect(6)
         # Check for trailing * without dot: use ffi.io*
         if par_kind_get() == 62:
             parser_advance()
@@ -99,8 +122,12 @@ fn parse_use_decl() -> i64:
                 break
             if par_kind_get() == 190:
                 break
-            if par_kind_get() == 6:
-                val orig_name = par_text_get()
+            val kw_name: text = use_kw_segment_text(par_kind_get())
+            val is_name_tok: bool = par_kind_get() == 6 or kw_name != ""
+            if is_name_tok:
+                var orig_name = par_text_get()
+                if kw_name != "":
+                    orig_name = kw_name
                 parser_advance()
                 # Support aliasing: name as alias
                 val is_as: bool = par_kind_get() == TOK_KW_AS

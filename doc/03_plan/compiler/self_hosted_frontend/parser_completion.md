@@ -321,6 +321,23 @@ src/app). Two issues:
    Verified: tmp/site12/g21_reverify.spl — all 4 escape forms green, control
    TRUE, no abort.
 
+### M11c — G22+G23: keyword path segments + `val _` discard binding — DONE 2026-06-12
+
+Found by the post-M11b in-process check (1153 errors, rc=124 timeout):
+- **G22:** `use app.cli.…` / `import app.cli` failed — `cli` is TOK_KW_CLI(212),
+  and use-path segments only accepted Ident(6). Fix in `parser_decls_use.spl`:
+  `use_kw_segment_text(kind)` helper — a kind is a textual keyword iff
+  `keyword_lookup(tok_kind_name(kind)) == kind` (kind-based, so it works for
+  in-memory sources where par_text_get() is ""). Applied at first-segment,
+  loop-segment, and import-list-name sites. Generalizes the M2 (`allow`) and
+  M9 (`as`) keyword-as-identifier pattern to ALL keywords in path positions.
+- **G23:** `val _ = expr` / `var _ = expr` discard bindings failed
+  ("expected =, got _") — `_` is kind 169. Fix in `parser_stmts.spl`
+  parse_val_decl_stmt + parse_var_decl_stmt, same accept-169 pattern as M10
+  params.
+Verified: tmp/site12/m11c_probe.spl all green + control TRUE; full regression
+battery (m5/m8/m9/m10/g19/g21 harnesses) green.
+
 ### M11 — SIGSEGV / rc=139 crashes (29 files) — IN PROGRESS 2026-06-12 (re-sweep first)
 
 Approach revised: the 29 crash files' first-error signatures in the 2026-06-11
