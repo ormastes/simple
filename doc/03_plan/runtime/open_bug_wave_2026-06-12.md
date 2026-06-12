@@ -13,25 +13,20 @@ verified fresh by the orchestrator, committed path-scoped, pushed often.
 | A2 | FAT32 dirent write-back | `FileHandle.dirent_sector/offset` + `_update_dirent()` patches cluster hi/lo + size; new `fat32_dirent_spec.spl` 7/7 | DONE, pushed `a734541c33` |
 | A1 | static-method default params unreachable | `constructor_overload_score` now scores `required<=provided<=total`; +5 tests | DONE, pushed `be08dc3ccc` |
 | A4 | compiled array OOB read segfault | root cause: `compile_inline_array_get/set` deref before nil/tag check; code fix rides parallel parser track local commit `adc8dcad379` | doc pushed `18e5fb2033`; code lands when parser track pushes |
-| B3 | generator `yield` crash (exit 132) | `async_ops.rs` trap→NIL return safety net; +2 MIR-lower regression tests | fix in worktree — verifying now |
-| A3 | positional class match wide destructure | `pattern_matches` gains `classes` param + `Pattern::Enum`-over-`Value::Object` branch; 6 call sites in `interpreter_control.rs`; +5 tests | fix in worktree — verifying now |
+| B3 | generator `yield` crash (exit 132) | `async_ops.rs` trap→NIL return safety net; +2 MIR-lower regression tests (async_desugar 7/7 green) | DONE, on main via resolution-commit sweep (`62f9ce296dc` lineage); probe exit 0 |
+| A3 | positional class match wide destructure | `pattern_matches` gains `classes` param + `Pattern::Enum`-over-`Value::Object` branch; 6 call sites in `interpreter_control.rs`; +5 tests (5/5 green) | DONE, pushed `66b65e11719` (interpreter mode; cranelift open) |
 
-## Remaining steps (this session)
+## Wave closed 2026-06-12
 
-1. **Verify fresh** (running): `cargo test --lib interpreter_patterns` (A3, 5 tests),
-   `cargo test --lib async_desugar` (B3, 2 tests), `cargo build --release -p simple-driver`.
-2. **Probe on fresh binary**: `/tmp/b3_gen_probe.spl` must exit 0 (was 132);
-   A3 small/big match probes must print matched values.
-3. **Commit + push** (plumbing retry-loop from repo root, path-scoped):
-   - B3: `codegen/instr/async_ops.rs`, `hir/lower/tests/async_desugar_tests.rs`,
-     `doc/08_tracking/bug/async_await_interpreter_crashes_2026-06-11.md`
-   - A3: `interpreter_patterns.rs`, `interpreter_control.rs`,
-     `doc/08_tracking/bug/positional_class_match_wide_destructure_2026-06-11.md`
-4. **Redeploy seed once**, smoke-gated, covering A1 + B3 + A3:
-   copy fresh release binary over `bin/release/x86_64-unknown-linux-gnu/simple_seed`
-   (NOT `bin/simple` — that is the stage4 self-hosted binary);
-   smoke: `simple_seed -c`, a spec run, B3 + A3 probes. Backup exists
-   (`simple_seed.bak.2026-06-11-preB3b`).
+All steps completed: tests verified fresh (interpreter_patterns 5/5,
+async_desugar 7/7), probes green (B3 exit 0, A3 `matched: 10 20 30` under
+`SIMPLE_EXECUTION_MODE=interpreter`, A1 prints 5/7), all fixes on main,
+seed redeployed to `bin/release/x86_64-unknown-linux-gnu/simple_seed`
+(backup `simple_seed.bak.2026-06-12-preA3B3`) and smoke-gated:
+probes + `math_spec.spl` 13/13 via stage4 `bin/simple test` delegation.
+Note: test/ was reorganized to numbered dirs mid-wave; old spec paths like
+`test/01_unit/lib/std/*` are gone — runner reports plain FAILED (not
+file-not-found) for missing paths.
 
 ## Open follow-ups (not in this wave)
 
