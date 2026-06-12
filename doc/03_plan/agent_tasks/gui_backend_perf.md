@@ -375,6 +375,10 @@ Updated: 2026-06-11
   while walking DOM/layout children, with direct unit coverage for stacked
   layout geometry. During coverage work, the browser `paint_box` scene mutation
   gap was isolated and recorded as a follow-up bug.
+- this commit -- Browser DOM accessor recursion length hoisting:
+  DOM child removal/insertion, text-content concatenation, id lookup, and tag
+  collection now reuse stable child/result counts in recursive scans, with
+  direct unit coverage for source-order text and descendant lookup behavior.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
