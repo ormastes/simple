@@ -35,4 +35,12 @@ Execution of follow-up plan
 ## Log
 - 2026-06-12: state created; lanes A/B/D/E spawned (Sonnet, background).
 - 2026-06-12 Lane E (P6): AC-5 closed. Added `fn is_usable()` to `BackendProbeResult` in `backend_probe.spl`; added `use std.gpu.engine2d.backend_cuda_ext` to renderbackend spec. Device→host readback (`cuda_memcpy_dtoh`) was already correct; gap was spec compilation failures. renderbackend spec: 9p/2f → 11p/0f; processing spec: 7p/0f unchanged. No new externs; no seed rebuild needed.
+- 2026-06-12 Lane A (P1): AC-1 closed. `setup-directx-linux.shs` hardened (meson via
+  python3-venv fallback for PEP 668, perl JSON::PP cpan-local fallback, SPIRV-header
+  probing); glslang 16.3.0 bootstrapped; dxvk-native built+installed to
+  `build/dx/prefix` (`libdxvk_d3d11.so`), readiness `dxvk_ready: true`. Probe flipped
+  to live: evidence `platform=linux-dxvk leaf=dlopen device=true`, reason
+  "dxvk-d3d11 device created leaf=dlopen". backend_directx_spec 18/18 on forced
+  (uncached) re-run. vkd3d (d3d12) autotools build still fails — recorded as blocker
+  in readiness state; D3D11 path (what the backend uses) is fully live.
 - 2026-06-12 Lane B (P2): AC-2 + AC-3 closed. VKSPIRV-001: Replaced all 8 placeholder SPIR-V stubs in `backend_vulkan_spirv_raster_blobs.spl` (2006 lines) with real compiled SPIR-V 1.3 modules (2576B–3680B) assembled via `spirv-as --target-env vulkan1.1` (SPIRV-Tools v2025.1), validated with `spirv-val`. Kernels: rect_outline, circle_filled, circle_outline, line, rounded_rect, triangle_filled, gradient_rect, blit. Updated comment block in `backend_vulkan_spirv.spl` to remove "placeholder" language. rt_vulkan_init crash (AC-3): confirmed non-reproducible with lavapipe ICD — `rt_vulkan_init()` returns `true`, `VulkanBackend.init(4,4)` + `clear()` succeed; no crash; original crash resolved in prior work. Parity bug doc updated (Remaining Scope → resolved). Both specs 22/22 green.

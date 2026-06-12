@@ -23,17 +23,23 @@ AC-4 partial; AC-3/AC-8 closed with recorded follow-ups)
 ### P1 — DirectX runtime prefix build (closes AC-4)
 The setup script and readiness probe shipped (0bf1773151) but the dxvk/vkd3d
 prefix build was deferred because the agent sandbox had no network.
-- [ ] Run `sh scripts/setup/setup-directx-linux.shs` with network access.
-- [ ] Re-run `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_directx_spec.spl`
+- [x] Run `sh scripts/setup/setup-directx-linux.shs` with network access.
+      (2026-06-12: dxvk-native built into `build/dx/prefix`, `dxvk_ready: true`;
+      vkd3d/d3d12 autotools build fails — recorded blocker, D3D11 path unaffected.)
+- [x] Re-run `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_directx_spec.spl`
       against the real DXVK ICD (probe should flip from gated to live).
-- Verify: probe evidence "directx initialized" instead of
-  "d3d11 device or swapchain creation failed".
+      (18/18 on forced re-run.)
+- Verified: probe evidence `platform=linux-dxvk leaf=dlopen device=true`,
+  reason "dxvk-d3d11 device created leaf=dlopen".
 
 ### P2 — Vulkan follow-ups from AC-3 (bug doc: `doc/08_tracking/bug/engine2d_vulkan_glsl_spirv_parity_2026-05-29.md`)
-- [ ] VKSPIRV-001: replace placeholder SPIR-V blobs with real compiled SPIR-V
+- [x] VKSPIRV-001: replace placeholder SPIR-V blobs with real compiled SPIR-V
       for the processing kernels (GLSL → SPIR-V parity).
-- [ ] Root-cause the `rt_vulkan_init` interpreter crash that blocks the full
-      lavapipe end-to-end readback test.
+      (2026-06-12: all 8 blobs real SPIR-V 1.3, spirv-as + spirv-val; pushed
+      7875a3e7d5f.)
+- [x] Root-cause the `rt_vulkan_init` interpreter crash that blocks the full
+      lavapipe end-to-end readback test. (Non-reproducible — returns true with
+      lavapipe; init+clear succeed; resolved by prior interpreter fix.)
 
 ### P3 — Windows-side validation (AC-6 was probe-gated)
 - [ ] Run the DirectX 2D engine specs on a real Windows host (native D3D11);
@@ -56,8 +62,10 @@ Bug doc: `doc/08_tracking/bug/browser_renderer_spec_sequence_failures_2026-06-11
 
 ### P6 — CUDA readback gap (pre-existing, same subsystem)
 Bug doc: `doc/08_tracking/bug/cuda_engine2d_mirror_only_readback_gap_2026-05-29.md`
-- [ ] Close the mirror-only readback gap so CUDA drawing-lane readback matches
-      the Vulkan/CPU contract.
+- [x] Close the mirror-only readback gap so CUDA drawing-lane readback matches
+      the Vulkan/CPU contract. (2026-06-12: `cuda_memcpy_dtoh` readback was
+      already correct; gap was spec compile failures — fixed, 11/0 + 7/0;
+      pushed dfcc7fd6bcf.)
 
 ## Verification
 
