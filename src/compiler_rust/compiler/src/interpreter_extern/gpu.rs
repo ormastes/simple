@@ -32,9 +32,9 @@ mod opencl_dlopen {
     }
 
     #[cfg(windows)]
-    fn load_symbol(handle: isize, name: &[u8]) -> Option<*mut c_void> {
+    fn load_symbol(handle: *mut c_void, name: &[u8]) -> Option<*mut c_void> {
         use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
-        let symbol = unsafe { GetProcAddress(handle, name.as_ptr()) };
+        let symbol = unsafe { GetProcAddress(handle as _, name.as_ptr()) };
         symbol.map(|f| f as *mut c_void)
     }
 
@@ -65,10 +65,10 @@ mod opencl_dlopen {
             for name in ["OpenCL.dll"] {
                 let c_name = CString::new(name).ok()?;
                 let handle = unsafe { LoadLibraryA(c_name.as_ptr() as *const u8) };
-                if handle == 0 {
+                if handle.is_null() {
                     continue;
                 }
-                if let Some(symbol) = load_symbol(handle as isize, b"clGetPlatformIDs\0") {
+                if let Some(symbol) = load_symbol(handle as *mut c_void, b"clGetPlatformIDs\0") {
                     return Some(OpenClFns {
                         cl_get_platform_ids: symbol_to_cl_get_platform_ids(symbol),
                     });
