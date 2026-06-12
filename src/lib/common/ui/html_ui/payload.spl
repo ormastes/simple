@@ -1,0 +1,184 @@
+# payload.spl — base64 payload helpers and .spl source code generation.
+#
+# IMPORTANT: generated Simple source strings must NEVER contain a raw CSS/HTML
+# literal with brace characters, because {ident} in Simple string literals is
+# interpolation. All payload content is kept base64-encoded. The generated
+# source code itself is constructed via string concatenation that never places
+# '{' immediately before an identifier token.
+#
+# Base64 is re-used from std.common.base_encoding.base64 (sole provider).
+
+use std.common.base_encoding.base64.{base64_encode, base64_decode}
+
+# Element-to-part mapping for dyn builds.
+struct UiPartMap:
+    tags: [text]
+    parts: [text]
+
+# ---------------------------------------------------------------------------
+# Public API: encode/decode wrappers
+# ---------------------------------------------------------------------------
+
+fn payload_encode(data: text) -> text:
+    base64_encode(data)
+
+fn payload_decode(encoded: text) -> text:
+    base64_decode(encoded)
+
+# Split a base64 string into chunks of at most chunk_len characters.
+fn payload_split(b64_text: text, chunk_len: i64) -> [text]:
+    var chunks: [text] = []
+    val n = b64_text.len()
+    var pos = 0
+    while pos < n:
+        val end = if pos + chunk_len > n: n else: pos + chunk_len
+        chunks = chunks + [b64_text.slice(pos, end)]
+        pos = end
+    chunks
+
+# ---------------------------------------------------------------------------
+# Code generation
+# ---------------------------------------------------------------------------
+
+# Generate a single-module std-form source that embeds html + css as b64 consts.
+# name         : module identifier (ASCII, no spaces)
+# html_b64     : base64-encoded HTML content
+# css_b64s     : list of base64-encoded CSS contents (one per sheet)
+#
+# The generated module exports:
+#   ui_name()         -> text
+#   ui_elements()     -> [text]   (populated externally; returns [] here)
+#   ui_html_b64()     -> text
+#   ui_css_b64(idx)   -> text
+fn gen_std_module_source(name: text, html_b64: text, css_b64s: [text]) -> text:
+    val nl = "\n"
+    val q = "\""
+    var src = "# Generated std UI module: " + name + nl
+    src = src + "# Do not edit — produced by html_ui payload codegen." + nl
+    src = src + nl
+    src = src + "fn ui_name() -> text:" + nl
+    src = src + "    " + q + name + q + nl
+    src = src + nl
+    src = src + "fn ui_elements() -> [text]:" + nl
+    src = src + "    []" + nl
+    src = src + nl
+    src = src + "fn ui_html_b64() -> text:" + nl
+    src = src + "    " + q + html_b64 + q + nl
+    src = src + nl
+    # css_b64 by index via if/elif chain (no struct literals needed)
+    src = src + "fn ui_css_b64(idx: i64) -> text:" + nl
+    if css_b64s.len() == 0:
+        src = src + "    " + q + q + nl
+    else:
+        var i = 0
+        while i < css_b64s.len():
+            if i == 0:
+                src = src + "    if idx == 0:" + nl
+            else:
+                src = src + "    else if idx == " + i.to_text() + ":" + nl
+            src = src + "        " + q + css_b64s[i] + q + nl
+            i = i + 1
+        src = src + "    else:" + nl
+        src = src + "        " + q + q + nl
+    src = src + nl
+    src = src + "export ui_name" + nl
+    src = src + "export ui_elements" + nl
+    src = src + "export ui_html_b64" + nl
+    src = src + "export ui_css_b64" + nl
+    src
+
+# Generate the dyn main module source. This is the module with the element→part
+# map. For merged (small) builds, embed the full payloads directly.
+#
+# name              : module name
+# map               : element-to-part-filename map
+# embedded_html_b64 : html payload (may be "" if split into parts)
+# embedded_css_b64s : css payloads (may be [] if split into parts)
+fn gen_dyn_main_source(name: text, map: UiPartMap, embedded_html_b64: text, embedded_css_b64s: [text]) -> text:
+    val nl = "\n"
+    val q = "\""
+    var src = "# Generated dyn main UI module: " + name + nl
+    src = src + "# Do not edit — produced by html_ui payload codegen." + nl
+    src = src + nl
+    src = src + "fn ui_name() -> text:" + nl
+    src = src + "    " + q + name + q + nl
+    src = src + nl
+    # ui_elements — list all tags in the map
+    src = src + "fn ui_elements() -> [text]:" + nl
+    if map.tags.len() == 0:
+        src = src + "    []" + nl
+    else:
+        src = src + "    [" + nl
+        var i = 0
+        while i < map.tags.len():
+            val comma = if i + 1 < map.tags.len(): "," else: ""
+            src = src + "        " + q + map.tags[i] + q + comma + nl
+            i = i + 1
+        src = src + "    ]" + nl
+    src = src + nl
+    # ui_html_b64 — embedded or empty
+    src = src + "fn ui_html_b64() -> text:" + nl
+    src = src + "    " + q + embedded_html_b64 + q + nl
+    src = src + nl
+    # ui_css_b64 — embedded or empty
+    src = src + "fn ui_css_b64(idx: i64) -> text:" + nl
+    if embedded_css_b64s.len() == 0:
+        src = src + "    " + q + q + nl
+    else:
+        var ci = 0
+        while ci < embedded_css_b64s.len():
+            if ci == 0:
+                src = src + "    if idx == 0:" + nl
+            else:
+                src = src + "    else if idx == " + ci.to_text() + ":" + nl
+            src = src + "        " + q + embedded_css_b64s[ci] + q + nl
+            ci = ci + 1
+        src = src + "    else:" + nl
+        src = src + "        " + q + q + nl
+    src = src + nl
+    # ui_part_for — element → part filename
+    src = src + "fn ui_part_for(tag: text) -> text:" + nl
+    if map.tags.len() == 0:
+        src = src + "    " + q + q + nl
+    else:
+        var pi = 0
+        while pi < map.tags.len():
+            if pi == 0:
+                src = src + "    if tag == " + q + map.tags[pi] + q + ":" + nl
+            else:
+                src = src + "    else if tag == " + q + map.tags[pi] + q + ":" + nl
+            src = src + "        " + q + map.parts[pi] + q + nl
+            pi = pi + 1
+        src = src + "    else:" + nl
+        src = src + "        " + q + q + nl
+    src = src + nl
+    src = src + "export ui_name" + nl
+    src = src + "export ui_elements" + nl
+    src = src + "export ui_html_b64" + nl
+    src = src + "export ui_css_b64" + nl
+    src = src + "export ui_part_for" + nl
+    src
+
+# Generate a dyn part module source.
+# name        : parent module name
+# idx         : part index
+# payload_b64 : the b64-encoded payload chunk for this part
+fn gen_dyn_part_source(name: text, idx: i64, payload_b64: text) -> text:
+    val nl = "\n"
+    val q = "\""
+    var src = "# Generated dyn part module: " + name + "_part_" + idx.to_text() + nl
+    src = src + "# Do not edit — produced by html_ui payload codegen." + nl
+    src = src + nl
+    src = src + "fn ui_part_payload() -> text:" + nl
+    src = src + "    " + q + payload_b64 + q + nl
+    src = src + nl
+    src = src + "export ui_part_payload" + nl
+    src
+
+export UiPartMap
+export payload_encode
+export payload_decode
+export payload_split
+export gen_std_module_source
+export gen_dyn_main_source
+export gen_dyn_part_source
