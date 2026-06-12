@@ -249,6 +249,9 @@ Updated: 2026-06-11
 - this commit -- browser script marker scan allocation removal:
   script render and execution parsers now search markers from offsets directly
   instead of slicing a tail string before each lookup.
+- this commit -- corpus fixture PPM allocation tightening:
+  browser corpus PPM fixtures now decode into a pre-sized ARGB buffer instead
+  of push-growing one pixel per RGB triplet.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
