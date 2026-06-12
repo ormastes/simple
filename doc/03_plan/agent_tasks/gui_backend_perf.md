@@ -451,6 +451,10 @@ Updated: 2026-06-11
   collection now reuse stable child counts and exact-size arrays where results
   are caller-visible, clearing the remaining general optimizer findings in
   low-level DOM accessors.
+- this commit -- Browser engine layout traversal length hoisting:
+  Core block layout and paint traversal now reuse stable child counts in their
+  recursive loops, clearing the remaining general optimizer findings in the
+  browser-engine layout pass without changing computed box order or height.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
