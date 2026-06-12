@@ -860,17 +860,34 @@ Gap classes mined from check_m11f.log + solo log:
   keyword segments (G25 round-trip) into the type name; param/return/val
   positions + generics-after-path probed green. Round-2 verified: g34 4/4,
   g35 5/5, batteries m11e 8/8 g33 5/5 g32 4/4 m12a 5+bridge-ok.
-- **G36** raw string literals `r"..."` (main_lazy_json.spl
-  `result.replace(r"\", r"\\")`) — lexer lacks the r-prefix; cascades to the
-  `,`(307×)/`]`(93×)/`->`(36×) classes.
-- **G37** match-EXPRESSION as initializer: `val source = match f(x):` with
-  `case Ok(v):` block arms (commands.spl pervasive), and caseless
-  string-literal arms `"html":` (render_adapter.spl render_repl). 248×
-  residual ':' class.
-- **G38** render_adapter "index expression cannot be an
-  assignment/comparison/logical inside []" (71×) — suspects: subscript
-  assignment `meta["k"] = v` or lone `{` inside interpolated strings
-  (`"{s}.repl-container {\n"` CSS builder); needs probe separation.
+- **G36** raw string literals `r"..."` — DONE 2026-06-12 (agent died
+  mid-report; orchestrator verified+grafted `be70b6e954f`): lexer r-prefix
+  raw scan in lexer_struct.spl. g36_probe 7/7; all 7 batteries green;
+  docker: main_lazy_json.spl 307-class → 0.
+- **G37** — NOT a real gap: match-expr-as-initializer and caseless string
+  arms parse clean in isolation (g37_probe 5/5); the ':' class was cascade
+  fallout from lexical breaks earlier in the files. Lesson: re-mine residue
+  after each lexer fix.
+- **G38** — DONE 2026-06-12, three real root causes (initial probes
+  false-greened because `{...}` interpolates in probe literals — rebuilt
+  with pure concat):
+  1. Nested string literals inside `{...}` interpolation segments
+     (render_adapter.spl:168/170): lean scan_string terminated at the first
+     inner quote. Fix: interpolation-aware `{` branch with brace-depth +
+     nested-string + escape tracking, seed scan_fstring_impl parity
+     (lexer_struct.spl ~:449; `{`+quote → literal, no `}` before EOL →
+     literal).
+  2. String-literal index `m["k"]`: `bracket_expr_is_invalid` flagged tag-3
+     exprs in COMPILED stage4 only — imported EXPR_* const comparisons
+     misevaluate compiled (interpreted/compiled divergence; traced with
+     SIMPLE_TRACE_EXPR_TAGS). Mitigation: numeric tags in
+     parser_expr.spl:80. Divergence recorded as
+     doc/08_tracking/bug/stage4_imported_const_compare_2026-06-12.md.
+  3. `val` keyword as for-tuple binding name (commands.spl:252
+     `for (key, val) in obj.items():`) — parser_stmts.spl:536, generalized
+     to full keyword round-trip.
+  Docker gate: commands.spl 8→0, main_lazy_json 307→0, render_adapter
+  10→0; whole-run totals 2,130 → 20-39. Batteries all green.
 
 ALSO: interpreted parse_module is superlinear in file size AND degrades per
 call (selector.spl prefixes: 20→<1s, 40→2s, 80→6s, 160→256s; identical

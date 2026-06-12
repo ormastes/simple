@@ -446,6 +446,58 @@ impl CoreLexer:
                 else:
                     parts.push("\\")
                     parts.push(esc)
+            elif c == "{":
+                # G38: "{expr}" interpolation may contain nested strings whose
+                # quotes must not terminate the outer string (seed
+                # scan_fstring_impl parity). `{` immediately followed by a
+                # quote is a literal brace (seed special case). Otherwise
+                # lookahead for the matching `}` tracking brace depth and
+                # nested-string state; if none before end-of-line, the `{`
+                # is a literal brace (CSS/JSON patterns). On success the
+                # whole `{...}` is copied verbatim (inner escapes kept raw
+                # for the downstream interpolation re-parse).
+                val la_next: text = self.peek_next()
+                val la_is_quote: bool = la_next == "\"" or la_next == "'"
+                var la_found: i64 = -1
+                if not la_is_quote:
+                    var la: i64 = self.pos + 1
+                    val src_len: i64 = self.source.len()
+                    var la_depth: i64 = 1
+                    var la_str: text = ""
+                    var la_esc: bool = false
+                    for j in 0..100000:
+                        if la >= src_len:
+                            break
+                        val lc: text = self.source[la:la + 1]
+                        if lc == _NL:
+                            break
+                        if la_str != "":
+                            if la_esc:
+                                la_esc = false
+                            elif lc == "\\":
+                                la_esc = true
+                            elif lc == la_str:
+                                la_str = ""
+                        else:
+                            if lc == "\"":
+                                la_str = lc
+                            elif lc == "'":
+                                la_str = lc
+                            elif lc == "{":
+                                la_depth = la_depth + 1
+                            elif lc == "}":
+                                la_depth = la_depth - 1
+                                if la_depth == 0:
+                                    la_found = la
+                                    break
+                        la = la + 1
+                if la_found >= 0:
+                    for j in 0..100000:
+                        if self.pos > la_found:
+                            break
+                        parts.push(self.advance())
+                else:
+                    parts.push(self.advance())
             else:
                 parts.push(self.advance())
         val result: text = parts.join("")
