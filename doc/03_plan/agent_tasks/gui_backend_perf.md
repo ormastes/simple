@@ -472,6 +472,10 @@ Updated: 2026-06-11
   Web render static-shell cache counting now scans markers in place instead of
   allocating tail substrings per match, and retained shell command replay uses
   exact-size command arrays instead of push-growth during hot cache reuse.
+- this commit -- UI route websocket frame decode tightening:
+  Websocket route payload unmasking now writes into an exact-size byte buffer
+  and uses direct four-byte mask slots instead of per-byte mask scans and
+  push-growth; JSON helper scans also reuse stable text lengths.
 
 ## Current remaining work
 

@@ -300,17 +300,30 @@ fn _read_ws_frame_conn(stream: ConnStream) -> text?:
                 Ok(payload_bytes):
                     if not masked:
                         return payload_bytes.to_text()
-                    var decoded: [u8] = []
+                    val payload_count = payload_bytes.len()
+                    if payload_count == 0:
+                        return ""
+                    var mask0: u8 = 0
+                    var mask1: u8 = 0
+                    var mask2: u8 = 0
+                    var mask3: u8 = 0
+                    var mi = 0
+                    for mk in mask_key:
+                        if mi == 0:
+                            mask0 = mk
+                        elif mi == 1:
+                            mask1 = mk
+                        elif mi == 2:
+                            mask2 = mk
+                        elif mi == 3:
+                            mask3 = mk
+                        mi = mi + 1
+                    var decoded: [u8] = [0u8; payload_count]
                     var pi = 0
                     for pb in payload_bytes:
                         val mk_idx = pi % 4
-                        var mk_byte: u8 = 0
-                        var mi = 0
-                        for mk in mask_key:
-                            if mi == mk_idx:
-                                mk_byte = mk
-                            mi = mi + 1
-                        decoded.push(pb ^ mk_byte)
+                        val mk_byte = if mk_idx == 0: mask0 elif mk_idx == 1: mask1 elif mk_idx == 2: mask2 else: mask3
+                        decoded[pi] = pb ^ mk_byte
                         pi = pi + 1
                     return decoded.to_text()
 
@@ -358,24 +371,25 @@ fn _json_field(json: text, field: text) -> text:
     if pos < 0:
         return ""
     val start = pos + key.len()
-    if start >= json.len():
+    val json_len = json.len()
+    if start >= json_len:
         return ""
     val first_ch = json[start]
     if first_ch == "\"":
         val inner = start + 1
         var end = inner
-        while end < json.len() and json[end] != "\"":
+        while end < json_len and json[end] != "\"":
             if json[end] == "\\":
                 end = end + 1
             end = end + 1
         return json.slice(inner, end)
     var end = start
-    while end < json.len():
+    while end < json_len:
         val ch = json[end]
         if ch == "," or ch == "}" or ch == "]":
             return json.slice(start, end).trim()
         end = end + 1
-    return json.slice(start, json.len()).trim()
+    return json.slice(start, json_len).trim()
 
 fn _extract_object(json: text, field: text) -> text:
     """Extract a nested JSON object for the given field key."""
@@ -389,7 +403,8 @@ fn _extract_object(json: text, field: text) -> text:
         return "{}"
     var depth = 0
     var i = brace
-    while i < json.len():
+    val json_len = json.len()
+    while i < json_len:
         val ch = json[i]
         if ch == "{":
             depth = depth + 1
@@ -405,7 +420,8 @@ fn _parse_u64(s: text) -> u64:
         return 0 as u64
     var i = 0
     var acc: u64 = 0 as u64
-    while i < s.len():
+    val s_len = s.len()
+    while i < s_len:
         val digit = _digit(s.slice(i, i + 1))
         if digit < 0:
             break
@@ -428,15 +444,17 @@ fn _digit(ch: text) -> i64:
 
 fn _find_from(haystack: text, needle: text, start: i64) -> i64:
     if needle == "":
-        return if start < haystack.len(): start else: haystack.len()
+        val haystack_len_empty = haystack.len()
+        return if start < haystack_len_empty: start else: haystack_len_empty
     if start < 0:
         return -1
-    val limit = haystack.len() - needle.len()
+    val needle_len = needle.len()
+    val limit = haystack.len() - needle_len
     if limit < start:
         return -1
     var i = start
     while i <= limit:
-        if haystack.slice(i, i + needle.len()) == needle:
+        if haystack.slice(i, i + needle_len) == needle:
             return i
         i = i + 1
     return -1
