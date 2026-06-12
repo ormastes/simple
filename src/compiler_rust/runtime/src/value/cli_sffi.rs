@@ -222,11 +222,67 @@ fn simple_binary_path() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("simple"))
 }
 
+const DELEGATE_DEPTH_ENV: &str = "SIMPLE_DELEGATE_DEPTH";
+const MAX_DELEGATE_DEPTH: u32 = 3;
+
+fn delegate_depth() -> u32 {
+    std::env::var(DELEGATE_DEPTH_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// True when `candidate` is this very executable (canonicalized comparison).
+fn is_current_exe(candidate: &std::path::Path) -> bool {
+    match (
+        std::env::current_exe().and_then(|c| c.canonicalize()),
+        candidate.canonicalize(),
+    ) {
+        (Ok(cur), Ok(cand)) => cur == cand,
+        _ => false,
+    }
+}
+
+/// Refuse a delegation that would spawn this same binary or exceed the
+/// delegation-depth budget. simple_binary_path() falls back to current_exe(),
+/// so a relocated/renamed binary (e.g. a simple.bak backup run where the
+/// repo-relative driver candidates don't exist) resolves the delegate to
+/// itself and forks without bound — 5814 runaway simple.bak processes
+/// OOM-killed the whole user session (2026-06-12). The depth budget also
+/// breaks A→B→A cycles that the path comparison can't see.
+fn delegate_guard(simple_bin: &std::path::Path, context: &str) -> Option<u32> {
+    if is_current_exe(simple_bin) {
+        eprintln!(
+            "error: refusing to delegate '{}' to this same binary ({}); \
+             set SIMPLE_BOOTSTRAP_DRIVER to a real seed driver.",
+            context,
+            simple_bin.display()
+        );
+        return None;
+    }
+    let depth = delegate_depth();
+    if depth >= MAX_DELEGATE_DEPTH {
+        eprintln!(
+            "error: delegation depth {} reached while running '{}' ({}); \
+             aborting to avoid a spawn loop.",
+            depth,
+            context,
+            simple_bin.display()
+        );
+        return None;
+    }
+    Some(depth + 1)
+}
+
 /// Delegate a CLI command to the Rust Simple binary (standalone mode).
 fn delegate_to_simple_binary(command: &str, args: RuntimeValue) -> i64 {
     let simple_bin = simple_binary_path();
+    let Some(next_depth) = delegate_guard(&simple_bin, command) else {
+        return 1;
+    };
 
     let mut cmd = Command::new(&simple_bin);
+    cmd.env(DELEGATE_DEPTH_ENV, next_depth.to_string());
     cmd.arg(command);
 
     // Add arguments from the array (skip first element which is the command itself)
@@ -324,11 +380,7 @@ pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -
     // forever — the SIMPLE_TEST_DEPTH guard then aborts the FIRST legitimate
     // run (stage4 10th-site (a), 2026-06-11).
     let simple_bin = simple_binary_path();
-    let same_binary = match (std::env::current_exe(), simple_bin.canonicalize()) {
-        (Ok(cur), Ok(resolved)) => cur.canonicalize().map(|c| c == resolved).unwrap_or(false),
-        _ => false,
-    };
-    if same_binary {
+    if is_current_exe(&simple_bin) {
         eprintln!(
             "error: cannot run tests: the test runner would re-spawn this same binary ({}).\n  \
              Provide a Rust seed driver via SIMPLE_BOOTSTRAP_DRIVER or keep \
@@ -337,8 +389,12 @@ pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -
         );
         return 1;
     }
+    let Some(next_depth) = delegate_guard(&simple_bin, "test") else {
+        return 1;
+    };
 
     let mut cmd = Command::new(&simple_bin);
+    cmd.env(DELEGATE_DEPTH_ENV, next_depth.to_string());
     cmd.arg("test");
 
     // Add all arguments
@@ -764,7 +820,12 @@ pub extern "C" fn rt_test_db_validate(db_path: RuntimeValue) -> i64 {
 
     // This requires simple-driver which has the Database implementation
     // For now, delegate to the current simple binary
-    let mut cmd = Command::new(simple_binary_path());
+    let simple_bin = simple_binary_path();
+    let Some(next_depth) = delegate_guard(&simple_bin, "test --validate-db") else {
+        return -1;
+    };
+    let mut cmd = Command::new(&simple_bin);
+    cmd.env(DELEGATE_DEPTH_ENV, next_depth.to_string());
     cmd.arg("test");
     cmd.arg("--validate-db");
     cmd.arg(&path_str);
@@ -821,7 +882,12 @@ pub extern "C" fn rt_test_db_cleanup_stale_runs(db_path: RuntimeValue) -> i64 {
         None => return -1,
     };
 
-    let mut cmd = Command::new(simple_binary_path());
+    let simple_bin = simple_binary_path();
+    let Some(next_depth) = delegate_guard(&simple_bin, "test --cleanup-runs") else {
+        return -1;
+    };
+    let mut cmd = Command::new(&simple_bin);
+    cmd.env(DELEGATE_DEPTH_ENV, next_depth.to_string());
     cmd.arg("test");
     cmd.arg("--cleanup-runs");
     cmd.arg("--db-path");
