@@ -5,16 +5,16 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 0
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 32
 - **Warnings:** 1
 
 ---
 
-## Language Features (1 features)
+## Runtime / Native / Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Multicore Green Handle Array Join Native Blocker Specification](test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.md) | Auto-generated | N/A | 1 | 0% | 0 lines |
+| [Multicore Green Handle Array Join Native Regression](test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.md) | Regression | N/A | 1 | 20% | 32 lines |
 
