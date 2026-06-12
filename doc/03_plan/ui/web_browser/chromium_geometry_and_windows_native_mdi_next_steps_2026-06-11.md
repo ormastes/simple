@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 52 labeled fixtures through `55_flex_wrap_align_content_space_around` with exact
+  now covers 53 labeled fixtures through `56_flex_wrap_align_content_space_evenly` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -566,6 +566,18 @@ Smallest next implementation step:
   - the Simple row-wrap branch applies the same focused start offset and
     inter-line gap without blur, tolerance, resolution scaling, or copied
     Chromium pixels
+- Live `56_flex_wrap_align_content_space_evenly` evidence now passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused fixture-56 result records Chromium row flex-wrap cross-axis
+  `align-content:space-evenly` distribution:
+  - the explicit flex container border box is `x=16`, `y=16`, `width=90`,
+    `height=110`
+  - the two wrapped lines have heights `20` and `30`, leaving 60px free in the
+    cross axis; Chrome places the first line at `y=36` and the second at
+    `y=76`
+  - the Simple row-wrap branch applies the same focused start offset and
+    inter-line gap without blur, tolerance, resolution scaling, or copied
+    Chromium pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -608,12 +620,13 @@ Smallest next implementation step:
   `52_flex_column_justify_space_evenly`, and
   `53_flex_wrap_align_content_flex_end`, and
   `54_flex_wrap_align_content_space_between`, and
-  `55_flex_wrap_align_content_space_around`:
+  `55_flex_wrap_align_content_space_around`, and
+  `56_flex_wrap_align_content_space_evenly`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `55` in its default manifest, excluding only
+    covers fixtures `02` through `56` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `52` fixtures, `52` passes, `0` failures, and
+    reports `53` fixtures, `53` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
