@@ -414,6 +414,10 @@ Updated: 2026-06-11
   JS module statement, binding, export-declarator, and generic text splitters
   now reuse stable source lengths while preserving quoted semicolon and
   top-level comma behavior.
+- this commit -- Browser module helper array preallocation:
+  JS module statement, import-binding, generic text split, and text-removal
+  helpers now write into exact-size arrays instead of growing empty arrays on the
+  browser module-loading path.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

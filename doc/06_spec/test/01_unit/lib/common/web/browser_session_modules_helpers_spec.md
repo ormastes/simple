@@ -27,7 +27,7 @@ browser_session_modules_helpers_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -101,6 +101,29 @@ expect(parts[2]).to_equal("")
 
 </details>
 
+#### removes only the first matching text item
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val parts = remove_text_once(["alpha", "beta", "beta", "gamma"], "beta")
+val unchanged = remove_text_once(["alpha", "gamma"], "beta")
+
+expect(parts.len()).to_equal(3)
+expect(parts[0]).to_equal("alpha")
+expect(parts[1]).to_equal("beta")
+expect(parts[2]).to_equal("gamma")
+expect(unchanged.len()).to_equal(2)
+expect(unchanged[0]).to_equal("alpha")
+expect(unchanged[1]).to_equal("gamma")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -120,8 +143,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
