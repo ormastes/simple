@@ -394,6 +394,10 @@ Updated: 2026-06-11
   HTML text extraction, escaping, stylesheet discovery, CSS import stripping,
   and stylesheet insertion now reuse stable input lengths in loop conditions;
   direct stylesheet-source coverage locks inline/link/import ordering.
+- this commit -- Browser session HTML stylesheet array preallocation:
+  Stylesheet source extraction, CSS import extraction, and stylesheet insertion
+  now count and fill exact-size source arrays, clearing the remaining general
+  optimizer findings for browser-session HTML utilities.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
