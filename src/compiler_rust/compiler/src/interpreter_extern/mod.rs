@@ -1978,6 +1978,29 @@ pub(crate) fn call_extern_function(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Evaluate all arguments upfront
+    let evaluated: Vec<Value> = args
+        .iter()
+        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    call_extern_function_with_values(name, &evaluated, env, functions, classes, enums, impl_methods)
+}
+
+/// Dispatch an extern function with pre-evaluated argument values.
+///
+/// Used by `call_extern_function` after argument evaluation, and directly by
+/// the JIT interp-call bridge for extern declarations the JIT could not link
+/// natively (e.g. rt_torch_* in a torch-less build).
+pub(crate) fn call_extern_function_with_values(
+    name: &str,
+    evaluated: &[Value],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
     // Diagram tracing for extern function calls
     if diagram_sffi::is_diagram_enabled() {
         diagram_sffi::trace_call(name);
@@ -1989,15 +2012,9 @@ pub(crate) fn call_extern_function(
         )));
     }
 
-    // Evaluate all arguments upfront
-    let evaluated: Vec<Value> = args
-        .iter()
-        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-        .collect::<Result<Vec<_>, _>>()?;
-
     // Fast path: O(1) HashMap lookup for extern functions.
     if let Some(func) = EXTERN_DISPATCH.get(name) {
-        return func(&evaluated, env, functions, classes, enums, impl_methods);
+        return func(evaluated, env, functions, classes, enums, impl_methods);
     }
 
     // Prefix dispatches remain outside the table because they are wildcard namespaces.

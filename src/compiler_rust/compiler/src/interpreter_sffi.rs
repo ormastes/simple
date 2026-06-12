@@ -611,6 +611,13 @@ unsafe extern "C" fn interp_call_handler(
     let result = with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
+        } else if name.starts_with("rt_") || name.starts_with("spl_") {
+            // Extern declarations routed through InterpCall by the hybrid
+            // transform (e.g. JIT-unresolvable rt_torch_* in torch-less
+            // builds) dispatch to the interpreter's extern handlers.
+            crate::interpreter_extern::call_extern_function_with_values(
+                name, &args, env, funcs, classes, enums, impl_methods,
+            )
         } else {
             tracing::error!("rt_interp_call: function not found: {}", name);
             // E3008 - Function Not Found

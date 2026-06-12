@@ -668,7 +668,27 @@ impl ExecCore {
         let hir_module = hir::lower_with_context(&ast, path).map_err(|e| format!("HIR lowering error: {}", e))?;
 
         // Lower to MIR
-        let mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
+        let mut mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
+
+        // Extern declarations the JIT cannot resolve (e.g. rt_torch_* in a
+        // torch-less build) would link as null pointers and SIGSEGV at call
+        // time. Route them through the interpreter bridge, whose extern
+        // dispatch has graceful unavailable-backend handlers.
+        let unresolvable_externs: HashSet<String> = mir_module
+            .extern_fn_names
+            .iter()
+            .filter(|name| self.symbol_provider.get_symbol(name.as_str()).is_none())
+            .cloned()
+            .collect();
+        if std::env::var("SIMPLE_DEBUG_EXTERNS").is_ok() {
+            eprintln!(
+                "[run_file_jit] extern_fn_names={:?} unresolvable={:?}",
+                mir_module.extern_fn_names, unresolvable_externs
+            );
+        }
+        if !unresolvable_externs.is_empty() {
+            simple_compiler::mir::apply_hybrid_transform(&mut mir_module, &unresolvable_externs);
+        }
 
         // Check for main function
         let has_main = mir_module.functions.iter().any(|f| f.name == "main");
