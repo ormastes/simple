@@ -202,6 +202,54 @@ printf '%s\n' "$output" | grep -Fq "Go scheduler GOMAXPROCS must match CPU worke
 
 cp "$source_report" "$tmp_report"
 
+awk '
+    /^## Hosted Fairness Evidence/ {
+        skip = 1
+        next
+    }
+    skip && /^## / {
+        skip = 0
+    }
+    !skip { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "removed hosted sliced-fairness section unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'Hosted Fairness Evidence'" ||
+    fail "missing expected hosted fairness section failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
+    /multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9/ {
+        sub(/quick_done=true/, "quick_done=false")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated hosted sliced-fairness evidence unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "missing 'multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9'" ||
+    fail "missing expected hosted sliced-fairness evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
 {
     cat "$tmp_report"
     printf '\nNumbered alias probe: thread_spawn3 must never appear in profile evidence.\n'
@@ -228,4 +276,6 @@ echo "case=simple_multicore_queue_model_global_fifo"
 echo "case=simple_multicore_pool_used_partial"
 echo "case=simple_multicore_parallelism_missing"
 echo "case=go_scheduler_width_mismatch"
+echo "case=hosted_sliced_fairness_section_missing"
+echo "case=hosted_sliced_fairness_marker_corrupt"
 echo "case=numbered_concurrency_alias"

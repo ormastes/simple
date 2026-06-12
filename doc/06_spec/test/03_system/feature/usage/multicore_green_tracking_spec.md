@@ -307,7 +307,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -341,7 +341,7 @@ expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/smf_runtime_poo
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.md")
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_agent_plan_spec.md")
 step("Verify the public API contract summary remains explicit")
-expect(row).to_contain("positive_fixtures=5")
+expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=6")
 expect(row).to_contain("task_spawn approved")
 expect(row).to_contain("task_spawn_wrong_surface_import.spl rejects OS-thread facade")
@@ -353,6 +353,9 @@ expect(row).to_contain("go_stress_slower_than_c")
 expect(row).to_contain("simple_multicore_queue_model_global_fifo")
 expect(row).to_contain("simple_multicore_pool_used_partial")
 expect(row).to_contain("simple_multicore_parallelism_missing")
+expect(row).to_contain("hosted_sliced_fairness_section_missing")
+expect(row).to_contain("hosted_sliced_fairness_marker_corrupt")
+expect(row).to_contain("go_scheduler_width_mismatch")
 expect(row).to_contain("numbered_concurrency_alias")
 ```
 
