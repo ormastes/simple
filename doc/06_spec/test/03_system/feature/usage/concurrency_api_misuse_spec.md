@@ -1,6 +1,6 @@
 # Concurrency API Misuse System Contract
 
-> This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+> This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and direct runtime aliases.
 
 <!-- sdn-diagram:id=concurrency_api_misuse_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ concurrency_api_misuse_spec -> std
 
 # Concurrency API Misuse System Contract
 
-This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and direct runtime aliases.
 
 ## At a Glance
 
@@ -58,7 +58,7 @@ closed at compile time while the approved meaningful API names remain usable.
 The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green
 thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and
 pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad
-argument types, and numbered alias names.
+argument types, and direct runtime aliases.
 
 ## Requirements
 
@@ -100,7 +100,7 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 - `multicore_green_spawn` must accept a single zero-argument closure.
 - `multicore_green_set_parallelism` must accept an integer worker count.
 - `task_spawn` must stay available as the pool-backed native task API.
-- Numbered spawn aliases must be rejected.
+- `thread_spawn_with_args` must stay on the OS-thread surface.
 - The profile-script API contract checks approved public names before checking
   misuse fixtures.
 
@@ -154,15 +154,15 @@ expect(output).to_contain("misuse_fixtures=11")
 
 </details>
 
-#### rejects OS-thread surface misuse and numbered aliases
+#### rejects OS-thread surface misuse
 
 - Reject thread_spawn imported from the cooperative-green surface
+- expect compile error
+- Reject thread_spawn_with_args imported from the cooperative-green surface
 - expect compile error
 - Reject thread_spawn called with too many arguments
 - expect compile error
 - Reject thread_spawn called with a non-closure argument
-- expect compile error
-- Reject numbered thread_spawn aliases
 - expect compile error
 - Reject task_spawn imported from the OS-thread surface
 - expect compile error
@@ -177,12 +177,12 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Reject thread_spawn imported from the cooperative-green surface")
 expect_compile_error("thread_spawn_wrong_surface_import.spl", "E-PAR-003", "thread_spawn belongs to std.concurrent.thread")
+step("Reject thread_spawn_with_args imported from the cooperative-green surface")
+expect_compile_error("thread_spawn_with_args_wrong_surface_import.spl", "E-PAR-003", "thread_spawn_with_args belongs to std.concurrent.thread")
 step("Reject thread_spawn called with too many arguments")
 expect_compile_error("thread_spawn_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject thread_spawn called with a non-closure argument")
 expect_compile_error("thread_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
-step("Reject numbered thread_spawn aliases")
-expect_compile_error("numbered_thread_spawn_alias_import.spl", "E-PAR-002", "numbered name and is not a public API")
 step("Reject task_spawn imported from the OS-thread surface")
 expect_compile_error("task_spawn_wrong_surface_import.spl", "E-PAR-001", "task_spawn is not part of the OS-thread facade")
 ```
