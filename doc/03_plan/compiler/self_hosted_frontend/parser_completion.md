@@ -285,10 +285,33 @@ inline fn-lambda, `loop:`, M9 as-cast spot check all
 
 ---
 
-### M11 — SIGSEGV / rc=139 crashes (29 files)
+### M11a — G19: `if val` / `elif val` / `while val` pattern binding — DONE 2026-06-12
 
-Reproduce each via inline harness. Cross-reference `compiled_array_oob_read_segfault_2026-06-11.md`.
-Fix OOB reads in parser recovery paths: `parser_decls_part3.spl`, `parser_primary_part3.spl`.
+NEW gap found by the first post-M10 in-process smoke (masked by prelude
+poisoning in the original sweep): the binding forms didn't parse at all,
+poisoning the check prelude at src/app/mcp/main_lazy_assistant.spl:701.
+Landed in `fff9f3b8559` (local) / grafted to origin. Encoding: parser-level
+desugar in `core/parser_stmts.spl` (no AST/bridge changes) —
+`if val N = E:` → `STMT_BLOCK([val N = E, if N != nil: …])`;
+`while val N = E:` → `while true: { val N = E; if N == nil: break; … }`;
+`elif val` covered by recursion. Verified: if/elif/while-val + plain-if
+regression green, control TRUE, lazy_outline 16/16.
+Note: the flat_ast bridge OOBs on ANY fn in the in-memory harness context
+(plain `if` too) — pre-existing harness artifact, not the desugar; real
+check-path bridging validated via the docker in-process smoke instead.
+
+### M11 — SIGSEGV / rc=139 crashes (29 files) — IN PROGRESS 2026-06-12 (re-sweep first)
+
+Approach revised: the 29 crash files' first-error signatures in the 2026-06-11
+sweep log (caseless match, `?` in types, Indent continuations, fn-in-enum,
+class-body) are all error classes FIXED by M5–M10 — the SIGSEGVs were in
+error-recovery paths that should no longer be reached. Instead of chasing
+stale crashes: rebuild stage4 with M1–M10, re-run the full src/lib sweep
+(`/tmp/s4_resweep.sh`, docker, `SIMPLE_FRONTEND_DELEGATED=1` to force the
+in-process lean frontend), then fix only crashes that REMAIN.
+Cross-reference `compiled_array_oob_read_segfault_2026-06-11.md` for any
+survivors; recovery-path OOB suspects: `parser_decls_part3.spl`,
+`parser_primary_part3.spl`.
 
 ---
 
