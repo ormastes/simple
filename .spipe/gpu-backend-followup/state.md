@@ -75,4 +75,13 @@ Execution of follow-up plan
   conflict auto-resolve. Restored (f1ec5f27860) → 93/5. Residual 5: CSS nesting
   ×3, custom properties, border fixture — Lane D2 (Sonnet) spawned. P4 stage4
   redeploy started in background (deploy gate landed a1b5ba09e8e).
+- 2026-06-12 P3 in flight: directx-windows-validation.yml pushed (11a8add665d) —
+  windows-latest cargo seed build + backend_directx_spec + probe evidence. First
+  two runs exposed a repo-wide latent break: blanket .gitignore rules (`log/`,
+  `third_party/`, `system/`, `*.o`, `*.lib`) silently swallowed 50+ files of
+  `src/compiler_rust/vendor/` (vendor/log entirely; ring third_party/fiat +
+  pregenerated NASM objects; rustix system/ backends; windows-sys import libs),
+  so fresh checkouts could not build the seed offline at all. Fixed: files
+  committed + hermetic `!src/compiler_rust/vendor/**` rule appended last
+  (9f479af40b1, 836848993a9). Run 27446486821 in progress.
 - 2026-06-12 Lane B (P2): AC-2 + AC-3 closed. VKSPIRV-001: Replaced all 8 placeholder SPIR-V stubs in `backend_vulkan_spirv_raster_blobs.spl` (2006 lines) with real compiled SPIR-V 1.3 modules (2576B–3680B) assembled via `spirv-as --target-env vulkan1.1` (SPIRV-Tools v2025.1), validated with `spirv-val`. Kernels: rect_outline, circle_filled, circle_outline, line, rounded_rect, triangle_filled, gradient_rect, blit. Updated comment block in `backend_vulkan_spirv.spl` to remove "placeholder" language. rt_vulkan_init crash (AC-3): confirmed non-reproducible with lavapipe ICD — `rt_vulkan_init()` returns `true`, `VulkanBackend.init(4,4)` + `clear()` succeed; no crash; original crash resolved in prior work. Parity bug doc updated (Remaining Scope → resolved). Both specs 22/22 green.
