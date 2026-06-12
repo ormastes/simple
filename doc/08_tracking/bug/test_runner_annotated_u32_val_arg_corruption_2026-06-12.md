@@ -1,8 +1,30 @@
 # Annotated u32 `val` locals corrupt as call args in it blocks under `bin/simple test`
 
 Date: 2026-06-12
-Status: open
-Owner: gpu-backend-dx-harden lane (found), compiler/test-runner lane (fix)
+Status: fixed (seed interpreter, 2026-06-12); run-mode in the deployed stage4
+binary still carries the old behavior until the next stage4 redeploy
+Owner: gpu-backend-dx-harden lane
+
+## Root Cause (corrected)
+
+Not u32-specific and not call-arg-specific. The Rust seed interpreter has a
+dedicated statement walker for NESTED blocks inside closure bodies
+(`exec_block_closure_mut` in
+`src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`). Its
+`Node::Let` arm hand-rolled binding for only `Pattern::Identifier` /
+`MutIdentifier` / `MoveIdentifier` — so `val x: T = ...` (Pattern::Typed) and
+tuple/array destructuring inside `if`/`while`/`else` bodies within a
+describe/it lambda evaluated their RHS but bound NOTHING. The next read
+failed with "variable `x` not found". Top-level it-block statements were
+unaffected because `exec_block_closure` already used `bind_pattern_value`.
+
+## Fix
+
+`exec_block_closure_mut` now binds via the shared `bind_pattern_value`
+(same as the top-level walker). Verified after seed rebuild:
+- regression spec `test/01_unit/compiler/interpreter/closure_nested_typed_binding_spec.spl` 5/5
+- the ORIGINAL annotated backend_vulkan_processing_spec content: 22/22 (was 17/5)
+- current vulkan specs unchanged 22/22 + 22/22
 
 ## Summary
 
