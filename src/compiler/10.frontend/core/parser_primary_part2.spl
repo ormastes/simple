@@ -650,6 +650,75 @@ fn parse_primary_expr() -> i64:
     if par_kind_get() == 40:
         return parse_if_expr()
 
+    # Inline fn lambda: fn(param: Type, ...) -> RetType: body
+    # G16: fn keyword (kind 20) in expression position
+    if par_kind_get() == 20:
+        parser_advance()
+        # Parse parameter list
+        parser_expect(140)
+        var fn_param_names: [i64] = []
+        if par_kind_get() != 141:
+            val fn_p0 = par_text_get()
+            if par_kind_get() == 6 or par_kind_get() == 169:
+                parser_advance()
+                fn_param_names.push(expr_ident(fn_p0, 0))
+                if par_kind_get() == 161:
+                    parser_advance()
+                    parser_parse_type()
+                for fn_pi in 0..100:
+                    if par_kind_get() != 160:
+                        break
+                    parser_advance()
+                    if par_kind_get() == 141:
+                        break
+                    val fn_pn = par_text_get()
+                    if par_kind_get() == 6 or par_kind_get() == 169:
+                        parser_advance()
+                        fn_param_names.push(expr_ident(fn_pn, 0))
+                    if par_kind_get() == 161:
+                        parser_advance()
+                        parser_parse_type()
+        parser_expect(141)
+        # Optional return type: -> Type
+        if par_kind_get() == 167:
+            parser_advance()
+            parser_parse_type()
+        # Expect ':' then body
+        parser_expect(161)
+        # Block body or expression body (same pattern as backslash lambda)
+        var fn_lam_stmts: [i64] = []
+        if par_kind_get() == 180 or par_kind_get() == 181:
+            parser_skip_newlines()
+            var fn_blk: [i64] = []
+            if par_kind_get() == 181:
+                parser_advance()
+            for fn_bi in 0..100000:
+                parser_skip_newlines()
+                val fn_bk = par_kind_get()
+                if fn_bk == 182:
+                    parser_advance()
+                    break
+                if fn_bk == 141 or fn_bk == 160 or fn_bk == 190:
+                    break
+                val fn_s = parse_statement()
+                fn_blk.push(fn_s)
+                if parser_has_errors():
+                    break
+                parser_skip_newlines()
+            fn_lam_stmts.push(expr_block(fn_blk, -1, 0))
+        else:
+            val fn_body_e = parse_expr()
+            fn_lam_stmts.push(fn_body_e)
+        return expr_lambda(fn_param_names, fn_lam_stmts, 0)
+
+    # loop: block — infinite loop (G18)
+    # loop keyword (kind 51) in expression position
+    if par_kind_get() == 51:
+        parser_advance()
+        parser_expect(161)
+        val loop_body_stmts = parse_block()
+        return expr_block(loop_body_stmts, -1, 0)
+
     parser_error("unexpected token in expression: " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'")
     parser_advance()
     expr_nil_lit(0)

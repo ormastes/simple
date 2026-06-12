@@ -262,12 +262,26 @@ checks all `parser_has_errors()=false`; control TRUE; lazy_outline_equivalence
 
 ---
 
-### M10 — G12+G16+G17+G18: Low-count cleanup (fixes ~71 files)
+### M10 — G12+G16+G17+G18: Low-count cleanup (fixes ~71 files) — DONE 2026-06-12
 
-- `?` postfix (type `T?` and `expr?` unwrap) → `parser_primary.spl`.
-- `_` as param name → `parser_decls_part1.spl`.
-- `loop` expression → `parser_expr.spl`.
-- `|` in pattern position → `parser_stmts.spl`.
+Landed in `2c62bd472c7` (local line) / grafted to origin.
+- **G12** `?`(130) postfix in `parse_postfix_on` (~777) + `parse_postfix` (~919),
+  parser_expr.spl — covers `expr?` (pipe.spl:91) and `T?` types.
+- **G17** `_`(kind 169) accepted in `parser_expect_param_name()`
+  (parser_decls_part1.spl:82-91) — no real `fn(_:` uses found in src/lib but
+  the helper now matches the Rust seed.
+- **G16** inline fn-lambda `fn(s: text) -> i64: body` (string_bench.spl:55,
+  replay_driver.spl:75) — `fn`(20) handler at end of `parse_primary_expr`,
+  parser_primary_part2.spl.
+- **G18** `loop:`(51) handler in the same site (gzip/compression files).
+
+DEFERRED: `|` in pattern position (needs pattern-parser changes — fold into
+M11/M12 if the sweep still shows it); no-colon `loop` form (not found in real
+files).
+
+Verified (orchestrator harness): `i64?` type + return, `g()?`, `_` param,
+inline fn-lambda, `loop:`, M9 as-cast spot check all
+`parser_has_errors()=false`; control TRUE; lazy_outline_equivalence 16/16.
 
 ---
 
