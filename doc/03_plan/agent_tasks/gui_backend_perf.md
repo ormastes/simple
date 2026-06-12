@@ -234,6 +234,9 @@ Updated: 2026-06-11
 - this commit -- layout rect allocation tightening:
   layout root rect creation, visible-child filtering, and fixed-layout rect
   collection now avoid empty push-grown arrays and hoist fixed child counts.
+- this commit -- Draw IR event loop count hoist:
+  Draw IR command matching, event batch resolution, and composition planning now
+  reuse batch/command counts instead of dispatching `.len()` in hot loops.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
