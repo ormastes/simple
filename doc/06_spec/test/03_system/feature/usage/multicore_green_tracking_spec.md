@@ -315,7 +315,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -351,6 +351,7 @@ expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green
 step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=11")
+expect(row).to_contain("checked_in_misuse_fixtures=25")
 expect(absent_in_text(row, "misuse_fixtures=611")).to_equal(1)
 expect(row).to_contain("task_spawn approved")
 expect(row).to_contain("thread_spawn_with_args_wrong_surface_import.spl rejects cooperative-green facade")
