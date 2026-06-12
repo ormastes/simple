@@ -57,7 +57,7 @@ expect(pixels[11]).to_equal(0xFFFFFFFFu32)
 
 #### reuses retained pixels for unchanged html
 
-1. var cache = SimpleWebHtmlPixelCache create
+- var cache = SimpleWebHtmlPixelCache create
    - Expected: first.len() equals `12`
    - Expected: second.len() equals `12`
    - Expected: cache.stores equals `1`
