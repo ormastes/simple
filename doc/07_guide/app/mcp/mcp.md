@@ -87,6 +87,22 @@ echo '{"jsonrpc":"2.0","id":"2","method":"tools/list"}' | bin/simple_mcp_server
 SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
 ```
 
+For local command-wrapper coverage, use the command-line handshake system spec:
+
+```bash
+bin/simple check test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl
+bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --native
+```
+
+That spec launches each Simple-created MCP wrapper, runs `--json` readiness,
+sends `initialize`, `notifications/initialized`, and `tools/list`, and requires
+the response inside the configured time limit. The helper is pure Simple
+stdlib code: no Node.js wrapper and no direct `rt_*` extern declarations. The
+matching plan and generated/manual page are:
+
+- `doc/03_plan/sys_test/mcp_cmdline_handshake.md`
+- `doc/06_spec/test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.md`
+
 When updating MCP specs, also regenerate and review their scenario manuals:
 
 ```bash

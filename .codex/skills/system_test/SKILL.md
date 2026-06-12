@@ -162,6 +162,16 @@ describe "<Feature Name>":
   and computed style.
 - Environmental tests should capture command/API/protocol/binary/log evidence
   when that is more meaningful than a screenshot.
+- MCP command-line server specs should use a reusable helper that launches the
+  actual wrapper command, sends `initialize`, `notifications/initialized`, and
+  `tools/list`, and asserts readiness JSON, exit code, elapsed time, JSON-RPC
+  response, tools array, and an expected tool marker. Keep the helper pure
+  Simple/stdlib: do not add direct `rt_*` externs, Node.js wrappers, or hosted
+  fallback requirements. Prefer JSON Lines input when validating wrappers that
+  advertise JSONL auto-detect; use framed `Content-Length` only for servers
+  whose shared transport is known to support multi-message framed stdin.
+  Include all local Simple-created MCP wrappers in one system spec when the
+  contract is "launch by command line and handshake within a time limit".
 - Short grammar features must have runtime-specific coverage:
   - Interpreter specs may cover pipe-forward, composition, placeholder lambdas, method references, optional access, and compact DSL forms.
   - Native specs must cover only compact forms intended to work in native mode.

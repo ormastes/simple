@@ -1,0 +1,128 @@
+# codex-system-test
+"""
+# MCP Command-Line Handshake
+
+System tests for every Simple-created local MCP command wrapper. Each scenario
+launches the server by command line, sends real MCP `initialize` and
+`tools/list` frames over stdin, and requires a bounded response time.
+"""
+
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_write}
+use std.nogc_sync_mut.io.process_ops.{shell}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+struct McpCmdlineProbe:
+    label: text
+    command: text
+    timeout_seconds: i64
+    max_elapsed_ms: i64
+    exit_code: i64
+    elapsed_ms: i64
+    stdout: text
+    stderr: text
+    ready_json: text
+    ok: bool
+    reason: text
+
+fn mcp_frame(body: text) -> text:
+    body + "\n"
+
+fn mcp_initialize_frame(id: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"simple-system-test\",\"version\":\"1\"}}}"
+    mcp_frame(body)
+
+fn mcp_initialized_frame() -> text:
+    mcp_frame("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}")
+
+fn mcp_tools_list_frame(id: text) -> text:
+    mcp_frame("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"tools/list\",\"params\":{}}")
+
+fn shell_escape_text(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn mcp_cmdline_probe(label: text, command: text, timeout_seconds: i64, max_elapsed_ms: i64, expected_ready: text, expected_tool: text) -> McpCmdlineProbe:
+    val root = cwd()
+    val input_path = "/tmp/simple_mcp_cmdline_" + label + "_" + current_time_ms().to_string() + ".in"
+    val input = mcp_initialize_frame("1") + mcp_initialized_frame() + mcp_tools_list_frame("2")
+    if not file_write(input_path, input):
+        return McpCmdlineProbe(label: label, command: command, timeout_seconds: timeout_seconds, max_elapsed_ms: max_elapsed_ms, exit_code: 1, elapsed_ms: 0, stdout: "", stderr: "input write failed", ready_json: "", ok: false, reason: "input_write_failed")
+
+    val ready = shell(command + " --json")
+    val start_ms = current_time_ms()
+    val full_cmd = "cd " + shell_escape_text(root) + " && SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 SIMPLE_ALLOW_HOSTED_FALLBACK=0 timeout " + timeout_seconds.to_string() + "s " + command + " < " + shell_escape_text(input_path)
+    val result = shell(full_cmd)
+    val elapsed = current_time_ms() - start_ms
+    file_delete(input_path)
+
+    val ready_out = (ready.stdout ?? "").trim()
+    val stdout = result.stdout ?? ""
+    val stderr = result.stderr ?? ""
+    var ok = true
+    var reason = ""
+    if ready.exit_code != 0:
+        ok = false
+        reason = "ready_json_failed"
+    elif expected_ready != "" and not ready_out.contains(expected_ready):
+        ok = false
+        reason = "ready_json_missing_marker"
+    elif result.exit_code != 0:
+        ok = false
+        reason = "handshake_exit_" + result.exit_code.to_string()
+    elif elapsed > max_elapsed_ms:
+        ok = false
+        reason = "elapsed_ms_" + elapsed.to_string()
+    elif not stdout.contains("\"jsonrpc\""):
+        ok = false
+        reason = "missing_jsonrpc_response"
+    elif not stdout.contains("\"id\":\"1\"") and not stdout.contains("\"id\":1"):
+        ok = false
+        reason = "missing_initialize_response"
+    elif not stdout.contains("\"id\":\"2\"") and not stdout.contains("\"id\":2"):
+        ok = false
+        reason = "missing_tools_list_response"
+    elif not stdout.contains("\"tools\""):
+        ok = false
+        reason = "missing_tools_array"
+    elif expected_tool != "" and not stdout.contains(expected_tool):
+        ok = false
+        reason = "missing_expected_tool_" + expected_tool
+    elif stdout.contains("parse error") or stderr.contains("parse error"):
+        ok = false
+        reason = "parse_error"
+    elif stdout.contains("native_missing") or stderr.contains("native_missing"):
+        ok = false
+        reason = "native_missing"
+
+    McpCmdlineProbe(label: label, command: command, timeout_seconds: timeout_seconds, max_elapsed_ms: max_elapsed_ms, exit_code: result.exit_code, elapsed_ms: elapsed, stdout: stdout, stderr: stderr, ready_json: ready_out, ok: ok, reason: reason)
+
+fn expect_probe_ok(label: text, command: text, expected_ready: text, expected_tool: text):
+    val probe = mcp_cmdline_probe(label, command, 15, 15000, expected_ready, expected_tool)
+    expect(probe.ok).to_equal(true)
+    expect(probe.exit_code).to_equal(0)
+    expect(probe.elapsed_ms).to_be_less_than(15001)
+    expect(probe.ready_json).to_contain(expected_ready)
+    expect(probe.stdout).to_contain(expected_tool)
+
+describe "MCP Command-Line Handshake":
+    describe "REQ-MCP-CMD-001: local MCP wrappers answer real stdio handshakes":
+        it "should launch simple_mcp_server and list Simple tools within the time limit":
+            step("Run bin/simple_mcp_server with initialize and tools/list frames")
+            expect_probe_ok("simple_mcp", "bin/simple_mcp_server", "Simple MCP Server", "play_wm_text_status")
+
+        it "should launch simple_lsp_mcp_server and list LSP tools within the time limit":
+            step("Run bin/simple_lsp_mcp_server with initialize and tools/list frames")
+            expect_probe_ok("simple_lsp_mcp", "bin/simple_lsp_mcp_server", "simple-lsp-mcp", "definition")
+
+        it "should launch t32_mcp_server and list TRACE32 tools within the time limit":
+            step("Run bin/t32_mcp_server with initialize and tools/list frames")
+            expect_probe_ok("t32_mcp", "bin/t32_mcp_server", "TRACE32 MCP Server", "t32_")
+
+        it "should launch t32_lsp_mcp_server and list TRACE32 LSP tools within the time limit":
+            step("Run bin/t32_lsp_mcp_server with initialize and tools/list frames")
+            expect_probe_ok("t32_lsp_mcp", "bin/t32_lsp_mcp_server", "TRACE32 LSP MCP Server", "definition")
+
+        it "should launch obsidian_lsp_mcp_server and list Obsidian tools within the time limit":
+            step("Run bin/obsidian_lsp_mcp_server with initialize and tools/list frames")
+            expect_probe_ok("obsidian_lsp_mcp", "bin/obsidian_lsp_mcp_server", "Obsidian LSP MCP Server", "obsidian")
