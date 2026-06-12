@@ -553,3 +553,6 @@ Updated: 2026-06-11
   rules into an exact-size buffer and uses in-place stable insertion sort, so
   startup style resolution avoids repeated replacement-list allocation while
   preserving specificity and source-order cascade behavior.
+- Host taskbar shell allocation tightening: registry snapshots and taskbar
+  running-window models now use exact-size output arrays instead of append
+  growth while preserving registry insertion order and minimized-state mapping.
