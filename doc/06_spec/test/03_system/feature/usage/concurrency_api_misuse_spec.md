@@ -1,6 +1,6 @@
 # Concurrency API Misuse System Contract
 
-> This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+> This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 <!-- sdn-diagram:id=concurrency_api_misuse_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ concurrency_api_misuse_spec -> std
 
 # Concurrency API Misuse System Contract
 
-This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 ## At a Glance
 
@@ -56,8 +56,9 @@ This system spec proves the public concurrency API surfaces fail closed at compi
 This system spec proves the public concurrency API surfaces fail
 closed at compile time while the approved meaningful API names remain usable.
 The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green
-thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must
-reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and
+pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad
+argument types, and numbered alias names.
 
 ## Requirements
 
@@ -90,6 +91,7 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
   OS-thread API.
 - `cooperative_green_spawn` must stay on the cooperative-green surface.
 - `multicore_green_spawn` must stay on the multicore-green surface.
+- `multicore_green_spawn_sliced` must stay on the multicore-green surface.
 - `multicore_green_spawn` must accept a single zero-argument closure.
 - `multicore_green_set_parallelism` must accept an integer worker count.
 - `task_spawn` must stay available as the pool-backed native task API.
@@ -139,7 +141,7 @@ val (output, code) = run_profile_contract()
 expect(code).to_equal(0)
 step("Verify approved public-name fixtures were checked before misuse fixtures")
 expect(output).to_contain("concurrency_api_contract=true")
-expect(output).to_contain("positive_fixtures=5")
+expect(output).to_contain("positive_fixtures=6")
 expect(output).to_contain("fixtures=6")
 expect(output).to_contain("misuse_fixtures=6")
 ```
