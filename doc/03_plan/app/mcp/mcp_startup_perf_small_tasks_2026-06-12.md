@@ -105,6 +105,35 @@ Hub / `export use *` offenders in closure:
 - The 1460 ms is process startup + module loading + tool-table construction, all before the first JSON-RPC response.
 - LSP-MCP at 34 ms shows the achievable floor when handler imports are deferred.
 
+### Profiling update (2026-06-12, native binary — CORRECTS A3)
+
+The wrapper actually execs `build/bootstrap/mcp-package/simple_mcp_server` (2 MB native
+ELF, libc-only, stripped), NOT `bin/release/.../simple_mcp_server` (which exits silently
+when run directly — separate bug worth checking). Direct phase timing of the packaged
+binary:
+
+| Phase | Time |
+|-------|------|
+| start → `initialize` response | **~0 ms** (262 B, 9 file opens, no .spl/.smf reads) |
+| `initialize` → `tools/list` response | **~1.5 s, 100% user CPU**, 11.5 MB RSS |
+
+So in the NATIVE server the cost is entirely **tools/list response construction**, not
+module loading (A3's earlier attribution applies to the interpreted path only). gdb
+stack samples at 0.4/0.8/1.2 s all land in one function (PC ~0x5dd7ed–0x5dd93f) with
+`__memcpy_avx_unaligned_erms` beneath — repeated full-buffer string copying plus a
+per-character tight loop: the O(n²) string-concat / char-indexed JSON-escape pattern in
+the tools-list builder (and the rt string primitives under it). 38 KB output should cost
+~10 ms; it costs 1500 ms.
+
+Implications (no arch/interface change needed):
+- A build-time pre-escaped literal manifest (research item 4) reduces tools/list to a
+  single write → expected ~1.5 s → tens of ms, byte-identical response.
+- The rt-level string hot path (concat realloc-copy, O(i) char_at in escape loops) is a
+  general script-perf bug: fixing it speeds up ALL Simple scripts, not just MCP.
+- B2's table-driven rewrite must be re-measured natively — it removed duplicate schema
+  generation but still string-concatenates; without a parts-array + single join (or the
+  literal manifest) it may remain slow.
+
 ### Summary for Lane B/D
 
 The bottleneck is entirely in start→initialize: ~1460 ms. Cutting handler imports on the startup path (B3) is the highest-leverage change. `mcp_sdk/server/app.spl` has the largest exclusive closure (7 files) and is a candidate for narrower imports (D1/D2). `main_dispatch.spl` importing all lazy modules eagerly is the structural root cause.
