@@ -150,8 +150,9 @@ DONE (2026-06-11): E-PAR-001..005 ported to
 Per-rule semantics extracted from check.rs:
 - E-PAR-001: `task_spawn` imported from any `std.concurrent.thread` path →
   "task_spawn is not part of the OS-thread facade"; help: use std.nogc_async_mut.thread_pool
-- E-PAR-002: numbered alias (thread_spawn2 / spawn_isolated2 / spawn_limited2) →
-  "<name> is a numbered name and is not a public API"; help: use *_with_args form
+- E-PAR-002: number-suffixed concurrency alias imported from a public facade →
+  "<name> is a numbered name and is not a public API"; help: use the semantic
+  `*_with_args` form
 - E-PAR-003: concurrency symbol imported from wrong module surface →
   "<name> belongs to <expected_owner>, not <actual_owner>"
 - E-PAR-004: call-shape violation — covers BOTH wrong arity (argc != 1) AND wrong first-arg type:

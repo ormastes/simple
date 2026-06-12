@@ -374,7 +374,7 @@ expect(row).to_contain("hosted_sliced_fairness_marker_corrupt")
 expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
 expect(row).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(row).to_contain("go_scheduler_width_mismatch")
-expect(row).to_contain("numbered_concurrency_alias")
+expect(row).to_contain("forbidden_number_suffix_api_name")
 step("Verify the system-test plan describes the cooperative-green negative profile case")
 val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
