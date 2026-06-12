@@ -1,0 +1,572 @@
+# ui_build — HTML/CSS UI artifact builder (std and dyn SMF forms).
+#
+# Usage (interpreter mode):
+#   bin/simple run src/app/ui_build/main.spl -- build <page.html> -o <outdir> [--form=std|dyn]
+#   bin/simple run src/app/ui_build/main.spl -- --verify <name>.uib.sdn
+#   bin/simple run src/app/ui_build/main.spl -- verify <name>.uib.sdn
+
+use std.nogc_sync_mut.io.file_ops.{
+    file_exists, file_read, file_write, file_size, file_size_raw,
+    file_read_bytes
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.io_runtime (exit)
+use std.nogc_sync_mut.cli.cli_util.{get_cli_args, has_flag, get_flag_value}
+
+use std.common.ui.html_ui.pair.{HtmlCssPair, pair_load}
+use std.common.ui.html_ui.catalog.{catalog_supports, catalog_tags}
+use std.common.ui.html_ui.doc_ops.{used_tags}
+use std.common.ui.html_ui.payload.{
+    UiPartMap, payload_encode, payload_split,
+    gen_std_module_source, gen_dyn_main_source, gen_dyn_part_source
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _basename_no_ext(path: text) -> text:
+    # Get the filename portion then strip extension.
+    val n = path.length()
+    var slash_pos = -1
+    var i = 0
+    while i < n:
+        if path.char_at(i) == "/":
+            slash_pos = i
+        i = i + 1
+    var name = path
+    if slash_pos >= 0:
+        name = path.slice(slash_pos + 1, n)
+    # Strip extension
+    val m = name.length()
+    var dot_pos = -1
+    var j = 0
+    while j < m:
+        if name.char_at(j) == ".":
+            dot_pos = j
+        j = j + 1
+    if dot_pos > 0:
+        name = name.slice(0, dot_pos)
+    name
+
+fn _read_file_content(path: text) -> text:
+    file_read(path)
+
+fn _write_file_content(path: text, content: text) -> bool:
+    file_write(path, content)
+
+fn _read_smf_magic(path: text) -> text:
+    # Read first 4 bytes to check for "SMF\0" magic.
+    # We read the file as bytes and look at first 4 i64 values.
+    val bytes = file_read_bytes(path)
+    if bytes.len() < 4:
+        return ""
+    val b0 = bytes[0]
+    val b1 = bytes[1]
+    val b2 = bytes[2]
+    val b3 = bytes[3]
+    b0.chr() + b1.chr() + b2.chr() + b3.chr()
+
+fn _array_contains(arr: [text], v: text) -> bool:
+    var i = 0
+    while i < arr.len():
+        if arr[i] == v:
+            return true
+        i = i + 1
+    false
+
+fn _join_text(arr: [text], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < arr.len():
+        if i > 0:
+            out = out + sep
+        out = out + arr[i]
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# SDN manifest helpers
+# ---------------------------------------------------------------------------
+
+# Write a .uib.sdn sidecar manifest.
+# artifacts: list of "path|role|byte_count" triples joined as text items
+# elements: list of tag names
+# part_map_tags / part_map_parts: parallel arrays for element->part mapping
+fn _write_manifest(
+    sidecar_path: text,
+    form: text,
+    html_path: text,
+    css_paths: [text],
+    artifacts: [text],
+    elements: [text],
+    part_map_tags: [text],
+    part_map_parts: [text]
+):
+    val nl = "\n"
+    var out = "# ui_build sidecar manifest" + nl
+    out = out + "# SDN format - do not edit manually" + nl
+    out = out + nl
+    out = out + "form: " + form + nl
+    out = out + "source_html: " + html_path + nl
+    out = out + "source_css:" + nl
+    var i = 0
+    while i < css_paths.len():
+        out = out + "  - " + css_paths[i] + nl
+        i = i + 1
+    out = out + nl
+    out = out + "artifacts:" + nl
+    i = 0
+    while i < artifacts.len():
+        # artifact entries are "path|role|byte_count"
+        val parts = artifacts[i].split("|")
+        if parts.len() == 3:
+            out = out + "  - path: " + parts[0] + nl
+            out = out + "    role: " + parts[1] + nl
+            out = out + "    byte_count: " + parts[2] + nl
+        i = i + 1
+    out = out + nl
+    out = out + "elements:" + nl
+    i = 0
+    while i < elements.len():
+        out = out + "  - " + elements[i] + nl
+        i = i + 1
+    out = out + nl
+    out = out + "part_map:" + nl
+    i = 0
+    while i < part_map_tags.len():
+        out = out + "  " + part_map_tags[i] + ": " + part_map_parts[i] + nl
+        i = i + 1
+    _write_file_content(sidecar_path, out)
+
+# Parse the SDN manifest back into a simple structure.
+# Returns: form, html_path, artifact lines, elements, part tags, part parts
+# We use a simple line-based parser.
+struct UibManifest:
+    form: text
+    html_path: text
+    artifact_paths: [text]
+    artifact_roles: [text]
+    artifact_byte_counts: [i64]
+    elements: [text]
+    part_map_tags: [text]
+    part_map_parts: [text]
+
+fn _parse_manifest(content: text) -> UibManifest:
+    val lines = content.split("\n")
+    var form = ""
+    var html_path = ""
+    var artifact_paths: [text] = []
+    var artifact_roles: [text] = []
+    var artifact_byte_counts: [i64] = []
+    var elements: [text] = []
+    var part_map_tags: [text] = []
+    var part_map_parts: [text] = []
+    var section = ""
+    var cur_path = ""
+    var cur_role = ""
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            i = i + 1
+            pass_dn
+        if trimmed.starts_with("form:"):
+            form = trimmed.slice(5, trimmed.length()).trim()
+            section = ""
+        else if trimmed.starts_with("source_html:"):
+            html_path = trimmed.slice(12, trimmed.length()).trim()
+            section = ""
+        else if trimmed == "artifacts:":
+            section = "artifacts"
+            cur_path = ""
+            cur_role = ""
+        else if trimmed == "elements:":
+            section = "elements"
+        else if trimmed == "part_map:":
+            section = "part_map"
+        else if trimmed == "source_css:":
+            section = "source_css"
+        else if section == "artifacts":
+            if trimmed.starts_with("- path:"):
+                # Flush previous artifact if complete
+                if cur_path != "" and cur_role != "":
+                    artifact_paths = artifact_paths + [cur_path]
+                    artifact_roles = artifact_roles + [cur_role]
+                    artifact_byte_counts = artifact_byte_counts + [0]
+                cur_path = trimmed.slice(7, trimmed.length()).trim()
+                cur_role = ""
+            else if trimmed.starts_with("role:"):
+                cur_role = trimmed.slice(5, trimmed.length()).trim()
+            else if trimmed.starts_with("byte_count:"):
+                val bc_str = trimmed.slice(11, trimmed.length()).trim()
+                # Flush this artifact
+                if cur_path != "":
+                    artifact_paths = artifact_paths + [cur_path]
+                    artifact_roles = artifact_roles + [cur_role]
+                    # parse i64 from bc_str
+                    var bc: i64 = 0
+                    var di = 0
+                    while di < bc_str.length():
+                        val d = bc_str.char_at(di) as i64
+                        if d >= 48 and d <= 57:
+                            bc = bc * 10 + (d - 48)
+                        di = di + 1
+                    artifact_byte_counts = artifact_byte_counts + [bc]
+                    cur_path = ""
+                    cur_role = ""
+        else if section == "elements":
+            if trimmed.starts_with("- "):
+                elements = elements + [trimmed.slice(2, trimmed.length()).trim()]
+        else if section == "part_map":
+            if trimmed.contains(":"):
+                val colon = trimmed.find(":")
+                if colon > 0:
+                    val tag = trimmed.slice(0, colon).trim()
+                    val part = trimmed.slice(colon + 1, trimmed.length()).trim()
+                    part_map_tags = part_map_tags + [tag]
+                    part_map_parts = part_map_parts + [part]
+        i = i + 1
+    # flush last artifact if incomplete byte_count line was missing
+    if cur_path != "" and cur_role != "":
+        artifact_paths = artifact_paths + [cur_path]
+        artifact_roles = artifact_roles + [cur_role]
+        artifact_byte_counts = artifact_byte_counts + [0]
+    UibManifest(
+        form: form,
+        html_path: html_path,
+        artifact_paths: artifact_paths,
+        artifact_roles: artifact_roles,
+        artifact_byte_counts: artifact_byte_counts,
+        elements: elements,
+        part_map_tags: part_map_tags,
+        part_map_parts: part_map_parts
+    )
+
+# ---------------------------------------------------------------------------
+# Compile helper: run bin/simple compile <src> --emit-smf -o <out>
+# Returns true on success (exit code 0 AND output file exists AND size >= 179).
+# ---------------------------------------------------------------------------
+
+fn _compile_smf(gen_src: text, out_smf: text) -> bool:
+    val result = process_run("bin/simple", ["compile", gen_src, "--emit-smf", "-o", out_smf])
+    val exit_code = result.2
+    if exit_code != 0:
+        print("  [compile error] exit=" + exit_code.to_text())
+        print("  stdout: " + result.0)
+        print("  stderr: " + result.1)
+        return false
+    if not file_exists(out_smf):
+        print("  [compile error] output file not created: " + out_smf)
+        return false
+    val sz = file_size(out_smf)
+    if sz < 179:
+        print("  [compile error] output file too small: " + sz.to_text() + " bytes")
+        return false
+    true
+
+# ---------------------------------------------------------------------------
+# Build command
+# ---------------------------------------------------------------------------
+
+fn cmd_build(args: [text]) -> i64:
+    # Parse: build <page.html> -o <outdir> [--form=std|dyn]
+    var html_path = ""
+    var outdir = ""
+    var form = "std"
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "-o" and i + 1 < args.len():
+            outdir = args[i + 1]
+            i = i + 2
+            pass_dn
+        if a.starts_with("--form="):
+            form = a.slice(7, a.length())
+        else if not a.starts_with("-"):
+            html_path = a
+        i = i + 1
+
+    if html_path == "":
+        print("ui_build: missing <page.html> argument")
+        return 1
+    if outdir == "":
+        print("ui_build: missing -o <outdir> argument")
+        return 1
+    if form != "std" and form != "dyn":
+        print("ui_build: --form must be std or dyn, got: " + form)
+        return 1
+    if not file_exists(html_path):
+        print("ui_build: HTML file not found: " + html_path)
+        return 1
+
+    val name = _basename_no_ext(html_path)
+    print("ui_build: building '" + name + "' form=" + form + " -> " + outdir)
+
+    # Step 1: Load pair, collect used tags, check catalog.
+    val pair = pair_load(html_path)
+    val html_text = _read_file_content(html_path)
+    val tags = used_tags(html_text)
+
+    var bad_tags: [text] = []
+    var j = 0
+    while j < tags.len():
+        if not catalog_supports(tags[j]):
+            bad_tags = bad_tags + [tags[j]]
+        j = j + 1
+    if bad_tags.len() > 0:
+        print("ui_build: ERROR — tags not in catalog: " + _join_text(bad_tags, ", "))
+        return 1
+
+    # Create outdir and gen subdir.
+    dir_create_all(outdir)
+    val gendir = outdir + "/gen"
+    dir_create_all(gendir)
+
+    # Encode payloads.
+    val html_b64 = payload_encode(html_text)
+    var css_b64s: [text] = []
+    var ci = 0
+    while ci < pair.css_paths.len():
+        val css_text = _read_file_content(pair.css_paths[ci])
+        css_b64s = css_b64s + [payload_encode(css_text)]
+        ci = ci + 1
+
+    var artifact_entries: [text] = []
+    var part_map_tags: [text] = []
+    var part_map_parts: [text] = []
+    val sidecar_path = outdir + "/" + name + ".uib.sdn"
+
+    if form == "std":
+        # Generate std module source.
+        val gen_src = gen_std_module_source(name, html_b64, css_b64s)
+        val gen_path = gendir + "/" + name + "_std.spl"
+        _write_file_content(gen_path, gen_src)
+        val smf_path = outdir + "/" + name + ".smf"
+        print("  compiling std module...")
+        if not _compile_smf(gen_path, smf_path):
+            print("ui_build: compile failed")
+            return 1
+        val sz = file_size(smf_path)
+        print("  " + smf_path + " (" + sz.to_text() + " bytes)")
+        artifact_entries = artifact_entries + [smf_path + "|main|" + sz.to_text()]
+        # Part map is empty for std form.
+        _write_manifest(sidecar_path, "std", html_path, pair.css_paths, artifact_entries, tags, part_map_tags, part_map_parts)
+        print("  manifest: " + sidecar_path)
+        return 0
+
+    # --- dyn form ---
+    # Try merged build first (all payloads embedded in main module).
+    val empty_map = UiPartMap(tags: [], parts: [])
+    val merged_src = gen_dyn_main_source(name, empty_map, html_b64, css_b64s)
+    val merged_gen_path = gendir + "/" + name + "_dyn_main.spl"
+    _write_file_content(merged_gen_path, merged_src)
+    val merged_smf_path = outdir + "/" + name + ".smf"
+    print("  compiling dyn merged attempt...")
+    val merged_ok = _compile_smf(merged_gen_path, merged_smf_path)
+    if merged_ok:
+        val merged_sz = file_size(merged_smf_path)
+        if merged_sz <= 4096:
+            print("  merged build fits: " + merged_smf_path + " (" + merged_sz.to_text() + " bytes)")
+            artifact_entries = artifact_entries + [merged_smf_path + "|main|" + merged_sz.to_text()]
+            _write_manifest(sidecar_path, "merged", html_path, pair.css_paths, artifact_entries, tags, part_map_tags, part_map_parts)
+            print("  manifest: " + sidecar_path)
+            return 0
+
+    # Merged too large (or compile failed) — split payloads into part modules.
+    # Combine all payload into one b64 string, split into chunks.
+    # Each chunk becomes a part module compiled to a separate SMF.
+    # Shrink chunk_len and retry up to 8 times if any part exceeds 4096 bytes.
+    var chunk_len: i64 = 2000
+    var attempt = 0
+    var parts_ok = false
+    var final_part_smfs: [text] = []
+    var final_part_b64s: [text] = []
+    while attempt < 8 and not parts_ok:
+        attempt = attempt + 1
+        # Combine html + all css into one payload string for splitting.
+        var combined = html_b64
+        var ki = 0
+        while ki < css_b64s.len():
+            combined = combined + "|" + css_b64s[ki]
+            ki = ki + 1
+        val chunks = payload_split(combined, chunk_len)
+        var overflow = false
+        var candidate_smfs: [text] = []
+        var pi = 0
+        while pi < chunks.len():
+            val part_src = gen_dyn_part_source(name, pi, chunks[pi])
+            val part_gen_path = gendir + "/" + name + "_part_" + pi.to_text() + ".spl"
+            val part_smf_path = outdir + "/" + name + "_part_" + pi.to_text() + ".smf"
+            _write_file_content(part_gen_path, part_src)
+            if not _compile_smf(part_gen_path, part_smf_path):
+                print("ui_build: part compile failed at chunk_len=" + chunk_len.to_text())
+                overflow = true
+                pi = chunks.len()
+                pass_dn
+            val part_sz = file_size(part_smf_path)
+            if part_sz >= 4096:
+                print("  part " + pi.to_text() + " too large: " + part_sz.to_text() + " bytes, shrinking chunk")
+                overflow = true
+                pi = chunks.len()
+                pass_dn
+            candidate_smfs = candidate_smfs + [part_smf_path]
+            pi = pi + 1
+        if not overflow:
+            parts_ok = true
+            final_part_smfs = candidate_smfs
+            final_part_b64s = chunks
+            # Build tag->part mapping: round-robin tags across parts
+            var ti = 0
+            while ti < tags.len():
+                val part_idx = ti % chunks.len()
+                val part_smf_name = name + "_part_" + part_idx.to_text() + ".smf"
+                part_map_tags = part_map_tags + [tags[ti]]
+                part_map_parts = part_map_parts + [part_smf_name]
+                ti = ti + 1
+        else:
+            chunk_len = chunk_len / 2
+            part_map_tags = []
+            part_map_parts = []
+
+    if not parts_ok:
+        print("ui_build: ERROR — could not split into parts < 4096 bytes after 8 attempts")
+        return 1
+
+    # Compile dyn main module with the part map (no embedded payloads).
+    val dyn_map = UiPartMap(tags: part_map_tags, parts: part_map_parts)
+    val main_src = gen_dyn_main_source(name, dyn_map, "", [])
+    val main_gen_path = gendir + "/" + name + "_dyn_main.spl"
+    _write_file_content(main_gen_path, main_src)
+    print("  compiling dyn main module...")
+    if not _compile_smf(main_gen_path, merged_smf_path):
+        print("ui_build: dyn main compile failed")
+        return 1
+    val main_sz = file_size(merged_smf_path)
+    print("  " + merged_smf_path + " (" + main_sz.to_text() + " bytes) [main]")
+    artifact_entries = artifact_entries + [merged_smf_path + "|main|" + main_sz.to_text()]
+
+    var pi2 = 0
+    while pi2 < final_part_smfs.len():
+        val part_sz = file_size(final_part_smfs[pi2])
+        print("  " + final_part_smfs[pi2] + " (" + part_sz.to_text() + " bytes) [part]")
+        artifact_entries = artifact_entries + [final_part_smfs[pi2] + "|part|" + part_sz.to_text()]
+        pi2 = pi2 + 1
+
+    _write_manifest(sidecar_path, "dyn", html_path, pair.css_paths, artifact_entries, tags, part_map_tags, part_map_parts)
+    print("  manifest: " + sidecar_path)
+    0
+
+# ---------------------------------------------------------------------------
+# Verify command
+# ---------------------------------------------------------------------------
+
+fn cmd_verify(sidecar_path: text) -> i64:
+    print("ui_build verify: " + sidecar_path)
+    if not file_exists(sidecar_path):
+        print("FAIL: sidecar not found: " + sidecar_path)
+        return 1
+    val content = _read_file_content(sidecar_path)
+    val mf = _parse_manifest(content)
+
+    var all_ok = true
+
+    # Check each artifact.
+    var ai = 0
+    while ai < mf.artifact_paths.len():
+        val ap = mf.artifact_paths[ai]
+        val role = mf.artifact_roles[ai]
+        val recorded_bc = mf.artifact_byte_counts[ai]
+        if not file_exists(ap):
+            print("FAIL artifact missing: " + ap)
+            all_ok = false
+            ai = ai + 1
+            pass_dn
+        val sz = file_size(ap)
+        if sz < 179:
+            print("FAIL artifact too small (" + sz.to_text() + " bytes): " + ap)
+            all_ok = false
+            ai = ai + 1
+            pass_dn
+        # Check magic bytes "SMF\0"
+        val magic = _read_smf_magic(ap)
+        if magic.length() < 4:
+            print("FAIL artifact unreadable: " + ap)
+            all_ok = false
+            ai = ai + 1
+            pass_dn
+        val m0 = magic.char_at(0)
+        val m1 = magic.char_at(1)
+        val m2 = magic.char_at(2)
+        val m3 = magic.char_at(3) as i64
+        if m0 != "S" or m1 != "M" or m2 != "F" or m3 != 0:
+            print("FAIL artifact bad magic (expected SMF\\0): " + ap)
+            all_ok = false
+            ai = ai + 1
+            pass_dn
+        # Dyn parts must be < 4096 bytes.
+        if role == "part" and sz >= 4096:
+            print("FAIL dyn part >= 4096 bytes (" + sz.to_text() + "): " + ap)
+            all_ok = false
+            ai = ai + 1
+            pass_dn
+        print("OK artifact: " + ap + " (" + sz.to_text() + " bytes, " + role + ")")
+        ai = ai + 1
+
+    # Element coverage: re-scan source HTML.
+    if not file_exists(mf.html_path):
+        print("FAIL: source HTML not found: " + mf.html_path)
+        all_ok = false
+    else:
+        val html_text = _read_file_content(mf.html_path)
+        val live_tags = used_tags(html_text)
+        var ti = 0
+        while ti < live_tags.len():
+            val tag = live_tags[ti]
+            if _array_contains(mf.elements, tag):
+                print("OK " + tag)
+            else:
+                print("MISSING " + tag)
+                all_ok = false
+            ti = ti + 1
+
+    if all_ok:
+        print("PASS")
+        return 0
+    print("FAIL")
+    1
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+fn main():
+    val args = get_cli_args()
+    if args.len() == 0:
+        print("ui_build: no command given. Usage: build <page.html> -o <outdir> [--form=std|dyn] | --verify <sidecar.uib.sdn>")
+        exit(1)
+
+    val cmd = args[0]
+
+    if cmd == "--verify" or cmd == "verify":
+        if args.len() < 2:
+            print("ui_build: --verify requires a sidecar path")
+            exit(1)
+        val code = cmd_verify(args[1])
+        exit(code)
+
+    if cmd == "build":
+        var build_args: [text] = []
+        var i = 1
+        while i < args.len():
+            build_args = build_args + [args[i]]
+            i = i + 1
+        val code = cmd_build(build_args)
+        exit(code)
+
+    print("ui_build: unknown command: " + cmd)
+    exit(1)
+
+main()

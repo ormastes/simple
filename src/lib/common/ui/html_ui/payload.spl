@@ -6,9 +6,10 @@
 # source code itself is constructed via string concatenation that never places
 # '{' immediately before an identifier token.
 #
-# Base64 is re-used from std.common.base_encoding.base64 (sole provider).
-
-use std.common.base_encoding.base64.{base64_encode, base64_decode}
+# Interpreter-safe base64: the stdlib base64_encode calls text.bytes() which
+# is not available in interpreter mode ("Function 'str.bytes' not found").
+# This module provides a pure-Simple fallback using char_at/chr/bitwise ops
+# that works in both interpreter and compiled modes.
 
 # Element-to-part mapping for dyn builds.
 struct UiPartMap:
@@ -16,14 +17,168 @@ struct UiPartMap:
     parts: [text]
 
 # ---------------------------------------------------------------------------
+# Interpreter-safe base64 (RFC 4648 standard, with '=' padding)
+# Derives UTF-8 bytes from codepoints via arithmetic — no .bytes() call.
+# ---------------------------------------------------------------------------
+
+val _B64_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+# Encode a single codepoint (Unicode scalar) into its UTF-8 byte sequence
+# and append to out_bytes array (value type — returns updated array).
+fn _cp_to_utf8_bytes(cp: i64, out: [i64]) -> [i64]:
+    if cp < 0x80:
+        out = out + [cp]
+    else if cp < 0x800:
+        out = out + [(0xC0 | (cp >> 6))]
+        out = out + [(0x80 | (cp & 0x3F))]
+    else if cp < 0x10000:
+        out = out + [(0xE0 | (cp >> 12))]
+        out = out + [(0x80 | ((cp >> 6) & 0x3F))]
+        out = out + [(0x80 | (cp & 0x3F))]
+    else:
+        out = out + [(0xF0 | (cp >> 18))]
+        out = out + [(0x80 | ((cp >> 12) & 0x3F))]
+        out = out + [(0x80 | ((cp >> 6) & 0x3F))]
+        out = out + [(0x80 | (cp & 0x3F))]
+    out
+
+# Convert text to a list of UTF-8 byte values (i64) using char_at + codepoint arithmetic.
+fn _text_to_utf8_bytes(data: text) -> [i64]:
+    val n = data.length()
+    var bytes: [i64] = []
+    var i = 0
+    while i < n:
+        val cp = data.char_at(i) as i64
+        bytes = _cp_to_utf8_bytes(cp, bytes)
+        i = i + 1
+    bytes
+
+# Decode a base64 char to its 6-bit value; returns -1 for invalid/whitespace.
+fn _b64_char_value(c: i64) -> i64:
+    # A-Z: 0-25
+    if c >= 65 and c <= 90:
+        return c - 65
+    # a-z: 26-51
+    if c >= 97 and c <= 122:
+        return c - 71
+    # 0-9: 52-61
+    if c >= 48 and c <= 57:
+        return c + 4
+    # '+': 62
+    if c == 43:
+        return 62
+    # '/': 63
+    if c == 47:
+        return 63
+    -1
+
+# Encode arbitrary text as standard base64 (RFC 4648 §4, with '=' padding).
+# Works in interpreter mode — uses char_at and codepoint arithmetic only.
+fn _interp_base64_encode(data: text) -> text:
+    val bytes = _text_to_utf8_bytes(data)
+    val n = bytes.len()
+    var out = ""
+    var i = 0
+    while i < n:
+        val b1 = bytes[i]
+        var b2: i64 = 0
+        var b3: i64 = 0
+        if i + 1 < n:
+            b2 = bytes[i + 1]
+        if i + 2 < n:
+            b3 = bytes[i + 2]
+        val idx0 = b1 >> 2
+        val idx1 = ((b1 & 3) << 4) | (b2 >> 4)
+        val idx2 = ((b2 & 15) << 2) | (b3 >> 6)
+        val idx3 = b3 & 63
+        out = out + _B64_TABLE.char_at(idx0)
+        out = out + _B64_TABLE.char_at(idx1)
+        if i + 1 < n:
+            out = out + _B64_TABLE.char_at(idx2)
+        else:
+            out = out + "="
+        if i + 2 < n:
+            out = out + _B64_TABLE.char_at(idx3)
+        else:
+            out = out + "="
+        i = i + 3
+    out
+
+# Decode standard base64 text back to UTF-8 text.
+# Works in interpreter mode — uses char_at only.
+fn _interp_base64_decode(encoded: text) -> text:
+    val n = encoded.length()
+    var out_bytes: [i64] = []
+    var acc = 0
+    var bits = 0
+    var i = 0
+    while i < n:
+        val raw = encoded.char_at(i) as i64
+        i = i + 1
+        # skip whitespace
+        if raw == 32 or raw == 9 or raw == 10 or raw == 13:
+            pass_dn
+        # padding terminates
+        if raw == 61:
+            bits = 0
+        else:
+            val v = _b64_char_value(raw)
+            if v >= 0:
+                acc = (acc << 6) | v
+                bits = bits + 6
+                if bits >= 8:
+                    bits = bits - 8
+                    out_bytes = out_bytes + [(acc >> bits) & 0xFF]
+    # Reconstruct text from UTF-8 bytes (codepoints)
+    var result = ""
+    var bi = 0
+    val bn = out_bytes.len()
+    while bi < bn:
+        val b = out_bytes[bi]
+        if b < 0x80:
+            result = result + b.chr()
+            bi = bi + 1
+        else if b < 0xE0:
+            if bi + 1 < bn:
+                val b2 = out_bytes[bi + 1]
+                val cp = ((b & 0x1F) << 6) | (b2 & 0x3F)
+                result = result + cp.chr()
+                bi = bi + 2
+            else:
+                result = result + "?"
+                bi = bi + 1
+        else if b < 0xF0:
+            if bi + 2 < bn:
+                val b2 = out_bytes[bi + 1]
+                val b3 = out_bytes[bi + 2]
+                val cp = ((b & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+                result = result + cp.chr()
+                bi = bi + 3
+            else:
+                result = result + "?"
+                bi = bi + 1
+        else:
+            if bi + 3 < bn:
+                val b2 = out_bytes[bi + 1]
+                val b3 = out_bytes[bi + 2]
+                val b4 = out_bytes[bi + 3]
+                val cp = ((b & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F)
+                result = result + cp.chr()
+                bi = bi + 4
+            else:
+                result = result + "?"
+                bi = bi + 1
+    result
+
+# ---------------------------------------------------------------------------
 # Public API: encode/decode wrappers
 # ---------------------------------------------------------------------------
 
 fn payload_encode(data: text) -> text:
-    base64_encode(data)
+    _interp_base64_encode(data)
 
 fn payload_decode(encoded: text) -> text:
-    base64_decode(encoded)
+    _interp_base64_decode(encoded)
 
 # Split a base64 string into chunks of at most chunk_len characters.
 fn payload_split(b64_text: text, chunk_len: i64) -> [text]:

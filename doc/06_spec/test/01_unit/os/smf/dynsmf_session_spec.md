@@ -83,9 +83,9 @@ short, and invalid SMF artifacts before accepting a handle.
 #### declares all requested stdlib-like library ids
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -96,10 +96,12 @@ expect(manifest[2].id).to_equal("render2d")
 expect(manifest[3].id).to_equal("web_renderer")
 expect(manifest[4].id).to_equal("gui_renderer")
 expect(manifest[5].id).to_equal("tui_renderer")
+expect(manifest[6].id).to_equal("ui_html")
 expect(dynsmf_manifest_all_precompiled(manifest)).to_equal(true)
 expect(manifest[0].artifact_kind).to_equal("precompiled_smf")
 expect(manifest[0].default_autoload).to_equal(true)
 expect(manifest[5].default_autoload).to_equal(true)
+expect(manifest[6].default_autoload).to_equal(true)
 ```
 
 </details>
@@ -107,46 +109,39 @@ expect(manifest[5].default_autoload).to_equal(true)
 #### creates deterministic compile plans for all precompiled artifacts
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val manifest = dynsmf_default_manifest()
 val plans = dynsmf_build_plans(manifest)
-expect(plans.len()).to_equal(6)
+expect(plans.len()).to_equal(7)
 expect(dynsmf_build_plans_ready(plans)).to_equal(true)
 expect(plans[0].source_path).to_equal("src/lib/nogc_sync_mut/io/file.spl")
 expect(plans[0].command).to_equal("bin/simple compile src/lib/nogc_sync_mut/io/file.spl -o build/dynsmf/file_io.smf")
 expect(plans[2].source_path).to_equal("src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl")
 expect(plans[3].source_path).to_equal("src/app/ui.render/html_widgets.spl")
 expect(plans[5].output_path).to_equal("build/dynsmf/tui_renderer.smf")
+expect(plans[6].source_path).to_equal("src/lib/common/ui/html_ui/dynsmf_entry.spl")
+expect(plans[6].output_path).to_equal("build/dynsmf/ui_html.smf")
 ```
 
 </details>
 
 #### records general background compile evidence for non-gui and gui artifacts
 
-1. DynSmfManifestEntry
-
-2. DynSmfManifestEntry
-
-3. DynSmfManifestEntry
-
-4. DynSmfManifestEntry
-
-5. DynSmfManifestEntry
-
-6. DynSmfArtifactStatus
-
-7. DynSmfArtifactStatus
-
-8. DynSmfArtifactStatus
-
-9. DynSmfArtifactStatus
-
-10. DynSmfArtifactStatus
+- DynSmfManifestEntry
+- DynSmfManifestEntry
+- DynSmfManifestEntry
+- DynSmfManifestEntry
+- DynSmfManifestEntry
+- DynSmfArtifactStatus
+- DynSmfArtifactStatus
+- DynSmfArtifactStatus
+- DynSmfArtifactStatus
+- DynSmfArtifactStatus
    - Expected: session.evidence.len() equals `5`
    - Expected: session.evidence[0].library_id equals `file_io`
    - Expected: session.evidence[0].action equals `compile_background`
@@ -165,7 +160,7 @@ expect(plans[5].output_path).to_equal("build/dynsmf/tui_renderer.smf")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -211,7 +206,7 @@ expect(session.evidence[4].reason).to_equal("artifact_ready")
 #### validates precompiled SMF artifact bytes without filesystem dependency
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -238,7 +233,7 @@ expect(invalid.reason).to_equal("invalid_magic")
 #### reports non-precompiled or missing artifacts as not ready
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -267,7 +262,7 @@ expect(missing_file.reason).to_equal("missing_file")
 #### supports skip all from args
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -283,7 +278,7 @@ expect(policy.source).to_equal("arg:--no-dynsmf")
 #### supports skip all from env
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -299,7 +294,7 @@ expect(policy.source).to_equal("env:SIMPLE_DYNSMF")
 #### supports per-id disable from args
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -317,7 +312,7 @@ expect(policy.source).to_equal("arg:--disable-dynsmf")
 #### supports per-id disable from env
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -337,17 +332,18 @@ expect(policy.source).to_equal("env:SIMPLE_DYNSMF_DISABLE")
 #### autoloads tui_renderer and records evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val manifest = dynsmf_default_manifest()
 val session = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
-expect(session.loaded.len()).to_equal(6)
+expect(session.loaded.len()).to_equal(7)
 expect(session.loaded[0].id).to_equal("file_io")
 expect(session.loaded[5].id).to_equal("tui_renderer")
+expect(session.loaded[6].id).to_equal("ui_html")
 expect(session.evidence[0].action).to_equal("load")
 expect(session.evidence[0].status).to_equal("loaded")
 expect(session.evidence[0].reason).to_equal("smf_dlopen")
@@ -359,20 +355,22 @@ expect(session.evidence[0].to_text()).to_contain("default:loaded")
 #### records skip evidence when tui_renderer is disabled while loading other defaults
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val manifest = dynsmf_default_manifest()
 val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=tui_renderer"], "", "")
 val session = dynsmf_session_autoload(dynsmf_session_new("test", policy), manifest)
-expect(session.loaded.len()).to_equal(5)
+expect(session.loaded.len()).to_equal(6)
 expect(session.loaded[0].id).to_equal("file_io")
 expect(session.evidence[5].library_id).to_equal("tui_renderer")
 expect(session.evidence[5].action).to_equal("skip")
 expect(session.evidence[5].reason).to_equal("disabled")
+expect(session.evidence[6].library_id).to_equal("ui_html")
+expect(session.evidence[6].action).to_equal("load")
 ```
 
 </details>
@@ -380,9 +378,9 @@ expect(session.evidence[5].reason).to_equal("disabled")
 #### records skip evidence for every default when all dynSMF loading is disabled
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -390,17 +388,19 @@ val manifest = dynsmf_default_manifest()
 val policy = dynsmf_policy_from_args_env(["--no-dynsmf"], "", "")
 val session = dynsmf_session_autoload(dynsmf_session_new("test", policy), manifest)
 expect(session.loaded.len()).to_equal(0)
-expect(session.evidence.len()).to_equal(6)
+expect(session.evidence.len()).to_equal(7)
 expect(session.evidence[0].action).to_equal("skip")
 expect(session.evidence[5].library_id).to_equal("tui_renderer")
 expect(session.evidence[5].policy_source).to_equal("arg:--no-dynsmf")
+expect(session.evidence[6].library_id).to_equal("ui_html")
+expect(session.evidence[6].action).to_equal("skip")
 ```
 
 </details>
 
 #### checked loading fails before dlopen when the artifact file is missing
 
-1. DynSmfManifestEntry
+- DynSmfManifestEntry
    - Expected: session.loaded.len() equals `0`
    - Expected: session.evidence.len() equals `1`
    - Expected: session.evidence[0].status equals `failed`
@@ -408,7 +408,7 @@ expect(session.evidence[5].policy_source).to_equal("arg:--no-dynsmf")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -429,7 +429,7 @@ expect(session.evidence[0].reason).to_equal("artifact_missing_file")
 #### can append symbol and stale lookups to session evidence
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -438,15 +438,15 @@ Reproduction: this block contains the complete executable scenario source.
 val manifest = dynsmf_default_manifest()
 val loaded = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
 val with_symbol = dynsmf_session_record_symbol(loaded, "tui_renderer", "render_tui_tree")
-expect(with_symbol.evidence.len()).to_equal(7)
-expect(with_symbol.evidence[6].action).to_equal("symbol")
-expect(with_symbol.evidence[6].status).to_equal("ok")
-expect(with_symbol.evidence[6].reason).to_equal("render_tui_tree@1")
+expect(with_symbol.evidence.len()).to_equal(8)
+expect(with_symbol.evidence[7].action).to_equal("symbol")
+expect(with_symbol.evidence[7].status).to_equal("ok")
+expect(with_symbol.evidence[7].reason).to_equal("render_tui_tree@1")
 val unloaded = dynsmf_session_unload(with_symbol, "tui_renderer")
 val with_stale = dynsmf_session_record_symbol(unloaded, "tui_renderer", "render_tui_tree")
-expect(with_stale.evidence[8].action).to_equal("symbol")
-expect(with_stale.evidence[8].status).to_equal("stale")
-expect(with_stale.evidence[8].reason).to_equal("unloaded")
+expect(with_stale.evidence[9].action).to_equal("symbol")
+expect(with_stale.evidence[9].status).to_equal("stale")
+expect(with_stale.evidence[9].reason).to_equal("unloaded")
 ```
 
 </details>
@@ -454,7 +454,7 @@ expect(with_stale.evidence[8].reason).to_equal("unloaded")
 #### unloads, reports stale symbol lookup, and reloads with fresh generation
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -468,14 +468,14 @@ expect(symbol_before.reason).to_equal("render_tui_tree@1")
 val missing_symbol = dynsmf_session_symbol(loaded, "tui_renderer", "missing_symbol")
 expect(missing_symbol.status).to_equal("missing")
 val unloaded = dynsmf_session_unload(loaded, "tui_renderer")
-expect(unloaded.evidence[6].reason).to_equal("smf_dlclose")
+expect(unloaded.evidence[7].reason).to_equal("smf_dlclose")
 val stale = dynsmf_session_symbol(unloaded, "tui_renderer", "render_tui_tree")
 expect(stale.status).to_equal("stale")
 val reloaded = dynsmf_session_autoload(unloaded, manifest)
 val symbol_after = dynsmf_session_symbol(reloaded, "tui_renderer", "render_tui_tree")
 expect(symbol_after.status).to_equal("ok")
 expect(symbol_after.generation).to_be_greater_than(symbol_before.generation)
-expect(reloaded.evidence[7].action).to_equal("reload")
+expect(reloaded.evidence[8].action).to_equal("reload")
 ```
 
 </details>
