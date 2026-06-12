@@ -15,6 +15,7 @@ use gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
     layout_get_x, layout_get_y, layout_get_width, layout_get_height,
     layout_get_node, layout_get_children}
 use common.render_scene.scene.{RenderScene, SceneCommand, render_scene}
+use common.string_builder.{StringBuilder}
 
 class SimpleBrowserTarget:
     kind: text
@@ -84,7 +85,8 @@ fn _contains_folded(haystack: text, needle: text) -> bool:
 
 fn _field_override(overrides: [text], key: text) -> text:
     var idx = 0
-    while idx + 1 < overrides.len():
+    val override_count = overrides.len()
+    while idx + 1 < override_count:
         if overrides[idx] == key:
             return overrides[idx + 1]
         idx = idx + 2
@@ -96,13 +98,20 @@ fn _push_warning(ctx: SimpleBrowserBuildContext, msg: text):
 fn _text_content(node: BeDomNode) -> text:
     if be_dom_get_is_text(node):
         return be_dom_get_text(node)
-    var out = ""
+    val sb = StringBuilder.new()
+    _append_text_content(node, sb)
+    sb.to_text().trim()
+
+fn _append_text_content(node: BeDomNode, sb: StringBuilder):
+    if be_dom_get_is_text(node):
+        sb.push(be_dom_get_text(node))
+        return
     val children = be_dom_get_children(node)
     var idx = 0
-    while idx < children.len():
-        out = out + _text_content(children[idx])
+    val child_count = children.len()
+    while idx < child_count:
+        _append_text_content(children[idx], sb)
         idx = idx + 1
-    out.trim()
 
 fn _scheme(url: text) -> text:
     match url.index_of("://"):
@@ -325,12 +334,16 @@ fn _decorate_dom(node: BeDomNode, base_url: text, current_form_key: text, curren
         _decorate_form_control(node, next_form_key, next_form_action, next_form_method, overrides, ctx)
 
     val children = be_dom_get_children(node)
-    var next_children: [BeDomNode] = []
+    val child_count = children.len()
+    if child_count == 0:
+        be_dom_set_children(node, [])
+        return
+    var next_children: [BeDomNode] = [children[0]; child_count]
     var idx = 0
-    while idx < children.len():
+    while idx < child_count:
         var child = children[idx]
         _decorate_dom(child, base_url, next_form_key, next_form_action, next_form_method, overrides, ctx)
-        next_children.push(child)
+        next_children[idx] = child
         idx = idx + 1
     be_dom_set_children(node, next_children)
 
@@ -361,6 +374,8 @@ fn _collect_interactions(box: BeLayoutBox, collection: SimpleBrowserCollection):
         ))
     elif kind == "field":
         val unsupported = be_dom_get_attr(node, "data-simple-unsupported") == "true"
+        val node_text = _text_content(node)
+        val placeholder = be_dom_get_attr(node, "placeholder")
         val field = SimpleBrowserField(
             key: be_dom_get_attr(node, "data-simple-field-key"),
             form_key: be_dom_get_attr(node, "data-simple-form-key"),
@@ -368,8 +383,8 @@ fn _collect_interactions(box: BeLayoutBox, collection: SimpleBrowserCollection):
             name: be_dom_get_attr(node, "data-simple-name"),
             tag: be_dom_get_attr(node, "data-simple-tag"),
             input_type: be_dom_get_attr(node, "data-simple-input-type"),
-            value: if _text_content(node) == be_dom_get_attr(node, "placeholder"): "" else: _text_content(node),
-            placeholder: be_dom_get_attr(node, "placeholder"),
+            value: if node_text == placeholder: "" else: node_text,
+            placeholder: placeholder,
             x: x, y: y, width: width, height: height,
             unsupported: unsupported
         )
@@ -385,7 +400,8 @@ fn _collect_interactions(box: BeLayoutBox, collection: SimpleBrowserCollection):
 
     val children = layout_get_children(box)
     var idx = 0
-    while idx < children.len():
+    val child_count = children.len()
+    while idx < child_count:
         _collect_interactions(children[idx], collection)
         idx = idx + 1
 
@@ -429,11 +445,16 @@ fn simple_browser_render_remote_page(url: text, html: text, viewport_w: i32, vie
     _render_page(url, html, viewport_w, viewport_h, [])
 
 fn _flatten_field_overrides(fields: [SimpleBrowserField]) -> [text]:
-    var out: [text] = []
+    val field_count = fields.len()
+    if field_count == 0:
+        return []
+    var out: [text] = [""; field_count * 2]
     var idx = 0
-    while idx < fields.len():
-        out.push(fields[idx].key)
-        out.push(fields[idx].value)
+    var out_idx = 0
+    while idx < field_count:
+        out[out_idx] = fields[idx].key
+        out[out_idx + 1] = fields[idx].value
+        out_idx = out_idx + 2
         idx = idx + 1
     out
 
@@ -451,13 +472,16 @@ fn simple_browser_hit_target(page: SimpleBrowserPageState, x: i32, y: i32) -> Si
     nil
 
 fn simple_browser_set_field_value(page: SimpleBrowserPageState, field_key: text, value: text) -> SimpleBrowserPageState:
+    val field_count = page.fields.len()
     var next_fields: [SimpleBrowserField] = []
+    if field_count > 0:
+        next_fields = [page.fields[0]; field_count]
     var idx = 0
-    while idx < page.fields.len():
+    while idx < field_count:
         var field = page.fields[idx]
         if field.key == field_key:
             field.value = value
-        next_fields.push(field)
+        next_fields[idx] = field
         idx = idx + 1
     val updated = SimpleBrowserPageState(
         current_url: page.current_url,

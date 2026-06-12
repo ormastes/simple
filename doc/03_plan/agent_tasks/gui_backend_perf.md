@@ -442,6 +442,10 @@ Updated: 2026-06-11
   Pending request dequeue and favorite-link removal now write exact-size arrays
   instead of append-growing replacement lists, preserving request order and
   favorite normalization behavior.
+- this commit -- Simple browser page DOM/form array tightening:
+  DOM decoration, field override flattening, and edited-field rebuilds now reuse
+  stable lengths and exact-size arrays, while DOM text extraction uses a shared
+  StringBuilder to avoid recursive text concatenation in page startup rendering.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
