@@ -356,6 +356,10 @@ Updated: 2026-06-11
 - this commit -- Metal text dispatch length hoisting:
   Metal glyph dispatch now reuses the stable text length while walking glyphs,
   avoiding repeated `.len()` calls in the native-first text rendering path.
+- this commit -- OpenCL readback allocation tightening:
+  OpenCL host readback now fills an exact-size `u32` pixel buffer by index
+  instead of push-growing one pixel at a time during backend framebuffer
+  readback.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
