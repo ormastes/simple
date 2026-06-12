@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 70
-- pass count: 70
+- fixtures: 71
+- pass count: 71
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -93,6 +93,7 @@ pixels, or text antialiasing normalization.
 | `71_flex_wrap_gap_align_content_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/71_flex_wrap_gap_align_content_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/71_flex_wrap_gap_align_content_end_structural_report.sdn` |
 | `72_flex_wrap_gap_align_content_start` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/72_flex_wrap_gap_align_content_start_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/72_flex_wrap_gap_align_content_start_structural_report.sdn` |
 | `73_flex_wrap_gap_align_content_unsafe_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/73_flex_wrap_gap_align_content_unsafe_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/73_flex_wrap_gap_align_content_unsafe_center_structural_report.sdn` |
+| `74_flex_gap_justify_unsafe_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/74_flex_gap_justify_unsafe_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/74_flex_gap_justify_unsafe_center_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -172,3 +173,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `71_flex_wrap_gap_align_content_end` | 0 | 0.000 | `` |
 | `72_flex_wrap_gap_align_content_start` | 0 | 0.000 | `` |
 | `73_flex_wrap_gap_align_content_unsafe_center` | 0 | 0.000 | `` |
+| `74_flex_gap_justify_unsafe_center` | 0 | 0.000 | `` |
