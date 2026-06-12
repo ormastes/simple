@@ -116,3 +116,14 @@ verify
   satisfied (compiled-mode end-to-end equivalence remains a noted
   limitation — interpreter specs can't import treesitter directly).
   Phase → verify: all of AC-1..AC-7 now have landed implementations.
+- analyze (2026-06-12): native-binary phase profiling CORRECTED the bottleneck
+  attribution: start→initialize is ~0 ms (no source reads); the full ~1.5 s is
+  tools/list JSON construction — gdb samples pin one function over
+  __memcpy_avx_unaligned_erms (O(n^2) string concat + per-char escape).
+  Landed: --probe self-check flag, wrapper cheap-probe fast path w/ handshake
+  fallback, table-driven _mcp_static_tools_result (byte-identical, md5-verified),
+  11 redundant startup imports cut (104→93 resolutions), mcp_sdk core/shell
+  decoupled. Plan + baseline: doc/03_plan/app/mcp/
+  mcp_startup_perf_small_tasks_2026-06-12.md; guide updated (2026-06-12 section).
+  Remaining: build-time literal tools/list manifest, rt string primitive perf
+  (concat/char_at), mcp-package rebuild + re-measure, tool_set core|all split.

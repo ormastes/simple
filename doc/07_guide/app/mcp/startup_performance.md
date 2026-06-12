@@ -29,6 +29,34 @@ Cold stale-stamp starts still pay the double cost once; warm starts now skip
 the extra handshake. That remains the single biggest wrapper-level win, ahead
 of anything library layering can save.
 
+## 2026-06-12 update — the hotspot is tools/list construction, not load
+
+Direct phase-timing of `build/bootstrap/mcp-package/simple_mcp_server` corrected
+the earlier attribution:
+
+| Phase | Time |
+|-------|------|
+| start → `initialize` response | ~0 ms (262 B, 9 file opens, no .spl/.smf reads) |
+| `initialize` → `tools/list` response | ~1.5 s, 100% user CPU, 11.5 MB RSS |
+
+gdb stack samples (0.4/0.8/1.2 s) all land in one function with
+`__memcpy_avx_unaligned_erms` underneath: repeated full-buffer string copies plus a
+per-character loop — the O(n²) concat/escape pattern building the 38 KB tools/list
+JSON. 38 KB should cost ~10 ms, not 1500 ms. "Before the first response" in the
+old framing is really "before the first *tools/list* response".
+
+Landed since (plan `doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md`):
+`--probe` self-check flag (version/tool-count/manifest-hash, no handshake), wrapper
+cheap-probe fast path with full-handshake fallback, table-driven
+`_mcp_static_tools_result()` (byte-identical output), 11 redundant startup imports
+dropped, `mcp_sdk/core` no longer pulls `shell.spl` into every consumer.
+
+Next steps, no interface change: (a) build-time pre-escaped literal tools/list
+manifest — expected ~1.5 s → tens of ms; (b) parts-array + single join where JSON
+must be built at runtime; (c) fix rt string primitives (concat realloc-copy, O(i)
+char_at in escape loops) — a general script-perf win; (d) rebuild mcp-package with
+the above and re-measure.
+
 ## The startup-reduction ladder (apply in this order)
 
 1. **Measure before changing anything.** `scripts/check/check-mcp-native-smoke.shs`
