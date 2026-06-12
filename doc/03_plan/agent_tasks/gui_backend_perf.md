@@ -216,6 +216,10 @@ Updated: 2026-06-11
 - this commit -- debug attr loop length hoist:
   `simple_web_layout_debug_attr_by_id` now reuses the parsed node count instead
   of dispatching `nodes.len()` on every scan iteration.
+- this commit -- session widget-store copy removal:
+  `WidgetStore.upsert_record` and `WidgetStore.set_prop` now allocate the exact
+  result array once and fill by index instead of rebuilding records and props
+  with repeated array concatenation on each append or replacement.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
