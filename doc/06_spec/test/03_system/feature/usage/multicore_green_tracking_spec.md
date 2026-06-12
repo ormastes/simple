@@ -309,12 +309,13 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 - Verify the public API contract summary remains explicit
    - Expected: absent_in_text(row, "misuse_fixtures=611") equals `1`
 - Verify negative profile contract cases stay release-visible
+- Verify the system-test plan describes the cooperative-green negative profile case
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -372,6 +373,10 @@ expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
 expect(row).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(row).to_contain("go_scheduler_width_mismatch")
 expect(row).to_contain("numbered_concurrency_alias")
+step("Verify the system-test plan describes the cooperative-green negative profile case")
+val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
+expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
+expect(system_plan).to_contain("cooperative-label")
 ```
 
 </details>
