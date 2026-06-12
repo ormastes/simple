@@ -93,6 +93,17 @@ See doc/03_plan/ui/graphics/engine/gpu_backend_parallel_agent_plan_2026-06-11.md
   doc/08_tracking/bug/stage4_deploy_no_seed_test_runner_blocked_2026-06-11.md.
   All gpu-backend-dx-harden verification ran green BEFORE the swap.
 
+- 2026-06-12: Rust seed rebuilt (vendor/log shim needed log_enabled! macro +
+  checksum refresh); bin/simple test working again via seed delegation.
+  Vulkan spec false-green exposed and ROOT-CAUSED: B's "all pass" claim hid
+  8 failures with three stacked causes — nonexistent to_not_equal matcher,
+  fn read_pixels self-mutation (JIT lowering error), and the real trigger:
+  annotated `val x: u32` locals corrupt as call args in it blocks under the
+  test runner (bug doc test_runner_annotated_u32_val_arg_corruption_2026-06-12).
+  After fixes: vulkan processing 22/22, vulkan drawing 22/22; full lane
+  re-verified post-deploy (directx 18/18, order 4/4, cuda 7/7, rocm 7/7,
+  acceleration 24/24).
+
 ## Final AC Status
 - AC-1 CLOSED (b54cea0085) · AC-2 CLOSED (b54cea0085) · AC-3 CLOSED with
   follow-ups VKSPIRV-001 + rt_vulkan_init crash (6ac82fcc6b)

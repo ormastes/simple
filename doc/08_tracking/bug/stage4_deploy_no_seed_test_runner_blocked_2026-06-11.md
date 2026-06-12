@@ -1,8 +1,26 @@
 # stage4 deploy left no seed driver — `bin/simple test` blocked host-wide
 
 Date: 2026-06-11
-Status: open
+Status: resolved (2026-06-12 — seed rebuilt; deploy-gate suggestion still open)
 Owner: stage4 deploy lane
+
+## Resolution (2026-06-12)
+
+Rebuilt the seed with `cargo build --profile bootstrap -p simple-driver
+-p simple-native-all` → `src/compiler_rust/target/bootstrap/simple`.
+Two vendored-source fixes were required:
+
+- `vendor/log/src/lib.rs`: the minimal log shim lacked the `log_enabled!`
+  macro form needed by vendored regalloc2 v0.11.2 (it only had a function);
+  added a no-op `log_enabled!` returning false.
+- `vendor/log/.cargo-checksum.json`: updated the `src/lib.rs` sha256 so cargo
+  accepts the modified vendored source.
+
+Verified: `setsid timeout 30 bin/simple -c "print(1+1)"` → 2;
+`bin/simple test` runs again via seed delegation (engine2d lane re-verified:
+directx 18/18, order 4/4, cuda 7/7, rocm 7/7, acceleration 24/24, vulkan
+processing 22/22, vulkan drawing 22/22). The suggested deploy-gate fix
+(refuse to swap bin/simple without a working probed seed) remains open.
 
 ## Summary
 
