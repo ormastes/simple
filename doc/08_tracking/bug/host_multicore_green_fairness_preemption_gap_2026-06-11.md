@@ -100,7 +100,7 @@ SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
 lane has equivalent fairness/preemption guarantees.
 
-Related active host-side blocker:
+Related historical host-side blockers:
 
 - `doc/08_tracking/bug/multicore_green_sliced_native_closure_blocker_2026-06-11.md`
   is now a historical blocker record for the earlier captured-mutable-state
@@ -108,6 +108,8 @@ Related active host-side blocker:
   function, and the regression spec above now proves source-run and native
   `EXIT=0`.
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
+  now records the closed explicit scalar-state stepper path; it is no longer
+  the remaining hosted parity gap.
 - `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`
   now records the closed standalone-native blocker that used to sit underneath
   that stepper path: returning a function value from inside a loop/search

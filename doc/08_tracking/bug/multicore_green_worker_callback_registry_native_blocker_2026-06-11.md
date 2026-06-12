@@ -65,8 +65,8 @@ note while this bug was still active.
 - `doc/08_tracking/bug/native_function_value_param_array_blocker_2026-06-11.md`
 
 The callback-registry worker boundary is now closed. The larger
-resumable-stepper native blocker remains open above a different lower
-boundary:
+resumable-stepper native path is also closed and kept under regression coverage.
+The later helper-handle boundary below it is likewise closed:
 
 - `doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`
 

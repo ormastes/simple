@@ -531,12 +531,13 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 - Verify stale active-blocker wording is absent
    - Expected: absent_in_text(row, stale_simpleos_handoff_gate_phrase()) equals `1`
    - Expected: absent_in_text(row, "SimpleOS final handoff are closed") equals `1`
+   - Expected: absent_in_text(row, "resumable-stepper native blocker remains open") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -563,6 +564,7 @@ expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green
 step("Verify stale active-blocker wording is absent")
 expect(absent_in_text(row, stale_simpleos_handoff_gate_phrase())).to_equal(1)
 expect(absent_in_text(row, "SimpleOS final handoff are closed")).to_equal(1)
+expect(absent_in_text(row, "resumable-stepper native blocker remains open")).to_equal(1)
 ```
 
 </details>

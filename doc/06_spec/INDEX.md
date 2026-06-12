@@ -4,23 +4,16 @@
 
 ## Quick Stats
 
-- **Total Features:** 3
-- **Complete Documentation:** 3 (100%)
+- **Total Features:** 1
+- **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 177
-- **Warnings:** 2
+- **Total Lines:** 169
 
 ---
 
-## Performance / Concurrency (1 features)
+## Runtime Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Multicore Green Cross-Language Profile Gate](test/05_perf/stress/multicore_green_cross_language_gate_spec.md) | Implemented | N/A | 3 | 60% | 109 lines |
+| [Multicore Green Feature Tracking Specification](test/03_system/feature/usage/multicore_green_tracking_spec.md) | Current | N/A | 9 | 60% | 169 lines |
 
-## Runtime / Native / Concurrency (2 features)
-
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Multicore Green Resumable Stepper Native Blocker](test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.md) | Regression | N/A | 1 | 20% | 34 lines |
-| [Multicore Green Channel Struct Send Native Blocker](test/03_system/feature/usage/multicore_green_channel_struct_send_native_blocker_spec.md) | Regression | N/A | 1 | 20% | 34 lines |
