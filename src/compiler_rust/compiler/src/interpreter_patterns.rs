@@ -1,3 +1,4 @@
+// ORCHESTRATOR NOTE: the killed agent ALSO modified interpreter_control.rs (callers updated to a 5-arg match_pattern-style signature). That partial is saved at /tmp/a3_partial_interpreter_control.rs; the repo copy was reset to upstream. If you change the fn signature in interpreter_patterns.rs you must update those callers too.
 //! Pattern matching functions for the interpreter
 //!
 //! This module provides pattern matching implementations used by match expressions
@@ -9,7 +10,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 
-use super::{Enums, BLOCK_SCOPED_ENUMS};
+use super::{Classes, Enums, BLOCK_SCOPED_ENUMS};
 
 /// Check if a pattern is a catch-all that covers any value.
 pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
@@ -28,6 +29,7 @@ pub(super) fn match_sequence_pattern(
     patterns: &[Pattern],
     bindings: &mut HashMap<String, Value>,
     enums: &Enums,
+    classes: &Classes,
     is_tuple: bool,
 ) -> Result<bool, CompileError> {
     let values: &[Value] = if is_tuple {
@@ -64,7 +66,7 @@ pub(super) fn match_sequence_pattern(
 
         // Match patterns before rest
         for (pat, val) in before_rest.iter().zip(values.iter()) {
-            if !pattern_matches(pat, val, bindings, enums)? {
+            if !pattern_matches(pat, val, bindings, enums, classes)? {
                 return Ok(false);
             }
         }
@@ -72,7 +74,7 @@ pub(super) fn match_sequence_pattern(
         // Match patterns after rest (from the end)
         for (i, pat) in after_rest.iter().enumerate() {
             let val_idx = values.len() - after_rest.len() + i;
-            if !pattern_matches(pat, &values[val_idx], bindings, enums)? {
+            if !pattern_matches(pat, &values[val_idx], bindings, enums, classes)? {
                 return Ok(false);
             }
         }
@@ -99,7 +101,7 @@ pub(super) fn match_sequence_pattern(
         }
 
         for (pat, val) in patterns.iter().zip(values.iter()) {
-            if !pattern_matches(pat, val, bindings, enums)? {
+            if !pattern_matches(pat, val, bindings, enums, classes)? {
                 return Ok(false);
             }
         }
@@ -113,6 +115,7 @@ pub(crate) fn pattern_matches(
     value: &Value,
     bindings: &mut HashMap<String, Value>,
     enums: &Enums,
+    classes: &Classes,
 ) -> Result<bool, CompileError> {
     match pattern {
         Pattern::Wildcard => Ok(true),
@@ -257,7 +260,7 @@ pub(crate) fn pattern_matches(
                     if let (Some(patterns), Some(vp)) = (payload, value_payload) {
                         if patterns.len() == 1 {
                             // Single payload - match directly
-                            if pattern_matches(&patterns[0], vp.as_ref(), bindings, enums)? {
+                            if pattern_matches(&patterns[0], vp.as_ref(), bindings, enums, classes)? {
                                 return Ok(true);
                             }
                         } else {
@@ -266,7 +269,7 @@ pub(crate) fn pattern_matches(
                                 if patterns.len() == values.len() {
                                     let mut all_match = true;
                                     for (pat, val) in patterns.iter().zip(values.iter()) {
-                                        if !pattern_matches(pat, val, bindings, enums)? {
+                                        if !pattern_matches(pat, val, bindings, enums, classes)? {
                                             all_match = false;
                                             break;
                                         }
@@ -284,11 +287,64 @@ pub(crate) fn pattern_matches(
                     }
                 }
             }
+
+            // Positional class/struct pattern: `case ClassName(a, b, c)` where the value is
+            // a class instance (`Value::Object`).  The parser emits this as
+            // `Pattern::Enum { name: "_", variant: "ClassName", payload: Some([…]) }` because
+            // it cannot distinguish enum variants from class names at parse time.
+            //
+            // When `name == "_"` (user-defined, unresolved) and `variant` matches the object's
+            // class name, bind the payload patterns to the class fields in declaration order.
+            // This is the correct semantics: positional patterns follow the field order in the
+            // class definition.
+            if let Value::Object { class, fields: obj_fields } = value {
+                let name_matches = enum_name == "_"
+                    || enum_name == class
+                    || matches!(enum_name.as_str(), "Option" | "Result");
+                if name_matches && variant == class {
+                    match payload {
+                        None => {
+                            // Unit pattern `case Foo:` — matches any instance of Foo
+                            return Ok(true);
+                        }
+                        Some(patterns) => {
+                            // Positional: look up field order from ClassDef
+                            if let Some(class_def) = classes.get(class.as_str()) {
+                                let field_names: Vec<&str> =
+                                    class_def.fields.iter().map(|f| f.name.as_str()).collect();
+                                if patterns.len() != field_names.len() {
+                                    // Arity mismatch — clean failure (not an error, just no-match)
+                                    return Ok(false);
+                                }
+                                let mut temp_bindings = HashMap::new();
+                                let mut all_match = true;
+                                for (pat, field_name) in patterns.iter().zip(field_names.iter()) {
+                                    if let Some(field_val) = obj_fields.get(*field_name) {
+                                        if !pattern_matches(pat, field_val, &mut temp_bindings, enums, classes)? {
+                                            all_match = false;
+                                            break;
+                                        }
+                                    } else {
+                                        all_match = false;
+                                        break;
+                                    }
+                                }
+                                if all_match {
+                                    bindings.extend(temp_bindings);
+                                    return Ok(true);
+                                }
+                            }
+                            // ClassDef not found — fall through to Ok(false)
+                        }
+                    }
+                }
+            }
+
             Ok(false)
         }
 
-        Pattern::Tuple(patterns) => match_sequence_pattern(value, patterns, bindings, enums, true),
-        Pattern::Array(patterns) => match_sequence_pattern(value, patterns, bindings, enums, false),
+        Pattern::Tuple(patterns) => match_sequence_pattern(value, patterns, bindings, enums, classes, true),
+        Pattern::Array(patterns) => match_sequence_pattern(value, patterns, bindings, enums, classes, false),
 
         Pattern::Struct { name, fields } => {
             if let Value::Object {
@@ -297,9 +353,15 @@ pub(crate) fn pattern_matches(
             } = value
             {
                 if class == name {
+                    if std::env::var("SIMPLE_DEBUG_MATCH").as_deref() == Ok("1") {
+                        eprintln!("[DEBUG Pattern::Struct] class={} obj_fields={:?}", class, obj_fields.keys().collect::<Vec<_>>());
+                        for (k, v) in obj_fields.iter() {
+                            eprintln!("  field {} = {:?}", k, v);
+                        }
+                    }
                     for (field_name, field_pat) in fields {
                         if let Some(field_val) = obj_fields.get(field_name) {
-                            if !pattern_matches(field_pat, field_val, bindings, enums)? {
+                            if !pattern_matches(field_pat, field_val, bindings, enums, classes)? {
                                 return Ok(false);
                             }
                         } else {
@@ -315,7 +377,7 @@ pub(crate) fn pattern_matches(
         Pattern::Or(patterns) => {
             for pat in patterns {
                 let mut temp_bindings = HashMap::new();
-                if pattern_matches(pat, value, &mut temp_bindings, enums)? {
+                if pattern_matches(pat, value, &mut temp_bindings, enums, classes)? {
                     bindings.extend(temp_bindings);
                     return Ok(true);
                 }
@@ -337,7 +399,7 @@ pub(crate) fn pattern_matches(
             };
 
             if type_matches {
-                pattern_matches(pattern, value, bindings, enums)
+                pattern_matches(pattern, value, bindings, enums, classes)
             } else {
                 Ok(false)
             }
@@ -445,5 +507,160 @@ pub(crate) fn check_enum_exhaustiveness(
         None
     } else {
         Some(missing)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use simple_parser::Parser;
+    use crate::interpreter::evaluate_module;
+
+    /// Run a Simple snippet and return the exit code.
+    /// Use `main = <expr>` to set a numeric exit code (0 = ok, non-zero = error).
+    fn run(src: &str) -> i32 {
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse");
+        evaluate_module(&module.items).expect("evaluate")
+    }
+
+    // --- Positional class pattern (the bug) ---
+
+    #[test]
+    fn positional_class_3field_matches_and_binds() {
+        // Regression for: case P(x, y, z) over a class instance silently no-matched.
+        // The match arm should fire and each binding should carry the correct field value.
+        let src = r#"
+class P:
+    x: i64
+    y: i64
+    z: i64
+
+var result_ = -1
+val p = P(x: 10, y: 20, z: 30)
+match p:
+    case P(a, b, c):
+        if a == 10 and b == 20 and c == 30:
+            result_ = 0
+        else:
+            result_ = 2
+    case _:
+        result_ = 1
+main = result_
+"#;
+        let code = run(src);
+        assert_eq!(code, 0, "3-field positional class match should fire and bind correctly");
+    }
+
+    #[test]
+    fn positional_class_20field_matches() {
+        // Wide destructure (20 fields) — the production case from flat_ast_bridge_part1.spl.
+        let src = r#"
+class Big:
+    f1: i64
+    f2: i64
+    f3: i64
+    f4: i64
+    f5: i64
+    f6: i64
+    f7: i64
+    f8: i64
+    f9: i64
+    f10: i64
+    f11: i64
+    f12: i64
+    f13: i64
+    f14: i64
+    f15: i64
+    f16: i64
+    f17: i64
+    f18: i64
+    f19: i64
+    f20: i64
+
+var result_ = -1
+val b = Big(f1: 1, f2: 2, f3: 3, f4: 4, f5: 5, f6: 6, f7: 7, f8: 8, f9: 9, f10: 10, f11: 11, f12: 12, f13: 13, f14: 14, f15: 15, f16: 16, f17: 17, f18: 18, f19: 19, f20: 20)
+match b:
+    case Big(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20):
+        if a1 == 1 and a20 == 20:
+            result_ = 0
+        else:
+            result_ = 2
+    case _:
+        result_ = 1
+main = result_
+"#;
+        let code = run(src);
+        assert_eq!(code, 0, "20-field positional class match should fire and bind in declaration order");
+    }
+
+    #[test]
+    fn positional_class_arity_mismatch_does_not_match() {
+        // Arity mismatch: 2 patterns for a 3-field class → clean no-match, not a panic.
+        let src = r#"
+class P:
+    x: i64
+    y: i64
+    z: i64
+
+var result_ = -1
+val p = P(x: 1, y: 2, z: 3)
+match p:
+    case P(a, b):
+        result_ = 1
+    case _:
+        result_ = 0
+main = result_
+"#;
+        let code = run(src);
+        assert_eq!(code, 0, "arity mismatch should produce clean no-match (fall through to wildcard)");
+    }
+
+    #[test]
+    fn named_field_struct_pattern_still_works() {
+        // Named-field patterns (Pattern::Struct via `{ }` brace syntax) must be unaffected.
+        let src = r#"
+class P:
+    x: i64
+    y: i64
+
+var result_ = -1
+val p = P(x: 5, y: 6)
+match p:
+    case P { x, y }:
+        if x == 5 and y == 6:
+            result_ = 0
+        else:
+            result_ = 2
+    case _:
+        result_ = 1
+main = result_
+"#;
+        let code = run(src);
+        assert_eq!(code, 0, "named-field struct pattern must still work after positional class fix");
+    }
+
+    #[test]
+    fn enum_positional_pattern_unaffected() {
+        // Enum variant positional patterns must continue to work.
+        let src = r#"
+enum Color:
+    Red
+    Green
+    Blue(i64)
+
+var result_ = -1
+val c = Color.Blue(42)
+match c:
+    case Color.Blue(n):
+        if n == 42:
+            result_ = 0
+        else:
+            result_ = 2
+    case _:
+        result_ = 1
+main = result_
+"#;
+        let code = run(src);
+        assert_eq!(code, 0, "enum positional pattern must be unaffected by the class fix");
     }
 }

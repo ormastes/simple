@@ -120,7 +120,7 @@ pub(super) fn exec_if(
     if let Some(pattern) = &if_stmt.let_pattern {
         let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
         let mut bindings = HashMap::new();
-        if pattern_matches(pattern, &value, &mut bindings, enums)? {
+        if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
             // Pattern matched - add bindings and execute then block
             for (name, val) in bindings {
                 env.insert(name, val);
@@ -156,7 +156,7 @@ pub(super) fn exec_if(
             // elif val PATTERN = EXPR: pattern binding
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
-            if pattern_matches(pattern, &value, &mut bindings, enums)? {
+            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
                 for (name, val) in bindings {
                     env.insert(name, val);
                 }
@@ -243,7 +243,7 @@ pub(super) fn exec_while(
             check_timeout!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
-            if !pattern_matches(pattern, &value, &mut bindings, enums)? {
+            if !pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
                 break;
             }
             // Pattern matched - add bindings and execute body
@@ -4583,7 +4583,7 @@ fn exec_match_core(
 
     for (arm_index, arm) in match_stmt.arms.iter().enumerate() {
         let mut bindings = HashMap::new();
-        if pattern_matches(&arm.pattern, &subject, &mut bindings, enums)? {
+        if pattern_matches(&arm.pattern, &subject, &mut bindings, enums, classes)? {
             if let Some(guard) = &arm.guard {
                 let mut guard_env = env.clone();
                 for (name, value) in &bindings {
@@ -4649,7 +4649,7 @@ pub(crate) fn exec_if_expr(
     if let Some(pattern) = &if_stmt.let_pattern {
         let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
         let mut bindings = HashMap::new();
-        if pattern_matches(pattern, &value, &mut bindings, enums)? {
+        if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
             // Pattern matched - add bindings and execute then block
             for (name, val) in bindings {
                 env.insert(name, val);
@@ -4689,7 +4689,7 @@ pub(crate) fn exec_if_expr(
         if let Some(pattern) = pattern {
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
-            if pattern_matches(pattern, &value, &mut bindings, enums)? {
+            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
                 for (name, val) in bindings {
                     env.insert(name, val);
                 }
