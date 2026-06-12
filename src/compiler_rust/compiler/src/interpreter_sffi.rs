@@ -615,7 +615,7 @@ unsafe extern "C" fn interp_call_handler(
             // Extern declarations routed through InterpCall by the hybrid
             // transform (e.g. JIT-unresolvable rt_torch_* in torch-less
             // builds) dispatch to the interpreter's extern handlers.
-            crate::interpreter_extern::call_extern_function_with_values(
+            crate::interpreter::interpreter_extern::call_extern_function_with_values(
                 name, &args, env, funcs, classes, enums, impl_methods,
             )
         } else {
