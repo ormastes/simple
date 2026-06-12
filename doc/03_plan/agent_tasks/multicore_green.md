@@ -40,8 +40,9 @@ Date: 2026-06-06
   as `val callbacks = [\: 7]`, the function-value loop-return path, the direct
   by-value struct-array runtime shape, and the stale helper-side array-literal
   hybrid fallback are now fixed on rebuilt debug binaries. The active
-  current-source hosted native blocker remains the resumable-stepper probe
-  itself, which still crashes with `EXIT=139`. The
+  current-source hosted native blocker is now narrower than the scheduler
+  itself: post-join string work before returning a local result array still
+  crashes with `EXIT=139`. The
   checked-in release binary remains tracked as stale evidence in
   `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 

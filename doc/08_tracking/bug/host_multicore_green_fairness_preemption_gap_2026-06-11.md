@@ -34,17 +34,19 @@ Current hosted multicore-green evidence does not yet prove:
 - long-running CPU work is preempted or yield-forced with a host-side contract
 - host fairness semantics comparable to Go's scheduler under sustained loop load
 
-Current best explicit host-fairness experiment now also has executable blocker
-coverage:
+Current best explicit host-fairness experiment now has executable native
+regression coverage:
 
-- `test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl`
+- `test/03_system/feature/usage/multicore_green_resumable_stepper_native_regression_spec.spl`
   writes a generated resumable-stepper probe that:
   - uses the existing hosted `multicore_green` worker pool
   - keeps work items scalar by queueing only callback ids and indexes
-  - still crashes in the hosted native binary before returning the first
-    completion
+  - returns `result=7` with `EXIT=0` in the hosted native binary
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
-  is the narrowed blocker record for that path
+  is now the closed historical blocker record for that path
+- `doc/08_tracking/bug/multicore_green_post_join_array_return_native_blocker_2026-06-12.md`
+  records the remaining narrower native crash after joining a worker and doing
+  extra post-join string work before returning a local result array
 
 Current hosted blocking-compensation evidence now includes:
 
@@ -86,9 +88,12 @@ Related active host-side blocker:
   captured-closure/state path for repeated pool-task requeue still ends in
   `exit=139`, so explicit sliced-task support is not ready to claim yet.
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
-  records the newer callback-id resumable-stepper prototype. That path removes
-  function-valued queue items, but a single completed stepper still segfaults
-  in the debug-seed hosted native path with `EXIT=139`.
+  records the newer callback-id resumable-stepper prototype as closed. That
+  path removes function-valued queue items and now returns `result=7` with
+  `EXIT=0` in the debug-seed hosted native path.
+- `doc/08_tracking/bug/multicore_green_post_join_array_return_native_blocker_2026-06-12.md`
+  records the remaining post-join array-return continuation crash with
+  `EXIT=139`.
 - `doc/08_tracking/bug/native_struct_array_runtime_blocker_2026-06-11.md`
   now records the closed smaller hosted-native blocker that used to sit beneath
   that stepper path: a direct native array of a by-value struct is green again

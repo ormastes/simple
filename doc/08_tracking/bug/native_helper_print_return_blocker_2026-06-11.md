@@ -69,11 +69,13 @@ That seed bug is now fixed by narrowing the compilability fallback:
 - static-string `println(...)` helpers stay on the native path
 - helper return values after built-in `println` are correct again
 
-The hosted fairness experiment must still be rerun above that fix. The current
-remaining lower hosted blocker is again the helper handle-array return path.
+The hosted fairness experiment has since been rerun above that fix. The
+callback-id resumable-stepper path is green; the remaining lower hosted blocker
+is the post-join array-return continuation path.
 
 ## Executable Evidence
 
 - `test/03_system/feature/usage/native_helper_print_return_blocker_spec.spl`
 - `test/03_system/feature/usage/multicore_green_helper_handles_return_native_blocker_spec.spl`
-- `test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl`
+- `test/03_system/feature/usage/multicore_green_resumable_stepper_native_regression_spec.spl`
+- `test/03_system/feature/usage/multicore_green_post_join_array_return_native_blocker_spec.spl`
