@@ -26,7 +26,16 @@ Build an HTML-based UI toolchain: a `ui-edit` CLI that creates/updates HTML + on
 - Rendering-pipeline changes (web_render lane is reused, not modified).
 
 ## Phase
-dev-done
+done
 
 ## Log
 - dev: Created state file with 9 acceptance criteria (type: feature)
+- research (haiku+sonnet, parallel): theme candidates (Sakura recommended) + SMF internals (min SMF 179 B, lane wiring) -> doc/01_research/ui/html_ui/
+- design (fable): doc/05_design/ui/html_ui/html_ui_toolchain.md; P1 resolved (real SMF parts feasible)
+- impl wave 2 (sonnet+haiku x3, parallel): core lib src/lib/common/ui/html_ui/ (6 modules), theme_html assets (47 styled elements / 49-tag showcase), guide skeleton
+- impl wave 3 (sonnet x3, parallel): ui_edit CLI, ui_build CLI (+interpreter-safe base64; std base64 str.bytes bug doc), dynSMF lane ui_html entry (7/7 plans, 219 B SMF)
+- review (fable): fixed pair.spl interpreter I/O (io_runtime), aligned integration spec to 7 manifest entries, bug doc app_root_run_path_passed_as_option
+- harden wave 4 (sonnet x3, parallel): stub-SMF detection + content-level payload verify + --strict (bug doc emit_smf_stub_drops_module_content), 2 integration specs (6/0, 5/0), guide finalized (244 lines, verified syntax, 51-entry catalog table)
+- final gate (fable): 13/13 simple check OK; specs re-run green; verify oracle PASS on theme (OK payload 7173 bytes decoded)
+- recovery (fable): parallel-session jj reconcile clobbered this closeout + deleted ui_build_cli_spec.spl from worktree; restored from 857f5a30951, re-validated 5/0
+- ACs: AC-1..9 met. Caveats recorded as bugs: compiled SMF artifacts are 219 B stubs repo-wide (payload lives in gen module; verify checks content there; --strict fails stubs); interpreter exit codes unreliable (PASS/FAIL stdout authoritative)
