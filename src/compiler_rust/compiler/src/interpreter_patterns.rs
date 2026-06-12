@@ -10,7 +10,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 
-use super::{Classes, Enums, BLOCK_SCOPED_ENUMS};
+use super::{Enums, BLOCK_SCOPED_ENUMS};
 
 /// Check if a pattern is a catch-all that covers any value.
 pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
@@ -29,7 +29,6 @@ pub(super) fn match_sequence_pattern(
     patterns: &[Pattern],
     bindings: &mut HashMap<String, Value>,
     enums: &Enums,
-    classes: &Classes,
     is_tuple: bool,
 ) -> Result<bool, CompileError> {
     let values: &[Value] = if is_tuple {
@@ -66,7 +65,7 @@ pub(super) fn match_sequence_pattern(
 
         // Match patterns before rest
         for (pat, val) in before_rest.iter().zip(values.iter()) {
-            if !pattern_matches(pat, val, bindings, enums, classes)? {
+            if !pattern_matches(pat, val, bindings, enums)? {
                 return Ok(false);
             }
         }
@@ -74,7 +73,7 @@ pub(super) fn match_sequence_pattern(
         // Match patterns after rest (from the end)
         for (i, pat) in after_rest.iter().enumerate() {
             let val_idx = values.len() - after_rest.len() + i;
-            if !pattern_matches(pat, &values[val_idx], bindings, enums, classes)? {
+            if !pattern_matches(pat, &values[val_idx], bindings, enums)? {
                 return Ok(false);
             }
         }
@@ -101,7 +100,7 @@ pub(super) fn match_sequence_pattern(
         }
 
         for (pat, val) in patterns.iter().zip(values.iter()) {
-            if !pattern_matches(pat, val, bindings, enums, classes)? {
+            if !pattern_matches(pat, val, bindings, enums)? {
                 return Ok(false);
             }
         }
@@ -115,7 +114,6 @@ pub(crate) fn pattern_matches(
     value: &Value,
     bindings: &mut HashMap<String, Value>,
     enums: &Enums,
-    classes: &Classes,
 ) -> Result<bool, CompileError> {
     match pattern {
         Pattern::Wildcard => Ok(true),
@@ -260,7 +258,7 @@ pub(crate) fn pattern_matches(
                     if let (Some(patterns), Some(vp)) = (payload, value_payload) {
                         if patterns.len() == 1 {
                             // Single payload - match directly
-                            if pattern_matches(&patterns[0], vp.as_ref(), bindings, enums, classes)? {
+                            if pattern_matches(&patterns[0], vp.as_ref(), bindings, enums)? {
                                 return Ok(true);
                             }
                         } else {
@@ -269,7 +267,7 @@ pub(crate) fn pattern_matches(
                                 if patterns.len() == values.len() {
                                     let mut all_match = true;
                                     for (pat, val) in patterns.iter().zip(values.iter()) {
-                                        if !pattern_matches(pat, val, bindings, enums, classes)? {
+                                        if !pattern_matches(pat, val, bindings, enums)? {
                                             all_match = false;
                                             break;
                                         }
@@ -287,64 +285,11 @@ pub(crate) fn pattern_matches(
                     }
                 }
             }
-
-            // Positional class/struct pattern: `case ClassName(a, b, c)` where the value is
-            // a class instance (`Value::Object`).  The parser emits this as
-            // `Pattern::Enum { name: "_", variant: "ClassName", payload: Some([…]) }` because
-            // it cannot distinguish enum variants from class names at parse time.
-            //
-            // When `name == "_"` (user-defined, unresolved) and `variant` matches the object's
-            // class name, bind the payload patterns to the class fields in declaration order.
-            // This is the correct semantics: positional patterns follow the field order in the
-            // class definition.
-            if let Value::Object { class, fields: obj_fields } = value {
-                let name_matches = enum_name == "_"
-                    || enum_name == class
-                    || matches!(enum_name.as_str(), "Option" | "Result");
-                if name_matches && variant == class {
-                    match payload {
-                        None => {
-                            // Unit pattern `case Foo:` — matches any instance of Foo
-                            return Ok(true);
-                        }
-                        Some(patterns) => {
-                            // Positional: look up field order from ClassDef
-                            if let Some(class_def) = classes.get(class.as_str()) {
-                                let field_names: Vec<&str> =
-                                    class_def.fields.iter().map(|f| f.name.as_str()).collect();
-                                if patterns.len() != field_names.len() {
-                                    // Arity mismatch — clean failure (not an error, just no-match)
-                                    return Ok(false);
-                                }
-                                let mut temp_bindings = HashMap::new();
-                                let mut all_match = true;
-                                for (pat, field_name) in patterns.iter().zip(field_names.iter()) {
-                                    if let Some(field_val) = obj_fields.get(*field_name) {
-                                        if !pattern_matches(pat, field_val, &mut temp_bindings, enums, classes)? {
-                                            all_match = false;
-                                            break;
-                                        }
-                                    } else {
-                                        all_match = false;
-                                        break;
-                                    }
-                                }
-                                if all_match {
-                                    bindings.extend(temp_bindings);
-                                    return Ok(true);
-                                }
-                            }
-                            // ClassDef not found — fall through to Ok(false)
-                        }
-                    }
-                }
-            }
-
             Ok(false)
         }
 
-        Pattern::Tuple(patterns) => match_sequence_pattern(value, patterns, bindings, enums, classes, true),
-        Pattern::Array(patterns) => match_sequence_pattern(value, patterns, bindings, enums, classes, false),
+        Pattern::Tuple(patterns) => match_sequence_pattern(value, patterns, bindings, enums, true),
+        Pattern::Array(patterns) => match_sequence_pattern(value, patterns, bindings, enums, false),
 
         Pattern::Struct { name, fields } => {
             if let Value::Object {
@@ -361,7 +306,7 @@ pub(crate) fn pattern_matches(
                     }
                     for (field_name, field_pat) in fields {
                         if let Some(field_val) = obj_fields.get(field_name) {
-                            if !pattern_matches(field_pat, field_val, bindings, enums, classes)? {
+                            if !pattern_matches(field_pat, field_val, bindings, enums)? {
                                 return Ok(false);
                             }
                         } else {
@@ -377,7 +322,7 @@ pub(crate) fn pattern_matches(
         Pattern::Or(patterns) => {
             for pat in patterns {
                 let mut temp_bindings = HashMap::new();
-                if pattern_matches(pat, value, &mut temp_bindings, enums, classes)? {
+                if pattern_matches(pat, value, &mut temp_bindings, enums)? {
                     bindings.extend(temp_bindings);
                     return Ok(true);
                 }
@@ -399,7 +344,7 @@ pub(crate) fn pattern_matches(
             };
 
             if type_matches {
-                pattern_matches(pattern, value, bindings, enums, classes)
+                pattern_matches(pattern, value, bindings, enums)
             } else {
                 Ok(false)
             }

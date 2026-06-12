@@ -126,35 +126,40 @@ fn _peek32_dirent(buf: [u8], offset: i32) -> u32:
 fn _peek16_dirent(buf: [u8], offset: i32) -> u32:
     (buf[offset + 1].to_u32() << 8u32) | buf[offset].to_u32()
 
-# Build a 512-byte root-dir sector with a single 8.3 entry for "TEST    TXT"
-# at byte offset 0.  first_cluster=0, file_size=0 (file not written yet).
-# Entry layout (32 bytes at offset 0):
-#   [0..7]  = "TEST    " (8.3 base, space-padded)
-#   [8..10] = "TXT"
-#   [11]    = 0x20 (ATTR_ARCHIVE)
-#   [20..21] = cluster_high = 0x0000
-#   [26..27] = cluster_low  = 0x0000
-#   [28..31] = file_size    = 0x00000000
-#   [32]    = 0x00 (end-of-directory sentinel)
+# Build a 512-byte root-dir sector with one deleted entry at offset 0 (0xE5)
+# and the real "TEST    TXT" entry at offset 32 (second slot).
+# Placing the real entry at offset 32 ensures _find_root_entry returns Ok(32),
+# which is non-zero — avoiding the interpreter nil/0 ambiguity for i32? Optional.
+# Entry at offset 32:
+#   [32..39]  = "TEST    " (8.3 base, space-padded)
+#   [40..42]  = "TXT"
+#   [43]      = 0x20 (ATTR_ARCHIVE)
+#   [52..53]  = cluster_high = 0x0000
+#   [58..59]  = cluster_low  = 0x0000
+#   [60..63]  = file_size    = 0x00000000
+#   [64]      = 0x00 (end-of-directory sentinel)
+# After write with cluster 2 and 3 bytes: dirent_offset = 32 % 512 = 32.
 fn _make_root_dir_with_test_txt() -> [u8]:
     var sec = _zero_sector()
-    # "TEST    " = 0x54 0x45 0x53 0x54 0x20 0x20 0x20 0x20
-    sec[0] = 0x54u8   # T
-    sec[1] = 0x45u8   # E
-    sec[2] = 0x53u8   # S
-    sec[3] = 0x54u8   # T
-    sec[4] = 0x20u8   # space
-    sec[5] = 0x20u8   # space
-    sec[6] = 0x20u8   # space
-    sec[7] = 0x20u8   # space
+    # Slot 0: deleted entry (0xE5 first byte) — skipped by _find_root_entry
+    sec[0] = 0xE5u8
+    # Slot 1 (offset 32): "TEST    TXT" real entry
+    sec[32] = 0x54u8   # T
+    sec[33] = 0x45u8   # E
+    sec[34] = 0x53u8   # S
+    sec[35] = 0x54u8   # T
+    sec[36] = 0x20u8   # space
+    sec[37] = 0x20u8   # space
+    sec[38] = 0x20u8   # space
+    sec[39] = 0x20u8   # space
     # "TXT"
-    sec[8]  = 0x54u8  # T
-    sec[9]  = 0x58u8  # X
-    sec[10] = 0x54u8  # T
+    sec[40] = 0x54u8   # T
+    sec[41] = 0x58u8   # X
+    sec[42] = 0x54u8   # T
     # attr = ARCHIVE
-    sec[11] = 0x20u8
-    # cluster_high, cluster_low, file_size all zero already (from _zero_sector)
-    # Byte 32: end-of-directory marker (already 0x00 from zero_sector)
+    sec[43] = 0x20u8
+    # cluster_high, cluster_low, file_size all zero (from _zero_sector)
+    # Byte 64: end-of-directory marker (already 0x00 from zero_sector)
     sec
 
 # FAT entry helpers
@@ -184,21 +189,22 @@ describe "fat32 dirent persistence — wave-4e":
 
     describe "open() records dirent location":
 
-        it "dirent_sector equals root-dir LBA (64) for entry at offset 0":
+        it "dirent_sector equals root-dir LBA (64) for entry at byte 32":
             val root_dir = _make_root_dir_with_test_txt()
             val fs = _make_fs_with_rootdir(root_dir)
             val h_result = fs.open("/TEST.TXT")
             assert_true(h_result.is_ok())
             val h = h_result.unwrap()
+            # Entry is in the root-dir sector (LBA 64); offset 32 < 512 so same sector.
             expect(h.dirent_sector).to_equal(64u64)
 
-        it "dirent_offset equals 0 for the first directory entry":
+        it "dirent_offset equals 32 for the second directory slot":
             val root_dir = _make_root_dir_with_test_txt()
             val fs = _make_fs_with_rootdir(root_dir)
             val h_result = fs.open("/TEST.TXT")
             assert_true(h_result.is_ok())
             val h = h_result.unwrap()
-            expect(h.dirent_offset).to_equal(0)
+            expect(h.dirent_offset).to_equal(32)
 
     describe "write() persists first_cluster and file_size to on-disk dirent":
 
@@ -221,9 +227,10 @@ describe "fat32 dirent persistence — wave-4e":
             val h1 = w_result.unwrap()
             # allocate_cluster always picks cluster 2 from a fresh FAT.
             expect(h1.start_cluster).to_equal(2u32)
-            # Re-read root-dir sector from device; first_cluster_low at +26..+27.
+            # Re-read root-dir sector from device; entry at dirent_offset=32,
+            # so first_cluster_low is at sector byte 32+26=58.
             val dirent_sec = dev.get_sector(_root_dir_lba())
-            val cl_low = _peek16_dirent(dirent_sec, 26)
+            val cl_low = _peek16_dirent(dirent_sec, 58)
             expect(cl_low).to_equal(2u32)
 
         it "after write, dirent first_cluster_high bytes are zero for cluster < 65536":
@@ -239,8 +246,9 @@ describe "fat32 dirent persistence — wave-4e":
             buf.push(0x01u8)
             val w_result = fs.write(dev, h0, buf)
             assert_true(w_result.is_ok())
+            # entry at dirent_offset=32, cluster_high at 32+20=52
             val dirent_sec = dev.get_sector(_root_dir_lba())
-            val cl_high = _peek16_dirent(dirent_sec, 20)
+            val cl_high = _peek16_dirent(dirent_sec, 52)
             expect(cl_high).to_equal(0u32)
 
         it "after write, dirent file_size bytes equal bytes written":
@@ -259,8 +267,9 @@ describe "fat32 dirent persistence — wave-4e":
             buf.push(0x44u8)
             val w_result = fs.write(dev, h0, buf)
             assert_true(w_result.is_ok())
+            # entry at dirent_offset=32, file_size at 32+28=60
             val dirent_sec = dev.get_sector(_root_dir_lba())
-            val fsz = _peek32_dirent(dirent_sec, 28)
+            val fsz = _peek32_dirent(dirent_sec, 60)
             expect(fsz).to_equal(4u32)
 
     describe "root_dir_data cache coherence after write":
