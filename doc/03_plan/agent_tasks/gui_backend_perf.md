@@ -334,6 +334,10 @@ Updated: 2026-06-11
   Greedy text wrapping, paint-run projection, and SDN diagnostics now fill
   word/line-count-sized arrays instead of grow-copying line, run, and entry
   arrays in the corpus text layout path.
+- this commit -- Engine2D emulation allocation tightening:
+  Text drawing now reuses the string length in the glyph loop, and polygon
+  scanline fill reuses a count-sized intersection buffer instead of grow-copying
+  node lists on every row.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
