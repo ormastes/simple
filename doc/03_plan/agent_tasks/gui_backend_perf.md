@@ -363,6 +363,9 @@ Updated: 2026-06-11
 - this commit -- Engine2D emulation sort length hoisting:
   The shared emulation math insertion sort now reuses the stable array length
   instead of dispatching `.len()` on every outer-loop iteration.
+- this commit -- Browser renderer scene-color scan length hoisting:
+  Browser render scene-color detection now reuses the rendered pixel count while
+  scanning for the first non-white pixel in the pure Simple HTML startup path.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
