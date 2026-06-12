@@ -4,7 +4,7 @@
 # type inference support, and expression-level control flow.
 # Extracted from parser.spl.
 
-use compiler.core.tokens.{tok_kind_name}
+use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_INT_LIT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_IDENT}
 use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR}
@@ -32,7 +32,7 @@ use compiler.core.tokens.{TOK_KW_BIND, TOK_KW_RECEIVE, TOK_KW_AFTER}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
-use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit}
+use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_unit, expr_block}
@@ -350,6 +350,8 @@ fn parse_statement() -> i64:
 
     # Expression statement (including assignment and walrus)
     # Note: Walrus operator handled inline during expression parsing
+    # G31: tuple assignment (a, b) = expr is handled naturally:
+    #   G29 makes (a, b) a tuple expr; parse_assignment sees = and builds expr_assign.
     val expression = parse_expr()
     stmt_expr_stmt(expression, 0)
 
@@ -363,12 +365,19 @@ fn parse_val_decl_stmt() -> i64:
         return parse_tuple_destructure_val()
 
     # G23: discard binding `val _ = expr` (`_` is kind 169, not Ident)
+    # G26: accept keyword tokens as binding names (e.g. val after = ...)
     var name = par_text_get()
     if par_kind_get() == 169:
         name = "_"
         parser_advance()
     else:
-        parser_expect(6)
+        val vd_kw_name = tok_kind_name(par_kind_get())
+        val vd_is_kw = keyword_lookup(vd_kw_name) == par_kind_get()
+        if vd_is_kw:
+            name = vd_kw_name
+            parser_advance()
+        else:
+            parser_expect(6)
 
     # Optional type annotation: val x: i64 = ...
     var type_tag = 0
@@ -411,12 +420,19 @@ fn parse_var_decl_stmt() -> i64:
         return parse_tuple_destructure_var()
 
     # G23: discard binding `var _ = expr` (`_` is kind 169, not Ident)
+    # G26: accept keyword tokens as binding names (e.g. var after = ...)
     var name = par_text_get()
     if par_kind_get() == 169:
         name = "_"
         parser_advance()
     else:
-        parser_expect(6)
+        val vr_kw_name = tok_kind_name(par_kind_get())
+        val vr_is_kw = keyword_lookup(vr_kw_name) == par_kind_get()
+        if vr_is_kw:
+            name = vr_kw_name
+            parser_advance()
+        else:
+            parser_expect(6)
 
     var type_tag = 0
     if par_kind_get() == 161:
@@ -666,9 +682,16 @@ fn parse_match_stmt() -> i64:
                 pattern_binding = par_text_get()
                 parser_expect(6)
 
-            # Expect colon after pattern
-            parser_expect(161)
-            val arm_body = parse_block()
+            # G28: accept `=>` (kind 168) as arm separator for single-expr arms
+            var arm_body: [i64] = []
+            if par_kind_get() == 168:
+                parser_advance()
+                val arrow_expr = parse_expr()
+                arm_body.push(arrow_expr)
+            else:
+                # Expect colon after pattern
+                parser_expect(161)
+                arm_body = parse_block()
 
             # Create arm
             for i in 0..patterns.len():
@@ -800,12 +823,21 @@ fn parse_tuple_destructure_val() -> i64:
     # The evaluator detects the "(" prefix and destructures
     parser_advance()  # consume (
     var joined = "("
-    joined = joined + par_text_get()
-    parser_expect(6)
+    # G30: accept _ (kind 169) as element name
+    if par_kind_get() == 169:
+        joined = joined + "_"
+        parser_advance()
+    else:
+        joined = joined + par_text_get()
+        parser_expect(6)
     while par_kind_get() == 160:
         parser_advance()  # consume ,
-        joined = joined + "," + par_text_get()
-        parser_expect(6)
+        if par_kind_get() == 169:
+            joined = joined + ",_"
+            parser_advance()
+        else:
+            joined = joined + "," + par_text_get()
+            parser_expect(6)
     parser_expect(141)
     joined = joined + ")"
     parser_expect(100)
@@ -818,12 +850,21 @@ fn parse_tuple_destructure_var() -> i64:
     # The evaluator detects the "(" prefix and destructures
     parser_advance()  # consume (
     var joined = "("
-    joined = joined + par_text_get()
-    parser_expect(6)
+    # G30: accept _ (kind 169) as element name
+    if par_kind_get() == 169:
+        joined = joined + "_"
+        parser_advance()
+    else:
+        joined = joined + par_text_get()
+        parser_expect(6)
     while par_kind_get() == 160:
         parser_advance()  # consume ,
-        joined = joined + "," + par_text_get()
-        parser_expect(6)
+        if par_kind_get() == 169:
+            joined = joined + ",_"
+            parser_advance()
+        else:
+            joined = joined + "," + par_text_get()
+            parser_expect(6)
     parser_expect(141)
     joined = joined + ")"
     parser_expect(100)

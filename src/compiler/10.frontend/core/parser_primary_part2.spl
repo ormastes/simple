@@ -6,7 +6,7 @@ use compiler.frontend.core.parser_primary.*
 # - parse_primary: primary expression parsing (literals, identifiers, keywords, etc.)
 # - ASM parsing: asm match, asm assert, target spec parsing
 
-use compiler.core.tokens.{tok_kind_name}
+use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_INT_LIT, TOK_FLOAT_LIT, TOK_STRING_LIT}
 use compiler.core.tokens.{TOK_BOOL_LIT, TOK_NIL_LIT, TOK_IDENT}
 use compiler.core.tokens.{TOK_KW_IF, TOK_KW_MATCH, TOK_KW_CASE}
@@ -33,7 +33,7 @@ use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_IF, TOK_KW_IN}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use compiler.core.ast.{expr_unary, expr_call, expr_array_lit, expr_method_call, expr_lambda}
-use compiler.core.ast.{expr_block}
+use compiler.core.ast.{expr_block, expr_tuple}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_dict_lit}
@@ -356,6 +356,17 @@ fn parse_primary_expr() -> i64:
             parser_advance()
             return expr_unit(0)
         val inner = parse_expr()
+        # G29: tuple literal — (e1, e2, ...)
+        if par_kind_get() == 160:
+            var tup_elems: [i64] = []
+            tup_elems.push(inner)
+            while par_kind_get() == 160:
+                parser_advance()
+                if par_kind_get() == 141:
+                    break
+                tup_elems.push(parse_expr())
+            parser_expect(141)
+            return expr_tuple(tup_elems, 0)
         parser_expect(141)
         return inner
 
@@ -718,6 +729,13 @@ fn parse_primary_expr() -> i64:
         parser_expect(161)
         val loop_body_stmts = parse_block()
         return expr_block(loop_body_stmts, -1, 0)
+
+    # G26: keyword used as identifier expression (e.g. `after.len()`)
+    val pe_kw_name = tok_kind_name(par_kind_get())
+    val pe_is_kw = keyword_lookup(pe_kw_name) == par_kind_get()
+    if pe_is_kw:
+        parser_advance()
+        return expr_ident(pe_kw_name, 0)
 
     parser_error("unexpected token in expression: " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'")
     parser_advance()

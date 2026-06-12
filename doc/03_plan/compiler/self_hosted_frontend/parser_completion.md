@@ -353,6 +353,26 @@ WATCH (M12): shifts are encoded as expr_binary(82/83) — same op codes as
 `<`/`>` — and flat_ast_bridge_part1.spl:247 flattens ALL binary ops to
 BinOp.Add anyway. Op fidelity is part of M12 flat-bridge hardening.
 
+### M11e — G25–G31: keyword members, trailing-op continuation, match arrows, tuples — DONE 2026-06-12
+
+Batch from the 40-min docker check on the M11c binary (855 errors, 14 prelude
+files) — all seven verified as lean-only failures (seed compiles these files
+daily), fixed by Sonnet agent (local commit 026ea542ad4), orchestrator
+round-2 verified via tmp/site12/m11e_probe.spl + full battery:
+- **G25** `.new`/keyword member names after `.` (parse_postfix sites)
+- **G26** keywords as binding names (`val after = …`) + expr-primary ident
+  fallback rescue before the final error branch
+- **G27** trailing-binary-operator line continuation (lexer newline
+  suppression when last token is binop/comma)
+- **G28** match arrow arms `pattern => expr` (kind 168)
+- **G29** tuple literals `( a, b, … )` in paren-expr (expr_tuple)
+- **G30** `_` elements in tuple destructure
+- **G31** tuple assignment `(a, b) = expr` — free via G29 + expr_assign path
+Also recorded: doc/08_tracking/bug/interp_state_corruption_parse_module_2026-06-12.md
+(P2 seed-interpreter bug — for-in frames and pre-parse fs writes corrupt the
+interpreted parser's hex-literal conversion; sweep harnesses use index-while +
+no interleaved writes + straight-line generated chunks as workarounds).
+
 ### M11 — SIGSEGV / rc=139 crashes (29 files) — IN PROGRESS 2026-06-12 (re-sweep first)
 
 Approach revised: the 29 crash files' first-error signatures in the 2026-06-11
