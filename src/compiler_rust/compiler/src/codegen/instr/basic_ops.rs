@@ -136,8 +136,23 @@ pub fn compile_cast<M: Module>(
             }
         }
     } else if is_from_float && !is_to_float {
-        // Float to int conversion
-        let widened = if to_signed {
+        // Float to int conversion. The HIR `from` type can disagree with the
+        // actual cranelift value: call results arrive as plain ints in the
+        // tagged i64 ABI even when HIR typed the expression as float (e.g.
+        // `floor(x + 0.5)` mis-typed f32 — verifier rejected fcvt_to_sint on
+        // an i64 arg, 2026-06-12). Dispatch on the actual value type.
+        let src_ty = builder.func.dfg.value_type(src_val);
+        let widened = if src_ty.is_int() {
+            if src_ty.bits() < 64 {
+                if to_signed {
+                    builder.ins().sextend(types::I64, src_val)
+                } else {
+                    builder.ins().uextend(types::I64, src_val)
+                }
+            } else {
+                src_val
+            }
+        } else if to_signed {
             builder.ins().fcvt_to_sint(types::I64, src_val)
         } else {
             builder.ins().fcvt_to_uint(types::I64, src_val)
