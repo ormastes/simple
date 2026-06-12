@@ -148,6 +148,9 @@ See doc/03_plan/ui/graphics/engine/gpu_backend_parallel_agent_plan_2026-06-11.md
 - dxvk-native-d3d11: missing ()
 - vkd3d: missing ()
 - system-libvulkan: ready (/usr/lib/x86_64-linux-gnu/libvulkan.so.1)
+- dxvk-native-d3d11: missing ()
+- vkd3d: missing ()
+- system-libvulkan: ready (/usr/lib/x86_64-linux-gnu/libvulkan.so.1)
 
 ## Blockers
 - dxvk-meson-build: meson/ninja build of dxvk-native failed; structured-handle fallback active
