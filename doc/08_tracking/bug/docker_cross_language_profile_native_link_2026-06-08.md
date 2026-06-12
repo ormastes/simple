@@ -1,20 +1,25 @@
 # Docker Cross-Language Profile Native Link Blocker
 
-Status: Partially fixed. Release-wrapper profile runs now pass in Docker, but the debug
+Status: Partially fixed.
 
 ## Status
 
-Partially fixed. Release-wrapper profile runs now pass in Docker, but the debug
-compiler path `src/compiler_rust/target/debug/simple` still reproduces the
-native linker failure inside the container.
+Partially fixed. Rebuilt release-wrapper profile runs have passed in Docker, but
+the debug compiler path `src/compiler_rust/target/debug/simple` still
+reproduces the native linker failure inside the container. The checked-in
+`bin/release/simple` wrapper is currently a separate stale-artifact blocker and
+must not be treated as equivalent to a freshly rebuilt release wrapper.
 
 ## Summary
 
 `PROFILE_DOCKER_ISOLATION=1` with `simple-cross-language-perf:latest` runs the
 existing cross-language profile script in a separate Docker process with C and
-Go toolchains available. The release-wrapper compiler path now supports
-contract-gated Simple native rows inside the container, but the debug compiler
-path still fails during native linking.
+Go toolchains available. A freshly rebuilt release-wrapper compiler path
+supports contract-gated Simple native rows inside the container, but the debug
+compiler path still fails during native linking. The checked-in release wrapper
+currently points at a missing platform binary; that stale-wrapper state is
+tracked separately in
+`doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 
 ## Evidence
 
@@ -54,7 +59,8 @@ script: fresh smoke reports fall back to `compile failed` for Simple native
 rows, so the checked profile contract no longer matches the current harness.
 Release-wrapper selection still produces full contract-gated cross-language
 reports with positive Simple native `thread_spawn` and `multicore_green_spawn`
-rows.
+rows when the release wrapper has been rebuilt. The checked-in release wrapper
+is not authoritative until the stale release-binary blocker is closed.
 
 ## Release-Path Resolution Evidence
 
@@ -117,6 +123,9 @@ The same container run succeeds with:
 bin/release/simple compile build/cross_lang_perf/hello.spl --native -o /tmp/hello_native_in_docker_release
 ```
 
+That success requires a release wrapper whose platform binary exists in the
+mounted workspace.
+
 Contract-gated Docker evidence:
 
 ```sh
@@ -144,3 +153,40 @@ reported Go scheduler width does not match `CPU_WORKERS`. The large fanout
 stress rows showed Go `9.260ms`, Simple multicore green native `11.353ms` with
 `pool_used=1000/1000`, `parallelism=2/2`, and
 `queue_model=work_stealing`, and C pthreads `63.408ms`.
+
+## 2026-06-12 Checked-In Wrapper Smoke
+
+A quick Docker-isolated smoke of the same canonical profile script completed in
+a separate container process without crashing, but all Simple native and SMF
+rows reported `compile failed` because the checked-in release wrapper target is
+missing in this workspace. C and Go still compiled, proving the Docker image and
+profile harness path were usable.
+
+Command shape:
+
+```sh
+PROFILE_DOCKER_ISOLATION=1 SKIP_PROFILE_REPORT_CONTRACT=1 \
+REPORT_PATH=build/tmp/cross_language_perf_quick_docker_smoke.md \
+RUNS=1 WARM_IN_PROCESS=1 CPU_WORKERS=2 OS_THREAD_WORKERS=2 \
+COOPERATIVE_GREEN_WORKERS=2 MULTICORE_GREEN_WORKERS=2 \
+FANOUT_WORKERS=8 FANOUT_COOPERATIVE_GREEN_WORKERS=8 \
+FANOUT_MULTICORE_GREEN_WORKERS=8 FANOUT_ITERS=1 \
+FANOUT_STRESS_WORKERS=8 FANOUT_STRESS_ITERS=1 RUN_TIMEOUT=20 \
+PROFILE_DOCKER_CPUS=2 PROFILE_DOCKER_MEMORY=2g \
+sh scripts/check/check-cross-language-perf.shs
+```
+
+Focused failure:
+
+```text
+bin/release/simple: line 7: /workspace/bin/release/x86_64-unknown-linux-gnu/simple: No such file or directory
+```
+
+Interpretation:
+
+- This is not a new profile script or C/Go toolchain failure.
+- It is the checked-in release-wrapper stale-artifact state tracked by
+  `multicore_green_release_binary_stale_2026-06-11.md`.
+- Contract-gated M:N evidence must continue to cite the checked-in
+  `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+  or a fresh report generated with a rebuilt release wrapper.
