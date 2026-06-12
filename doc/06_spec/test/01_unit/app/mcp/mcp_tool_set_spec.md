@@ -28,7 +28,7 @@ mcp_tool_set_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -269,12 +269,77 @@ expect(count).to_equal(151)
 
 </details>
 
+### MCP tool-set — argv selection plumbing
+
+#### --tool-set=core switches the active set
+
+-  mcp init tool set
+   - Expected: _mcp_get_tool_set() equals `core`
+-  mcp init tool set
+   - Expected: _mcp_get_tool_set() equals `all`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = ["--tool-set=core"]
+_mcp_init_tool_set(args)
+expect(_mcp_get_tool_set()).to_equal("core")
+val back = ["--tool-set=all"]
+_mcp_init_tool_set(back)
+expect(_mcp_get_tool_set()).to_equal("all")
+```
+
+</details>
+
+#### invalid tool-set value is ignored (stays all)
+
+-  mcp init tool set
+   - Expected: _mcp_get_tool_set() equals `all`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = ["--tool-set=bogus"]
+_mcp_init_tool_set(args)
+expect(_mcp_get_tool_set()).to_equal("all")
+```
+
+</details>
+
+#### mcp_strip_tool_set_args removes only the flag
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = ["--tool-set=core", "--probe", "x"]
+val stripped = mcp_strip_tool_set_args(args)
+expect(stripped.len()).to_equal(2)
+expect(stripped[0]).to_equal("--probe")
+expect(stripped[1]).to_equal("x")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

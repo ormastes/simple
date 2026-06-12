@@ -28,7 +28,7 @@ mcp_sdk_json_builder_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -390,6 +390,61 @@ expect(r.contains("something went wrong")).to_equal(true)
 
 </details>
 
+### JSON-RPC builders (mcp_sdk.core.jsonrpc, rewritten)
+
+#### jsonrpc_request builds the exact envelope
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r = jsonrpc_request("7", "tools/list", "42")
+val interior = "\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\",\"params\":42"
+expect(r.contains(interior)).to_equal(true)
+expect(r.len()).to_equal(interior.len() + 2)
+```
+
+</details>
+
+#### jsonrpc_notification builds the exact envelope
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r = jsonrpc_notification("initialized", "1")
+val interior = "\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":1"
+expect(r.contains(interior)).to_equal(true)
+expect(r.len()).to_equal(interior.len() + 2)
+```
+
+</details>
+
+#### jsonrpc_error_with_data nests the error object exactly
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val r = jsonrpc_error_with_data("3", -32600, "bad request", "9")
+val head_interior = "\"jsonrpc\":\"2.0\",\"id\":3,\"error\":"
+val err_interior = "\"code\":-32600,\"message\":\"bad request\",\"data\":9"
+expect(r.contains(head_interior)).to_equal(true)
+expect(r.contains(err_interior)).to_equal(true)
+expect(r.len()).to_equal(head_interior.len() + err_interior.len() + 4)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -407,13 +462,14 @@ Tests covering:
 - escape_json round-trips via js/extract_json_string
 - first_n_chars uses native substring
 - make_tool_result and make_tool_error JSON structure
+- JSON-RPC builders (mcp_sdk.core.jsonrpc, rewritten)
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
