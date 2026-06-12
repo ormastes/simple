@@ -1360,7 +1360,91 @@ fn flatten_at_blocks(css: text) -> text:
         pos = close + 1
     count
 
+fn _css_collect_custom_props(css: text) -> text:
+    # Collect --name: value pairs from :root { } blocks.
+    # Returns a compact string of "--name:value\n" entries.
+    val css_len = css.len()
+    var out = ""
+    var pos: i64 = 0
+    var guard = 0
+    while pos < css_len and guard < 200:
+        guard = guard + 1
+        val brace = find_from(css, "{", pos)
+        if brace < 0:
+            break
+        val sel_raw = css.substring(pos, brace)
+        val sel = sel_raw.trim()
+        val close = css_matching_close(css, brace)
+        if close < 0:
+            break
+        if sel == ":root":
+            val body = css.substring(brace + 1, close)
+            val body_len = body.len()
+            var bp: i64 = 0
+            var bg = 0
+            while bp < body_len and bg < 200:
+                bg = bg + 1
+                val dd = find_from(body, "--", bp)
+                if dd < 0:
+                    break
+                val colon = find_from(body, ":", dd)
+                if colon < 0:
+                    break
+                val semi = find_from(body, ";", colon)
+                val name = body.substring(dd, colon).trim()
+                var val_end = semi
+                if val_end < 0:
+                    val_end = body_len
+                val prop_val = body.substring(colon + 1, val_end).trim()
+                if name.len() > 2:
+                    out = out + name + ":" + prop_val + "\n"
+                bp = if semi >= 0: semi + 1 else: body_len
+        pos = close + 1
+    out
+
+fn _css_resolve_vars(css: text, props: text) -> text:
+    # Substitute var(--name) with value from props string.
+    if props.len() == 0 or css.index_of("var(") < 0:
+        return css
+    var out = css
+    val props_len = props.len()
+    var pp: i64 = 0
+    var pg = 0
+    while pp < props_len and pg < 200:
+        pg = pg + 1
+        val nl = find_from(props, "\n", pp)
+        var line_end = nl
+        if line_end < 0:
+            line_end = props_len
+        val line = props.substring(pp, line_end).trim()
+        val lc = line.index_of(":")
+        if lc > 0:
+            val prop_name = line.substring(0, lc).trim()
+            val prop_val = line.substring(lc + 1, line.len()).trim()
+            val var_token = "var(" + prop_name + ")"
+            out = out.replace(var_token, prop_val)
+        pp = if nl >= 0: nl + 1 else: props_len
+    out
+
 fn extract_css(html: text) -> Rules:
+    # First pass: collect CSS custom properties from all :root blocks
+    var custom_props = ""
+    var pre_pos = 0
+    var pre_guard = 0
+    while pre_guard < 100:
+        pre_guard = pre_guard + 1
+        val pre_sp = find_from(html, "<style", pre_pos)
+        if pre_sp < 0:
+            break
+        val pre_open = find_from(html, ">", pre_sp)
+        if pre_open < 0:
+            break
+        val pre_close = find_from(html, "</style", pre_open)
+        if pre_close < 0:
+            break
+        val pre_css = html.substring(pre_open + 1, pre_close)
+        custom_props = custom_props + _css_collect_custom_props(pre_css)
+        pre_pos = pre_close + 1
     val rule_count = count_css_rules(html)
     var group_parts: [[[text]]] = [[[]]; rule_count]
     var decls: [text] = [""; rule_count]
@@ -1378,7 +1462,8 @@ fn extract_css(html: text) -> Rules:
         val close = find_from(html, "</style", open)
         if close < 0:
             break
-        val css = html.substring(open + 1, close)
+        val css_raw = html.substring(open + 1, close)
+        val css = _css_resolve_vars(css_raw, custom_props)
         # split into "selector { decls }" chunks
         # @-wrapper blocks (@layer, @supports, @media) are skipped at the outer
         # brace level — their inner rules are parsed as if the wrapper were absent.

@@ -43,6 +43,15 @@ Execution of follow-up plan
   "dxvk-d3d11 device created leaf=dlopen". backend_directx_spec 18/18 on forced
   (uncached) re-run. vkd3d (d3d12) autotools build still fails — recorded as blocker
   in readiness state; D3D11 path (what the backend uses) is fully live.
+- 2026-06-12 Lane D2 (P5/AC-4) closed: browser_renderer_spec 98/0 (orchestrator
+  re-verified uncached). CSS nesting normalization fixed in html_string_parser
+  (`_norm_emit_rule` placeholder-template emit — works around brace-literal
+  scope-corruption interpreter bug, recorded as
+  doc/08_tracking/bug/interp_brace_literal_scope_corruption_2026-06-12.md with
+  minimal repro); CSS custom properties (`:root` `--name`/`var()`) wired into
+  extract_css; border spec expectations corrected to box-model-true positions
+  (verified against fixture CSS: outer #000000 at (4,4), header #003366 at
+  x=15, left #006600 at x=24).
 - 2026-06-12 P4 (AC-6) closed: bootstrap-from-scratch.sh --deploy completed;
   stage4 binary redeployed through the new gate (seed probe + post-swap smoke
   passed). `bin/simple run` verified picking up the nested-closure typed/tuple

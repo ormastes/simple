@@ -57,9 +57,13 @@ prefix build was deferred because the agent sandbox had no network.
 
 ### P5 — GUI rendering path residual (Agent D lane, AC-8)
 Bug doc: `doc/08_tracking/bug/browser_renderer_spec_sequence_failures_2026-06-11.md`
-- [ ] Fix depth-blind `normalize_child_combinators` for `:has(> ...)`.
-- [ ] Isolate cross-test renderer state; clear the residual 22 failures in
-      `browser_renderer_spec` (76 pass / 22 fail as of 2026-06-11).
+- [x] Fix depth-blind `normalize_child_combinators` for `:has(> ...)`.
+      (Landed via ab5558fa058 + restored candidate_count hoist f1ec5f27860.)
+- [x] Isolate cross-test renderer state; clear the residual failures in
+      `browser_renderer_spec`. (2026-06-12: 98 pass / 0 fail — CSS nesting,
+      custom properties, and border expectations fixed; brace-literal
+      interpreter bug recorded in
+      doc/08_tracking/bug/interp_brace_literal_scope_corruption_2026-06-12.md.)
 
 ### P6 — CUDA readback gap (pre-existing, same subsystem)
 Bug doc: `doc/08_tracking/bug/cuda_engine2d_mirror_only_readback_gap_2026-05-29.md`

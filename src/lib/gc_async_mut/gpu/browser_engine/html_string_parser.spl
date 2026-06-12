@@ -152,15 +152,22 @@ fn _remove_char(s: text, ch: text) -> text:
         i = i + 1
     out
 
-fn _norm_rule_open_brace(rule_body: text) -> text:
-    " { "
+fn _norm_emit_rule(xsel: text, xbody: text) -> text:
+    # Use replace to inject xbody to avoid interpreter + concatenation scope bug
+    var result = "XSELTOKEN OPENBRACE XBODYTOKEN CLOSEBRACE "
+    result = result.replace("XSELTOKEN", xsel)
+    result = result.replace("OPENBRACE", "{")
+    result = result.replace("XBODYTOKEN", xbody)
+    result = result.replace("CLOSEBRACE", "}")
+    result
 
-fn _norm_rule_close_brace(rule_body: text) -> text:
-    " } "
+fn _norm_amp_sel(parent: text, sel_tail: text) -> text:
+    if sel_tail.starts_with(".") or sel_tail.starts_with("#") or sel_tail.starts_with(":"):
+        parent + sel_tail
+    else:
+        parent + " " + sel_tail
 
 fn _normalize_one_rule(parent: text, rule_body: text) -> text:
-    val open_br = _norm_rule_open_brace(parent)
-    val close_br = _norm_rule_close_brace(parent)
     val body_len = rule_body.len()
     var base_decls = ""
     var nested = ""
@@ -168,41 +175,35 @@ fn _normalize_one_rule(parent: text, rule_body: text) -> text:
     var guard = 0
     while pos < body_len and guard < 100:
         guard = guard + 1
-        val next_amp = _find_from(rule_body, "&", pos)
+        var next_amp = _find_from(rule_body, "&", pos)
         if next_amp < 0:
-            val tail_raw = rule_body.substring(pos, body_len)
-            val tail_no_brace = _remove_char(tail_raw, "}")
-            val tail = tail_no_brace.trim()
+            var tail_raw = rule_body.substring(pos, body_len)
+            var tail_no_brace = _remove_char(tail_raw, "}")
+            var tail = tail_no_brace.trim()
             if tail.len() > 0:
                 base_decls = base_decls + " " + tail
             break
-        val before_raw = rule_body.substring(pos, next_amp)
-        val before = before_raw.trim()
+        var before_raw = rule_body.substring(pos, next_amp)
+        var before = before_raw.trim()
         if before.len() > 0:
             base_decls = base_decls + " " + before
-        val nested_open = _find_from(rule_body, "{", next_amp)
+        var nested_open = _find_from(rule_body, "{", next_amp)
         if nested_open < 0:
             break
-        val nested_close = _find_matching_close_brace(rule_body, nested_open)
+        var nested_close = _find_matching_close_brace(rule_body, nested_open)
         if nested_close < 0:
             break
         val sel_tail_raw = rule_body.substring(next_amp + 1, nested_open)
         val sel_tail = sel_tail_raw.trim()
         val decl_raw = rule_body.substring(nested_open + 1, nested_close)
-        val decl = decl_raw.trim()
-        var sep = " "
-        if sel_tail.starts_with(".") or sel_tail.starts_with("#") or sel_tail.starts_with(":"):
-            sep = ""
-        val rule_part = parent + sep + sel_tail + open_br + decl + close_br
-        nested = nested + rule_part
+        val decl_trimmed = decl_raw.trim()
+        val xsel = _norm_amp_sel(parent, sel_tail)
+        nested = nested + _norm_emit_rule(xsel, decl_trimmed)
         pos = nested_close + 1
     var out = ""
     if base_decls.len() > 0:
-        out = parent + open_br + base_decls + close_br
+        out = _norm_emit_rule(parent, base_decls.trim())
     out + nested
-
-fn _norm_find_close(css: text, brace: i64) -> i64:
-    _find_matching_close_brace(css, brace)
 
 fn _normalize_css_nesting(css: text) -> text:
     if css.index_of("&") < 0:
@@ -217,7 +218,7 @@ fn _normalize_css_nesting(css: text) -> text:
         if brace < 0:
             out = out + css.substring(pos, css_len)
             break
-        val close = _norm_find_close(css, brace)
+        val close = _find_matching_close_brace(css, brace)
         if close < 0:
             out = out + css.substring(pos, css_len)
             break
@@ -227,8 +228,6 @@ fn _normalize_css_nesting(css: text) -> text:
         if body.index_of("&") >= 0:
             out = out + _normalize_one_rule(sel, body)
         else:
-            val open_br = _norm_rule_open_brace(sel)
-            val close_br = _norm_rule_close_brace(sel)
-            out = out + sel + open_br + body + close_br
+            out = out + _norm_emit_rule(sel, body)
         pos = close + 1
     out
