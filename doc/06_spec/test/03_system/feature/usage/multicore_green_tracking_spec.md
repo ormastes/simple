@@ -314,7 +314,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -369,6 +369,7 @@ expect(row).to_contain("simple_multicore_parallelism_missing")
 expect(row).to_contain("hosted_sliced_fairness_section_missing")
 expect(row).to_contain("hosted_sliced_fairness_marker_corrupt")
 expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
+expect(row).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(row).to_contain("go_scheduler_width_mismatch")
 expect(row).to_contain("numbered_concurrency_alias")
 ```

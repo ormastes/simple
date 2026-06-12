@@ -123,8 +123,8 @@ Failed: 0
 - Multicore green rows must contain `parallelism=` evidence.
 - Multicore green rows must contain `pool_used=` evidence before being used as
   M:N evidence.
-- Multicore green rows must contain exactly the work-stealing queue model in
-  the generated report contract.
+- Multicore green worker, fanout, and stress rows must contain exactly the
+  work-stealing queue model in the generated report contract.
 - The large fanout section must include Go and C rows so goroutine fanout can be
   compared with one-pthread-per-task C.
 - The Simple-vs-Go-vs-C stress section must include C pthread, Go goroutine, and
@@ -168,12 +168,15 @@ Failed: 0
 - Verify multicore-green, Go, and C worker rows have positive timing evidence
 - Verify multicore-green stays inside the current worker-shape smoke threshold
 - Verify concurrency model labels preserve semantic distinctions
+   - Expected: model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("pool_used=") equals `-1`
+   - Expected: model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("parallelism=") equals `-1`
+   - Expected: model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("M:N") equals `-1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -201,7 +204,12 @@ step("Verify multicore-green stays inside the current worker-shape smoke thresho
 expect(multicore).to_be_less_than(native_baseline * 20 + 1)
 step("Verify concurrency model labels preserve semantic distinctions")
 expect(model_text(row_for_label(parallel, "Simple cooperative green (native)"))).to_contain("cooperative")
+expect(model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("pool_used=")).to_equal(-1)
+expect(model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("parallelism=")).to_equal(-1)
+expect(model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("M:N")).to_equal(-1)
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("parallelism=")
+expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("pool_used=100/100")
+expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 expect(report).to_contain("Go GOMAXPROCS:** 100")
 expect(report).to_contain("Go scheduler: `GOMAXPROCS=100")
 expect(report).to_contain("not a Go M:N goroutine equivalent")
@@ -219,12 +227,15 @@ expect(report).to_contain("used_runtime_pool()")
 - Verify multicore-green, Go, and C fanout rows have positive timing evidence
 - Verify multicore-green fanout stays inside the native smoke threshold
 - Verify fanout model labels are explicit
+   - Expected: model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("pool_used=") equals `-1`
+   - Expected: model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("parallelism=") equals `-1`
+   - Expected: model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("M:N") equals `-1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -254,7 +265,12 @@ step("Verify fanout model labels are explicit")
 expect(model_text(row_for_label(fanout, "C (pthreads)"))).to_contain("one OS thread per tiny task")
 expect(model_text(row_for_label(fanout, "Go"))).to_contain("goroutine per tiny task + channel")
 expect(model_text(row_for_label(fanout, "Simple cooperative green (native)"))).to_contain("cooperative queue fanout")
+expect(model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("pool_used=")).to_equal(-1)
+expect(model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("parallelism=")).to_equal(-1)
+expect(model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("M:N")).to_equal(-1)
 expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("parallelism=")
+expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("pool_used=1000/1000")
+expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 ```
 
 </details>

@@ -4,13 +4,19 @@
 
 ## Quick Stats
 
-- **Total Features:** 3
-- **Complete Documentation:** 3 (100%)
+- **Total Features:** 4
+- **Complete Documentation:** 4 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 259
+- **Total Lines:** 368
 - **Warnings:** 1
 
 ---
+
+## Performance / Concurrency (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Multicore Green Cross-Language Profile Gate](test/05_perf/stress/multicore_green_cross_language_gate_spec.md) | Implemented | N/A | 3 | 60% | 109 lines |
 
 ## Runtime / Native / Concurrency (2 features)
 
