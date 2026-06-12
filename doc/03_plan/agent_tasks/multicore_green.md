@@ -36,12 +36,11 @@ Date: 2026-06-06
   checked-in `bin/release/simple` binary for this lane: the helper-return
   function-value probes, helper-side `Channel.id()` native path, the smaller
   pool-worker struct-send path, the function-valued local or parameter array
-  path such as `val callbacks = [step_fn]`, and the stale helper-side
-  array-literal hybrid fallback are now fixed on rebuilt debug binaries. The
-  remaining lower current-source native boundary beneath the fairness lane is
-  the raw by-value struct-array runtime shape; the active hosted native
-  blocker above that remains the resumable-stepper probe itself, which still
-  crashes. The
+  path such as `val callbacks = [step_fn]`, the function-value loop-return
+  path, the direct by-value struct-array runtime shape, and the stale
+  helper-side array-literal hybrid fallback are now fixed on rebuilt debug
+  binaries. The active current-source hosted native blocker remains the
+  resumable-stepper probe itself, which still crashes with `EXIT=139`. The
   checked-in release binary remains tracked as stale evidence in
   `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 
@@ -303,19 +302,28 @@ Each agent reports:
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 - unresolved blockers or files intentionally left untouched.
 
-## Current Sync Status (2026-06-11)
+## Current Sync Status (2026-06-12)
 
-- `origin/main` currently contains `1318e56068`
-  (`docs: close simpleos green handoff status drift`) below the newer unrelated
-  tip `fb197d30a1`.
-- The multicore-green lane already synced:
+- This refresh follows the pushed thread-spawn native regression sync
+  (`test: keep thread spawn native regression green`) and records the current
+  multicore-green lane evidence after rebasing onto the latest `origin/main`.
+- Focused current-source checks on 2026-06-12 passed for the thread-spawn
+  native regression, multicore-green helper handles, resumable-stepper blocker
+  boundary, worker callback registry, channel struct send, callable field,
+  fairness/preemption gap docs, thread-yield gap docs, blocking compensation,
+  parallelism bound, host parity tracking, native function-value loop return,
+  native function-value param-array, native struct-array, hosted SimpleOS
+  cooperative green, hosted SimpleOS multicore green, hosted SimpleOS green
+  channel wake, profile report contract, and cross-language gate.
+- The multicore-green lane has also synced:
   - Docker auto-binary selection preferring `bin/simple` / `bin/release/simple`
     while leaving `src/compiler_rust/target/debug/simple` as an explicit
     regression override;
   - the fixed generated `fanout_stress_multicore_green.spl` source shape;
   - refreshed Go-vs-Simple research and SimpleOS evidence docs;
   - closure-aligned architecture, design, tracker, and report text for the
-    final SimpleOS AP ring/user handoff lane.
+    final SimpleOS AP ring/user handoff lane;
+  - handle-array native lowering and thread-spawn native regression coverage.
 - The shared workspace remains dirty outside this lane because other sessions
   are active in the checkout; future multicore-green syncs must keep unrelated
   files out of lane commits unless the user explicitly asks for an integration

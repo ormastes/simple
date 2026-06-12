@@ -61,9 +61,9 @@
   evidence until the checked-in release binary is refreshed to match current
   source/runtime/compiler behavior.
 - `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
-  now pins the smaller standalone-native blocker beneath the resumable-stepper
-  lane: returning a function value from inside a loop/search branch still
-  crashes in native artifacts even without the worker pool.
+  now regression-covers the closed smaller standalone-native blocker beneath
+  the resumable-stepper lane: returning a function value from inside a
+  loop/search branch now returns `EXIT=0` in standalone native artifacts.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` checks the pure Simple green-channel contract: empty recv parks a logical green task, send unparks the oldest waiter, FIFO buffering works, and bounded backpressure does not block the carrier worker.
 
 ## Blocking Evidence To Track
@@ -75,10 +75,11 @@
 - The interpreter unit spec can pass its example and then hang in `spipe-docgen`; this is a test-runner/docgen issue, not a failed multicore-green assertion.
 - The value-index warning currently recommends angle-bracket indexing that fails to parse in expression contexts; tracked in `doc/08_tracking/bug/angle_bracket_index_lint_parse_mismatch_2026-06-06.md`.
 
-## Current Sync Status (2026-06-11)
+## Current Sync Status (2026-06-12)
 
-- `origin/main` is now at `207c6be9d921`
-  (`docs: clarify multicore green parity gap`).
+- This refresh follows the pushed thread-spawn native regression sync
+  (`test: keep thread spawn native regression green`) and records the current
+  multicore-green lane evidence after rebasing onto the latest `origin/main`.
 - Since the earlier `fa7f7ab27554` profile-script hardening sync, the
   multicore-green lane also synced:
   - closure-aligned SimpleOS final AP ring/user handoff wording across
@@ -91,10 +92,13 @@
   sessions are active in this checkout; future sync work must keep those files
   out of multicore-green commits unless the user explicitly asks for an
   integration commit.
-- Current-source rebuilt debug artifacts now pass both scalar and object-return
-  helper-return native probes, while the resumable-stepper native probe still
-  crashes with `EXIT=139`. The checked-in `bin/release/simple` remains tracked
-  as stale lane evidence until it is refreshed against current source.
-- Hosted SimpleOS feature specs rerun during the later doc-alignment passes
-  still pass: cooperative green `3`, multicore green `6`, green-channel wake
-  `4`, and the final handoff blocker contract `3`.
+- Current-source rebuilt debug artifacts now pass the scalar/object
+  helper-return probes, helper-side handle-array join, channel-struct send,
+  callback registry, function-value param-array, function-value loop-return,
+  and direct struct-array native regressions. The active current-source hosted
+  native blocker above those lower fixes remains the resumable-stepper probe,
+  which is still explicitly pinned at `EXIT=139`.
+- Hosted SimpleOS feature specs rerun on 2026-06-12 still pass: cooperative
+  green `3`, multicore green `6`, and green-channel wake `4`. The profile
+  report contract and numeric cross-language gate also pass against
+  `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
