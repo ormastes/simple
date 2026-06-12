@@ -54,10 +54,14 @@ Vulkan ICD available; no NVIDIA/AMD/Metal device).
 
 ## Known open items
 
-- `detect_backends()` dumps core in the seed interpreter when calling
-  `cuda_available()` on this host — pre-existing interpreter-executor crash,
-  independent of the parser fix (see
-  `doc/08_tracking/bug/parser_interface_path_segment_false_positive_2026-06-12.md`).
+- ~~`detect_backends()` dumps core in the seed~~ — FIXED 2026-06-12: root
+  cause was the cranelift JIT linking JIT-unresolvable externs (all
+  `rt_torch_*` on a torch-less host) as null pointers. Unresolvable externs
+  now route through the `rt_interp_call` interpreter bridge with raw-scalar
+  unboxing; `detect_backends()` returns `[]` and `cuda_available()` returns
+  `false` on GPU-less hosts in both JIT and interpreter modes. Remaining
+  bridge gap (f64/text extern returns degrade instead of crash):
+  `doc/08_tracking/bug/jit_interp_bridge_typed_extern_returns_2026-06-12.md`.
 - GPU→web→2D path gaps and ranked optimizations:
   `doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md`
   (T1–T8 small-task list: fonts, dirty-rect upload, JIT crash, spec splits).
