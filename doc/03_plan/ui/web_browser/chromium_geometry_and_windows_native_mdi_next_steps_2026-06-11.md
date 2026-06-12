@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 77 labeled fixtures through `80_flex_gap_justify_end` with exact
+  now covers 78 labeled fixtures through `81_flex_column_gap_justify_end` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -885,6 +885,18 @@ Smallest next implementation step:
     mode, placing children at `x=92`, `x=144`, and `x=206`
   - the Simple renderer applies the same end offset without blur, tolerance,
     resolution scaling, or copied Chromium pixels
+- Live `81_flex_column_gap_justify_end` evidence now passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused fixture-81 result records Chromium column flex gap plus logical
+  `justify-content:end`:
+  - the explicit flex container border box is `x=16`, `y=16`, `width=80`,
+    `height=140`
+  - child heights `20`, `30`, and `20` plus two `12px` gaps leave `46px` of
+    free main-axis space
+  - Chrome maps logical `end` to the main-end offset in this horizontal writing
+    mode, placing children at `y=62`, `y=94`, and `y=136`
+  - the Simple renderer applies the same vertical end offset without blur,
+    tolerance, resolution scaling, or copied Chromium pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -951,12 +963,13 @@ Smallest next implementation step:
   `77_flex_gap_justify_safe_center_no_shrink_overflow`, and
   `78_flex_column_gap_justify_unsafe_center_no_shrink_overflow`, and
   `79_flex_column_gap_justify_safe_center_no_shrink_overflow`, and
-  `80_flex_gap_justify_end`:
+  `80_flex_gap_justify_end`, and
+  `81_flex_column_gap_justify_end`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `80` in its default manifest, excluding only
+    covers fixtures `02` through `81` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `77` fixtures, `77` passes, `0` failures, and
+    reports `78` fixtures, `78` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
