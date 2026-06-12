@@ -459,6 +459,11 @@ Updated: 2026-06-11
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
 - `97ed` -- DirectX backend order
+- this commit -- UI web session token parser allocation removal:
+  SessionToken parsing now records the four required separator offsets in a
+  single scan and rejects extra separators immediately instead of push-growing a
+  temporary dot-position array; token helper scanners also reuse stable input
+  lengths.
 
 ## Current remaining work
 

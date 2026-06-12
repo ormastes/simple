@@ -29,7 +29,7 @@ capability_gating_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,6 +85,21 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val tok = SessionToken.issue("dev", "https://app.example.com", 60000u64, "test-secret-key")
 expect(tok.serialize().contains("%2E")).to_equal(true)
+```
+
+</details>
+
+#### rejects tokens with extra separators
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = SessionToken.parse("token.dev.https%2E%2Eapp.example.com.123.sig.extra")
+expect(result.is_err()).to_be(true)
 ```
 
 </details>
@@ -145,8 +160,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
