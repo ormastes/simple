@@ -258,6 +258,9 @@ Updated: 2026-06-11
 - this commit -- Draw IR diff allocation tightening:
   Draw IR baseline diffs now pre-count node diffs and fill an exact-size result
   array instead of push-growing changed/added/removed entries.
+- this commit -- UI access adapter registry allocation tightening:
+  Adapter target replacement now pre-counts retained entries and fills an
+  exact-size registry array instead of push-growing the filtered list.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
