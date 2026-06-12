@@ -406,6 +406,10 @@ Updated: 2026-06-11
   Normal page-load history updates now trim stale forward entries with an
   exact-size prefix array before appending, matching the runtime-side history
   allocation fix.
+- this commit -- Browser loading URL/search loop length hoisting:
+  URLSearchParams decode/set helpers and dynamic stylesheet/script loader loops
+  now reuse stable loop lengths, refreshing counts only when loader work queues
+  grow during iteration.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
