@@ -338,6 +338,11 @@ Updated: 2026-06-11
   Text drawing now reuses the string length in the glyph loop, and polygon
   scanline fill reuses a count-sized intersection buffer instead of grow-copying
   node lists on every row.
+- this commit -- baremetal framebuffer allocation tightening:
+  Baremetal readback and text-background rendering now fill exact-size pixel
+  buffers, and the fallback glyph loop reuses the text length during startup
+  framebuffer text drawing. The slice also keeps text/image framebuffer writes
+  inside mutating backend methods so helper copies do not drop pixels.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

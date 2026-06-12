@@ -28,7 +28,7 @@ baremetal_constructor_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -81,6 +81,105 @@ expect(engine.height()).to_equal(7)
 
 </details>
 
+#### reads host-backed framebuffer pixels in row-major order
+
+- engine clear
+- engine draw rect filled
+   - Expected: pixels.len() equals `12`
+   - Expected: pixels[0] equals `0xFF010203u32`
+   - Expected: pixels[5] equals `0xFFABCDEFu32`
+   - Expected: pixels[6] equals `0xFFABCDEFu32`
+   - Expected: pixels[11] equals `0xFF010203u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val fb = FramebufferDriver.from_buffer(4, 3)
+val backend = BaremetalBackend.create(fb)
+
+val engine = Engine2D.create_with_baremetal_backend_dims(4, 3, backend)
+engine.clear(0xFF010203u32)
+engine.draw_rect_filled(1, 1, 2, 1, 0xFFABCDEFu32)
+val pixels = engine.read_pixels()
+
+expect(pixels.len()).to_equal(12)
+expect(pixels[0]).to_equal(0xFF010203u32)
+expect(pixels[5]).to_equal(0xFFABCDEFu32)
+expect(pixels[6]).to_equal(0xFFABCDEFu32)
+expect(pixels[11]).to_equal(0xFF010203u32)
+```
+
+</details>
+
+#### draw_text_bg preserves filled background and foreground glyph pixels
+
+- engine clear
+- engine draw text bg
+   - Expected: pixels[1 * 8 + 1] equals `0xFF112233u32`
+   - Expected: pixels[1 * 8 + 3] equals `0xFFFFFFFFu32`
+   - Expected: pixels[4 * 8 + 1] equals `0xFFFFFFFFu32`
+   - Expected: pixels[7 * 8 + 6] equals `0xFF112233u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val fb = FramebufferDriver.from_buffer(8, 8)
+val backend = BaremetalBackend.create(fb)
+
+val engine = Engine2D.create_with_baremetal_backend_dims(8, 8, backend)
+engine.clear(0xFF000000u32)
+engine.draw_text_bg(1, 1, "A", 0xFFFFFFFFu32, 0xFF112233u32, 7)
+val pixels = engine.read_pixels()
+
+expect(pixels[1 * 8 + 1]).to_equal(0xFF112233u32)
+expect(pixels[1 * 8 + 3]).to_equal(0xFFFFFFFFu32)
+expect(pixels[4 * 8 + 1]).to_equal(0xFFFFFFFFu32)
+expect(pixels[7 * 8 + 6]).to_equal(0xFF112233u32)
+```
+
+</details>
+
+#### draw_text writes foreground glyph pixels without filling background
+
+- engine clear
+- engine draw text
+   - Expected: pixels[1 * 8 + 1] equals `0xFF000000u32`
+   - Expected: pixels[1 * 8 + 3] equals `0xFFFFFFFFu32`
+   - Expected: pixels[4 * 8 + 1] equals `0xFFFFFFFFu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val fb = FramebufferDriver.from_buffer(8, 8)
+val backend = BaremetalBackend.create(fb)
+
+val engine = Engine2D.create_with_baremetal_backend_dims(8, 8, backend)
+engine.clear(0xFF000000u32)
+engine.draw_text(1, 1, "A", 0xFFFFFFFFu32, 7)
+val pixels = engine.read_pixels()
+
+expect(pixels[1 * 8 + 1]).to_equal(0xFF000000u32)
+expect(pixels[1 * 8 + 3]).to_equal(0xFFFFFFFFu32)
+expect(pixels[4 * 8 + 1]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -100,8 +199,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

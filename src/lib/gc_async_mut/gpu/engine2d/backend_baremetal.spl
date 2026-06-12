@@ -275,24 +275,45 @@ impl RenderBackend for BaremetalBackend:
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Draw text using Engine2D's shared 5x7 glyph raster."""
-        _bm_render_text(self, x, y, text_val, color, font_size)
+        val gh = glyph_height()
+        var scale = font_size / gh
+        if scale < 1:
+            scale = 1
+        val text_w = text_val.len().to_i32() * glyph_advance(scale)
+        val text_h = gh * scale
+        if text_w <= 0 or text_h <= 0:
+            return
+        val buf_size = text_w * text_h
+        var buf: [u32] = [0u32; buf_size]
+        buf = render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, color, font_size)
+        self.draw_image(x, y, text_w, text_h, buf)
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         """Blit a pixel array to the framebuffer."""
+        val pixel_count = pixels.len()
         var row = 0
         while row < h:
             var col = 0
             while col < w:
                 val src_idx = row * w + col
-                if src_idx < pixels.len():
+                if src_idx < pixel_count:
                     val px = x + col
                     val py = y + row
                     val c = pixels[src_idx]
-                    if color_a(c) == 255:
-                        _bm_put(self, px, py, c)
-                    else if color_a(c) > 0:
-                        val dst = _bm_get_pixel(self, px, py)
-                        _bm_put(self, px, py, blend(c, dst))
+                    if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                        var allowed = true
+                        if self.clip_enabled:
+                            if (px < self.clip_x or px >= self.clip_x + self.clip_w or
+                                py < self.clip_y or py >= self.clip_y + self.clip_h):
+                                allowed = false
+                        if allowed and _bm_mask_blocks(self, px, py):
+                            allowed = false
+                        if allowed:
+                            if color_a(c) == 255:
+                                self.fb.framebuffer_put_pixel_argb(px.to_u32(), py.to_u32(), c)
+                            else if color_a(c) > 0:
+                                val dst = self.fb.framebuffer_read_pixel_argb(px.to_u32(), py.to_u32())
+                                self.fb.framebuffer_put_pixel_argb(px.to_u32(), py.to_u32(), blend(c, dst))
                 col = col + 1
             row = row + 1
 
@@ -326,14 +347,15 @@ impl RenderBackend for BaremetalBackend:
 
     fn read_pixels() -> [u32]:
         """Return a copy of the framebuffer's back buffer."""
-        # Return the back buffer directly — it is a [u32] array
-        var copy: [u32] = []
         val total = self.w * self.h
+        if total <= 0:
+            return []
+        var copy: [u32] = [0u32; total]
         var i = 0
         while i < total:
             val x = i % self.w
             val y = i / self.w
-            copy.push(self.fb.framebuffer_read_pixel_argb(x.to_u32(), y.to_u32()))
+            copy[i] = self.fb.framebuffer_read_pixel_argb(x.to_u32(), y.to_u32())
             i = i + 1
         copy
 
@@ -411,13 +433,9 @@ impl Engine2DExtended for BaremetalBackend:
         val text_h = gh * scale
         if text_w <= 0 or text_h <= 0:
             return
-        var buf: [u32] = []
-        var _i = 0
         val buf_size = text_w * text_h
-        while _i < buf_size:
-            buf.push(bg)
-            _i = _i + 1
-        render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
+        var buf: [u32] = [bg; buf_size]
+        buf = render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
         self.draw_image(x, y, text_w, text_h, buf)
 
 # ============================================================================
@@ -455,7 +473,8 @@ fn _bm_render_text(backend: BaremetalBackend, x: i32, y: i32, text_val: text, co
         scale = 1
     var cursor_x = x
     var idx = 0
-    while idx < text_val.len():
+    val text_len = text_val.len()
+    while idx < text_len:
         val ch = text_val.slice(idx, idx + 1)
         _bm_render_glyph(backend, cursor_x, y, ch, color, scale)
         cursor_x = cursor_x + 6 * scale
