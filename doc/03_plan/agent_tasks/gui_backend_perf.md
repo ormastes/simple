@@ -322,6 +322,10 @@ Updated: 2026-06-11
 - this commit -- browser script execution scan length hoisting:
   Browser JS execution now reuses variable-store, HTML, and stdout line counts
   inside startup script scanning and console replay loops.
+- this commit -- browser script execution allocation tightening:
+  Browser JS source execution now preallocates statement-bounded output and
+  variable-store arrays, then returns compact output prefixes instead of
+  grow-copying console and assignment arrays during startup script execution.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

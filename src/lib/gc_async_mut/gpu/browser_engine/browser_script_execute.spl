@@ -128,16 +128,19 @@ fn _script_host_escape_diagnostic(source: text) -> text:
     ""
 
 fn _run_browser_js_source(source: text) -> (bool, [text], text):
-    var output: [text] = []
     val host_escape = _script_host_escape_diagnostic(source)
     if host_escape != "":
-        return (false, output, host_escape)
+        return (false, [], host_escape)
     val cr_normalized = source.replace("\r", "\n")
     val normalized = cr_normalized.replace(";", ";\n")
     val statements = normalized.split("\n")
+    val statement_count = statements.len()
+    var output: [text] = [""; statement_count]
+    var output_count = 0
     # Simple single-level variable store: parallel key/value arrays
-    var var_names: [text] = []
-    var var_values: [text] = []
+    var var_names: [text] = [""; statement_count]
+    var var_values: [text] = [""; statement_count]
+    var var_count = 0
     for raw in statements:
         val statement = raw.trim()
         if statement == "":
@@ -145,7 +148,8 @@ fn _run_browser_js_source(source: text) -> (bool, [text], text):
         # Try print/console.log with literal
         val payload = _literal_console_log_payload(statement)
         if payload != "":
-            output.push(payload)
+            output[output_count] = payload
+            output_count = output_count + 1
             continue
         # Try print(varname) — look up variable
         val trimmed = _strip_optional_semicolon(statement)
@@ -153,32 +157,41 @@ fn _run_browser_js_source(source: text) -> (bool, [text], text):
             val inner = trimmed.substring(6, trimmed.len() - 1).trim()
             var found_val: text = ""
             var vi: i32 = 0
-            val var_count = var_names.len()
             while vi < var_count:
                 if var_names[vi] == inner:
                     found_val = var_values[vi]
                 vi = vi + 1
-            output.push(found_val)
+            output[output_count] = found_val
+            output_count = output_count + 1
             continue
         if trimmed.starts_with("console.log(") and trimmed.ends_with(")"):
             val inner = trimmed.substring(12, trimmed.len() - 1).trim()
             var found_val: text = ""
             var vi: i32 = 0
-            val var_count = var_names.len()
             while vi < var_count:
                 if var_names[vi] == inner:
                     found_val = var_values[vi]
                 vi = vi + 1
-            output.push(found_val)
+            output[output_count] = found_val
+            output_count = output_count + 1
             continue
         # Try assignment: const/let/var/val name = "value"
         val (vname, vval) = _extract_assignment_value(statement)
         if vname != "":
-            var_names.push(vname)
-            var_values.push(vval)
+            var_names[var_count] = vname
+            var_values[var_count] = vval
+            var_count = var_count + 1
             continue
         # Unknown statement — skip (not deny), browser JS has many constructs
-    (true, output, "")
+    (true, _text_list_prefix(output, output_count), "")
+
+fn _text_list_prefix(values: [text], count: i32) -> [text]:
+    var out: [text] = [""; count]
+    var i = 0
+    while i < count:
+        out[i] = values[i]
+        i = i + 1
+    out
 
 pub fn execute_scripts_in_html(html: text) -> BrowserScriptExecutionResult:
     var result = BrowserScriptExecutionResult.empty()
