@@ -397,6 +397,13 @@ Open gaps tied to the active browser objective:
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
     now reports `fixture_count=56`, `pass_count=56`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
+- The same live geometry lane now passes for `60_flex_align_self_mixed_overrides`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's row flex `align-self:center` and
+    `align-self:flex-end` overrides inside one fixed-height flex container
+  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+    now reports `fixture_count=57`, `pass_count=57`, `fail_count=0`, and
+    `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
     passes with one listed scenario and zero failures

@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 56 labeled fixtures through `59_flex_column_axis_gap_basic` with exact
+  now covers 57 labeled fixtures through `60_flex_align_self_mixed_overrides` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -610,6 +610,16 @@ Smallest next implementation step:
     does not move the single column on the cross axis
   - the Simple column flex branch applies the same row gap without blur,
     tolerance, resolution scaling, or copied Chromium pixels
+- Live `60_flex_align_self_mixed_overrides` evidence now passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused fixture-60 result records Chromium row flex per-item cross-axis
+  override placement:
+  - the explicit flex container border box is `x=16`, `y=16`, `width=160`,
+    `height=60`
+  - Chrome places the center override at `y=36` and the flex-end override at
+    `y=56`, while the default item remains at `y=16`
+  - the Simple row flex branch applies the same per-item align-self offsets
+    without blur, tolerance, resolution scaling, or copied Chromium pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -656,12 +666,13 @@ Smallest next implementation step:
   `56_flex_wrap_align_content_space_evenly`, and
   `57_flex_wrap_gap_basic`, and
   `58_flex_wrap_axis_gap_basic`, and
-  `59_flex_column_axis_gap_basic`:
+  `59_flex_column_axis_gap_basic`, and
+  `60_flex_align_self_mixed_overrides`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `59` in its default manifest, excluding only
+    covers fixtures `02` through `60` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `56` fixtures, `56` passes, `0` failures, and
+    reports `57` fixtures, `57` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
