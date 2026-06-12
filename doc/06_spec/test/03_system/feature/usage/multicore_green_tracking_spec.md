@@ -315,7 +315,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -353,6 +353,7 @@ expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=11")
 expect(absent_in_text(row, "misuse_fixtures=611")).to_equal(1)
 expect(row).to_contain("task_spawn approved")
+expect(row).to_contain("thread_spawn_with_args_wrong_surface_import.spl rejects cooperative-green facade")
 expect(row).to_contain("task_spawn_wrong_surface_import.spl rejects OS-thread facade")
 expect(row).to_contain("multicore_green_wrong_surface_import.spl rejects OS-thread facade")
 expect(row).to_contain("multicore_green_sliced_wrong_surface_import.spl rejects OS-thread facade")
