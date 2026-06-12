@@ -39,6 +39,15 @@ fn indirect_call_lambda() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::IndirectCall { .. })));
 }
 
+#[test]
+fn inline_lambda_array_literal_keeps_function_value_unboxed() {
+    let mir =
+        compile_to_mir("fn test() -> i64:\n    val callbacks: [fn() -> i64] = [\\: 7]\n    return callbacks[0]()\n")
+            .unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::IndirectCall { .. })));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+}
+
 // =============================================================================
 // rt_value_to_string boxing (lowering_expr.rs lines 351, 365, 370)
 // =============================================================================

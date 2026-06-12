@@ -94,10 +94,10 @@
   integration commit.
 - Current-source rebuilt debug artifacts now pass the scalar/object
   helper-return probes, helper-side handle-array join, channel-struct send,
-  callback registry, function-value param-array, function-value loop-return,
-  and direct struct-array native regressions. The active current-source hosted
-  native blocker above those lower fixes remains the resumable-stepper probe,
-  which is still explicitly pinned at `EXIT=139`.
+  callback registry, function-value param-array, inline lambda array literals,
+  function-value loop-return, and direct struct-array native regressions. The
+  active current-source hosted native blocker above those lower fixes remains
+  the resumable-stepper probe, which is still explicitly pinned at `EXIT=139`.
 - Hosted SimpleOS feature specs rerun on 2026-06-12 still pass: cooperative
   green `3`, multicore green `6`, and green-channel wake `4`. The profile
   report contract and numeric cross-language gate also pass against

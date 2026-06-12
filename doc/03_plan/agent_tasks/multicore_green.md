@@ -36,11 +36,12 @@ Date: 2026-06-06
   checked-in `bin/release/simple` binary for this lane: the helper-return
   function-value probes, helper-side `Channel.id()` native path, the smaller
   pool-worker struct-send path, the function-valued local or parameter array
-  path such as `val callbacks = [step_fn]`, the function-value loop-return
-  path, the direct by-value struct-array runtime shape, and the stale
-  helper-side array-literal hybrid fallback are now fixed on rebuilt debug
-  binaries. The active current-source hosted native blocker remains the
-  resumable-stepper probe itself, which still crashes with `EXIT=139`. The
+  path such as `val callbacks = [step_fn]`, inline lambda array literals such
+  as `val callbacks = [\: 7]`, the function-value loop-return path, the direct
+  by-value struct-array runtime shape, and the stale helper-side array-literal
+  hybrid fallback are now fixed on rebuilt debug binaries. The active
+  current-source hosted native blocker remains the resumable-stepper probe
+  itself, which still crashes with `EXIT=139`. The
   checked-in release binary remains tracked as stale evidence in
   `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 

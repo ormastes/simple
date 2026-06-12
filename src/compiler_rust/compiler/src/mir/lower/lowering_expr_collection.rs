@@ -1,7 +1,7 @@
 //! Collection expression lowering: Tuple, Array, VecLiteral, Dict, ArrayRepeat.
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, HirType, TypeId};
+use crate::hir::{HirExpr, HirExprKind, HirType, TypeId};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
@@ -175,12 +175,32 @@ impl<'a> MirLowerer<'a> {
         }
 
         let has_function_elements = elements.iter().any(|elem| {
-            self.type_registry
-                .and_then(|tr| tr.get(elem.ty))
-                .is_some_and(|ty| matches!(ty, HirType::Function { .. }))
+            matches!(elem.kind, HirExprKind::Lambda { .. })
+                || self
+                    .type_registry
+                    .and_then(|tr| tr.get(elem.ty))
+                    .is_some_and(|ty| matches!(ty, HirType::Function { .. }))
+        }) || self.type_registry.and_then(|tr| tr.get(outer_ty)).is_some_and(|ty| {
+            matches!(
+                ty,
+                HirType::Array { element, .. }
+                    if self
+                        .type_registry
+                        .and_then(|tr| tr.get(*element))
+                        .is_some_and(|element_ty| matches!(element_ty, HirType::Function { .. }))
+            )
         });
 
         if has_function_elements {
+            let outer_function_element = self
+                .type_registry
+                .and_then(|tr| tr.get(outer_ty))
+                .and_then(|ty| match ty {
+                    HirType::Array { element, .. } => Some(*element),
+                    _ => None,
+                })
+                .and_then(|element| self.type_registry.and_then(|tr| tr.get(element)))
+                .is_some_and(|element_ty| matches!(element_ty, HirType::Function { .. }));
             let capacity = elements.len() as i64;
             let capacity_reg = self.with_func(|func, current_block| {
                 let reg = func.new_vreg();
@@ -203,13 +223,21 @@ impl<'a> MirLowerer<'a> {
             })?;
             for elem in elements {
                 let reg = self.lower_expr(elem)?;
+                let elem_is_function = outer_function_element
+                    || matches!(elem.kind, HirExprKind::Lambda { .. })
+                    || self
+                        .type_registry
+                        .and_then(|tr| tr.get(elem.ty))
+                        .is_some_and(|ty| matches!(ty, HirType::Function { .. }));
                 let needs_int_boxing = matches!(
                     elem.ty,
                     TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
                 );
                 let needs_float_boxing = matches!(elem.ty, TypeId::F32 | TypeId::F64);
                 let needs_bool_boxing = elem.ty == TypeId::BOOL || elem.ty == TypeId::I8;
-                let pushed = if needs_bool_boxing {
+                let pushed = if elem_is_function {
+                    reg
+                } else if needs_bool_boxing {
                     self.with_func(|func, current_block| {
                         let boxed = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();

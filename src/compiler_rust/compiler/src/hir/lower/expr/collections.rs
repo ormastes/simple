@@ -62,8 +62,21 @@ impl Lowerer {
     /// Empty arrays use the configured default element type from type_inference_config.
     pub(super) fn lower_array(&mut self, exprs: &[Expr], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let mut hir_exprs = Vec::new();
-        let elem_ty = if let Some(first) = exprs.first() {
-            self.infer_type(first, ctx)?
+        for e in exprs {
+            hir_exprs.push(self.lower_expr(e, ctx)?);
+        }
+
+        let elem_ty = if let Some(first) = hir_exprs.first() {
+            match &first.kind {
+                HirExprKind::Lambda { params, body, .. } => {
+                    let param_types = params.iter().map(|(_, ty)| *ty).collect();
+                    self.module.types.register(HirType::Function {
+                        params: param_types,
+                        ret: body.ty,
+                    })
+                }
+                _ => first.ty,
+            }
         } else {
             // Empty array - use configured default or error if strict mode
             if self.type_inference_config.strict_empty_collections {
@@ -71,10 +84,6 @@ impl Lowerer {
             }
             self.type_inference_config.empty_array_default
         };
-
-        for e in exprs {
-            hir_exprs.push(self.lower_expr(e, ctx)?);
-        }
 
         let arr_ty = self.module.types.register(HirType::Array {
             element: elem_ty,
