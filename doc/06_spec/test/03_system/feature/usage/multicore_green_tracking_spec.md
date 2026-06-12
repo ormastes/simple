@@ -150,7 +150,7 @@ Failed: 0
   Simple fanout, Go stress, runtime-pool, and parallelism evidence cannot pass
   silently.
 - The tracking row must carry the concurrency API misuse spec so wrong-surface,
-  wrong-arity, bad-argument, and numbered-alias diagnostics stay tied to
+  wrong-arity, bad-argument, and forbidden number-suffix API-name diagnostics stay tied to
   REQ-MCG-010.
 - The tracking row must carry the agent-plan spec so parallel-agent lanes keep
   meaningful names and acceptance evidence.
@@ -185,7 +185,7 @@ Failed: 0
 - Numeric suffix names are not acceptable user-facing concurrency APIs.
 - Runtime aliases must use semantic names instead of number suffixes.
 - Documentation must not use a number suffix to distinguish API behavior.
-- Wrong-surface imports, bad spawn arguments, and numbered concurrency aliases
+- Wrong-surface imports, bad spawn arguments, and forbidden number-suffix API names
   must remain compile-time failures covered by the misuse spec.
 
 ## Status Expectations
