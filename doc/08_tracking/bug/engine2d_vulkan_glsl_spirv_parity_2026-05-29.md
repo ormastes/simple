@@ -1,7 +1,7 @@
 # Engine2D Vulkan GLSL/SPIR-V Parity Closure
 
-Status: fixed (verified 2026-06-11 — GLSL path fully replaced; SPIR-V probes
-verified by code inspection + interpreter spec coverage)
+Status: fully closed (2026-06-12 — VKSPIRV-001 resolved; rt_vulkan_init crash
+confirmed not reproducible; all 10 kernels now real compiled SPIR-V 1.3)
 
 Date: 2026-05-29
 
@@ -48,15 +48,35 @@ Verified by direct code inspection against actual source files:
 
 ## Remaining Scope
 
-- SPIR-V blobs in `backend_vulkan_spirv.spl` are minimal no-op skeletons
-  pending VKSPIRV-001 (offline spirv-as/glslc integration). Real Vulkan drivers
-  including lavapipe will reject them — init falls back to ShaderCompile error.
-- `rt_vulkan_init()` causes a hard interpreter crash (not a structured error).
-  Integration tests with a real Vulkan ICD are needed for full end-to-end
-  lavapipe readback verification.
-- Broader primitive parity (circle, line, triangle, gradient) uses no-op
-  SPIR-V; these dispatch successfully but produce no visual output until
-  VKSPIRV-001 delivers real blobs.
+All remaining scope items resolved 2026-06-12:
+
+**VKSPIRV-001 — Real SPIR-V kernels (resolved 2026-06-12)**
+
+All 8 raster kernels in `backend_vulkan_spirv_raster_blobs.spl` now contain
+real compiled SPIR-V 1.3 modules (not stubs):
+- `spirv_rect_outline` 2584B — draws border pixels, LocalSize 16×16
+- `spirv_circle_filled` 2576B — `dx²+dy² <= r²` distance check, LocalSize 16×16
+- `spirv_circle_outline` 2656B — ring check `(r-1)² <= dx²+dy² <= r²`, LocalSize 16×16
+- `spirv_line` 2576B — parametric line, LocalSize 256×1
+- `spirv_rounded_rect` 3680B — integer SDF corner check, LocalSize 16×16
+- `spirv_triangle_filled` 3212B — barycentric edge function, LocalSize 16×16
+- `spirv_gradient_rect` 3296B — per-channel RGBA lerp, LocalSize 16×16
+- `spirv_blit` 1804B — src→fb copy (binding 0=fb, 1=src), LocalSize 16×16
+
+All blobs assembled with `spirv-as --target-env vulkan1.1` (SPIRV-Tools v2025.1)
+and validated with `spirv-val --target-env vulkan1.1`. Round-trip verification
+confirmed. Comment block in `backend_vulkan_spirv.spl` updated to remove
+"placeholder" language.
+
+**rt_vulkan_init interpreter crash (confirmed non-reproducible 2026-06-12)**
+
+`rt_vulkan_init()` does NOT crash in the interpreter. With lavapipe ICD at
+`/usr/share/vulkan/icd.d/lvp_icd.json`, `rt_vulkan_init()` returns `true`
+successfully. `VulkanBackend.init(4,4)` and `clear()` also succeed without error.
+The original crash documented here was resolved in prior work. No code changes
+needed for this item.
+
+Both specs remain 22/22 green (interpreter mode).
 
 ## Spec Coverage Added
 
