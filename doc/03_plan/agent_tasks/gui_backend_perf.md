@@ -434,6 +434,10 @@ Updated: 2026-06-11
   Cookie splitting, document assignment parsing, jar upsert/removal, and
   request-header serialization now reuse stable lengths and exact-size arrays
   while preserving path/domain/expiry matching behavior.
+- this commit -- Browser storage pair helper allocation tightening:
+  Storage pair lookup now reuses stable list lengths, and pair upsert writes an
+  exact-size output array for both replacement and append cases while preserving
+  key order and storage API property collision behavior.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
