@@ -338,6 +338,21 @@ Found by the post-M11b in-process check (1153 errors, rc=124 timeout):
 Verified: tmp/site12/m11c_probe.spl all green + control TRUE; full regression
 battery (m5/m8/m9/m10/g19/g21 harnesses) green.
 
+### M11d — G24: `<<`/`>>` shift operators in parse_comparison — DONE 2026-06-12
+
+Found by the host-side pre-sweep harness (tmp/site12/lean_parse_sweep.spl —
+parses all src/lib files through the lean parser via the seed interpreter, no
+rebuild needed). `(n >> (pos * 8)) & 0xff` failed in src/lib/bitwise_utils.spl:
+the lexer splits `<<`/`>>` into two 82/83 tokens (for generics), and the
+duplicate comparison chain at parser_expr.spl:433 (parse_binary_from) pairs
+them back into shifts but the ACTIVE chain parse_comparison (:227) did not.
+Fix: mirrored the two-token pairing into parse_comparison. Verified:
+tmp/site12/g24_probe.spl — shr/shl green, nested generics unbroken, control
+TRUE.
+WATCH (M12): shifts are encoded as expr_binary(82/83) — same op codes as
+`<`/`>` — and flat_ast_bridge_part1.spl:247 flattens ALL binary ops to
+BinOp.Add anyway. Op fidelity is part of M12 flat-bridge hardening.
+
 ### M11 — SIGSEGV / rc=139 crashes (29 files) — IN PROGRESS 2026-06-12 (re-sweep first)
 
 Approach revised: the 29 crash files' first-error signatures in the 2026-06-11
