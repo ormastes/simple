@@ -20,12 +20,16 @@ use std.io_runtime.{env_get, file_exists, exit, get_args}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write, stderr_flush}
 use .mcp_log_options
 
+extern fn stdin_read_char() -> text
+extern fn print_raw(s: text)
+
+var _MCP_TRANSPORT_MODE = "framed"
+
 fn _mcp_error(scope: text, msg: text):
     stderr_write("[error] " + scope + ": " + msg + "\n")
     stderr_flush()
 use std.mcp_sdk.server.app.{app_extract_id, app_extract_str, app_extract_obj}
 use std.mcp_sdk.server.method_detect.{has_method}
-use std.nogc_async_mut.mcp.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
 
 fn _mcp_find_simple_binary() -> text:
     val env_bin = env_get("SIMPLE_BINARY") ?? ""
@@ -176,36 +180,21 @@ fn _mcp_tools_list_result() -> text:
     _MCP_TOOLS_LIST_CACHE = _mcp_static_tools_result()
     _MCP_TOOLS_LIST_CACHE
 
-fn _mcp_initialize_result(id: text) -> text:
-    val tools_cap = LB() + RB()
-    val resources_cap = jo1(jp("listChanged", "false"))
-    val prompts_cap = jo1(jp("listChanged", "false"))
+fn _mcp_initialize_result() -> text:
     var caps = LB()
-    caps = caps + jp("tools", tools_cap)
-    caps = caps + "," + jp("resources", resources_cap)
-    caps = caps + "," + jp("prompts", prompts_cap)
+    caps = caps + jp("tools", LB() + RB())
+    caps = caps + "," + jp("resources", jo1(jp("listChanged", "false")))
+    caps = caps + "," + jp("prompts", jo1(jp("listChanged", "false")))
     caps = caps + "," + jp("logging", LB() + RB())
     caps = caps + "," + jp("roots", jo1(jp("listChanged", "false")))
     caps = caps + RB()
     val info = jo2(jp("name", js(SERVER_NAME)), jp("version", js(SERVER_VERSION)))
-    val result = jo3(
-        jp("protocolVersion", js("2025-06-18")),
-        jp("capabilities", caps),
-        jp("serverInfo", info)
-    )
-    make_json_result(id, result)
-
-fn _mcp_tools_call_result(msg: text) -> text:
-    val id = _mcp_extract_id(msg, "tools/call")
-    val params = app_extract_obj(msg, "params")
-    var tool_name = ""
-    var args_raw = "{}"
-    if params != "":
-        tool_name = app_extract_str(params, "name")
-        val a = app_extract_obj(params, "arguments")
-        if a != "":
-            args_raw = a
-    dispatch_tool(id, tool_name, args_raw)
+    var result = LB()
+    result = result + jp("protocolVersion", js("2025-06-18"))
+    result = result + "," + jp("capabilities", caps)
+    result = result + "," + jp("serverInfo", info)
+    result = result + RB()
+    result
 
 # Extract JSON-RPC id from message, with sensible fallbacks.
 fn _mcp_extract_id(msg: text, method: text) -> text:
@@ -217,6 +206,99 @@ fn _mcp_extract_id(msg: text, method: text) -> text:
     if method == "tools/list":
         return "\"2\""
     parsed
+
+fn _mcp_read_line() -> text:
+    var result = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            return result
+        result = result + ch
+        if ch == "\n":
+            return result
+
+fn _mcp_read_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        result = result + ch
+        i = i + 1
+    result
+
+fn _mcp_strip_line_end(line: text) -> text:
+    val n = line.len()
+    if n >= 2 and line.substring(n - 2, n) == "\r\n":
+        return line.substring(0, n - 2)
+    if n >= 1 and line.substring(n - 1, n) == "\n":
+        return line.substring(0, n - 1)
+    if n >= 1 and line.substring(n - 1, n) == "\r":
+        return line.substring(0, n - 1)
+    line
+
+fn _mcp_parse_decimal_raw(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "0":
+            result = result * 10
+        elif ch == "1":
+            result = result * 10 + 1
+        elif ch == "2":
+            result = result * 10 + 2
+        elif ch == "3":
+            result = result * 10 + 3
+        elif ch == "4":
+            result = result * 10 + 4
+        elif ch == "5":
+            result = result * 10 + 5
+        elif ch == "6":
+            result = result * 10 + 6
+        elif ch == "7":
+            result = result * 10 + 7
+        elif ch == "8":
+            result = result * 10 + 8
+        elif ch == "9":
+            result = result * 10 + 9
+        else:
+            return result
+        i = i + 1
+    result
+
+fn _mcp_read_message() -> text:
+    var content_length = 0
+    while true:
+        var line = _mcp_read_line()
+        if line == "":
+            if content_length > 0:
+                break
+            return ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        line = _mcp_strip_line_end(line)
+        if line.starts_with(LB()):
+            _MCP_TRANSPORT_MODE = "jsonl"
+            return line
+        if line.starts_with("Content-Length:"):
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            content_length = _mcp_parse_decimal_raw(len_str)
+    if content_length <= 0:
+        return ""
+    _mcp_read_chars(content_length)
+
+fn _mcp_write_message(body: text):
+    if _MCP_TRANSPORT_MODE == "jsonl":
+        print_raw(body + "\n")
+        return
+    val nl = "\n"
+    print_raw("Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl)
+    print_raw(body)
 
 fn main() -> i64:
     val raw_args = mcp_get_cli_args()
@@ -251,11 +333,15 @@ fn main() -> i64:
             print progress
         return 0
 
-    # Serve loop — use app-local MCP protocol I/O to avoid std SDK extern
-    # forwarding issues in local native package artifacts.
-    val protocol = create_protocol_state()
+    # Initialize server metadata. Tool metadata and calls are routed through
+    # the static table below; native builds cannot safely register closure
+    # handlers into the generic SDK registry.
+    mcp_server_init(SERVER_NAME, SERVER_VERSION)
+
+    # Serve loop — uses direct stdio framing to avoid native Optional transport
+    # issues that can stop after the first framed request.
     while true:
-        val msg = protocol_read_message(protocol)
+        val msg = _mcp_read_message()
         if msg == "":
             exit(0)
             return 0
@@ -266,9 +352,18 @@ fn main() -> i64:
         var response = ""
         if has_method(msg, "initialize"):
             val id = _mcp_extract_id(msg, "initialize")
-            response = _mcp_initialize_result(id)
+            response = make_json_result(id, _mcp_initialize_result())
         elif has_method(msg, "tools/call"):
-            response = _mcp_tools_call_result(msg)
+            val id = _mcp_extract_id(msg, "tools/call")
+            val params = app_extract_obj(msg, "params")
+            var tool_name = ""
+            var args_raw = "{}"
+            if params != "":
+                tool_name = app_extract_str(params, "name")
+                val extracted_args = app_extract_obj(params, "arguments")
+                if extracted_args != "":
+                    args_raw = extracted_args
+            response = dispatch_tool(id, tool_name, args_raw)
         elif has_method(msg, "tools/list"):
             val id = _mcp_extract_id(msg, "tools/list")
             response = make_json_result(id, _mcp_tools_list_result())
@@ -322,5 +417,5 @@ fn main() -> i64:
             if id != "" and id != "null":
                 response = make_error(id, -32601, "Method not found")
         if response != "":
-            protocol_write_message(protocol, response)
+            _mcp_write_message(response)
     0
