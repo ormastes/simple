@@ -42,8 +42,16 @@ prefix build was deferred because the agent sandbox had no network.
       lavapipe; init+clear succeed; resolved by prior interpreter fix.)
 
 ### P3 — Windows-side validation (AC-6 was probe-gated)
-- [ ] Run the DirectX 2D engine specs on a real Windows host (native D3D11);
-      Linux side already green via DXVK path.
+- [x] Run the DirectX 2D engine specs on a real Windows host (native D3D11);
+      Linux side already green via DXVK path. (2026-06-12: GitHub Actions
+      `.github/workflows/directx-windows-validation.yml` on windows-latest —
+      backend_directx_spec 18/18, probe evidence
+      `platform=windows-native leaf=structured device=true` (D3D11 device via
+      WARP on the GPU-less runner); runs 27447200015 + 27447787444. Getting
+      there fixed real defects: gitignore-swallowed + lib-pruned vendor crates
+      (9f479af40b1, 836848993a9, 6d7f8fc8f63), pre-0.59 windows-sys HMODULE ABI
+      in interpreter_extern/gpu.rs opencl_dlopen (4b449334c16), and the probe's
+      hardcoded linux-dxvk platform label (335514040f5).)
 
 ### P4 — Stage4 redeploy + deploy-gate hardening
 - [x] Redeploy stage4 so `bin/simple run` picks up the nested-closure

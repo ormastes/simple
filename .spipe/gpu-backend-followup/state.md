@@ -84,4 +84,17 @@ Execution of follow-up plan
   so fresh checkouts could not build the seed offline at all. Fixed: files
   committed + hermetic `!src/compiler_rust/vendor/**` rule appended last
   (9f479af40b1, 836848993a9). Run 27446486821 in progress.
+- 2026-06-12 P3 CLOSED (last open item — plan complete): windows-latest run
+  27447200015 green, confirmation 27447787444 green — backend_directx_spec
+  18/18 in interpreter mode on native Windows, probe evidence
+  `platform=windows-native leaf=structured device=true` (D3D11 via WARP on the
+  GPU-less runner). Beyond the vendor gitignore break, two more latent defects
+  fixed en route: versioned windows_x86_64_msvc vendor dirs had lib/ import
+  libs deliberately pruned (checksums edited) → LNK1181; restored pristine
+  libs for Cargo.lock versions 0.33.0/0.42.2/0.48.5/0.52.6 from crates.io
+  tarballs (6d7f8fc8f63). interpreter_extern/gpu.rs opencl_dlopen still used
+  pre-0.59 windows-sys isize HMODULE ABI — never compiled on Windows since the
+  dep bump; fixed to pointer handles (4b449334c16). dx_platform_probe
+  hardcoded linux-dxvk; now reports windows-native via get_host_os()
+  (335514040f5), Linux re-verified 18/18.
 - 2026-06-12 Lane B (P2): AC-2 + AC-3 closed. VKSPIRV-001: Replaced all 8 placeholder SPIR-V stubs in `backend_vulkan_spirv_raster_blobs.spl` (2006 lines) with real compiled SPIR-V 1.3 modules (2576B–3680B) assembled via `spirv-as --target-env vulkan1.1` (SPIRV-Tools v2025.1), validated with `spirv-val`. Kernels: rect_outline, circle_filled, circle_outline, line, rounded_rect, triangle_filled, gradient_rect, blit. Updated comment block in `backend_vulkan_spirv.spl` to remove "placeholder" language. rt_vulkan_init crash (AC-3): confirmed non-reproducible with lavapipe ICD — `rt_vulkan_init()` returns `true`, `VulkanBackend.init(4,4)` + `clear()` succeed; no crash; original crash resolved in prior work. Parity bug doc updated (Remaining Scope → resolved). Both specs 22/22 green.
