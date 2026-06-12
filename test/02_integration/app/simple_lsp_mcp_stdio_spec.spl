@@ -17,10 +17,13 @@ fn lsp_init_body(id: text) -> text:
 fn lsp_tools_body(id: text) -> text:
     "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"tools/list\",\"params\":{}}"
 
+fn lsp_initialized_notification_body() -> text:
+    "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"
+
 fn send_lsp_mcp(messages: text) -> text:
     val tmp = "/tmp/simple_lsp_mcp_stdio_input.txt"
     rt_file_write_text(tmp, messages)
-    val result = shell("cat " + tmp + " | bin/simple_lsp_mcp_server 2>/dev/null")
+    val result = shell("cat " + tmp + " | node bin/mcp_stdio_bridge.js -- bin/release/linux-x86_64/simple_lsp_mcp_server 2>/dev/null")
     result.stdout ?? ""
 
 describe "Simple LSP MCP stdio":
@@ -37,6 +40,13 @@ describe "Simple LSP MCP stdio":
         val input = lsp_mcp_msg(lsp_init_body("1")) + lsp_mcp_msg(lsp_tools_body("2"))
         val output = send_lsp_mcp(input)
         expect(output.starts_with("Content-Length: ")).to_equal(true)
+        expect(output.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\"")).to_equal(true)
+        expect(output.contains("\"name\":\"lsp_definition\"")).to_equal(true)
+        expect(output.contains("\"error\":")).to_equal(false)
+
+    it "swallows Claude and Gemini initialized notification before tools/list":
+        val input = lsp_mcp_jsonl(lsp_init_body("1")) + lsp_mcp_jsonl(lsp_initialized_notification_body()) + lsp_mcp_jsonl(lsp_tools_body("2"))
+        val output = send_lsp_mcp(input)
         expect(output.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\"")).to_equal(true)
         expect(output.contains("\"name\":\"lsp_definition\"")).to_equal(true)
         expect(output.contains("\"error\":")).to_equal(false)

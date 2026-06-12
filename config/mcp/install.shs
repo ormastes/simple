@@ -25,20 +25,113 @@ case "$OS" in
 esac
 
 # --- Claude Code (.mcp.json) ---
-cp "$SRC" "$PROJECT_ROOT/.mcp.json"
+if [ "$EXT" = "" ]; then
+    SIMPLE_MCP_CMD="$PROJECT_ROOT/bin/simple_mcp_server"
+    SIMPLE_LSP_MCP_CMD="$PROJECT_ROOT/bin/simple_lsp_mcp_server"
+    SIMPLE_MCP_NATIVE_CMD="$PROJECT_ROOT/build/bootstrap/mcp-package/simple_mcp_server"
+    SIMPLE_LSP_MCP_NATIVE_CMD="$PROJECT_ROOT/bin/release/linux-x86_64/simple_lsp_mcp_server"
+    if [ ! -x "$SIMPLE_LSP_MCP_NATIVE_CMD" ]; then
+        SIMPLE_LSP_MCP_NATIVE_CMD="$PROJECT_ROOT/build/bootstrap/mcp-package/simple_lsp_mcp_server"
+    fi
+    BRIDGE_CMD="$PROJECT_ROOT/bin/mcp_stdio_bridge.js"
+    STITCH_CMD="$PROJECT_ROOT/bin/codex_stitch_mcp.js"
+    SIMPLE_MCP_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- $(shell_quote "$SIMPLE_MCP_NATIVE_CMD")"
+    SIMPLE_LSP_MCP_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- $(shell_quote "$SIMPLE_LSP_MCP_NATIVE_CMD")"
+    STITCH_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- node $(shell_quote "$STITCH_CMD")"
+    cat > "$PROJECT_ROOT/.mcp.json" <<EOF
+{
+  "_comment": "MCP Servers Configuration (local absolute paths for Claude Code)",
+
+  "mcpServers": {
+    "simple-mcp": {
+      "_info": "Simple MCP server launched from this checkout",
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "simple-lsp-mcp": {
+      "_info": "Simple LSP MCP server launched from this checkout",
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_LSP_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "stitch": {
+      "_info": "Google Stitch MCP proxy launched through the repo wrapper",
+      "command": "/bin/sh",
+      "args": ["-lc", "$STITCH_LAUNCH"]
+    }
+  }
+}
+EOF
+else
+    cp "$SRC" "$PROJECT_ROOT/.mcp.json"
+fi
 echo "Installed .mcp.json for $OS"
+
+# --- Gemini CLI project settings ---
+if [ "$EXT" = "" ] && [ -d "$PROJECT_ROOT/.gemini" ]; then
+    cat > "$PROJECT_ROOT/.gemini/settings.json" <<EOF
+{
+  "context": {
+    "fileName": ["GEMINI.md", "CLAUDE.md"]
+  },
+  "hooks": {
+  },
+  "mcpServers": {
+    "simple-mcp": {
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "simple-lsp-mcp": {
+      "command": "/bin/sh",
+      "args": ["-lc", "$SIMPLE_LSP_MCP_LAUNCH"],
+      "env": {
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_LIB": "$PROJECT_ROOT/src"
+      }
+    },
+    "stitch": {
+      "command": "/bin/sh",
+      "args": ["-lc", "$STITCH_LAUNCH"]
+    }
+  }
+}
+EOF
+    echo "Installed Gemini MCP settings for $OS"
+fi
 
 # --- Codex CLI (global ~/.codex/config.toml) ---
 if command -v codex >/dev/null 2>&1; then
     SERVERS="simple-mcp simple-lsp-mcp"
     for NAME in $SERVERS; do
-        CMD="$PROJECT_ROOT/bin/${NAME}${EXT}"
         # Convert server name to wrapper name (simple-mcp -> simple_mcp_server)
         WRAPPER=$(echo "$NAME" | sed 's/-/_/g')_server
         CMD="$PROJECT_ROOT/bin/${WRAPPER}${EXT}"
+        if [ "$NAME" = "simple-mcp" ] && [ "$EXT" = "" ]; then
+            CMD="$SIMPLE_MCP_NATIVE_CMD"
+            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- $(shell_quote "$CMD")"
+        elif [ "$NAME" = "simple-lsp-mcp" ] && [ "$EXT" = "" ]; then
+            CMD="$SIMPLE_LSP_MCP_NATIVE_CMD"
+            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- $(shell_quote "$CMD")"
+        else
+            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$CMD")"
+        fi
         if [ -e "$CMD" ] || [ -L "$CMD" ]; then
             codex mcp remove "$NAME" 2>/dev/null || true
-            LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec $(shell_quote "$CMD")"
             codex mcp add "$NAME" --env SIMPLE_LOG=error --env RUST_LOG=error --env SIMPLE_LIB="$PROJECT_ROOT/src" -- /bin/sh -lc "$LAUNCH"
         else
             echo "Warning: $CMD not found, skipping $NAME"
@@ -52,7 +145,8 @@ if command -v codex >/dev/null 2>&1; then
         if [ -f "$STITCH_CMD" ]; then
             codex mcp remove "stitch-mcp" 2>/dev/null || true
             codex mcp remove "stitch" 2>/dev/null || true
-            codex mcp add "stitch-mcp" -- node "$STITCH_CMD"
+            STITCH_CODEX_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- node $(shell_quote "$STITCH_CMD")"
+            codex mcp add "stitch-mcp" -- /bin/sh -lc "$STITCH_CODEX_LAUNCH"
         else
             echo "Warning: $STITCH_CMD not found, skipping stitch"
         fi

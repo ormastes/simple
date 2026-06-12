@@ -23,9 +23,9 @@ use .mcp_log_options
 fn _mcp_error(scope: text, msg: text):
     stderr_write("[error] " + scope + ": " + msg + "\n")
     stderr_flush()
-use std.mcp_sdk.server.app.{mcp_server_init, mcp_server_tool, mcp_server_handle, app_unwrap_text, app_extract_id, app_extract_str, app_extract_obj}
+use std.mcp_sdk.server.app.{app_extract_id, app_extract_str, app_extract_obj}
 use std.mcp_sdk.server.method_detect.{has_method}
-use std.mcp_sdk.transport.transport.{StdioTransport}
+use std.nogc_async_mut.mcp.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
 
 fn _mcp_find_simple_binary() -> text:
     val env_bin = env_get("SIMPLE_BINARY") ?? ""
@@ -169,28 +169,43 @@ fn mcp_get_cli_args() -> [text]:
 fn _mcp_input_schema(props: text, req: text) -> text:
     "{\"type\":\"object\",\"properties\":" + props + ",\"required\":" + req + "}"
 
-# Register one tool with closures that capture name/props/req by value.
-# Using a function wrapper so each call gets its own stack frame — this ensures
-# the closures capture distinct values rather than a shared loop variable.
-fn _register_mcp_tool(n: text, d: text, props: text, req: text):
-    mcp_server_tool(
-        n,
-        d,
-        fn() -> text: _mcp_input_schema(props, req),
-        fn(a: text) -> text: dispatch_tool_content(n, a)
-    )
-
-# Register all tools from the table.
-fn _register_all_tools():
-    for entry in get_tool_table():
-        _register_mcp_tool(entry.name, entry.description, entry.props_json, entry.required_json)
-
 # Lazily build and cache the tools/list result JSON.
 fn _mcp_tools_list_result() -> text:
     if _MCP_TOOLS_LIST_CACHE != "":
         return _MCP_TOOLS_LIST_CACHE
     _MCP_TOOLS_LIST_CACHE = _mcp_static_tools_result()
     _MCP_TOOLS_LIST_CACHE
+
+fn _mcp_initialize_result(id: text) -> text:
+    val tools_cap = LB() + RB()
+    val resources_cap = jo1(jp("listChanged", "false"))
+    val prompts_cap = jo1(jp("listChanged", "false"))
+    var caps = LB()
+    caps = caps + jp("tools", tools_cap)
+    caps = caps + "," + jp("resources", resources_cap)
+    caps = caps + "," + jp("prompts", prompts_cap)
+    caps = caps + "," + jp("logging", LB() + RB())
+    caps = caps + "," + jp("roots", jo1(jp("listChanged", "false")))
+    caps = caps + RB()
+    val info = jo2(jp("name", js(SERVER_NAME)), jp("version", js(SERVER_VERSION)))
+    val result = jo3(
+        jp("protocolVersion", js("2025-06-18")),
+        jp("capabilities", caps),
+        jp("serverInfo", info)
+    )
+    make_json_result(id, result)
+
+fn _mcp_tools_call_result(msg: text) -> text:
+    val id = _mcp_extract_id(msg, "tools/call")
+    val params = app_extract_obj(msg, "params")
+    var tool_name = ""
+    var args_raw = "{}"
+    if params != "":
+        tool_name = app_extract_str(params, "name")
+        val a = app_extract_obj(params, "arguments")
+        if a != "":
+            args_raw = a
+    dispatch_tool(id, tool_name, args_raw)
 
 # Extract JSON-RPC id from message, with sensible fallbacks.
 fn _mcp_extract_id(msg: text, method: text) -> text:
@@ -236,28 +251,24 @@ fn main() -> i64:
             print progress
         return 0
 
-    # Register all 151 tools with the McpServer facade.
-    mcp_server_init(SERVER_NAME, SERVER_VERSION)
-    _register_all_tools()
-
-    # Serve loop — uses Content-Length framing (StdioTransport.new()).
-    val t = StdioTransport.new()
+    # Serve loop — use app-local MCP protocol I/O to avoid std SDK extern
+    # forwarding issues in local native package artifacts.
+    val protocol = create_protocol_state()
     while true:
-        val msg_opt = t.read_message()
-        if msg_opt == nil:
+        val msg = protocol_read_message(protocol)
+        if msg == "":
             exit(0)
             return 0
-        val msg = app_unwrap_text(msg_opt)
 
         # Core methods: delegate to the McpServer facade.
         # tools/list is handled locally so we return the full 151-tool list
         # without registry pagination (smoke check requires all tools in one response).
         var response = ""
-        if has_method(msg, "initialize") or (
-            has_method(msg, "tools/call")):
-            val resp_opt = mcp_server_handle(msg)
-            if resp_opt != nil:
-                response = app_unwrap_text(resp_opt)
+        if has_method(msg, "initialize"):
+            val id = _mcp_extract_id(msg, "initialize")
+            response = _mcp_initialize_result(id)
+        elif has_method(msg, "tools/call"):
+            response = _mcp_tools_call_result(msg)
         elif has_method(msg, "tools/list"):
             val id = _mcp_extract_id(msg, "tools/list")
             response = make_json_result(id, _mcp_tools_list_result())
@@ -311,5 +322,5 @@ fn main() -> i64:
             if id != "" and id != "null":
                 response = make_error(id, -32601, "Method not found")
         if response != "":
-            t.write_message(response)
+            protocol_write_message(protocol, response)
     0
