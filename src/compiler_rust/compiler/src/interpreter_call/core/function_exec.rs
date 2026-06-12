@@ -235,6 +235,27 @@ fn execute_function_body(
         Err(e) => return Err(e),
     };
 
+    // Auto-wrap return value in Some() when the declared return type is T? (Optional)
+    // and the actual return value is not already an Option enum.
+    // This handles `fn f() -> i32?: return 42` without explicit `return Some(42)`.
+    let result = if matches!(func.return_type, Some(Type::Optional(_))) {
+        match &result {
+            Value::Enum { enum_name, .. } if enum_name == "Option" => result,
+            Value::Nil => Value::Enum {
+                enum_name: "Option".to_string(),
+                variant: "None".to_string(),
+                payload: None,
+            },
+            _ => Value::Enum {
+                enum_name: "Option".to_string(),
+                variant: "Some".to_string(),
+                payload: Some(Box::new(result)),
+            },
+        }
+    } else {
+        result
+    };
+
     // Validate return type
     validate_unit!(
         &result,

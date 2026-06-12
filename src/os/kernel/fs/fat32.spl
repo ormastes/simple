@@ -267,9 +267,10 @@ impl Fat32Filesystem:
         val entry_result = self._find_root_entry(path)
         if entry_result.is_err():
             return Err(entry_result.unwrap_err())
-        val off = entry_result.unwrap()
-        if off < 0:
+        val off_opt = entry_result.unwrap()
+        if off_opt.is_none():
             return Err(ENOENT)
+        val off = off_opt.unwrap()
         val cluster_high = (self.root_dir_data[off + 21].to_u32() << 8) | self.root_dir_data[off + 20].to_u32()
         val cluster_low  = (self.root_dir_data[off + 27].to_u32() << 8) | self.root_dir_data[off + 26].to_u32()
         val start = (cluster_high << 16) | cluster_low
@@ -369,9 +370,10 @@ impl Fat32Filesystem:
         val entry_result = self._find_root_entry(path)
         if entry_result.is_err():
             return Err(entry_result.unwrap_err())
-        val off = entry_result.unwrap()
-        if off < 0:
+        val off_opt = entry_result.unwrap()
+        if off_opt.is_none():
             return Err(ENOENT)
+        val off = off_opt.unwrap()
         val fsize = ((self.root_dir_data[off + 31].to_u32() << 24) | (self.root_dir_data[off + 30].to_u32() << 16) |
                      (self.root_dir_data[off + 29].to_u32() << 8)  |  self.root_dir_data[off + 28].to_u32())
         Ok(FileStat(
@@ -380,14 +382,11 @@ impl Fat32Filesystem:
             mtime: 0u64
         ))
 
-    fn _find_root_entry(self, path: text) -> Result<i32, i32>:
+    fn _find_root_entry(self, path: text) -> Result<i32?, i32>:
         """Walk stashed root_dir_data to find 8.3 entry matching path.
 
-        Returns Ok(byte_offset) on match, Ok(-1) if not found.
+        Returns Ok(Some(byte_offset)) on match, Ok(None) if not found.
         Path must start with '/' followed by an 8.3 name.
-        Changed from Result<i32?, i32> to Result<i32, i32> with sentinel -1
-        to avoid interpreter Optional-unwrap issues (i32? stores as raw i64,
-        and .unwrap() fails on primitive types in the interpreter).
         """
         # Strip leading '/'
         var name = path
@@ -401,7 +400,7 @@ impl Fat32Filesystem:
             val off = idx * 32
             val first_byte = self.root_dir_data[off]
             if first_byte == 0x00u8:
-                return Ok(-1)   # end of directory — not found
+                return Ok(None)   # end of directory — not found
             if first_byte == 0xE5u8:
                 lfn_name = ""           # orphan any pending LFN
                 idx = idx + 1
@@ -416,7 +415,7 @@ impl Fat32Filesystem:
             # 8.3 entry. Match accumulated LFN first (the long name),
             # then fall back to the 8.3 short name.
             if lfn_name.len() > 0 and lfn_name.upper() == upper:
-                return Ok(off)
+                return Ok(Some(off))
             # Build 8.3 name string
             var entry_name = ""
             var ni = 0
@@ -435,10 +434,10 @@ impl Fat32Filesystem:
             if ext.len() > 0:
                 entry_name = entry_name + "." + ext
             if entry_name.upper() == upper:
-                return Ok(off)
+                return Ok(Some(off))
             lfn_name = ""
             idx = idx + 1
-        Ok(-1)
+        Ok(None)
 
     fn _read_fat_entry(self, dev: BlockDevice, cluster: u32) -> Result<u32, text>:
         """Read the 28-bit FAT32 entry for cluster from the FAT region on dev."""

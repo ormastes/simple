@@ -612,3 +612,84 @@ main = x
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 493); // 7*64 + 5*8 + 5 = 493
 }
+
+// ============= Optional auto-wrap (FINDING-T2-dirent) =============
+// When a function is declared -> T? and returns a plain T (no explicit Some()),
+// the interpreter must auto-wrap the return value in Some() so that
+// .is_some(), .unwrap(), .unwrap_or() work on the caller side.
+
+#[test]
+fn interpreter_optional_return_plain_int_unwrap() {
+    // fn returns plain i32 from a -> i32? function; caller calls .unwrap()
+    let code = r#"
+fn find_offset() -> i32?:
+    return 42
+
+r = find_offset()
+main = r.unwrap()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_optional_return_plain_int_is_some() {
+    // .is_some() must return true for auto-wrapped Some(42)
+    let code = r#"
+fn find_offset() -> i32?:
+    return 42
+
+r = find_offset()
+var x = 0
+if r.is_some():
+    x = 1
+main = x
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_optional_return_nil_is_none() {
+    // returning nil from -> T? function must auto-wrap to None
+    let code = r#"
+fn find_offset() -> i32?:
+    return nil
+
+r = find_offset()
+var x = 0
+if r.is_none():
+    x = 1
+main = x
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_optional_return_unwrap_or() {
+    // .unwrap_or() with auto-wrapped Some value returns the wrapped value
+    let code = r#"
+fn find_offset() -> i32?:
+    return 7
+
+r = find_offset()
+main = r.unwrap_or(99)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 7);
+}
+
+#[test]
+fn interpreter_optional_explicit_some_still_works() {
+    // Explicit Some() wrapping must not double-wrap
+    let code = r#"
+fn find_offset() -> i32?:
+    return Some(55)
+
+r = find_offset()
+main = r.unwrap()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 55);
+}
