@@ -418,6 +418,10 @@ Updated: 2026-06-11
   JS module statement, import-binding, generic text split, and text-removal
   helpers now write into exact-size arrays instead of growing empty arrays on the
   browser module-loading path.
+- this commit -- Browser module transform length hoisting:
+  Script extraction, module symbol suffix generation, brace scanning, and module
+  cache lookup now reuse stable loop lengths; script extraction also caches the
+  debug sentinel scan instead of rechecking the full HTML per loop.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
