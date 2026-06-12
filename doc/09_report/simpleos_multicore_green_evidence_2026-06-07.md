@@ -74,6 +74,24 @@ SimpleOS cooperative lane, the hosted multicore-green scheduler lane, and the
 hosted green-channel wake bridge still pass after the host/profile-script
 changes, without changing the already-closed final live-handoff claim.
 
+## 2026-06-12 Hosted Refresh
+
+The hosted SimpleOS feature lane was rerun from
+`/tmp/simple-mgreen-sliced-jj-1000` after the concurrency API misuse and profile
+contract tracking refresh:
+
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`
+  -> PASS, 3 scenarios in 3783ms
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean`
+  -> PASS, 7 scenarios in 10953ms
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
+  -> PASS, 4 scenarios in 10508ms
+
+This refresh does not rerun a live QEMU lane. It confirms that the hosted
+SimpleOS cooperative, multicore-green scheduler, and green-channel wake
+contracts remain current after the profile/API contract documentation updates,
+without changing the already-closed final live-handoff claim.
+
 ## Current Refresh
 
 After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `9b5cb43402`,
