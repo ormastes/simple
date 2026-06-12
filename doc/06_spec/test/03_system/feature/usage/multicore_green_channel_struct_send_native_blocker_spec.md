@@ -1,6 +1,6 @@
 # Multicore Green Channel Struct Send Native Blocker
 
-> This SSpec pins the smaller current-source native blocker underneath the resumable-stepper fairness experiment: a `multicore_green` worker that sends a plain struct payload through a channel and then returns still segfaults in a standalone native binary.
+> This SSpec keeps the smaller current-source native blocker closed underneath the resumable-stepper fairness experiment: a `multicore_green` worker can send a plain struct payload through a channel, return, and let the main thread observe the expected value in a standalone native binary.
 
 <!-- sdn-diagram:id=multicore_green_channel_struct_send_native_blocker_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_channel_struct_send_native_blocker_spec -> std
 
 # Multicore Green Channel Struct Send Native Blocker
 
-This SSpec pins the smaller current-source native blocker underneath the resumable-stepper fairness experiment: a `multicore_green` worker that sends a plain struct payload through a channel and then returns still segfaults in a standalone native binary.
+This SSpec keeps the smaller current-source native blocker closed underneath the resumable-stepper fairness experiment: a `multicore_green` worker can send a plain struct payload through a channel, return, and let the main thread observe the expected value in a standalone native binary.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the smaller current-source native blocker underneath the resumab
 |-------|-------|
 | Feature IDs | #multicore-green-channel-struct-send-native-blocker |
 | Category | Runtime / Native / Concurrency |
-| Status | Blocked |
+| Status | Regression |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,10 +53,10 @@ This SSpec pins the smaller current-source native blocker underneath the resumab
 
 ## Overview
 
-This SSpec pins the smaller current-source native blocker underneath the
-resumable-stepper fairness experiment: a `multicore_green` worker that sends a
-plain struct payload through a channel and then returns still segfaults in a
-standalone native binary.
+This SSpec keeps the smaller current-source native blocker closed underneath
+the resumable-stepper fairness experiment: a `multicore_green` worker can send a
+plain struct payload through a channel, return, and let the main thread observe
+the expected value in a standalone native binary.
 
 ## Requirements
 
@@ -82,27 +82,27 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ## Scenarios
 
-### multicore green channel struct send native blocker
+### multicore green channel struct send native regression
 
-#### keeps the smaller pool-plus-struct-send crash explicit
+#### keeps the smaller pool-plus-struct-send path green
 
 - Write the reduced pool channel struct-send probe
    - Expected: write_out equals ``
    - Expected: write_code equals `0`
 - The reduced probe still type-checks under the fresh debug compiler
    - Expected: check_code equals `0`
-- Hosted native compile still succeeds before the runtime crash boundary
+- Hosted native compile still succeeds
    - Expected: compile_code equals `0`
-- The standalone native probe still segfaults after the pool worker sends the struct payload
+- The standalone native probe returns the expected payload value
    - Expected: native_code equals `0`
-- The tracker records the same reduced native blocker
+- The tracker records the lower blocker as closed
    - Expected: tracker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -116,23 +116,24 @@ val (check_out, check_code) = shell(SIMPLE_BIN + " check " + SOURCE_PATH)
 expect(check_code).to_equal(0)
 expect(check_out).to_contain("All checks passed")
 
-step("Hosted native compile still succeeds before the runtime crash boundary")
+step("Hosted native compile still succeeds")
 val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
 expect(compile_code).to_equal(0)
 expect(compile_out).to_contain("Compiled")
 
-step("The standalone native probe still segfaults after the pool worker sends the struct payload")
+step("The standalone native probe returns the expected payload value")
 val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/mcg_struct_send.out 2>&1; code=$?; cat /tmp/mcg_struct_send.out; echo EXIT=$code'")
 expect(native_code).to_equal(0)
-expect(native_out).to_contain("Segmentation fault")
-expect(native_out).to_contain("EXIT=139")
+expect(native_out).to_contain("value=7")
+expect(native_out).to_contain("EXIT=0")
 
-step("The tracker records the same reduced native blocker")
+step("The tracker records the lower blocker as closed")
 val (tracker_out, tracker_code) = shell("cat doc/08_tracking/bug/multicore_green_channel_struct_send_native_blocker_2026-06-11.md")
 expect(tracker_code).to_equal(0)
-expect(tracker_out).to_contain("Status: open")
+expect(tracker_out).to_contain("Status: closed")
 expect(tracker_out).to_contain("plain struct payload through a channel")
-expect(tracker_out).to_contain("EXIT=139")
+expect(tracker_out).to_contain("value=7")
+expect(tracker_out).to_contain("EXIT=0")
 ```
 
 </details>
