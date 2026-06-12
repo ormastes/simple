@@ -370,6 +370,11 @@ Updated: 2026-06-11
   Browser style block normalization, `@supports` wrapper stripping, and CSS
   nesting normalization now reuse stable input lengths during startup style
   parsing instead of dispatching `.len()` in parser loop conditions.
+- this commit -- Browser layout recursion length hoisting:
+  Low-level browser layout and paint recursion now reuse stable child counts
+  while walking DOM/layout children, with direct unit coverage for stacked
+  layout geometry. During coverage work, the browser `paint_box` scene mutation
+  gap was isolated and recorded as a follow-up bug.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
