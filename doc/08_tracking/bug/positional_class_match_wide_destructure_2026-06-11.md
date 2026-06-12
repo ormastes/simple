@@ -1,7 +1,7 @@
 # Bug: positional class/struct pattern match silently no-matches (interpreter) and SIGSEGVs (cranelift)
 
 - **Date:** 2026-06-11
-- **Status:** interpreter FIXED IN SEED (2026-06-12, pending redeploy); cranelift SIGSEGV still open
+- **Status:** FULLY FIXED (interpreter 2026-06-12; cranelift/JIT compiled path 2026-06-12)
 - **Severity:** high — silent wrong behavior in interpreted mode, crash in compiled mode
 
 ## Symptom
@@ -17,8 +17,11 @@
   (3-field, 20-field, arity mismatch, named-field unaffected, enum positional
   unaffected) all green. Production workaround in `flat_ast_bridge_part1.spl`
   is still in place and does not need to be reverted.
-- **Cranelift-compiled:** SIGSEGV at the match (verified by native-building
-  `bigmatch.spl` with the release seed and running in docker). Still open.
+- **Cranelift-compiled (JIT):** printed "no match" (the `rt_enum_check_discriminant`
+  call always returned false on an object pointer). **FIXED 2026-06-12** in
+  `hir/lower/stmt_lowering.rs` and `hir/lower/expr/control.rs`. Verified:
+  `/tmp/a3_match_probe.spl` (Point with x=10,y=20,z=30) prints `matched: 10 20 30`
+  in both compiled and interpreter modes.
 
 Enum-variant positional patterns are unaffected (pervasively used and green).
 
@@ -60,15 +63,40 @@ bindings only if all sub-patterns match. Arity mismatch → `Ok(false)` (clean
 no-match). `match_sequence_pattern` and all `pattern_matches` call sites in
 `interpreter_control.rs` updated to pass the `classes` parameter.
 
+## Fix applied (cranelift/compiled — 2026-06-12)
+
+Root cause: `Pattern::Enum{name:"_", variant:"ClassName"}` in the HIR lowering
+was treated as an enum variant in both the condition check and payload extraction:
+
+1. **Condition** (`lower_pattern_condition_stmt` / `lower_pattern_condition`):
+   emitted `rt_enum_check_discriminant(subject, hash(ClassName))` which always
+   returns false for an object pointer → arm never matched.
+
+2. **Payload extraction** (stmt path): emitted `rt_enum_payload` + array indexing
+   which is wrong for flat-struct objects.
+
+**Fix in `hir/lower/stmt_lowering.rs` and `hir/lower/expr/control.rs`:**
+
+- In both `lower_pattern_condition_stmt` and `lower_pattern_condition`: before
+  emitting the discriminant check, probe `self.module.types.lookup(variant)` — if
+  the variant name resolves to a `HirType::Struct` (i.e. a class), return
+  `Bool(true)` instead (the type system already guarantees the match at the call
+  site).
+
+- In the binding extraction block (stmt path): detect the class/struct pattern
+  via the same type lookup. For each payload pattern at position `i`, emit
+  `HirExprKind::FieldAccess { receiver: subject, field_index: i }` with the
+  struct's own field type. Also patch `ctx.locals[local_idx].ty` to the concrete
+  field type (not ANY), because the MIR lowering reads `local.ty` as
+  `effective_declared_ty` for the Store instruction — leaving it as ANY causes
+  the downstream type system to mis-format i64 fields (prints as float zero).
+
+**Regression tests added** in `hir/lower/tests/control_flow_tests.rs`:
+- `test_positional_class_pattern_match_lowering`: verifies `Bool(true)` condition
+  and `FieldAccess` bindings for `case Point(a, b, c)`.
+- `test_enum_variant_pattern_condition_still_uses_discriminant`: guards that
+  enum variants still use `rt_enum_check_discriminant`.
+
 ## Remaining open
 
-Cranelift SIGSEGV: out of scope for this fix. Cranelift codegen for positional
-class patterns needs separate investigation.
-
-## Fix direction (original, archived)
-
-Either implement positional field binding for class/struct patterns in both
-the seed interpreter and cranelift lowering, or reject the pattern at
-parse/type-check time with a diagnostic ("positional patterns are only
-supported for enum variants — use `case P(x: x, y: y)` or field access").
-Silent no-match is the worst of the options.
+None. Both interpreter and cranelift paths are fixed and verified.

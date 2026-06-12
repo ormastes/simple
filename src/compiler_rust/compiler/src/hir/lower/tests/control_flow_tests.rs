@@ -144,11 +144,13 @@ fn test_positional_class_pattern_match_lowering() {
 
     let func = &module.functions[0];
 
-    // The first statement should be an If (the match arm).
+    // Find the first HirStmt::If in the body (the match arm).
+    // There may be Let stmts before it (e.g. parameter copies).
     // Its condition must be Bool(true) — NOT a BuiltinCall to rt_enum_check_discriminant.
-    let HirStmt::If { condition, then_block, .. } = &func.body[0] else {
-        panic!("expected match to lower to HirStmt::If, got: {:?}", func.body[0]);
-    };
+    let match_if = func.body.iter().find(|s| matches!(s, HirStmt::If { .. }))
+        .unwrap_or_else(|| panic!("expected a HirStmt::If in function body; body: {:?}", func.body));
+
+    let HirStmt::If { condition, then_block, .. } = match_if else { unreachable!() };
 
     assert!(
         matches!(condition.kind, HirExprKind::Bool(true)),
@@ -157,12 +159,14 @@ fn test_positional_class_pattern_match_lowering() {
     );
 
     // The then_block must include FieldAccess bindings for a, b, c at indices 0, 1, 2.
+    // FieldAccess maps field_index to byte_offset = i*8, which matches the flat struct layout
+    // allocated by rt_alloc in the compiled path (fields at 0, 8, 16, …).
     let repr = format!("{:?}", then_block);
     assert!(
         repr.contains("FieldAccess"),
-        "positional class pattern bindings must use FieldAccess, not rt_enum_payload; then_block repr: {repr}"
+        "positional class pattern bindings must use FieldAccess; then_block repr: {repr}"
     );
-    // Also confirm rt_enum_payload is NOT used for the class pattern bindings
+    // Confirm rt_enum_payload is NOT used for the class pattern bindings
     assert!(
         !repr.contains("rt_enum_payload"),
         "positional class pattern must NOT use rt_enum_payload; then_block repr: {repr}"
@@ -178,10 +182,11 @@ fn test_enum_variant_pattern_condition_still_uses_discriminant() {
 
     let func = &module.functions[0];
 
-    // The first statement should be an If whose condition uses rt_enum_check_discriminant.
-    let HirStmt::If { condition, .. } = &func.body[0] else {
-        panic!("expected enum match to lower to HirStmt::If");
-    };
+    // Find the first HirStmt::If whose condition uses rt_enum_check_discriminant.
+    let match_if = func.body.iter().find(|s| matches!(s, HirStmt::If { .. }))
+        .unwrap_or_else(|| panic!("expected a HirStmt::If in function body"));
+
+    let HirStmt::If { condition, .. } = match_if else { unreachable!() };
 
     let repr = format!("{:?}", condition.kind);
     assert!(

@@ -955,13 +955,37 @@ impl Lowerer {
 
                         let value = if let Some(ref struct_fields) = class_struct_fields {
                             // Positional class/struct pattern: bind payload[i] to field i
-                            // in declaration order via FieldAccess.
-                            // Use the struct field's type if available, else fall back to
-                            // the binding's resolved type.
+                            // in declaration order via FieldAccess (byte-offset load).
+                            //
+                            // Class/struct instances in the compiled path are allocated
+                            // via rt_alloc as plain flat memory with 8-byte-aligned fields
+                            // at sequential offsets 0, 8, 16, … — NOT as RuntimeObjects.
+                            // FieldAccess { field_index: i } lowers to FieldGet with
+                            // byte_offset = i * 8, which is the correct layout.
+                            //
+                            // Use the struct's own field type for the expression so that
+                            // the MIR lowering/codegen applies the right load width and
+                            // avoids spurious boxing/unboxing.  The Let ty is set to the
+                            // same field type (not ANY) so that downstream type consumers
+                            // (e.g. string interpolation) know the value's true type.
+                            //
+                            // IMPORTANT: the local was added by `extract_pattern_bindings`
+                            // with type ANY (because that helper only resolves enum variant
+                            // field types, not class fields).  The MIR lowering reads
+                            // `local.ty` (not `HirStmt::Let.ty`) to determine
+                            // effective_declared_ty, so we must patch the local's type now
+                            // to match the concrete field type, otherwise the MIR Store
+                            // uses ANY and the value is mis-formatted at runtime.
                             let field_ty = struct_fields
                                 .get(i)
                                 .map(|(_, ty)| *ty)
-                                .unwrap_or(binding_ty);
+                                .unwrap_or(TypeId::ANY);
+                            // Patch the local's type to the concrete field type.
+                            if field_ty != TypeId::ANY {
+                                if let Some(local) = ctx.locals.get_mut(local_idx) {
+                                    local.ty = field_ty;
+                                }
+                            }
                             HirExpr {
                                 kind: HirExprKind::FieldAccess {
                                     receiver: Box::new(HirExpr {
@@ -1014,9 +1038,17 @@ impl Lowerer {
                             }
                         };
 
+                        // Use the value's own type for the Let declaration.
+                        // For class patterns, value.ty is the struct's field type (e.g.
+                        // TypeId::I64), NOT the binding_type_map entry (which is ANY for
+                        // class patterns since collect_pattern_bindings only resolves enum
+                        // variant field types). Using the value type ensures the MIR Store
+                        // and subsequent uses see the correct concrete type rather than ANY,
+                        // preventing misformatting (e.g. i64 field printed as float zero).
+                        let let_ty = if class_struct_fields.is_some() { value.ty } else { binding_ty };
                         binding_stmts.push(HirStmt::Let {
                             local_index: local_idx,
-                            ty: binding_ty,
+                            ty: let_ty,
                             value: Some(value),
                         });
                     }
