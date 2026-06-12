@@ -751,11 +751,17 @@ pub(crate) fn compile_interp_call<M: Module>(
     let result = call_runtime_4(ctx, builder, "rt_interp_call", name_ptr, name_len, argc, argv);
 
     if let Some(d) = dest {
-        // rt_interp_call returns a boxed RuntimeValue. When the destination is
-        // a raw scalar (bool/int) — e.g. a JIT-unresolvable extern like
-        // rt_torch_cuda_available() -> bool — unbox it so conditions and
-        // arithmetic in compiled code see 0/1 instead of NaN-boxed bits.
-        let value = if vreg_is_native_equality_scalar(ctx, *d) {
+        // rt_interp_call returns a boxed RuntimeValue. Extern declarations
+        // routed here by the hybrid transform (JIT-unresolvable rt_*/spl_*
+        // symbols, e.g. rt_torch_cuda_available() -> bool in a torch-less
+        // build) have raw scalar/handle destinations, so unbox — otherwise a
+        // NaN-boxed `false` reads as truthy in compiled conditions. Call
+        // dests carry no entry in vreg_types, so the SFFI naming convention
+        // is the reliable signal here. Boxed-value flows (interpreted
+        // function fallbacks) keep the boxed result. Known gap: f64/text
+        // extern returns are not representable through this bridge yet.
+        let is_extern_bridge = func_name.starts_with("rt_") || func_name.starts_with("spl_");
+        let value = if is_extern_bridge || vreg_is_native_equality_scalar(ctx, *d) {
             call_runtime_1(ctx, builder, "rt_value_raw_i64", result)
         } else {
             result
