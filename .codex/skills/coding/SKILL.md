@@ -236,15 +236,21 @@ explicit-argument spawning.
 Keep concurrency surfaces separate. Importing `thread_spawn` from
 `std.concurrent.cooperative_green`, importing `cooperative_green_spawn` from
 `std.concurrent.thread`, importing `multicore_green_spawn` from
+`std.concurrent.thread`, importing `multicore_green_spawn_sliced` from
 `std.concurrent.thread`, or similar wrong-surface imports is rejected with
 `E-PAR-003`. Passing non-closures to `thread_spawn`, `green_spawn`,
 `cooperative_green_spawn`, or `multicore_green_spawn`, or passing text to
 `multicore_green_set_parallelism`, is rejected with `E-PAR-004`.
+`multicore_green_spawn_sliced` requires an integer initial state plus a step
+function and rejects wrong arity, non-integer state, or non-function step
+arguments with `E-PAR-004`.
 Green tasks are share-nothing: a `green_spawn`, `cooperative_green_spawn`, or
 `multicore_green_spawn` closure must not read module-level mutable `var`s or
-write captured `var`s — rejected with `E-PAR-006`. Pass values in as locals or
-return results from the closure. `thread_spawn` is exempt (OS threads may
-share via Mutex).
+write captured `var`s. Inline `multicore_green_spawn_sliced` step lambdas must
+follow the same rule. Violations are rejected with `E-PAR-006`. Pass values in
+as locals, return results from the closure, or advance sliced state through
+`MulticoreGreenSliceResult`. `thread_spawn` is exempt (OS threads may share via
+Mutex).
 
 ## Reserved Keywords
 

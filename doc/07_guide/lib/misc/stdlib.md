@@ -164,9 +164,11 @@ for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
 
 Green tasks are **share-nothing** (enforced by `simple check` as `E-PAR-006`): a
 `green_spawn`, `cooperative_green_spawn`, or `multicore_green_spawn` closure must
-not read module-level mutable `var`s or write captured `var`s. Pass inputs as
-locals captured by value and communicate via return values or
-`green_channel`. `thread_spawn` is exempt — OS threads may share through Mutex.
+not read module-level mutable `var`s or write captured `var`s. Inline
+`multicore_green_spawn_sliced` step lambdas follow the same rule. Pass inputs as
+locals captured by value and communicate via return values,
+`MulticoreGreenSliceResult` state, or `green_channel`. `thread_spawn` is exempt
+because OS threads may share through Mutex.
 
 ### Green Thread Example
 
@@ -241,7 +243,11 @@ hosted fairness API for long Pure Simple work: each step returns
 `MulticoreGreenSliceResult.completed(value)` to finish. The API intentionally
 uses scalar progress state so it avoids the older captured-mutable-state
 closure blocker and does not change the semantics of plain
-`multicore_green_spawn` closures.
+`multicore_green_spawn` closures. `simple check` rejects
+`multicore_green_spawn_sliced` when it is imported from the wrong concurrency
+surface (`E-PAR-003`), called without both an integer initial state and a step
+function (`E-PAR-004`), or given an inline step lambda that mutates shared state
+(`E-PAR-006`).
 
 ---
 

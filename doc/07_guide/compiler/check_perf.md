@@ -161,7 +161,13 @@ contract was enforced; reports generated with `SKIP_PROFILE_REPORT_CONTRACT=1`
 are explicitly labeled as skipped and must not be cited as gated M:N evidence.
 The profile-report contract and `simple check` reject numbered concurrency
 aliases; use semantic API names in reports, generated workloads, runtime extern
-declarations, and profile-script comments.
+declarations, and profile-script comments. The public concurrency API contract
+also rejects wrong-surface imports with `E-PAR-003`, rejects bad spawn
+arguments with `E-PAR-004`, and rejects shared mutable state in green-process
+closures with `E-PAR-006`. For `multicore_green_spawn_sliced`, profile fixtures
+must pass an integer initial state plus a step function; inline step lambdas are
+share-nothing and must advance state through `MulticoreGreenSliceResult` rather
+than mutating captured `var`s.
 
 ### What it measures
 

@@ -27,7 +27,7 @@ multicore_green_tracking_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,7 +106,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/multicore_green_tracking_spec.spl
 Multicore green tracking contract PASSED
 Files: 1
-Passed: 8
+Passed: 9
 Failed: 0
 ```
 
@@ -165,6 +165,8 @@ Failed: 0
   multicore green, and the SimpleOS green carrier.
 - The tracking row must carry guide links for the compiler perf guide and
   standard library concurrency API guide.
+- Public API maps must document the `multicore_green_spawn_sliced`
+  wrong-surface, bad-argument, and share-nothing diagnostics.
 - The tracking row must carry the current direct runtime blocker, the SMF
   historical tracker, and the closed SimpleOS final handoff evidence so later
   agents do not reopen the wrong lane.
@@ -434,6 +436,49 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 
 </details>
 
+#### keeps public concurrency API maps aligned with sliced misuse diagnostics
+
+- Read the public guide and coding-skill API maps
+- Verify sliced API misuse diagnostics stay documented
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the public guide and coding-skill API maps")
+val stdlib = rt_file_read_text("doc/07_guide/lib/misc/stdlib.md") ?? ""
+val perf = rt_file_read_text("doc/07_guide/compiler/check_perf.md") ?? ""
+val coding = rt_file_read_text(".codex/skills/coding/SKILL.md") ?? ""
+step("Verify sliced API misuse diagnostics stay documented")
+expect(stdlib).to_contain("multicore_green_spawn_sliced")
+expect(stdlib).to_contain("E-PAR-003")
+expect(stdlib).to_contain("E-PAR-004")
+expect(stdlib).to_contain("E-PAR-006")
+expect(stdlib).to_contain("integer initial state")
+expect(stdlib).to_contain("step function")
+expect(stdlib).to_contain("MulticoreGreenSliceResult")
+expect(perf).to_contain("multicore_green_spawn_sliced")
+expect(perf).to_contain("E-PAR-003")
+expect(perf).to_contain("E-PAR-004")
+expect(perf).to_contain("E-PAR-006")
+expect(perf).to_contain("integer initial state")
+expect(perf).to_contain("step function")
+expect(perf).to_contain("MulticoreGreenSliceResult")
+expect(coding).to_contain("multicore_green_spawn_sliced")
+expect(coding).to_contain("E-PAR-003")
+expect(coding).to_contain("E-PAR-004")
+expect(coding).to_contain("E-PAR-006")
+expect(coding).to_contain("integer initial state")
+expect(coding).to_contain("step function")
+expect(coding).to_contain("MulticoreGreenSliceResult")
+```
+
+</details>
+
 #### keeps concurrency TUI captures free of runner ordinal labels
 
 - Read source manuals that describe multicore-green evidence
@@ -515,8 +560,8 @@ expect(absent_in_text(row, "SimpleOS final handoff are closed")).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
