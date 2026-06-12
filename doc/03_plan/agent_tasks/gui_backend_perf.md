@@ -360,6 +360,9 @@ Updated: 2026-06-11
   OpenCL host readback now fills an exact-size `u32` pixel buffer by index
   instead of push-growing one pixel at a time during backend framebuffer
   readback.
+- this commit -- Engine2D emulation sort length hoisting:
+  The shared emulation math insertion sort now reuses the stable array length
+  instead of dispatching `.len()` on every outer-loop iteration.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
