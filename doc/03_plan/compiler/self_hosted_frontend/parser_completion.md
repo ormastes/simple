@@ -208,12 +208,22 @@ lazy_outline_equivalence 16/16.
 
 ---
 
-### M7 — G6: `match` arms without `case` keyword (fixes ~57 files)
+### M7 — G6: `match` arms without `case` keyword (fixes ~57 files) — DONE 2026-06-12
 
-**File:** `src/compiler/10.frontend/core/parser_stmts.spl`  
-Accept `Ident.Ident:` or `Ident:` directly as match arm; `case` keyword stays optional.  
-**Test:** Enum match arms without `case` → 0 errors.  
-**Docker:** `bin/simple check src/lib/common/llm/content_authority.spl`
+Landed in `79ce94d8009` (local line) / grafted to origin. Fix site:
+`core/parser_stmts.spl:574-576` — the match-arm loop's else branch was an
+error-and-advance stub; replaced with a caseless-arm path mirroring the `case`
+branch (parse_expr pattern, optional `if` guard, optional `as` binding,
+expect `:`, parse_block body, same `arm_new_with_binding_and_rationale` +
+`normalize_wildcard_pattern` helpers — no forked pattern parser).
+
+Real arm forms covered: `Enum.Variant:` (content_authority.spl), `Ok(v):` /
+`Err(m):` constructor bindings (capability_policy.spl), literal/wildcard
+`0:` / `_:`. `case` keyword stays working.
+
+Verified: caseless enum arms, `case` regression, constructor-binding arms,
+M6 spot-check all `parser_has_errors()=false`; control TRUE;
+lazy_outline_equivalence 16/16.
 
 ---
 
