@@ -1,7 +1,7 @@
 #!/bin/sh
 # setup-directx-linux.shs — Idempotent DirectX-on-Linux local-prefix build
 # Builds vkd3d (wine-vkd3d) and dxvk-native from source into build/dx/prefix.
-# No sudo required. Uses pip install --user meson when meson is absent.
+# No sudo required. Uses python3 -m venv fallback for meson when absent.
 # On build failure records the concrete blocker in the state file and continues.
 #
 # Usage: sh scripts/setup/setup-directx-linux.shs
@@ -66,27 +66,77 @@ check_tool ninja
 check_tool git
 check_tool pkg-config
 
-# ── Ensure meson is available (pip --user fallback) ───────────────────────────
+# ── Ensure meson is available (python3 -m venv fallback) ─────────────────────
+DX_VENV="$DX_BUILD/meson-venv"
+
 ensure_meson() {
     if command -v meson >/dev/null 2>&1; then
         log_info "meson already available: $(meson --version)"
         return 0
     fi
-    log_info "meson not found; installing via pip install --user meson ..."
-    if ! command -v pip3 >/dev/null 2>&1 && ! command -v pip >/dev/null 2>&1; then
-        record_blocker "meson" "pip/pip3 not available; cannot install meson"
+    # Check if already installed in our venv
+    if [ -x "$DX_VENV/bin/meson" ]; then
+        export PATH="$DX_VENV/bin:$PATH"
+        log_info "meson from venv: $(meson --version)"
+        return 0
+    fi
+    # Try pip install --user first (works on non-PEP-668 systems)
+    if command -v pip3 >/dev/null 2>&1 || command -v pip >/dev/null 2>&1; then
+        PIP_CMD="$(command -v pip3 2>/dev/null || command -v pip)"
+        "$PIP_CMD" install --user meson ninja --quiet 2>/dev/null
+        export PATH="$HOME/.local/bin:$PATH"
+        if command -v meson >/dev/null 2>&1; then
+            log_info "meson installed via pip --user: $(meson --version)"
+            return 0
+        fi
+    fi
+    # Fallback: python3 -m venv (handles PEP 668 externally-managed-environment)
+    if ! command -v python3 >/dev/null 2>&1; then
+        record_blocker "meson" "python3 not available; cannot create venv for meson"
         return 1
     fi
-    PIP_CMD="$(command -v pip3 || command -v pip)"
-    "$PIP_CMD" install --user meson --quiet
-    # Add ~/.local/bin to PATH for this session
-    export PATH="$HOME/.local/bin:$PATH"
+    log_info "meson not found; installing via python3 -m venv fallback ..."
+    python3 -m venv "$DX_VENV" 2>/dev/null || {
+        record_blocker "meson" "python3 -m venv failed; cannot install meson"
+        return 1
+    }
+    "$DX_VENV/bin/pip" install meson ninja --quiet 2>/dev/null || {
+        record_blocker "meson" "pip install meson in venv failed"
+        return 1
+    }
+    export PATH="$DX_VENV/bin:$PATH"
     if ! command -v meson >/dev/null 2>&1; then
-        record_blocker "meson" "pip install --user meson succeeded but meson binary not found in ~/.local/bin"
+        record_blocker "meson" "meson venv install succeeded but binary not found"
         return 1
     fi
-    log_info "meson installed: $(meson --version)"
+    log_info "meson installed via venv: $(meson --version)"
     return 0
+}
+
+# ── Ensure perl JSON module available (cpan --local fallback) ─────────────────
+PERL_LOCAL="$HOME/.perl5"
+ensure_perl_json() {
+    if perl -MJSON -e '1' 2>/dev/null; then
+        return 0
+    fi
+    # Check local install
+    if PERL5LIB="$PERL_LOCAL/lib/perl5" perl -MJSON -e '1' 2>/dev/null; then
+        export PERL5LIB="$PERL_LOCAL/lib/perl5${PERL5LIB:+:$PERL5LIB}"
+        return 0
+    fi
+    if ! command -v cpan >/dev/null 2>&1; then
+        return 1
+    fi
+    log_info "perl JSON module not found; installing JSON::PP via cpan (local) ..."
+    mkdir -p "$PERL_LOCAL"
+    PERL_MM_OPT="INSTALL_BASE=$PERL_LOCAL" cpan -I JSON::PP 2>/dev/null && {
+        export PERL5LIB="$PERL_LOCAL/lib/perl5${PERL5LIB:+:$PERL5LIB}"
+        perl -MJSON -e '1' 2>/dev/null && {
+            log_info "perl JSON installed via cpan local."
+            return 0
+        }
+    }
+    return 1
 }
 
 # ── Check Vulkan loader (required for both builds) ────────────────────────────
@@ -123,16 +173,43 @@ else
         VKD3D_BUILT=true
         VKD3D_LIB="$VKD3D_SENTINEL"
     else
-        log_info "Cloning wine/vkd3d ..."
-        VKD3D_SRC="$DX_BUILD/vkd3d"
-        if [ ! -d "$VKD3D_SRC/.git" ]; then
-            git clone --depth=1 https://gitlab.winehq.org/wine/vkd3d.git "$VKD3D_SRC" 2>&1 || {
-                # Try github mirror on failure
-                git clone --depth=1 https://github.com/wine-mirror/wine-vkd3d.git "$VKD3D_SRC" 2>&1 || {
-                    record_blocker "vkd3d-clone" "git clone failed for both winehq and github mirrors; check network"
-                    VKD3D_SRC=""
+        # Prefer the release tarball: it ships the widl-generated idl headers
+        # (vkd3d_d3dx9shader.h etc.). A git checkout needs Wine's widl tool to
+        # generate them, which is rarely installed — that was the silent
+        # autotools blocker on Ubuntu (vkd3d_d3dx9shader.h: No such file).
+        VKD3D_VERSION="${VKD3D_VERSION:-1.13}"
+        VKD3D_TARBALL_SRC="$DX_BUILD/vkd3d-$VKD3D_VERSION"
+        VKD3D_SRC=""
+        if [ ! -f "$VKD3D_TARBALL_SRC/include/vkd3d_d3dx9shader.h" ]; then
+            log_info "Fetching vkd3d $VKD3D_VERSION release tarball ..."
+            _vkd3d_txz="$DX_BUILD/vkd3d-$VKD3D_VERSION.tar.xz"
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL -o "$_vkd3d_txz" "https://dl.winehq.org/vkd3d/source/vkd3d-$VKD3D_VERSION.tar.xz" 2>/dev/null || true
+            elif command -v wget >/dev/null 2>&1; then
+                wget -qO "$_vkd3d_txz" "https://dl.winehq.org/vkd3d/source/vkd3d-$VKD3D_VERSION.tar.xz" 2>/dev/null || true
+            fi
+            if [ -s "$_vkd3d_txz" ]; then
+                (cd "$DX_BUILD" && tar xf "$_vkd3d_txz" 2>/dev/null) || rm -rf "$VKD3D_TARBALL_SRC"
+            fi
+        fi
+        if [ -f "$VKD3D_TARBALL_SRC/include/vkd3d_d3dx9shader.h" ]; then
+            VKD3D_SRC="$VKD3D_TARBALL_SRC"
+            log_ok "vkd3d release source with pre-generated headers: $VKD3D_SRC"
+        else
+            log_info "Tarball unavailable; falling back to git clone of wine/vkd3d ..."
+            VKD3D_SRC="$DX_BUILD/vkd3d"
+            if [ ! -d "$VKD3D_SRC/.git" ]; then
+                git clone --depth=1 https://gitlab.winehq.org/wine/vkd3d.git "$VKD3D_SRC" 2>&1 || {
+                    # Try github mirror on failure
+                    git clone --depth=1 https://github.com/wine-mirror/wine-vkd3d.git "$VKD3D_SRC" 2>&1 || {
+                        record_blocker "vkd3d-clone" "git clone failed for both winehq and github mirrors; check network"
+                        VKD3D_SRC=""
+                    }
                 }
-            }
+            fi
+            if [ -n "$VKD3D_SRC" ] && ! command -v widl >/dev/null 2>&1; then
+                log_info "warning: widl not found — git-checkout vkd3d cannot generate idl headers; build will likely fail"
+            fi
         fi
         if [ -n "$VKD3D_SRC" ] && [ -d "$VKD3D_SRC" ]; then
             log_info "Configuring vkd3d with cmake ..."
@@ -169,8 +246,8 @@ else
                         fi
                     done
                 fi
-                (cd "$VKD3D_SRC" && autoreconf -fi 2>&1) && \
-                (cd "$VKD3D_SRC" && CPPFLAGS="$VKD3D_CPPFLAGS" ./configure --prefix="$DX_PREFIX" 2>&1) && \
+                ([ -x "$VKD3D_SRC/configure" ] || (cd "$VKD3D_SRC" && autoreconf -fi 2>&1)) && \
+                (cd "$VKD3D_SRC" && CPPFLAGS="$VKD3D_CPPFLAGS" ./configure --prefix="$DX_PREFIX" --disable-tests --disable-demos 2>&1) && \
                 make -C "$VKD3D_SRC" -j"$DX_JOBS" install 2>&1 && {
                     VKD3D_BUILT=true
                     VKD3D_LIB="$DX_PREFIX/lib/libvkd3d.so"

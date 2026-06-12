@@ -43,6 +43,16 @@ Execution of follow-up plan
   "dxvk-d3d11 device created leaf=dlopen". backend_directx_spec 18/18 on forced
   (uncached) re-run. vkd3d (d3d12) autotools build still fails — recorded as blocker
   in readiness state; D3D11 path (what the backend uses) is fully live.
+- 2026-06-12 vkd3d blocker closed: root cause = git checkout needs Wine's `widl`
+  to generate idl headers (vkd3d_d3dx9shader.h missing). Fixed by building the
+  vkd3d 1.13 release tarball (ships pre-generated headers) into the prefix —
+  readiness now `vkd3d_ready: true` AND `dxvk_ready: true` (full D3D11+D3D12
+  lanes). setup-directx-linux.shs now prefers the release tarball, skips
+  autoreconf when configure ships, and warns when widl is absent on the git
+  path. Also repaired origin damage: auto-resolve commit 0ee6fe2fb6c had
+  partially reverted Lane A's script (meson-venv fallback dropped,
+  ensure_perl_json half-removed) — reconstructed from Lane A blob + tarball
+  improvements.
 - 2026-06-12 Lane D2 (P5/AC-4) closed: browser_renderer_spec 98/0 (orchestrator
   re-verified uncached). CSS nesting normalization fixed in html_string_parser
   (`_norm_emit_rule` placeholder-template emit — works around brace-literal
