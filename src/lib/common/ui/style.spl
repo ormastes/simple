@@ -536,29 +536,35 @@ fn resolve_style(
     state: text
 ) -> StyleRule:
     """Resolve the effective style for a widget by cascading all matching rules in specificity order."""
-    # Collect matching entries sorted by specificity (ascending so higher overrides lower)
-    var matched: [StyleEntry] = []
+    var match_count = 0
     for entry in sheet.entries:
         if entry.selector.matches(widget_id, widget_kind, classes, state):
-            matched = matched.push(entry)
+            match_count = match_count + 1
 
-    # Sort by specificity ascending (insertion sort — sheet is typically short)
-    var sorted: [StyleEntry] = []
-    for entry in matched:
-        var inserted = false
-        var result_sorted: [StyleEntry] = []
-        for existing in sorted:
-            if (not inserted and entry.selector.specificity < existing.selector.specificity):
-                result_sorted = result_sorted.push(entry)
-                inserted = true
-            result_sorted = result_sorted.push(existing)
-        if not inserted:
-            result_sorted = result_sorted.push(entry)
-        sorted = result_sorted
+    if match_count == 0:
+        return StyleRule.default()
+
+    var matched: [StyleEntry] = [sheet.entries[0]; match_count]
+    var write_idx = 0
+    for entry in sheet.entries:
+        if entry.selector.matches(widget_id, widget_kind, classes, state):
+            matched[write_idx] = entry
+            write_idx = write_idx + 1
+
+    # Sort by specificity ascending so higher specificity cascades later.
+    var i = 1
+    while i < match_count:
+        val current = matched[i]
+        var j = i - 1
+        while j >= 0 and current.selector.specificity < matched[j].selector.specificity:
+            matched[j + 1] = matched[j]
+            j = j - 1
+        matched[j + 1] = current
+        i = i + 1
 
     # Cascade all matching rules from lowest to highest specificity
     var resolved = StyleRule.default()
-    for entry in sorted:
+    for entry in matched:
         resolved = cascade_rule(resolved, entry.rule)
     return resolved
 

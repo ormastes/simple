@@ -549,3 +549,7 @@ Updated: 2026-06-11
   listing, and tree replacement now use exact-size arrays instead of
   append-growing replacement lists while preserving handle generation and
   active-surface behavior.
+- Shared UI style cascade tightening: `resolve_style` now collects matching
+  rules into an exact-size buffer and uses in-place stable insertion sort, so
+  startup style resolution avoids repeated replacement-list allocation while
+  preserving specificity and source-order cascade behavior.
