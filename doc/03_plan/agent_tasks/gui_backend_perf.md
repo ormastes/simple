@@ -446,6 +446,11 @@ Updated: 2026-06-11
   DOM decoration, field override flattening, and edited-field rebuilds now reuse
   stable lengths and exact-size arrays, while DOM text extraction uses a shared
   StringBuilder to avoid recursive text concatenation in page startup rendering.
+- this commit -- Browser engine DOM accessor allocation tightening:
+  Child removal/insertion, recursive text extraction, id lookup, and tag
+  collection now reuse stable child counts and exact-size arrays where results
+  are caller-visible, clearing the remaining general optimizer findings in
+  low-level DOM accessors.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
