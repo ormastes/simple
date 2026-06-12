@@ -93,3 +93,16 @@ Tasks:
 4. Start Agent D in parallel once the first runtime evidence shape is stable.
 5. Run verification with `find doc/06_spec -name '*_spec.spl' | wc -l` and
    focused Simple checks before release handoff.
+
+## Refactoring Alignment (2026-06-12)
+
+`doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md`
+section 4 adopts this plan's contract as the top interface tier; main
+refactoring executed by a separate agent. Two of its gap items land here:
+
+- Gap 1: freeze the `SemanticUiTree`/`SemanticUiCommand` contract and prove
+  adapter equivalence (TUI / pure Simple GUI / pure Simple web / Tauri /
+  Electron / browser) before further host-specific render behavior.
+- Gap 2: the pure-Simple advanced bypass (web renderer → Engine2D direct) is a
+  queryable capability — every adapter reports `reached_engine2d` plus fallback
+  reason as typed evidence, consistent with the error-handling states above.

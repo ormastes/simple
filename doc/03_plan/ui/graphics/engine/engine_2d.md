@@ -57,3 +57,18 @@ The named scenario binds to `examples/09_embedded/simple_os/arch/x86_64/gui_entr
 | `NFR-E2D-QEMU-005` Freestanding closure avoids hosted/GPU backend leakage | `gui_entry_engine2d.spl` uses `Engine2DBaremetalCore` and Simple Web pixels, not `browser_backend` or full hosted `Engine2D` |
 | `NFR-E2D-QEMU-006` Scenario memory matches desktop/browser needs | `x64-wm-simple-web-check` uses `2G`, not low-memory probe settings |
 | WM architecture coverage | `gui_entry_engine2d_wm_simple_web_spec.spl` verifies WM service, launcher, Simple Web pixel production, Engine2D blit, and final render marker |
+
+## Refactoring Alignment (2026-06-12)
+
+Engine2D is being refactored toward the unified-surface architecture in
+`game_engine_2d3d_unification_plan_2026-06-12.md` (renderer3d output as a
+`CompositeLayer` on the shared `gpu_surface`, camera `render_order`, shared
+`RenderBackend`/`ComputeSession` traits). The main refactoring is executed by a
+separate agent; this plan stays the regression gate for that work:
+
+- Serial markers, QMP pixel assertions, and primitive color checks above must
+  keep passing unchanged through the refactor.
+- Baseline changes caused by the compositor unification must be explicit
+  (`UPDATE_BASELINE=1`), never silent.
+- The freestanding closure rule (`NFR-E2D-QEMU-005`) still applies: the unified
+  compositor path must not leak hosted/GPU backends into the baremetal lane.

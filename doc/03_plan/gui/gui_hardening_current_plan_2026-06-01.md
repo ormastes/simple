@@ -9757,3 +9757,20 @@ stdio with the current warning profiles unchanged. Final sync guards passed with
 file count stable at `78091`, and the runtime/spec continuation was pushed to
 `origin/main` as `bd8f91c903`. Broader typed-array prototype parity and
 production GUI pixel parity remain open.
+
+## Refactoring Alignment (2026-06-12)
+
+GUI render-path refactoring direction is set by
+`doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md`
+(section 4); the main refactoring is executed by a separate agent. Constraints
+this hardening plan enforces during that work:
+
+- Pure Simple GUI/web render requests route through the shared web render API;
+  any pixel/capture path reports whether it reached Engine2D (typed
+  `reached_engine2d` + fallback reason, no implicit bypass).
+- GUI surfaces become `CompositeLayer`s in the shared compositor `LayerTree`
+  alongside Engine2D/3D output; GUI renders at native resolution regardless of
+  3D resolution scaling.
+- Existing parity gates in this plan (pixel parity specs, generated-manual
+  scenario counts, shared runtime checks) are the regression evidence for the
+  refactor — entries continue to be appended here per pass.

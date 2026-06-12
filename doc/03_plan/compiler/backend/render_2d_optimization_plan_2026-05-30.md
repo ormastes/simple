@@ -282,3 +282,19 @@ Progress 2026-05-30:
 - Vulkan/Metal/WebGPU session conformance (already have session files; future work)
 - 3D rendering (separate engine3d path)
 - Compiler auto-vectorization of Simple → SIMD (separate MIR pass in `simd_lowering.spl`)
+
+## Refactoring Alignment (2026-06-12)
+
+This plan is a prerequisite of
+`doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md`
+(its P5 render-graph/MDI phase and interface-unification gap 3 depend on the
+`ComputeSession` trait landing). Main refactoring is executed by a separate
+agent. Alignment constraints for that work:
+
+- The `ComputeSession` trait must serve game2d, GUI, and the Simple web
+  renderer uniformly — no per-consumer backend forks.
+- Per-backend conformance specs keep typed hardware-absent states (no hidden
+  passes), matching the shared-UI backend design.
+- The 3D non-goal stands, but the trait surface must not preclude engine3d
+  adopting the same session contract later (unified compositor shares one
+  `gpu_surface`).

@@ -204,3 +204,18 @@ Targets: ARM32 (scalar first, optional NEON), ARM64 (scalar + NEON), RV32 (scala
 - Perf interface reports counters without changing behavior.
 - ARM/RISC-V 32/64 paths compile with scalar fallback and typed unavailable GPU diagnostics.
 - Tests prove perf mode and managed mode cannot be accidentally mixed.
+
+## Refactoring Alignment (2026-06-12)
+
+Per `doc/03_plan/ui/graphics/engine/game_engine_2d3d_unification_plan_2026-06-12.md`
+(P1 unified surface), main refactoring executed by a separate agent:
+
+- A managed 3D session's output frame becomes a `CompositeLayer` (z-index 0 by
+  default) in the compositor `LayerTree`, composited with 2D/GUI layers on the
+  shared `gpu_surface` — sessions do not own the swapchain alone.
+- 2D and 3D layers do not share a depth buffer; world-space 2D uses
+  render-to-texture on a mesh inside the 3D session.
+- Session invariants above are unchanged by the refactor — in particular
+  frame-to-session binding (rule 5) and explicit readback/fallback policy
+  (rules 6-7) also govern compositor blits.
+- Camera `render_order` lives in engine components, not in the session layer.
