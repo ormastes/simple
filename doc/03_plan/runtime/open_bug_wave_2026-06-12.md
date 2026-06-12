@@ -28,18 +28,28 @@ Note: test/ was reorganized to numbered dirs mid-wave; old spec paths like
 `test/01_unit/lib/std/*` are gone — runner reports plain FAILED (not
 file-not-found) for missing paths.
 
+## Follow-up wave closed 2026-06-12 (evening)
+
+- **B3 cranelift for-in gap**: CLOSED — `run_file_jit` scans lowered MIR for
+  `Yield` and falls back to the interpreter before compiling (no SIGSEGV);
+  guard+test swept to main via `a1e84fc2691`, doc `f3b2f4376ea`. Interpreter
+  gen-fn iteration itself remains S7.
+- **A3 cranelift**: CLOSED — class patterns skip `rt_enum_check_discriminant`,
+  bindings lower to `FieldAccess` with concrete field types; pushed
+  `789ff1ff17a`; probe prints `matched: 10 20 30` in JIT.
+- **A4 code fix**: CLOSED — `calls.rs` fix carried to main via reorganization
+  commits; OOB probe returns benign value, exit 0.
+- **FINDING-T2-dirent**: CLOSED — interpreter auto-wraps plain returns into
+  `Some(...)` for `-> T?` functions; FAT32 sentinel `-1` reverted to `i32?`;
+  pushed `60fd804c365`, +5 regression tests, fat32_dirent_spec 7/7.
+- Seed redeployed (backup `simple_seed.bak.2026-06-12-preWave2`); smoke:
+  all probes + math_spec 13/13 via stage4 delegation.
+
 ## Open follow-ups (not in this wave)
 
-- **B3 cranelift for-in gap**: `for x in gen()` still exits 139 in compiled mode
-  (documented in async bug doc line ~86). Needs generator state-machine support
-  in the cranelift path, not a safety net.
-- **A3 cranelift**: positional class match fixed in interpreter only; compiled
-  path still open (bug doc tracks it).
-- **A4 code fix**: lands with parser track's push of `adc8dcad379` (calls.rs ±104).
 - **B5 eager-async**: DOCUMENTED-CANONICAL, pinned by 7 `test_b5_*` tests
   (`31fe3a3bede`); no production change planned.
-- **FINDING-T2-dirent**: Optional-unwrap interpreter limitation forced sentinel
-  `-1` returns in FAT32 `_find_root_entry`; revisit when Optional unwrap works
-  in interpreter element contexts.
+- **S7 interpreter generators**: `for x in gen fn` in the interpreter errors
+  with "yield called outside of generator" — separate feature track.
 - **Parser completion** (foreign track): lean-parser language coverage, weeks-scale,
   own plan — do not touch its files (`codegen/**`, `mir/lower/**`, `Cargo.toml`, etc.).
