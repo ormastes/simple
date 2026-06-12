@@ -391,9 +391,31 @@ survivors; recovery-path OOB suspects: `parser_decls_part3.spl`,
 ### M12 — Flat-bridge hardening + remove delegation
 
 **Files:** `src/compiler/10.frontend/flat_ast_bridge_part1.spl`, `flat_ast_bridge_part2.spl`
-1. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
-2. Remove `simple_seed` delegation guards from `src/app/cli/check.spl` and lint entry.
-3. **Gate:** `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl` exits 0; full 1855-file sweep reports 0 errors.
+
+#### M12a — binary-op fidelity — DONE 2026-06-12
+Resolves the M11d WATCH item. Two halves, landed together:
+- `parser_expr.spl`: shift paths now emit `expr_binary(66/67, ...)`
+  (TOK_SHL/TOK_SHR — kinds the lexer never produces, free for AST use)
+  instead of reusing 82/83; single `<`/`>` comparisons keep 82/83.
+  Sites: parse_comparison :233/:243, parse_binary_from :450/:459.
+- `flat_ast_bridge_part1.spl`: new `op_kind_to_binop(kind)` (:208–228) maps
+  all 19 binary token kinds to real BinOp variants (Shl/Shr/BitAnd/BitOr/
+  BitXor confirmed variant names); replaces the hardcoded `BinOp.Add`
+  flattening at :269 (was :247).
+- Verified (orchestrator round-2): tmp/site12/m12a_probe.spl — shl/shr/
+  lt/generics/comparison-chain all clean, must-fail control true;
+  m11e_probe.spl battery unchanged.
+- KNOWN PRE-EXISTING (verified by swapping origin bridge file back in,
+  identical crash): interpreted `flat_ast_to_module` dies with
+  "array index out of bounds: index 0, length 0" right after entry —
+  affects seed-interpreted bridge only; compiled stage4 check pipeline
+  exercises the bridge fine. Track under M12 remaining work.
+
+#### M12 remaining
+1. Interpreted `flat_ast_to_module` entry OOB (see above) — diagnose/fix.
+2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
+3. Remove `simple_seed` delegation guards from `src/app/cli/check.spl` and lint entry.
+4. **Gate:** `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl` exits 0; full 1855-file sweep reports 0 errors.
 
 ---
 
