@@ -286,6 +286,10 @@ Updated: 2026-06-11
   Patch JSON escaping, field extraction, numeric parsing, and bounded substring
   search now reuse stable string lengths inside scanner loops instead of
   dispatching repeated `.len()` calls.
+- this commit -- UI snapshot wire scan length hoisting:
+  Snapshot JSON number/string extraction and revision parsing now reuse stable
+  string lengths inside scanner loops, matching the patch-wire fast path for
+  websocket startup protocol handling.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
