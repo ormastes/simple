@@ -35,6 +35,21 @@ pub extern "C" fn rt_value_as_bool(v: RuntimeValue) -> bool {
 pub extern "C" fn rt_value_truthy(v: RuntimeValue) -> bool {
     v.truthy()
 }
+/// Coerce a boxed RuntimeValue to a raw machine i64 with a full-width return.
+/// Used by the InterpCall bridge to hand interpreter results back to compiled
+/// code whose destination is a raw bool/int register (bool -> 0/1, nil -> 0).
+#[no_mangle]
+pub extern "C" fn rt_value_raw_i64(v: RuntimeValue) -> i64 {
+    if v.is_int() {
+        v.as_int()
+    } else if v.is_bool() {
+        i64::from(v.as_bool())
+    } else if v.is_float() {
+        v.as_float() as i64
+    } else {
+        0
+    }
+}
 #[no_mangle]
 pub extern "C" fn rt_value_is_nil(v: RuntimeValue) -> bool {
     v.is_nil()

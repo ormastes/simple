@@ -67,6 +67,9 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     }
                     MirInst::InterpCall { func_name, .. } => {
                         names.insert(func_name.clone());
+                        // The interp bridge returns boxed RuntimeValues; raw
+                        // bool/int destinations are unboxed via this helper.
+                        names.insert("rt_value_raw_i64".to_string());
                     }
                     MirInst::DictLit { .. } => {
                         names.insert("rt_dict_new".to_string());

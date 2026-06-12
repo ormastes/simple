@@ -751,7 +751,16 @@ pub(crate) fn compile_interp_call<M: Module>(
     let result = call_runtime_4(ctx, builder, "rt_interp_call", name_ptr, name_len, argc, argv);
 
     if let Some(d) = dest {
-        ctx.vreg_values.insert(*d, result);
+        // rt_interp_call returns a boxed RuntimeValue. When the destination is
+        // a raw scalar (bool/int) — e.g. a JIT-unresolvable extern like
+        // rt_torch_cuda_available() -> bool — unbox it so conditions and
+        // arithmetic in compiled code see 0/1 instead of NaN-boxed bits.
+        let value = if vreg_is_native_equality_scalar(ctx, *d) {
+            call_runtime_1(ctx, builder, "rt_value_raw_i64", result)
+        } else {
+            result
+        };
+        ctx.vreg_values.insert(*d, value);
     }
     Ok(())
 }
