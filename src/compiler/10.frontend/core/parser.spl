@@ -13,7 +13,7 @@
 #   parser_stmts.spl        — statement parsing
 #   parser_decls.spl        — declaration and module body parsing
 
-use compiler.core.tokens.{tok_kind_name}
+use compiler.core.tokens.{tok_kind_name, keyword_lookup}
 use compiler.core.tokens.{TOK_IDENT}
 use compiler.core.tokens.{TOK_KW_FN, TOK_KW_DYN}
 use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
@@ -282,9 +282,26 @@ fn parser_parse_type() -> i64:
         if dyn_id >= 0:
             return TYPE_NAMED_BASE + dyn_id
         return TYPE_ANY
-    val type_name = par_text_get()
+    var type_name = par_text_get()
     if par_kind_get() == 6:
         parser_advance()
+        # G35: absorb dotted path segments: json.Value  or  json::Value
+        for _gi35 in 0..20:
+            val seg_kind = par_kind_get()
+            if seg_kind != 164 and seg_kind != 162:
+                break
+            parser_advance()
+            var seg_name = par_text_get()
+            val seg_k = par_kind_get()
+            val is_ident = seg_k == 6
+            val seg_kn = tok_kind_name(seg_k)
+            val seg_is_kw = keyword_lookup(seg_kn) == seg_k
+            if not is_ident and not seg_is_kw:
+                break
+            if seg_is_kw and not is_ident:
+                seg_name = seg_kn
+            parser_advance()
+            type_name = type_name + "." + seg_name
         # Check for generic type: Option<T>, Result<T, E>, Dict<K,V>, etc.
         val has_lt: bool = par_kind_get() == 82
         val has_lt_gen: bool = par_kind_get() == 86

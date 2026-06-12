@@ -851,14 +851,26 @@ prelude closure; rc=124 at 900s with 2,413 errors accumulated across prelude
 files = the G34/G35 wave, not a crash).
 
 Gap classes mined from check_m11f.log + solo log:
-- **G34** `::` path separator (`FeatureId::RecordStart`) — seed ACCEPTS it
-  (parity required); bulk of the 172× "unexpected ':' in expression".
-- **G35** dotted type names in annotations (`json_value: json.Value`) —
-  type parser rejects `Module.Type`; cascade accounts for most of the
-  `.`/`)`/`->`/`:` classes (e.g. src/app/sdn/commands.spl:230).
-- **G36** main_lazy_json.spl `,`(52×)/`]`(11×) class — to sample.
-- **G37** render_adapter.spl "index expression cannot be an assignment,
-  comparison, or logical expression inside []" (6×) — to sample.
+- **G34** `::` path separator — DONE 2026-06-12: lexer fuses `::` →
+  TOK_COLON_COLON (162, pre-existing kind) at lexer_struct.spl:867-874;
+  parse_postfix/parse_postfix_on accept 162 alongside 164 (parser_expr.spl
+  :681/:826). features.spl 63→0 errors in docker gate.
+- **G35** dotted type names in annotations — DONE 2026-06-12:
+  parser_parse_type (core/parser.spl:285-298) absorbs `.`/`::` + ident or
+  keyword segments (G25 round-trip) into the type name; param/return/val
+  positions + generics-after-path probed green. Round-2 verified: g34 4/4,
+  g35 5/5, batteries m11e 8/8 g33 5/5 g32 4/4 m12a 5+bridge-ok.
+- **G36** raw string literals `r"..."` (main_lazy_json.spl
+  `result.replace(r"\", r"\\")`) — lexer lacks the r-prefix; cascades to the
+  `,`(307×)/`]`(93×)/`->`(36×) classes.
+- **G37** match-EXPRESSION as initializer: `val source = match f(x):` with
+  `case Ok(v):` block arms (commands.spl pervasive), and caseless
+  string-literal arms `"html":` (render_adapter.spl render_repl). 248×
+  residual ':' class.
+- **G38** render_adapter "index expression cannot be an
+  assignment/comparison/logical inside []" (71×) — suspects: subscript
+  assignment `meta["k"] = v` or lone `{` inside interpolated strings
+  (`"{s}.repl-container {\n"` CSS builder); needs probe separation.
 
 ALSO: interpreted parse_module is superlinear in file size AND degrades per
 call (selector.spl prefixes: 20→<1s, 40→2s, 80→6s, 160→256s; identical
