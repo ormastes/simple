@@ -57,7 +57,8 @@ use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 use compiler.core.parser.{rt_is_debug_mode_enabled}
 
 # Import expression parsing
-use compiler.frontend.core.parser_expr.{parse_expr}
+use compiler.frontend.core.parser_expr.{parse_expr, parse_postfix_on, parse_binary_from}
+use compiler.core.ast.{expr_assign, expr_compound_assign}
 
 fn parse_optional_rationale_args() -> text:
     var msg = ""
@@ -241,7 +242,31 @@ fn parse_statement() -> i64:
         return parse_while_stmt()
 
     if par_kind_get() == 43:
-        return parse_match_stmt()
+        # G33: `match` may be an identifier (var match = true; match = false).
+        # After consuming `match`, a token that cannot start an expression
+        # means identifier usage. Tradeoff: scrutinees starting with -, (
+        # still route to match-stmt (their kinds can start expressions).
+        parser_advance()
+        if g33_kw_ident_follow(par_kind_get()):
+            var mleft = parse_postfix_on(expr_ident("match", 0))
+            mleft = parse_binary_from(mleft)
+            if par_kind_get() == 100 or par_kind_get() == 106:
+                parser_advance()
+                return stmt_expr_stmt(expr_assign(mleft, parse_expr(), 0), 0)
+            if par_kind_get() == 101:
+                parser_advance()
+                return stmt_expr_stmt(expr_compound_assign(60, mleft, parse_expr(), 0), 0)
+            if par_kind_get() == 102:
+                parser_advance()
+                return stmt_expr_stmt(expr_compound_assign(61, mleft, parse_expr(), 0), 0)
+            if par_kind_get() == 103:
+                parser_advance()
+                return stmt_expr_stmt(expr_compound_assign(62, mleft, parse_expr(), 0), 0)
+            if par_kind_get() == 104:
+                parser_advance()
+                return stmt_expr_stmt(expr_compound_assign(63, mleft, parse_expr(), 0), 0)
+            return stmt_expr_stmt(mleft, 0)
+        return parse_match_stmt_tail()
 
     if par_kind_get() == 47:
         parser_advance()
@@ -585,8 +610,30 @@ fn parse_while_stmt() -> i64:
     val body = parse_block()
     stmt_while_stmt(cond, body, 0)
 
+# G33: kinds that cannot START an expression — a statement keyword followed
+# by one of these is being used as an identifier, not a keyword.
+fn g33_kw_ident_follow(kind: i64) -> bool:
+    if kind >= 100 and kind <= 106:
+        return true
+    if kind == 141 or kind == 160 or kind == 161 or kind == 164 or kind == 168:
+        return true
+    if kind == 180 or kind == 181 or kind == 182:
+        return true
+    if kind == 55 or kind == 56:
+        return true
+    if kind >= 60 and kind <= 67:
+        return true
+    if kind >= 80 and kind <= 85:
+        return true
+    if kind >= 120 and kind <= 122:
+        return true
+    false
+
 fn parse_match_stmt() -> i64:
     parser_advance()
+    return parse_match_stmt_tail()
+
+fn parse_match_stmt_tail() -> i64:
     val scrutinee = parse_expr()
     parser_expect(161)
     parser_skip_newlines()
@@ -929,5 +976,6 @@ fn parse_gpu_launch_stmt() -> i64:
 export parse_block, parse_statement
 export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
 export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
+export parse_match_stmt_tail, g33_kw_ident_follow
 export parse_receive_stmt, parse_bind_stmt
 export parse_if_expr, parse_for_expr, parse_while_expr
