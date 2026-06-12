@@ -410,6 +410,10 @@ Updated: 2026-06-11
   URLSearchParams decode/set helpers and dynamic stylesheet/script loader loops
   now reuse stable loop lengths, refreshing counts only when loader work queues
   grow during iteration.
+- this commit -- Browser module helper scanner length hoisting:
+  JS module statement, binding, export-declarator, and generic text splitters
+  now reuse stable source lengths while preserving quoted semicolon and
+  top-level comma behavior.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
