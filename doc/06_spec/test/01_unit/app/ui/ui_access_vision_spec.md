@@ -1,6 +1,6 @@
 # Ui Access Vision Specification
 
-> 1. bounds: Some
+> <details>
 
 <!-- sdn-diagram:id=ui_access_vision_spec.arch -->
 <details class="sdn-source">
@@ -41,7 +41,7 @@ ui_access_vision_spec -> common
 
 #### stores bounds, marks, issues, and capture result fields
 
-1. bounds: Some
+- bounds: Some
    - Expected: result.bounds.len() equals `1`
    - Expected: result.bounds[0].canonical_id equals `main#submit_btn`
    - Expected: result.marks.len() equals `1`
@@ -104,7 +104,7 @@ expect(result.captured).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -119,10 +119,12 @@ expect(result.marks.len()).to_equal(0)
 expect(result.issues.len()).to_equal(1)
 expect(result.issues[0].code).to_equal("vision.no_image")
 expect(result.issues[0].severity).to_equal("warning")
-expect(result.issues[0].bounds != nil).to_equal(true)
-if val issue_bounds = result.issues[0].bounds:
+var has_bounds = false
+if val Some(issue_bounds) = result.issues[0].bounds:
+    has_bounds = true
     expect(issue_bounds.x).to_equal(10)
     expect(issue_bounds.w).to_equal(80)
+expect(has_bounds).to_equal(true)
 ```
 
 </details>

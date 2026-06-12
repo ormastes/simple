@@ -308,6 +308,10 @@ Updated: 2026-06-11
   Recent-event snapshot copies, surface-filtered event lists, and widget child
   id lists now use exact-size buffers and cached event counts instead of
   repeated push growth and repeated loop-bound length calls.
+- this commit -- UI access vision allocation tightening:
+  Visual probe sidecar bounds and marks now pre-count matching nodes and fill
+  exact-size arrays, while JSON escaping reuses the input length in the scan
+  loop. The stale vision unit fixture now includes snapshot revisions.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
