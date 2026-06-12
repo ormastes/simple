@@ -438,6 +438,10 @@ Updated: 2026-06-11
   Storage pair lookup now reuses stable list lengths, and pair upsert writes an
   exact-size output array for both replacement and append cases while preserving
   key order and storage API property collision behavior.
+- this commit -- Browser session queue/favorite array tightening:
+  Pending request dequeue and favorite-link removal now write exact-size arrays
+  instead of append-growing replacement lists, preserving request order and
+  favorite normalization behavior.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

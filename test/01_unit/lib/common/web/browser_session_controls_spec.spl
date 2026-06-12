@@ -36,3 +36,36 @@ describe "BrowserSession primitive browser controls":
         session.remove_favorite("https://example.com/app")
         expect(session.is_favorite("https://example.com/app")).to_equal(false)
         expect(session.favorite_links.len()).to_equal(1)
+
+    it "dequeues pending network requests in insertion order":
+        var session = BrowserSession.new()
+
+        val first_result = session.begin_network_navigation("https://example.com/one", "GET", "", "", "")
+        val second_result = session.begin_network_navigation("https://example.com/two", "POST", "X-Test: 1", "body", "text/plain")
+
+        match first_result:
+            Ok(_) =>
+                expect(session.has_pending_requests()).to_equal(true)
+            Err(e) =>
+                fail("Expected first navigation request to enqueue: {e}")
+        match second_result:
+            Ok(_) =>
+                expect(session.has_pending_requests()).to_equal(true)
+            Err(e) =>
+                fail("Expected second navigation request to enqueue: {e}")
+
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.url).to_equal("https://example.com/one")
+                expect(request.method).to_equal("GET")
+            nil =>
+                fail("Expected first pending request")
+        match session.take_pending_request():
+            Some(request) =>
+                expect(request.url).to_equal("https://example.com/two")
+                expect(request.method).to_equal("POST")
+                expect(request.body).to_equal("body")
+            nil =>
+                fail("Expected second pending request")
+
+        expect(session.has_pending_requests()).to_equal(false)
