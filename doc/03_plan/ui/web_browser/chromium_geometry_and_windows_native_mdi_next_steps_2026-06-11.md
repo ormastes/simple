@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 63 labeled fixtures through `66_flex_wrap_gap_align_content_flex_end` with exact
+  now covers 64 labeled fixtures through `67_flex_wrap_gap_align_content_center` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -702,6 +702,19 @@ Smallest next implementation step:
     `y=96` and `y=126`
   - the Simple wrap branch applies the same flex-end offset and base row gap
     without blur, tolerance, resolution scaling, or copied Chromium pixels
+- Live `67_flex_wrap_gap_align_content_center` evidence now passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused fixture-67 result records Chromium wrapped row flex line-gap plus
+  `align-content:center` distribution:
+  - the explicit flex container border box is `x=16`, `y=16`, `width=90`,
+    `height=140`
+  - the first flex line has `height=20`; the second line has `height=30`; the
+    explicit `row-gap:10px` makes base line content `60px`, leaving `80px`
+    of free cross-axis space
+  - Chrome centers the line block by offsetting it `40px`, placing line starts
+    at `y=56` and `y=86`
+  - the Simple wrap branch applies the same center offset and base row gap
+    without blur, tolerance, resolution scaling, or copied Chromium pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -753,13 +766,14 @@ Smallest next implementation step:
   `62_flex_column_gap_space_around`,
   `63_flex_wrap_gap_align_content_space_between`, and
   `64_flex_wrap_gap_align_content_space_around`, and
-  `65_flex_wrap_gap_align_content_space_evenly`, and
-  `66_flex_wrap_gap_align_content_flex_end`:
+  `65_flex_wrap_gap_align_content_space_evenly`,
+  `66_flex_wrap_gap_align_content_flex_end`, and
+  `67_flex_wrap_gap_align_content_center`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `66` in its default manifest, excluding only
+    covers fixtures `02` through `67` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `63` fixtures, `63` passes, `0` failures, and
+    reports `64` fixtures, `64` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
