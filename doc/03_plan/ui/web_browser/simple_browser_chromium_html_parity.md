@@ -519,10 +519,24 @@ Open gaps tied to the active browser objective:
   `74_flex_gap_justify_unsafe_center`:
   - result: `layout_match`, `mismatch_count=0`
   - focused result: records Chrome's row flex `gap:12px` plus
-    `justify-content:unsafe center`; the Pure Simple parser normalizes the
+    `justify-content:unsafe center`; the Pure Simple parser preserves the
     overflow-position prefix and applies the same centered main-axis placement
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
     now reports `fixture_count=71`, `pass_count=71`, `fail_count=0`, and
+    `blur_or_tolerance_used=false`
+- The same live geometry lane now passes for
+  `75_flex_gap_justify_unsafe_center_overflow`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's row flex `gap:12px` plus
+    nominally overflowing `justify-content:unsafe center`; Chromium resolves
+    default `flex-shrink:1` before alignment, so the Pure Simple renderer now
+    keeps the unsafe overflow-position prefix but does not apply a pre-shrink
+    negative center offset
+  - renderer update: row and column flex `unsafe center` remain center-aligned
+    for positive free space while shrink-resolved overflow starts from the
+    Chrome-matched start edge
+  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+    now reports `fixture_count=72`, `pass_count=72`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
