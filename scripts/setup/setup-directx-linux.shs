@@ -1,7 +1,7 @@
 #!/bin/sh
 # setup-directx-linux.shs — Idempotent DirectX-on-Linux local-prefix build
 # Builds vkd3d (wine-vkd3d) and dxvk-native from source into build/dx/prefix.
-# No sudo required. Uses python3 -m venv fallback for meson when absent.
+# No sudo required. Uses pip install --user meson when meson is absent.
 # On build failure records the concrete blocker in the state file and continues.
 #
 # Usage: sh scripts/setup/setup-directx-linux.shs
@@ -66,77 +66,27 @@ check_tool ninja
 check_tool git
 check_tool pkg-config
 
-# ── Ensure meson is available (python3 -m venv fallback) ─────────────────────
-DX_VENV="$DX_BUILD/meson-venv"
-
+# ── Ensure meson is available (pip --user fallback) ───────────────────────────
 ensure_meson() {
     if command -v meson >/dev/null 2>&1; then
         log_info "meson already available: $(meson --version)"
         return 0
     fi
-    # Check if already installed in our venv
-    if [ -x "$DX_VENV/bin/meson" ]; then
-        export PATH="$DX_VENV/bin:$PATH"
-        log_info "meson from venv: $(meson --version)"
-        return 0
-    fi
-    # Try pip install --user first (works on non-PEP-668 systems)
-    if command -v pip3 >/dev/null 2>&1 || command -v pip >/dev/null 2>&1; then
-        PIP_CMD="$(command -v pip3 2>/dev/null || command -v pip)"
-        "$PIP_CMD" install --user meson ninja --quiet 2>/dev/null
-        export PATH="$HOME/.local/bin:$PATH"
-        if command -v meson >/dev/null 2>&1; then
-            log_info "meson installed via pip --user: $(meson --version)"
-            return 0
-        fi
-    fi
-    # Fallback: python3 -m venv (handles PEP 668 externally-managed-environment)
-    if ! command -v python3 >/dev/null 2>&1; then
-        record_blocker "meson" "python3 not available; cannot create venv for meson"
+    log_info "meson not found; installing via pip install --user meson ..."
+    if ! command -v pip3 >/dev/null 2>&1 && ! command -v pip >/dev/null 2>&1; then
+        record_blocker "meson" "pip/pip3 not available; cannot install meson"
         return 1
     fi
-    log_info "meson not found; installing via python3 -m venv fallback ..."
-    python3 -m venv "$DX_VENV" 2>/dev/null || {
-        record_blocker "meson" "python3 -m venv failed; cannot install meson"
-        return 1
-    }
-    "$DX_VENV/bin/pip" install meson ninja --quiet 2>/dev/null || {
-        record_blocker "meson" "pip install meson in venv failed"
-        return 1
-    }
-    export PATH="$DX_VENV/bin:$PATH"
+    PIP_CMD="$(command -v pip3 || command -v pip)"
+    "$PIP_CMD" install --user meson --quiet
+    # Add ~/.local/bin to PATH for this session
+    export PATH="$HOME/.local/bin:$PATH"
     if ! command -v meson >/dev/null 2>&1; then
-        record_blocker "meson" "meson venv install succeeded but binary not found"
+        record_blocker "meson" "pip install --user meson succeeded but meson binary not found in ~/.local/bin"
         return 1
     fi
-    log_info "meson installed via venv: $(meson --version)"
+    log_info "meson installed: $(meson --version)"
     return 0
-}
-
-# ── Ensure perl JSON module available (cpan --local fallback) ─────────────────
-PERL_LOCAL="$HOME/.perl5"
-ensure_perl_json() {
-    if perl -MJSON -e '1' 2>/dev/null; then
-        return 0
-    fi
-    # Check local install
-    if PERL5LIB="$PERL_LOCAL/lib/perl5" perl -MJSON -e '1' 2>/dev/null; then
-        export PERL5LIB="$PERL_LOCAL/lib/perl5${PERL5LIB:+:$PERL5LIB}"
-        return 0
-    fi
-    if ! command -v cpan >/dev/null 2>&1; then
-        return 1
-    fi
-    log_info "perl JSON module not found; installing JSON::PP via cpan (local) ..."
-    mkdir -p "$PERL_LOCAL"
-    PERL_MM_OPT="INSTALL_BASE=$PERL_LOCAL" cpan -I JSON::PP 2>/dev/null && {
-        export PERL5LIB="$PERL_LOCAL/lib/perl5${PERL5LIB:+:$PERL5LIB}"
-        perl -MJSON -e '1' 2>/dev/null && {
-            log_info "perl JSON installed via cpan local."
-            return 0
-        }
-    }
-    return 1
 }
 
 # ── Check Vulkan loader (required for both builds) ────────────────────────────
