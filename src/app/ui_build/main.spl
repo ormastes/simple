@@ -17,7 +17,7 @@ use std.common.ui.html_ui.pair.{HtmlCssPair, pair_load}
 use std.common.ui.html_ui.catalog.{catalog_supports, catalog_tags}
 use std.common.ui.html_ui.doc_ops.{used_tags}
 use std.common.ui.html_ui.payload.{
-    UiPartMap, payload_encode, payload_split,
+    UiPartMap, payload_encode, payload_split, payload_decode,
     gen_std_module_source, gen_dyn_main_source, gen_dyn_part_source
 }
 
@@ -87,7 +87,8 @@ fn _join_text(arr: [text], sep: text) -> text:
 # ---------------------------------------------------------------------------
 
 # Write a .uib.sdn sidecar manifest.
-# artifacts: list of "path|role|byte_count" triples joined as text items
+# artifacts: list of "path|role|byte_count|gen_module|stub" quintuples joined with "|"
+#   (gen_module is the .spl source path; stub is "true"/"false")
 # elements: list of tag names
 # part_map_tags / part_map_parts: parallel arrays for element->part mapping
 fn _write_manifest(
@@ -115,12 +116,15 @@ fn _write_manifest(
     out = out + "artifacts:" + nl
     i = 0
     while i < artifacts.len():
-        # artifact entries are "path|role|byte_count"
+        # artifact entries are "path|role|byte_count|gen_module|stub"
         val parts = artifacts[i].split("|")
-        if parts.len() == 3:
+        if parts.len() >= 3:
             out = out + "  - path: " + parts[0] + nl
             out = out + "    role: " + parts[1] + nl
             out = out + "    byte_count: " + parts[2] + nl
+            if parts.len() >= 5:
+                out = out + "    gen_module: " + parts[3] + nl
+                out = out + "    stub: " + parts[4] + nl
         i = i + 1
     out = out + nl
     out = out + "elements:" + nl
@@ -145,6 +149,8 @@ struct UibManifest:
     artifact_paths: [text]
     artifact_roles: [text]
     artifact_byte_counts: [i64]
+    artifact_gen_modules: [text]
+    artifact_stubs: [bool]
     elements: [text]
     part_map_tags: [text]
     part_map_parts: [text]
@@ -165,12 +171,18 @@ fn _parse_manifest(content: text) -> UibManifest:
     var artifact_paths: [text] = []
     var artifact_roles: [text] = []
     var artifact_byte_counts: [i64] = []
+    var artifact_gen_modules: [text] = []
+    var artifact_stubs: [bool] = []
     var elements: [text] = []
     var part_map_tags: [text] = []
     var part_map_parts: [text] = []
     var section = ""
     var cur_path = ""
     var cur_role = ""
+    var cur_bc: i64 = 0
+    var cur_gen_module = ""
+    var cur_stub = false
+    var cur_bc_seen = false
     var i = 0
     while i < lines.len():
         val line = lines[i]
@@ -188,6 +200,10 @@ fn _parse_manifest(content: text) -> UibManifest:
             section = "artifacts"
             cur_path = ""
             cur_role = ""
+            cur_bc = 0
+            cur_gen_module = ""
+            cur_stub = false
+            cur_bc_seen = false
         else if trimmed == "elements:":
             section = "elements"
         else if trimmed == "part_map:":
@@ -198,30 +214,39 @@ fn _parse_manifest(content: text) -> UibManifest:
             val path_prefix = "- path:"
             val role_prefix = "role:"
             val bc_prefix = "byte_count:"
+            val gm_prefix = "gen_module:"
+            val stub_prefix = "stub:"
             if trimmed.starts_with(path_prefix):
-                if cur_path != "" and cur_role != "":
+                if cur_path != "" and cur_bc_seen:
                     artifact_paths = artifact_paths + [cur_path]
                     artifact_roles = artifact_roles + [cur_role]
-                    artifact_byte_counts = artifact_byte_counts + [0]
+                    artifact_byte_counts = artifact_byte_counts + [cur_bc]
+                    artifact_gen_modules = artifact_gen_modules + [cur_gen_module]
+                    artifact_stubs = artifact_stubs + [cur_stub]
                 cur_path = trimmed.slice(7, trimmed.length()).trim()
                 cur_role = ""
+                cur_bc = 0
+                cur_gen_module = ""
+                cur_stub = false
+                cur_bc_seen = false
             else if trimmed.starts_with(role_prefix):
                 cur_role = trimmed.slice(5, trimmed.length()).trim()
             else if trimmed.starts_with(bc_prefix):
                 val bc_str = trimmed.slice(11, trimmed.length()).trim()
-                if cur_path != "":
-                    artifact_paths = artifact_paths + [cur_path]
-                    artifact_roles = artifact_roles + [cur_role]
-                    var bc: i64 = 0
-                    var di = 0
-                    while di < bc_str.length():
-                        val d = char_code(bc_str.char_at(di))
-                        if d >= 48 and d <= 57:
-                            bc = bc * 10 + (d - 48)
-                        di = di + 1
-                    artifact_byte_counts = artifact_byte_counts + [bc]
-                    cur_path = ""
-                    cur_role = ""
+                var bc: i64 = 0
+                var di = 0
+                while di < bc_str.length():
+                    val d = char_code(bc_str.char_at(di))
+                    if d >= 48 and d <= 57:
+                        bc = bc * 10 + (d - 48)
+                    di = di + 1
+                cur_bc = bc
+                cur_bc_seen = true
+            else if trimmed.starts_with(gm_prefix):
+                cur_gen_module = trimmed.slice(11, trimmed.length()).trim()
+            else if trimmed.starts_with(stub_prefix):
+                val sv = trimmed.slice(5, trimmed.length()).trim()
+                cur_stub = sv == "true"
         else if section == "elements":
             val elem = _parse_list_item(trimmed)
             if elem != "":
@@ -235,17 +260,21 @@ fn _parse_manifest(content: text) -> UibManifest:
                     part_map_tags = part_map_tags + [tag]
                     part_map_parts = part_map_parts + [part]
         i = i + 1
-    # flush last artifact if incomplete byte_count line was missing
-    if cur_path != "" and cur_role != "":
+    # flush last artifact
+    if cur_path != "" and cur_bc_seen:
         artifact_paths = artifact_paths + [cur_path]
         artifact_roles = artifact_roles + [cur_role]
-        artifact_byte_counts = artifact_byte_counts + [0]
+        artifact_byte_counts = artifact_byte_counts + [cur_bc]
+        artifact_gen_modules = artifact_gen_modules + [cur_gen_module]
+        artifact_stubs = artifact_stubs + [cur_stub]
     UibManifest(
         form: form,
         html_path: html_path,
         artifact_paths: artifact_paths,
         artifact_roles: artifact_roles,
         artifact_byte_counts: artifact_byte_counts,
+        artifact_gen_modules: artifact_gen_modules,
+        artifact_stubs: artifact_stubs,
         elements: elements,
         part_map_tags: part_map_tags,
         part_map_parts: part_map_parts
@@ -272,6 +301,20 @@ fn _compile_smf(gen_src: text, out_smf: text) -> bool:
         print("  [compile error] output file too small: " + sz.to_text() + " bytes")
         return false
     true
+
+# Check if an SMF output is a stub (compiler limitation: payload not embedded).
+# Returns true when smf_size < 1024 and gen_module_size > 2048.
+fn _is_stub_smf(smf_path: text, gen_src: text) -> bool:
+    val smf_sz = file_size(smf_path)
+    val gen_sz = file_size(gen_src)
+    smf_sz < 1024 and gen_sz > 2048
+
+# Build an artifact entry string (pipe-delimited quintuple).
+fn _artifact_entry(smf_path: text, role: text, sz: i64, gen_src: text, stub: bool) -> text:
+    var stub_str = "false"
+    if stub:
+        stub_str = "true"
+    smf_path + "|" + role + "|" + sz.to_text() + "|" + gen_src + "|" + stub_str
 
 # ---------------------------------------------------------------------------
 # Build command
@@ -370,8 +413,12 @@ fn cmd_build(args: [text]) -> i64:
             print("ui_build: compile failed")
             return 1
         val sz = file_size(smf_path)
-        print("  " + smf_path + " (" + sz.to_text() + " bytes)")
-        artifact_entries = artifact_entries + [smf_path + "|main|" + sz.to_text()]
+        val is_stub = _is_stub_smf(smf_path, gen_path)
+        if is_stub:
+            print("WARN stub smf: " + smf_path + " (" + sz.to_text() + " bytes) payload not embedded (see emit_smf_stub_drops_module_content_2026-06-12)")
+        else:
+            print("  " + smf_path + " (" + sz.to_text() + " bytes)")
+        artifact_entries = artifact_entries + [_artifact_entry(smf_path, "main", sz, gen_path, is_stub)]
         # Part map is empty for std form.
         _write_manifest(sidecar_path, "std", html_path, pair.css_paths, artifact_entries, tags, part_map_tags, part_map_parts)
         print("  manifest: " + sidecar_path)
@@ -389,8 +436,12 @@ fn cmd_build(args: [text]) -> i64:
     if merged_ok:
         val merged_sz = file_size(merged_smf_path)
         if merged_sz <= 4096:
-            print("  merged build fits: " + merged_smf_path + " (" + merged_sz.to_text() + " bytes)")
-            artifact_entries = artifact_entries + [merged_smf_path + "|main|" + merged_sz.to_text()]
+            val merged_stub = _is_stub_smf(merged_smf_path, merged_gen_path)
+            if merged_stub:
+                print("WARN stub smf: " + merged_smf_path + " (" + merged_sz.to_text() + " bytes) payload not embedded (see emit_smf_stub_drops_module_content_2026-06-12)")
+            else:
+                print("  merged build fits: " + merged_smf_path + " (" + merged_sz.to_text() + " bytes)")
+            artifact_entries = artifact_entries + [_artifact_entry(merged_smf_path, "main", merged_sz, merged_gen_path, merged_stub)]
             _write_manifest(sidecar_path, "merged", html_path, pair.css_paths, artifact_entries, tags, part_map_tags, part_map_parts)
             print("  manifest: " + sidecar_path)
             return 0
@@ -465,14 +516,23 @@ fn cmd_build(args: [text]) -> i64:
         print("ui_build: dyn main compile failed")
         return 1
     val main_sz = file_size(merged_smf_path)
-    print("  " + merged_smf_path + " (" + main_sz.to_text() + " bytes) [main]")
-    artifact_entries = artifact_entries + [merged_smf_path + "|main|" + main_sz.to_text()]
+    val main_stub = _is_stub_smf(merged_smf_path, main_gen_path)
+    if main_stub:
+        print("WARN stub smf: " + merged_smf_path + " (" + main_sz.to_text() + " bytes) payload not embedded (see emit_smf_stub_drops_module_content_2026-06-12)")
+    else:
+        print("  " + merged_smf_path + " (" + main_sz.to_text() + " bytes) [main]")
+    artifact_entries = artifact_entries + [_artifact_entry(merged_smf_path, "main", main_sz, main_gen_path, main_stub)]
 
     var pi2 = 0
     while pi2 < final_part_smfs.len():
         val part_sz = file_size(final_part_smfs[pi2])
-        print("  " + final_part_smfs[pi2] + " (" + part_sz.to_text() + " bytes) [part]")
-        artifact_entries = artifact_entries + [final_part_smfs[pi2] + "|part|" + part_sz.to_text()]
+        val part_gen_path = gendir + "/" + name + "_part_" + pi2.to_text() + ".spl"
+        val part_stub = _is_stub_smf(final_part_smfs[pi2], part_gen_path)
+        if part_stub:
+            print("WARN stub smf: " + final_part_smfs[pi2] + " (" + part_sz.to_text() + " bytes) payload not embedded (see emit_smf_stub_drops_module_content_2026-06-12)")
+        else:
+            print("  " + final_part_smfs[pi2] + " (" + part_sz.to_text() + " bytes) [part]")
+        artifact_entries = artifact_entries + [_artifact_entry(final_part_smfs[pi2], "part", part_sz, part_gen_path, part_stub)]
         pi2 = pi2 + 1
 
     _write_manifest(sidecar_path, "dyn", html_path, pair.css_paths, artifact_entries, tags, part_map_tags, part_map_parts)
@@ -480,10 +540,45 @@ fn cmd_build(args: [text]) -> i64:
     0
 
 # ---------------------------------------------------------------------------
+# Payload content verification helper
+# ---------------------------------------------------------------------------
+
+# Extract the ui_html_b64() return literal from a generated .spl source.
+# The generated source contains a line like:
+#   fn ui_html_b64() -> text: "<b64data>"
+# We scan for the function name and grab the string literal on the same line.
+fn _extract_html_b64_from_gen(gen_path: text) -> text:
+    if not file_exists(gen_path):
+        return ""
+    val src = _read_file_content(gen_path)
+    val lines = src.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.contains("ui_html_b64") and line.contains("->"):
+            # Next non-blank line or continuation has the return literal.
+            var j = i + 1
+            while j < lines.len():
+                val next = lines[j].trim()
+                if next != "":
+                    # Strip leading "return " if present.
+                    var lit = next
+                    if lit.starts_with("return "):
+                        lit = lit.slice(7, lit.length()).trim()
+                    # Strip surrounding quotes.
+                    val ln = lit.length()
+                    if ln >= 2 and lit.char_at(0) == "\"" and lit.char_at(ln - 1) == "\"":
+                        return lit.slice(1, ln - 1)
+                    return ""
+                j = j + 1
+        i = i + 1
+    ""
+
+# ---------------------------------------------------------------------------
 # Verify command
 # ---------------------------------------------------------------------------
 
-fn cmd_verify(sidecar_path: text) -> i64:
+fn cmd_verify(sidecar_path: text, strict: bool) -> i64:
     print("ui_build verify: " + sidecar_path)
     if not file_exists(sidecar_path):
         print("FAIL: sidecar not found: " + sidecar_path)
@@ -498,6 +593,9 @@ fn cmd_verify(sidecar_path: text) -> i64:
     while ai < mf.artifact_paths.len():
         val ap = mf.artifact_paths[ai]
         val role = mf.artifact_roles[ai]
+        var is_stub = false
+        if ai < mf.artifact_stubs.len():
+            is_stub = mf.artifact_stubs[ai]
         if not file_exists(ap):
             print("FAIL artifact missing: " + ap)
             all_ok = false
@@ -512,6 +610,11 @@ fn cmd_verify(sidecar_path: text) -> i64:
             else if role == "part" and sz >= 4096:
                 print("FAIL dyn part >= 4096 bytes (" + sz.to_text() + "): " + ap)
                 all_ok = false
+            else if is_stub and strict:
+                print("FAIL stub artifact (--strict): " + ap + " (" + sz.to_text() + " bytes, " + role + ")")
+                all_ok = false
+            else if is_stub:
+                print("WARN stub artifact: " + ap + " (" + sz.to_text() + " bytes, " + role + ") payload not embedded")
             else:
                 print("OK artifact: " + ap + " (" + sz.to_text() + " bytes, " + role + ")")
         ai = ai + 1
@@ -532,6 +635,44 @@ fn cmd_verify(sidecar_path: text) -> i64:
                 print("MISSING " + tag)
                 all_ok = false
             ti = ti + 1
+
+    # Payload content verification via gen module.
+    # Find the main artifact's gen_module path.
+    var main_gen = ""
+    var mgi = 0
+    while mgi < mf.artifact_roles.len():
+        if mf.artifact_roles[mgi] == "main":
+            if mgi < mf.artifact_gen_modules.len():
+                main_gen = mf.artifact_gen_modules[mgi]
+        mgi = mgi + 1
+    if main_gen != "":
+        val b64 = _extract_html_b64_from_gen(main_gen)
+        if b64 == "":
+            print("WARN payload: could not extract ui_html_b64 from gen module: " + main_gen)
+        else:
+            val decoded = payload_decode(b64)
+            val decoded_len = decoded.length()
+            if decoded_len < 10:
+                print("FAIL payload: decoded html too short (" + decoded_len.to_text() + " bytes): " + main_gen)
+                all_ok = false
+            else:
+                # Re-derive tags from decoded html and compare to manifest elements.
+                val decoded_tags = used_tags(decoded)
+                var payload_ok = true
+                var dti = 0
+                while dti < decoded_tags.len():
+                    val dt = decoded_tags[dti]
+                    if not _array_contains(mf.elements, dt):
+                        print("FAIL payload tag not in manifest: " + dt)
+                        payload_ok = false
+                    dti = dti + 1
+                if payload_ok:
+                    print("OK payload " + decoded_len.to_text() + " bytes decoded")
+                else:
+                    print("FAIL payload: tag coverage mismatch")
+                    all_ok = false
+    else:
+        print("WARN payload: no gen_module recorded in sidecar (pre-hardening artifact)")
 
     if all_ok:
         print("PASS")
@@ -569,7 +710,13 @@ fn main():
         if args.len() < 2:
             print("ui_build: --verify requires a sidecar path")
             exit(1)
-        val code = cmd_verify(args[1])
+        var strict_flag = false
+        var vi = 2
+        while vi < args.len():
+            if args[vi] == "--strict":
+                strict_flag = true
+            vi = vi + 1
+        val code = cmd_verify(args[1], strict_flag)
         exit(code)
 
     if cmd == "build":
