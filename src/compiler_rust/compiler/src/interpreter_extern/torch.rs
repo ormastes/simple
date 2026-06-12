@@ -248,6 +248,31 @@ pub fn rt_ps_torch_tensor(args: &[Value]) -> Result<Value, CompileError> {
     rt_torch_tensor(args)
 }
 
+pub fn rt_torch_cuda_available(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_torch_cuda_available requires 0 arguments"));
+    }
+
+    Ok(Value::Bool(torch_cuda_available_impl()))
+}
+
+#[cfg(feature = "pytorch")]
+fn torch_cuda_available_impl() -> bool {
+    simple_runtime::value::rt_torch_cuda_available() != 0
+}
+
+#[cfg(not(feature = "pytorch"))]
+fn torch_cuda_available_impl() -> bool {
+    unsafe {
+        let fptr = match lookup_torch_symbol("rt_torch_cuda_available") {
+            Some(fptr) => fptr,
+            None => return false,
+        };
+        let func: extern "C" fn() -> i32 = std::mem::transmute(fptr);
+        func() != 0
+    }
+}
+
 pub fn rt_torch_to_cuda(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Err(CompileError::runtime(
