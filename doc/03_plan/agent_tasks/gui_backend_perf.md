@@ -330,6 +330,10 @@ Updated: 2026-06-11
   HTML text stripping, whitespace normalization, and wrapped-line extraction
   now use exact-size buffers and compact prefixes instead of grow-copying text
   arrays during corpus text layout.
+- this commit -- browser text painter wrap allocation tightening:
+  Greedy text wrapping, paint-run projection, and SDN diagnostics now fill
+  word/line-count-sized arrays instead of grow-copying line, run, and entry
+  arrays in the corpus text layout path.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

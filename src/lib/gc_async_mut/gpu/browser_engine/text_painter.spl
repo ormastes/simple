@@ -170,14 +170,18 @@ fn _text_list_prefix(values: [text], count: i32) -> [text]:
 fn _wrap_text_with_widths(text_content: text, font_size: i64, layout_width: i32, width_percent: i64) -> [BrowserTextLayoutLine]:
     """Wrap text and retain each line width from the greedy wrap pass."""
     val words = text_content.split(" ")
-    var lines: [BrowserTextLayoutLine] = []
-    var current: [text] = []
+    val word_count = words.len()
+    if word_count == 0:
+        return []
+    var lines: [BrowserTextLayoutLine] = [BrowserTextLayoutLine(line: "", width: 0); word_count]
+    var line_count = 0
+    var current: [text] = [""; word_count]
+    var current_count = 0
     var current_width = 0
     val max_px = layout_width.to_i64()
     val space_width = _estimate_char_width_px(" ", font_size, width_percent)
 
     var i = 0
-    val word_count = words.len()
     while i < word_count:
         val word = words[i]
         if word.len() == 0:
@@ -186,19 +190,34 @@ fn _wrap_text_with_widths(text_content: text, font_size: i64, layout_width: i32,
         val word_width = _estimate_word_width_px(word, font_size, width_percent)
         val sep_width = if current_width > 0: space_width else: 0
         if current_width + sep_width + word_width <= max_px:
-            current.push(word)
+            current[current_count] = word
+            current_count = current_count + 1
             current_width = current_width + sep_width + word_width
         else:
-            if current.len() > 0:
-                lines.push(BrowserTextLayoutLine(line: current.join(" "), width: current_width))
-            current = [word]
+            if current_count > 0:
+                lines[line_count] = BrowserTextLayoutLine(line: _text_list_prefix(current, current_count).join(" "), width: current_width)
+                line_count = line_count + 1
+            current = [""; word_count]
+            current[0] = word
+            current_count = 1
             current_width = word_width
         i = i + 1
 
-    if current.len() > 0:
-        lines.push(BrowserTextLayoutLine(line: current.join(" "), width: current_width))
+    if current_count > 0:
+        lines[line_count] = BrowserTextLayoutLine(line: _text_list_prefix(current, current_count).join(" "), width: current_width)
+        line_count = line_count + 1
 
-    lines
+    _text_layout_line_prefix(lines, line_count)
+
+fn _text_layout_line_prefix(values: [BrowserTextLayoutLine], count: i32) -> [BrowserTextLayoutLine]:
+    if count == 0:
+        return []
+    var out: [BrowserTextLayoutLine] = [values[0]; count]
+    var i = 0
+    while i < count:
+        out[i] = values[i]
+        i = i + 1
+    out
 
 fn _famous_site_corpus_layout_lines_with_widths(html: text, font_size: i64, layout_width: i32) -> [BrowserTextLayoutLine]:
     val raw = _strip_tags(html)
@@ -227,12 +246,12 @@ pub fn br_famous_site_corpus_layout_line_widths_sdn(html: text, font_size: i64, 
     pixel width for comparison with Chrome's layout metrics JSON.
     """
     val lines = _famous_site_corpus_layout_lines_with_widths(html, font_size, layout_width)
-    var entries: [text] = []
-    var i = 0
     val line_count = lines.len()
+    var entries: [text] = [""; line_count]
+    var i = 0
     while i < line_count:
         val line = lines[i]
-        entries.push("    (line text: \"{line.line}\" width: {line.width})")
+        entries[i] = "    (line text: \"{line.line}\" width: {line.width})"
         i = i + 1
     "(text_lines count: {lines.len()}\n" + entries.join("\n") + "\n)"
 
@@ -244,38 +263,40 @@ pub fn br_famous_site_corpus_layout_paint_runs(html: text, font_size: i64, layou
     duplicating font-stack calibration in renderer code.
     """
     val lines = _famous_site_corpus_layout_lines_with_widths(html, font_size, layout_width)
-    var runs: [BrowserTextPaintRun] = []
-    var i = 0
     val line_count = lines.len()
+    if line_count == 0:
+        return []
+    var runs: [BrowserTextPaintRun] = [BrowserTextPaintRun(line: "", x: 0, y: 0, width: 0); line_count]
+    var i = 0
     while i < line_count:
         val line = lines[i]
-        runs.push(BrowserTextPaintRun(
+        runs[i] = BrowserTextPaintRun(
             line: line.line,
             x: origin_x,
             y: origin_y + i * line_height,
             width: line.width.to_i32()
-        ))
+        )
         i = i + 1
     runs
 
 pub fn br_famous_site_corpus_layout_paint_runs_sdn(html: text, font_size: i64, layout_width: i32, origin_x: i32, origin_y: i32, line_height: i32) -> text:
     val runs = br_famous_site_corpus_layout_paint_runs(html, font_size, layout_width, origin_x, origin_y, line_height)
-    var entries: [text] = []
-    var i = 0
     val run_count = runs.len()
+    var entries: [text] = [""; run_count]
+    var i = 0
     while i < run_count:
         val run = runs[i]
-        entries.push("    (run text: \"{run.line}\" x: {run.x} y: {run.y} width: {run.width})")
+        entries[i] = "    (run text: \"{run.line}\" x: {run.x} y: {run.y} width: {run.width})"
         i = i + 1
     "(paint_runs count: {runs.len()}\n" + entries.join("\n") + "\n)"
 
 pub fn br_famous_site_corpus_layout_lines_sdn(html: text, font_size: i64, layout_width: i32) -> text:
     val lines = br_famous_site_corpus_layout_lines(html, font_size, layout_width)
-    var entries: [text] = []
-    var i = 0
     val line_count = lines.len()
+    var entries: [text] = [""; line_count]
+    var i = 0
     while i < line_count:
         val line = lines[i]
-        entries.push("    (line text: \"{line}\")")
+        entries[i] = "    (line text: \"{line}\")"
         i = i + 1
     "(text_lines count: {lines.len()}\n" + entries.join("\n") + "\n)"
