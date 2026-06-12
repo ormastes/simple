@@ -1,6 +1,6 @@
-# Thread Spawn Native Zero-Join Blocker
+# Thread Spawn Native Zero-Join Regression
 
-> This SSpec pins the current standalone native `thread_spawn` fork-join blocker. A minimal top-level worker workload using the public `std.concurrent.thread` surface must stay green in the interpreter and SMF paths, while the current standalone native artifact still reproduces the zero-result join failure.
+> This SSpec regression-covers the standalone native `thread_spawn` fork-join path. A minimal top-level worker workload using the public `std.concurrent.thread` surface must stay green in the interpreter, SMF, and standalone native paths.
 
 <!-- sdn-diagram:id=thread_spawn_native_zero_join_blocker_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ thread_spawn_native_zero_join_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Thread Spawn Native Zero-Join Blocker
+# Thread Spawn Native Zero-Join Regression
 
-This SSpec pins the current standalone native `thread_spawn` fork-join blocker. A minimal top-level worker workload using the public `std.concurrent.thread` surface must stay green in the interpreter and SMF paths, while the current standalone native artifact still reproduces the zero-result join failure.
+This SSpec regression-covers the standalone native `thread_spawn` fork-join path. A minimal top-level worker workload using the public `std.concurrent.thread` surface must stay green in the interpreter, SMF, and standalone native paths.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the current standalone native `thread_spawn` fork-join blocker. 
 |-------|-------|
 | Feature IDs | #thread-spawn-native-zero-join |
 | Category | Runtime / Native / OS Thread |
-| Status | Blocked |
+| Status | Regression |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Research | doc/08_tracking/bug/thread_spawn_native_zero_join_2026-06-11.md |
@@ -52,10 +52,10 @@ This SSpec pins the current standalone native `thread_spawn` fork-join blocker. 
 
 ## Overview
 
-This SSpec pins the current standalone native `thread_spawn` fork-join blocker.
-A minimal top-level worker workload using the public `std.concurrent.thread`
-surface must stay green in the interpreter and SMF paths, while the current
-standalone native artifact still reproduces the zero-result join failure.
+This SSpec regression-covers the standalone native `thread_spawn` fork-join
+path. A minimal top-level worker workload using the public
+`std.concurrent.thread` surface must stay green in the interpreter, SMF, and
+standalone native paths.
 
 ## Requirements
 
@@ -77,9 +77,9 @@ bin/release/simple test test/03_system/feature/usage/thread_spawn_native_zero_jo
 
 ## Scenarios
 
-### thread_spawn native zero-join blocker
+### thread_spawn native zero-join regression
 
-#### keeps interpreter and SMF green while pinning the current standalone native join failure
+#### keeps interpreter, SMF, and standalone native fork-join green
 
 - Write the minimal public thread_spawn fork-join fixture
    - Expected: mkdir_code equals `0`
@@ -92,14 +92,16 @@ bin/release/simple test test/03_system/feature/usage/thread_spawn_native_zero_jo
    - Expected: interp_code equals `0`
 - Keep the SMF bytecode path green
    - Expected: smf_code equals `0`
-- Pin the current standalone native zero-result join failure
-   - Expected: native_code equals `74`
+- Keep the standalone native path green
+   - Expected: native_code equals `0`
+- The tracker records the closed lower blocker
+   - Expected: blocker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -129,10 +131,15 @@ val (smf_out, smf_code) = shell("timeout 20s " + SIMPLE_BIN + " " + SMF_PATH)
 expect(smf_out).to_contain("thread_spawn_native_join_pass=true")
 expect(smf_code).to_equal(0)
 
-step("Pin the current standalone native zero-result join failure")
+step("Keep the standalone native path green")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
-expect(native_out).to_contain("checksum_mismatch total=0 expected=14")
-expect(native_code).to_equal(74)
+expect(native_out).to_contain("thread_spawn_native_join_pass=true")
+expect(native_code).to_equal(0)
+
+step("The tracker records the closed lower blocker")
+val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/thread_spawn_native_zero_join_2026-06-11.md")
+expect(blocker_code).to_equal(0)
+expect(blocker).to_contain("Status: Closed")
 ```
 
 </details>
