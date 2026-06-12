@@ -27,7 +27,7 @@ multicore_green_tracking_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -315,7 +315,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 66 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -361,6 +361,7 @@ expect(row).to_contain("multicore_green_wrong_arity.spl rejects missing closure"
 expect(row).to_contain("multicore_green_bad_arg.spl rejects non-closure argument")
 expect(row).to_contain("multicore_green_parallelism_bad_arg.spl rejects non-integer worker count")
 expect(row).to_contain("multicore_green_shared_var_capture.spl rejects shared mutable closure state")
+
 expect(row).to_contain("multicore_green_sliced_wrong_surface_import.spl rejects OS-thread facade")
 expect(row).to_contain("multicore_green_sliced_wrong_arity.spl rejects wrong arity")
 expect(row).to_contain("multicore_green_sliced_bad_state_arg.spl rejects non-integer state")
@@ -384,6 +385,34 @@ step("Verify the system-test plan describes the cooperative-green negative profi
 val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(system_plan).to_contain("cooperative-label")
+```
+
+</details>
+
+#### keeps generated and checked-in misuse fixture counts distinct in the plan
+
+- Read the multicore-green system-test plan
+- Verify the generated profile-script count is named separately
+- Verify the checked-in misuse fixture inventory is named separately
+   - Expected: absent_in_text(plan, "misuse_fixtures=611") equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the multicore-green system-test plan")
+val plan = read_sys_test_plan()
+step("Verify the generated profile-script count is named separately")
+expect(plan).to_contain("generated profile-script contract")
+expect(plan).to_contain("misuse_fixtures=11")
+step("Verify the checked-in misuse fixture inventory is named separately")
+expect(plan).to_contain("checked-in misuse fixture inventory")
+expect(plan).to_contain("checked_in_misuse_fixtures=25")
+expect(absent_in_text(plan, "misuse_fixtures=611")).to_equal(1)
 ```
 
 </details>
@@ -579,8 +608,8 @@ expect(absent_in_text(row, "resumable-stepper native blocker remains open")).to_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
