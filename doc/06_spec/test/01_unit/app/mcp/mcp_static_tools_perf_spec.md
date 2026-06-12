@@ -59,7 +59,7 @@ with parts-array + `.join(",")` calls throughout:
 - `_mcp_static_props`: 36 sequential appends -> parts array + join
 - `_mcp_static_tools_result`: 151-tool loop body -> schemas array + join
 - `_mcp_hex_u64`: nibble concat loop -> parts array + join
-- `_mcp_probe_manifest_hash`: O(n^2) char_code_at(j) -> O(n) for-ch-in-name
+- `--probe`: cheap native startup check; manifest content is verified by tools/list specs
 
 ## Correctness contract
 
