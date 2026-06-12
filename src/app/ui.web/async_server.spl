@@ -308,10 +308,14 @@ class AsyncWebServer:
 
     me broadcast_render():
         """Emit patches to all connected WebSocket clients via their adapters."""
-        var alive_clients: [TcpStream] = []
-        var alive_adapters: [WebRuntimeAdapter] = []
+        val client_count = self.ws_clients.len()
+        if client_count == 0:
+            return
+        var alive_clients: [TcpStream] = [self.ws_clients[0]; client_count]
+        var alive_adapters: [WebRuntimeAdapter] = [self.ws_adapters[0]; client_count]
+        var alive_count = 0
         var idx = 0
-        while idx < self.ws_clients.len():
+        while idx < client_count:
             val client = self.ws_clients[idx]
             var adapter = self.ws_adapters[idx]
             adapter.emit_patches()
@@ -325,15 +329,27 @@ class AsyncWebServer:
                 if not ok:
                     client_ok = false
             if client_ok:
-                alive_clients = alive_clients.push(client)
-                alive_adapters = alive_adapters.push(adapter)
+                alive_clients[alive_count] = client
+                alive_adapters[alive_count] = adapter
+                alive_count = alive_count + 1
             idx = idx + 1
 
         # Prune disconnected clients
-        if alive_clients.len() != self.ws_clients.len():
-            print "Pruned {self.ws_clients.len() - alive_clients.len()} disconnected client(s)"
-            self.ws_clients = alive_clients
-            self.ws_adapters = alive_adapters
+        if alive_count != client_count:
+            print "Pruned {client_count - alive_count} disconnected client(s)"
+            if alive_count == 0:
+                self.ws_clients = []
+                self.ws_adapters = []
+            else:
+                var compact_clients: [TcpStream] = [alive_clients[0]; alive_count]
+                var compact_adapters: [WebRuntimeAdapter] = [alive_adapters[0]; alive_count]
+                var compact_idx = 0
+                while compact_idx < alive_count:
+                    compact_clients[compact_idx] = alive_clients[compact_idx]
+                    compact_adapters[compact_idx] = alive_adapters[compact_idx]
+                    compact_idx = compact_idx + 1
+                self.ws_clients = compact_clients
+                self.ws_adapters = compact_adapters
 
     fn flush_render_queue():
         """Drain render channel messages (from file watcher thread)."""

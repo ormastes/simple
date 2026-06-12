@@ -464,6 +464,10 @@ Updated: 2026-06-11
   single scan and rejects extra separators immediately instead of push-growing a
   temporary dot-position array; token helper scanners also reuse stable input
   lengths.
+- this commit -- async websocket broadcast allocation tightening:
+  AsyncWebServer broadcast pruning now writes surviving websocket clients and
+  runtime adapters into count-sized arrays and compacts once only when a client
+  disconnects, avoiding repeated push-growth during render broadcasts.
 
 ## Current remaining work
 
