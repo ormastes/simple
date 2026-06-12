@@ -99,7 +99,7 @@ val results = runner.run_all()
 ### Profile Script Reports
 - **Cross-language profile:** `scripts/check/check-cross-language-perf.shs`
 - **GUI profile:** `tools/gui_perf_bench/run_all_benchmarks.shs`
-- **Common report contract:** `test/05_perf/profile_scripts/profile_report_contract_test.shs`
+- **Common report contract:** `test/05_perf/profile_scripts/profile_report_contract_test.shs` (no args checks the canonical checked-in cross-language report; profile wrappers pass kind, script path, and report path explicitly)
 - **Report location:** `doc/09_report/*.md`
 
 ## Benchmark Configuration
