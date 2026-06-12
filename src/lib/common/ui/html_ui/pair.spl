@@ -1,14 +1,14 @@
 # HtmlCssPair — tracks an HTML file and its associated CSS stylesheets.
 #
-# NOTE: pair_load / pair_save / pair_add_css do file I/O via std.nogc_sync_mut.fs.
-# This is a common/ module that crosses tier boundaries by design (the toolchain
-# CLI lives in src/app and needs common data structures for its pipeline).
-# Caller must ensure a runtime that supports file I/O.
+# NOTE: pair_load / pair_save / pair_add_css do file I/O via std.io
+# (file_read/file_write resolve in interpreter mode; the std.nogc_sync_mut.fs
+# externs rt_file_read_text/rt_file_write_text do not). This is a common/
+# module that crosses tier boundaries by design (the toolchain CLI lives in
+# src/app and needs common data structures for its pipeline).
 #
 # Arrays are VALUE TYPES in Simple — all mutation returns a new struct.
 
-use std.nogc_sync_mut.fs.{read_file, write_string}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_read, file_write, file_exists}
 
 struct HtmlCssPair:
     html_path: text
@@ -18,7 +18,7 @@ struct HtmlCssPair:
 #   <link rel="stylesheet" href="...">
 # CSS path resolution is relative to the HTML file's directory.
 fn pair_load(html_path: text) -> HtmlCssPair:
-    val content = read_file(html_path)
+    val content = file_read(html_path)
     val css = _discover_css(html_path, content)
     HtmlCssPair(html_path: html_path, css_paths: css)
 
@@ -33,24 +33,25 @@ fn pair_add_css(pair: HtmlCssPair, css_path: text) -> HtmlCssPair:
         i = i + 1
     # Create empty CSS file if missing
     if not file_exists(css_path):
-        write_string(css_path, "")
+        file_write(css_path, "")
     # Inject <link> into HTML
-    val html_content = read_file(pair.html_path)
+    val html_content = file_read(pair.html_path)
     val injected = _inject_link(html_content, css_path)
-    write_string(pair.html_path, injected)
+    file_write(pair.html_path, injected)
     val new_css = pair.css_paths + [css_path]
     HtmlCssPair(html_path: pair.html_path, css_paths: new_css)
 
 # Persist the in-memory pair's html_path list back to disk by re-scanning
 # (no-op if the file already matches — used to flush after external edits).
 fn pair_save(pair: HtmlCssPair) -> bool:
-    val content = read_file(pair.html_path)
+    val content = file_read(pair.html_path)
     var rebuilt = _strip_links(content)
     var i = 0
     while i < pair.css_paths.len():
         rebuilt = _inject_link(rebuilt, pair.css_paths[i])
         i = i + 1
-    write_string(pair.html_path, rebuilt)
+    file_write(pair.html_path, rebuilt)
+    true
 
 # ============================================================================
 # Internal helpers

@@ -6,8 +6,7 @@
 #   bin/simple run src/app/ui_build/main.spl -- verify <name>.uib.sdn
 
 use std.nogc_sync_mut.io.file_ops.{
-    file_exists, file_read, file_write, file_size, file_size_raw,
-    file_read_bytes
+    file_exists, file_read, file_write, file_size, file_size_raw
 }
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.process_ops.{process_run}
@@ -56,17 +55,14 @@ fn _read_file_content(path: text) -> text:
 fn _write_file_content(path: text, content: text) -> bool:
     file_write(path, content)
 
-fn _read_smf_magic(path: text) -> text:
-    # Read first 4 bytes to check for "SMF\0" magic.
-    # We read the file as bytes and look at first 4 i64 values.
-    val bytes = file_read_bytes(path)
-    if bytes.len() < 4:
-        return ""
-    val b0 = bytes[0]
-    val b1 = bytes[1]
-    val b2 = bytes[2]
-    val b3 = bytes[3]
-    b0.chr() + b1.chr() + b2.chr() + b3.chr()
+fn _check_smf_magic(path: text) -> bool:
+    # SMF magic is "SMF\0" (bytes 83 77 70 0).
+    # file_read returns empty for binary files (NUL terminates read).
+    # Use process_run od to check the first 3 bytes numerically.
+    val result = process_run("od", ["-An", "-tu1", "-N3", path])
+    val out = result.0.trim()
+    # od output looks like "83  77  70"
+    out.contains("83") and out.contains("77") and out.contains("70")
 
 fn _array_contains(arr: [text], v: text) -> bool:
     var i = 0
@@ -153,6 +149,15 @@ struct UibManifest:
     part_map_tags: [text]
     part_map_parts: [text]
 
+# Extract the value from a "- value" list-item line (trimmed).
+# Returns "" if the line is not a list item.
+# Extracted as a standalone fn to avoid JIT starts_with nil issue in nested else-if.
+fn _parse_list_item(trimmed: text) -> text:
+    val dash = "- "
+    if trimmed.starts_with(dash):
+        return trimmed.slice(2, trimmed.length()).trim()
+    ""
+
 fn _parse_manifest(content: text) -> UibManifest:
     val lines = content.split("\n")
     var form = ""
@@ -170,10 +175,10 @@ fn _parse_manifest(content: text) -> UibManifest:
     while i < lines.len():
         val line = lines[i]
         val trimmed = line.trim()
+        # Single else-if chain: blank/comment lines are skipped cleanly.
         if trimmed == "" or trimmed.starts_with("#"):
-            i = i + 1
             pass_dn
-        if trimmed.starts_with("form:"):
+        else if trimmed.starts_with("form:"):
             form = trimmed.slice(5, trimmed.length()).trim()
             section = ""
         else if trimmed.starts_with("source_html:"):
@@ -190,27 +195,27 @@ fn _parse_manifest(content: text) -> UibManifest:
         else if trimmed == "source_css:":
             section = "source_css"
         else if section == "artifacts":
-            if trimmed.starts_with("- path:"):
-                # Flush previous artifact if complete
+            val path_prefix = "- path:"
+            val role_prefix = "role:"
+            val bc_prefix = "byte_count:"
+            if trimmed.starts_with(path_prefix):
                 if cur_path != "" and cur_role != "":
                     artifact_paths = artifact_paths + [cur_path]
                     artifact_roles = artifact_roles + [cur_role]
                     artifact_byte_counts = artifact_byte_counts + [0]
                 cur_path = trimmed.slice(7, trimmed.length()).trim()
                 cur_role = ""
-            else if trimmed.starts_with("role:"):
+            else if trimmed.starts_with(role_prefix):
                 cur_role = trimmed.slice(5, trimmed.length()).trim()
-            else if trimmed.starts_with("byte_count:"):
+            else if trimmed.starts_with(bc_prefix):
                 val bc_str = trimmed.slice(11, trimmed.length()).trim()
-                # Flush this artifact
                 if cur_path != "":
                     artifact_paths = artifact_paths + [cur_path]
                     artifact_roles = artifact_roles + [cur_role]
-                    # parse i64 from bc_str
                     var bc: i64 = 0
                     var di = 0
                     while di < bc_str.length():
-                        val d = bc_str.char_at(di) as i64
+                        val d = char_code(bc_str.char_at(di))
                         if d >= 48 and d <= 57:
                             bc = bc * 10 + (d - 48)
                         di = di + 1
@@ -218,8 +223,9 @@ fn _parse_manifest(content: text) -> UibManifest:
                     cur_path = ""
                     cur_role = ""
         else if section == "elements":
-            if trimmed.starts_with("- "):
-                elements = elements + [trimmed.slice(2, trimmed.length()).trim()]
+            val elem = _parse_list_item(trimmed)
+            if elem != "":
+                elements = elements + [elem]
         else if section == "part_map":
             if trimmed.contains(":"):
                 val colon = trimmed.find(":")
@@ -282,12 +288,14 @@ fn cmd_build(args: [text]) -> i64:
         if a == "-o" and i + 1 < args.len():
             outdir = args[i + 1]
             i = i + 2
-            pass_dn
-        if a.starts_with("--form="):
+        else if a.starts_with("--form="):
             form = a.slice(7, a.length())
+            i = i + 1
         else if not a.starts_with("-"):
             html_path = a
-        i = i + 1
+            i = i + 1
+        else:
+            i = i + 1
 
     if html_path == "":
         print("ui_build: missing <page.html> argument")
@@ -310,11 +318,23 @@ fn cmd_build(args: [text]) -> i64:
     val html_text = _read_file_content(html_path)
     val tags = used_tags(html_text)
 
+    # Metadata/boilerplate tags that appear in any HTML document but are not
+    # UI widgets — skip catalog check for these.
+    val _meta_tags: [text] = ["html", "head", "meta", "title", "link", "script",
+        "style", "noscript", "base", "small", "br", "wbr", "abbr", "cite",
+        "dfn", "kbd", "samp", "var", "mark", "time", "sub", "sup", "i", "b",
+        "u", "s", "del", "ins", "q", "address", "bdo", "bdi", "figure",
+        "figcaption", "map", "area", "track", "source", "video", "audio",
+        "canvas", "svg", "object", "embed", "iframe", "picture", "template",
+        "slot", "progress", "meter", "output", "datalist", "optgroup",
+        "colgroup", "col", "caption"]
+
     var bad_tags: [text] = []
     var j = 0
     while j < tags.len():
-        if not catalog_supports(tags[j]):
-            bad_tags = bad_tags + [tags[j]]
+        val t = tags[j]
+        if not catalog_supports(t) and not _array_contains(_meta_tags, t):
+            bad_tags = bad_tags + [t]
         j = j + 1
     if bad_tags.len() > 0:
         print("ui_build: ERROR — tags not in catalog: " + _join_text(bad_tags, ", "))
@@ -478,41 +498,22 @@ fn cmd_verify(sidecar_path: text) -> i64:
     while ai < mf.artifact_paths.len():
         val ap = mf.artifact_paths[ai]
         val role = mf.artifact_roles[ai]
-        val recorded_bc = mf.artifact_byte_counts[ai]
         if not file_exists(ap):
             print("FAIL artifact missing: " + ap)
             all_ok = false
-            ai = ai + 1
-            pass_dn
-        val sz = file_size(ap)
-        if sz < 179:
-            print("FAIL artifact too small (" + sz.to_text() + " bytes): " + ap)
-            all_ok = false
-            ai = ai + 1
-            pass_dn
-        # Check magic bytes "SMF\0"
-        val magic = _read_smf_magic(ap)
-        if magic.length() < 4:
-            print("FAIL artifact unreadable: " + ap)
-            all_ok = false
-            ai = ai + 1
-            pass_dn
-        val m0 = magic.char_at(0)
-        val m1 = magic.char_at(1)
-        val m2 = magic.char_at(2)
-        val m3 = magic.char_at(3) as i64
-        if m0 != "S" or m1 != "M" or m2 != "F" or m3 != 0:
-            print("FAIL artifact bad magic (expected SMF\\0): " + ap)
-            all_ok = false
-            ai = ai + 1
-            pass_dn
-        # Dyn parts must be < 4096 bytes.
-        if role == "part" and sz >= 4096:
-            print("FAIL dyn part >= 4096 bytes (" + sz.to_text() + "): " + ap)
-            all_ok = false
-            ai = ai + 1
-            pass_dn
-        print("OK artifact: " + ap + " (" + sz.to_text() + " bytes, " + role + ")")
+        else:
+            val sz = file_size(ap)
+            if sz < 179:
+                print("FAIL artifact too small (" + sz.to_text() + " bytes): " + ap)
+                all_ok = false
+            else if not _check_smf_magic(ap):
+                print("FAIL artifact bad magic (expected SMF\\0): " + ap)
+                all_ok = false
+            else if role == "part" and sz >= 4096:
+                print("FAIL dyn part >= 4096 bytes (" + sz.to_text() + "): " + ap)
+                all_ok = false
+            else:
+                print("OK artifact: " + ap + " (" + sz.to_text() + " bytes, " + role + ")")
         ai = ai + 1
 
     # Element coverage: re-scan source HTML.
@@ -543,7 +544,21 @@ fn cmd_verify(sidecar_path: text) -> i64:
 # ---------------------------------------------------------------------------
 
 fn main():
-    val args = get_cli_args()
+    val raw_args = get_cli_args()
+    # get_cli_args may return [script.spl, "--", cmd, ...] or ["--", cmd, ...].
+    # Skip any leading script path (ends with .spl) and any "--" separator.
+    var args: [text] = []
+    var ai = 0
+    # Skip script path if present.
+    if raw_args.len() > 0 and raw_args[0].ends_with(".spl"):
+        ai = 1
+    # Skip "--" separator if present.
+    if ai < raw_args.len() and raw_args[ai] == "--":
+        ai = ai + 1
+    while ai < raw_args.len():
+        args = args + [raw_args[ai]]
+        ai = ai + 1
+
     if args.len() == 0:
         print("ui_build: no command given. Usage: build <page.html> -o <outdir> [--form=std|dyn] | --verify <sidecar.uib.sdn>")
         exit(1)

@@ -8,8 +8,11 @@
 #
 # Interpreter-safe base64: the stdlib base64_encode calls text.bytes() which
 # is not available in interpreter mode ("Function 'str.bytes' not found").
-# This module provides a pure-Simple fallback using char_at/chr/bitwise ops
-# that works in both interpreter and compiled modes.
+# This module provides a pure-Simple fallback using char_at + char_code
+# (from std.common.string_core) that works in both interpreter and compiled
+# modes. char_at() is byte-indexed; char_code() returns the codepoint as i64.
+
+use std.common.string_core.{char_code}
 
 # Element-to-part mapping for dyn builds.
 struct UiPartMap:
@@ -23,34 +26,43 @@ struct UiPartMap:
 
 val _B64_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
-# Encode a single codepoint (Unicode scalar) into its UTF-8 byte sequence
-# and append to out_bytes array (value type — returns updated array).
-fn _cp_to_utf8_bytes(cp: i64, out: [i64]) -> [i64]:
-    if cp < 0x80:
-        out = out + [cp]
-    else if cp < 0x800:
-        out = out + [(0xC0 | (cp >> 6))]
-        out = out + [(0x80 | (cp & 0x3F))]
-    else if cp < 0x10000:
-        out = out + [(0xE0 | (cp >> 12))]
-        out = out + [(0x80 | ((cp >> 6) & 0x3F))]
-        out = out + [(0x80 | (cp & 0x3F))]
-    else:
-        out = out + [(0xF0 | (cp >> 18))]
-        out = out + [(0x80 | ((cp >> 12) & 0x3F))]
-        out = out + [(0x80 | ((cp >> 6) & 0x3F))]
-        out = out + [(0x80 | (cp & 0x3F))]
-    out
-
-# Convert text to a list of UTF-8 byte values (i64) using char_at + codepoint arithmetic.
+# Convert text to a list of raw UTF-8 byte values (i64).
+# char_at(i) is codepoint-indexed: advance i by 1 per codepoint.
+# char_code(ch) returns the Unicode codepoint as i64.
+# ch.len() is the UTF-8 byte-width used for encoding, not for indexing.
+# length() in interpreter includes a trailing NUL — skip cp==0.
 fn _text_to_utf8_bytes(data: text) -> [i64]:
     val n = data.length()
     var bytes: [i64] = []
     var i = 0
     while i < n:
-        val cp = data.char_at(i) as i64
-        bytes = _cp_to_utf8_bytes(cp, bytes)
+        val ch = data.char_at(i)
+        val cp = char_code(ch)
         i = i + 1
+        # Skip null bytes (interpreter length() counts trailing NUL).
+        if cp > 0 and cp < 0x80:
+            bytes = bytes + [cp]
+        else if cp >= 0x80 and cp < 0x800:
+            val hi = 0xC0 | (cp >> 6)
+            val lo = 0x80 | (cp & 0x3F)
+            bytes = bytes + [hi]
+            bytes = bytes + [lo]
+        else if cp >= 0x800 and cp < 0x10000:
+            val b0 = 0xE0 | (cp >> 12)
+            val b1 = 0x80 | ((cp >> 6) & 0x3F)
+            val b2 = 0x80 | (cp & 0x3F)
+            bytes = bytes + [b0]
+            bytes = bytes + [b1]
+            bytes = bytes + [b2]
+        else if cp >= 0x10000:
+            val b0 = 0xF0 | (cp >> 18)
+            val b1 = 0x80 | ((cp >> 12) & 0x3F)
+            val b2 = 0x80 | ((cp >> 6) & 0x3F)
+            val b3 = 0x80 | (cp & 0x3F)
+            bytes = bytes + [b0]
+            bytes = bytes + [b1]
+            bytes = bytes + [b2]
+            bytes = bytes + [b3]
     bytes
 
 # Decode a base64 char to its 6-bit value; returns -1 for invalid/whitespace.
@@ -113,13 +125,13 @@ fn _interp_base64_decode(encoded: text) -> text:
     var bits = 0
     var i = 0
     while i < n:
-        val raw = encoded.char_at(i) as i64
+        val raw = char_code(encoded.char_at(i))
         i = i + 1
-        # skip whitespace
-        if raw == 32 or raw == 9 or raw == 10 or raw == 13:
+        # Skip whitespace and nulls; handle padding and data chars.
+        if raw == 32 or raw == 9 or raw == 10 or raw == 13 or raw == 0:
             pass_dn
-        # padding terminates
-        if raw == 61:
+        else if raw == 61:
+            # padding terminates
             bits = 0
         else:
             val v = _b64_char_value(raw)
@@ -128,15 +140,23 @@ fn _interp_base64_decode(encoded: text) -> text:
                 bits = bits + 6
                 if bits >= 8:
                     bits = bits - 8
-                    out_bytes = out_bytes + [(acc >> bits) & 0xFF]
-    # Reconstruct text from UTF-8 bytes (codepoints)
+                    val byte_val = (acc >> bits) & 0xFF
+                    out_bytes = out_bytes + [byte_val]
+    # Reconstruct text from UTF-8 bytes (codepoints).
     var result = ""
     var bi = 0
     val bn = out_bytes.len()
     while bi < bn:
         val b = out_bytes[bi]
-        if b < 0x80:
+        if b == 0:
+            # Null bytes: chr(0) renders as space in interpreter; skip.
+            bi = bi + 1
+        else if b < 0x80:
             result = result + b.chr()
+            bi = bi + 1
+        else if b < 0xC0:
+            # Continuation byte without lead — skip
+            result = result + "?"
             bi = bi + 1
         else if b < 0xE0:
             if bi + 1 < bn:
