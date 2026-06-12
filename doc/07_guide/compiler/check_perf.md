@@ -159,6 +159,10 @@ They also fail closed before measuring work if the runtime reports
 Reports include a `Profile contract:` header. Current evidence must say the
 contract was enforced; reports generated with `SKIP_PROFILE_REPORT_CONTRACT=1`
 are explicitly labeled as skipped and must not be cited as gated M:N evidence.
+Run `sh test/05_perf/profile_scripts/profile_report_contract_test.shs` with no
+arguments to check the canonical cross-language profile script/report pair.
+Use the explicit `kind script report` form only for non-canonical profile
+outputs.
 The profile-report contract and `simple check` reject forbidden number-suffix
 API names; use semantic API names in reports, generated workloads, runtime extern
 declarations, and profile-script comments. The public concurrency API contract
