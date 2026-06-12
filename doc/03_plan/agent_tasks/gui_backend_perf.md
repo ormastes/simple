@@ -261,6 +261,9 @@ Updated: 2026-06-11
 - this commit -- UI access adapter registry allocation tightening:
   Adapter target replacement now pre-counts retained entries and fills an
   exact-size registry array instead of push-growing the filtered list.
+- this commit -- Browser paint scene bridge allocation tightening:
+  Paint command conversion now pre-counts emitted scene commands and fills an
+  exact-size command array instead of push-growing during the hot bridge loop.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
