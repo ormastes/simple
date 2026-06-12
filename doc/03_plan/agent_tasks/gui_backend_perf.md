@@ -312,6 +312,10 @@ Updated: 2026-06-11
   Visual probe sidecar bounds and marks now pre-count matching nodes and fill
   exact-size arrays, while JSON escaping reuses the input length in the scan
   loop. The stale vision unit fixture now includes snapshot revisions.
+- this commit -- UI patch stream allocation tightening:
+  Warm reconnect patch generation now pre-counts mappable retained events and
+  fills an exact-size patch array instead of repeatedly grow-copying patches
+  during startup/reconnect replay.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

@@ -63,12 +63,17 @@ impl PatchStream:
         if earliest > from_sequence + 1:
             # gap-in-retention: client is too far behind the retained ring
             return PatchSinceResult(snapshot: snapshot, patches: [])
-        var patches: [UIPatch] = []
+        val patch_count = _mappable_patch_count(events, from_sequence)
+        if patch_count == 0:
+            return PatchSinceResult(snapshot: nil, patches: [])
+        var patches: [UIPatch] = [_empty_patch(); patch_count]
+        var write_idx = 0
         for event in events:
             if event.sequence > from_sequence:
                 val patch = _event_to_patch(event)
                 if patch != nil:
-                    patches = patches.push(patch)
+                    patches[write_idx] = patch
+                    write_idx = write_idx + 1
         return PatchSinceResult(snapshot: nil, patches: patches)
 
 # =========================================================================
@@ -164,3 +169,23 @@ fn _event_to_patch(event: UiAccessEvent) -> UIPatch?:
     # expected as the protocol evolves. Callers should not depend on exhaustive
     # coverage of event_kind values.
     return nil
+
+fn _mappable_patch_count(events: [UiAccessEvent], from_sequence: i64) -> i32:
+    var count = 0
+    for event in events:
+        if event.sequence > from_sequence and _event_kind_maps_to_patch(event.event_kind):
+            count = count + 1
+    count
+
+fn _event_kind_maps_to_patch(kind: text) -> bool:
+    kind == "mount" or kind == "unmount" or kind == "update" or kind == "focus" or kind == "blur" or kind == "action"
+
+fn _empty_patch() -> UIPatch:
+    UIPatch(
+        kind: PatchKind.UpdateProp,
+        target_id: "",
+        parent_id: "",
+        prop_key: "",
+        prop_value: "",
+        node: nil
+    )
