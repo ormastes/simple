@@ -11,6 +11,10 @@ use common.ui.widget.{UIState, WidgetNode}
 use common.ui.surface.{SurfaceManager}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry}
 
+struct UiAccessNodeBuild:
+    nodes: [UiAccessNode]
+    next_idx: i32
+
 fn ui_access_empty_snapshot(mode: text, active_surface: text, recent_events: [UiAccessEvent]) -> UiAccessSnapshot:
     UiAccessSnapshot(
         protocol_version: UI_ACCESS_PROTOCOL_VERSION,
@@ -65,21 +69,35 @@ fn ui_access_snapshot_persistable(snapshot: UiAccessSnapshot) -> UiAccessSnapsho
     snapshot
 
 fn ui_access_recent_events(events: [UiAccessEvent], count: i32) -> [UiAccessEvent]:
-    var out: [UiAccessEvent] = []
-    var start = events.len() - count
+    val event_count = events.len()
+    var start = event_count - count
     if start < 0:
         start = 0
+    if start >= event_count:
+        return []
+    val out_count = event_count - start
+    var out: [UiAccessEvent] = [events[start]; out_count]
     var i = start
-    while i < events.len():
-        out = out.push(events[i])
+    var write_idx = 0
+    while i < event_count:
+        out[write_idx] = events[i]
         i = i + 1
+        write_idx = write_idx + 1
     out
 
 fn ui_access_recent_surface_events(events: [UiAccessEvent], surface_id: text, count: i32) -> [UiAccessEvent]:
-    var filtered: [UiAccessEvent] = []
+    var filtered_count = 0
     for event in events:
         if surface_id == "" or event.surface_id == surface_id:
-            filtered = filtered.push(event)
+            filtered_count = filtered_count + 1
+    if filtered_count == 0:
+        return []
+    var filtered: [UiAccessEvent] = [events[0]; filtered_count]
+    var write_idx = 0
+    for event in events:
+        if surface_id == "" or event.surface_id == surface_id:
+            filtered[write_idx] = event
+            write_idx = write_idx + 1
     ui_access_recent_events(filtered, count)
 
 fn ui_access_record_event(events: [UiAccessEvent], sequence: i64, surface_id: text, widget_id: text, event_kind: text, payload: text) -> [UiAccessEvent]:
@@ -105,13 +123,35 @@ fn ui_access_lifecycle_events(events: [UiAccessEvent], sequence_base: i64, surfa
     out
 
 fn _access_nodes_from_widget(surface_id: text, node: WidgetNode, focused_id: text) -> [UiAccessNode]:
-    _access_append_node(surface_id, node, focused_id, [])
+    val node_count = _access_widget_count(node)
+    var out: [UiAccessNode] = [_access_node_from_widget(surface_id, node, focused_id); node_count]
+    val build = _access_fill_nodes_from_widget(surface_id, node, focused_id, UiAccessNodeBuild(nodes: out, next_idx: 0))
+    build.nodes
 
-fn _access_append_node(surface_id: text, node: WidgetNode, focused_id: text, nodes: [UiAccessNode]) -> [UiAccessNode]:
+fn _access_widget_count(node: WidgetNode) -> i32:
+    val children = node.children()
+    val child_count = children.len()
+    var total = 1
+    var child_idx = 0
+    while child_idx < child_count:
+        total = total + _access_widget_count(children[child_idx])
+        child_idx = child_idx + 1
+    total
+
+fn _access_node_child_ids(surface_id: text, children: [WidgetNode]) -> [text]:
+    val child_count = children.len()
     var child_ids: [text] = []
-    for child in node.children():
-        child_ids = child_ids.push(ui_access_canonical_id(surface_id, child.id))
-    var out = nodes.push(UiAccessNode(
+    if child_count > 0:
+        child_ids = [ui_access_canonical_id(surface_id, children[0].id); child_count]
+        var child_idx = 0
+        while child_idx < child_count:
+            child_ids[child_idx] = ui_access_canonical_id(surface_id, children[child_idx].id)
+            child_idx = child_idx + 1
+    child_ids
+
+fn _access_node_from_widget(surface_id: text, node: WidgetNode, focused_id: text) -> UiAccessNode:
+    val children = node.children()
+    UiAccessNode(
         canonical_id: ui_access_canonical_id(surface_id, node.id),
         surface_id: surface_id,
         widget_id: node.id,
@@ -122,9 +162,20 @@ fn _access_append_node(surface_id: text, node: WidgetNode, focused_id: text, nod
         selected: false,
         text_value: node.get_prop("text"),
         props: [],
-        child_ids: child_ids,
+        child_ids: _access_node_child_ids(surface_id, children),
         action_names: []
-    ))
-    for child in node.children():
-        out = _access_append_node(surface_id, child, focused_id, out)
-    out
+    )
+
+fn _access_fill_nodes_from_widget(surface_id: text, node: WidgetNode, focused_id: text, build: UiAccessNodeBuild) -> UiAccessNodeBuild:
+    var nodes = build.nodes
+    nodes[build.next_idx] = _access_node_from_widget(surface_id, node, focused_id)
+    var next_idx = build.next_idx + 1
+    val children = node.children()
+    val child_count = children.len()
+    var child_idx = 0
+    while child_idx < child_count:
+        val child_build = _access_fill_nodes_from_widget(surface_id, children[child_idx], focused_id, UiAccessNodeBuild(nodes: nodes, next_idx: next_idx))
+        nodes = child_build.nodes
+        next_idx = child_build.next_idx
+        child_idx = child_idx + 1
+    UiAccessNodeBuild(nodes: nodes, next_idx: next_idx)

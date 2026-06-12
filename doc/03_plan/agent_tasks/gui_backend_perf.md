@@ -304,6 +304,10 @@ Updated: 2026-06-11
 - this commit -- UI access source scan length hoisting:
   Access-source envelope JSON escaping now reuses the stable input length
   inside the scanner loop, matching the optimized patch/snapshot wire helpers.
+- this commit -- UI access snapshot allocation tightening:
+  Recent-event snapshot copies, surface-filtered event lists, and widget child
+  id lists now use exact-size buffers and cached event counts instead of
+  repeated push growth and repeated loop-bound length calls.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
