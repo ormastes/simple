@@ -430,6 +430,10 @@ Updated: 2026-06-11
   Hit testing, field lookup, form method lookup, and form pair serialization now
   reuse stable field/target counts, with form serialization writing exact-size
   pair arrays for the pure helper path independent of the baseline-red renderer spec.
+- this commit -- Browser session cookie helper allocation tightening:
+  Cookie splitting, document assignment parsing, jar upsert/removal, and
+  request-header serialization now reuse stable lengths and exact-size arrays
+  while preserving path/domain/expiry matching behavior.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
