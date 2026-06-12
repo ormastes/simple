@@ -398,6 +398,10 @@ Updated: 2026-06-11
   Stylesheet source extraction, CSS import extraction, and stylesheet insertion
   now count and fill exact-size source arrays, clearing the remaining general
   optimizer findings for browser-session HTML utilities.
+- this commit -- Browser runtime history trim preallocation:
+  Runtime-side history pushes now trim forward entries with an exact-size prefix
+  array before appending the new entry, with direct coverage for stale forward
+  history replacement.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
