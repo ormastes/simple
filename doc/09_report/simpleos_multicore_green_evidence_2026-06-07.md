@@ -45,7 +45,7 @@ SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_sy
 | Evidence | Result | Assertions |
 |----------|--------|------------|
 | SimpleOS cooperative green | PASS | 3 |
-| SimpleOS multicore green scheduler contract | PASS | 6 |
+| SimpleOS multicore green scheduler contract | PASS | 7 |
 | SimpleOS green-channel wake bridge | PASS | 4 |
 | SimpleOS final hardware handoff blocker contract | PASS | 3 |
 | SimpleOS green-carrier compile check | PASS | 1 file |
@@ -65,7 +65,7 @@ cross-language profile-script hardening update:
 - `bin/release/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`
   -> PASS, 3 assertions in 426ms
 - `bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean`
-  -> PASS, 6 assertions in 3942ms
+  -> PASS, 7 assertions after the hosted/live evidence-boundary guard was added
 - `bin/release/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
   -> PASS, 4 assertions in 3780ms
 
@@ -81,7 +81,7 @@ the SimpleOS green-thread loop was rerun with `--clean` on 2026-06-07. The
 direct rerun passed:
 
 - cooperative green system contract: 3 assertions
-- multicore green scheduler contract: 6 assertions
+- multicore green scheduler contract: 7 assertions
 - green-channel wake bridge: 4 assertions
 - green-carrier compile check: 1 file
 - green-carrier unit contract: 38 assertions

@@ -28,7 +28,7 @@ simpleos_multicore_green_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -61,9 +61,11 @@ separately from normal OS task ids. It also proves the hosted SimpleOS lane
 routes runtime, timer, and compiler preemption safepoints through named
 scheduler-owned green carrier adapters.
 
-The spec is intentionally not a live QEMU proof. The QEMU SMP evidence remains
-tracked in the multicore-green system plan until guest-visible AP execution is
-available to assert.
+The spec is intentionally not a live QEMU proof. Hosted scheduler evidence
+stays separate from the opt-in live QEMU AP lane and from the final
+`SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` marker triplet
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
+`USER_SYSCALL_PASS=true`.
 
 ## Requirements
 
@@ -143,11 +145,13 @@ This is hosted model evidence; live QEMU/AP execution remains covered by
 - This spec proves hosted/model SimpleOS scheduler behavior.
 - It proves scheduler-owned carrier state, remote enqueue/IPI intent,
   topology-bounded green state, and named preemption-safepoint routing.
-- It does not by itself prove live AP hardware execution.
-- Live AP and guest-visible dispatch evidence is owned by
+- It does not by itself prove live AP hardware execution or final ring/user
+  handoff.
+- Live AP, guest-visible dispatch, and final ring/user handoff evidence are
+  owned by
   `green_carrier_qemu_spec.spl`.
-- Final hardware context-switch handoff remains tracked until live guest proof
-  covers that exact transition.
+- The final handoff remains an opt-in live-QEMU gate and is recorded in
+  `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`.
 
 ## TUI Capture
 
@@ -156,7 +160,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl
 SimpleOS multicore green contract PASSED
 Files: 1
-Passed: 6
+Passed: 7
 Failed: 0
 ```
 
@@ -484,12 +488,52 @@ expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 
 </details>
 
+#### keeps hosted and live-QEMU evidence boundaries current
+
+- Read the hosted SimpleOS multicore-green spec and linked evidence docs
+- Verify hosted evidence does not claim to be the live AP or final handoff lane
+   - Expected: absent_in_text(self_doc, "guest-visible AP execution is available") equals `1`
+   - Expected: absent_in_text(self_doc, "Final hardware context-switch handoff remains tracked until live guest proof") equals `1`
+- Verify the linked plan and report carry the final live marker triplet
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the hosted SimpleOS multicore-green spec and linked evidence docs")
+val self_doc = rt_file_read_text("test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl") ?? ""
+val plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
+val report = rt_file_read_text("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md") ?? ""
+val blocker = rt_file_read_text("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md") ?? ""
+
+step("Verify hosted evidence does not claim to be the live AP or final handoff lane")
+expect(self_doc).to_contain("This spec is intentionally not a live QEMU proof")
+expect(self_doc).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1")
+expect(self_doc).to_contain("Passed: 7")
+expect(absent_in_text(self_doc, "guest-visible AP execution is available")).to_equal(1)
+expect(absent_in_text(self_doc, "Final hardware context-switch handoff remains tracked until live guest proof")).to_equal(1)
+
+step("Verify the linked plan and report carry the final live marker triplet")
+expect(plan).to_contain("HW_HANDOFF_PASS=true")
+expect(plan).to_contain("USER_ENTRY_PASS=true")
+expect(plan).to_contain("USER_SYSCALL_PASS=true")
+expect(report).to_contain("Final Ring/User Handoff PASS")
+expect(blocker).to_contain("Status: CLOSED")
+expect(blocker).to_contain("Final Ring/User Handoff PASS")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -7,13 +7,13 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 163
+- **Total Lines:** 117
 
 ---
 
-## Runtime Concurrency (1 features)
+## SimpleOS / Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Multicore Green Feature Tracking Specification](test/03_system/feature/usage/multicore_green_tracking_spec.md) | Current | N/A | 7 | 60% | 163 lines |
+| [SimpleOS Multicore Green System Contract](test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.md) | In Progress | N/A | 7 | 60% | 117 lines |
 

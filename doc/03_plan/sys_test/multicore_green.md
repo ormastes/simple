@@ -124,6 +124,6 @@
   Docker-isolated rerun. Keep this path perf-sensitive because the host native
   compile/run SSpec still takes about 60 seconds.
 - Hosted SimpleOS feature specs rerun on 2026-06-12 still pass: cooperative
-  green `3`, multicore green `6`, and green-channel wake `4`. The profile
+  green `3`, multicore green `7`, and green-channel wake `4`. The profile
   report contract and numeric cross-language gate also pass against
   `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.

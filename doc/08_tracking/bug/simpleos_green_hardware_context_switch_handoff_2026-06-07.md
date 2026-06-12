@@ -24,14 +24,14 @@ Current live QEMU evidence proves:
 That scheduler-owned green handoff evidence is now supplemented by the final
 ring/user marker triplet listed above.
 
-## Missing Proof
+## Historical Missing Proof
 
-Before this blocker can close, a live guest must prove that a runnable green task
-can cross the actual AP hardware context-switch boundary used by SimpleOS ring or
-user task execution, rather than only updating hosted scheduler state and
-QEMU-friendly fixed carrier slots.
+This was the original closure condition: a live guest had to prove that a
+runnable green task could cross the actual AP hardware context-switch boundary
+used by SimpleOS ring or user task execution, rather than only updating hosted
+scheduler state and QEMU-friendly fixed carrier slots.
 
-Minimum evidence:
+The now-satisfied minimum evidence was:
 
 - the AP owns the runnable green task through the same scheduler queue state used
   by normal execution;
@@ -42,12 +42,12 @@ Minimum evidence:
 - the live QEMU SSpec records named serial markers for the final hardware
   handoff, user entry, and user-mode syscall return.
 
-## Verification Target
+## Regression Target
 
-Extend `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` and
-`examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl` only
-after the SimpleOS kernel path exposes the real AP context-switch proof point.
-The final marker must be separate from the existing
+Keep `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` and
+`examples/09_embedded/simple_os/arch/x86_64/green_carrier_probe_entry.spl`
+aligned with the real AP context-switch proof point. The final marker must
+remain separate from the existing
 `SCHED_HANDOFF_PASS=true` marker so scheduler-state evidence cannot be mistaken
 for ring/user hardware handoff evidence.
 
@@ -66,6 +66,21 @@ The executable live gate is
 final hardware/user markers from a real AP ring/user handoff path whose user
 payload reaches the syscall entry and returns through the kernel syscall
 dispatcher.
+
+## Final Ring/User Handoff PASS
+
+The final live green-carrier QEMU lane now proves the real AP ring/user path
+through the explicit marker triplet:
+
+```text
+[green-carrier-qemu] HW_HANDOFF_PASS=true
+[green-carrier-qemu] USER_ENTRY_PASS=true
+[green-carrier-qemu] USER_SYSCALL_PASS=true
+```
+
+The default live/readiness probe must remain separate and must not print the
+final marker triplet unless `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` is
+set.
 
 Current proof-point candidates:
 
@@ -281,8 +296,8 @@ green-carrier lane, and revalidates the handoff immediately before calling
 `dispatch_enter_user_blocking`. The probe emits non-final
 `USER_CR3_READY=true` when that state is present.
 
-This closes the legacy `cr3=1` final-path prerequisite from the direct-entry
-experiment, but it does not close this blocker. The user payload still has not
-emitted `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
-`USER_SYSCALL_PASS=true`; the remaining gap is the actual ring/user transition
-and syscall-return observation after the enter bridge.
+This closed the legacy `cr3=1` final-path prerequisite from the direct-entry
+experiment. At that intermediate stage the user payload still had not emitted
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`;
+the later final live lane closed that remaining ring/user transition and
+syscall-return observation gap.
