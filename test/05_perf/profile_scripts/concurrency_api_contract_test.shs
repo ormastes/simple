@@ -109,6 +109,9 @@ fn step_once(state: i64) -> MulticoreGreenSliceResult:
 
 fn main():
     val handle = multicore_green_spawn_sliced(0, step_once)
+    val result = handle.join()
+    if result == 19:
+        println("public_multicore_green_sliced_result=19")
 SIMPLE
 
 write_fixture public_task_spawn <<'SIMPLE'
@@ -116,6 +119,46 @@ use std.nogc_async_mut.thread_pool.{task_spawn}
 
 fn main():
     val handle = task_spawn(\: 17)
+SIMPLE
+
+write_fixture multicore_sliced_wrong_surface_import <<'SIMPLE'
+use std.concurrent.thread.{multicore_green_spawn_sliced}
+
+fn main():
+    val handle = multicore_green_spawn_sliced(0, \state: state)
+SIMPLE
+
+write_fixture multicore_sliced_wrong_arity <<'SIMPLE'
+use std.concurrent.multicore_green.{multicore_green_spawn_sliced}
+
+fn main():
+    val handle = multicore_green_spawn_sliced(0)
+SIMPLE
+
+write_fixture multicore_sliced_bad_state_arg <<'SIMPLE'
+use std.concurrent.multicore_green.{multicore_green_spawn_sliced}
+
+fn main():
+    val handle = multicore_green_spawn_sliced("zero", \state: state)
+SIMPLE
+
+write_fixture multicore_sliced_bad_step_arg <<'SIMPLE'
+use std.concurrent.multicore_green.{multicore_green_spawn_sliced}
+
+fn main():
+    val handle = multicore_green_spawn_sliced(0, 42)
+SIMPLE
+
+write_fixture multicore_sliced_shared_var_capture <<'SIMPLE'
+use std.concurrent.multicore_green.{multicore_green_spawn_sliced, MulticoreGreenSliceResult}
+
+var shared_state = 0
+
+fn main():
+    val handle = multicore_green_spawn_sliced(0, \state:
+        shared_state = shared_state + state
+        MulticoreGreenSliceResult.completed(shared_state)
+    )
 SIMPLE
 
 write_fixture numbered_thread_spawn_alias_import <<'SIMPLE'
@@ -170,7 +213,8 @@ expect_run_contains public_cooperative_green "cooperative_green_public=true"
 positive_fixtures=$((positive_fixtures + 1))
 expect_run_contains public_multicore_green "multicore_green_public=true"
 positive_fixtures=$((positive_fixtures + 1))
-expect_check_passes public_multicore_green_sliced
+expect_run_contains public_multicore_green_sliced "public_multicore_green_sliced_result=19"
+echo "public_multicore_green_sliced_result=19"
 positive_fixtures=$((positive_fixtures + 1))
 expect_check_passes public_task_spawn
 positive_fixtures=$((positive_fixtures + 1))
@@ -181,7 +225,12 @@ for name in \
     multicore_wrong_surface_import \
     numbered_runtime_extern \
     numbered_limited_runtime_extern \
-    direct_runtime_pool_extern
+    direct_runtime_pool_extern \
+    multicore_sliced_wrong_surface_import \
+    multicore_sliced_wrong_arity \
+    multicore_sliced_bad_state_arg \
+    multicore_sliced_bad_step_arg \
+    multicore_sliced_shared_var_capture
 do
     expect_check_fails "$name"
     fixtures=$((fixtures + 1))

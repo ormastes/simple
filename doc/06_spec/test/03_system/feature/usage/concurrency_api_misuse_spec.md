@@ -92,6 +92,11 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 - `cooperative_green_spawn` must stay on the cooperative-green surface.
 - `multicore_green_spawn` must stay on the multicore-green surface.
 - `multicore_green_spawn_sliced` must stay on the multicore-green surface.
+- `multicore_green_spawn_sliced` must run and join to a concrete result in
+  the public API contract.
+- `multicore_green_spawn_sliced` must reject wrong surface imports, wrong
+  arity, non-integer initial state, non-function step arguments, and shared
+  mutable captures in inline step lambdas.
 - `multicore_green_spawn` must accept a single zero-argument closure.
 - `multicore_green_set_parallelism` must accept an integer worker count.
 - `task_spawn` must stay available as the pool-backed native task API.
@@ -106,7 +111,7 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `19`
+   - Expected: fixture_count() equals `25`
 
 
 <details>
@@ -117,7 +122,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(19)
+expect(fixture_count()).to_equal(25)
 ```
 
 </details>
@@ -132,7 +137,7 @@ expect(fixture_count()).to_equal(19)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -141,9 +146,10 @@ val (output, code) = run_profile_contract()
 expect(code).to_equal(0)
 step("Verify approved public-name fixtures were checked before misuse fixtures")
 expect(output).to_contain("concurrency_api_contract=true")
+expect(output).to_contain("public_multicore_green_sliced_result=19")
 expect(output).to_contain("positive_fixtures=6")
-expect(output).to_contain("fixtures=6")
-expect(output).to_contain("misuse_fixtures=6")
+expect(output).to_contain("fixtures=11")
+expect(output).to_contain("misuse_fixtures=11")
 ```
 
 </details>
@@ -234,12 +240,20 @@ expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 - expect compile error
 - Reject direct access to internal runtime-pool symbols
 - expect compile error
+- Reject multicore_green_spawn_sliced imported from the OS-thread surface
+- expect compile error
+- Reject multicore_green_spawn_sliced called with too few arguments
+- expect compile error
+- Reject multicore_green_spawn_sliced called with non-integer initial state
+- expect compile error
+- Reject multicore_green_spawn_sliced called with non-function step argument
+- expect compile error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -253,6 +267,14 @@ step("Reject multicore_green_set_parallelism called with text")
 expect_compile_error("multicore_green_parallelism_bad_arg.spl", "E-PAR-004", "integer worker count")
 step("Reject direct access to internal runtime-pool symbols")
 expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "internal runtime-pool symbol")
+step("Reject multicore_green_spawn_sliced imported from the OS-thread surface")
+expect_compile_error("multicore_green_sliced_wrong_surface_import.spl", "E-PAR-003", "multicore_green_spawn_sliced belongs to std.concurrent.multicore_green")
+step("Reject multicore_green_spawn_sliced called with too few arguments")
+expect_compile_error("multicore_green_sliced_wrong_arity.spl", "E-PAR-004", "initial integer state and step function")
+step("Reject multicore_green_spawn_sliced called with non-integer initial state")
+expect_compile_error("multicore_green_sliced_bad_state_arg.spl", "E-PAR-004", "initial integer state and step function")
+step("Reject multicore_green_spawn_sliced called with non-function step argument")
+expect_compile_error("multicore_green_sliced_bad_step_arg.spl", "E-PAR-004", "initial integer state and step function")
 ```
 
 </details>
@@ -265,12 +287,14 @@ expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "
 - expect compile error
 - Reject multicore_green_spawn closures that read module-level mutable variables
 - expect compile error
+- Reject multicore_green_spawn_sliced inline step lambdas that mutate shared variables
+- expect compile error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -280,6 +304,8 @@ step("Reject cooperative_green_spawn closures that mutate captured variables")
 expect_compile_error("cooperative_green_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'local_count'")
 step("Reject multicore_green_spawn closures that read module-level mutable variables")
 expect_compile_error("multicore_green_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_sum'")
+step("Reject multicore_green_spawn_sliced inline step lambdas that mutate shared variables")
+expect_compile_error("multicore_green_sliced_shared_var_capture.spl", "E-PAR-006", "must not share mutable variable 'shared_state'")
 ```
 
 </details>

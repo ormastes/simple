@@ -40,12 +40,10 @@
 - `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` records the latest SimpleOS verification commands and results for the cooperative, multicore scheduler, green-channel wake, QEMU default, and QEMU live lanes.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl` checks fanout/fanin checksum parity across Simple OS threads, cooperative green, and multicore green; it also requires multicore-green handles to report whether the runtime pool was used before treating the row as M:N evidence.
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` parses the Docker contract profile report and gates numeric Simple OS-thread and multicore-green native rows against Go goroutine and C pthread baselines, proves Go beats C in the isolated large-fanout stress row, requires Go `GOMAXPROCS` fairness metadata, and keeps cooperative green classified as non-M:N.
-- `test/03_system/feature/usage/concurrency_api_misuse_spec.spl` checks the public concurrency API contract: approved meaningful public names remain usable through `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` with `positive_fixtures=6` and `misuse_fixtures=6`, including `task_spawn` and a run/join proof that `multicore_green_spawn_sliced` returns `public_multicore_green_sliced_result=19`; `task_spawn_wrong_surface_import.spl` and `multicore_green_wrong_surface_import.spl` reject the OS-thread facade; wrong-surface imports, wrong arity, non-closure arguments, bad parallelism argument types, and forbidden numbered aliases fail closed at compile time; and `doc/06_spec/test/03_system/feature/usage/concurrency_api_misuse_spec.md` mirrors the executable manual. The current-source rerun on 2026-06-12 passes all six scenarios but remains perf-sensitive at about 80 seconds because it launches many isolated compiler-check fixtures.
+- `test/03_system/feature/usage/concurrency_api_misuse_spec.spl` checks the public concurrency API contract: approved meaningful public names remain usable through `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` with `positive_fixtures=6` and `misuse_fixtures=11`, including `task_spawn` and a run/join proof that `multicore_green_spawn_sliced` returns `public_multicore_green_sliced_result=19`; `task_spawn_wrong_surface_import.spl`, `multicore_green_wrong_surface_import.spl`, and `multicore_green_sliced_wrong_surface_import.spl` reject the OS-thread facade; wrong-surface imports, wrong arity, non-closure/non-function arguments, bad parallelism or sliced-state argument types, forbidden numbered aliases, and shared mutable captures in green-process closures fail closed at compile time; and `doc/06_spec/test/03_system/feature/usage/concurrency_api_misuse_spec.md` mirrors the executable manual. The current-source rerun on 2026-06-12 passes all six scenarios with `25` checked-in misuse fixtures.
 - `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` checks that `doc/03_plan/agent_tasks/multicore_green.md` uses meaningful parallel-agent lane names instead of `Agent A`/`Agent B` labels, and keeps each lane tied to deliverables and acceptance evidence.
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the remaining hosted fairness/preemption gap explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths.
 - `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so the remaining host gap is deeper than a missing OS-thread yield primitive.
-<<<<<<< Conflict 1 of 2
-+++++++ Contents of side #1
 - `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
   proves the explicit Pure Simple sliced-task API can provide a hosted
   fairness contract without changing plain closure semantics: with hosted
@@ -55,28 +53,22 @@
   remains `1` on both source-run and standalone native paths. The 2026-06-12
   native compile/run SSpec takes about 60 seconds and remains perf-sensitive.
 - `test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl`
-  now regression-covers the closed smaller hosted-native blocker beneath the
-  callback-id resumable-stepper lane: a direct native array of a by-value
-  struct is green again on current-source seed/native.
+  regression-covers the smaller hosted-native by-value struct-array path
+  beneath the callback-id resumable-stepper lane on current-source seed/native.
 - `test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl`
-  now regression-covers the closed hosted-native helper path beneath the
-  callback-id resumable-stepper lane: local `MulticoreGreenHandle` array
-  iteration plus `join()` now prints `result=7` with `EXIT=0` in the standalone
-  native artifact.
+  regression-covers the hosted-native helper path beneath the callback-id
+  resumable-stepper lane: local `MulticoreGreenHandle` array iteration plus
+  `join()` must stay explicit evidence instead of being inferred from source
+  shape alone.
 - `test/03_system/feature/usage/multicore_green_helper_handles_return_native_blocker_spec.spl`
-  now regression-covers the closed helper handle-array return path beneath the
-  callback-id resumable-stepper lane: the spec writes real multi-line Simple
-  source, type-checks it, compiles it to hosted native, and verifies that a
-  helper can join local `MulticoreGreenHandle` values and return a separate
-  result array with `after=7` and `EXIT=0`. The 2026-06-12 corrected run is
-  functionally green, but this native compile/run SSpec takes about 64 seconds
-  and remains perf-sensitive.
+  regression-covers the helper handle-array return path beneath the callback-id
+  resumable-stepper lane with real multi-line Simple source, type-check,
+  hosted-native compile, and run evidence. This native compile/run SSpec is
+  perf-sensitive.
 - `test/03_system/feature/usage/multicore_green_post_join_array_return_native_blocker_spec.spl`
-  now regression-covers the closed post-join array-return blocker: a
-  `multicore_green` worker can be joined, followed by post-join `println`
-  work, before returning a local result array that prints `result=7` with
-  `EXIT=0`. The 2026-06-12 run is functionally green, but this native
-  compile/run SSpec still takes about 60 seconds and remains perf-sensitive.
+  regression-covers the post-join array-return path: a `multicore_green`
+  worker is joined before post-join work and local result-array return. This
+  native compile/run SSpec remains perf-sensitive.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records that the checked-in `bin/release/simple` binary has drifted from the
   current-source rebuilt `release` and `debug` compilers for the
@@ -85,51 +77,8 @@
   evidence until the checked-in release binary is refreshed to match current
   source/runtime/compiler behavior.
 - `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
-  now regression-covers the closed smaller standalone-native blocker beneath
-  the resumable-stepper lane: returning a function value from inside a
-  loop/search branch now returns `EXIT=0` in standalone native artifacts.
-%%%%%%% Changes from base #1 to side #2
--- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_blocker_spec.spl`
--  now pins the smaller hosted-native blocker beneath the callback-id
--  resumable-stepper lane: a pool worker that sends a plain struct payload
--  through a channel still segfaults in the standalone native artifact.
--- `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
--  records that the checked-in `bin/release/simple` binary has drifted from the
--  current-source rebuilt `release` and `debug` compilers for the
--  resumable-stepper native probe. The helper-return probes are now fixed on the
--  rebuilt debug path, so rebuilt current-source artifacts remain the stronger
--  evidence until the checked-in release binary is refreshed to match current
--  source/runtime/compiler behavior.
--- `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
--  keeps the earlier standalone-native lower blocker closed: returning a
--  function value from inside a loop/search branch is green again even without
--  the worker pool.
-%%%%%%% Changes from base #2 to side #3
--- `test/03_system/feature/usage/multicore_green_channel_struct_send_native_blocker_spec.spl`
--  now pins the smaller hosted-native blocker beneath the callback-id
--  resumable-stepper lane: a pool worker that sends a plain struct payload
--  through a channel still segfaults in the standalone native artifact.
-+- `test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl`
-+  now regression-covers the closed smaller hosted-native blocker beneath the
-+  callback-id resumable-stepper lane: a direct native array of a by-value
-+  struct is green again on current-source seed/native.
-+- `test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl`
-+  now pins the current smaller hosted-native blocker beneath the callback-id
-+  resumable-stepper lane: local `MulticoreGreenHandle` array iteration plus
-+  `join()` still returns `result={result}` with `EXIT=12` in the standalone
-+  native artifact.
- - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
-   records that the checked-in `bin/release/simple` binary has drifted from the
-   current-source rebuilt `release` and `debug` compilers for the
-   resumable-stepper native probe. The helper-return probes are now fixed on the
-   rebuilt debug path, so rebuilt current-source artifacts remain the stronger
-   evidence until the checked-in release binary is refreshed to match current
-   source/runtime/compiler behavior.
- - `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
-   now pins the smaller standalone-native blocker beneath the resumable-stepper
-   lane: returning a function value from inside a loop/search branch still
-   crashes in native artifacts even without the worker pool.
->>>>>>> Conflict 1 of 2 ends
+  regression-covers the standalone-native function-value loop-return path
+  beneath the resumable-stepper lane.
 - `test/01_unit/lib/nogc_async_mut/green_channel_spec.spl` checks the pure Simple green-channel contract: empty recv parks a logical green task, send unparks the oldest waiter, FIFO buffering works, and bounded backpressure does not block the carrier worker.
 
 ## Blocking Evidence To Track
@@ -154,39 +103,21 @@
   - refreshed Go-vs-Simple research wording so the remaining parity gap is
     explicitly hosted fairness/preemption, not final hardware handoff proof or
     the already-covered blocking-compensation path.
-- The workspace remains dirty outside the multicore-green lane because other
-  sessions are active in this checkout; future sync work must keep those files
-  out of multicore-green commits unless the user explicitly asks for an
-  integration commit.
-<<<<<<< Conflict 2 of 2
-+++++++ Contents of side #1
-- Current-source rebuilt debug artifacts now pass the scalar/object
-  helper-return probes, helper-side handle-array join, channel-struct send,
-  callback registry, function-value param-array, inline lambda array literals,
-  function-value loop-return, direct struct-array native regressions, and the
-  resumable-stepper scheduler path itself. The later post-join array-return
-  path is now closed too: post-join string work before returning a local result
-  array prints `result=7` with `EXIT=0` in the regression spec and the
-  Docker-isolated rerun. Keep this path perf-sensitive because the host native
-  compile/run SSpec still takes about 60 seconds.
-- Hosted SimpleOS feature specs rerun on 2026-06-12 still pass: cooperative
-  green `3`, multicore green `7`, and green-channel wake `4`. The profile
-  report contract and numeric cross-language gate also pass against
+- The shared default checkout remains dirty outside the multicore-green lane
+  because other sessions are active; this lane uses a separate jj workspace and
+  must keep those files out of multicore-green commits unless the user
+  explicitly asks for an integration commit.
+- Current-source rebuilt debug artifacts remain the stronger evidence for
+  native resumable-stepper and helper-return probes until the checked-in
+  `bin/release/simple` binary is refreshed to match current
+  source/runtime/compiler behavior.
+- Hosted SimpleOS feature specs rerun during the later doc-alignment passes
+  still pass, and the profile report contract plus numeric cross-language gate
+  pass against
   `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
-%%%%%%% Changes from base #1 to side #2
--- Current-source rebuilt debug artifacts now pass both scalar and object-return
--  helper-return native probes, while the resumable-stepper native probe still
--  crashes with `EXIT=139`. The checked-in `bin/release/simple` remains tracked
--  as stale lane evidence until it is refreshed against current source.
- - Hosted SimpleOS feature specs rerun during the later doc-alignment passes
-   still pass: cooperative green `3`, multicore green `6`, green-channel wake
-   `4`, and the final handoff blocker contract `3`.
-%%%%%%% Changes from base #2 to side #3
- - Current-source rebuilt debug artifacts now pass both scalar and object-return
-   helper-return native probes, while the resumable-stepper native probe still
-   crashes with `EXIT=139`. The checked-in `bin/release/simple` remains tracked
-   as stale lane evidence until it is refreshed against current source.
- - Hosted SimpleOS feature specs rerun during the later doc-alignment passes
-   still pass: cooperative green `3`, multicore green `6`, green-channel wake
-   `4`, and the final handoff blocker contract `3`.
->>>>>>> Conflict 2 of 2 ends
+- This 2026-06-12 slice rebuilt `src/compiler_rust/target/debug/simple`, passed
+  `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` with
+  `positive_fixtures=6`, `misuse_fixtures=11`, and
+  `public_multicore_green_sliced_result=19`, then passed
+  `test/03_system/feature/usage/concurrency_api_misuse_spec.spl` with six
+  scenarios and `25` checked-in misuse fixtures.

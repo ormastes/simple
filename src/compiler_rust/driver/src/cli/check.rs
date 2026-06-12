@@ -853,7 +853,9 @@ fn concurrency_wrong_surface_error_owner_accepts(owner_path: &str, name: &str) -
         "thread_spawn" | "thread_spawn_with_args" => is_concurrency_thread_path(owner_path),
         "green_spawn" => is_green_thread_path(owner_path) || is_cooperative_green_path(owner_path),
         "cooperative_green_spawn" | "cooperative_green_spawn_value" => is_cooperative_green_path(owner_path),
-        "multicore_green_spawn" | "multicore_green_set_parallelism" => is_multicore_green_path(owner_path),
+        "multicore_green_spawn" | "multicore_green_spawn_sliced" | "multicore_green_set_parallelism" => {
+            is_multicore_green_path(owner_path)
+        }
         _ => false,
     }
 }
@@ -1027,12 +1029,7 @@ fn validate_concurrency_call_shape(
     let Some(first) = args.first() else {
         return;
     };
-    let accepted = match rule.first_arg {
-        ConcurrencyFirstArg::Closure => matches!(first.value, Expr::Lambda { .. }),
-        ConcurrencyFirstArg::Integer => {
-            literal_type_name(&first.value).is_some_and(|found| numeric_literal_type_compatible("i64", found))
-        }
-    };
+    let accepted = concurrency_arg_matches(rule.first_arg, &first.value);
     if !accepted {
         errors.push(concurrency_call_shape_error(
             file_path,
@@ -1045,17 +1042,45 @@ fn validate_concurrency_call_shape(
         ));
     }
 
-    if rule.share_nothing {
-        if let Expr::Lambda { params, body, .. } = &first.value {
-            for violation in lambda_share_nothing_violations(params, body, &ctx.module_mut_globals) {
-                errors.push(concurrency_shared_capture_error(
+    if let Some(second_kind) = rule.second_arg {
+        if let Some(second) = args.get(1) {
+            if !concurrency_arg_matches(second_kind, &second.value) {
+                errors.push(concurrency_call_shape_error(
                     file_path,
-                    first.span.line,
-                    first.span.column,
+                    second.span.line,
+                    second.span.column,
                     canonical_name,
-                    &violation,
+                    rule.expected,
+                    concurrency_arg_found(&second.value),
+                    rule.help,
                 ));
             }
+        }
+    }
+
+    if let Some(arg_index) = rule.share_nothing_arg {
+        if let Some(arg) = args.get(arg_index) {
+            if let Expr::Lambda { params, body, .. } = &arg.value {
+                for violation in lambda_share_nothing_violations(params, body, &ctx.module_mut_globals) {
+                    errors.push(concurrency_shared_capture_error(
+                        file_path,
+                        arg.span.line,
+                        arg.span.column,
+                        canonical_name,
+                        &violation,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn concurrency_arg_matches(kind: ConcurrencyArgKind, expr: &Expr) -> bool {
+    match kind {
+        ConcurrencyArgKind::Closure => matches!(expr, Expr::Lambda { .. }),
+        ConcurrencyArgKind::Function => matches!(expr, Expr::Lambda { .. } | Expr::Identifier(_) | Expr::Path(_)),
+        ConcurrencyArgKind::Integer => {
+            literal_type_name(expr).is_some_and(|found| numeric_literal_type_compatible("i64", found))
         }
     }
 }
@@ -1284,46 +1309,59 @@ fn concurrency_shared_capture_error(
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ConcurrencyFirstArg {
+enum ConcurrencyArgKind {
     Closure,
+    Function,
     Integer,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ConcurrencyCallRule {
     expected_arity: usize,
-    first_arg: ConcurrencyFirstArg,
+    first_arg: ConcurrencyArgKind,
+    second_arg: Option<ConcurrencyArgKind>,
     expected: &'static str,
     help: &'static str,
     /// Green-process surfaces are share-nothing: spawned closures must not
     /// capture or mutate variables shared with other tasks (E-PAR-006).
     /// OS threads (`thread_spawn`) may share through Mutex/RwLock, so they
     /// stay exempt.
-    share_nothing: bool,
+    share_nothing_arg: Option<usize>,
 }
 
 fn concurrency_call_rule(name: &str) -> Option<ConcurrencyCallRule> {
     match name {
         "thread_spawn" => Some(ConcurrencyCallRule {
             expected_arity: 1,
-            first_arg: ConcurrencyFirstArg::Closure,
+            first_arg: ConcurrencyArgKind::Closure,
+            second_arg: None,
             expected: "single zero-argument value closure",
             help: "pass a closure such as `\\: 1`; use thread_spawn_with_args for explicit thread arguments",
-            share_nothing: false,
+            share_nothing_arg: None,
         }),
         "green_spawn" | "cooperative_green_spawn" | "multicore_green_spawn" => Some(ConcurrencyCallRule {
             expected_arity: 1,
-            first_arg: ConcurrencyFirstArg::Closure,
+            first_arg: ConcurrencyArgKind::Closure,
+            second_arg: None,
             expected: "single zero-argument value closure",
             help: "pass a closure such as `\\: 1`; use thread_spawn_with_args for explicit thread arguments",
-            share_nothing: true,
+            share_nothing_arg: Some(0),
+        }),
+        "multicore_green_spawn_sliced" => Some(ConcurrencyCallRule {
+            expected_arity: 2,
+            first_arg: ConcurrencyArgKind::Integer,
+            second_arg: Some(ConcurrencyArgKind::Function),
+            expected: "initial integer state and step function",
+            help: "pass an integer initial state and a step function `fn(i64) -> MulticoreGreenSliceResult`",
+            share_nothing_arg: Some(1),
         }),
         "multicore_green_set_parallelism" => Some(ConcurrencyCallRule {
             expected_arity: 1,
-            first_arg: ConcurrencyFirstArg::Integer,
+            first_arg: ConcurrencyArgKind::Integer,
+            second_arg: None,
             expected: "single integer worker count",
             help: "pass an integer worker count such as `4`, not text",
-            share_nothing: false,
+            share_nothing_arg: None,
         }),
         _ => None,
     }
@@ -2154,7 +2192,7 @@ fn concurrency_wrong_surface_error(
         | "cooperative_green_spawn_value"
         | "cooperative_green_run_one"
         | "cooperative_green_run_all" => is_cooperative_green_path(owner_path),
-        "multicore_green_spawn" => is_multicore_green_path(owner_path),
+        "multicore_green_spawn" | "multicore_green_spawn_sliced" => is_multicore_green_path(owner_path),
         "task_spawn" => is_thread_pool_path(owner_path),
         _ => true,
     };
@@ -2173,7 +2211,7 @@ fn concurrency_wrong_surface_error(
         expected: Some(expected_owner.to_string()),
         found: Some(owner_path.to_string()),
         notes: vec![
-            "thread_spawn, green_spawn, cooperative_green_spawn, multicore_green_spawn, and task_spawn intentionally live on separate concurrency surfaces"
+            "thread_spawn, green_spawn, cooperative_green_spawn, multicore_green_spawn, multicore_green_spawn_sliced, and task_spawn intentionally live on separate concurrency surfaces"
                 .to_string(),
         ],
         help: vec![format!("import {name} from {expected_owner}")],
@@ -2188,7 +2226,7 @@ fn expected_concurrency_owner(name: &str) -> Option<&'static str> {
         | "cooperative_green_spawn_value"
         | "cooperative_green_run_one"
         | "cooperative_green_run_all" => Some("std.concurrent.cooperative_green"),
-        "multicore_green_spawn" => Some("std.concurrent.multicore_green"),
+        "multicore_green_spawn" | "multicore_green_spawn_sliced" => Some("std.concurrent.multicore_green"),
         "task_spawn" => Some("std.nogc_async_mut.thread_pool"),
         _ => None,
     }

@@ -4,25 +4,17 @@
 
 ## Quick Stats
 
-- **Total Features:** 4
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 4
-- **Total Lines:** 0
-- **Warnings:** 4
+- **Total Features:** 1
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 58
+- **Warnings:** 1
 
 ---
 
-## Standard Library (3 features)
+## Language / Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Backend Vulkan Processing Specification](test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_processing_spec.md) | Auto-generated | N/A | 22 | 0% | 0 lines |
-| [Backend Cuda Processing Specification](test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_processing_spec.md) | Auto-generated | N/A | 7 | 0% | 0 lines |
-| [Backend Cuda Renderbackend Specification](test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.md) | Auto-generated | N/A | 11 | 0% | 0 lines |
-
-## Application (1 features)
-
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
+| [Concurrency API Misuse System Contract](test/03_system/feature/usage/concurrency_api_misuse_spec.md) | Active | N/A | 6 | 40% | 58 lines |
 
