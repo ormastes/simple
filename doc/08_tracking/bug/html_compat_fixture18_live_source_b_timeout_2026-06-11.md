@@ -1,6 +1,6 @@
 # HTML Compat Fixture 18 Live Source-B Timeout
 
-- **Status:** open
+- **Status:** closed — all AC verified 2026-06-12
 - **Date:** 2026-06-11
 - **Lane:** Simple Web / Chromium HTML pixel parity
 
@@ -101,3 +101,41 @@ Likely areas to inspect:
 - The fix must not rely on a machine-specific absolute compiler path; automatic
   child runtime discovery must either find a runnable local runtime or fail
   quickly with a clear missing-runtime error.
+
+## Verification (2026-06-12)
+
+Reproduced and verified on Linux (x86_64). No code changes needed — the fix
+documented in Summary was already committed.
+
+**Repro without SIMPLE_BINARY (automatic discovery via `bin/simple` symlink):**
+```text
+SIMPLE_LIB=src bin/simple run src/app/wm_compare/html_compat.spl --only=18_flex_grow_weights
+[html_compat] Fixture: 18_flex_grow_weights
+[html_compat]   loading source A...  ok  pixels=76800
+[html_compat]   capturing source B...  ok  pixels=76800
+[html_compat]   RESULT: EXACT match
+elapsed ≈ 7s, exit 0
+```
+
+**report.sdn confirms all AC:**
+```
+simple: (capture success: true width: 320 height: 240 pixel_count: 76800 error: "")
+compare: (exact: true accepted: true different_pixels: 0 match_pct_10000: 10000)
+```
+
+**html_compat spec suite (test/03_system/gui/wm_compare/html_compat_spec.spl):**
+- 18 tests passed, 0 failed, duration ≈ 4.4s
+
+**Full wm_compare spec suite (18 files):**
+- Passed: 173, Failed: 8 (all 8 in `golden_gate_spec.spl` — pre-existing framebuffer
+  baseline drift unrelated to this bug)
+- `html_compat_spec.spl`: PASS
+- `html_compat_geometry_probe_spec.spl`: PASS
+
+**Root cause (confirmed):** Not an HTML tokenizer/parser hang. The original
+timeout was in child runtime discovery — `bin/simple` symlink pointed to an
+arch-specific binary that did not exist in clean worktrees, so the harness
+fell through to `/usr/bin/env` (not a Simple binary) and timed out waiting
+for its `--version` probe. The fix in `html_compat_part1.spl` probes each
+candidate with a 2s `rt_process_run_timeout` `--version` call and returns `""`
+(fail-fast) when no candidate passes.
