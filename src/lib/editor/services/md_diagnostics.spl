@@ -134,6 +134,8 @@ fn md_check_frontmatter_property_schema(content: text, path: text, rules: [MdPro
 
 fn md_check_duplicate_headings(content: text, path: text) -> [EditorDiagnostic]:
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
     val lines = content.split("\n")
     val total = lines.len()
     # Collect (level, text, line_number) for all headings outside code fences
@@ -187,6 +189,8 @@ fn md_check_duplicate_headings(content: text, path: text) -> [EditorDiagnostic]:
 
 fn md_check_broken_heading_links(content: text, path: text) -> [EditorDiagnostic]:
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
     val lines = content.split("\n")
     val total = lines.len()
     # Collect valid heading slugs
@@ -212,14 +216,14 @@ fn md_check_broken_heading_links(content: text, path: text) -> [EditorDiagnostic
         i = i + 1
     # Find all links with # prefix in URL and check against valid slugs
     val link_positions = _md_diag_find_links_with_positions(content)
-    var j = 0
-    while j < link_positions.len():
-        val item = link_positions[j]
-        val link_line = item.0
-        val link_col = item.1
-        val link_url = item.3
-        if link_url.starts_with("#"):
-            val anchor = link_url.slice(1, link_url.len())
+    val lines_count = lines.len()
+    for item in link_positions:
+        var link_line = item.0
+        var link_col = item.1
+        var link_url = item.3
+        var is_anchor = link_url.starts_with("#")
+        if is_anchor:
+            var anchor = link_url.slice(1, link_url.len())
             var found = false
             var k = 0
             while k < valid_slugs.len():
@@ -228,22 +232,31 @@ fn md_check_broken_heading_links(content: text, path: text) -> [EditorDiagnostic
                     break
                 k = k + 1
             if not found:
+                # Clamp end_col to actual line length
+                var end_col = link_col + link_url.len() + 2
+                if link_line < lines_count:
+                    var this_line = lines[link_line]
+                    var this_len = this_line.len()
+                    if end_col > this_len:
+                        end_col = this_len
+                var diag_msg = "Broken heading anchor: \"" + link_url + "\" does not match any heading"
                 val d = EditorDiagnostic(
                     path: path,
                     line: link_line,
                     col: link_col,
                     end_line: link_line,
-                    end_col: link_col + link_url.len() + 2,
+                    end_col: end_col,
                     severity: "error",
-                    message: "Broken heading anchor: \"" + link_url + "\" does not match any heading",
+                    message: diag_msg,
                     source: "markdown"
                 )
                 results.push(d)
-        j = j + 1
     results
 
 fn md_check_empty_headings(content: text, path: text) -> [EditorDiagnostic]:
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
     val lines = content.split("\n")
     val total = lines.len()
     var in_fence = false
@@ -280,6 +293,8 @@ fn md_check_empty_headings(content: text, path: text) -> [EditorDiagnostic]:
 
 fn md_check_inconsistent_list_markers(content: text, path: text) -> [EditorDiagnostic]:
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
     val lines = content.split("\n")
     val total = lines.len()
     var in_fence = false
@@ -324,35 +339,41 @@ fn md_check_inconsistent_list_markers(content: text, path: text) -> [EditorDiagn
 
 fn md_check_missing_alt_text(content: text, path: text) -> [EditorDiagnostic]:
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
     val image_positions = _md_diag_find_images_with_positions(content)
-    var i = 0
-    while i < image_positions.len():
-        val item = image_positions[i]
-        val img_line = item.0
-        val img_col = item.1
-        val alt_text = item.2
-        val alt_trimmed = alt_text.trim()
-        if alt_trimmed.len() == 0:
-            val lines = content.split("\n")
-            var end_col = img_col + 4
-            if img_line < lines.len():
-                end_col = lines[img_line].len()
+    for item in image_positions:
+        var diag_line = item.0
+        var diag_col = item.1
+        var alt_text = item.2
+        var alt_len = alt_text.trim().len()
+        if alt_len == 0:
+            # Compute end_col inline — avoid hoisted array in for-loop scope
+            var end_col = diag_col + 4
+            val img_lines = content.split("\n")
+            var img_line_count = img_lines.len()
+            if diag_line < img_line_count:
+                var img_line_text = img_lines[diag_line]
+                var img_line_len = img_line_text.len()
+                if end_col > img_line_len:
+                    end_col = img_line_len
             val d = EditorDiagnostic(
                 path: path,
-                line: img_line,
-                col: img_col,
-                end_line: img_line,
+                line: diag_line,
+                col: diag_col,
+                end_line: diag_line,
                 end_col: end_col,
                 severity: "info",
                 message: "Image is missing alt text",
                 source: "markdown"
             )
             results.push(d)
-        i = i + 1
     results
 
 fn md_check_unclosed_code_fences(content: text, path: text) -> [EditorDiagnostic]:
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
     val lines = content.split("\n")
     val total = lines.len()
     var in_fence = false
@@ -369,12 +390,14 @@ fn md_check_unclosed_code_fences(content: text, path: text) -> [EditorDiagnostic
                 fence_start_line = i
         i = i + 1
     if in_fence:
+        # fence_start_line is always < total because we set it during the scan
+        val fence_end_col = if fence_start_line < total then lines[fence_start_line].len() else: 0
         val d = EditorDiagnostic(
             path: path,
             line: fence_start_line,
             col: 0,
             end_line: fence_start_line,
-            end_col: lines[fence_start_line].len(),
+            end_col: fence_end_col,
             severity: "error",
             message: "Unclosed code fence starting here",
             source: "markdown"
@@ -384,6 +407,8 @@ fn md_check_unclosed_code_fences(content: text, path: text) -> [EditorDiagnostic
 
 fn md_check_heading_level_skip(content: text, path: text) -> [EditorDiagnostic]:
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
     val lines = content.split("\n")
     val total = lines.len()
     var in_fence = false
@@ -422,6 +447,8 @@ fn md_check_trailing_whitespace(content: text, path: text) -> [EditorDiagnostic]
     # Flag lines that end with exactly 1 trailing space.
     # Lines ending with 2+ trailing spaces are intentional hard line breaks in markdown.
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
     val lines = content.split("\n")
     val total = lines.len()
     var i = 0
@@ -447,6 +474,9 @@ fn md_check_trailing_whitespace(content: text, path: text) -> [EditorDiagnostic]
 
 fn md_validate_local_links(content: text, path: text, existing_files: [text]) -> [EditorDiagnostic]:
     var results: [EditorDiagnostic] = []
+    if content.len() == 0:
+        return results
+    val lines = content.split("\n")
     val link_positions = _md_diag_find_links_with_positions(content)
     var i = 0
     while i < link_positions.len():
@@ -473,12 +503,17 @@ fn md_validate_local_links(content: text, path: text, existing_files: [text]) ->
                     break
                 k = k + 1
             if not found:
+                var link_end_col = link_col + link_url.len() + 2
+                if link_line < lines.len():
+                    val llen = lines[link_line].len()
+                    if link_end_col > llen:
+                        link_end_col = llen
                 val d = EditorDiagnostic(
                     path: path,
                     line: link_line,
                     col: link_col,
                     end_line: link_line,
-                    end_col: link_col + link_url.len() + 2,
+                    end_col: link_end_col,
                     severity: "warning",
                     message: "Local link target not found: \"" + local_path + "\"",
                     source: "markdown"
@@ -594,11 +629,14 @@ fn _md_diag_find_images_with_positions(content: text) -> [(i64, i64, text, text)
                             while k < line_len and line.char_at(k) != ")":
                                 url = url + line.char_at(k)
                                 k = k + 1
-                            val url_clean = _md_diag_strip_url_title(url)
-                            val entry = (img_start_col, img_start_col, alt, url_clean)
-                            # NOTE: first element is line_idx, second is col
-                            val correct_entry = (line_idx, img_start_col, alt, url_clean)
-                            results.push(correct_entry)
+                            # Inline url title strip: take url up to first space
+                            var url_clean = url
+                            var ui = 0
+                            while ui < url.len() and url.char_at(ui) != " ":
+                                ui = ui + 1
+                            url_clean = url.slice(0, ui).trim()
+                            val img_entry = (line_idx, img_start_col, alt, url_clean)
+                            results.push(img_entry)
                             col = k + 1
                             continue
                 col = col + 1
