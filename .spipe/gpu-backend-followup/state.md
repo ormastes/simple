@@ -34,3 +34,4 @@ Execution of follow-up plan
 
 ## Log
 - 2026-06-12: state created; lanes A/B/D/E spawned (Sonnet, background).
+- 2026-06-12 Lane E (P6): AC-5 closed. Added `fn is_usable()` to `BackendProbeResult` in `backend_probe.spl`; added `use std.gpu.engine2d.backend_cuda_ext` to renderbackend spec. Device→host readback (`cuda_memcpy_dtoh`) was already correct; gap was spec compilation failures. renderbackend spec: 9p/2f → 11p/0f; processing spec: 7p/0f unchanged. No new externs; no seed rebuild needed.

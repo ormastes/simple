@@ -81,3 +81,31 @@ Verified on this host (no NVIDIA GPU, nvcc 13.0 present):
 The 2 pre-existing failures in the renderbackend spec were present before this
 change and are not caused by it (confirmed by reverting and re-running). They
 should be investigated separately.
+
+## P6 Readback Spec Gap Closure (2026-06-12)
+
+Closed the 2 pre-existing spec failures identified in the 2026-06-11 note:
+
+1. `draw_text_bg` method not found on `CudaBackend` — the implementation lives
+   in `backend_cuda_ext.spl` as `impl Engine2DExtended for CudaBackend`, but
+   the spec did not import that module. Fix: added
+   `use std.gpu.engine2d.backend_cuda_ext` to
+   `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`.
+
+2. `is_usable()` method not found on `BackendProbeResult` — `BackendProbe3D`
+   had this method but the 2D `BackendProbeResult` did not. Fix: added
+   `fn is_usable() -> bool: self.status == BackendStatus.Initialized` to
+   `BackendProbeResult` in `backend_probe.spl`, matching the 3D pattern.
+
+The device→host readback path itself (`cuda_memcpy_dtoh` in `read_pixels()`)
+was already implemented and correct; the gap was purely in spec coverage — the
+tests that should have verified it were failing to compile, not failing at
+runtime. No new `rt_cuda_*` externs required; no seed rebuild needed.
+
+Verified on this host (no NVIDIA GPU, nvcc 13.0 present):
+
+- `bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_renderbackend_spec.spl`
+  - Before: 9 passed, 2 failed.
+  - After: 11 passed, 0 failed.
+- `bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_cuda_processing_spec.spl`
+  - Result: 7 passed, 0 failed (unchanged).
