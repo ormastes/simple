@@ -459,6 +459,36 @@ impl CoreLexer:
         else:
             rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", result)
 
+    # ----- Raw String Scanning (r"...") -----
+
+    me scan_raw_string(start_line: i64, start_col: i64):
+        # Consume the opening double-quote (the `r` was already consumed by scan_ident).
+        # No escape processing: backslashes and all chars are literal.
+        # Terminated by the first unescaped `"`.  Cannot span newlines.
+        self.cur_start = self.pos
+        self.advance()  # consume opening "
+        var raw_parts: [text] = []
+        var raw_done: bool = false
+        for i in 0..100000:
+            if raw_done:
+                break
+            if self.at_end():
+                self.make_token(191, "unterminated string", start_line, start_col)
+                return
+            val rc: text = self.peek()
+            if rc == _NL:
+                self.make_token(191, "unterminated string", start_line, start_col)
+                return
+            if rc == "\"":
+                self.advance()
+                raw_done = true
+            else:
+                raw_parts.push(self.advance())
+        val raw_result: text = raw_parts.join("")
+        self.make_token(3, raw_result, start_line, start_col)
+        self.cur_text = raw_result
+        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", raw_result)
+
     # ----- Identifier/Keyword Scanning -----
 
     me scan_ident():
@@ -475,6 +505,15 @@ impl CoreLexer:
                 break
 
         val ident_text: text = self.source[start:self.pos]
+
+        # G36: r"..." raw string — backslashes are literal, no escape processing.
+        # Matches Rust seed scan_raw_double_string semantics: read until closing "
+        # (cannot span newlines). Emits kind 3 (StringLit) with raw content.
+        if ident_text == "r":
+            val next_ch: text = self.peek()
+            if next_ch == "\"":
+                self.scan_raw_string(start_line, start_col)
+                return
 
         # Check for keyword
         val kw_kind: i64 = keyword_lookup(ident_text)
