@@ -556,3 +556,6 @@ Updated: 2026-06-11
 - Host taskbar shell allocation tightening: registry snapshots and taskbar
   running-window models now use exact-size output arrays instead of append
   growth while preserving registry insertion order and minimized-state mapping.
+- UI Web CSS startup allocation tightening: `generate_css` now uses the shared
+  StringBuilder path for its large static fragment stream instead of rebuilding
+  the fragment array on each append.
