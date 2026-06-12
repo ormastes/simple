@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 64
-- pass count: 64
+- fixtures: 65
+- pass count: 65
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -87,6 +87,7 @@ pixels, or text antialiasing normalization.
 | `65_flex_wrap_gap_align_content_space_evenly` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/65_flex_wrap_gap_align_content_space_evenly_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/65_flex_wrap_gap_align_content_space_evenly_structural_report.sdn` |
 | `66_flex_wrap_gap_align_content_flex_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/66_flex_wrap_gap_align_content_flex_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/66_flex_wrap_gap_align_content_flex_end_structural_report.sdn` |
 | `67_flex_wrap_gap_align_content_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/67_flex_wrap_gap_align_content_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/67_flex_wrap_gap_align_content_center_structural_report.sdn` |
+| `68_flex_wrap_gap_align_content_stretch` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/68_flex_wrap_gap_align_content_stretch_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/68_flex_wrap_gap_align_content_stretch_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -160,3 +161,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `65_flex_wrap_gap_align_content_space_evenly` | 0 | 0.000 | `` |
 | `66_flex_wrap_gap_align_content_flex_end` | 0 | 0.000 | `` |
 | `67_flex_wrap_gap_align_content_center` | 0 | 0.000 | `` |
+| `68_flex_wrap_gap_align_content_stretch` | 0 | 0.000 | `` |
