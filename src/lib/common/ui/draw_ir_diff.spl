@@ -145,26 +145,83 @@ fn _draw_ir_count_state(diffs: [DrawIrNodeDiff], state: text) -> i32:
             count = count + 1
     count
 
-fn draw_ir_diff_compositions(baseline: DrawIrComposition, current: DrawIrComposition) -> DrawIrDiffReport:
-    var diffs: [DrawIrNodeDiff] = []
+fn _draw_ir_diff_placeholder() -> DrawIrNodeDiff:
+    DrawIrNodeDiff(
+        component_id: "",
+        state: "",
+        dx: 0,
+        dy: 0,
+        dwidth: 0,
+        dheight: 0,
+        color_changed: false,
+        text_changed: false,
+        style_changed: false,
+        border_changed: false,
+        hit_rect_changed: false,
+        text_bounds_changed: false
+    )
+
+fn _draw_ir_diff_count(baseline: DrawIrComposition, current: DrawIrComposition) -> i32:
+    var count = 0
     for batch in current.batches:
         for command in batch.commands:
-            val base = _draw_ir_find_command(baseline, command.component_id)
-            if base == nil:
-                diffs = diffs.push(_draw_ir_added_diff(command))
-            else:
-                diffs = diffs.push(_draw_ir_changed_diff(base, command))
+            count = count + 1
     for batch in baseline.batches:
         for command in batch.commands:
             if _draw_ir_find_command(current, command.component_id) == nil:
-                diffs = diffs.push(_draw_ir_removed_diff(command))
+                count = count + 1
+    count
+
+fn draw_ir_diff_compositions(baseline: DrawIrComposition, current: DrawIrComposition) -> DrawIrDiffReport:
+    val diff_count = _draw_ir_diff_count(baseline, current)
+    if diff_count == 0:
+        return DrawIrDiffReport(
+            baseline_id: baseline.composition_id,
+            current_id: current.composition_id,
+            node_count: 0,
+            changed_count: 0,
+            added_count: 0,
+            removed_count: 0,
+            diffs: []
+        )
+    var diffs: [DrawIrNodeDiff] = [_draw_ir_diff_placeholder(); diff_count]
+    var write_idx = 0
+    var changed_count = 0
+    var added_count = 0
+    var removed_count = 0
+    for batch in current.batches:
+        for command in batch.commands:
+            val base = _draw_ir_find_command(baseline, command.component_id)
+            val diff = if base == nil:
+                _draw_ir_added_diff(command)
+            else:
+                _draw_ir_changed_diff(base, command)
+            if diff.state == "changed":
+                changed_count = changed_count + 1
+            else if diff.state == "added":
+                added_count = added_count + 1
+            if write_idx >= diff_count:
+                panic("Draw IR diff count underflow: write index {write_idx} >= diff count {diff_count}")
+            diffs[write_idx] = diff
+            write_idx = write_idx + 1
+    for batch in baseline.batches:
+        for command in batch.commands:
+            if _draw_ir_find_command(current, command.component_id) == nil:
+                val diff = _draw_ir_removed_diff(command)
+                removed_count = removed_count + 1
+                if write_idx >= diff_count:
+                    panic("Draw IR diff count underflow: write index {write_idx} >= diff count {diff_count}")
+                diffs[write_idx] = diff
+                write_idx = write_idx + 1
+    if write_idx != diff_count:
+        panic("Draw IR diff count mismatch: wrote {write_idx}, expected {diff_count}")
     DrawIrDiffReport(
         baseline_id: baseline.composition_id,
         current_id: current.composition_id,
-        node_count: diffs.len(),
-        changed_count: _draw_ir_count_changed(diffs),
-        added_count: _draw_ir_count_state(diffs, "added"),
-        removed_count: _draw_ir_count_state(diffs, "removed"),
+        node_count: diff_count,
+        changed_count: changed_count,
+        added_count: added_count,
+        removed_count: removed_count,
         diffs: diffs
     )
 

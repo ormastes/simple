@@ -255,6 +255,9 @@ Updated: 2026-06-11
 - this commit -- Engine2D class selector split removal:
   Simple Web Engine2D class helpers now scan class tokens in place instead of
   allocating a split token array for each selector probe.
+- this commit -- Draw IR diff allocation tightening:
+  Draw IR baseline diffs now pre-count node diffs and fill an exact-size result
+  array instead of push-growing changed/added/removed entries.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
