@@ -170,6 +170,8 @@ Failed: 0
 - The tracking row must carry the current direct runtime blocker, the SMF
   historical tracker, and the closed SimpleOS final handoff evidence so later
   agents do not reopen the wrong lane.
+- The tracking row must carry the checked-in release-binary stale blocker while
+  current-source rebuilt artifacts remain stronger native evidence.
 
 ## Naming Expectations
 
@@ -527,7 +529,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -540,6 +542,8 @@ expect(row).to_contain("SMF runtime-pool lookup has focused regression evidence"
 expect(row).to_contain("doc/08_tracking/bug/native_thread_spawn_with_args_abi_2026-06-06.md")
 expect(row).to_contain("doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md")
 expect(row).to_contain("doc/08_tracking/bug/multicore_green_stress_scale_blockers_2026-06-07.md")
+expect(row).to_contain("doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md")
+expect(row).to_contain("checked-in release binary remains tracked as stale")
 step("Verify the SimpleOS final handoff closure remains visible")
 expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
 expect(row).to_contain("SimpleOS final ring/user handoff is closed")

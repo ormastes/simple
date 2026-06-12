@@ -121,3 +121,8 @@
   `public_multicore_green_sliced_result=19`, then passed
   `test/03_system/feature/usage/concurrency_api_misuse_spec.spl` with six
   scenarios and `25` checked-in misuse fixtures.
+- The checked-in release-binary stale blocker is now part of the canonical
+  feature row and tracking SSpec so future agents cannot use
+  `bin/release/simple` as authoritative multicore-green native evidence until
+  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
+  is closed.
