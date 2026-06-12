@@ -837,8 +837,18 @@ errors, but NEW blocker: SIGSEGV (rc=139) in flat-bridge on
 crash; M11c binary did not crash — recovery now produces partial-AST shapes
 the bridge reads unguarded; same class as compiled_array_oob_read_segfault
 bug doc; interpreted twin = "index 0 but length 0" at bridge entry, verified
-truly pre-existing with BOTH pre-M12a parser+bridge swapped in). Bridge-OOB
-fix delegated (agent in flight).
+truly pre-existing with BOTH pre-M12a parser+bridge swapped in).
+**Bridge-OOB FIXED 2026-06-12**: root cause `decl_get_name(idx)` fell through
+to the legacy `decl_name[idx]` array which is never populated on the env-var
+decl path — empty-array OOB. Fix: bounds guards on 9 `decl_get_*` accessors
+in `core/ast_part1.spl` (span/name/ret_type/fields/field_types/
+field_defaults/field_bits/type_params/type_param_constraints) + 2 bridge
+guards (`STMT_ASSIGN` body[0], `EXPR_DICT_COMP` args) in
+`flat_ast_bridge_part1.spl`. Verified: interpreted m12a_probe now prints
+bridge-ok (OOB gone); m11e 8/8 + g33 batteries clean; REBUILT stage4 docker
+solo check on features.spl: rc=139 segv ELIMINATED (now runs the whole
+prelude closure; rc=124 at 900s with 2,413 errors accumulated across prelude
+files = the G34/G35 wave, not a crash).
 
 Gap classes mined from check_m11f.log + solo log:
 - **G34** `::` path separator (`FeatureId::RecordStart`) — seed ACCEPTS it
