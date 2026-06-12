@@ -231,6 +231,9 @@ Updated: 2026-06-11
 - this commit -- builder child staging removal:
   dropdown, menubar, tabs, list, and table builders now attach generated child
   nodes directly instead of first growing staging arrays and replaying them.
+- this commit -- layout rect allocation tightening:
+  layout root rect creation, visible-child filtering, and fixed-layout rect
+  collection now avoid empty push-grown arrays and hoist fixed child counts.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
