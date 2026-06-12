@@ -290,6 +290,10 @@ Updated: 2026-06-11
   Snapshot JSON number/string extraction and revision parsing now reuse stable
   string lengths inside scanner loops, matching the patch-wire fast path for
   websocket startup protocol handling.
+- this commit -- Web render marker scan allocation tightening:
+  Dynamic-region marker scanning now reuses haystack/marker lengths and scans
+  bounded slices directly instead of allocating a full tail substring before
+  each marker lookup.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
