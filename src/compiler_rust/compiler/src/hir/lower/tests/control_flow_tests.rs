@@ -123,3 +123,69 @@ fn test_untyped_empty_array_specializes_on_first_append() {
         Some(HirType::Array { element, .. }) if matches!(module.types.get(*element), Some(HirType::Struct { name, .. }) if name == "Boxed")
     ));
 }
+
+/// A3 cranelift gap: positional class pattern `case ClassName(a, b, c)` must lower
+/// with Bool(true) condition (not rt_enum_check_discriminant) and FieldAccess
+/// bindings (not rt_enum_payload) so compiled/JIT mode matches correctly.
+///
+/// Regression for bug: positional_class_match_wide_destructure_2026-06-11.md
+#[test]
+fn test_positional_class_pattern_match_lowering() {
+    // match statement using positional class pattern
+    let source = "class Point:\n    x: i64\n    y: i64\n    z: i64\n\nfn run(p: Point) -> i64:\n    match p:\n        case Point(a, b, c):\n            return a\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+
+    // Verify the Point type is a struct
+    let point_tid = module.types.lookup("Point").expect("Point type not found");
+    assert!(
+        matches!(module.types.get(point_tid), Some(HirType::Struct { name, .. }) if name == "Point"),
+        "Point should be a Struct type"
+    );
+
+    let func = &module.functions[0];
+
+    // The first statement should be an If (the match arm).
+    // Its condition must be Bool(true) — NOT a BuiltinCall to rt_enum_check_discriminant.
+    let HirStmt::If { condition, then_block, .. } = &func.body[0] else {
+        panic!("expected match to lower to HirStmt::If, got: {:?}", func.body[0]);
+    };
+
+    assert!(
+        matches!(condition.kind, HirExprKind::Bool(true)),
+        "positional class pattern condition must be Bool(true), not a discriminant check; got: {:?}",
+        condition.kind
+    );
+
+    // The then_block must include FieldAccess bindings for a, b, c at indices 0, 1, 2.
+    let repr = format!("{:?}", then_block);
+    assert!(
+        repr.contains("FieldAccess"),
+        "positional class pattern bindings must use FieldAccess, not rt_enum_payload; then_block repr: {repr}"
+    );
+    // Also confirm rt_enum_payload is NOT used for the class pattern bindings
+    assert!(
+        !repr.contains("rt_enum_payload"),
+        "positional class pattern must NOT use rt_enum_payload; then_block repr: {repr}"
+    );
+}
+
+/// Enum variant positional patterns must still use rt_enum_check_discriminant
+/// (regression guard: class-pattern fix must not affect enum matching).
+#[test]
+fn test_enum_variant_pattern_condition_still_uses_discriminant() {
+    let source = "enum Color:\n    Red\n    Green\n    Blue\n\nfn is_red(c: Color) -> i64:\n    match c:\n        case Color.Red:\n            return 1\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+
+    let func = &module.functions[0];
+
+    // The first statement should be an If whose condition uses rt_enum_check_discriminant.
+    let HirStmt::If { condition, .. } = &func.body[0] else {
+        panic!("expected enum match to lower to HirStmt::If");
+    };
+
+    let repr = format!("{:?}", condition.kind);
+    assert!(
+        repr.contains("rt_enum_check_discriminant") || repr.contains("rt_is_none") || repr.contains("rt_is_some"),
+        "enum variant pattern condition should use rt_enum_check_discriminant; got: {repr}"
+    );
+}

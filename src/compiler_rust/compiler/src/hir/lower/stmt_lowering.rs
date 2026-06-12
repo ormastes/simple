@@ -924,12 +924,26 @@ impl Lowerer {
         let mut binding_stmts = Vec::new();
         if let Pattern::Enum {
             payload: Some(payload_patterns),
+            variant: enum_variant,
             ..
         } = &arm.pattern
         {
             // Build a map from binding name to its resolved type
             // (computed by extract_pattern_bindings using enum variant field types)
             let binding_type_map: std::collections::HashMap<String, TypeId> = bindings.iter().cloned().collect();
+
+            // Detect positional class/struct pattern: Pattern::Enum{name:"_", variant:"ClassName"}
+            // over a class instance. The parser emits class-name patterns this way because it
+            // cannot distinguish enum variants from class names at parse time.
+            // For these, we use FieldAccess (positional field index) instead of rt_enum_payload.
+            let class_struct_fields: Option<Vec<(String, TypeId)>> =
+                self.module.types.lookup(enum_variant.as_str()).and_then(|tid| {
+                    if let Some(HirType::Struct { fields, .. }) = self.module.types.get(tid) {
+                        Some(fields.clone())
+                    } else {
+                        None
+                    }
+                });
 
             for (i, p) in payload_patterns.iter().enumerate() {
                 if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
@@ -939,46 +953,67 @@ impl Lowerer {
                         // instead of ANY, so MIR lowering can insert proper unboxing
                         let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
 
-                        // Extract payload from enum subject, then bind to locals.
-                        // For multi-field variants, `rt_enum_payload` returns the
-                        // wrapper *array* (heap pointer) — its type is opaque (ANY),
-                        // not `binding_ty`. Otherwise `lower_builtin_call_expr` would
-                        // see the binding's scalar type, apply `UnboxInt` to the
-                        // heap pointer, and produce garbage. See
-                        // doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md.
-                        let payload_expr_ty = if payload_patterns.len() == 1 {
-                            binding_ty
-                        } else {
-                            TypeId::ANY
-                        };
-                        let payload_expr = HirExpr {
-                            kind: HirExprKind::BuiltinCall {
-                                name: "rt_enum_payload".to_string(),
-                                args: vec![HirExpr {
-                                    kind: HirExprKind::Local(subject_idx),
-                                    ty: subject_ty,
-                                }],
-                            },
-                            ty: payload_expr_ty,
-                        };
-
-                        // For single-payload enums, use payload directly
-                        // For multi-payload, would need tuple indexing
-                        let value = if payload_patterns.len() == 1 {
-                            payload_expr
-                        } else {
-                            // Multi-field: index into tuple payload
+                        let value = if let Some(ref struct_fields) = class_struct_fields {
+                            // Positional class/struct pattern: bind payload[i] to field i
+                            // in declaration order via FieldAccess.
+                            // Use the struct field's type if available, else fall back to
+                            // the binding's resolved type.
+                            let field_ty = struct_fields
+                                .get(i)
+                                .map(|(_, ty)| *ty)
+                                .unwrap_or(binding_ty);
                             HirExpr {
-                                kind: HirExprKind::Index {
-                                    receiver: Box::new(payload_expr),
-                                    index: Box::new(HirExpr {
-                                        kind: HirExprKind::Integer(i as i64),
-                                        ty: TypeId::I64,
+                                kind: HirExprKind::FieldAccess {
+                                    receiver: Box::new(HirExpr {
+                                        kind: HirExprKind::Local(subject_idx),
+                                        ty: subject_ty,
                                     }),
+                                    field_index: i,
                                 },
-                                ty: binding_ty,
+                                ty: field_ty,
+                            }
+                        } else {
+                            // Enum variant payload extraction (original path).
+                            // Extract payload from enum subject, then bind to locals.
+                            // For multi-field variants, `rt_enum_payload` returns the
+                            // wrapper *array* (heap pointer) — its type is opaque (ANY),
+                            // not `binding_ty`. Otherwise `lower_builtin_call_expr` would
+                            // see the binding's scalar type, apply `UnboxInt` to the
+                            // heap pointer, and produce garbage. See
+                            // doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md.
+                            let payload_expr_ty = if payload_patterns.len() == 1 {
+                                binding_ty
+                            } else {
+                                TypeId::ANY
+                            };
+                            let payload_expr = HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_enum_payload".to_string(),
+                                    args: vec![HirExpr {
+                                        kind: HirExprKind::Local(subject_idx),
+                                        ty: subject_ty,
+                                    }],
+                                },
+                                ty: payload_expr_ty,
+                            };
+
+                            if payload_patterns.len() == 1 {
+                                payload_expr
+                            } else {
+                                // Multi-field: index into tuple payload
+                                HirExpr {
+                                    kind: HirExprKind::Index {
+                                        receiver: Box::new(payload_expr),
+                                        index: Box::new(HirExpr {
+                                            kind: HirExprKind::Integer(i as i64),
+                                            ty: TypeId::I64,
+                                        }),
+                                    },
+                                    ty: binding_ty,
+                                }
                             }
                         };
+
                         binding_stmts.push(HirStmt::Let {
                             local_index: local_idx,
                             ty: binding_ty,
@@ -1202,6 +1237,24 @@ impl Lowerer {
                             name: "rt_is_some".to_string(),
                             args: vec![subject_ref],
                         },
+                        ty: TypeId::BOOL,
+                    });
+                }
+
+                // Positional class/struct pattern: `case ClassName(a, b, c)` where the
+                // parser emits Pattern::Enum{name:"_", variant:"ClassName", ...} because
+                // it cannot distinguish enum variants from class names at parse time.
+                // When `variant` resolves to a known Struct (class) type the discriminant
+                // check must NOT fire — it would call rt_enum_check_discriminant on an
+                // object pointer and always return false (silent no-match).
+                // The type system already guarantees the object is of that class at the
+                // call site, so the condition is always true.
+                let is_class_pattern = self.module.types.lookup(variant.as_str()).map_or(false, |tid| {
+                    matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
+                });
+                if is_class_pattern {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Bool(true),
                         ty: TypeId::BOOL,
                     });
                 }

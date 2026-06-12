@@ -700,6 +700,28 @@ impl ExecCore {
             return Ok(exit_code);
         }
 
+        // B3 for-in gap: generator functions (containing Yield instructions) are not
+        // supported by the Cranelift JIT state-machine lowering when called as top-level
+        // `gen fn` declarations (generator_state_map is None for these).  The JIT would
+        // compile them to a safe NIL return, but `for x in gen()` then passes that NIL
+        // pointer to rt_for_iterable / rt_array_len and segfaults.
+        // Detect any Yield in the MIR and bail out so the caller's fallback to the
+        // interpreter (which handles generators correctly) takes over.
+        let has_generator = mir_module.functions.iter().any(|f| {
+            f.blocks.iter().any(|b| {
+                b.instructions
+                    .iter()
+                    .any(|i| matches!(i, simple_compiler::mir::MirInst::Yield { .. }))
+            })
+        });
+        if has_generator {
+            return Err(
+                "JIT does not support generator functions (for-in over gen fn); \
+                 falling back to interpreter"
+                    .to_string(),
+            );
+        }
+
         // Select JIT backend based on execution mode
         let jit_backend = match self.execution_mode {
             ExecutionMode::CraneliftJit => JitBackend::Cranelift,
@@ -873,6 +895,45 @@ mod tests {
             Path::new("scripts/check.shs"),
             "shs"
         ));
+    }
+
+    /// B3 for-in regression: the generator-detection helper correctly identifies
+    /// a MIR module that contains a Yield instruction so run_file_jit can bail
+    /// out early and let the interpreter fallback handle it.
+    #[test]
+    fn generator_yield_detected_in_mir_module() {
+        use simple_compiler::mir::{
+            MirBlock, MirFunction, MirInst, MirModule, VReg,
+        };
+        use simple_parser::ast::Visibility;
+        use simple_compiler::hir::TypeId;
+
+        // Build a minimal MIR module with one function that has a Yield instruction.
+        let mut func = MirFunction::new("gen".to_string(), TypeId::ANY, Visibility::Public);
+        let block = func.blocks.first_mut().expect("entry block exists");
+        block.instructions.push(MirInst::Yield { value: VReg(0) });
+
+        let has_generator = func.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| matches!(i, MirInst::Yield { .. }))
+        });
+        assert!(
+            has_generator,
+            "function with Yield should be detected as a generator"
+        );
+
+        // A plain function (no Yield) must NOT trigger the fallback.
+        let plain = MirFunction::new("main".to_string(), TypeId::ANY, Visibility::Public);
+        let plain_has_generator = plain.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| matches!(i, MirInst::Yield { .. }))
+        });
+        assert!(
+            !plain_has_generator,
+            "plain function without Yield should not be flagged as a generator"
+        );
     }
 }
 

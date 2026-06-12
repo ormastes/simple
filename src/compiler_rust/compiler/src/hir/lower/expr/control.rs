@@ -482,6 +482,24 @@ impl Lowerer {
                     });
                 }
 
+                // Positional class/struct pattern: `case ClassName(a, b, c)` where the
+                // parser emits Pattern::Enum{name:"_", variant:"ClassName", ...} because
+                // it cannot distinguish enum variants from class names at parse time.
+                // When `variant` resolves to a known Struct (class) type the discriminant
+                // check must NOT fire — it would call rt_enum_check_discriminant on an
+                // object pointer and always return false (silent no-match).
+                // The type system already guarantees the object is of that class at the
+                // call site, so the condition is always true.
+                let is_class_pattern = self.module.types.lookup(variant.as_str()).map_or(false, |tid| {
+                    matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
+                });
+                if is_class_pattern {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Bool(true),
+                        ty: TypeId::BOOL,
+                    });
+                }
+
                 // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
                 // All enums use hashed variant name discriminants consistently
                 let expected_disc: i64 = {

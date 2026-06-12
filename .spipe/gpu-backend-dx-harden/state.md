@@ -136,6 +136,9 @@ See doc/03_plan/ui/graphics/engine/gpu_backend_parallel_agent_plan_2026-06-11.md
   These belong to other agents' scopes but need orchestrator or owner restoration.
 
 ## Components
+- dxvk-native-d3d11: ready (/home/ormastes/dev/pub/simple/build/dx/prefix/lib/libdxvk_d3d11.so)
+- vkd3d: ready (/home/ormastes/dev/pub/simple/build/dx/prefix/lib/libvkd3d.so)
+- system-libvulkan: ready (/usr/lib/x86_64-linux-gnu/libvulkan.so.1)
 - dxvk-native-d3d11: missing ()
 - vkd3d: missing ()
 - system-libvulkan: ready (/usr/lib/x86_64-linux-gnu/libvulkan.so.1)
