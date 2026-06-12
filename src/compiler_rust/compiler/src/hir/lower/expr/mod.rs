@@ -595,6 +595,22 @@ impl Lowerer {
         // Lower arguments for generic method call
         let hir_args = self.lower_call_args(args, ctx)?;
 
+        if (method == "append" || method == "push") && hir_args.len() == 1 {
+            if let HirExprKind::Local(local_idx) = receiver_hir.kind {
+                if let Some(HirType::Array { element, size }) = self.module.types.get(receiver_hir.ty).cloned() {
+                    if element == self.type_inference_config.empty_array_default && size == Some(0) {
+                        let refined_ty = self.module.types.register(HirType::Array {
+                            element: hir_args[0].ty,
+                            size,
+                        });
+                        if let Some(local) = ctx.locals.get_mut(local_idx) {
+                            local.ty = refined_ty;
+                        }
+                    }
+                }
+            }
+        }
+
         // Look up return type from module functions
         let recv_ty = receiver_hir.ty;
         let return_ty = self.lookup_method_return_type(recv_ty, method);

@@ -49,9 +49,9 @@
   callback-id resumable-stepper lane: a direct native array of a by-value
   struct is green again on current-source seed/native.
 - `test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl`
-  now pins the current smaller hosted-native blocker beneath the callback-id
-  resumable-stepper lane: local `MulticoreGreenHandle` array iteration plus
-  `join()` still returns `result={result}` with `EXIT=12` in the standalone
+  now regression-covers the closed hosted-native helper path beneath the
+  callback-id resumable-stepper lane: local `MulticoreGreenHandle` array
+  iteration plus `join()` now prints `result=7` with `EXIT=0` in the standalone
   native artifact.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records that the checked-in `bin/release/simple` binary has drifted from the

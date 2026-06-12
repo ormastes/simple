@@ -86,6 +86,23 @@ fn test_lower_empty_array() {
 }
 
 #[test]
+fn test_empty_array_append_refines_indexed_element_type() {
+    let module = parse_and_lower(
+        "class Handle:\n    value: i64\n    fn join() -> i64:\n        self.value\n\nfn test() -> i64:\n    var handles = []\n    handles.append(Handle(value: 7))\n    val handle = handles[0]\n    return handle.join()\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
+    let handles_ty = func.locals[0].ty;
+    let Some(HirType::Array { element, size }) = module.types.get(handles_ty) else {
+        panic!("expected handles to keep an array type, got {:?}", module.types.get(handles_ty));
+    };
+    assert_eq!(*size, Some(0));
+    assert_eq!(module.types.get_type_name(*element).as_deref(), Some("Handle"));
+    assert_eq!(module.types.get_type_name(func.locals[1].ty).as_deref(), Some("Handle"));
+}
+
+#[test]
 fn test_lower_index_expression() {
     let module =
         parse_and_lower("fn test() -> i64:\n    let arr = [1, 2, 3]\n    let x = arr[0]\n    return x\n").unwrap();

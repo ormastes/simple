@@ -217,7 +217,11 @@ pub(crate) fn compile_struct_init<M: Module>(
         builder.ins().store(MemFlags::new(), storage_val, ptr, *offset as i32);
     }
 
-    ctx.vreg_values.insert(dest, ptr);
+    // Struct values use the same tagged heap-object ABI as arrays/strings once
+    // they can flow through generic containers. Field access masks the tag.
+    let heap_tag = builder.ins().iconst(types::I64, 1);
+    let tagged_ptr = builder.ins().bor(ptr, heap_tag);
+    ctx.vreg_values.insert(dest, tagged_ptr);
 }
 
 fn widen_struct_field_value(

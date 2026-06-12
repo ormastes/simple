@@ -22,7 +22,9 @@ pub fn compile_field_get<M: Module>(
     byte_offset: usize,
     field_type: TypeId,
 ) -> InstrResult<()> {
-    let obj_ptr = get_vreg_or_default(ctx, builder, &object);
+    let obj_value = get_vreg_or_default(ctx, builder, &object);
+    let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
+    let obj_ptr = builder.ins().band(obj_value, tag_mask);
 
     // Diagnostic: log FieldGet at non-zero offsets when tracing is enabled.
     // This helps diagnose cross-module FieldGet bugs where byte_offset is
@@ -54,7 +56,9 @@ pub fn compile_field_set<M: Module>(
     _field_type: TypeId,
     value: VReg,
 ) -> InstrResult<()> {
-    let obj_ptr = get_vreg_or_default(ctx, builder, &object);
+    let obj_value = get_vreg_or_default(ctx, builder, &object);
+    let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
+    let obj_ptr = builder.ins().band(obj_value, tag_mask);
     let val = get_vreg_or_default(ctx, builder, &value);
     builder.ins().store(MemFlags::new(), val, obj_ptr, byte_offset as i32);
     Ok(())

@@ -1,6 +1,6 @@
-# Multicore Green Handle Array Join Native Blocker
+# Multicore Green Handle Array Join Native Regression
 
-> This SSpec pins the current lower hosted-native blocker beneath the remaining `multicore_green` resumable-stepper lane. The smaller by-value struct-array blocker is closed; the active failure is now local handle-array iteration and join inside a helper.
+> This SSpec regression-covers the hosted-native helper path where an inferred empty local handle array is populated with `append`, iterated, and joined.
 
 <!-- sdn-diagram:id=multicore_green_handle_array_join_native_blocker_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ multicore_green_handle_array_join_native_blocker_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Multicore Green Handle Array Join Native Blocker
+# Multicore Green Handle Array Join Native Regression
 
-This SSpec pins the current lower hosted-native blocker beneath the remaining `multicore_green` resumable-stepper lane. The smaller by-value struct-array blocker is closed; the active failure is now local handle-array iteration and join inside a helper.
+This SSpec regression-covers the hosted-native helper path where an inferred empty local handle array is populated with `append`, iterated, and joined.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the current lower hosted-native blocker beneath the remaining `m
 |-------|-------|
 | Feature IDs | #multicore-green-handle-array-join-native-blocker |
 | Category | Runtime / Native / Concurrency |
-| Status | Blocked |
+| Status | Regression |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,10 +53,8 @@ This SSpec pins the current lower hosted-native blocker beneath the remaining `m
 
 ## Overview
 
-This SSpec pins the current lower hosted-native blocker beneath the remaining
-`multicore_green` resumable-stepper lane. The smaller by-value struct-array
-blocker is closed; the active failure is now local handle-array iteration and
-join inside a helper.
+This SSpec regression-covers the hosted-native helper path where an inferred
+empty local handle array is populated with `append`, iterated, and joined.
 
 ## Requirements
 
@@ -82,26 +80,26 @@ bin/release/simple test test/03_system/feature/usage/multicore_green_handle_arra
 
 ## Scenarios
 
-### multicore green handle-array join native blocker
+### multicore green handle-array join native regression
 
-#### keeps the lower hosted-native handle-array failure explicit
+#### keeps local handle-array iteration and join native
 
 - Write the reduced handle-array join probe
    - Expected: write_code equals `0`
 - The reduced probe still type-checks under the fresh debug compiler
    - Expected: check_code equals `0`
-- Hosted native compile still succeeds before the runtime failure
+- Hosted native compile succeeds for the helper loop
    - Expected: compile_code equals `0`
-- The native probe still returns the lower handle-array mismatch boundary
+- The native probe joins the indexed handles and returns the worker result
    - Expected: native_code equals `0`
-- The tracker records the current lower blocker
+- The tracker records the closed lower blocker
    - Expected: blocker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -113,19 +111,20 @@ step("The reduced probe still type-checks under the fresh debug compiler")
 val (_, check_code) = shell(SIMPLE_BIN + " check " + SOURCE_PATH)
 expect(check_code).to_equal(0)
 
-step("Hosted native compile still succeeds before the runtime failure")
+step("Hosted native compile succeeds for the helper loop")
 val (_, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
 expect(compile_code).to_equal(0)
 
-step("The native probe still returns the lower handle-array mismatch boundary")
+step("The native probe joins the indexed handles and returns the worker result")
 val (native_out, native_code) = shell("sh -c './" + NATIVE_PATH + " >/tmp/mcg_handle_array_join_probe.out 2>&1; code=$?; cat /tmp/mcg_handle_array_join_probe.out; echo EXIT=$code'")
 expect(native_code).to_equal(0)
-expect(native_out).to_contain("EXIT=12")
+expect(native_out).to_contain("result=7")
+expect(native_out).to_contain("EXIT=0")
 
-step("The tracker records the current lower blocker")
+step("The tracker records the closed lower blocker")
 val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/multicore_green_handle_array_join_native_blocker_2026-06-11.md")
 expect(blocker_code).to_equal(0)
-expect(blocker).to_contain("Status: open")
+expect(blocker).to_contain("Status: closed")
 ```
 
 </details>

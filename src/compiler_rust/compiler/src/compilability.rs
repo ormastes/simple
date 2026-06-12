@@ -189,11 +189,6 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>) {
         Node::For(for_stmt) => {
             analyze_expr(&for_stmt.iterable, reasons);
             analyze_block(&for_stmt.body, reasons);
-            // Scalar range loops lower to native loop MIR. Other iterable
-            // loops still require collection iteration runtime support.
-            if !matches!(for_stmt.iterable, Expr::Range { .. }) {
-                add_reason(reasons, FallbackReason::CollectionOps);
-            }
         }
         Node::Loop(loop_stmt) => {
             analyze_block(&loop_stmt.body, reasons);
@@ -1039,6 +1034,35 @@ fn run_one() -> i64:
         assert!(
             status.is_compilable(),
             "struct-array helper should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_empty_handle_array_for_join_helper_compilable() {
+        let results = parse_and_analyze(
+            r#"class Handle:
+    value: i64
+
+    fn join() -> i64:
+        self.value
+
+fn spawn_handle() -> Handle:
+    Handle(value: 7)
+
+fn run_one() -> i64:
+    var handles = []
+    handles.append(spawn_handle())
+    var total = 0
+    for handle in handles:
+        total = total + handle.join()
+    total
+"#,
+        );
+        let status = results.get("run_one").unwrap();
+        assert!(
+            status.is_compilable(),
+            "empty handle-array for-loop helper should compile natively, got {:?}",
             status.reasons()
         );
     }
