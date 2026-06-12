@@ -343,6 +343,10 @@ Updated: 2026-06-11
   buffers, and the fallback glyph loop reuses the text length during startup
   framebuffer text drawing. The slice also keeps text/image framebuffer writes
   inside mutating backend methods so helper copies do not drop pixels.
+- this commit -- selector matcher loop length hoisting:
+  Browser selector `:not(...)` option scans and compound class-token scans now
+  reuse stable split-list counts instead of dispatching `.len()` in loop
+  conditions during fallback CSS selector matching.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
