@@ -246,6 +246,9 @@ Updated: 2026-06-11
 - this commit -- Simple Web framebuffer seed allocation tightening:
   the Pure Simple HTML pixel renderer now initializes its white framebuffer in
   one exact-size array allocation instead of push-growing every pixel.
+- this commit -- browser script marker scan allocation removal:
+  script render and execution parsers now search markers from offsets directly
+  instead of slicing a tail string before each lookup.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
