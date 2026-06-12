@@ -7,14 +7,14 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 51
+- **Total Lines:** 34
 - **Warnings:** 1
 
 ---
 
-## Language / Concurrency (1 features)
+## Runtime / Native / Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Concurrency API Misuse System Contract](test/03_system/feature/usage/concurrency_api_misuse_spec.md) | Active | N/A | 6 | 40% | 51 lines |
+| [Multicore Green Helper Handles Return Native Blocker](test/03_system/feature/usage/multicore_green_helper_handles_return_native_blocker_spec.md) | Regression | N/A | 1 | 20% | 34 lines |
 

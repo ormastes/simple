@@ -45,8 +45,13 @@ regression coverage:
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
   is now the closed historical blocker record for that path
 - `doc/08_tracking/bug/multicore_green_post_join_array_return_native_blocker_2026-06-12.md`
-  records the remaining narrower native crash after joining a worker and doing
-  extra post-join string work before returning a local result array
+  records the closed narrower native regression after joining a worker and doing
+  extra post-join string work before returning a local result array. That
+  regression now prints `result=7` with `EXIT=0`.
+- `doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`
+  records the closed helper handle-array return boundary. The corrected
+  generated-source regression now type-checks real multi-line Simple source,
+  compiles it to hosted native, and observes `after=7` with `EXIT=0`.
 
 Current hosted blocking-compensation evidence now includes:
 
@@ -92,17 +97,20 @@ Related active host-side blocker:
   path removes function-valued queue items and now returns `result=7` with
   `EXIT=0` in the debug-seed hosted native path.
 - `doc/08_tracking/bug/multicore_green_post_join_array_return_native_blocker_2026-06-12.md`
-  records the remaining post-join array-return continuation crash with
-  `EXIT=139`.
+  records the closed post-join array-return continuation regression with
+  `EXIT=0`.
 - `doc/08_tracking/bug/native_struct_array_runtime_blocker_2026-06-11.md`
   now records the closed smaller hosted-native blocker that used to sit beneath
   that stepper path: a direct native array of a by-value struct is green again
   on current-source seed/native.
 - `doc/08_tracking/bug/multicore_green_handle_array_join_native_blocker_2026-06-11.md`
-  now records the current smaller hosted-native blocker beneath that stepper
-  path: local `MulticoreGreenHandle` array iteration plus `join()` still
-  returns `result={result}` with `EXIT=12` even before the full resumable
-  stepper machinery is required.
+  now records the closed smaller hosted-native blocker beneath that stepper
+  path: local `MulticoreGreenHandle` array iteration plus `join()` now returns
+  `result=7` with `EXIT=0`.
+- `doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md`
+  now records the closed helper handle-array return boundary beneath that
+  stepper path: a helper can keep local `MulticoreGreenHandle` handles, join
+  them, and return a separate ordered result array with `EXIT=0`.
 - `doc/08_tracking/bug/native_function_value_loop_return_blocker_2026-06-11.md`
   now records the closed standalone-native blocker that used to sit underneath
   that stepper path: returning a function value from inside a loop/search
@@ -113,9 +121,9 @@ Related active host-side blocker:
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
   records the newer evidence split: the checked-in `bin/release/simple` binary
   is stale for this lane, while current-source rebuilt `release` and `debug`
-  artifacts are the stronger evidence for the remaining hosted-native blocker.
-  The native symbol-collision sub-bug (`worker.1`) is fixed there, but the
-  rebuilt helper-return and resumable-stepper probes still fail at runtime.
+  artifacts are the stronger evidence for hosted-native regression checks.
+  The native symbol-collision sub-bug (`worker.1`) is fixed there, and rebuilt
+  helper-return and resumable-stepper probes now pass at runtime.
 
 ## Current Evidence Boundary
 

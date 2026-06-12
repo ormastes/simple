@@ -1,16 +1,16 @@
 # Multicore Green Helper Handles Return Native Blocker
 
 Date: 2026-06-11
-Status: open
+Status: closed
 Owner: multicore-green lane
 
 ## Summary
 
-The current lower hosted-native blocker beneath the resumable-stepper lane is
-no longer worker callback lookup or worker-side channel send/recv.
+The former lower hosted-native blocker beneath the resumable-stepper lane is
+now closed on current-source native.
 
-Those lower paths now pass on current-source native. The active smaller crash
-boundary is a helper that:
+Those lower paths now pass on current-source native. The formerly active
+smaller crash boundary was a helper that:
 
 - keeps a local `handles` array of `MulticoreGreenHandle`
 - appends one spawned worker handle into that array
@@ -18,7 +18,8 @@ boundary is a helper that:
 - joins the stored handles in a `for handle in handles` loop
 - returns a separate `ordered` result array to the caller
 
-That helper still crashes on current-source native with `EXIT=139`.
+That helper now exits cleanly on current-source native with `EXIT=0` and prints
+`after=7`.
 
 The smaller generic helper post-`println` seed blocker that briefly sat beneath
 this path is now closed in
@@ -42,11 +43,19 @@ fn run_one(stepper: Stepper) -> [i64]:
     ordered
 ```
 
-Observed native output:
+Historical native output:
 
 ```text
 before
 EXIT=139
+```
+
+Current native output:
+
+```text
+before
+after=7
+EXIT=0
 ```
 
 ## What Is Already Closed Below This
@@ -59,8 +68,9 @@ These neighboring lower boundaries are now green on current-source native:
 - inline coordinator logic in `main`
 - helper return without local handle-array iteration
 
-So the remaining lower bug is more specific than “multicore_green workers
-crash” or “channels crash”.
+So this lower bug is no longer active evidence against the resumable
+multicore-green path. The broader hosted fairness/preemption gap remains open
+in `doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md`.
 
 ## Relationship To Other Blockers
 
@@ -69,10 +79,10 @@ crash” or “channels crash”.
 - `doc/08_tracking/bug/multicore_green_worker_callback_registry_native_blocker_2026-06-11.md`
 - `doc/08_tracking/bug/native_helper_print_return_blocker_2026-06-11.md`
 
-The older worker-callback registry blocker is now closed. The higher
-resumable-stepper blocker remains open above this narrower helper
-handle-array-plus-return boundary. The temporary lower helper-print-return
-blocker is also now closed beneath it.
+The older worker-callback registry blocker is now closed. This narrower helper
+handle-array-plus-return boundary is also closed. The broader hosted
+fairness/preemption gap remains open until the runtime has executable
+fairness/preemption evidence comparable to Go under sustained loop load.
 
 ## Executable Evidence
 

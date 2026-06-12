@@ -1,6 +1,6 @@
 # Multicore Green Helper Handles Return Native Blocker
 
-> This SSpec pins the current lower hosted-native blocker beneath the resumable-stepper lane. The worker callback and one-shot channel paths are now green. The remaining crash needs a helper that keeps a local handle array, joins those handles, and returns a separate result array.
+> This SSpec keeps regression coverage for the former lower hosted-native blocker beneath the resumable-stepper lane. A helper may keep a local handle array, join those handles, and return a separate result array without crashing on current-source native.
 
 <!-- sdn-diagram:id=multicore_green_helper_handles_return_native_blocker_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_helper_handles_return_native_blocker_spec -> std
 
 # Multicore Green Helper Handles Return Native Blocker
 
-This SSpec pins the current lower hosted-native blocker beneath the resumable-stepper lane. The worker callback and one-shot channel paths are now green. The remaining crash needs a helper that keeps a local handle array, joins those handles, and returns a separate result array.
+This SSpec keeps regression coverage for the former lower hosted-native blocker beneath the resumable-stepper lane. A helper may keep a local handle array, join those handles, and return a separate result array without crashing on current-source native.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the current lower hosted-native blocker beneath the resumable-st
 |-------|-------|
 | Feature IDs | #multicore-green-helper-handles-return-native-blocker |
 | Category | Runtime / Native / Concurrency |
-| Status | Blocked |
+| Status | Regression |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,10 +53,10 @@ This SSpec pins the current lower hosted-native blocker beneath the resumable-st
 
 ## Overview
 
-This SSpec pins the current lower hosted-native blocker beneath the
-resumable-stepper lane. The worker callback and one-shot channel paths are now
-green. The remaining crash needs a helper that keeps a local handle array,
-joins those handles, and returns a separate result array.
+This SSpec keeps regression coverage for the former lower hosted-native blocker beneath the
+resumable-stepper lane. A helper may keep a local handle array, join those
+handles, and return a separate result array without crashing on current-source
+native.
 
 ## Requirements
 
@@ -84,7 +84,7 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ### multicore green helper handles return native blocker
 
-#### pins the smaller helper handle-array return crash
+#### keeps the helper handle-array return path green
 
 - Write the reduced helper-handle probe source
    - Expected: write_code equals `0`
@@ -92,16 +92,16 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
    - Expected: check_code equals `0`
 - Hosted native compile succeeds before the runtime crash boundary
    - Expected: compile_code equals `0`
-- The native probe still crashes after printing the helper entry marker
+- The native probe exits cleanly after joining helper handles and returning the result array
    - Expected: native_code equals `0`
-- The tracker records the narrowed helper handle-array blocker
+- The tracker records the closed helper handle-array regression
    - Expected: blocker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -119,18 +119,19 @@ val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH +
 expect(compile_code).to_equal(0)
 expect(compile_out).to_contain("Compiled")
 
-step("The native probe still crashes after printing the helper entry marker")
+step("The native probe exits cleanly after joining helper handles and returning the result array")
 val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/mcg_helper_handles_return.out 2>&1; code=$?; cat /tmp/mcg_helper_handles_return.out; echo EXIT=$code'")
 expect(native_code).to_equal(0)
 expect(native_out).to_contain("before")
-expect(native_out).to_contain("EXIT=139")
+expect(native_out).to_contain("after=7")
+expect(native_out).to_contain("EXIT=0")
 
-step("The tracker records the narrowed helper handle-array blocker")
+step("The tracker records the closed helper handle-array regression")
 val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md")
 expect(blocker_code).to_equal(0)
-expect(blocker).to_contain("Status: open")
+expect(blocker).to_contain("Status: closed")
 expect(blocker).to_contain("local `handles` array")
-expect(blocker).to_contain("EXIT=139")
+expect(blocker).to_contain("EXIT=0")
 ```
 
 </details>

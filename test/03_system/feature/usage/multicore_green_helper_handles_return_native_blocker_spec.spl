@@ -3,14 +3,14 @@
 
 **Feature IDs:** #multicore-green-helper-handles-return-native-blocker
 **Category:** Runtime / Native / Concurrency
-**Status:** Blocked
+**Status:** Regression
 
 ## Overview
 
-This SSpec pins the current lower hosted-native blocker beneath the
-resumable-stepper lane. The worker callback and one-shot channel paths are now
-green. The remaining crash needs a helper that keeps a local handle array,
-joins those handles, and returns a separate result array.
+This SSpec keeps regression coverage for the former lower hosted-native blocker beneath the
+resumable-stepper lane. A helper may keep a local handle array, join those
+handles, and return a separate result array without crashing on current-source
+native.
 
 ## Requirements
 
@@ -50,83 +50,84 @@ fn shell(command: text) -> (text, i64):
 
 fn probe_source() -> text:
     [
-        "use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism}\\n",
-        "use std.nogc_sync_mut.concurrent.channel.{channel_new, channel_from_id}\\n",
-        "\\n",
-        "class StepResult:\\n",
-        "    done: bool\\n",
-        "    value: i64\\n",
-        "    static fn completed(value: i64) -> StepResult:\\n",
-        "        StepResult(done: true, value: value)\\n",
-        "\\n",
-        "class Stepper:\\n",
-        "    callback_id: i64\\n",
-        "    static fn new(step_fn: fn() -> StepResult) -> Stepper:\\n",
-        "        Stepper(callback_id: register_stepper(step_fn))\\n",
-        "\\n",
-        "class StepTask:\\n",
-        "    stop: bool\\n",
-        "    index: i64\\n",
-        "    callback_id: i64\\n",
-        "\\n",
-        "class StepCompletion:\\n",
-        "    index: i64\\n",
-        "    value: i64\\n",
-        "\\n",
-        "var CALLBACK_IDS: [i64] = []\\n",
-        "var CALLBACKS: [fn() -> StepResult] = []\\n",
-        "var NEXT_ID: i64 = 1\\n",
-        "\\n",
-        "fn register_stepper(step_fn: fn() -> StepResult) -> i64:\\n",
-        "    val callback_id = NEXT_ID\\n",
-        "    NEXT_ID = NEXT_ID + 1\\n",
-        "    CALLBACK_IDS = CALLBACK_IDS + [callback_id]\\n",
-        "    CALLBACKS = CALLBACKS + [step_fn]\\n",
-        "    callback_id\\n",
-        "\\n",
-        "fn get_stepper(callback_id: i64) -> fn() -> StepResult:\\n",
-        "    for i in 0..CALLBACK_IDS.len():\\n",
-        "        if CALLBACK_IDS[i] == callback_id:\\n",
-        "            return CALLBACKS[i]\\n",
-        "    \\\\: StepResult.completed(0)\\n",
-        "\\n",
-        "fn stop_task() -> StepTask:\\n",
-        "    StepTask(stop: true, index: -1, callback_id: 0)\\n",
-        "\\n",
-        "fn worker_loop(work_id: i64, result_id: i64) -> i64:\\n",
-        "    val work = channel_from_id(work_id)\\n",
-        "    val results = channel_from_id(result_id)\\n",
-        "    val task = work.recv() as StepTask\\n",
-        "    val step = get_stepper(task.callback_id)()\\n",
-        "    results.send(StepCompletion(index: task.index, value: step.value))\\n",
-        "    0\\n",
-        "\\n",
-        "fn run_one(stepper: Stepper) -> [i64]:\\n",
-        "    val work = channel_new()\\n",
-        "    val results = channel_new()\\n",
-        "    work.send(StepTask(stop: false, index: 0, callback_id: stepper.callback_id))\\n",
-        "    var handles = []\\n",
-        "    handles.append(multicore_green_spawn(\\\\: worker_loop(work.id(), results.id())))\\n",
-        "    var ordered = [0]\\n",
-        "    val completion = results.recv() as StepCompletion\\n",
-        "    ordered[completion.index] = completion.value\\n",
-        "    work.send(stop_task())\\n",
-        "    for handle in handles:\\n",
-        "        handle.join()\\n",
-        "    ordered\\n",
-        "\\n",
-        "fn main() -> i64:\\n",
-        "    multicore_green_set_parallelism(1)\\n",
-        "    println(\\\"before\\\")\\n",
-        "    val ordered = run_one(Stepper.new(\\\\: StepResult.completed(7)))\\n",
-        "    println(\\\"after=\\\" + ordered[0].to_string())\\n",
-        "    if ordered[0] != 7:\\n",
-        "        return 151\\n",
-        "    0\\n"
-    ].join("")
+        "use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism}",
+        "use std.nogc_sync_mut.concurrent.channel.{channel_new, channel_from_id}",
+        "",
+        "class StepResult:",
+        "    done: bool",
+        "    value: i64",
+        "    static fn completed(value: i64) -> StepResult:",
+        "        StepResult(done: true, value: value)",
+        "",
+        "class Stepper:",
+        "    callback_id: i64",
+        "    static fn new(step_fn: fn() -> StepResult) -> Stepper:",
+        "        Stepper(callback_id: register_stepper(step_fn))",
+        "",
+        "class StepTask:",
+        "    stop: bool",
+        "    index: i64",
+        "    callback_id: i64",
+        "",
+        "class StepCompletion:",
+        "    index: i64",
+        "    value: i64",
+        "",
+        "var CALLBACK_IDS: [i64] = []",
+        "var CALLBACKS: [fn() -> StepResult] = []",
+        "var NEXT_ID: i64 = 1",
+        "",
+        "fn register_stepper(step_fn: fn() -> StepResult) -> i64:",
+        "    val callback_id = NEXT_ID",
+        "    NEXT_ID = NEXT_ID + 1",
+        "    CALLBACK_IDS = CALLBACK_IDS + [callback_id]",
+        "    CALLBACKS = CALLBACKS + [step_fn]",
+        "    callback_id",
+        "",
+        "fn get_stepper(callback_id: i64) -> fn() -> StepResult:",
+        "    for i in 0..CALLBACK_IDS.len():",
+        "        if CALLBACK_IDS[i] == callback_id:",
+        "            return CALLBACKS[i]",
+        "    \\: StepResult.completed(0)",
+        "",
+        "fn stop_task() -> StepTask:",
+        "    StepTask(stop: true, index: -1, callback_id: 0)",
+        "",
+        "fn worker_loop(work_id: i64, result_id: i64) -> i64:",
+        "    val work = channel_from_id(work_id)",
+        "    val results = channel_from_id(result_id)",
+        "    val task = work.recv() as StepTask",
+        "    val step = get_stepper(task.callback_id)()",
+        "    results.send(StepCompletion(index: task.index, value: step.value))",
+        "    0",
+        "",
+        "fn run_one(stepper: Stepper) -> [i64]:",
+        "    val work = channel_new()",
+        "    val results = channel_new()",
+        "    work.send(StepTask(stop: false, index: 0, callback_id: stepper.callback_id))",
+        "    var handles = []",
+        "    handles.append(multicore_green_spawn(\\: worker_loop(work.id(), results.id())))",
+        "    var ordered = [0]",
+        "    val completion = results.recv() as StepCompletion",
+        "    ordered[completion.index] = completion.value",
+        "    work.send(stop_task())",
+        "    for handle in handles:",
+        "        handle.join()",
+        "    ordered",
+        "",
+        "fn main() -> i64:",
+        "    multicore_green_set_parallelism(1)",
+        "    println(\"before\")",
+        "    val ordered = run_one(Stepper.new(\\: StepResult.completed(7)))",
+        "    println(\"after=\" + ordered[0].to_string())",
+        "    if ordered[0] != 7:",
+        "        return 151",
+        "    0",
+        ""
+    ].join("\n")
 
 describe "multicore green helper handles return native blocker":
-    it "pins the smaller helper handle-array return crash":
+    it "keeps the helper handle-array return path green":
         step("Write the reduced helper-handle probe source")
         val (write_out, write_code) = shell("mkdir -p " + BUILD_DIR + " && cat > " + SOURCE_PATH + " <<'EOF'\n" + probe_source() + "\nEOF")
         expect(write_code).to_equal(0)
@@ -141,15 +142,16 @@ describe "multicore green helper handles return native blocker":
         expect(compile_code).to_equal(0)
         expect(compile_out).to_contain("Compiled")
 
-        step("The native probe still crashes after printing the helper entry marker")
+        step("The native probe exits cleanly after joining helper handles and returning the result array")
         val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/mcg_helper_handles_return.out 2>&1; code=$?; cat /tmp/mcg_helper_handles_return.out; echo EXIT=$code'")
         expect(native_code).to_equal(0)
         expect(native_out).to_contain("before")
-        expect(native_out).to_contain("EXIT=139")
+        expect(native_out).to_contain("after=7")
+        expect(native_out).to_contain("EXIT=0")
 
-        step("The tracker records the narrowed helper handle-array blocker")
+        step("The tracker records the closed helper handle-array regression")
         val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/multicore_green_helper_handles_return_native_blocker_2026-06-11.md")
         expect(blocker_code).to_equal(0)
-        expect(blocker).to_contain("Status: open")
+        expect(blocker).to_contain("Status: closed")
         expect(blocker).to_contain("local `handles` array")
-        expect(blocker).to_contain("EXIT=139")
+        expect(blocker).to_contain("EXIT=0")

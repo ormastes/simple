@@ -53,6 +53,14 @@
   callback-id resumable-stepper lane: local `MulticoreGreenHandle` array
   iteration plus `join()` now prints `result=7` with `EXIT=0` in the standalone
   native artifact.
+- `test/03_system/feature/usage/multicore_green_helper_handles_return_native_blocker_spec.spl`
+  now regression-covers the closed helper handle-array return path beneath the
+  callback-id resumable-stepper lane: the spec writes real multi-line Simple
+  source, type-checks it, compiles it to hosted native, and verifies that a
+  helper can join local `MulticoreGreenHandle` values and return a separate
+  result array with `after=7` and `EXIT=0`. The 2026-06-12 corrected run is
+  functionally green, but this native compile/run SSpec takes about 64 seconds
+  and remains perf-sensitive.
 - `test/03_system/feature/usage/multicore_green_post_join_array_return_native_blocker_spec.spl`
   now regression-covers the closed post-join array-return blocker: a
   `multicore_green` worker can be joined, followed by post-join `println`
