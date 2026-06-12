@@ -46,12 +46,12 @@ html_compat_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val catalog = build_catalog()
-expect(catalog.len()).to_equal(57)
+expect(catalog.len()).to_equal(58)
 expect(_catalog_has("00_text_only")).to_equal(true)
 expect(_catalog_has("01_inline_text")).to_equal(true)
 expect(_catalog_has("02_block_boxes")).to_equal(true)
@@ -109,6 +109,7 @@ expect(_catalog_has("55_flex_wrap_align_content_space_around")).to_equal(true)
 expect(_catalog_has("56_flex_wrap_align_content_space_evenly")).to_equal(true)
 expect(_catalog_has("57_flex_wrap_gap_basic")).to_equal(true)
 expect(_catalog_has("58_flex_wrap_axis_gap_basic")).to_equal(true)
+expect(_catalog_has("59_flex_column_axis_gap_basic")).to_equal(true)
 ```
 
 </details>
@@ -502,7 +503,7 @@ expect(report).to_contain("| `24_flex_wrap_reverse_basic` | pass | 0 |")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 69 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -543,13 +544,14 @@ expect(wrapper).to_contain("55_flex_wrap_align_content_space_around")
 expect(wrapper).to_contain("56_flex_wrap_align_content_space_evenly")
 expect(wrapper).to_contain("57_flex_wrap_gap_basic")
 expect(wrapper).to_contain("58_flex_wrap_axis_gap_basic")
+expect(wrapper).to_contain("59_flex_column_axis_gap_basic")
 expect(wrapper).to_contain("CHROME_CAPTURE_GEOMETRY_OUTPUT")
 expect(wrapper).to_contain("HTML_COMPAT_GEOMETRY_JSON=\"$geometry_json\"")
 expect(wrapper).to_contain("src/app/wm_compare/html_compat_geometry_probe_cli.spl")
 expect(wrapper).to_contain("\"$fixture\" \"$geometry_json\" \"$structural_sdn\" \"$WIDTH\" \"$HEIGHT\"")
 expect(wrapper).to_contain("blur_or_tolerance_used=false")
-expect(report).to_contain("- fixtures: 55")
-expect(report).to_contain("- pass count: 55")
+expect(report).to_contain("- fixtures: 56")
+expect(report).to_contain("- pass count: 56")
 expect(report).to_contain("- fail count: 0")
 expect(report).to_contain("- blur/tolerance used: false")
 expect(report).to_contain("It does not use blur, downscaling, pixel tolerance, copied Chromium")
