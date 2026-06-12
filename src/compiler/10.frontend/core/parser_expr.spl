@@ -56,6 +56,8 @@ use compiler.core.ast.{expr_dict_lit}
 use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use compiler.core.ast.{expr_match_expr, expr_block, expr_lambda}
 use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_spread, expr_asm, expr_asm_match, expr_asm_assert, EXPR_SPREAD, expr_exists_check, EXPR_EXISTS_CHECK}
+use compiler.core.ast.{expr_cast, EXPR_CAST}
+use compiler.core.tokens.{TOK_KW_AS}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_args}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
@@ -331,13 +333,30 @@ fn parse_unary() -> i64:
         parser_advance()
         val operand = parse_unary()
         return expr_unary(123, operand, 0)
-    parse_postfix()
+    var cast_base = parse_postfix()
+    # `expr as Type` — as is TOK_KW_AS (221); cast can chain: x as T1 as T2
+    for _ci in 0..20:
+        if par_kind_get() == TOK_KW_AS:
+            parser_advance()
+            val cast_type = parser_parse_type()
+            cast_base = expr_cast(cast_base, cast_type, 0)
+        else:
+            break
+    cast_base
 
 fn parse_binary_from(base: i64) -> i64:
     # Continue binary expression parsing from an already-parsed base.
     # Used by parse_call_arg when ident is already consumed.
     # Handles: *, /, %, **, +, -, .., ..=, ??, comparisons, and, or
     var left = base
+    # G14: as-cast at unary level (tighter than mul) — apply before multiplication loop
+    for _cas in 0..20:
+        if par_kind_get() == TOK_KW_AS:
+            parser_advance()
+            val cast_type = parser_parse_type()
+            left = expr_cast(left, cast_type, 0)
+        else:
+            break
     # Multiplication level
     for i in 0..1000:
         if par_kind_get() == 62:

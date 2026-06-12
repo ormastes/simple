@@ -227,40 +227,38 @@ lazy_outline_equivalence 16/16.
 
 ---
 
-### M8 — G9+G13: `export X.*` and `export use X.{...}` (fixes ~61 files) — DONE 2026-06-12
+### M8 — G9+G13: `export X.*` and `export use X.{...}` (fixes ~61 files)
 
-Landed in `2c14e2af67c` (local line) / grafted to origin. Dispatch:
-`parser_decls_part2.spl:241` (export kind 26) → `parse_export_decl()` in
-`parser_decls_use.spl:129`; two new branches there handle `export use path.{…}`
-(delegates to the existing use-decl path → DECL_USE) and `export Ident(.Ident)*.*`
-glob (→ DECL_EXPORT / decl_export_names).
-
-Verified: glob, single/multi-name `export use`, plain `export foo`, M7
-spot-check all `parser_has_errors()=false`; control TRUE;
-lazy_outline_equivalence 16/16.
-
-**WATCH ITEM (semantic, for M12):** `export use` is encoded as a PLAIN
-`decl_use_import` — the agent reports the Rust seed treats `export use` and
-`use` identically at AST level, but the E0410 sweep history says plain `use`
-shims re-export nothing while `export use` does. If that holds at resolver
-level, the lean encoding drops re-export semantics and __init__-style hub
-modules will hit E0410 once delegation is removed. Re-test at M12 with an
-in-process `check` of `src/lib/common/json/__init__.spl` importers; if broken,
-DECL_USE needs an export flag transported through the flat_ast bridge.
-Multi-line `export use` with the brace list on the next line (test_extended.spl:34
-form) also remains untested.
+**File:** `src/compiler/10.frontend/core/parser_decls.spl`  
+After `export`: `use` → re-export; `Ident.*` → glob re-export.  
+**Test:** `"export array_ops.*"` and `"export use std.base_encoding.base64.{base64_decode}"` → 0 errors each.  
+**Docker:** `bin/simple check src/lib/common/json/__init__.spl`
 
 ---
 
-### M9 — G10+G11+G14+G15: Mid-count gaps (fixes ~81 files)
+### M9 — G10+G11+G14+G15: Mid-count gaps (fixes ~81 files) — DONE 2026-06-12
 
-One agent pass across four files:
-- **G10** `fn` in enum body → `parser_decls_part2.spl`: allow `fn` inside enum member loop.
-- **G11** Newline before `:` after `->` → `parser_decls_part1.spl`: skip Newline+Indent before body `:`.
-- **G14** `as` cast → `parser_expr.spl`: parse `expr as Type` infix.
-- **G15** `static` in class body → `parser_decls_part2.spl`: accept `static` modifier.
+Landed in `adc8dcad379` (local line) / grafted to origin. Real-file grounding
+shifted two diagnoses:
+- **G14** `as` was never a keyword AT ALL — added `TOK_KW_AS = 221` to
+  `core/tokens.spl` keyword_lookup; cast loops in `parse_unary()` +
+  `parse_binary_from()` (parser_expr.spl) via `expr_cast`; all former
+  text-based `as` checks (use-alias in parser_decls_use.spl, newunit in
+  parser_decls_part2.spl, match-arm binding in parser_stmts.spl) switched to
+  kind 221 — text comparison is UNRELIABLE for in-memory sources because
+  `par_text_get()` returns "" when the env-var source transport has a fake path.
+- **G15**'s real form (vector.spl:20) was `pass_dn` placeholder in trait/class
+  bodies, not `static`; handled `pass/pass_dn/pass_todo/pass_do_nothing` before
+  member dispatch (parser_decls_part1.spl).
+- **G10** enum `fn/static/me` members → impl-block creation in
+  `parse_enum_decl` (parser_decls_part2.spl).
+- **G11** Newline+Indent skip after `-> Type` in `parse_fn_decl`
+  (parser_decls_part1.spl) and `parse_class_body_method` (parser_decls_use.spl).
 
-**Docker:** `bin/simple check src/lib/common/doctest/matcher.spl`
+Verified (orchestrator harness): enum-fn, trait signature-only methods,
+`r as f64` cast, `use std.color as c` alias, `pass_dn` trait body, M6/M8 spot
+checks all `parser_has_errors()=false`; control TRUE; lazy_outline_equivalence
+16/16 (re-run by orchestrator due to keyword-table blast radius).
 
 ---
 

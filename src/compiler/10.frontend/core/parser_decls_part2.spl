@@ -34,6 +34,7 @@ use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get,
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
+use compiler.core.tokens.{TOK_KW_AS}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -60,6 +61,7 @@ fn parse_enum_decl() -> i64:
     parser_expect(181)
 
     var variant_names: [text] = []
+    var parse_enum_method_ids: [i64] = []
 
     for i in 0..1000:
         parser_skip_newlines()
@@ -73,6 +75,23 @@ fn parse_enum_decl() -> i64:
         if par_kind_get() == 3:
             parser_advance()
             parser_skip_newlines_and_semicolons()
+            continue
+
+        # G10: fn method inside enum body (e.g. MatchResult.is_pass())
+        if par_kind_get() == 20:
+            val em_id = parse_class_body_method(enum_name, false, false)
+            if em_id >= 0:
+                parse_enum_method_ids.push(em_id)
+            continue
+        if par_kind_get() == 30:
+            val esm_id = parse_class_body_method(enum_name, true, false)
+            if esm_id >= 0:
+                parse_enum_method_ids.push(esm_id)
+            continue
+        if par_kind_get() == 34:
+            val emm_id = parse_class_body_method(enum_name, false, true)
+            if emm_id >= 0:
+                parse_enum_method_ids.push(emm_id)
             continue
 
         # Skip comments that may appear as idents
@@ -105,7 +124,11 @@ fn parse_enum_decl() -> i64:
         variant_names.push(vname)
         parser_skip_newlines_and_semicolons()
 
-    decl_enum_def(enum_name, variant_names, 0)
+    val enum_d = decl_enum_def(enum_name, variant_names, 0)
+    if parse_enum_method_ids.len() > 0:
+        val enum_impl = decl_impl_block(enum_name, parse_enum_method_ids, 0)
+        module_add_decl(enum_impl)
+    enum_d
 
 # ===== Top-Level Module Parsing =====
 
@@ -423,7 +446,7 @@ fn parse_module_body():
             parser_expect(6)
             parser_expect(161)
             val inner_type = parser_parse_type()
-            if par_kind_get() == 6 and par_text_get() == "as":
+            if par_kind_get() == TOK_KW_AS:
                 parser_advance()
             else:
                 parser_error("expected 'as' in newunit declaration")
