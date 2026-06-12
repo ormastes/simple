@@ -116,6 +116,27 @@ mcp_probe_native() {
   fi
   # Stale or missing stamp: delete it before probing so a probe failure leaves no stamp
   _mcp_probe_stamp_delete "${probe_native}"
+
+  # --- Cheap self-check probe (C1) ---
+  # Try `<candidate> --probe` first: prints one line "simple-mcp probe ok ..." and exits 0.
+  # Use stdin from /dev/null and a short timeout so binaries that predate --probe (they
+  # read from stdin as an MCP server and get EOF) don't hang and fall through cleanly.
+  #
+  # Benchmarking note (C3): to measure real probe/startup latency use
+  # scripts/check/check-mcp-native-smoke.shs (no artificial sleeps).
+  # Do NOT use test/03_system/tools/mcp/mcp_startup_test_system.shs (it has sleep 1
+  # between messages, adding ~3 s of artificial delay) or npx (package-manager overhead).
+  _probe_out="$(timeout "${SIMPLE_MCP_NATIVE_PROBE_QUICK_TIMEOUT:-2}" \
+    "${probe_native}" --probe </dev/null 2>>"${log_dir}/simple_mcp_stderr.log")" && \
+  _probe_rc=0 || _probe_rc=$?
+  if [ "${_probe_rc}" = "0" ] && printf '%s' "${_probe_out}" | grep -q 'probe ok'; then
+    _mcp_probe_stamp_write "${probe_native}" || true
+    printf 'probe_quick_ok wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+    return 0
+  fi
+  printf 'probe_quick_fallback wrapper=simple_mcp_server native=%s rc=%s reason=no_probe_ok\n' "${probe_native}" "${_probe_rc}" >>"${log_dir}/simple_mcp_startup.log"
+
+  # --- Full-handshake fallback (original path, unchanged) ---
   probe_tmp="$(mktemp "${TMPDIR:-/tmp}/simple_mcp_probe.XXXXXX")" || probe_tmp=""
   if [ -z "${probe_tmp}" ]; then
     return 1
@@ -128,7 +149,7 @@ mcp_probe_native() {
     printf 'probe_cache_miss wrapper=simple_mcp_server native=%s stamp=written\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
     return 0
   fi
-  printf 'native_probe_failed wrapper=simple_mcp_server native=%s reason=missing_wm_text_tools fallback=next_candidate\n' "${probe_native}" >>"${log_dir}/simple_mcp_startup.log"
+  printf 'native_probe_failed wrapper=simple_mcp_server native=%s reason=missing_wm_text_tools fallback=next_candidate\n' "${probe_native}" >>"${log_dir}/simple_mcp_stderr.log"
   rm -f "${probe_tmp}"
   return 1
 }
