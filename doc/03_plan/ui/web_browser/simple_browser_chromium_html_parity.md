@@ -538,6 +538,18 @@ Open gaps tied to the active browser objective:
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
     now reports `fixture_count=72`, `pass_count=72`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
+- The same live geometry lane now passes for
+  `76_flex_gap_justify_unsafe_center_no_shrink_overflow`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's row flex `gap:12px`, `flex-shrink:0`,
+    and overflowing `justify-content:unsafe center`; the Pure Simple renderer
+    now treats `flex-shrink:0` as zero shrink weight and applies the same
+    negative unsafe center offset
+  - renderer update: fixed shrink-factor accounting so explicit
+    `flex-shrink:0` no longer behaves like `flex-shrink:1`
+  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+    now reports `fixture_count=73`, `pass_count=73`, `fail_count=0`, and
+    `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
     passes with one listed scenario and zero failures

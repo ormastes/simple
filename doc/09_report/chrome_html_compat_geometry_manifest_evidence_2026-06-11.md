@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 72
-- pass count: 72
+- fixtures: 73
+- pass count: 73
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -95,6 +95,7 @@ pixels, or text antialiasing normalization.
 | `73_flex_wrap_gap_align_content_unsafe_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/73_flex_wrap_gap_align_content_unsafe_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/73_flex_wrap_gap_align_content_unsafe_center_structural_report.sdn` |
 | `74_flex_gap_justify_unsafe_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/74_flex_gap_justify_unsafe_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/74_flex_gap_justify_unsafe_center_structural_report.sdn` |
 | `75_flex_gap_justify_unsafe_center_overflow` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/75_flex_gap_justify_unsafe_center_overflow_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/75_flex_gap_justify_unsafe_center_overflow_structural_report.sdn` |
+| `76_flex_gap_justify_unsafe_center_no_shrink_overflow` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/76_flex_gap_justify_unsafe_center_no_shrink_overflow_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/76_flex_gap_justify_unsafe_center_no_shrink_overflow_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -176,3 +177,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `73_flex_wrap_gap_align_content_unsafe_center` | 0 | 0.000 | `` |
 | `74_flex_gap_justify_unsafe_center` | 0 | 0.000 | `` |
 | `75_flex_gap_justify_unsafe_center_overflow` | 3 | 0.422 | `gap_unsafe_center_overflow_a,gap_unsafe_center_overflow_b,gap_unsafe_center_overflow_c` |
+| `76_flex_gap_justify_unsafe_center_no_shrink_overflow` | 0 | 0.000 | `` |

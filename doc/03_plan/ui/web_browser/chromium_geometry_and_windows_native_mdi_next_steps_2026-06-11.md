@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 72 labeled fixtures through `75_flex_gap_justify_unsafe_center_overflow` with exact
+  now covers 73 labeled fixtures through `76_flex_gap_justify_unsafe_center_no_shrink_overflow` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -823,6 +823,19 @@ Smallest next implementation step:
   - the Simple parser now preserves `unsafe-center` and avoids applying a
     pre-shrink negative main-axis offset, matching Chromium without blur,
     tolerance, resolution scaling, or copied Chromium pixels
+- Live `76_flex_gap_justify_unsafe_center_no_shrink_overflow` evidence now
+  passes with `layout_match` and `mismatch_count=0`.
+- The focused fixture-76 result records Chromium row flex gap plus
+  `flex-shrink:0` and overflowing `justify-content:unsafe center`:
+  - the explicit flex container border box is `x=16`, `y=16`, `width=100`,
+    `height=60`
+  - child widths `60`, `50`, and `30` plus two `12px` gaps create a `164px`
+    item group and `-64px` of main-axis free space
+  - Chrome honors the unsafe overflow-position prefix when shrinking is
+    disabled, placing children at `x=-16`, `x=56`, and `x=118`
+  - the Simple renderer now treats `flex-shrink:0` as zero shrink weight and
+    applies the same negative unsafe-center offset without blur, tolerance,
+    resolution scaling, or copied Chromium pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -884,12 +897,13 @@ Smallest next implementation step:
   `72_flex_wrap_gap_align_content_start`, and
   `73_flex_wrap_gap_align_content_unsafe_center`, and
   `74_flex_gap_justify_unsafe_center`, and
-  `75_flex_gap_justify_unsafe_center_overflow`:
+  `75_flex_gap_justify_unsafe_center_overflow`, and
+  `76_flex_gap_justify_unsafe_center_no_shrink_overflow`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `75` in its default manifest, excluding only
+    covers fixtures `02` through `76` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `72` fixtures, `72` passes, `0` failures, and
+    reports `73` fixtures, `73` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
