@@ -297,6 +297,10 @@ Updated: 2026-06-11
 - this commit -- WASM hello GUI marker/surface allocation tightening:
   Generated-WASM GUI marker scanning now uses bounded direct scans, and surface
   evidence pre-counts present surfaces before filling an exact-size list.
+- this commit -- Semantic UI contract allocation tightening:
+  Semantic snapshot conversion, transport evidence matrices, and JSON list
+  assembly now pre-size result arrays instead of repeatedly grow-copying
+  semantic UI payloads.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
