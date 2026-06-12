@@ -1,6 +1,6 @@
 # Browser Session Html Tag Std Specification
 
-> 1.  assert visible tag
+> <details>
 
 <!-- sdn-diagram:id=browser_session_html_tag_std_spec.arch -->
 <details class="sdn-source">
@@ -40,28 +40,21 @@ browser_session_html_tag_std_spec -> std
 
 #### covers sectioning and landmark tags with visible fallback rendering
 
-1.  assert visible tag
-
-2.  assert visible tag
-
-3.  assert visible tag
-
-4.  assert visible tag
-
-5.  assert visible tag
-
-6.  assert visible tag
-
-7.  assert visible tag
-
-8.  assert visible tag
+-  assert visible tag
+-  assert visible tag
+-  assert visible tag
+-  assert visible tag
+-  assert visible tag
+-  assert visible tag
+-  assert visible tag
+-  assert visible tag
    - Expected: render.ok is true
    - Expected: render.width equals `320`
    - Expected: render.height equals `160`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -86,7 +79,7 @@ expect(render.height).to_equal(160)
 #### keeps template contents inert and out of visible body rendering
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

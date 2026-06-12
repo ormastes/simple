@@ -41,7 +41,7 @@ browser_session_html_metadata_tags_spec -> std
 #### keeps document metadata out of visible text extraction
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(html_to_text(html)).to_equal("Visible body")
 #### keeps standalone title and style contents hidden
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

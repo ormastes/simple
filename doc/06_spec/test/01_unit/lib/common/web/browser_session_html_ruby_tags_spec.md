@@ -41,7 +41,7 @@ browser_session_html_ruby_tags_spec -> std
 #### renders ruby annotations without leaking rp fallback markers twice
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(html_to_text(html)).to_equal("漢(kan)")
 #### keeps adjacent ruby annotations readable without rp fallback tags
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

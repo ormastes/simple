@@ -41,7 +41,7 @@ browser_session_html_grouping_tags_spec -> std
 #### preserves paragraph pre blockquote figure and div text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(html_to_text(html)).to_equal("Paragraph\n Pre text QuoteFigure bodyCaptio
 #### separates ordered unordered and menu list items
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -71,7 +71,7 @@ expect(html_to_text(html)).to_equal("One\nTwo\nAlpha\nBeta\nAction\nMore")
 #### separates definition list terms and descriptions
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

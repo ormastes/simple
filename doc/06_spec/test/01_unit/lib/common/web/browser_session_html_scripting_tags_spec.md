@@ -1,6 +1,6 @@
 # Browser Session Html Scripting Tags Specification
 
-> 1. var session = BrowserSession new
+> <details>
 
 <!-- sdn-diagram:id=browser_session_html_scripting_tags_spec.arch -->
 <details class="sdn-source">
@@ -40,18 +40,16 @@ browser_session_html_scripting_tags_spec -> std
 
 #### hides noscript fallback from visible rendering when scripting is enabled
 
-1. var session = BrowserSession new
-
-2. Ok
+- var session = BrowserSession new
+- Ok
    - Expected: session.current_body_html does not contain `Fallback body`
    - Expected: session.render_html_document() does not contain `Fallback body`
-
-3. Err
+- Err
    - Expected: "unexpected open error: {e}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -76,19 +74,17 @@ match result:
 
 #### runs script content and hides noscript fallback when scripting is enabled
 
-1. var session = BrowserSession new
-
-2. Ok
+- var session = BrowserSession new
+- Ok
    - Expected: session.current_body_html equals `Scripted body`
    - Expected: session.current_body_html does not contain `Fallback body`
    - Expected: session.render_html_document() does not contain `Fallback body`
-
-3. Err
+- Err
    - Expected: "unexpected open error: {e}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -113,17 +109,15 @@ match result:
 
 #### ignores script content and keeps noscript fallback visible when runtime is disabled
 
-1. var session = BrowserSession new without runtime
-
-2. Ok
+- var session = BrowserSession new without runtime
+- Ok
    - Expected: session.current_body_html does not contain `Scripted body`
-
-3. Err
+- Err
    - Expected: "unexpected open error: {e}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

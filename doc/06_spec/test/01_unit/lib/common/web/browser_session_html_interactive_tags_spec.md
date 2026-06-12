@@ -41,7 +41,7 @@ browser_session_html_interactive_tags_spec -> std
 #### shows only summary text for closed details and full content for open details
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -58,7 +58,7 @@ expect(html_to_text(open_html)).to_equal("MoreVisible detail")
 #### hides closed dialog content and exposes open dialog fallback text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

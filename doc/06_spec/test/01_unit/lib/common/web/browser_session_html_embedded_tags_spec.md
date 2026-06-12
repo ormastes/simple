@@ -41,7 +41,7 @@ browser_session_html_embedded_tags_spec -> std
 #### uses image alt text inside picture source fallback groups
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(html_to_text(html)).to_equal("Hero image")
 #### uses area alt text while preserving embedded fallback text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

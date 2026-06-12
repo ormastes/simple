@@ -41,7 +41,7 @@ browser_session_html_edit_tags_spec -> std
 #### marks inserted and deleted text in plain text extraction
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(html_to_text(html)).to_equal("Before [-old][+new] after")
 #### keeps nested inline text inside edit annotations
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -41,7 +41,7 @@ browser_session_html_text_level_tags_spec -> std
 #### preserves text content across common text-level formatting tags
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(html_to_text(html)).to_equal("emstrongsmallscitequotedfnabbrdatatimecodev
 #### maps br to a visible line break and wbr to an optional zero-width break
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

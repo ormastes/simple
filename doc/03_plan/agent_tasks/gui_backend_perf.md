@@ -390,6 +390,10 @@ Updated: 2026-06-11
   BrowserSession UI-access link nodes and fixed control snapshots now count and
   fill exact-size node arrays, removing the remaining optimizer-reported
   push-growth findings while preserving link filtering and source order.
+- this commit -- Browser session HTML parser length hoisting:
+  HTML text extraction, escaping, stylesheet discovery, CSS import stripping,
+  and stylesheet insertion now reuse stable input lengths in loop conditions;
+  direct stylesheet-source coverage locks inline/link/import ordering.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

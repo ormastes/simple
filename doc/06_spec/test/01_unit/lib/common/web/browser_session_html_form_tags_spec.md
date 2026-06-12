@@ -41,7 +41,7 @@ browser_session_html_form_tags_spec -> std
 #### preserves visible label and option text across form container tags
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(html_to_text(html)).to_equal("ProfileNameOneTwoSuggestNotesSaveDone")
 #### extracts text from value-bearing form controls
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -41,7 +41,7 @@ browser_session_html_table_tags_spec -> std
 #### preserves caption row and cell boundaries for table text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
