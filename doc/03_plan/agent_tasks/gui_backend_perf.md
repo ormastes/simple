@@ -379,6 +379,9 @@ Updated: 2026-06-11
   DOM child removal/insertion, text-content concatenation, id lookup, and tag
   collection now reuse stable child/result counts in recursive scans, with
   direct unit coverage for source-order text and descendant lookup behavior.
+- this commit -- Browser DOM accessor allocation tightening:
+  Text-content concatenation now fills a child-count-sized text array instead
+  of push-growing a per-node part list during startup DOM text scans.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
