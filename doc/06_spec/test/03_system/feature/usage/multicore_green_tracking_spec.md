@@ -315,7 +315,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -361,6 +361,7 @@ expect(row).to_contain("multicore_green_sliced_wrong_arity.spl rejects wrong ari
 expect(row).to_contain("multicore_green_sliced_bad_state_arg.spl rejects non-integer state")
 expect(row).to_contain("multicore_green_sliced_bad_step_arg.spl rejects non-function step")
 expect(row).to_contain("multicore_green_sliced_shared_var_capture.spl rejects shared mutable step state")
+expect(row).to_contain("multicore_green_direct_rt_pool_access.spl rejects internal runtime-pool symbol")
 step("Verify negative profile contract cases stay release-visible")
 expect(row).to_contain("large_simple_multicore_fanout_slower_than_c")
 expect(row).to_contain("simple_multicore_stress_slower_than_c")
