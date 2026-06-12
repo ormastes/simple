@@ -5,16 +5,16 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 0
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 51
 - **Warnings:** 1
 
 ---
 
-## Other (1 features)
+## Language / Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Html Compat Specification](test/03_system/gui/wm_compare/html_compat_spec.md) | Auto-generated | N/A | 19 | 0% | 0 lines |
+| [Concurrency API Misuse System Contract](test/03_system/feature/usage/concurrency_api_misuse_spec.md) | Active | N/A | 6 | 40% | 51 lines |
 

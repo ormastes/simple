@@ -1,6 +1,6 @@
 # Multicore Green Post-Join Array Return Native Blocker
 
-> This SSpec pins the narrower native blocker found after the resumable-stepper path itself became green. A `run_steppers` function that joins a `multicore_green` worker and then performs extra post-join string work before returning a local result array still segfaults in standalone native.
+> This SSpec keeps the narrower native blocker fixed after the resumable-stepper path itself became green. A `run_steppers` function that joins a `multicore_green` worker and then performs extra post-join string work before returning a local result array must stay on the native call path and return the expected array value.
 
 <!-- sdn-diagram:id=multicore_green_post_join_array_return_native_blocker_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_post_join_array_return_native_blocker_spec -> std
 
 # Multicore Green Post-Join Array Return Native Blocker
 
-This SSpec pins the narrower native blocker found after the resumable-stepper path itself became green. A `run_steppers` function that joins a `multicore_green` worker and then performs extra post-join string work before returning a local result array still segfaults in standalone native.
+This SSpec keeps the narrower native blocker fixed after the resumable-stepper path itself became green. A `run_steppers` function that joins a `multicore_green` worker and then performs extra post-join string work before returning a local result array must stay on the native call path and return the expected array value.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the narrower native blocker found after the resumable-stepper pa
 |-------|-------|
 | Feature IDs | #multicore-green-post-join-array-return-native-blocker |
 | Category | Runtime / Native / Concurrency |
-| Status | Blocked |
+| Status | Regression |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,10 +53,11 @@ This SSpec pins the narrower native blocker found after the resumable-stepper pa
 
 ## Overview
 
-This SSpec pins the narrower native blocker found after the resumable-stepper
+This SSpec keeps the narrower native blocker fixed after the resumable-stepper
 path itself became green. A `run_steppers` function that joins a
 `multicore_green` worker and then performs extra post-join string work before
-returning a local result array still segfaults in standalone native.
+returning a local result array must stay on the native call path and return the
+expected array value.
 
 ## Requirements
 
@@ -82,9 +83,9 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ## Scenarios
 
-### multicore green post join array return native blocker
+### multicore green post join array return native regression
 
-#### keeps the narrowed post-join native crash explicit
+#### keeps post-join native array return on the compiled path
 
 - Write the post-join array-return probe source
    - Expected: write_code equals `0`
@@ -92,16 +93,16 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
    - Expected: check_code equals `0`
 - Hosted native compile succeeds before the narrowed runtime crash
    - Expected: compile_code equals `0`
-- The native probe still crashes after joining before returning the array
+- The native probe runs after joining and returns the array
    - Expected: native_code equals `0`
-- The tracker records the narrowed blocker
+- The tracker records the narrowed blocker as closed
    - Expected: blocker_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -119,17 +120,19 @@ val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH +
 expect(compile_code).to_equal(0)
 expect(compile_out).to_contain("Compiled")
 
-step("The native probe still crashes after joining before returning the array")
+step("The native probe runs after joining and returns the array")
 val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/mcg_post_join_array_return.out 2>&1; code=$?; cat /tmp/mcg_post_join_array_return.out; echo EXIT=$code'")
 expect(native_code).to_equal(0)
-expect(native_out).to_contain("EXIT=139")
+expect(native_out).to_contain("after_join=1")
+expect(native_out).to_contain("result=7")
+expect(native_out).to_contain("EXIT=0")
 
-step("The tracker records the narrowed blocker")
+step("The tracker records the narrowed blocker as closed")
 val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/multicore_green_post_join_array_return_native_blocker_2026-06-12.md")
 expect(blocker_code).to_equal(0)
-expect(blocker).to_contain("Status: open")
+expect(blocker).to_contain("Status: closed")
 expect(blocker).to_contain("post-join")
-expect(blocker).to_contain("EXIT=139")
+expect(blocker).to_contain("EXIT=0")
 ```
 
 </details>

@@ -39,16 +39,17 @@ Date: 2026-06-06
   path such as `val callbacks = [step_fn]`, inline lambda array literals such
   as `val callbacks = [\: 7]`, the function-value loop-return path, the direct
   by-value struct-array runtime shape, and the stale helper-side array-literal
-  hybrid fallback are now fixed on rebuilt debug binaries. The active
-  current-source hosted native blocker is now narrower than the scheduler
-  itself: post-join string work before returning a local result array still
-  crashes with `EXIT=139`. The
-  checked-in release binary remains tracked as stale evidence in
-  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
+  hybrid fallback are now fixed on rebuilt debug binaries. The later
+  post-join array-return blocker is also closed: post-join `println` work
+  before returning a local result array now prints `result=7` with `EXIT=0`
+  in the regression spec and Docker-isolated rerun. This evidence remains
+  perf-sensitive because the host native compile/run SSpecs take about
+  60 seconds. The checked-in release binary remains tracked as stale evidence
+  in `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`.
 
 ## Coordination Contract
 
-- Owned lane: multicore green / pherallel runtime evidence, Go-thread research,
+- Owned lane: multicore-green runtime-pool evidence, Go-thread research,
   profile scripts, and SimpleOS green-carrier scheduler evidence.
 - Preserve public API names and semantics:
   `thread_spawn` is the explicit OS-thread API, `cooperative_green_spawn` is

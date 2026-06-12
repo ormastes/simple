@@ -3,14 +3,15 @@
 
 **Feature IDs:** #multicore-green-post-join-array-return-native-blocker
 **Category:** Runtime / Native / Concurrency
-**Status:** Blocked
+**Status:** Regression
 
 ## Overview
 
-This SSpec pins the narrower native blocker found after the resumable-stepper
+This SSpec keeps the narrower native blocker fixed after the resumable-stepper
 path itself became green. A `run_steppers` function that joins a
 `multicore_green` worker and then performs extra post-join string work before
-returning a local result array still segfaults in standalone native.
+returning a local result array must stay on the native call path and return the
+expected array value.
 
 ## Requirements
 
@@ -132,8 +133,8 @@ fn probe_source() -> text:
         "    0\n"
     ].join("")
 
-describe "multicore green post join array return native blocker":
-    it "keeps the narrowed post-join native crash explicit":
+describe "multicore green post join array return native regression":
+    it "keeps post-join native array return on the compiled path":
         step("Write the post-join array-return probe source")
         val (write_out, write_code) = shell("mkdir -p " + BUILD_DIR + " && cat > " + SOURCE_PATH + " <<'EOF'\n" + probe_source() + "\nEOF")
         expect(write_code).to_equal(0)
@@ -148,14 +149,16 @@ describe "multicore green post join array return native blocker":
         expect(compile_code).to_equal(0)
         expect(compile_out).to_contain("Compiled")
 
-        step("The native probe still crashes after joining before returning the array")
+        step("The native probe runs after joining and returns the array")
         val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/mcg_post_join_array_return.out 2>&1; code=$?; cat /tmp/mcg_post_join_array_return.out; echo EXIT=$code'")
         expect(native_code).to_equal(0)
-        expect(native_out).to_contain("EXIT=139")
+        expect(native_out).to_contain("after_join=1")
+        expect(native_out).to_contain("result=7")
+        expect(native_out).to_contain("EXIT=0")
 
-        step("The tracker records the narrowed blocker")
+        step("The tracker records the narrowed blocker as closed")
         val (blocker, blocker_code) = shell("cat doc/08_tracking/bug/multicore_green_post_join_array_return_native_blocker_2026-06-12.md")
         expect(blocker_code).to_equal(0)
-        expect(blocker).to_contain("Status: open")
+        expect(blocker).to_contain("Status: closed")
         expect(blocker).to_contain("post-join")
-        expect(blocker).to_contain("EXIT=139")
+        expect(blocker).to_contain("EXIT=0")

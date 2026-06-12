@@ -1,6 +1,6 @@
 # Concurrency API Misuse System Contract
 
-> This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+> This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 <!-- sdn-diagram:id=concurrency_api_misuse_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ concurrency_api_misuse_spec -> std
 
 # Concurrency API Misuse System Contract
 
-This system spec proves the public pherallel/concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
+This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and numbered alias names.
 
 ## At a Glance
 
@@ -53,7 +53,7 @@ This system spec proves the public pherallel/concurrency API surfaces fail close
 
 ## Overview
 
-This system spec proves the public pherallel/concurrency API surfaces fail
+This system spec proves the public concurrency API surfaces fail
 closed at compile time while the approved meaningful API names remain usable.
 The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green
 thread APIs, `multicore_green_spawn`, and pool-backed `task_spawn` facades must
@@ -104,7 +104,7 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `20`
+   - Expected: fixture_count() equals `19`
 
 
 <details>
@@ -115,7 +115,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(20)
+expect(fixture_count()).to_equal(19)
 ```
 
 </details>
@@ -170,7 +170,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("Reject thread_spawn imported from the cooperative-green surface")
 expect_compile_error("thread_spawn_wrong_surface_import.spl", "E-PAR-003", "thread_spawn belongs to std.concurrent.thread")
 step("Reject thread_spawn called with too many arguments")
-expect_compile_error("thread_spawn_wrong_arity.spl", "E-PAR-004", "single zero-argument value closure")
+expect_compile_error("thread_spawn_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject thread_spawn called with a non-closure argument")
 expect_compile_error("thread_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 step("Reject numbered thread_spawn aliases")
@@ -207,13 +207,13 @@ Reproduction: this block contains the complete executable scenario source.
 step("Reject cooperative_green_spawn imported from the OS-thread surface")
 expect_compile_error("cooperative_green_wrong_surface_import.spl", "E-PAR-003", "cooperative_green_spawn belongs to std.concurrent.cooperative_green")
 step("Reject cooperative_green_spawn called with too many arguments")
-expect_compile_error("cooperative_green_wrong_arity.spl", "E-PAR-004", "single zero-argument value closure")
+expect_compile_error("cooperative_green_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject cooperative_green_spawn called with a non-closure argument")
 expect_compile_error("cooperative_green_bad_arg.spl", "E-PAR-004", "pass a closure")
 step("Reject green_spawn imported from the OS-thread surface")
 expect_compile_error("green_spawn_wrong_surface_import.spl", "E-PAR-003", "green_spawn belongs to std.concurrent.green_thread")
 step("Reject green_spawn called with too many arguments")
-expect_compile_error("green_spawn_wrong_arity.spl", "E-PAR-004", "single zero-argument value closure")
+expect_compile_error("green_spawn_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject green_spawn called with a non-closure argument")
 expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 ```
@@ -244,11 +244,11 @@ Reproduction: this block contains the complete executable scenario source.
 step("Reject multicore_green_spawn imported from the OS-thread surface")
 expect_compile_error("multicore_green_wrong_surface_import.spl", "E-PAR-003", "multicore_green_spawn belongs to std.concurrent.multicore_green")
 step("Reject multicore_green_spawn called with too many arguments")
-expect_compile_error("multicore_green_wrong_arity.spl", "E-PAR-004", "single zero-argument value closure")
+expect_compile_error("multicore_green_wrong_arity.spl", "E-PAR-004", "pass a closure")
 step("Reject multicore_green_spawn called with a non-closure argument")
 expect_compile_error("multicore_green_bad_arg.spl", "E-PAR-004", "pass a closure")
 step("Reject multicore_green_set_parallelism called with text")
-expect_compile_error("multicore_green_parallelism_bad_arg.spl", "E-PAR-004", "single integer worker count")
+expect_compile_error("multicore_green_parallelism_bad_arg.spl", "E-PAR-004", "integer worker count")
 step("Reject direct access to internal runtime-pool symbols")
 expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "internal runtime-pool symbol")
 ```

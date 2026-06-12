@@ -60,16 +60,35 @@ impl From<BridgeValue> for RuntimeValue {
 // Direct Value <-> RuntimeValue conversion (for simple types)
 // ============================================================================
 
-/// Convert an interpreter Value to a RuntimeValue (simple types only)
+/// Convert an interpreter Value to a RuntimeValue.
 pub fn value_to_runtime(v: &Value) -> RuntimeValue {
     match v {
         Value::Nil => RuntimeValue::NIL,
         Value::Int(i) => RuntimeValue::from_int(*i),
+        Value::UInt { value, .. } => RuntimeValue::from_int(*value as i64),
         Value::Float(f) => RuntimeValue::from_float(*f),
+        Value::Float32(f) => RuntimeValue::from_float(*f as f64),
         Value::Bool(b) => RuntimeValue::from_bool(*b),
-        // Complex types need heap allocation - return NIL for now
+        Value::Str(s) | Value::Symbol(s) => simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64),
+        Value::Array(items) | Value::FrozenArray(items) => values_to_runtime_array(items.iter()),
+        Value::FixedSizeArray { data, .. } | Value::Tuple(data) => values_to_runtime_array(data.iter()),
+        Value::LabeledTuple { values, .. } => values_to_runtime_array(values.iter()),
         _ => RuntimeValue::NIL,
     }
+}
+
+fn values_to_runtime_array<'a>(items: impl IntoIterator<Item = &'a Value>) -> RuntimeValue {
+    let values: Vec<RuntimeValue> = items.into_iter().map(value_to_runtime).collect();
+    let array = simple_runtime::value::rt_array_new(values.len() as u64);
+    if array == RuntimeValue::NIL {
+        return RuntimeValue::NIL;
+    }
+    for value in values {
+        if !simple_runtime::value::rt_array_push(array, value) {
+            return RuntimeValue::NIL;
+        }
+    }
+    array
 }
 
 /// Convert a RuntimeValue to an interpreter Value (simple types only)
@@ -184,6 +203,25 @@ mod tests {
         assert_eq!(value_to_runtime(&Value::Nil), RuntimeValue::NIL);
         assert_eq!(value_to_runtime(&Value::Int(42)).as_int(), 42);
         assert_eq!(value_to_runtime(&Value::Bool(true)), RuntimeValue::TRUE);
+    }
+
+    #[test]
+    fn test_value_to_runtime_array() {
+        let value = Value::array(vec![Value::Int(7), Value::Bool(true)]);
+        let runtime = value_to_runtime(&value);
+
+        assert_eq!(simple_runtime::value::rt_array_len(runtime), 2);
+        assert_eq!(simple_runtime::value::rt_array_get(runtime, 0).as_int(), 7);
+        assert_eq!(simple_runtime::value::rt_array_get(runtime, 1), RuntimeValue::TRUE);
+    }
+
+    #[test]
+    fn test_value_to_runtime_tuple_as_indexable_array() {
+        let runtime = value_to_runtime(&Value::Tuple(vec![Value::Int(3), Value::Int(4)]));
+
+        assert_eq!(simple_runtime::value::rt_array_len(runtime), 2);
+        assert_eq!(simple_runtime::value::rt_array_get(runtime, 0).as_int(), 3);
+        assert_eq!(simple_runtime::value::rt_array_get(runtime, 1).as_int(), 4);
     }
 
     #[test]

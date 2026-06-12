@@ -126,10 +126,9 @@ pub fn analyze_function(f: &FunctionDef) -> CompilabilityStatus {
         reasons.push(FallbackReason::Decorators);
     }
 
-    // Check for effects - functions with effects may need interpreter fallback
-    if !f.effects.is_empty() {
-        reasons.push(FallbackReason::AsyncAwait);
-    }
+    // Effect annotations are capability/verification metadata. They do not by
+    // themselves require interpreter fallback; concrete unsupported constructs
+    // such as `await`, `yield`, or blocking builtin calls add reasons below.
 
     // Analyze the function body
     analyze_block(&f.body, &mut reasons);
@@ -818,6 +817,19 @@ mod tests {
         assert!(
             status.is_compilable(),
             "array literal helper should compile natively, got {:?}",
+            status.reasons()
+        );
+    }
+
+    #[test]
+    fn test_io_effect_array_return_helper_compilable() {
+        let results = parse_and_analyze(
+            "@io\nfn run_once() -> [i64]:\n    val value = 7\n    println(\"after=1\")\n    return [value]\n",
+        );
+        let status = results.get("run_once").unwrap();
+        assert!(
+            status.is_compilable(),
+            "io helper with native println and array return should compile natively, got {:?}",
             status.reasons()
         );
     }
