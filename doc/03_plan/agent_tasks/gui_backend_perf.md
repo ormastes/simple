@@ -542,3 +542,10 @@ Updated: 2026-06-11
 +- Update backend startup/render evidence set first (highest priority for verify/readability).
 +- Capture GPU/font offload decision proofs second (required for performance claim closure).
 +- Then do pure Simple text/layout optimization pass with explicit behavior-preservation checks.
+
+## Current state update
+
+- Shared UI surface manager allocation tightening: open, close, surface ID
+  listing, and tree replacement now use exact-size arrays instead of
+  append-growing replacement lists while preserving handle generation and
+  active-surface behavior.
