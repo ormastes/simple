@@ -7,14 +7,13 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 44
-- **Warnings:** 1
+- **Total Lines:** 163
 
 ---
 
-## Runtime Concurrency / Tracking (1 features)
+## Runtime Concurrency (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Multicore Green Host Parity Gap Tracking Specification](test/03_system/feature/usage/multicore_green_host_parity_gap_spec.md) | Active | N/A | 3 | 20% | 44 lines |
+| [Multicore Green Feature Tracking Specification](test/03_system/feature/usage/multicore_green_tracking_spec.md) | Current | N/A | 7 | 60% | 163 lines |
 
