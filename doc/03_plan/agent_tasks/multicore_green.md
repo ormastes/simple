@@ -57,7 +57,9 @@ Date: 2026-06-06
   `cooperative_green_spawn_value` remains the precomputed-result helper for
   callers that already have a value, and
   `multicore_green_spawn` is the current Pure Simple bounded-worker M:N
-  candidate over `rt_pool_*`.
+  candidate over `rt_pool_*`. `multicore_green_spawn_sliced` is the explicit
+  scalar-state fairness API for long Pure Simple work; the public API contract
+  must keep the run/join marker `public_multicore_green_sliced_result=19`.
 - Do not use numbered API names to distinguish behavior.
 - Do not rewrite Simple features in C/Rust for benchmark wins. C, Go, and Rust
   are evidence baselines or seed/runtime implementation contexts only.
@@ -222,6 +224,8 @@ Deliverables:
   regression and historical closure of the earlier callback-id prototype;
 - profile/report visibility for the generated hosted sliced-fairness evidence
   section without reclassifying ordinary closure scheduling as preemptive;
+- public API contract visibility for the scalar-state sliced API through
+  `public_multicore_green_sliced_result=19`;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:
@@ -252,6 +256,9 @@ Deliverables:
 - hosted SimpleOS cooperative/multicore specs are trusted current evidence
   again because the green/cooperative SSpec runner mismatch is closed and
   regression-covered;
+- hosted SimpleOS multicore evidence keeps the model/live boundary executable:
+  the hosted spec has 7 scenarios and rejects stale wording that treats
+  live AP or final ring/user proof as unavailable;
 - live QEMU proof for AP startup plus scheduler-visible CPU1 green dispatch;
 - final hardware context-switch handoff kept separate from scheduler-state
   proof and backed by the `HW_HANDOFF_PASS`, `USER_ENTRY_PASS`, and

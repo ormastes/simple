@@ -7,13 +7,13 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 117
+- **Total Lines:** 120
 
 ---
 
-## SimpleOS / Concurrency (1 features)
+## Runtime Concurrency / Planning (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [SimpleOS Multicore Green System Contract](test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.md) | In Progress | N/A | 7 | 60% | 117 lines |
+| [Multicore Green Agent Plan Specification](test/03_system/feature/usage/multicore_green_agent_plan_spec.md) | Active | N/A | 4 | 60% | 120 lines |
 

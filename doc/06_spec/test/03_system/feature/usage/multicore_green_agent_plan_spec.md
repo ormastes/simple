@@ -135,6 +135,8 @@ Failed: 0
   carrier cooperative queue APIs.
 - `multicore_green_spawn` is the current Pure Simple bounded-worker M:N
   candidate over `rt_pool_*`.
+- `multicore_green_spawn_sliced` is the scalar-state fairness API and must
+  keep a public run/join result marker.
 - `task_spawn` is the lower-level pool-backed task API, not the named
   cross-language profile row.
 - Numeric suffix API names must not be used to distinguish public behavior.
@@ -145,6 +147,8 @@ Failed: 0
   claiming Go-like M:N CPU-parallel work.
 - SimpleOS fixed-slot QEMU evidence must not be confused with final AP
   ring/user hardware context-switch handoff evidence.
+- Hosted SimpleOS multicore evidence must keep the hosted-vs-live boundary
+  executable and current.
 
 ## Verification Expectations
 
@@ -213,7 +217,7 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -227,7 +231,10 @@ expect(plan).to_contain("focused native smoke coverage for `thread_spawn_with_ar
 expect(plan).to_contain("current-carrier queue semantics")
 expect(plan).to_contain("handle evidence methods remain stable")
 expect(plan).to_contain("dedicated tracking for the remaining hosted multicore-green parity gap")
+expect(plan).to_contain("public_multicore_green_sliced_result=19")
 expect(plan).to_contain("live QEMU proof for AP startup plus scheduler-visible CPU1 green dispatch")
+expect(plan).to_contain("hosted SimpleOS multicore evidence keeps the model/live boundary executable")
+expect(plan).to_contain("the hosted spec has 7 scenarios")
 ```
 
 </details>
@@ -274,7 +281,7 @@ expect(plan).to_contain("SimpleOS Green Carrier")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -284,6 +291,8 @@ step("Verify semantic API names remain explicit")
 expect(plan).to_contain("`thread_spawn` is the explicit OS-thread API")
 expect(plan).to_contain("`cooperative_green_spawn` and")
 expect(plan).to_contain("`multicore_green_spawn` is the current Pure Simple bounded-worker M:N")
+expect(plan).to_contain("`multicore_green_spawn_sliced` is the explicit")
+expect(plan).to_contain("public_multicore_green_sliced_result=19")
 step("Verify numbered API names remain forbidden")
 expect(plan).to_contain("Do not use numbered API names to distinguish behavior.")
 ```
