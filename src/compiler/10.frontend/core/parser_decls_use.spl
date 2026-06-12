@@ -128,9 +128,38 @@ fn parse_use_decl() -> i64:
 
 fn parse_export_decl() -> i64:
     parser_advance()
+    # G13: export use path.{names} or export use path.*  — delegate to use-decl parser
+    if par_kind_get() == 27:
+        return parse_use_decl()
     var names: [text] = []
     val first_name = par_text_get()
     parser_expect(6)
+    # G9: export X.* or export X.{names} — glob/brace re-export
+    if par_kind_get() == 164:
+        parser_advance()  # consume '.'
+        # Wildcard: export X.*
+        if par_kind_get() == 62:
+            parser_advance()  # consume '*'
+            names.push(first_name + ".*")
+            return decl_export_names(names, 0)
+        # Brace list: export X.{a, b}  (treat as export use X.{a,b})
+        if par_kind_get() == 142:
+            var brace_names: [text] = []
+            parser_advance()  # consume '{'
+            for i in 0..100:
+                val at_rb: bool = par_kind_get() == 143
+                if at_rb:
+                    break
+                if par_kind_get() == 190:
+                    break
+                if par_kind_get() == 6:
+                    brace_names.push(par_text_get())
+                    parser_advance()
+                if par_kind_get() == 160:
+                    parser_advance()
+            if par_kind_get() == 143:
+                parser_advance()  # consume '}'
+            return decl_use_import(first_name, brace_names, 0)
     # Support aliasing: name as alias
     val first_is_as: bool = (par_kind_get() == 6) and (par_text_get() == "as")
     if first_is_as:

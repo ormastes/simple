@@ -227,12 +227,28 @@ lazy_outline_equivalence 16/16.
 
 ---
 
-### M8 — G9+G13: `export X.*` and `export use X.{...}` (fixes ~61 files)
+### M8 — G9+G13: `export X.*` and `export use X.{...}` (fixes ~61 files) — DONE 2026-06-12
 
-**File:** `src/compiler/10.frontend/core/parser_decls.spl`  
-After `export`: `use` → re-export; `Ident.*` → glob re-export.  
-**Test:** `"export array_ops.*"` and `"export use std.base_encoding.base64.{base64_decode}"` → 0 errors each.  
-**Docker:** `bin/simple check src/lib/common/json/__init__.spl`
+Landed in `2c14e2af67c` (local line) / grafted to origin. Dispatch:
+`parser_decls_part2.spl:241` (export kind 26) → `parse_export_decl()` in
+`parser_decls_use.spl:129`; two new branches there handle `export use path.{…}`
+(delegates to the existing use-decl path → DECL_USE) and `export Ident(.Ident)*.*`
+glob (→ DECL_EXPORT / decl_export_names).
+
+Verified: glob, single/multi-name `export use`, plain `export foo`, M7
+spot-check all `parser_has_errors()=false`; control TRUE;
+lazy_outline_equivalence 16/16.
+
+**WATCH ITEM (semantic, for M12):** `export use` is encoded as a PLAIN
+`decl_use_import` — the agent reports the Rust seed treats `export use` and
+`use` identically at AST level, but the E0410 sweep history says plain `use`
+shims re-export nothing while `export use` does. If that holds at resolver
+level, the lean encoding drops re-export semantics and __init__-style hub
+modules will hit E0410 once delegation is removed. Re-test at M12 with an
+in-process `check` of `src/lib/common/json/__init__.spl` importers; if broken,
+DECL_USE needs an export flag transported through the flat_ast bridge.
+Multi-line `export use` with the brace list on the next line (test_extended.spl:34
+form) also remains untested.
 
 ---
 
