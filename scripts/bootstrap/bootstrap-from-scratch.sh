@@ -446,8 +446,48 @@ fi
 if [ "${deploy}" -eq 1 ]; then
   deploy_dir="bin/release/${PLATFORM}"
   mkdir -p "${deploy_dir}"
+
+  # Deploy gate: never swap bin/simple to the self-hosted stage4 binary unless
+  # a working seed driver exists at the delegate path. Without it the stage4
+  # self-exec guard blocks `bin/simple test` host-wide (see
+  # doc/08_tracking/bug/stage4_deploy_no_seed_test_runner_blocked_2026-06-11.md).
+  seed_probe() {
+    [ -x "$1" ] || return 1
+    out="$(setsid timeout 30 "$1" -c 'print(1+1)' 2>/dev/null)" || return 1
+    [ "${out}" = "2" ]
+  }
+  seed_delegate="${deploy_dir}/simple_seed"
+  if ! seed_probe "${seed_delegate}"; then
+    seed_src=""
+    for cand in src/compiler_rust/target/bootstrap/simple \
+                src/compiler_rust/target/release/simple; do
+      if seed_probe "${cand}"; then seed_src="${cand}"; break; fi
+    done
+    if [ -z "${seed_src}" ]; then
+      echo "ERROR: deploy refused — no working seed driver for ${seed_delegate}." >&2
+      echo "  Build one first: cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" >&2
+      exit 1
+    fi
+    install -m755 "${seed_src}" "${seed_delegate}"
+    echo "Installed probed seed delegate: ${seed_src} -> ${seed_delegate}"
+  fi
+
+  prev_bin="${deploy_dir}/simple.pre_deploy"
+  [ -x "${deploy_dir}/simple" ] && cp "${deploy_dir}/simple" "${prev_bin}"
   install -m755 "${full_bin}" "${deploy_dir}/simple"
   echo "Deployed full CLI binary to ${deploy_dir}/simple"
+
+  # Post-swap smoke: the deployed binary must evaluate code; restore on failure.
+  smoke_out="$(setsid timeout 30 "${deploy_dir}/simple" -c 'print(1+1)' 2>/dev/null)"
+  if [ "${smoke_out}" != "2" ]; then
+    echo "ERROR: deployed binary failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
+    if [ -x "${prev_bin}" ]; then
+      mv "${prev_bin}" "${deploy_dir}/simple"
+      echo "Restored previous binary to ${deploy_dir}/simple" >&2
+    fi
+    exit 1
+  fi
+  rm -f "${prev_bin}"
 
   # Deploy MCP servers if they were built successfully
   if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then

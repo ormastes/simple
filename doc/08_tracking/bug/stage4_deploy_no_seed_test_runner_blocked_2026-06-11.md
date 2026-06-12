@@ -1,7 +1,7 @@
 # stage4 deploy left no seed driver — `bin/simple test` blocked host-wide
 
 Date: 2026-06-11
-Status: resolved (2026-06-12 — seed rebuilt; deploy-gate suggestion still open)
+Status: resolved (2026-06-12 — seed rebuilt; deploy-gate implemented in bootstrap-from-scratch.sh)
 Owner: stage4 deploy lane
 
 ## Resolution (2026-06-12)
@@ -20,7 +20,11 @@ Verified: `setsid timeout 30 bin/simple -c "print(1+1)"` → 2;
 `bin/simple test` runs again via seed delegation (engine2d lane re-verified:
 directx 18/18, order 4/4, cuda 7/7, rocm 7/7, acceleration 24/24, vulkan
 processing 22/22, vulkan drawing 22/22). The suggested deploy-gate fix
-(refuse to swap bin/simple without a working probed seed) remains open.
+(refuse to swap bin/simple without a working probed seed) is implemented:
+`bootstrap-from-scratch.sh --deploy` now probes the `simple_seed` delegate
+(installing it from a probed cargo build if absent), refuses the swap when no
+working seed exists, and smoke-tests the deployed binary post-swap with
+automatic restore of the previous binary on failure.
 
 ## Summary
 
