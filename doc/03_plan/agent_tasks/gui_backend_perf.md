@@ -264,6 +264,9 @@ Updated: 2026-06-11
 - this commit -- Browser paint scene bridge allocation tightening:
   Paint command conversion now pre-counts emitted scene commands and fills an
   exact-size command array instead of push-growing during the hot bridge loop.
+- this commit -- WM Draw IR composition allocation tightening:
+  Window-layer ordering and final Draw IR batch assembly now use exact-size
+  buffers instead of repeatedly grow-copying arrays during scene projection.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

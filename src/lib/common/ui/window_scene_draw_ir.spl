@@ -62,23 +62,31 @@ fn _wm_draw_ir_window_box(window: SharedWmWindow, component_id: text, part: text
         computed_style
     )
 
-fn _wm_draw_ir_push_window_in_order(windows: [SharedWmWindow], window: SharedWmWindow) -> [SharedWmWindow]:
-    var ordered: [SharedWmWindow] = []
-    var inserted = false
-    for current in windows:
-        if not inserted and window.z_index < current.z_index:
-            ordered = ordered.push(window)
-            inserted = true
-        ordered = ordered.push(current)
-    if not inserted:
-        ordered = ordered.push(window)
-    ordered
-
 fn _wm_draw_ir_visible_windows_by_layer(scene: SharedWmScene) -> [SharedWmWindow]:
-    var ordered: [SharedWmWindow] = []
+    var visible_count = 0
     for window in scene.windows:
         if not window.minimized:
-            ordered = _wm_draw_ir_push_window_in_order(ordered, window)
+            visible_count = visible_count + 1
+    if visible_count == 0:
+        return []
+    var ordered: [SharedWmWindow] = [scene.windows[0]; visible_count]
+    var ordered_count = 0
+    for window in scene.windows:
+        if not window.minimized:
+            var insert_at = ordered_count
+            var probe = 0
+            while probe < ordered_count:
+                if insert_at == ordered_count and window.z_index < ordered[probe].z_index:
+                    insert_at = probe
+                probe = probe + 1
+            var shift = ordered_count
+            while shift > insert_at:
+                ordered[shift] = ordered[shift - 1]
+                shift = shift - 1
+            ordered[insert_at] = window
+            ordered_count = ordered_count + 1
+    if ordered_count != visible_count:
+        panic("WM Draw IR visible window count mismatch: wrote {ordered_count}, expected {visible_count}")
     ordered
 
 fn _wm_draw_ir_desktop_batch(scene: SharedWmScene, backend_target: text) -> DrawIrBatch:
@@ -123,10 +131,17 @@ fn _wm_draw_ir_window_batch(window: SharedWmWindow, backend_target: text) -> Dra
     )
 
 fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarModel, backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
-    var batches: [DrawIrBatch] = []
-    batches = batches.push(_wm_draw_ir_desktop_batch(scene, backend_target))
-    batches = batches.push(_wm_draw_ir_chrome_batch(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count))
+    val desktop_batch = _wm_draw_ir_desktop_batch(scene, backend_target)
     val windows = _wm_draw_ir_visible_windows_by_layer(scene)
+    var batches: [DrawIrBatch] = [desktop_batch; windows.len() + 2]
+    batches[0] = desktop_batch
+    batches[1] = _wm_draw_ir_chrome_batch(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count)
+    var batch_idx = 2
     for window in windows:
-        batches = batches.push(_wm_draw_ir_window_batch(window, backend_target))
+        if batch_idx >= batches.len():
+            panic("WM Draw IR batch count underflow: batch index {batch_idx} >= batch count {batches.len()}")
+        batches[batch_idx] = _wm_draw_ir_window_batch(window, backend_target)
+        batch_idx = batch_idx + 1
+    if batch_idx != batches.len():
+        panic("WM Draw IR batch count mismatch: wrote {batch_idx}, expected {batches.len()}")
     draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, batches)
