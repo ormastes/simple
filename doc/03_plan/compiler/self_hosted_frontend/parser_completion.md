@@ -182,12 +182,19 @@ lazy_outline_equivalence 16/16.
 
 ---
 
-### M5 — G8: `self` as first parameter name (fixes ~38 files)
+### M5 — G8: `self` as first parameter name (fixes ~38 files) — DONE 2026-06-12
 
-**File:** `src/compiler/10.frontend/core/parser_decls_part1.spl`  
-Accept `self` as a valid param name (same handling as `me`).  
-**Test:** `"fn to_string(self) -> text: \"x\""` in class body → 0 errors.  
-**Docker:** `bin/simple check src/lib/common/color/types.spl`
+Landed in `dc5ab4e0561` (local line) / grafted to origin. `self` is keyword kind
+38 (`TOK_KW_SELF`, tokens.spl:73). The free-fn path already accepted it via
+`parser_expect_param_name()` (parser_decls_part1.spl:302,318,367,382); the gap
+was the CLASS METHOD path — `parse_class_body_method()` in
+`parser_decls_use.spl:259,273` used raw `parser_expect(6)` at both the
+first-param and loop-param sites. Fix: route both through
+`parser_expect_param_name()` (import added line 18).
+
+Verified: bare `fn to_string(self)`, `fn f(self, x: i64)` in class bodies, and
+typed free-fn `fn free_fn(self: i64)` all `parser_has_errors()=false`; control
+TRUE; M1 spot-check green; lazy_outline_equivalence 16/16.
 
 ---
 
