@@ -4,12 +4,19 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
+- **Total Features:** 2
+- **Complete Documentation:** 2 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 163
+- **Total Lines:** 218
+- **Warnings:** 1
 
 ---
+
+## Language / Concurrency (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Concurrency API Misuse System Contract](test/03_system/feature/usage/concurrency_api_misuse_spec.md) | Active | N/A | 6 | 40% | 55 lines |
 
 ## Runtime Concurrency (1 features)
 

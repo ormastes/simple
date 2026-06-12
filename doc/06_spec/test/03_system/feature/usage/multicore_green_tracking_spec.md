@@ -307,7 +307,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -344,6 +344,7 @@ step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=6")
 expect(row).to_contain("task_spawn approved")
+expect(row).to_contain("multicore_green_spawn_sliced approved with public_multicore_green_sliced_result=19")
 expect(row).to_contain("task_spawn_wrong_surface_import.spl rejects OS-thread facade")
 expect(row).to_contain("multicore_green_wrong_surface_import.spl rejects OS-thread facade")
 step("Verify negative profile contract cases stay release-visible")
