@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 79
-- pass count: 79
+- fixtures: 80
+- pass count: 80
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -102,6 +102,7 @@ pixels, or text antialiasing normalization.
 | `80_flex_gap_justify_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/80_flex_gap_justify_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/80_flex_gap_justify_end_structural_report.sdn` |
 | `81_flex_column_gap_justify_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/81_flex_column_gap_justify_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/81_flex_column_gap_justify_end_structural_report.sdn` |
 | `82_flex_gap_align_items_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/82_flex_gap_align_items_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/82_flex_gap_align_items_end_structural_report.sdn` |
+| `83_flex_auto_margin_align_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/83_flex_auto_margin_align_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/83_flex_auto_margin_align_center_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -190,3 +191,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `80_flex_gap_justify_end` | 0 | 0.000 | `` |
 | `81_flex_column_gap_justify_end` | 0 | 0.000 | `` |
 | `82_flex_gap_align_items_end` | 0 | 0.000 | `` |
+| `83_flex_auto_margin_align_center` | 0 | 0.000 | `` |
