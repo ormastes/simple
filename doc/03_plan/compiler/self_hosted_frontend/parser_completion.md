@@ -829,6 +829,35 @@ incremental per-file result writes survive timeouts.
   real match-stmt + match-expr + compound assign), g32_file_probe.spl
   (selector.spl end-to-end), m11e/m12a batteries for regression.
 
+### M11g — next gap wave (from rebuilt-stage4 docker check, 855→510 errors) — IN PROGRESS 2026-06-12
+
+Rebuild with M11d/e/f+M12a cut the in-process check from 855 to 510 parser
+errors, but NEW blocker: SIGSEGV (rc=139) in flat-bridge on
+`src/app/debug/remote/feature/features.spl` (solo-reproducible, 63 errors then
+crash; M11c binary did not crash — recovery now produces partial-AST shapes
+the bridge reads unguarded; same class as compiled_array_oob_read_segfault
+bug doc; interpreted twin = "index 0 but length 0" at bridge entry, verified
+truly pre-existing with BOTH pre-M12a parser+bridge swapped in). Bridge-OOB
+fix delegated (agent in flight).
+
+Gap classes mined from check_m11f.log + solo log:
+- **G34** `::` path separator (`FeatureId::RecordStart`) — seed ACCEPTS it
+  (parity required); bulk of the 172× "unexpected ':' in expression".
+- **G35** dotted type names in annotations (`json_value: json.Value`) —
+  type parser rejects `Module.Type`; cascade accounts for most of the
+  `.`/`)`/`->`/`:` classes (e.g. src/app/sdn/commands.spl:230).
+- **G36** main_lazy_json.spl `,`(52×)/`]`(11×) class — to sample.
+- **G37** render_adapter.spl "index expression cannot be an assignment,
+  comparison, or logical expression inside []" (6×) — to sample.
+
+ALSO: interpreted parse_module is superlinear in file size AND degrades per
+call (selector.spl prefixes: 20→<1s, 40→2s, 80→6s, 160→256s; identical
+40-line source parsed twice in one process: 69s then 124s — heap aging).
+A/B probe cleared G32: `and`/`&&`/`&`/`||` conditions all within the aging
+trend. "Hangs" in sweeps were timeouts, not loops. Interpreted host
+pre-sweep retired; compiled stage4 docker check is the loop gate now.
+Recorded as doc/08_tracking/bug/interp_parse_superlinear_2026-06-12.md.
+
 ### M12 — Flat-bridge hardening + remove delegation
 
 **Files:** `src/compiler/10.frontend/flat_ast_bridge_part1.spl`, `flat_ast_bridge_part2.spl`
