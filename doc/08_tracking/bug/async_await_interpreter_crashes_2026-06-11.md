@@ -1,6 +1,6 @@
 # Async/Await Interpreter Crashes - 2026-06-11
 
-Status: partially-fixed (2026-06-12) — B1/B2(await) VERIFIED FIXED; B3(generator SIGILL) FIXED IN SEED (2026-06-12) — exit 132 eliminated, JIT compile_yield emits safe NIL return; B3b(actor HIR scope) FIXED IN SEED — pending redeploy; B4(spawn SIGABRT) VERIFIED FIXED via E6; B5(Promise/FutureValue) DOCUMENTED-CANONICAL — behavior pinned by 7 Rust regression tests (S8, 2026-06-11); B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
+Status: partially-fixed (2026-06-12) — B1/B2(await) VERIFIED FIXED; B3(generator SIGILL) FIXED IN SEED (2026-06-12) — exit 132 eliminated, JIT compile_yield emits safe NIL return; B3 for-in SIGSEGV FIXED IN SEED (2026-06-12) — run_file_jit detects Yield in MIR and falls back to interpreter before dereferencing null; B3b(actor HIR scope) FIXED IN SEED — pending redeploy; B4(spawn SIGABRT) VERIFIED FIXED via E6; B5(Promise/FutureValue) DOCUMENTED-CANONICAL — behavior pinned by 7 Rust regression tests (S8, 2026-06-11); B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
 
 **Fixed 2026-06-11 (commit 861e29bc99):** the SIGSEGV had already become silent
 corruption (`await f()` always yielded 3 = NIL bit pattern in JIT mode; a
@@ -83,9 +83,22 @@ declarations because `lower_generator` is only called for outlined closure bodie
 - `src/compiler_rust/compiler/src/hir/lower/tests/async_desugar_tests.rs`: 2 new regression tests
   (`test_generator_fn_mir_lower_succeeds_single_yield`, `test_generator_fn_mir_lower_succeeds_two_yields`)
 
-**Remaining gap:** `for x in gen_counter()` causes exit 139 (segfault) — for-in iterator
-dispatch over generator objects is a separate unimplemented feature, not part of B3.
-Top-level `gen fn` calls via `gen_counter()` exit 0 cleanly.
+**Remaining gap (SEGFAULT FIXED 2026-06-12):** `for x in gen_counter()` previously caused
+exit 139 (SIGSEGV) in JIT mode — the JIT compiled `gen fn` to a NIL return, then
+`rt_for_iterable(0)` / `rt_array_len(0)` dereferenced a null pointer.
+
+Fix: `run_file_jit` in `src/compiler_rust/driver/src/exec_core.rs` now detects any `Yield`
+instruction in the MIR module and returns `Err(...)` before calling `compile_module`, which
+triggers the existing JIT-fallback-to-interpreter path in `run_file_with_args`.
+Result: `for x in gen_counter()` now exits 1 cleanly ("cannot iterate over this type") instead
+of crashing. Top-level `gen_counter()` calls still exit 0 cleanly via interpreter fallback.
+
+Regression test added: `exec_core::tests::generator_yield_detected_in_mir_module`
+(in `src/compiler_rust/driver/src/exec_core.rs`) — green.
+
+**Still open (deeper feature gap):** the interpreter itself does not support `for x in gen()` —
+it returns "cannot iterate over this type". Full generator iteration (`for x in gen fn`) is a
+separate unimplemented feature tracked under S7.
 
 **Integration behaviours still blocked (S7):** the following `async_integration_spec`
 scenarios remain declaration-only until for-in + generator iteration is fully wired:
