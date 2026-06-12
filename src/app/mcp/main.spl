@@ -79,6 +79,11 @@ val NL = "\n"
 # MCP log level (protocol-level, not debug log)
 var MCP_LOG_LEVEL = "info"
 
+# Active tool set for advertisement ("all" | "core").
+# Controlled by SIMPLE_MCP_TOOL_SET env var or --tool-set=<set> argv flag.
+# Default is "all" — existing clients are never affected unless they opt in.
+var _MCP_TOOL_SET = "all"
+
 # Tools/list response cache (built on first request, reused thereafter)
 var _MCP_TOOLS_LIST_CACHE = ""
 
@@ -157,17 +162,57 @@ fn mcp_get_cli_args() -> [text]:
         i = i + 1
     args
 
+# --- Tool set selection ---
+
+# Return the active tool set name ("all" or "core").
+fn _mcp_get_tool_set() -> text:
+    _MCP_TOOL_SET
+
+# Read tool-set selection from environment and argv.
+# Env var SIMPLE_MCP_TOOL_SET ("core" | "all") is checked first;
+# --tool-set=<set> argv flag overrides it.  Unknown values are silently ignored
+# so "all" is always the safe fallback.
+fn _mcp_init_tool_set(args: [text]):
+    val env_set = env_get("SIMPLE_MCP_TOOL_SET") ?? ""
+    if env_set == "core" or env_set == "all":
+        _MCP_TOOL_SET = env_set
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--tool-set="):
+            val v = arg.replace("--tool-set=", "")
+            if v == "core" or v == "all":
+                _MCP_TOOL_SET = v
+        i = i + 1
+
+# Strip --tool-set=... flags from the arg list so the unknown-arg check in
+# main() does not reject them.
+fn mcp_strip_tool_set_args(args: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if not arg.starts_with("--tool-set="):
+            out.push(arg)
+        i = i + 1
+    out
+
 # --- Tool registration helpers ---
 
 # Build an inputSchema JSON object from pre-built properties and required arrays.
 fn _mcp_input_schema(props: text, req: text) -> text:
     "{\"type\":\"object\",\"properties\":" + props + ",\"required\":" + req + "}"
 
-# Lazily build and cache the tools/list result JSON.
+# Lazily build and cache the tools/list result JSON for the active tool set.
+# "all" path is byte-identical to the original — default behavior unchanged.
+# "core" delegates to the T1 contract function _mcp_tools_list_json_for_set.
 fn _mcp_tools_list_result() -> text:
     if _MCP_TOOLS_LIST_CACHE != "":
         return _MCP_TOOLS_LIST_CACHE
-    _MCP_TOOLS_LIST_CACHE = _mcp_static_tools_result()
+    if _MCP_TOOL_SET == "core":
+        _MCP_TOOLS_LIST_CACHE = _mcp_tools_list_json_for_set("core")
+    else:
+        _MCP_TOOLS_LIST_CACHE = _mcp_static_tools_result()
     _MCP_TOOLS_LIST_CACHE
 
 fn _mcp_initialize_result() -> text:
@@ -297,7 +342,10 @@ fn main() -> i64:
         _mcp_error("mcp", log_opts.error)
         return 1
 
-    val args = mcp_clean_log_args(raw_args)
+    val args_log_stripped = mcp_clean_log_args(raw_args)
+    # Initialise active tool set from env var + argv before stripping the flag.
+    _mcp_init_tool_set(args_log_stripped)
+    val args = mcp_strip_tool_set_args(args_log_stripped)
     if args.len() > 0 and (args[0] == "--help" or args[0] == "-h" or args[0] == "help"):
         print_help_with_progress(log_opts.progress)
         return 0
@@ -314,7 +362,8 @@ fn main() -> i64:
     if args.len() > 0 and args[0] == "--probe":
         val probe_count = _mcp_probe_tool_count()
         val probe_hash = _mcp_probe_manifest_hash()
-        print "simple-mcp probe ok version={SERVER_VERSION} tools={probe_count} manifest_hash={probe_hash}"
+        val active_set = _mcp_get_tool_set()
+        print "simple-mcp probe ok version={SERVER_VERSION} tools={probe_count} manifest_hash={probe_hash} tool_set={active_set}"
         return 0
     if args.len() > 0:
         val message = "Unknown mcp option: {args[0]}"
@@ -418,3 +467,5 @@ fn main() -> i64:
         if response != "":
             _mcp_write_message(response)
     0
+
+export _mcp_get_tool_set
