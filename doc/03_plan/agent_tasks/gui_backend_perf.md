@@ -326,6 +326,10 @@ Updated: 2026-06-11
   Browser JS source execution now preallocates statement-bounded output and
   variable-store arrays, then returns compact output prefixes instead of
   grow-copying console and assignment arrays during startup script execution.
+- this commit -- browser text painter scan allocation tightening:
+  HTML text stripping, whitespace normalization, and wrapped-line extraction
+  now use exact-size buffers and compact prefixes instead of grow-copying text
+  arrays during corpus text layout.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
