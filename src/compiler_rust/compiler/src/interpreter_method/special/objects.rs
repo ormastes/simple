@@ -36,11 +36,17 @@ fn constructor_value_matches_type(value: &Value, ty: &Type) -> bool {
 }
 
 fn constructor_overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
-    if func.params.len() != values.len() {
+    let total_params = func.params.len();
+    let required_params = func.params.iter().filter(|p| p.default.is_none()).count();
+    let provided = values.len();
+
+    // Accept calls where required_params <= provided <= total_params.
+    // Exact-count matches score higher than default-fill matches (100-point bonus).
+    if provided < required_params || provided > total_params {
         return None;
     }
 
-    let mut score = 0usize;
+    let mut score = if provided == total_params { 100usize } else { 0usize };
     for (param, value) in func.params.iter().zip(values.iter()) {
         if let Some(ty) = &param.ty {
             if !constructor_value_matches_type(value, ty) {
@@ -242,4 +248,94 @@ pub fn handle_constructor_methods(
         .with_code(codes::UNKNOWN_CLASS)
         .with_help("check that the class exists and is spelled correctly");
     Err(CompileError::semantic_with_context(msg, ctx))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    /// Run source, return exit code (i32). `main = <expr>` sets exit code.
+    fn eval_exit(source: &str) -> i32 {
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse");
+        evaluate_module(&module.items).expect("eval")
+    }
+
+    fn eval_err(source: &str) -> bool {
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse");
+        evaluate_module(&module.items).is_err()
+    }
+
+    // Regression: static method with default param called with fewer args must not
+    // produce "unknown static method". Bug: constructor_overload_score required exact
+    // arg-count match, ignoring default parameter values.
+    #[test]
+    fn static_method_with_default_param_called_with_fewer_args() {
+        let result = eval_exit(r#"
+class Probe:
+    static fn make(a: i64, b: i64 = 0) -> i64:
+        a + b
+main = Probe.make(5)
+"#);
+        assert_eq!(result, 5, "make(5) should use default b=0, returning 5");
+    }
+
+    // Exact-count call still works and is preferred over default-fill overload.
+    #[test]
+    fn static_method_exact_count_still_works() {
+        let result = eval_exit(r#"
+class Probe:
+    static fn make(a: i64, b: i64 = 0) -> i64:
+        a + b
+main = Probe.make(3, 4)
+"#);
+        assert_eq!(result, 7, "make(3, 4) should return 7");
+    }
+
+    // Exact match beats default-fill when both overloads could match.
+    #[test]
+    fn exact_match_overload_preferred_over_default_fill() {
+        // Two overloads: make(a) and make(a, b=0).
+        // Calling make(5) should prefer the 1-param exact overload (score 100+2=102)
+        // over the 2-param default-fill overload (score 0+2=2).
+        let result = eval_exit(r#"
+class Probe:
+    static fn make(a: i64) -> i64:
+        a * 10
+    static fn make(a: i64, b: i64 = 0) -> i64:
+        a + b
+main = Probe.make(5)
+"#);
+        assert_eq!(result, 50, "exact 1-param overload should win: 5*10=50");
+    }
+
+    // Too-few args (all required) must still error.
+    #[test]
+    fn static_method_too_few_required_args_errors() {
+        assert!(
+            eval_err(r#"
+class Probe:
+    static fn make(a: i64, b: i64) -> i64:
+        a + b
+main = Probe.make(5)
+"#),
+            "calling make(5) when both params are required must error"
+        );
+    }
+
+    // Too-many args must still error.
+    #[test]
+    fn static_method_too_many_args_errors() {
+        assert!(
+            eval_err(r#"
+class Probe:
+    static fn make(a: i64) -> i64:
+        a
+main = Probe.make(1, 2)
+"#),
+            "calling make(1, 2) when only 1 param exists must error"
+        );
+    }
 }
