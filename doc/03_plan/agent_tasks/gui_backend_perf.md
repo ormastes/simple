@@ -386,6 +386,10 @@ Updated: 2026-06-11
   BrowserSession UI-access link label stripping now reuses the stable HTML
   snippet length while removing inline tags, with focused coverage for nested
   inline link text in source order.
+- this commit -- Browser session UI-access snapshot array preallocation:
+  BrowserSession UI-access link nodes and fixed control snapshots now count and
+  fill exact-size node arrays, removing the remaining optimizer-reported
+  push-growth findings while preserving link filtering and source order.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

@@ -41,23 +41,27 @@ browser_session_ui_access_spec -> std
 #### strips inline tags from link labels in source order
 
 - var session = BrowserSession new
+   - Expected: snapshot.nodes.len() equals `9`
    - Expected: _link_text(snapshot, "link_0") equals `Alpha Beta Gamma`
+   - Expected: _link_text(snapshot, "link_1") equals `Docs`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var session = BrowserSession.new()
 session.current_url = "https://example.com/base/index.html"
 session.current_title = "Links"
-session.current_body_html = "<a href=\"next.html\">Alpha <strong>Beta</strong> <span>Gamma</span></a>"
+session.current_body_html = "<a href=\"next.html\">Alpha <strong>Beta</strong> <span>Gamma</span></a><a href=\"\">Skip</a><a href=\"../guide.html\"><em>Docs</em></a>"
 
 val snapshot = session.ui_access_snapshot()
+expect(snapshot.nodes.len()).to_equal(9)
 expect(_link_text(snapshot, "link_0")).to_equal("Alpha Beta Gamma")
+expect(_link_text(snapshot, "link_1")).to_equal("Docs")
 ```
 
 </details>
