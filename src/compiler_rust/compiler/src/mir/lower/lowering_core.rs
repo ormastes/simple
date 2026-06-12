@@ -1157,7 +1157,20 @@ impl<'a> MirLowerer<'a> {
 
         for func in &hir.functions {
             let mir_func = self.lower_function(func)?;
-            module.functions.push(mir_func);
+            // B3 fix: if this function contains Yield instructions (i.e. it is a
+            // `gen fn` declaration), apply lower_generator so that generator_states
+            // and generator_complete are populated before codegen.  Without this the
+            // JIT emitter's compile_yield falls through to an unconditional trap
+            // (exit 132 / SIGILL) because generator_state_map is None.
+            let has_yield = mir_func.blocks.iter().any(|b| {
+                b.instructions.iter().any(|i| matches!(i, MirInst::Yield { .. }))
+            });
+            if has_yield {
+                let lowered = crate::mir::lower_generator(&mir_func, mir_func.entry_block);
+                module.functions.push(lowered.rewritten);
+            } else {
+                module.functions.push(mir_func);
+            }
         }
 
         // Apply AOP weaving if there are advice declarations (#1000-1050)

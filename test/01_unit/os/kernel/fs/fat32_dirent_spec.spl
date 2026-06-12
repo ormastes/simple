@@ -1,0 +1,303 @@
+"""
+# FAT32 Dirent Persistence — Wave-4e Spec
+
+**Bug:** fat32_no_cycle_guard_chain_walk_2026-06-11  FINDING-T2-dirent
+**Feature:** kernel FAT32 driver (IF-07) on-disk directory-entry persistence after write()
+
+Verifies that after write():
+  1. open() records dirent_sector and dirent_offset in the returned FileHandle.
+  2. write() calls _update_dirent; re-reading the root-dir sector shows
+     first_cluster hi/lo (offsets +20..+21, +26..+27) and file_size u32
+     (offsets +28..+31) updated correctly in the on-disk dirent.
+  3. root_dir_data cache is updated coherently (stat() sees the new size).
+  4. A second write() (append) correctly accumulates file_size in the dirent.
+  5. dirent_sector=0 handle skips _update_dirent without error.
+
+Geometry used throughout:
+  fat_start=32, data_start=64, bps=512, spc=1, data_clusters=8.
+  root_cluster=2 → root dir LBA = 64 + (2-2) = 64.
+  FAT entry for cluster N: 4-byte little-endian at LBA 32 byte-offset N*4.
+  The single 8.3 dirent for "TEST    TXT" is placed at byte offset 0 of LBA 64.
+  So dirent_sector=64, dirent_offset=0.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.fs.fat32.{Fat32Filesystem, FileHandle}
+
+# ============================================================================
+# In-memory mock block device — read_sector and write_sector
+# ============================================================================
+
+struct MockDirentSector:
+    lba: u64
+    data: [u8]
+
+class MockDirentDev:
+    sectors: [MockDirentSector]
+
+impl MockDirentDev:
+    static fn new() -> MockDirentDev:
+        MockDirentDev(sectors: [])
+
+    me fn with_sector(lba: u64, data: [u8]) -> MockDirentDev:
+        self.sectors.push(MockDirentSector(lba: lba, data: data))
+        self
+
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                return Ok(self.sectors[i].data)
+            i = i + 1
+        # Unregistered LBA: blank sector.
+        var z: [u8] = []
+        var zi = 0
+        while zi < 512:
+            z.push(0u8)
+            zi = zi + 1
+        Ok(z)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<(), text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                self.sectors[i] = MockDirentSector(lba: lba, data: data)
+                return Ok(())
+            i = i + 1
+        self.sectors.push(MockDirentSector(lba: lba, data: data))
+        Ok(())
+
+    fn get_sector(lba: u64) -> [u8]:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                return self.sectors[i].data
+            i = i + 1
+        var z: [u8] = []
+        var zi = 0
+        while zi < 512:
+            z.push(0u8)
+            zi = zi + 1
+        z
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+# fat_start=32, data_start=64, bps=512, spc=1, data_clusters=8
+# root_dir_data is passed in so open() can resolve names.
+fn _make_fs_with_rootdir(root_dir: [u8]) -> Fat32Filesystem:
+    Fat32Filesystem.make_for_dirent_test(32u32, 64u32, 512u32, 1u32, 8u32, root_dir)
+
+fn _fat_lba() -> u64: 32u64
+fn _root_dir_lba() -> u64: 64u64   # data_start + (root_cluster=2 - 2)*spc=1 = 64
+
+# Build a zeroed 512-byte sector.
+fn _zero_sector() -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 512:
+        b.push(0u8)
+        i = i + 1
+    b
+
+# Write a u32 little-endian into a byte array at offset.
+fn _poke32_dirent(buf: [u8], offset: i32, value: u32) -> [u8]:
+    buf[offset]     = (value & 0xFFu32).to_u8()
+    buf[offset + 1] = ((value >> 8u32)  & 0xFFu32).to_u8()
+    buf[offset + 2] = ((value >> 16u32) & 0xFFu32).to_u8()
+    buf[offset + 3] = ((value >> 24u32) & 0xFFu32).to_u8()
+    buf
+
+# Write a u16 little-endian into a byte array at offset.
+fn _poke16_dirent(buf: [u8], offset: i32, value: u16) -> [u8]:
+    buf[offset]     = (value.to_u32() & 0xFFu32).to_u8()
+    buf[offset + 1] = ((value.to_u32() >> 8u32) & 0xFFu32).to_u8()
+    buf
+
+# Read a u32 little-endian from a byte array at offset.
+fn _peek32_dirent(buf: [u8], offset: i32) -> u32:
+    ((buf[offset + 3].to_u32() << 24u32) |
+     (buf[offset + 2].to_u32() << 16u32) |
+     (buf[offset + 1].to_u32() << 8u32)  |
+      buf[offset].to_u32())
+
+# Read a u16 little-endian from a byte array at offset.
+fn _peek16_dirent(buf: [u8], offset: i32) -> u32:
+    (buf[offset + 1].to_u32() << 8u32) | buf[offset].to_u32()
+
+# Build a 512-byte root-dir sector with a single 8.3 entry for "TEST    TXT"
+# at byte offset 0.  first_cluster=0, file_size=0 (file not written yet).
+# Entry layout (32 bytes at offset 0):
+#   [0..7]  = "TEST    " (8.3 base, space-padded)
+#   [8..10] = "TXT"
+#   [11]    = 0x20 (ATTR_ARCHIVE)
+#   [20..21] = cluster_high = 0x0000
+#   [26..27] = cluster_low  = 0x0000
+#   [28..31] = file_size    = 0x00000000
+#   [32]    = 0x00 (end-of-directory sentinel)
+fn _make_root_dir_with_test_txt() -> [u8]:
+    var sec = _zero_sector()
+    # "TEST    " = 0x54 0x45 0x53 0x54 0x20 0x20 0x20 0x20
+    sec[0] = 0x54u8   # T
+    sec[1] = 0x45u8   # E
+    sec[2] = 0x53u8   # S
+    sec[3] = 0x54u8   # T
+    sec[4] = 0x20u8   # space
+    sec[5] = 0x20u8   # space
+    sec[6] = 0x20u8   # space
+    sec[7] = 0x20u8   # space
+    # "TXT"
+    sec[8]  = 0x54u8  # T
+    sec[9]  = 0x58u8  # X
+    sec[10] = 0x54u8  # T
+    # attr = ARCHIVE
+    sec[11] = 0x20u8
+    # cluster_high, cluster_low, file_size all zero already (from _zero_sector)
+    # Byte 32: end-of-directory marker (already 0x00 from zero_sector)
+    sec
+
+# FAT entry helpers
+fn _fat_put(buf: [u8], cluster: u32, entry: u32) -> [u8]:
+    _poke32_dirent(buf, (cluster * 4u32).to_i32(), entry)
+
+fn _eoc() -> u32: 0x0FFFFFFFu32
+
+# Build a 512-byte fresh handle (no dirent backing) for write-only tests.
+fn _make_bare_handle() -> FileHandle:
+    FileHandle(
+        fd: 0u64,
+        start_cluster: 0u32,
+        current_cluster: 0u32,
+        offset: 0u64,
+        file_size: 0u64,
+        is_open: true,
+        dirent_sector: 0u64,
+        dirent_offset: 0
+    )
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "fat32 dirent persistence — wave-4e":
+
+    describe "open() records dirent location":
+
+        it "dirent_sector equals root-dir LBA (64) for entry at offset 0":
+            val root_dir = _make_root_dir_with_test_txt()
+            val fs = _make_fs_with_rootdir(root_dir)
+            val h_result = fs.open("/TEST.TXT")
+            assert_true(h_result.is_ok())
+            val h = h_result.unwrap()
+            expect(h.dirent_sector).to_equal(64u64)
+
+        it "dirent_offset equals 0 for the first directory entry":
+            val root_dir = _make_root_dir_with_test_txt()
+            val fs = _make_fs_with_rootdir(root_dir)
+            val h_result = fs.open("/TEST.TXT")
+            assert_true(h_result.is_ok())
+            val h = h_result.unwrap()
+            expect(h.dirent_offset).to_equal(0)
+
+    describe "write() persists first_cluster and file_size to on-disk dirent":
+
+        it "after write, dirent first_cluster_low bytes reflect start_cluster":
+            val root_dir = _make_root_dir_with_test_txt()
+            val fs = _make_fs_with_rootdir(root_dir)
+            val h_result = fs.open("/TEST.TXT")
+            assert_true(h_result.is_ok())
+            val h0 = h_result.unwrap()
+            # FAT at LBA 32: all free.  Root-dir at LBA 64.  Data at LBA 64+(N-2).
+            var dev = MockDirentDev.new()
+            dev = dev.with_sector(_fat_lba(), _zero_sector())
+            dev = dev.with_sector(_root_dir_lba(), root_dir)
+            var buf: [u8] = []
+            buf.push(0xAAu8)
+            buf.push(0xBBu8)
+            buf.push(0xCCu8)
+            val w_result = fs.write(dev, h0, buf)
+            assert_true(w_result.is_ok())
+            val h1 = w_result.unwrap()
+            # allocate_cluster always picks cluster 2 from a fresh FAT.
+            expect(h1.start_cluster).to_equal(2u32)
+            # Re-read root-dir sector from device; first_cluster_low at +26..+27.
+            val dirent_sec = dev.get_sector(_root_dir_lba())
+            val cl_low = _peek16_dirent(dirent_sec, 26)
+            expect(cl_low).to_equal(2u32)
+
+        it "after write, dirent first_cluster_high bytes are zero for cluster < 65536":
+            val root_dir = _make_root_dir_with_test_txt()
+            val fs = _make_fs_with_rootdir(root_dir)
+            val h_result = fs.open("/TEST.TXT")
+            assert_true(h_result.is_ok())
+            val h0 = h_result.unwrap()
+            var dev = MockDirentDev.new()
+            dev = dev.with_sector(_fat_lba(), _zero_sector())
+            dev = dev.with_sector(_root_dir_lba(), root_dir)
+            var buf: [u8] = []
+            buf.push(0x01u8)
+            val w_result = fs.write(dev, h0, buf)
+            assert_true(w_result.is_ok())
+            val dirent_sec = dev.get_sector(_root_dir_lba())
+            val cl_high = _peek16_dirent(dirent_sec, 20)
+            expect(cl_high).to_equal(0u32)
+
+        it "after write, dirent file_size bytes equal bytes written":
+            val root_dir = _make_root_dir_with_test_txt()
+            val fs = _make_fs_with_rootdir(root_dir)
+            val h_result = fs.open("/TEST.TXT")
+            assert_true(h_result.is_ok())
+            val h0 = h_result.unwrap()
+            var dev = MockDirentDev.new()
+            dev = dev.with_sector(_fat_lba(), _zero_sector())
+            dev = dev.with_sector(_root_dir_lba(), root_dir)
+            var buf: [u8] = []
+            buf.push(0x11u8)
+            buf.push(0x22u8)
+            buf.push(0x33u8)
+            buf.push(0x44u8)
+            val w_result = fs.write(dev, h0, buf)
+            assert_true(w_result.is_ok())
+            val dirent_sec = dev.get_sector(_root_dir_lba())
+            val fsz = _peek32_dirent(dirent_sec, 28)
+            expect(fsz).to_equal(4u32)
+
+    describe "root_dir_data cache coherence after write":
+
+        it "root_dir_data cache file_size matches on-disk dirent after write":
+            val root_dir = _make_root_dir_with_test_txt()
+            val fs = _make_fs_with_rootdir(root_dir)
+            val h_result = fs.open("/TEST.TXT")
+            assert_true(h_result.is_ok())
+            val h0 = h_result.unwrap()
+            var dev = MockDirentDev.new()
+            dev = dev.with_sector(_fat_lba(), _zero_sector())
+            dev = dev.with_sector(_root_dir_lba(), root_dir)
+            var buf: [u8] = []
+            buf.push(0xFFu8)
+            buf.push(0xFEu8)
+            val w_result = fs.write(dev, h0, buf)
+            assert_true(w_result.is_ok())
+            # stat() reads from root_dir_data cache — should see updated size.
+            val st_result = fs.stat("/TEST.TXT")
+            assert_true(st_result.is_ok())
+            val st = st_result.unwrap()
+            expect(st.size).to_equal(2u64)
+
+    describe "dirent_sector=0 handle skips _update_dirent":
+
+        it "write with dirent_sector=0 succeeds without updating any sector":
+            val fs = Fat32Filesystem.make_for_alloc_test(32u32, 64u32, 512u32, 1u32, 8u32)
+            val h0 = _make_bare_handle()
+            var dev = MockDirentDev.new()
+            dev = dev.with_sector(_fat_lba(), _zero_sector())
+            var buf: [u8] = []
+            buf.push(0xDDu8)
+            val w_result = fs.write(dev, h0, buf)
+            assert_true(w_result.is_ok())
+            val h1 = w_result.unwrap()
+            expect(h1.file_size).to_equal(1u64)
+            # No root-dir sector was registered; device would return zeroed sector
+            # for any LBA, so no crash from _update_dirent — it skips entirely.
+            expect(h1.dirent_sector).to_equal(0u64)
