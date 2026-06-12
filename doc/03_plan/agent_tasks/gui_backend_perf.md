@@ -426,6 +426,10 @@ Updated: 2026-06-11
   BrowserSession UI-access link extraction and snapshot node construction now
   write into exact-size arrays, and inline tag stripping reuses the stable HTML
   length while preserving the browser controls/link action contract.
+- this commit -- Simple browser page form-helper loop tightening:
+  Hit testing, field lookup, form method lookup, and form pair serialization now
+  reuse stable field/target counts, with form serialization writing exact-size
+  pair arrays for the pure helper path independent of the baseline-red renderer spec.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
