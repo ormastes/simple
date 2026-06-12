@@ -294,6 +294,9 @@ Updated: 2026-06-11
   Dynamic-region marker scanning now reuses haystack/marker lengths and scans
   bounded slices directly instead of allocating a full tail substring before
   each marker lookup.
+- this commit -- WASM hello GUI marker/surface allocation tightening:
+  Generated-WASM GUI marker scanning now uses bounded direct scans, and surface
+  evidence pre-counts present surfaces before filling an exact-size list.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
