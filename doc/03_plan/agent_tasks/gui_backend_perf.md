@@ -274,6 +274,10 @@ Updated: 2026-06-11
   Scene projection, visible-window filtering, dragging, and focus transitions
   now fill exact-size window arrays instead of repeatedly grow-copying entries,
   and pointer hit-testing hoists the window count out of the scan loop.
+- this commit -- Window manager model allocation tightening:
+  Window replace, close, minimize, and focus transitions now size destination
+  arrays up front and fill them by index instead of push-growing during state
+  rebuilds.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
