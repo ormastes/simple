@@ -70,12 +70,11 @@
   worker is joined before post-join work and local result-array return. This
   native compile/run SSpec remains perf-sensitive.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
-  records that the checked-in `bin/release/simple` binary has drifted from the
-  current-source rebuilt `release` and `debug` compilers for the
-  resumable-stepper native probe. The helper-return probes are now fixed on the
-  rebuilt debug path, so rebuilt current-source artifacts remain the stronger
-  evidence until the checked-in release binary is refreshed to match current
-  source/runtime/compiler behavior.
+  records that the checked-in `bin/release/simple` wrapper currently points at
+  a missing `bin/release/x86_64-unknown-linux-gnu/simple` target in this
+  workspace. Current-source debug native regression specs are therefore the
+  stronger evidence until the checked-in release wrapper is refreshed to match
+  current source/runtime/compiler behavior.
 - `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
   regression-covers the standalone-native function-value loop-return path
   beneath the resumable-stepper lane.

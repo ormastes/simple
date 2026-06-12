@@ -9,73 +9,55 @@ Owner: multicore-green lane
 The checked-in `bin/release/simple` binary is no longer authoritative evidence
 for the hosted multicore-green fairness lane.
 
-Current-source rebuilt release artifacts and the checked-in release binary now
-disagree on the same probes:
+The checked-in release wrapper and current-source debug artifacts now disagree
+on the same lane:
 
 - checked-in `bin/release/simple`:
-  - helper-return function-value native probe passes
-  - resumable-stepper probe fails earlier at compile time with
-    `undefined symbol: rt_pool_is_done`
-- current-source rebuilt `src/compiler_rust/target/release/simple`:
-  - helper-return probes now compile and run successfully on both scalar and
-    object-returning shapes
-  - resumable-stepper probe compiles, but the native binary crashes with
-    `EXIT=139`
+  - wrapper exists, but its target
+    `bin/release/x86_64-unknown-linux-gnu/simple` is missing in this workspace
+  - it cannot run even `--version`, so it cannot be cited as hosted
+    multicore-green evidence
+- current-source `src/compiler_rust/target/debug/simple`:
+  - resumable-stepper hosted-native regression specs compile and run the probe
+    successfully with `EXIT=0`
+  - the historical blocker SSpec and the focused regression SSpec both pass
 
 ## Evidence
 
-Current-source rebuild:
+Current checked-in release wrapper:
 
 ```text
-cargo build --release -p simple-driver
-Finished `release` profile [optimized] target(s) in 2m 09s
+bin/release/simple --version
+bin/release/simple: line 7: /tmp/simple-mgreen-sliced-jj-1000/bin/release/x86_64-unknown-linux-gnu/simple: No such file or directory
 ```
 
-Current-source rebuilt helper-return probes:
+Current-source debug hosted-native regression evidence:
 
 ```text
-src/compiler_rust/target/release/simple compile build/tmp/fn_i64_helper.spl --native -o /tmp/fn_i64_helper_rel_fixed.bin
-Compiled ... -> /tmp/fn_i64_helper_rel_fixed.bin
+src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_resumable_stepper_native_regression_spec.spl --mode=interpreter --clean
+PASSED, 1 scenario
 
-/tmp/fn_i64_helper_rel_fixed.bin
-got=7
-EXIT=0
-
-src/compiler_rust/target/release/simple compile build/tmp/fn_struct_helper.spl --native -o /tmp/fn_struct_helper_rel_fixed.bin
-Compiled ... -> /tmp/fn_struct_helper_rel_fixed.bin
-
-/tmp/fn_struct_helper_rel_fixed.bin
-done=true
-value=7
-EXIT=0
+src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl --mode=interpreter --clean
+PASSED, 1 scenario
 ```
 
-Current-source rebuilt resumable-stepper probe:
+Repository state:
 
 ```text
-src/compiler_rust/target/release/simple compile build/test/multicore_green_resumable_stepper_native_blocker/resumable_stepper_probe.spl --native -o /tmp/resumable_stepper_probe_rebuilt_release.bin
-Compiled ... -> /tmp/resumable_stepper_probe_rebuilt_release.bin
-
-/tmp/resumable_stepper_probe_rebuilt_release.bin
-Segmentation fault (core dumped)
-EXIT=139
-```
-
-Checked-in `bin/release/simple` mismatch:
-
-```text
-bin/release/simple compile build/test/multicore_green_resumable_stepper_native_blocker/resumable_stepper_probe.spl --native -o /tmp/resumable_stepper_probe_release.bin
-error: codegen: undefined symbol: rt_pool_is_done
+bin/release/simple -> wrapper script
+bin/release/x86_64-unknown-linux-gnu/simple -> missing
+bin/simple -> absent
+src/compiler_rust/target/debug/simple -> present
 ```
 
 ## Why This Matters
 
-The fairness/preemption lane cannot rely on the checked-in release binary as
-proof of current behavior. Current-source rebuilt release and debug binaries are
-the stronger evidence for the remaining hosted-native blocker.
+The fairness/preemption lane cannot rely on the checked-in release wrapper as
+proof of current behavior. Current-source debug regression specs are the
+stronger evidence for hosted-native closure of the historical lower blockers.
 
 Until the source/runtime/compiler state is made consistent again:
 
-- current-source rebuilt release/debug probes are authoritative
+- current-source debug probes are authoritative in this workspace
 - checked-in `bin/release/simple` should be treated as stale lane evidence
   rather than a closure signal for multicore-green hosted parity

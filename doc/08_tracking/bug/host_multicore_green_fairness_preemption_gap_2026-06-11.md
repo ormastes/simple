@@ -118,11 +118,12 @@ Related historical host-side blockers:
   now records the closed helper-return regression that used to sit below the
   stepper path.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
-  records the newer evidence split: the checked-in `bin/release/simple` binary
-  is stale for this lane, while current-source rebuilt `release` and `debug`
-  artifacts are the stronger evidence for hosted-native regression checks.
-  The native symbol-collision sub-bug (`worker.1`) is fixed there, and rebuilt
-  helper-return and resumable-stepper probes now pass at runtime.
+  records the newer evidence split: the checked-in `bin/release/simple` wrapper
+  is stale for this lane because its platform target is missing in this
+  workspace, while current-source debug artifacts are the stronger evidence for
+  hosted-native regression checks. The native symbol-collision sub-bug
+  (`worker.1`) is fixed there, and debug-native helper-return and
+  resumable-stepper probes now pass at runtime.
 
 ## Current Evidence Boundary
 
