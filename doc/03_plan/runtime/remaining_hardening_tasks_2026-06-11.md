@@ -1,6 +1,12 @@
 # Remaining Hardening Tasks — Small-Task Replan (2026-06-11)
 
-## Status (updated 2026-06-11 evening)
+## FINAL STATUS (2026-06-12): all tasks closed or superseded
+
+Replan complete. Seed redeployed twice to the simple_seed delegate
+(B6 then B3b; B5 needed no production change). Remaining open items moved
+to their own bug docs: B3 generator interpreter-executor crash,
+seed static-method default params, FINDING-T2-dirent,
+selfhosted_mcp_binary_segfault (post stage4-parser work).
 
 | Task | Status | Commit |
 |------|--------|--------|
@@ -10,8 +16,8 @@
 | S4 worker.spl gc_boundary | DONE — whole http_server dir lints 0 | b039f331fb |
 | S5 seed B6 await type + SPIPE006 msg | DONE, seed redeployed to simple_seed | 829bbeb9c1 |
 | S6 seed B3/B3b desugar HIR scope | DONE — B3b FIXED; B3 rediagnosed: interpreter-executor crash, stays open | f1475ba7b7 |
-| S7 async_integration honest fill | in progress (after S8 redeploy; generator tests blocked on B3) | — |
-| S8 seed B5 Promise/FutureValue | in progress | — |
+| S7 async_integration honest fill | DONE 21/21 honest, 0 vacuous (B3-blocked scenarios listed in bug doc) | this commit |
+| S8 seed B5 Promise/FutureValue | DONE — DOCUMENTED-CANONICAL, 7 regression tests pin await behavior | 31fe3a3bede |
 | S9 FAT32 wave-4d allocator + Lean T7a–c | DONE alloc spec 9/9; open: FINDING-T2-dirent | c773d860f0 |
 | S10 stage4 broader validation | SUPERSEDED — parallel track deployed stage4 15:32 with 11/11 matrix (49e028bb31, d36ad61714); post-deploy S1–S9 verifications all ran through the deployed delegation chain. Remaining lean-parser coverage (1843/1855) is its own parser-completion plan. | — |
 

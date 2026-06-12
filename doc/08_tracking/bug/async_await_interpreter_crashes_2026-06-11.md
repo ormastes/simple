@@ -39,7 +39,7 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 | B5 | Promise vs FutureValue unreconciled in MIR executor | (c) Rust-seed | DOCUMENTED-CANONICAL (S8, 2026-06-11) | behavior pinned; 7 regression tests in async_gen_tests.rs green |
 | B6 | HIR hardcodes `TypeId::I64` for await result type | (c) Rust-seed | FIXED IN SEED — pending redeploy | S5 batch: `ty: operand_ty`; tests green |
 | C1 | Coverage gap: 7 specs are single-skip placeholders | (b)/(c) mixed | DOCUMENTED | see Coverage section below |
-| C2 | `async_integration_spec` has 21 hollow `expect(1).to_equal(1)` tests | (b) | DOCUMENTED | vacuous; needs real assertions when B3/B5 resolved |
+| C2 | `async_integration_spec` has 21 hollow `expect(1).to_equal(1)` tests | (b) | FILLED (S7, 2026-06-12) | 21/21 honest assertions; generator-blocked tests rewritten to pin declaration-level behaviour; 0 vacuous bodies remain |
 
 ## Summary
 
@@ -75,6 +75,17 @@ fn gen_counter():
 Fix required: in the interpreter execution layer (`src/compiler_rust/compiler/src/interpreter/`),
 handle `HirExprKind::Yield` correctly — set up generator state machine context
 before executing function body so yield doesn't abort. Authorized Rust change only.
+
+**Integration behaviours blocked by B3 (S7, 2026-06-12):** the following
+`async_integration_spec` scenarios remain unverifiable until B3 is fixed in the
+interpreter executor:
+- Generator value iteration from a spawn pipeline (calling a gen fn body from a green task)
+- Actor with generator method called at runtime (actor method containing yield)
+- `async fn` yielding from inside a generator body (mixed async+generator nesting)
+- Combined actor + generator + await full-pipeline execution (all four features together)
+
+These tests exist as structural/declaration-level assertions only (HIR registers correctly;
+execution is not attempted). See `test/01_unit/compiler/async/async_integration_spec.spl`.
 
 ### B3b — Actor HIR Scope Visibility (Rust-seed) — FIXED IN SEED (S6, 2026-06-11)
 
