@@ -1,6 +1,6 @@
 # Tauri Backend Specification
 
-> 1. Ok
+> <details>
 
 <!-- sdn-diagram:id=tauri_backend_spec.arch -->
 <details class="sdn-source">
@@ -28,7 +28,7 @@ tauri_backend_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,9 +41,9 @@ tauri_backend_spec -> common
 
 #### creates successfully
 
-1. Ok
+- Ok
    - Expected: backend.backend_name() equals `tauri`
-2. Err
+- Err
    - Expected: false is true
 
 
@@ -66,7 +66,7 @@ match result:
 
 #### reports correct capabilities
 
-1. Ok
+- Ok
    - Expected: has_capability(caps, Capability.Mouse) is true
    - Expected: has_capability(caps, Capability.Color) is true
    - Expected: has_capability(caps, Capability.Images) is true
@@ -74,7 +74,7 @@ match result:
    - Expected: has_capability(caps, Capability.Notification) is true
    - Expected: has_capability(caps, Capability.Touch) is false
    - Expected: backend.supports_touch() is false
-2. Err
+- Err
    - Expected: false is true
 
 
@@ -104,12 +104,12 @@ match result:
 
 #### models Android Tauri WebView as touch capable
 
-1. Ok
+- Ok
    - Expected: has_capability(caps, Capability.Touch) is true
    - Expected: backend.supports_touch() is true
    - Expected: backend.supports_mouse() is true
    - Expected: backend.backend_name() equals `tauri`
-2. Err
+- Err
    - Expected: false is true
 
 
@@ -136,12 +136,12 @@ match result:
 
 #### models iOS Tauri WebView as touch capable
 
-1. Ok
+- Ok
    - Expected: has_capability(caps, Capability.Touch) is true
    - Expected: backend.supports_touch() is true
    - Expected: backend.supports_images() is true
    - Expected: backend.backend_name() equals `tauri`
-2. Err
+- Err
    - Expected: false is true
 
 
@@ -168,10 +168,10 @@ match result:
 
 #### has correct viewport
 
-1. Ok
+- Ok
    - Expected: backend.viewport_width() equals `1280`
    - Expected: backend.viewport_height() equals `720`
-2. Err
+- Err
    - Expected: false is true
 
 
@@ -195,13 +195,13 @@ match result:
 
 #### initializes and shuts down
 
-1. Ok
-2. Ok
+- Ok
+- Ok
    - Expected: ok is true
-3. Err
+- Err
    - Expected: false is true
-4. backend shutdown
-5. Err
+- backend shutdown
+- Err
    - Expected: false is true
 
 
@@ -228,6 +228,108 @@ match result:
 
 </details>
 
+### TauriBackend device_class
+
+#### new_android device_class(411, 891) == Phone
+
+- Ok
+   - Expected: backend.device_class(411, 891) equals `DeviceClass.Phone`
+- Err
+   - Expected: false is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = TauriBackend.new_android(0)
+match result:
+    Ok(backend) =>
+        expect(backend.device_class(411, 891)).to_equal(DeviceClass.Phone)
+    Err(_) =>
+        expect(false).to_equal(true)
+```
+
+</details>
+
+#### new_android device_class(800, 1280) == Tablet
+
+- Ok
+   - Expected: backend.device_class(800, 1280) equals `DeviceClass.Tablet`
+- Err
+   - Expected: false is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = TauriBackend.new_android(0)
+match result:
+    Ok(backend) =>
+        expect(backend.device_class(800, 1280)).to_equal(DeviceClass.Tablet)
+    Err(_) =>
+        expect(false).to_equal(true)
+```
+
+</details>
+
+#### new_ios device_class(390, 844) == Phone
+
+- Ok
+   - Expected: backend.device_class(390, 844) equals `DeviceClass.Phone`
+- Err
+   - Expected: false is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = TauriBackend.new_ios(0)
+match result:
+    Ok(backend) =>
+        expect(backend.device_class(390, 844)).to_equal(DeviceClass.Phone)
+    Err(_) =>
+        expect(false).to_equal(true)
+```
+
+</details>
+
+#### new(desktop) device_class(1440, 900) == Desktop
+
+- Ok
+   - Expected: backend.device_class(1440, 900) equals `DeviceClass.Desktop`
+- Err
+   - Expected: false is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = TauriBackend.new(0)
+match result:
+    Ok(backend) =>
+        expect(backend.device_class(1440, 900)).to_equal(DeviceClass.Desktop)
+    Err(_) =>
+        expect(false).to_equal(true)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -242,13 +344,14 @@ match result:
 
 Tests covering:
 - TauriBackend
+- TauriBackend device_class
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

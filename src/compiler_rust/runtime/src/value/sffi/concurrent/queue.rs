@@ -31,14 +31,21 @@ static CONCURRENT_QUEUE_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomi
 pub extern "C" fn rt_concurrent_queue_new() -> i64 {
     let queue = Box::new(ConcurrentQueue::new());
     let handle = CONCURRENT_QUEUE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    CONCURRENT_QUEUE_MAP.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, queue);
+    CONCURRENT_QUEUE_MAP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(handle, queue);
     handle
 }
 
 /// Push value to back of concurrent queue
 #[no_mangle]
 pub extern "C" fn rt_concurrent_queue_push(handle: i64, value: RuntimeValue) {
-    if let Some(queue) = CONCURRENT_QUEUE_MAP.lock().unwrap_or_else(|e| e.into_inner()).get(&handle) {
+    if let Some(queue) = CONCURRENT_QUEUE_MAP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&handle)
+    {
         queue.data.lock().unwrap_or_else(|e| e.into_inner()).push_back(value);
     }
 }
@@ -79,7 +86,10 @@ pub extern "C" fn rt_concurrent_queue_len(handle: i64) -> i64 {
 /// Free concurrent queue
 #[no_mangle]
 pub extern "C" fn rt_concurrent_queue_free(handle: i64) {
-    CONCURRENT_QUEUE_MAP.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+    CONCURRENT_QUEUE_MAP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&handle);
 }
 
 /// Clear all concurrent queue handles (for test cleanup)

@@ -43,7 +43,7 @@ web_render_backend_api_spec -> std
 #### keeps headless as an explicit no-display render target
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -63,7 +63,7 @@ expect(web_render_capabilities_for_target(WEB_RENDER_TARGET_HEADLESS).len()).to_
 #### keeps standalone Chrome and Chromium as explicit browser render targets
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -83,22 +83,19 @@ expect(web_render_capabilities_for_target(WEB_RENDER_TARGET_CHROME).len()).to_eq
 
 #### keeps render_html as body-only HTML for web electron and tauri
 
-1. Err
+- Err
    - Expected: e equals ``
-
-2. Ok
+- Ok
    - Expected: electron_html equals `web_html`
    - Expected: electron_render_ipc_json(state, 1280, 720) equals `web_render_to_artifact(electron_req).ipc_json`
-
-3. Err
+- Err
    - Expected: e equals ``
-
-4. Ok
+- Ok
    - Expected: tauri_html equals `web_html`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -155,12 +152,10 @@ match tauri_result:
 
 #### records pure simple browser output as a shared web render artifact
 
-1. Err
+- Err
    - Expected: e equals ``
-
-2. Ok
-
-3. backend render frame
+- Ok
+- backend render frame
    - Expected: backend.web_render_target equals `pure_simple`
    - Expected: backend.last_artifact_pixels equals `64 * 48`
    - Expected: backend.last_artifact_engine2d_status equals `WEB_RENDER_ENGINE2D_STATUS_RENDERED`
@@ -168,7 +163,7 @@ match tauri_result:
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -202,17 +197,12 @@ match backend_result:
 
 #### records shared render request provenance across GUI web and headless targets
 
-1. web render request provenance evidence
-
-2. web render request provenance evidence
-
-3. web render request provenance evidence
-
-4. web render request provenance evidence
-
-5. web render request provenance evidence
-
-6. web render request provenance evidence
+- web render request provenance evidence
+- web render request provenance evidence
+- web render request provenance evidence
+- web render request provenance evidence
+- web render request provenance evidence
+- web render request provenance evidence
    - Expected: matrix.len() equals `6`
    - Expected: row.surface_id equals `main`
    - Expected: row.request_has_body is true
@@ -232,7 +222,7 @@ match backend_result:
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -282,23 +272,20 @@ expect(matrix[5].summary()).to_contain("engine2d_status=engine2d_rendered")
 
 #### matches Electron and Tauri live snapshot transports to the shared helper output
 
-1. Err
+- Err
    - Expected: e equals ``
-
-2. Ok
+- Ok
    - Expected: electron.snapshot_envelope_json("main", 5u64, "{\"mode\":\"NORMAL\"}") equals `web_render_snapshot_transport_json("electron", "main", 5u64, "{"mode":"NORMAL... (full value in folded executable source)`
    - Expected: electron.patch_envelope_json("main", 5u64, 6u64, "[]", "{\"mode\":\"INSERT\"}") equals `web_render_patch_transport_json("electron", "main", 5u64, 6u64, "[]", "{"mode... (full value in folded executable source)`
-
-3. Err
+- Err
    - Expected: e equals ``
-
-4. Ok
+- Ok
    - Expected: tauri.snapshot_envelope_json("main", 5u64, "{\"mode\":\"NORMAL\"}") equals `web_render_snapshot_transport_json("tauri", "main", 5u64, "{"mode":"NORMAL"}")`
    - Expected: tauri.patch_envelope_json("main", 5u64, 6u64, "[]", "{\"mode\":\"INSERT\"}") equals `web_render_patch_transport_json("tauri", "main", 5u64, 6u64, "[]", "{"mode":"... (full value in folded executable source)`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -326,7 +313,7 @@ match tauri_result:
 #### matches Electron and Tauri transport bundles to the common API
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -379,7 +366,7 @@ expect(tui_web.patch_envelope_json("main", 8u64, 9u64, "[]", "{\"mode\":\"NORMAL
 #### classifies static shells and dynamic islands for binary cache planning
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -406,7 +393,7 @@ expect(dynamic_profile.render_plan).to_equal("static_shell_with_dynamic_islands"
 #### can reuse prebuilt full HTML when producing Electron IPC JSON
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -425,7 +412,7 @@ expect(web_render_ipc_json(req)).to_contain("\"target\":\"electron\"")
 #### builds URL render requests through the common request envelope
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -450,7 +437,7 @@ expect(web_render_pixel_default_page_html("about:blank")).to_contain("<div id=\"
 #### records Engine2D provenance on shared web render artifacts
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

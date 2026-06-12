@@ -1924,10 +1924,7 @@ impl LlvmBackend {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for (i, arg) in all_args.iter().enumerate() {
                         let val = self.get_vreg(arg, vreg_map)?;
-                        let target_ty = declared_param_types
-                            .get(i)
-                            .copied()
-                            .or_else(|| Some(i64_type.into()));
+                        let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         arg_vals.push(casted.into());
                     }
@@ -2268,15 +2265,13 @@ impl LlvmBackend {
                     let fallback_name = resolved
                         .map(|n| n.replace("_dot_", "."))
                         .unwrap_or_else(|| dotted_name.clone());
-                    let func = called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None));
+                    let func =
+                        called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None));
                     let declared_param_types = func.get_type().get_param_types();
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for (i, arg) in all_args.iter().enumerate() {
                         let val = self.get_vreg(arg, vreg_map)?;
-                        let target_ty = declared_param_types
-                            .get(i)
-                            .copied()
-                            .or_else(|| Some(i64_type.into()));
+                        let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         arg_vals.push(casted.into());
                     }
@@ -2559,9 +2554,10 @@ impl LlvmBackend {
                         let alloc_call = builder
                             .build_call(alloc_fn, &[closure_size.into()], "alloc_closure")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc", &e))?;
-                        let closure_i64 = alloc_call.try_as_basic_value().left().ok_or_else(|| {
-                            CompileError::semantic("rt_alloc did not return closure storage")
-                        })?;
+                        let closure_i64 = alloc_call
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or_else(|| CompileError::semantic("rt_alloc did not return closure storage"))?;
                         let closure_ptr = builder
                             .build_int_to_ptr(
                                 closure_i64.into_int_value(),
@@ -2570,11 +2566,7 @@ impl LlvmBackend {
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?;
                         let fn_addr = builder
-                            .build_ptr_to_int(
-                                func.as_global_value().as_pointer_value(),
-                                i64_type,
-                                "fn_addr",
-                            )
+                            .build_ptr_to_int(func.as_global_value().as_pointer_value(), i64_type, "fn_addr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
                         let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
                         let slot_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());

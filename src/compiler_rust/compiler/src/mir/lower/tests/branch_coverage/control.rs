@@ -233,12 +233,16 @@ fn for_collection_specialized_from_untyped_empty_array_keeps_object_element_type
         .locals
         .iter()
         .any(|local| local.name == "item" && local.ty != crate::hir::TypeId::I32));
-    assert!(!func.blocks.iter().flat_map(|block| block.instructions.iter()).any(|inst| {
-        matches!(
-            inst,
-            MirInst::MethodCallStatic { func_name, .. } if func_name == "i32.get"
-        )
-    }));
+    assert!(!func
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .any(|inst| {
+            matches!(
+                inst,
+                MirInst::MethodCallStatic { func_name, .. } if func_name == "i32.get"
+            )
+        }));
 }
 
 #[test]

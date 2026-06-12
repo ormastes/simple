@@ -273,24 +273,28 @@ mod tests {
     // arg-count match, ignoring default parameter values.
     #[test]
     fn static_method_with_default_param_called_with_fewer_args() {
-        let result = eval_exit(r#"
+        let result = eval_exit(
+            r#"
 class Probe:
     static fn make(a: i64, b: i64 = 0) -> i64:
         a + b
 main = Probe.make(5)
-"#);
+"#,
+        );
         assert_eq!(result, 5, "make(5) should use default b=0, returning 5");
     }
 
     // Exact-count call still works and is preferred over default-fill overload.
     #[test]
     fn static_method_exact_count_still_works() {
-        let result = eval_exit(r#"
+        let result = eval_exit(
+            r#"
 class Probe:
     static fn make(a: i64, b: i64 = 0) -> i64:
         a + b
 main = Probe.make(3, 4)
-"#);
+"#,
+        );
         assert_eq!(result, 7, "make(3, 4) should return 7");
     }
 
@@ -300,14 +304,16 @@ main = Probe.make(3, 4)
         // Two overloads: make(a) and make(a, b=0).
         // Calling make(5) should prefer the 1-param exact overload (score 100+2=102)
         // over the 2-param default-fill overload (score 0+2=2).
-        let result = eval_exit(r#"
+        let result = eval_exit(
+            r#"
 class Probe:
     static fn make(a: i64) -> i64:
         a * 10
     static fn make(a: i64, b: i64 = 0) -> i64:
         a + b
 main = Probe.make(5)
-"#);
+"#,
+        );
         assert_eq!(result, 50, "exact 1-param overload should win: 5*10=50");
     }
 
@@ -315,12 +321,14 @@ main = Probe.make(5)
     #[test]
     fn static_method_too_few_required_args_errors() {
         assert!(
-            eval_err(r#"
+            eval_err(
+                r#"
 class Probe:
     static fn make(a: i64, b: i64) -> i64:
         a + b
 main = Probe.make(5)
-"#),
+"#
+            ),
             "calling make(5) when both params are required must error"
         );
     }
@@ -329,12 +337,14 @@ main = Probe.make(5)
     #[test]
     fn static_method_too_many_args_errors() {
         assert!(
-            eval_err(r#"
+            eval_err(
+                r#"
 class Probe:
     static fn make(a: i64) -> i64:
         a
 main = Probe.make(1, 2)
-"#),
+"#
+            ),
             "calling make(1, 2) when only 1 param exists must error"
         );
     }

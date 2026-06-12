@@ -96,7 +96,12 @@ fn test_untyped_empty_array_specializes_on_first_append() {
     else {
         panic!("expected second statement to be items.append(...)");
     };
-    let HirStmt::For { pattern_local, iterable, .. } = &func.body[2] else {
+    let HirStmt::For {
+        pattern_local,
+        iterable,
+        ..
+    } = &func.body[2]
+    else {
         panic!("expected third statement to be the items loop");
     };
 

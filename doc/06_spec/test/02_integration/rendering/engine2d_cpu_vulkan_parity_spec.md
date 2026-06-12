@@ -43,7 +43,7 @@ engine2d_cpu_vulkan_parity_spec -> std
 #### keeps cpu rendering deterministic
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect(parity_pixel_at(first, 2, 2, 32)).to_equal(rgb(40, 70, 100))
 #### matches the software reference for core primitives
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -77,14 +77,14 @@ expect(parity_pixels_equal(software, cpu)).to_equal(true)
 
 #### creates the Vulkan backend object without resolving the nogc session constructor
 
-1. var backend = VulkanBackend create
+- var backend = VulkanBackend create
    - Expected: backend.name() equals `vulkan`
    - Expected: backend.width() equals `0`
    - Expected: backend.height() equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

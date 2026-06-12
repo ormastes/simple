@@ -34,15 +34,9 @@ pub fn apply_relocations(
     imports: &dyn Fn(&str) -> Option<usize>,
     got_slot_resolver: &mut dyn FnMut(u32, usize) -> Result<usize, String>,
 ) -> Result<(), String> {
-    apply_relocations_with_symbol_resolver(
-        code,
-        relocs,
-        symbols,
-        base_address,
-        imports,
-        got_slot_resolver,
-        &|_| None,
-    )
+    apply_relocations_with_symbol_resolver(code, relocs, symbols, base_address, imports, got_slot_resolver, &|_| {
+        None
+    })
 }
 
 pub fn apply_relocations_with_symbol_resolver(

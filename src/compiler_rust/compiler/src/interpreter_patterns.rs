@@ -297,10 +297,13 @@ pub(crate) fn pattern_matches(
             // class name, bind the payload patterns to the class fields in declaration order.
             // This is the correct semantics: positional patterns follow the field order in the
             // class definition.
-            if let Value::Object { class, fields: obj_fields } = value {
-                let name_matches = enum_name == "_"
-                    || enum_name == class
-                    || matches!(enum_name.as_str(), "Option" | "Result");
+            if let Value::Object {
+                class,
+                fields: obj_fields,
+            } = value
+            {
+                let name_matches =
+                    enum_name == "_" || enum_name == class || matches!(enum_name.as_str(), "Option" | "Result");
                 if name_matches && variant == class {
                     match payload {
                         None => {
@@ -310,8 +313,7 @@ pub(crate) fn pattern_matches(
                         Some(patterns) => {
                             // Positional: look up field order from ClassDef
                             if let Some(class_def) = classes.get(class.as_str()) {
-                                let field_names: Vec<&str> =
-                                    class_def.fields.iter().map(|f| f.name.as_str()).collect();
+                                let field_names: Vec<&str> = class_def.fields.iter().map(|f| f.name.as_str()).collect();
                                 if patterns.len() != field_names.len() {
                                     // Arity mismatch — clean failure (not an error, just no-match)
                                     return Ok(false);
@@ -354,7 +356,11 @@ pub(crate) fn pattern_matches(
             {
                 if class == name {
                     if std::env::var("SIMPLE_DEBUG_MATCH").as_deref() == Ok("1") {
-                        eprintln!("[DEBUG Pattern::Struct] class={} obj_fields={:?}", class, obj_fields.keys().collect::<Vec<_>>());
+                        eprintln!(
+                            "[DEBUG Pattern::Struct] class={} obj_fields={:?}",
+                            class,
+                            obj_fields.keys().collect::<Vec<_>>()
+                        );
                         for (k, v) in obj_fields.iter() {
                             eprintln!("  field {} = {:?}", k, v);
                         }
@@ -590,7 +596,10 @@ match b:
 main = result_
 "#;
         let code = run(src);
-        assert_eq!(code, 0, "20-field positional class match should fire and bind in declaration order");
+        assert_eq!(
+            code, 0,
+            "20-field positional class match should fire and bind in declaration order"
+        );
     }
 
     #[test]
@@ -612,7 +621,10 @@ match p:
 main = result_
 "#;
         let code = run(src);
-        assert_eq!(code, 0, "arity mismatch should produce clean no-match (fall through to wildcard)");
+        assert_eq!(
+            code, 0,
+            "arity mismatch should produce clean no-match (fall through to wildcard)"
+        );
     }
 
     #[test]
@@ -636,7 +648,10 @@ match p:
 main = result_
 "#;
         let code = run(src);
-        assert_eq!(code, 0, "named-field struct pattern must still work after positional class fix");
+        assert_eq!(
+            code, 0,
+            "named-field struct pattern must still work after positional class fix"
+        );
     }
 
     #[test]

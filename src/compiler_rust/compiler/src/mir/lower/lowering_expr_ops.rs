@@ -45,8 +45,7 @@ impl<'a> MirLowerer<'a> {
             // Equality involving ANY needs runtime dispatch because native/source
             // paths can carry mixed boxed/raw RuntimeValue-like representations
             // across extern boundaries (for example channel receive).
-            if matches!(op, BinOp::Eq | BinOp::Is | BinOp::NotEq)
-                && (left.ty == TypeId::ANY || right.ty == TypeId::ANY)
+            if matches!(op, BinOp::Eq | BinOp::Is | BinOp::NotEq) && (left.ty == TypeId::ANY || right.ty == TypeId::ANY)
             {
                 let boxed_left = if left.ty == TypeId::ANY && right.ty != TypeId::ANY {
                     left_reg

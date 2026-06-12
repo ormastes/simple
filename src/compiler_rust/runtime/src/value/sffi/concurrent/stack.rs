@@ -30,14 +30,21 @@ static CONCURRENT_STACK_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomi
 pub extern "C" fn rt_concurrent_stack_new() -> i64 {
     let stack = Box::new(ConcurrentStack::new());
     let handle = CONCURRENT_STACK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    CONCURRENT_STACK_MAP.lock().unwrap_or_else(|e| e.into_inner()).insert(handle, stack);
+    CONCURRENT_STACK_MAP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(handle, stack);
     handle
 }
 
 /// Push value to concurrent stack
 #[no_mangle]
 pub extern "C" fn rt_concurrent_stack_push(handle: i64, value: RuntimeValue) {
-    if let Some(stack) = CONCURRENT_STACK_MAP.lock().unwrap_or_else(|e| e.into_inner()).get(&handle) {
+    if let Some(stack) = CONCURRENT_STACK_MAP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&handle)
+    {
         stack.data.lock().unwrap_or_else(|e| e.into_inner()).push(value);
     }
 }
@@ -78,7 +85,10 @@ pub extern "C" fn rt_concurrent_stack_len(handle: i64) -> i64 {
 /// Free concurrent stack
 #[no_mangle]
 pub extern "C" fn rt_concurrent_stack_free(handle: i64) {
-    CONCURRENT_STACK_MAP.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle);
+    CONCURRENT_STACK_MAP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&handle);
 }
 
 /// Clear all concurrent stack handles (for test cleanup)

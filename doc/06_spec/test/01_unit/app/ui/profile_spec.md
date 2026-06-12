@@ -142,7 +142,7 @@ expect(classify(600, bp)).to_equal(SizeClass.Regular)
 
 </details>
 
-#### returns Regular below 1200
+#### returns Regular below 840
 
 <details>
 <summary>Executable SSpec</summary>
@@ -152,12 +152,12 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val bp = default_breakpoints()
-expect(classify(1199, bp)).to_equal(SizeClass.Regular)
+expect(classify(839, bp)).to_equal(SizeClass.Regular)
 ```
 
 </details>
 
-#### returns Expanded at 1200
+#### returns Expanded at 840
 
 <details>
 <summary>Executable SSpec</summary>
@@ -167,7 +167,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val bp = default_breakpoints()
-expect(classify(1200, bp)).to_equal(SizeClass.Expanded)
+expect(classify(840, bp)).to_equal(SizeClass.Expanded)
 ```
 
 </details>
@@ -435,8 +435,8 @@ expect(resolved.id).to_equal("default")
 
 #### resolves landscape profile when set
 
-1. var ps = ProfileSet new
-2. ps = ps with landscape
+- var ps = ProfileSet new
+- ps = ps with landscape
    - Expected: resolved.id equals `landscape`
 
 
@@ -459,8 +459,8 @@ expect(resolved.id).to_equal("landscape")
 
 #### resolves portrait profile when set
 
-1. var ps = ProfileSet new
-2. ps = ps with portrait
+- var ps = ProfileSet new
+- ps = ps with portrait
    - Expected: resolved.id equals `portrait`
 
 
@@ -483,8 +483,8 @@ expect(resolved.id).to_equal("portrait")
 
 #### falls back to default for unset orientation
 
-1. var ps = ProfileSet new
-2. ps = ps with landscape
+- var ps = ProfileSet new
+- ps = ps with landscape
    - Expected: resolved.id equals `default`
 
 
@@ -507,8 +507,8 @@ expect(resolved.id).to_equal("default")
 
 #### resolves Square as Landscape
 
-1. var ps = ProfileSet new
-2. ps = ps with landscape
+- var ps = ProfileSet new
+- ps = ps with landscape
    - Expected: resolved.id equals `landscape`
 
 
@@ -547,8 +547,8 @@ expect(ps.has_profile(Orientation.Portrait)).to_equal(false)
 
 #### has_profile returns true when set
 
-1. var ps = ProfileSet new
-2. ps = ps with landscape
+- var ps = ProfileSet new
+- ps = ps with landscape
    - Expected: ps.has_profile(Orientation.Landscape) is true
 
 
@@ -585,8 +585,8 @@ expect(resolver.orientation()).to_equal(Orientation.Landscape)
 
 #### detects orientation change after update
 
-1. var resolver = ProfileResolver new
-2. resolver update
+- var resolver = ProfileResolver new
+- resolver update
    - Expected: resolver.orientation_changed(old) is true
    - Expected: resolver.orientation() equals `Orientation.Portrait`
 
@@ -609,8 +609,8 @@ expect(resolver.orientation()).to_equal(Orientation.Portrait)
 
 #### no change when orientation stays same
 
-1. var resolver = ProfileResolver new
-2. resolver update
+- var resolver = ProfileResolver new
+- resolver update
    - Expected: resolver.orientation_changed(old) is false
 
 
@@ -631,8 +631,8 @@ expect(resolver.orientation_changed(old)).to_equal(false)
 
 #### updates size classes on viewport change
 
-1. var resolver = ProfileResolver new
-2. resolver update
+- var resolver = ProfileResolver new
+- resolver update
    - Expected: resolver.horizontal_class() equals `SizeClass.Expanded`
 
 
@@ -1003,8 +1003,8 @@ expect(session.current_orientation()).to_equal(Orientation.Landscape)
 
 #### register_profile_set stores profiles
 
-1. var session = new session
-2. session register profile set
+- var session = new session
+- session register profile set
    - Expected: session.profile_sets.len() equals `1`
 
 
@@ -1026,9 +1026,9 @@ expect(session.profile_sets.len()).to_equal(1)
 
 #### register_profile_set replaces existing entry
 
-1. var session = new session
-2. session register profile set
-3. session register profile set
+- var session = new session
+- session register profile set
+- session register profile set
    - Expected: session.profile_sets.len() equals `1`
 
 

@@ -272,7 +272,9 @@ fn test_mir_method_call_static_struct_receiver_ir() {
     });
     let item = VReg(0);
     let result = VReg(1);
-    caller.blocks[0].instructions.push(MirInst::ConstInt { dest: item, value: 3 });
+    caller.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: item, value: 3 });
     caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
         dest: Some(result),
         receiver: item,

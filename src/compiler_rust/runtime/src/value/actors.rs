@@ -172,8 +172,7 @@ pub extern "C" fn rt_actor_join(actor: RuntimeValue) -> i64 {
                         // Surface why the join failed instead of a bare 0: the
                         // body's panic message was recorded at panic time and
                         // stays queryable via rt_actor_death_reason.
-                        let reason = crate::concurrency::actor_death_reason(actor_id)
-                            .unwrap_or(err);
+                        let reason = crate::concurrency::actor_death_reason(actor_id).unwrap_or(err);
                         eprintln!("[simple-actor] join of actor {actor_id} failed: {reason}");
                         return 0;
                     }

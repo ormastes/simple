@@ -43,7 +43,7 @@ vulkan_strict_spec -> std
 #### probe_vulkan returns a typed BackendProbeResult
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -59,7 +59,7 @@ expect(ok).to_equal(true)
 #### probe_vulkan reports requested_name as vulkan
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -74,7 +74,7 @@ expect(probe.requested_name).to_equal("vulkan")
 #### probe_vulkan on success reports api_name as vulkan
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -90,7 +90,7 @@ if probe.is_ok():
 #### probe_vulkan on failure carries non-empty fallback_reason
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -106,7 +106,7 @@ if not probe.is_ok():
 #### probe_vulkan diagnostic_text is non-empty
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -124,7 +124,7 @@ expect(txt.len()).to_be_greater_than(0)
 #### fails with typed error when Vulkan is not available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -145,7 +145,7 @@ if not probe.is_ok():
 #### fallback_reason is non-empty when Vulkan fails
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -164,7 +164,7 @@ if not probe.is_ok():
 #### does not silently fall back to cpu on Vulkan failure
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -182,15 +182,14 @@ if not probe.is_ok():
 
 #### succeeds and returns Engine2D when hardware available
 
-1. var engine = result unwrap
+- var engine = result unwrap
    - Expected: engine.width() equals `16`
    - Expected: engine.height() equals `16`
-
-2. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -210,14 +209,13 @@ if probe.is_ok():
 
 #### backend_name is vulkan when hardware available
 
-1. var engine = result unwrap
+- var engine = result unwrap
    - Expected: engine.backend_name() equals `vulkan`
-
-2. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -236,13 +234,12 @@ if probe.is_ok():
 
 #### SPIR-V shader modules load without error when hardware available
 
-1. var engine = result unwrap
-
-2. engine shutdown
+- var engine = result unwrap
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -264,20 +261,17 @@ if probe.is_ok():
 
 #### clear fills entire framebuffer with the given color
 
-1. var engine = result unwrap
-
-2. engine clear
-
-3. engine present
+- var engine = result unwrap
+- engine clear
+- engine present
    - Expected: pixels[0] equals `fill_color`
    - Expected: pixels[127] equals `fill_color`
    - Expected: pixels[255] equals `fill_color`
-
-4. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -303,18 +297,15 @@ if probe.is_ok():
 
 #### clear matches CPU reference pixel-for-pixel
 
-1. var engine = result unwrap
-
-2. engine clear
-
-3. engine present
+- var engine = result unwrap
+- engine clear
+- engine present
    - Expected: mismatch_count equals `0`
-
-4. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -345,21 +336,17 @@ if probe.is_ok():
 
 #### draw_rect_filled writes correct pixels in the rect region
 
-1. var engine = result unwrap
-
-2. engine clear
-
-3. engine draw rect filled
-
-4. engine present
+- var engine = result unwrap
+- engine clear
+- engine draw rect filled
+- engine present
    - Expected: inside equals `fg`
    - Expected: outside equals `bg`
-
-5. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -390,20 +377,16 @@ if probe.is_ok():
 
 #### clear then draw_rect_filled matches CPU reference pixel-for-pixel
 
-1. var engine = result unwrap
-
-2. engine clear
-
-3. engine draw rect filled
-
-4. engine present
+- var engine = result unwrap
+- engine clear
+- engine draw rect filled
+- engine present
    - Expected: mismatch_count equals `0`
-
-5. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -436,20 +419,16 @@ if probe.is_ok():
 
 #### rect outside framebuffer bounds does not corrupt surrounding pixels
 
-1. var engine = result unwrap
-
-2. engine clear
-
-3. engine draw rect filled
-
-4. engine present
+- var engine = result unwrap
+- engine clear
+- engine draw rect filled
+- engine present
    - Expected: pixels[0] equals `bg`
-
-5. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -478,23 +457,18 @@ if probe.is_ok():
 
 #### read_pixels after present reflects latest draw
 
-1. var engine = result unwrap
-
-2. engine clear
-
-3. engine present
+- var engine = result unwrap
+- engine clear
+- engine present
    - Expected: pixels_first[0] equals `first_color`
-
-4. engine clear
-
-5. engine present
+- engine clear
+- engine present
    - Expected: pixels_second[0] equals `second_color`
-
-6. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -522,21 +496,17 @@ if probe.is_ok():
 
 #### present idempotent — second present same content
 
-1. var engine = result unwrap
-
-2. engine clear
-
-3. engine present
-
-4. engine present
+- var engine = result unwrap
+- engine clear
+- engine present
+- engine present
    - Expected: p1[0] equals `p2[0]`
    - Expected: p1[255] equals `p2[255]`
-
-5. engine shutdown
+- engine shutdown
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

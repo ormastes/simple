@@ -2123,7 +2123,10 @@ mod tests {
         let args = build_safe_mode_child_args(Path::new("test/example_spec.spl"), &options);
 
         assert_eq!(args.first().map(String::as_str), Some("run"));
-        assert_eq!(args.get(1).map(String::as_str), Some("test/.spipe_matchers_example_spec.spl"));
+        assert_eq!(
+            args.get(1).map(String::as_str),
+            Some("test/.spipe_matchers_example_spec.spl")
+        );
         assert!(!args.iter().any(|arg| arg == "test"));
     }
 

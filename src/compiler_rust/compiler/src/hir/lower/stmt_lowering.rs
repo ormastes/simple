@@ -121,9 +121,9 @@ impl Lowerer {
                 }
 
                 let is_untyped_empty_array_binding = !has_explicit_type
-                    && value.as_ref().is_some_and(|expr| {
-                        matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty())
-                    });
+                    && value
+                        .as_ref()
+                        .is_some_and(|expr| matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty()));
                 if is_untyped_empty_array_binding {
                     let any_array_ty = self.module.types.register(HirType::Array {
                         element: TypeId::ANY,

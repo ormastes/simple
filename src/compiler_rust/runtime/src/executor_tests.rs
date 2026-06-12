@@ -147,7 +147,11 @@ fn test_worker_survives_panicking_task() {
     while counter.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "worker did not survive panicking task");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "worker did not survive panicking task"
+    );
 
     executor.shutdown();
 }

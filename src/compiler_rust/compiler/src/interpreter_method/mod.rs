@@ -147,18 +147,46 @@ pub(crate) fn evaluate_method_call(
                     // Previously this mutated outer_env with self= before calling exec_function,
                     // which caused me.field arg expressions to resolve against the callee's
                     // receiver rather than the caller's. (bug: self not found 2026-06-11)
-                    let self_fields = Arc::new(module_dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<HashMap<_, _>>());
+                    let self_fields = Arc::new(
+                        module_dict
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<HashMap<_, _>>(),
+                    );
                     let type_name_str = type_name.as_str();
-                    return super::exec_function(func, args, env, functions, classes, enums, impl_methods, Some((type_name_str, &self_fields)));
+                    return super::exec_function(
+                        func,
+                        args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                        Some((type_name_str, &self_fields)),
+                    );
                 }
             }
             // Try class methods
             if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
                     // Same fix: build self_fields and pass via self_ctx instead of mutating outer_env.
-                    let self_fields = Arc::new(module_dict.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<HashMap<_, _>>());
+                    let self_fields = Arc::new(
+                        module_dict
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<HashMap<_, _>>(),
+                    );
                     let type_name_str = type_name.as_str();
-                    return super::exec_function(func, args, env, functions, classes, enums, impl_methods, Some((type_name_str, &self_fields)));
+                    return super::exec_function(
+                        func,
+                        args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                        Some((type_name_str, &self_fields)),
+                    );
                 }
             }
         }

@@ -806,7 +806,8 @@ impl NativeBackend for LlvmBackend {
             for block in &func.blocks {
                 for inst in &block.instructions {
                     if let crate::mir::MirInst::LocalAddr { local_index, .. } = inst {
-                        max_local_index = Some(max_local_index.map_or(*local_index, |cur: usize| cur.max(*local_index)));
+                        max_local_index =
+                            Some(max_local_index.map_or(*local_index, |cur: usize| cur.max(*local_index)));
                     }
                 }
             }

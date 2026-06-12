@@ -95,7 +95,10 @@ fn test_empty_array_append_refines_indexed_element_type() {
     let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
     let handles_ty = func.locals[0].ty;
     let Some(HirType::Array { element, size }) = module.types.get(handles_ty) else {
-        panic!("expected handles to keep an array type, got {:?}", module.types.get(handles_ty));
+        panic!(
+            "expected handles to keep an array type, got {:?}",
+            module.types.get(handles_ty)
+        );
     };
     assert_eq!(*size, Some(0));
     assert_eq!(module.types.get_type_name(*element).as_deref(), Some("Handle"));
@@ -129,7 +132,11 @@ fn test_lower_local_function_value_call_uses_function_return_type() {
     .unwrap();
 
     let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
-    assert_eq!(func.locals[1].ty, TypeId::I64, "call result local must be typed as the function return type");
+    assert_eq!(
+        func.locals[1].ty,
+        TypeId::I64,
+        "call result local must be typed as the function return type"
+    );
     let HirStmt::Return(Some(expr)) = &func.body[3] else {
         panic!("Expected return statement");
     };
@@ -144,7 +151,11 @@ fn test_lower_callable_field_method_call_uses_function_return_type() {
     .unwrap();
 
     let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
-    assert_eq!(func.locals[1].ty, TypeId::I64, "method-syntax callable field result must use the function return type");
+    assert_eq!(
+        func.locals[1].ty,
+        TypeId::I64,
+        "method-syntax callable field result must use the function return type"
+    );
     let HirStmt::Return(Some(expr)) = &func.body[2] else {
         panic!("Expected return statement");
     };
@@ -161,10 +172,17 @@ fn test_lower_function_identifier_in_array_keeps_function_value_type() {
     let func = module.functions.iter().find(|f| f.name == "test").expect("test fn");
     let thunk_ty = func.locals[0].ty;
     let Some(HirType::Function { ret, .. }) = module.types.get(thunk_ty) else {
-        panic!("expected function-typed local for indexed function value, got {:?}", module.types.get(thunk_ty));
+        panic!(
+            "expected function-typed local for indexed function value, got {:?}",
+            module.types.get(thunk_ty)
+        );
     };
     assert_eq!(*ret, TypeId::I64);
-    assert_eq!(func.locals[1].ty, TypeId::I64, "calling the indexed function value should produce its return type");
+    assert_eq!(
+        func.locals[1].ty,
+        TypeId::I64,
+        "calling the indexed function value should produce its return type"
+    );
 }
 
 #[test]
@@ -174,10 +192,17 @@ fn test_lower_function_param_array_keeps_function_value_type() {
     )
     .unwrap();
 
-    let func = module.functions.iter().find(|f| f.name == "run_one").expect("run_one fn");
+    let func = module
+        .functions
+        .iter()
+        .find(|f| f.name == "run_one")
+        .expect("run_one fn");
     let callbacks_ty = func.locals[0].ty;
     let Some(HirType::Array { element, .. }) = module.types.get(callbacks_ty) else {
-        panic!("expected array-typed local for callbacks, got {:?}", module.types.get(callbacks_ty));
+        panic!(
+            "expected array-typed local for callbacks, got {:?}",
+            module.types.get(callbacks_ty)
+        );
     };
     let Some(HirType::Function { ret, .. }) = module.types.get(*element) else {
         panic!(
@@ -189,10 +214,17 @@ fn test_lower_function_param_array_keeps_function_value_type() {
 
     let thunk_ty = func.locals[1].ty;
     let Some(HirType::Function { ret, .. }) = module.types.get(thunk_ty) else {
-        panic!("expected function-typed local for indexed param function, got {:?}", module.types.get(thunk_ty));
+        panic!(
+            "expected function-typed local for indexed param function, got {:?}",
+            module.types.get(thunk_ty)
+        );
     };
     assert_eq!(*ret, TypeId::I64);
-    assert_eq!(func.locals[2].ty, TypeId::I64, "calling the indexed param function should produce its return type");
+    assert_eq!(
+        func.locals[2].ty,
+        TypeId::I64,
+        "calling the indexed param function should produce its return type"
+    );
 }
 
 #[test]
@@ -202,10 +234,17 @@ fn test_lower_inline_lambda_array_keeps_function_value_type() {
     )
     .unwrap();
 
-    let func = module.functions.iter().find(|f| f.name == "run_one").expect("run_one fn");
+    let func = module
+        .functions
+        .iter()
+        .find(|f| f.name == "run_one")
+        .expect("run_one fn");
     let callbacks_ty = func.locals[0].ty;
     let Some(HirType::Array { element, .. }) = module.types.get(callbacks_ty) else {
-        panic!("expected array-typed local for callbacks, got {:?}", module.types.get(callbacks_ty));
+        panic!(
+            "expected array-typed local for callbacks, got {:?}",
+            module.types.get(callbacks_ty)
+        );
     };
     let Some(HirType::Function { ret, .. }) = module.types.get(*element) else {
         panic!(
@@ -217,10 +256,17 @@ fn test_lower_inline_lambda_array_keeps_function_value_type() {
 
     let thunk_ty = func.locals[1].ty;
     let Some(HirType::Function { ret, .. }) = module.types.get(thunk_ty) else {
-        panic!("expected function-typed local for indexed inline lambda, got {:?}", module.types.get(thunk_ty));
+        panic!(
+            "expected function-typed local for indexed inline lambda, got {:?}",
+            module.types.get(thunk_ty)
+        );
     };
     assert_eq!(*ret, TypeId::I64);
-    assert_eq!(func.locals[2].ty, TypeId::I64, "calling the indexed inline lambda should produce its return type");
+    assert_eq!(
+        func.locals[2].ty,
+        TypeId::I64,
+        "calling the indexed inline lambda should produce its return type"
+    );
 }
 
 #[test]
@@ -595,9 +641,15 @@ fn test_await_expr_type_propagates_operand_type() {
 
     let func = &module.functions[0];
     // The Let binding stores the await expression; check its inferred type.
-    if let HirStmt::Let { ty, value: Some(ref expr), .. } = func.body[0] {
+    if let HirStmt::Let {
+        ty,
+        value: Some(ref expr),
+        ..
+    } = func.body[0]
+    {
         assert_eq!(
-            expr.ty, TypeId::F64,
+            expr.ty,
+            TypeId::F64,
             "await on f64 operand must produce F64 type, not I64 (B6 regression)"
         );
         // Also verify the let local got the right type
@@ -618,9 +670,13 @@ fn test_await_expr_string_type_propagates() {
     let module = parse_and_lower("fn test() -> i64:\n    let s = await \"hello\"\n    return 0\n").unwrap();
 
     let func = &module.functions[0];
-    if let HirStmt::Let { value: Some(ref expr), .. } = func.body[0] {
+    if let HirStmt::Let {
+        value: Some(ref expr), ..
+    } = func.body[0]
+    {
         assert_eq!(
-            expr.ty, TypeId::STRING,
+            expr.ty,
+            TypeId::STRING,
             "await on string operand must produce STRING type (B6 regression)"
         );
     } else {

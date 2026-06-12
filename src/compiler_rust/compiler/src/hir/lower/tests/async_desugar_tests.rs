@@ -123,10 +123,8 @@ fn main() -> i64:
     val result = gen_counter()
     return 0
 "#;
-    let hir = parse_and_lower(source)
-        .expect("generator fn with single yield should lower to HIR without error");
-    let mir = lower_to_mir(&hir)
-        .expect("generator fn should lower to MIR without error");
+    let hir = parse_and_lower(source).expect("generator fn with single yield should lower to HIR without error");
+    let mir = lower_to_mir(&hir).expect("generator fn should lower to MIR without error");
 
     // gen_counter must be present in MIR
     let gen_fn = mir.functions.iter().find(|f| f.name == "gen_counter");
@@ -147,10 +145,8 @@ fn main() -> i64:
     val result = gen_counter()
     return 0
 "#;
-    let hir = parse_and_lower(source)
-        .expect("generator fn with two yields should lower to HIR without error");
-    let mir = lower_to_mir(&hir)
-        .expect("generator fn should lower to MIR without error");
+    let hir = parse_and_lower(source).expect("generator fn with two yields should lower to HIR without error");
+    let mir = lower_to_mir(&hir).expect("generator fn should lower to MIR without error");
 
     let gen_fn = mir.functions.iter().find(|f| f.name == "gen_counter");
     assert!(gen_fn.is_some(), "gen_counter should appear in MIR module");

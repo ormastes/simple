@@ -62,9 +62,7 @@ impl Scheduler {
             joins.get(&id).cloned()
         };
         match handle {
-            Some(handle) => handle.join().map_err(|err| {
-                actor_death_reason(id).unwrap_or(err)
-            }),
+            Some(handle) => handle.join().map_err(|err| actor_death_reason(id).unwrap_or(err)),
             None => Err(format!("unknown actor id {id}")),
         }
     }

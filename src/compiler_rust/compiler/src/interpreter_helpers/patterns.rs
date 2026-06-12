@@ -383,10 +383,13 @@ pub(crate) fn handle_method_call_with_self_update(
                         // Re-insert self so arg expressions that reference the caller's
                         // self (e.g. `me.field` as a direct arg to a nested `me fn`)
                         // can still resolve during argument evaluation.
-                        env.insert(obj_name.to_string(), Value::Object {
-                            class: class.clone(),
-                            fields: Arc::clone(&fields),
-                        });
+                        env.insert(
+                            obj_name.to_string(),
+                            Value::Object {
+                                class: class.clone(),
+                                fields: Arc::clone(&fields),
+                            },
+                        );
                         match find_and_exec_method_with_self_owned(
                             method,
                             args,

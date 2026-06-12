@@ -369,11 +369,13 @@ impl<'a> Parser<'a> {
                 let attr_name = attr.name.clone();
                 self.error_hints.push(
                     ErrorHint::warning(
-                        format!("'#[{}]' uses deprecated syntax, use '@{}' instead", attr_name, attr_name),
+                        format!(
+                            "'#[{}]' uses deprecated syntax, use '@{}' instead",
+                            attr_name, attr_name
+                        ),
                         hash_span,
-                    ).with_help(
-                        format!("Replace '#[{}]' with '@{}'", attr_name, attr_name),
-                    ),
+                    )
+                    .with_help(format!("Replace '#[{}]' with '@{}'", attr_name, attr_name)),
                 );
                 attributes.push(attr);
             } else if self.check(&TokenKind::At) && self.is_at_known_attribute() {

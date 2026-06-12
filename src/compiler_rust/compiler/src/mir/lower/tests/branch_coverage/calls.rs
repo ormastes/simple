@@ -164,7 +164,10 @@ fn function_typed_field_method_call_keeps_real_signature() {
             if param_types == &vec![hir::TypeId::I32] && *return_type == hir::TypeId::I32
     )));
     assert!(
-        !has_inst(&mir, |i| matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".handler") || func_name == "handler")),
+        !has_inst(
+            &mir,
+            |i| matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".handler") || func_name == "handler")
+        ),
         "function-typed field method call should lower as FieldGet + IndirectCall, not a named method dispatch"
     );
 }
