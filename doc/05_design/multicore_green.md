@@ -72,6 +72,33 @@ Behavior:
 
 Design rule: only positive-handle work with work-stealing evidence can support
 hosted M:N claims. Inline fallback is correct behavior but not M:N evidence.
+Plain closures do not claim automatic preemption.
+
+### Explicit Sliced Fairness API
+
+`multicore_green_spawn_sliced(initial_state, step_fn)` is the current Pure
+Simple hosted fairness path for long tasks that can expose scalar progress
+state.
+
+Data structures:
+
+- `MulticoreGreenSliceResult.done`
+- `MulticoreGreenSliceResult.state`
+- `MulticoreGreenSliceResult.value`
+- `MulticoreGreenSlicedHandle.result_channel_id`
+
+Behavior:
+
+- `step_fn(state)` performs one bounded slice.
+- `MulticoreGreenSliceResult.continue_with(next_state)` sends the next scalar
+  state to the work channel and requeues one more pool task.
+- `MulticoreGreenSliceResult.completed(value)` sends the final value to the
+  result channel.
+- `MulticoreGreenSlicedHandle.join()` receives the completed value.
+
+Design rule: sliced work is an explicit user-facing fairness contract. It does
+not change `multicore_green_spawn` closure semantics and does not by itself
+prove preemption for uncooperative CPU loops.
 
 ## SimpleOS Design
 

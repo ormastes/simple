@@ -204,7 +204,7 @@ execution model:
 | `thread_spawn` / `ThreadHandle` | `src/lib/nogc_async_mut/concurrent/thread.spl` and `thread_sffi.spl` | OS thread (`pthread_create` / `CreateThread`) |
 | `cooperative_green_spawn` / `cooperative_green_spawn_value` / `GreenThreadHandle` / `cooperative_green_run_one` / `cooperative_green_run_all` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Cooperative green-thread queue on the current OS thread; no preemption or CPU parallelism |
 | `green_channel_new` / `green_channel_recv` / `green_channel_send` | `src/lib/nogc_async_mut/concurrent/green_channel.spl` | Pure Simple nonblocking green-channel contract; recv parks a logical green task, send unparks a waiter or reports bounded backpressure |
-| `multicore_green_spawn` / `multicore_green_set_parallelism` / `multicore_green_parallelism` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over `rt_pool_*`; current M:N benchmark candidate with a hosted Go `GOMAXPROCS`-like pool limit, not final scheduler-aware green runtime |
+| `multicore_green_spawn` / `multicore_green_spawn_sliced` / `multicore_green_set_parallelism` / `multicore_green_parallelism` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` / `MulticoreGreenSliceResult` / `MulticoreGreenSlicedHandle` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over `rt_pool_*`; current M:N benchmark candidate with a hosted Go `GOMAXPROCS`-like pool limit. `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work, not automatic preemption for ordinary closures |
 | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Lower-level pool-backed native task path when `rt_pool_*` is available; interpreter fallback otherwise; not the named cross-language M:N profile row |
 | `channel_new` / `channel_from_id` | `src/lib/nogc_sync_mut/concurrent/channel.spl` re-exported through `std.concurrent.channel` | Runtime MPMC channel |
 
@@ -217,6 +217,8 @@ function-valued global/global-array storage remains a separate delayed-storage
 blocker. Do not use either cooperative API for Go-style M:N
 CPU-parallel benchmarks. Use
 `multicore_green_spawn` for current cross-language Go-like benchmark work, use
+`multicore_green_spawn_sliced(initial_state, step_fn)` when a long task can
+yield by returning `MulticoreGreenSliceResult.continue_with(next_state)`, use
 `task_spawn` only for direct task API checks, or use a future scheduler-aware
 green runtime when that lands. When a test or profile claims M:N CPU
 parallelism, assert `used_runtime_pool()` so interpreter or platform fallback

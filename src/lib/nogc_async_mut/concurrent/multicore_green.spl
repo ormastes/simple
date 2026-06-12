@@ -4,6 +4,8 @@
 # the runtime-owned worker pool when rt_pool_* is linked, while keeping the
 # existing cooperative green-thread queue separate.
 
+use std.concurrent.channel.{channel_new, channel_from_id}
+
 extern fn rt_pool_submit(closure: Any) -> i64
 extern fn rt_pool_join(handle: i64) -> i64
 extern fn rt_pool_is_done(handle: i64) -> i64
@@ -36,6 +38,45 @@ class MulticoreGreenHandle:
             return rt_pool_join(self.native_handle)
         self.inline_result
 
+class MulticoreGreenSliceResult:
+    """One explicit resumable CPU slice result."""
+    done: bool
+    state: i64
+    value: i64
+
+    static fn continue_with(state: i64) -> MulticoreGreenSliceResult:
+        MulticoreGreenSliceResult(done: false, state: state, value: 0)
+
+    static fn completed(value: i64) -> MulticoreGreenSliceResult:
+        MulticoreGreenSliceResult(done: true, state: 0, value: value)
+
+class MulticoreGreenSliceTask:
+    state: i64
+
+class MulticoreGreenSliceDone:
+    value: i64
+
+class MulticoreGreenSlicedHandle:
+    """Join handle for an explicitly sliced multicore-green task."""
+    result_channel_id: i64
+
+    fn join() -> i64:
+        val results = channel_from_id(self.result_channel_id)
+        val done = results.recv() as MulticoreGreenSliceDone
+        done.value
+
+fn multicore_green_slice_worker(work_id: i64, result_id: i64, step_fn: fn(i64) -> MulticoreGreenSliceResult) -> i64:
+    val work = channel_from_id(work_id)
+    val results = channel_from_id(result_id)
+    val task = work.recv() as MulticoreGreenSliceTask
+    val next = step_fn(task.state)
+    if next.done:
+        results.send(MulticoreGreenSliceDone(value: next.value))
+    else:
+        work.send(MulticoreGreenSliceTask(state: next.state))
+        multicore_green_spawn(\: multicore_green_slice_worker(work_id, result_id, step_fn))
+    0
+
 fn multicore_green_spawn(task: fn() -> i64) -> MulticoreGreenHandle:
     """Spawn a value task on the bounded runtime worker pool when available."""
     val native_handle = rt_pool_submit(task)
@@ -50,6 +91,20 @@ fn multicore_green_spawn(task: fn() -> i64) -> MulticoreGreenHandle:
         inline_done: true,
         inline_result: task()
     )
+
+fn multicore_green_spawn_sliced(initial_state: i64, step_fn: fn(i64) -> MulticoreGreenSliceResult) -> MulticoreGreenSlicedHandle:
+    """Spawn explicit resumable CPU slices on the runtime worker pool.
+
+    This is a cooperative fairness API for CPU-heavy work that can expose a
+    scalar progress state. Each step returns quickly, then unfinished work is
+    requeued as a later pool task. Plain `multicore_green_spawn` closures still
+    run to completion and are not preempted automatically.
+    """
+    val work = channel_new()
+    val results = channel_new()
+    work.send(MulticoreGreenSliceTask(state: initial_state))
+    multicore_green_spawn(\: multicore_green_slice_worker(work.id(), results.id(), step_fn))
+    MulticoreGreenSlicedHandle(result_channel_id: results.id())
 
 fn multicore_green_set_parallelism(workers: i64) -> i64:
     """Set hosted runtime-pool parallelism.

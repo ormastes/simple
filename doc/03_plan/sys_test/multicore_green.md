@@ -44,6 +44,14 @@
 - `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` checks that `doc/03_plan/agent_tasks/multicore_green.md` uses meaningful parallel-agent lane names instead of `Agent A`/`Agent B` labels, and keeps each lane tied to deliverables and acceptance evidence.
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the remaining hosted fairness/preemption gap explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths.
 - `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so the remaining host gap is deeper than a missing OS-thread yield primitive.
+- `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
+  proves the explicit Pure Simple sliced-task API can provide a hosted
+  fairness contract without changing plain closure semantics: with hosted
+  parallelism pinned to `1`, `multicore_green_spawn_sliced` requeues a long CPU
+  task between short slices, a later quick `multicore_green_spawn` completes
+  during the first observation window, and `multicore_green_parallelism()`
+  remains `1` on both source-run and standalone native paths. The 2026-06-12
+  native compile/run SSpec takes about 60 seconds and remains perf-sensitive.
 - `test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl`
   now regression-covers the closed smaller hosted-native blocker beneath the
   callback-id resumable-stepper lane: a direct native array of a by-value

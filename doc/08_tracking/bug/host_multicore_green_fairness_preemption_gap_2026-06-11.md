@@ -80,6 +80,12 @@ Current hosted fairness-gap evidence also includes:
   proves raw `thread_yield()` is not enough for hosted fairness: even with
   `thread_yield()` inside the monopolizing task, the later quick task still
   does not finish during that same first short observation window
+- `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
+  proves the explicit Pure Simple sliced-task API is the current positive
+  hosted fairness path: with hosted parallelism pinned to `1`, a long
+  `multicore_green_spawn_sliced` task requeues itself between short slices, a
+  later quick `multicore_green_spawn` finishes during the first observation
+  window, and the pool width still reports `parallelism_after_join=1`.
 
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool
@@ -88,10 +94,10 @@ lane has equivalent fairness/preemption guarantees.
 Related active host-side blocker:
 
 - `doc/08_tracking/bug/multicore_green_sliced_native_closure_blocker_2026-06-11.md`
-  records a reverted additive prototype for explicit resumable sliced tasks.
-  That experiment narrowed the next host-runtime boundary again: the native
-  captured-closure/state path for repeated pool-task requeue still ends in
-  `exit=139`, so explicit sliced-task support is not ready to claim yet.
+  is now a historical blocker record for the earlier captured-mutable-state
+  prototype. The current public sliced API uses scalar state and a step
+  function, and the regression spec above now proves source-run and native
+  `EXIT=0`.
 - `doc/08_tracking/bug/multicore_green_resumable_stepper_native_blocker_2026-06-11.md`
   records the newer callback-id resumable-stepper prototype as closed. That
   path removes function-valued queue items and now returns `result=7` with
@@ -131,6 +137,7 @@ Current positive hosted evidence:
 
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl`
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
+- `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
 - `test/05_perf/stress/multicore_green_fanout_spec.spl`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 - `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
@@ -147,7 +154,9 @@ These do not yet close the hosted-runtime parity claim.
 This gap can close only when the hosted multicore-green lane has executable
 evidence for:
 
-- fairness/preemption or an equivalent enforced host-side yield contract
+- fairness/preemption for ordinary long-running closures, or a decision that
+  the explicit sliced API is the supported hosted fairness contract and profile
+  evidence/docs are updated to use it
 
 That evidence must be tied into the canonical multicore-green feature tracking
 and must not rely on SimpleOS-only scheduler proofs.

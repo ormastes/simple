@@ -144,7 +144,13 @@ The green/cooperative SSpec runner mismatch is closed (see
 rows are interpreted against the closed-regression behavior rather than as an
 open runner issue.
 The multicore-green fanout sources use compact handle arrays and loop-captured
-closures, not generated numbered handle variables.
+closures, not generated numbered handle variables. The public
+`multicore_green_spawn_sliced(initial_state, step_fn)` API is the current Pure
+Simple fairness path for long hosted work that can expose scalar progress
+state; it requeues between slices but is not yet the canonical cross-language
+profile row. Do not claim automatic preemption for ordinary
+`multicore_green_spawn` closures unless a separate executable fairness gate is
+added.
 They also fail closed before measuring work if the runtime reports
 `queue_model=global_fifo` or `queue_model=scheduler_owned`; only a single
 `queue_model=work_stealing` marker may support M:N profile evidence.
@@ -175,7 +181,7 @@ declarations, and profile-script comments.
 | Simple (SMF loader) | Bytecode VM | Shows bytecode dispatch win |
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
 | Simple `cooperative_green_spawn` / `cooperative_green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
-| Simple `multicore_green_spawn` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons; profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if `used_runtime_pool()` is false |
+| Simple `multicore_green_spawn` / `multicore_green_spawn_sliced` | Bounded runtime worker pool through `rt_pool_*` | Current Pure Simple M:N candidate row for CPU-heavy comparisons uses `multicore_green_spawn`; `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work. Profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if `used_runtime_pool()` is false |
 | Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Lower-level pool-backed task API with focused API/native evidence; not the named cross-language M:N profile row |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |
@@ -198,7 +204,7 @@ declarations, and profile-script comments.
 
 **Warm throughput (fib35):** C ≈ Simple-native < Go < Java (after JIT) < Bun < Simple-SMF < Erlang < Simple-interp < Python
 
-**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses Pure Simple `thread_spawn` fork-join. `thread_spawn_with_args` is tracked by the focused native smoke `scripts/check/check-thread-spawn-with-args-native.shs`, but it is not the profile baseline because the report is measuring scheduler and fanout behavior. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands. The generated multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`, print `multicore_green_parallelism=requested/actual` and `queue_model=work_stealing`, check every handle with `used_runtime_pool()`, and fail the row if the runtime pool or work-stealing evidence is unavailable.
+**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses Pure Simple `thread_spawn` fork-join. `thread_spawn_with_args` is tracked by the focused native smoke `scripts/check/check-thread-spawn-with-args-native.shs`, but it is not the profile baseline because the report is measuring scheduler and fanout behavior. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses `multicore_green_spawn` over `rt_pool_*` as the current Pure Simple M:N candidate until a scheduler-aware green runtime lands. Use `multicore_green_spawn_sliced` only when the benchmark is explicitly measuring scalar-state sliced fairness rather than ordinary closure scheduling. The generated multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`, print `multicore_green_parallelism=requested/actual` and `queue_model=work_stealing`, check every handle with `used_runtime_pool()`, and fail the row if the runtime pool or work-stealing evidence is unavailable.
 
 ### What matters per use case
 

@@ -155,7 +155,7 @@ for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
 | Spawn a platform thread | `std.concurrent.thread.{thread_spawn}` | `src/lib/nogc_async_mut/concurrent/thread.spl` / `thread_sffi.spl` | Uses OS threads (`pthread_create` / `CreateThread`) |
 | Schedule lightweight cooperative work | `std.concurrent.cooperative_green.{cooperative_green_spawn, cooperative_green_spawn_value, cooperative_green_run_one, cooperative_green_run_all}` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Runs queued work/results on the current OS thread; no preemption or CPU parallelism |
 | Coordinate logical green tasks | `std.concurrent.green_channel.{green_channel_new, green_channel_recv, green_channel_send}` | `src/lib/nogc_async_mut/concurrent/green_channel.spl` | Pure Simple nonblocking channel contract; empty recv parks a logical green task, send unparks a waiter, bounded full send reports backpressure |
-| Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism}` / `MulticoreGreenHandle.used_runtime_pool()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done`; profile rows require runtime-pool acceptance and treat inline fallback as non-M:N. Set parallelism before the first spawn for a Go `GOMAXPROCS`-like hosted pool limit; live pools can grow but do not claim shrink/preemption behavior yet. |
+| Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_spawn_sliced, multicore_green_set_parallelism, multicore_green_parallelism}` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenSliceResult` / `MulticoreGreenSlicedHandle` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done`; profile rows require runtime-pool acceptance and treat inline fallback as non-M:N. Set parallelism before the first spawn for a Go `GOMAXPROCS`-like hosted pool limit. Use `multicore_green_spawn_sliced` when a long task can expose scalar progress state and yield fairness by requeueing between slices. Live pools can grow but plain closures do not claim shrink/preemption behavior yet. |
 | Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Lower-level pool-backed task API. Native path uses `rt_pool_submit`, `rt_pool_join`, and `rt_pool_is_done` when linked; current cross-language M:N profile rows use `multicore_green_spawn` so profile evidence stays tied to `used_runtime_pool()`. |
 | Send values between concurrent work | `std.concurrent.channel.{channel_new, channel_from_id}` | `src/lib/nogc_sync_mut/concurrent/channel.spl` | Runtime MPMC channel surface |
 | Cancel async work cooperatively | `std.async.cancellation.{CancellationToken}` | `src/lib/nogc_async_mut/async/cancellation.spl` | Token registry with child-token propagation; poll `is_cancelled()` inside tasks |
@@ -203,10 +203,17 @@ use std.concurrent.multicore_green.{
     multicore_green_parallelism,
     multicore_green_set_parallelism,
     multicore_green_spawn,
+    multicore_green_spawn_sliced,
+    MulticoreGreenSliceResult,
 }
 
 fn value_9() -> i64:
     9
+
+fn count_step(state: i64) -> MulticoreGreenSliceResult:
+    if state >= 10:
+        return MulticoreGreenSliceResult.completed(state)
+    return MulticoreGreenSliceResult.continue_with(state + 1)
 
 fn main():
     multicore_green_set_parallelism(2)
@@ -214,6 +221,9 @@ fn main():
     print handle.join()
     print handle.used_runtime_pool()
     print multicore_green_parallelism()
+
+    val sliced = multicore_green_spawn_sliced(0, count_step)
+    print sliced.join()
 ```
 
 `multicore_green_spawn` is the current Pure Simple API used by the
@@ -225,6 +235,13 @@ use `handle.ran_inline_fallback()` only for interpreter or platform fallback
 coverage. Profile evidence should call `multicore_green_set_parallelism(workers)`
 before the first spawn, record `multicore_green_parallelism()`, and compare
 against Go rows whose `GOMAXPROCS` is pinned to the same `CPU_WORKERS` value.
+`multicore_green_spawn_sliced(initial_state, step_fn)` is the current explicit
+hosted fairness API for long Pure Simple work: each step returns
+`MulticoreGreenSliceResult.continue_with(next_state)` to requeue itself or
+`MulticoreGreenSliceResult.completed(value)` to finish. The API intentionally
+uses scalar progress state so it avoids the older captured-mutable-state
+closure blocker and does not change the semantics of plain
+`multicore_green_spawn` closures.
 
 ---
 

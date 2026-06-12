@@ -1,14 +1,14 @@
 # Multicore Green Sliced Native Closure Blocker
 
 Date: 2026-06-11
-Status: open
+Status: closed
 Owner: multicore-green lane
 
 ## Summary
 
-A local additive prototype for explicit resumable host-side sliced tasks was
-attempted in `src/lib/nogc_async_mut/concurrent/multicore_green.spl` and then
-reverted because the hosted native path was not stable enough to ship.
+An early local additive prototype for explicit resumable host-side sliced tasks
+was attempted in `src/lib/nogc_async_mut/concurrent/multicore_green.spl` and
+then reverted because the hosted native path was not stable enough to ship.
 
 The shape that was tried:
 
@@ -16,18 +16,22 @@ The shape that was tried:
 - `MulticoreGreenSliceResult`
 - `multicore_green_spawn_sliced(...)`
 
-The prototype worked far enough to prove the direction is plausible, but it
-failed on the native hosted path.
+That captured-mutable-state prototype failed on the native hosted path. The
+current public API closes this blocker with a simpler scalar-state contract:
+`MulticoreGreenSliceResult`, `MulticoreGreenSlicedHandle`, and
+`multicore_green_spawn_sliced(initial_state, step_fn)`.
 
 ## What Was Proven
 
 - interpreter-mode sliced fallback could be made to complete the explicit
   step-by-step sum task correctly after removing recursive inline slice growth
-- the remaining failure is narrower than "multicore green fairness is vague":
-  it is specifically the hosted native closure/runtime boundary for resumable
+- the remaining failure was narrower than "multicore green fairness is vague":
+  it was specifically the hosted native closure/runtime boundary for resumable
   captured slice state
+- the scalar-state public API now completes in source-run and hosted native
+  while preserving the bounded pool width
 
-## Reproduced Failure
+## Historical Failure
 
 Observed during direct hosted native verification:
 
@@ -39,26 +43,33 @@ Observed during direct hosted native verification:
 The failing experiment used a zero-arg closure field that captured a mutable
 state object and advanced one explicit slice per pool task.
 
+## Current Passing Evidence
+
+- `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
+  checks the supported scalar-state API on source-run and standalone native.
+- The fixture prints `quick_done_during_slices=true`,
+  `parallelism_after_join=1`, `total=9`, and exits with `EXIT=0`.
+
 ## Why This Matters
 
-This is the shortest additive path currently identified toward host-side
+This remains the shortest additive path currently identified toward host-side
 resumable M:N work without claiming automatic preemption for plain
 `fn() -> i64` tasks.
 
-So the blocker is now concrete:
+The blocker is now closed for the scalar-state API:
 
 - plain OS-thread yield is not enough
 - compiler safepoints are still a longer path
-- explicit sliced tasks are promising, but the hosted native closure/state path
-  still crashes
+- explicit sliced tasks are supported when user code exposes scalar progress
+  state through `multicore_green_spawn_sliced`
 
 ## Next Step
 
-Investigate the hosted native runtime/codegen boundary for:
+Continue investigating the broader hosted native runtime/codegen boundary for:
 
 - zero-arg captured closures stored in task objects
 - mutable captured state across repeated pool-task requeue
 - closure field invocation under the runtime-pool worker path
 
-Do not claim host-side sliced-task support until that native `exit=139` path is
-closed with executable evidence.
+Do not claim automatic preemption for plain `multicore_green_spawn` closures
+until that separate host fairness/preemption path has executable evidence.

@@ -216,13 +216,15 @@ Deliverables:
 - dedicated tracking for the remaining hosted multicore-green parity gap;
 - executable proof that hosted blocking compensation stays fixed while
   fairness/preemption remains open until stronger evidence lands;
-- executable blocker coverage for the best explicit resumable host-fairness
-  path, including the current callback-id resumable-stepper native crash;
+- executable blocker coverage for the explicit resumable host-fairness path,
+  including the scalar-state `multicore_green_spawn_sliced` source/native
+  regression and historical closure of the earlier callback-id prototype;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:
 
 - `bin/release/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean`
+- `bin/release/simple test test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl --mode=interpreter --clean`
 - `bin/release/simple test test/03_system/feature/usage/multicore_green_tracking_spec.spl --mode=interpreter --clean`
 - `bin/release/simple lint doc/08_tracking/feature/feature_db.sdn`
 
