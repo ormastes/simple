@@ -46,13 +46,14 @@ prefix build was deferred because the agent sandbox had no network.
       Linux side already green via DXVK path.
 
 ### P4 — Stage4 redeploy + deploy-gate hardening
-- [ ] Redeploy stage4 so `bin/simple run` picks up the nested-closure
-      typed-binding fix (currently only `test` mode, via the rebuilt seed,
-      has it). After redeploy, optionally restore the annotated
-      `val NAME: u32 = 0x...` forms in the Vulkan specs.
-- [ ] Deploy-gate: refuse the stage4 binary swap unless a probed seed exists
-      at the delegate path (suggested in
-      `doc/08_tracking/bug/stage4_deploy_no_seed_test_runner_blocked_2026-06-11.md`).
+- [x] Redeploy stage4 so `bin/simple run` picks up the nested-closure
+      typed-binding fix. (2026-06-12: redeployed through the new gate; run-mode
+      repro verified; directx spec 18/18 under new binary. No annotation
+      workarounds remained in the Vulkan specs.)
+- [x] Deploy-gate: refuse the stage4 binary swap unless a probed seed exists
+      at the delegate path. (Implemented + pushed a1b5ba09e8e: seed probe,
+      delegate auto-install from probed cargo seed, post-swap smoke with
+      auto-restore.)
 
 ### P5 — GUI rendering path residual (Agent D lane, AC-8)
 Bug doc: `doc/08_tracking/bug/browser_renderer_spec_sequence_failures_2026-06-11.md`

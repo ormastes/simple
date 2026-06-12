@@ -43,6 +43,12 @@ Execution of follow-up plan
   "dxvk-d3d11 device created leaf=dlopen". backend_directx_spec 18/18 on forced
   (uncached) re-run. vkd3d (d3d12) autotools build still fails — recorded as blocker
   in readiness state; D3D11 path (what the backend uses) is fully live.
+- 2026-06-12 P4 (AC-6) closed: bootstrap-from-scratch.sh --deploy completed;
+  stage4 binary redeployed through the new gate (seed probe + post-swap smoke
+  passed). `bin/simple run` verified picking up the nested-closure typed/tuple
+  val-binding fix (repro prints x=42 a=7 b=35); backend_directx_spec 18/18 under
+  the new binary. Stage3 self-host still fails (known LIM-010) — stage4 compiled
+  by fresh seed. No annotation workarounds left in Vulkan specs to restore.
 - 2026-06-12 sync + regression fix: jj sync pass — multicore test-harden commit
   rebased+pushed (746267ef7035); perf(mcp) tool-set commit pushed by its owner;
   abandoned superseded compile_cast revert side-head. Found browser_renderer_spec
