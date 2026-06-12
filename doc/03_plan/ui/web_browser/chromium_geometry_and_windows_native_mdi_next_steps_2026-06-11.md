@@ -35,7 +35,7 @@ Scope:
 - Current checked-in Chromium parity lane is still the older
   `src/app/wm_compare/html_compat.spl` bitmap/golden subset plus
   `structural_layout_report.spl`. The live Chrome structural geometry manifest
-  now covers 69 labeled fixtures through `72_flex_wrap_gap_align_content_start` with exact
+  now covers 70 labeled fixtures through `73_flex_wrap_gap_align_content_unsafe_center` with exact
   geometry matches and `blur_or_tolerance_used=false`.
 
 ## Windows Native Evidence Path
@@ -781,6 +781,20 @@ Smallest next implementation step:
     here
   - the Simple wrap branch already applies the same start offset without blur,
     tolerance, resolution scaling, or copied Chromium pixels
+- Live `73_flex_wrap_gap_align_content_unsafe_center` evidence now passes with
+  `layout_match` and `mismatch_count=0`.
+- The focused fixture-73 result records Chromium wrapped row flex line-gap plus
+  `align-content:unsafe center` distribution:
+  - the explicit flex container border box is `x=16`, `y=16`, `width=90`,
+    `height=140`
+  - the first flex line has `height=20`; the second line has `height=30`; the
+    explicit `row-gap:10px` makes base line content `60px`, leaving `80px`
+    of free cross-axis space
+  - Chrome ignores the overflow-position prefix for this in-bounds case and
+    centers the packed line block at starts `y=56` and `y=86`
+  - the Simple parser normalizes `unsafe center` to `center` and applies the
+    same center offset without blur, tolerance, resolution scaling, or copied
+    Chromium pixels
 - Live `22_flex_align_items_baseline` evidence now also passes with
   `layout_match` and `mismatch_count=0`.
 - The focused baseline-alignment fix was:
@@ -839,12 +853,13 @@ Smallest next implementation step:
   `69_flex_wrap_gap_align_content_flex_start`, and
   `70_flex_wrap_gap_align_content_normal`, and
   `71_flex_wrap_gap_align_content_end`, and
-  `72_flex_wrap_gap_align_content_start`:
+  `72_flex_wrap_gap_align_content_start`, and
+  `73_flex_wrap_gap_align_content_unsafe_center`:
   - `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
-    covers fixtures `02` through `72` in its default manifest, excluding only
+    covers fixtures `02` through `73` in its default manifest, excluding only
     the older text-only starter fixtures
   - `doc/09_report/chrome_html_compat_geometry_manifest_evidence_2026-06-11.md`
-    reports `69` fixtures, `69` passes, `0` failures, and
+    reports `70` fixtures, `70` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `tools/chrome-live-bitmap/capture_html_argb.js` now waits briefly for the
     Chrome DevTools page target after launch, avoiding a startup race without
