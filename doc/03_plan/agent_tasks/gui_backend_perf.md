@@ -402,6 +402,10 @@ Updated: 2026-06-11
   Runtime-side history pushes now trim forward entries with an exact-size prefix
   array before appending the new entry, with direct coverage for stale forward
   history replacement.
+- this commit -- Browser loading history trim preallocation:
+  Normal page-load history updates now trim stale forward entries with an
+  exact-size prefix array before appending, matching the runtime-side history
+  allocation fix.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
