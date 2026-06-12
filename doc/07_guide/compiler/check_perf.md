@@ -159,8 +159,8 @@ They also fail closed before measuring work if the runtime reports
 Reports include a `Profile contract:` header. Current evidence must say the
 contract was enforced; reports generated with `SKIP_PROFILE_REPORT_CONTRACT=1`
 are explicitly labeled as skipped and must not be cited as gated M:N evidence.
-The profile-report contract and `simple check` reject numbered concurrency
-aliases; use semantic API names in reports, generated workloads, runtime extern
+The profile-report contract and `simple check` reject forbidden number-suffix
+API names; use semantic API names in reports, generated workloads, runtime extern
 declarations, and profile-script comments. The public concurrency API contract
 also rejects wrong-surface imports with `E-PAR-003`, rejects bad spawn
 arguments with `E-PAR-004`, and rejects shared mutable state in green-process
