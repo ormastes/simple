@@ -567,6 +567,15 @@ Open gaps tied to the active browser objective:
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
     now reports `fixture_count=78`, `pass_count=78`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
+- The same live geometry lane now passes for
+  `82_flex_gap_align_items_end`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's row flex `gap:10px` plus logical
+    `align-items:end`; the Pure Simple renderer maps the logical end placement
+    to the same cross-axis end offset in this horizontal writing mode
+  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+    now reports `fixture_count=79`, `pass_count=79`, `fail_count=0`, and
+    `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
     passes with one listed scenario and zero failures
