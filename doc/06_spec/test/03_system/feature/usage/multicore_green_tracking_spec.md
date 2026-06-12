@@ -315,7 +315,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -356,6 +356,10 @@ expect(row).to_contain("task_spawn approved")
 expect(row).to_contain("thread_spawn_with_args_wrong_surface_import.spl rejects cooperative-green facade")
 expect(row).to_contain("task_spawn_wrong_surface_import.spl rejects OS-thread facade")
 expect(row).to_contain("multicore_green_wrong_surface_import.spl rejects OS-thread facade")
+expect(row).to_contain("multicore_green_wrong_arity.spl rejects missing closure")
+expect(row).to_contain("multicore_green_bad_arg.spl rejects non-closure argument")
+expect(row).to_contain("multicore_green_parallelism_bad_arg.spl rejects non-integer worker count")
+expect(row).to_contain("multicore_green_shared_var_capture.spl rejects shared mutable closure state")
 expect(row).to_contain("multicore_green_sliced_wrong_surface_import.spl rejects OS-thread facade")
 expect(row).to_contain("multicore_green_sliced_wrong_arity.spl rejects wrong arity")
 expect(row).to_contain("multicore_green_sliced_bad_state_arg.spl rejects non-integer state")
