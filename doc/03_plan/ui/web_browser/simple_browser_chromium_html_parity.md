@@ -338,6 +338,15 @@ Open gaps tied to the active browser objective:
   - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
     now reports `fixture_count=49`, `pass_count=49`, `fail_count=0`, and
     `blur_or_tolerance_used=false`
+- The same live geometry lane now passes for `53_flex_wrap_align_content_flex_end`:
+  - result: `layout_match`, `mismatch_count=0`
+  - focused result: records Chrome's row flex-wrap `align-content:flex-end`
+    cross-axis offset for a fixed-height container
+  - renderer update: the Simple row-wrap branch now applies focused
+    `align-content:flex-end` offset when explicit cross-axis space remains
+  - evidence update: `scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`
+    now reports `fixture_count=50`, `pass_count=50`, `fail_count=0`, and
+    `blur_or_tolerance_used=false`
 - The focused geometry spec file is green in the default no-cache runner:
   - `simple test test/03_system/gui/wm_compare/html_compat_geometry_probe_spec.spl --json --no-cache`
     passes with one listed scenario and zero failures
