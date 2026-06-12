@@ -220,6 +220,10 @@ Updated: 2026-06-11
   `WidgetStore.upsert_record` and `WidgetStore.set_prop` now allocate the exact
   result array once and fill by index instead of rebuilding records and props
   with repeated array concatenation on each append or replacement.
+- this commit -- global widget-store copy removal:
+  process-global `upsert_widget_record`, `set_internal_prop`, child
+  registration, and widget traversal helpers now avoid per-item array
+  concatenation while preserving widget id, prop, and child ordering.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes

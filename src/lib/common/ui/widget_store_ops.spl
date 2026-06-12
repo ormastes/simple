@@ -52,16 +52,28 @@ fn default_widget_record(id: text, kind: text) -> WidgetRecord:
     return WidgetRecord(id: id, kind: parse_widget_kind(kind).to_wire(), layout: "vbox", visible: true, focused: false)
 
 fn upsert_widget_record(record: WidgetRecord):
-    var updated: [WidgetRecord] = []
+    val registry_len = _widget_registry.len()
     var replaced = false
-    for existing in _widget_registry:
-        if existing.id == record.id:
-            updated = updated + [record]
+    var scan_idx = 0
+    while scan_idx < registry_len:
+        if _widget_registry[scan_idx].id == record.id:
             replaced = true
-        else:
-            updated = updated + [existing]
+            scan_idx = registry_len
+        scan_idx = scan_idx + 1
+    var updated_len = registry_len
     if not replaced:
-        updated = updated + [record]
+        updated_len = registry_len + 1
+    var updated: [WidgetRecord] = [record; updated_len]
+    var write_idx = 0
+    while write_idx < registry_len:
+        val existing = _widget_registry[write_idx]
+        if existing.id == record.id:
+            updated[write_idx] = record
+        else:
+            updated[write_idx] = existing
+        write_idx = write_idx + 1
+    if not replaced:
+        updated[registry_len] = record
     _widget_registry = updated
     _widget_registry_ready = true
     bump_widget_store_revision()
@@ -93,7 +105,14 @@ fn register_widget_child(parent_id: text, child_id: text):
     for current_id in existing:
         if current_id == child_id:
             return
-    set_internal_prop(parent_id, "ui_children", encode_child_ids(existing + [child_id]))
+    val existing_len = existing.len()
+    var updated: [text] = [child_id; existing_len + 1]
+    var i = 0
+    while i < existing_len:
+        updated[i] = existing[i]
+        i = i + 1
+    updated[existing_len] = child_id
+    set_internal_prop(parent_id, "ui_children", encode_child_ids(updated))
 
 fn widget_props() -> [WidgetProp]:
     if not _widget_props_ready:
@@ -120,16 +139,29 @@ fn set_internal_prop(node_id: text, key: text, value: text):
         _widget_props_ready = true
         bump_widget_store_revision()
         return
-    var props: [WidgetProp] = []
+    val prop_len = _widget_props_store.len()
     var replaced = false
-    for prop in _widget_props_store:
+    var scan_idx = 0
+    while scan_idx < prop_len:
+        val prop = _widget_props_store[scan_idx]
         if prop.node_id == node_id and prop.key == key:
-            props = props + [new_prop]
             replaced = true
-        else:
-            props = props + [prop]
+            scan_idx = prop_len
+        scan_idx = scan_idx + 1
+    var updated_len = prop_len
     if not replaced:
-        props = props + [new_prop]
+        updated_len = prop_len + 1
+    var props: [WidgetProp] = [new_prop; updated_len]
+    var write_idx = 0
+    while write_idx < prop_len:
+        val prop = _widget_props_store[write_idx]
+        if prop.node_id == node_id and prop.key == key:
+            props[write_idx] = new_prop
+        else:
+            props[write_idx] = prop
+        write_idx = write_idx + 1
+    if not replaced:
+        props[prop_len] = new_prop
     _widget_props_store = props
     bump_widget_store_revision()
 
@@ -139,17 +171,19 @@ fn encode_child_ids(ids: [text]) -> text:
 fn decode_child_ids(blob: text) -> [text]:
     if blob == "":
         return []
-    var ids: [text] = []
-    var current = ""
-    for ch in blob:
-        if ch == ",":
-            if current != "":
-                ids.push(current)
-                current = ""
-        else:
-            current = "{current}{ch}"
-    if current != "":
-        ids.push(current)
+    val parts = blob.split(",")
+    var id_count = 0
+    for part in parts:
+        if part != "":
+            id_count = id_count + 1
+    if id_count == 0:
+        return []
+    var ids: [text] = [""; id_count]
+    var write_idx = 0
+    for part in parts:
+        if part != "":
+            ids[write_idx] = part
+            write_idx = write_idx + 1
     return ids
 
 impl WidgetNode:
@@ -200,18 +234,35 @@ impl WidgetNode:
         return get_internal_prop(self.id, parse_semantic_prop(key)) != ""
 
     fn prop_keys() -> [text]:
-        var keys: [text] = []
+        var key_count = 0
         for prop in _widget_props_store:
             if prop.node_id == self.id:
-                keys = keys + [prop.key]
+                key_count = key_count + 1
+        if key_count == 0:
+            return []
+        var keys: [text] = [""; key_count]
+        var write_idx = 0
+        for prop in _widget_props_store:
+            if prop.node_id == self.id:
+                keys[write_idx] = prop.key
+                write_idx = write_idx + 1
         return keys
 
     fn children() -> [WidgetNode]:
-        var result: [WidgetNode] = []
-        for id in get_widget_child_ids(self.id):
+        val child_ids = get_widget_child_ids(self.id)
+        var child_count = 0
+        for id in child_ids:
+            if get_widget(id) != nil:
+                child_count = child_count + 1
+        if child_count == 0:
+            return []
+        var result: [WidgetNode] = [WidgetNode(id: ""); child_count]
+        var write_idx = 0
+        for id in child_ids:
             val child = get_widget(id)
             if child != nil:
-                result = result + [child]
+                result[write_idx] = child
+                write_idx = write_idx + 1
         return result
 
     fn child_count() -> i32:
@@ -243,7 +294,7 @@ impl WidgetNode:
         var ids: [text] = [self.id]
         for child in self.children():
             for cid in child.collect_ids():
-                ids = ids + [cid]
+                ids.push(cid)
         return ids
 
     fn widget_summary() -> text:
