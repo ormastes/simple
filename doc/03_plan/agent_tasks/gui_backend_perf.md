@@ -224,6 +224,10 @@ Updated: 2026-06-11
   process-global `upsert_widget_record`, `set_internal_prop`, child
   registration, and widget traversal helpers now avoid per-item array
   concatenation while preserving widget id, prop, and child ordering.
+- this commit -- session widget traversal copy removal:
+  session-scoped child registration, prop-key collection, child lookup, and
+  recursive id collection now avoid per-item array concatenation while keeping
+  nil-child filtering and traversal order intact.
 - `e0a0ec15f0c60d96dd320054e02c8309229e54ce` -- `perf(gui): carry browser text line widths`
 - `248bf87` -- glyph fallback scan removal
 - `c166d` -- backend preference lanes
