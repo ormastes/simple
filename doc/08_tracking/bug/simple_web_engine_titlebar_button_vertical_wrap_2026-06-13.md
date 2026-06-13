@@ -1,6 +1,6 @@
 # Bug: pure-Simple browser engine wraps titlebar widget button label vertically
 
-Status: Open
+Status: Fixed in focused pure-Simple layout regression
 
 **Date:** 2026-06-13
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl` (software HTML layout)
@@ -49,3 +49,23 @@ markup wraps identically). The CSS pins only measured Chromium/WebKit divergence
 and deliberately does not add a workaround `width`/`min-width` to mask this engine
 bug. Fix belongs in the software layout engine's intrinsic-width / nowrap handling
 for replaced/form-control inline boxes.
+
+## Fix Evidence
+
+Implemented in `simple_web_html_layout_renderer.spl` by carrying
+`white-space:nowrap`/`pre` through inherited style, using nowrap text ranges for
+text nodes, and including horizontal padding/borders in intrinsic width for
+auto-width nowrap controls.
+
+Focused regression:
+
+```sh
+SIMPLE_LIB=src SIMPLE_BOOTSTRAP_DRIVER=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple \
+  /home/ormastes/dev/pub/simple/bin/simple test test/02_integration/rendering/simple_web_titlebar_nowrap_spec.spl --no-cache
+```
+
+The reduced titlebar fixture now reports the pure-Simple button as `35 x 24`
+with `white_space_nowrap=true`, so the label no longer stacks vertically or
+overflows the 35px titlebar band. This does not claim exact Chromium/WebKit
+pixel parity (`43 x 24` in the cross-engine capture); remaining width parity is
+a separate measurement/refinement task.
