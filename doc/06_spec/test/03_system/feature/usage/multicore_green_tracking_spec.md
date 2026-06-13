@@ -149,8 +149,8 @@ Failed: 0
   explicit-argument ABI and multicore-green runtime-pool path so agent handoff
   commands stay release-visible.
 - The tracking row must carry the large-profile gate and profile-report
-  contract so Go scheduler metadata, Go-vs-C stress fanout, and runtime-pool
-  evidence stay release-visible.
+  contract so Go scheduler metadata, Go-vs-C ordinary fanout, Go-vs-C stress
+  fanout, and runtime-pool evidence stay release-visible.
 - The tracking row must carry the negative profile-report contract so broken
   Simple fanout, Go fanout, Go stress, runtime-pool, and parallelism evidence
   cannot pass silently.
@@ -265,7 +265,7 @@ expect(absent_in_text(row, "\"done\"")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -286,6 +286,8 @@ expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_docker_isol
 expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(nfr_req).to_contain("src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean")
+expect(nfr_req).to_contain("ordinary large-fanout section")
+expect(nfr_req).to_contain("large-fanout stress section")
 expect(absent_in_text(feature_req + nfr_req, "cross_language_perf_2026-06-08_docker_contract.md")).to_equal(1)
 expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_green")).to_equal(1)
 ```
@@ -619,7 +621,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 74 lines folded for reproduction.
+Runnable source: 76 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -646,6 +648,8 @@ expect(perf).to_contain("used_runtime_pool()")
 expect(perf).to_contain("queue_model=work_stealing")
 expect(perf).to_contain("GOMAXPROCS=$CPU_WORKERS")
 expect(perf).to_contain("contract-gated reports must keep")
+expect(perf).to_contain("checked large-fanout row")
+expect(perf).to_contain("checked stress report")
 expect(perf).to_contain("runtime-seed `rt_pool_*` support")
 expect(perf).to_contain("not describe this as a combined Pure Simple")
 expect(perf).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")

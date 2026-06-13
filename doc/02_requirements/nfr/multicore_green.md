@@ -20,9 +20,9 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 - NFR-MCG-004: Simple native OS-thread and multicore-green rows must stay within
   the documented ratios in `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
   for the checked-in Docker contract profile.
-- NFR-MCG-005: The large-fanout stress section must prove Go goroutine fanout
-  beats one-pthread-per-task C fanout so the benchmark distinguishes M:N
-  scheduling from OS-thread creation.
+- NFR-MCG-005: The ordinary large-fanout section and the large-fanout stress
+  section must prove Go goroutine fanout beats one-pthread-per-task C fanout so
+  the benchmark distinguishes M:N scheduling from OS-thread creation.
 - NFR-MCG-006: Any miss against the performance budget must create or update a
   measured blocker under `doc/08_tracking/bug/`.
 - NFR-MCG-007: Public APIs keep meaningful names: `thread_spawn`,
