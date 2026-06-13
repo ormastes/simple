@@ -64,6 +64,7 @@ design-implementation-in-progress
 - review: Strongest available review lane confirmed WebGPU should remain metadata/source-plan only and must not be promoted into `BackendKind` or `vulkan_backend.spl` in this slice.
 - impl: Added BrowserSession `application/wasm` script resource handling with inline/external WASM module records, validation status, separate `wasm` pending request kind, and ordered resume of later JavaScript.
 - spec: Added `test/01_unit/lib/common/web/browser_session_wasm_script_spec.spl` and generated `doc/06_spec/test/01_unit/lib/common/web/browser_session_wasm_script_spec.md`.
+- spec: Added fast REQ-WGPU-007 bridge coverage in `test/01_unit/lib/common/web/browser_session_wasm_fetch_bridge_spec.spl` and manual `doc/06_spec/test/01_unit/lib/common/web/browser_session_wasm_fetch_bridge_spec.md` for fetched `application/wasm` bytes, `WebAssembly.instantiate`, same-session `navigator.gpu` metadata, and `requestAdapter()` adapter metadata.
 - impl: Added Simple2D-to-WebGPU render submission evidence with render-pass/draw-call counters in the browser WebGPU command model and software replay result.
 - spec: Updated `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` for Simple2D WebGPU render submission and a guard that `BrowserRenderer.create_with_backend("webgpu")` still reports software fallback instead of overclaiming.
 - review: Strongest available review lane confirmed this proves deterministic in-process WebGPU command replay only; true Chrome/Electron pixel-backed WebGPU evidence remains a separate required slice.

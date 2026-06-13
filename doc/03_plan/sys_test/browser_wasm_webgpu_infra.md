@@ -16,6 +16,8 @@ plan in `doc/03_plan/platform/webgpu_js_wasm_simple.md`.
 | AC-4 | `test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.spl` | Prove Chrome WebGPU compute runs WGSL/readback when available or reports explicit host-unavailable status. |
 | AC-3 | `test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl` | Prove Chrome WebGPU draw evidence is separated from deterministic software fallback. |
 | AC-5 | `test/01_unit/lib/common/web/browser_session_wasm_script_spec.spl` | Prove `application/wasm` scripts load beside JavaScript in one session. |
+| AC-5, REQ-WGPU-007 | `test/01_unit/lib/common/web/browser_session_wasm_fetch_bridge_spec.spl` | Prove fetched WASM bytes instantiate and retain same-session WebGPU metadata through the fast BrowserSession bridge gate. |
+| REQ-WGPU-007 | `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` | Extended BrowserSession WASM fetch-chain conformance evidence beyond the fast bridge gate. |
 | AC-6, AC-7 | `test/01_unit/lib/common/web/browser_session_simple_script_spec.spl` | Prove `text/simple` commands run beside JavaScript and fail deterministically. |
 | AC-8 | `test/01_unit/compiler/semantics/gpu_target_contract_spec.spl` | Prove GPU target ordering and explicit WebGPU metadata. |
 | AC-4, AC-8 | `test/01_unit/compiler/codegen/gpu_portable_compute_spec.spl` | Prove WebGPU/WGSL portable compute source plans and host-import diagnostics. |
@@ -26,6 +28,7 @@ Run focused specs after changes:
 
 ```sh
 bin/simple test test/01_unit/lib/common/web/browser_session_wasm_script_spec.spl --mode=interpreter
+bin/simple test test/01_unit/lib/common/web/browser_session_wasm_fetch_bridge_spec.spl --mode=interpreter
 bin/simple test test/01_unit/lib/common/web/browser_session_simple_script_spec.spl --mode=interpreter
 bin/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter
 bin/simple test test/01_unit/compiler/semantics/gpu_target_contract_spec.spl --mode=interpreter
@@ -36,6 +39,13 @@ bin/simple test test/01_unit/browser_engine/chrome_webgpu_compute_evidence_spec.
 bin/simple test test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.spl --mode=interpreter
 ```
 
+Run extended broad regression evidence when touching BrowserSession WASM
+fetch/compile/instantiate internals:
+
+```sh
+bin/simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --mode=interpreter --timeout-ms=180000
+```
+
 Run generated manual and layout guards:
 
 ```sh
@@ -43,6 +53,8 @@ bin/simple spipe-docgen test/03_system/app/browser/feature/webgpu_js_wasm_simple
 bin/simple spipe-docgen test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl --output doc/06_spec
 bin/simple spipe-docgen test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.spl --output doc/06_spec
 bin/simple spipe-docgen test/01_unit/lib/common/web/browser_session_wasm_script_spec.spl --output doc/06_spec
+bin/simple spipe-docgen test/01_unit/lib/common/web/browser_session_wasm_fetch_bridge_spec.spl --output doc/06_spec
+bin/simple spipe-docgen test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl --output doc/06_spec
 bin/simple spipe-docgen test/01_unit/lib/common/web/browser_session_simple_script_spec.spl --output doc/06_spec
 bin/simple spipe-docgen test/01_unit/compiler/semantics/gpu_target_contract_spec.spl --output doc/06_spec
 bin/simple spipe-docgen test/01_unit/compiler/codegen/gpu_portable_compute_spec.spl --output doc/06_spec
