@@ -612,3 +612,6 @@ Updated: 2026-06-11
 - Simple Web ordered flex loop length hoisting: non-wrapping flex layout now
   reuses the ordered child count across sizing, baseline, and placement passes
   instead of asking the ordered child array for its length in every loop test.
+- Simple Web Draw IR first-command reuse: Draw IR command collection now keeps
+  the prebuilt first visible command and starts the fill loop at the next node,
+  avoiding duplicate command construction for the first rendered element.
