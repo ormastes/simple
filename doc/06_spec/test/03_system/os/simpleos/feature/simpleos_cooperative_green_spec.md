@@ -43,9 +43,9 @@ This system spec proves that the implemented cooperative-green API remains usabl
 | Feature IDs | #green-simpleos-cooperative |
 | Category | SimpleOS / Concurrency |
 | Status | Implemented |
-| Requirements | N/A |
+| Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
-| Design | N/A |
+| Design | doc/04_architecture/runtime/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl` |
 | Updated | 2026-06-01 |
@@ -60,7 +60,7 @@ execution.
 
 ## Requirements
 
-**Requirements:** N/A
+**Requirements:** doc/02_requirements/feature/multicore_green.md
 
 ## Plan
 
@@ -68,7 +68,7 @@ execution.
 
 ## Design
 
-**Design:** N/A
+**Design:** doc/04_architecture/runtime/multicore_green.md
 
 ## Research
 
@@ -130,6 +130,8 @@ carrier cooperative scheduling, not CPU-parallel M:N execution.
 
 ## Traceability Notes
 
+- NFR boundary: `doc/02_requirements/nfr/multicore_green.md`.
+- Detail design: `doc/05_design/multicore_green.md`.
 - `cooperative_green_spawn` covers closure-style logical work.
 - `cooperative_green_spawn_value` covers direct value fanout rows.
 - `cooperative_green_ready_count` is used as queue-depth evidence.
@@ -275,7 +277,9 @@ expect(handle.join()).to_equal(21)
 
 ## Related Documentation
 
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
 - **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Design:** [doc/04_architecture/runtime/multicore_green.md](doc/04_architecture/runtime/multicore_green.md)
 - **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 

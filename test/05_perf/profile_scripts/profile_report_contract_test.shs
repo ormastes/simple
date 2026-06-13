@@ -118,6 +118,30 @@ require_cooperative_green_rows_valid() {
     fi
 }
 
+require_os_thread_rows_valid() {
+    file="$1"
+    if ! awk -F'|' '
+        /^\|.*Simple \((native|SMF)\)/ {
+            row = $0
+            notes = $4
+            gsub(/^[ \t]+|[ \t]+$/, "", row)
+            gsub(/^[ \t]+|[ \t]+$/, "", notes)
+            if (notes !~ /(thread_spawn fork-join|std thread_spawn|OS-thread fanout)/) {
+                next
+            }
+            if (notes !~ /thread_spawn/) {
+                bad = 1
+            }
+            if (notes ~ /(thread_spawn_with_args|cooperative_green|multicore_green|runtime pool|pool_used=|parallelism=|queue_model=|goroutine|M:N)/) {
+                bad = 1
+            }
+        }
+        END { exit bad ? 1 : 0 }
+    ' "$file"; then
+        fail "invalid Simple OS-thread evidence row in $file"
+    fi
+}
+
 require_multicore_green_generator_fail_closed() {
     file="$1"
     if ! awk '
@@ -292,6 +316,7 @@ case "$kind" in
         require_contains "$report_path" "thread_spawn fork-join OS threads"
         require_contains "$report_path" "std thread_spawn"
         require_contains "$report_path" "OS-thread fanout"
+        require_os_thread_rows_valid "$report_path"
         require_contains "$report_path" "Simple cooperative green"
         require_contains "$report_path" "cooperative_green_spawn"
         require_contains "$report_path" "cooperative queue fanout"

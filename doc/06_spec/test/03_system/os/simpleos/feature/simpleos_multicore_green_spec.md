@@ -44,9 +44,9 @@ This system spec exercises the hosted SimpleOS contract for multicore green work
 | Feature IDs | #green-simpleos-multicore |
 | Category | SimpleOS / Concurrency |
 | Status | In Progress |
-| Requirements | N/A |
+| Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
-| Design | N/A |
+| Design | doc/04_architecture/runtime/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl` |
 | Updated | 2026-06-01 |
@@ -69,7 +69,7 @@ stays separate from the opt-in live QEMU AP lane and from the final
 
 ## Requirements
 
-**Requirements:** N/A
+**Requirements:** doc/02_requirements/feature/multicore_green.md
 
 ## Plan
 
@@ -77,7 +77,7 @@ stays separate from the opt-in live QEMU AP lane and from the final
 
 ## Design
 
-**Design:** N/A
+**Design:** doc/04_architecture/runtime/multicore_green.md
 
 ## Research
 
@@ -143,6 +143,8 @@ This is hosted model evidence; live QEMU/AP execution remains covered by
 ## Evidence Boundary
 
 - This spec proves hosted/model SimpleOS scheduler behavior.
+- NFR boundary: `doc/02_requirements/nfr/multicore_green.md`.
+- Detail design: `doc/05_design/multicore_green.md`.
 - It proves scheduler-owned carrier state, remote enqueue/IPI intent,
   topology-bounded green state, and named preemption-safepoint routing.
 - It does not by itself prove live AP hardware execution or final ring/user
@@ -551,7 +553,9 @@ expect(blocker).to_contain("Final Ring/User Handoff PASS")
 
 ## Related Documentation
 
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
 - **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Design:** [doc/04_architecture/runtime/multicore_green.md](doc/04_architecture/runtime/multicore_green.md)
 - **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 

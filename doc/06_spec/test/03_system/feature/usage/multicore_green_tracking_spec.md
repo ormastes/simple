@@ -311,13 +311,13 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 - Verify the public API contract summary remains explicit
    - Expected: absent_in_text(row, "misuse_fixtures=611") equals `1`
 - Verify negative profile contract cases stay release-visible
-- Verify the system-test plan describes the cooperative-green negative profile case
+- Verify the system-test plan describes cooperative-green and OS-thread negative profile cases
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 72 lines folded for reproduction.
+Runnable source: 75 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -387,11 +387,14 @@ expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
 expect(row).to_contain("cooperative_green_explanation_corrupt")
 expect(row).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(row).to_contain("go_scheduler_width_mismatch")
+expect(row).to_contain("os_thread_profile_row_thread_spawn_with_args")
 expect(row).to_contain("forbidden_number_suffix_api_name")
-step("Verify the system-test plan describes the cooperative-green negative profile case")
+step("Verify the system-test plan describes cooperative-green and OS-thread negative profile cases")
 val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 expect(system_plan).to_contain("cooperative-green explanation")
 expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
+expect(system_plan).to_contain("os_thread_profile_row_thread_spawn_with_args")
+expect(system_plan).to_contain("OS-thread-label")
 expect(system_plan).to_contain("cooperative-label")
 ```
 
@@ -546,7 +549,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -581,6 +584,7 @@ expect(perf).to_contain("PROFILE_DOCKER_SIMPLE_BINARY=src/compiler_rust/target/d
 
 step("Verify forbidden numbered API-name scans cover the public concurrency family")
 expect(profile_contract).to_contain("thread_spawn_with_args")
+expect(profile_contract).to_contain("require_os_thread_rows_valid")
 expect(profile_contract).to_contain("task_spawn")
 expect(profile_contract).to_contain("cooperative_green_spawn")
 expect(profile_contract).to_contain("multicore_green_spawn_sliced")

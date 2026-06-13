@@ -44,9 +44,9 @@ This system spec connects the pure green-channel contract to the SimpleOS green-
 | Feature IDs | #green-simpleos-channel-wake |
 | Category | SimpleOS / Concurrency |
 | Status | In Progress |
-| Requirements | N/A |
+| Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
-| Design | N/A |
+| Design | doc/04_architecture/runtime/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl` |
 | Updated | 2026-06-01 |
@@ -65,7 +65,7 @@ by the QEMU SMP proof item in the multicore-green plan.
 
 ## Requirements
 
-**Requirements:** N/A
+**Requirements:** doc/02_requirements/feature/multicore_green.md
 
 ## Plan
 
@@ -73,7 +73,7 @@ by the QEMU SMP proof item in the multicore-green plan.
 
 ## Design
 
-**Design:** N/A
+**Design:** doc/04_architecture/runtime/multicore_green.md
 
 ## Research
 
@@ -147,6 +147,8 @@ queue mutation: none
 
 ## Expected Results
 
+- NFR boundary: `doc/02_requirements/nfr/multicore_green.md`.
+- Detail design: `doc/05_design/multicore_green.md`.
 - `sent.unparked` is true only when a receiver was parked on the channel.
 - `decision.should_enqueue` is true only when the receiver id matches the parked
   green task id.
@@ -429,7 +431,9 @@ expect(applied.enqueued).to_be(false)
 
 ## Related Documentation
 
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
 - **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Design:** [doc/04_architecture/runtime/multicore_green.md](doc/04_architecture/runtime/multicore_green.md)
 - **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 
