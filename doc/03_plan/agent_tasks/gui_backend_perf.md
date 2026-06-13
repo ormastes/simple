@@ -707,3 +707,7 @@ Updated: 2026-06-11
   `extract_css` now counts non-empty custom-property style blocks, fills an
   exact-size block array, and joins once instead of repeatedly appending each
   `<style>` block's collected custom property text.
+- Simple Web custom-property prepass duplicate scan removal: `extract_css`
+  now counts valid `<style>` blocks without calling `_css_collect_custom_props`
+  during the count pass, so each style block is parsed for root custom
+  properties only in the fill pass.
