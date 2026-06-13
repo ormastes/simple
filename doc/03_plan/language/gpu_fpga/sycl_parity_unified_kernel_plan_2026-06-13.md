@@ -77,7 +77,8 @@ Runtime externs needed (Rust seed additions → require `scripts/bootstrap/boots
 - [x] W3.2 FPGA attributes — `VhdlKernelAttrs` (unroll_factor / pipeline_ii / memory_banks) shape kernel-entity VHDL (structural unroll, `GENERIC (II ...)`, banked port groups), fail-closed `VHDL-KERNEL-ATTR-INVALID`; 20/20 (`vhdl_kernel_attrs_contract_spec.spl`); G9 closed at backend level. TODO(W3.2-frontend): wire parsed `@unroll`/`@pipeline`/`@memory` decorators into `VhdlKernelAttrs` (v1 passes the options struct explicitly)
 - [x] W3.3 Pipes — both halves: `GpuPipe` host FIFO (`src/lib/nogc_sync_mut/gpu/pipe.spl`) + VHDL FIFO entity/endpoints/topology (`vhdl_kernel_pipe.spl`, 44/44 `vhdl_kernel_pipe_contract_spec.spl`)
 - [x] W4.3 Error model — `GpuQueue.wait_result() -> Result<i64, text>`, first-failure capture, no aborts
-- [ ] W2.6 vec types — in flight (agent); W2.1 descriptive kernel lowering — pending (compiler frontend)
+- [x] W2.6 Vec types — gpu_vec4/vec2_load/store_f32 intrinsics; OpenCL `vload4/vstore4/vload2/vstore2` (float4/float2) + PTX `ld/st.global.v4/v2.f32`; 22/22 (`vec_types_contract_spec.spl`); G11 closed
+- [ ] W2.1 descriptive kernel lowering — pending (compiler frontend; library `parallel_for`+CPU executor cover the productivity gap meanwhile)
 - [ ] W3.4 board flow, G4 shared/managed seed externs, W3.2 frontend decorator wiring — follow-ups
 - Found during W1: `grid` named-arg parser bug (P2) — `doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md`; API uses grid_dim/block_dim until fixed
 - [ ] W3.x — pending (headline)

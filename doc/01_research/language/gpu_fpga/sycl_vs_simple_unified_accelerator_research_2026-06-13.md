@@ -158,7 +158,7 @@ the implementing agent):
 | G8 spec constants | `gpu_spec_const_i64` + `SpecConstRegistry`, folded at emission | `spec_constants_contract_spec.spl` 13/13 |
 | G9 FPGA tuning | `VhdlKernelAttrs` unroll/II/banking + pipes (VHDL FIFO/endpoints/topology + `GpuPipe` host half) | `vhdl_kernel_attrs_contract_spec.spl` 20/20, `vhdl_kernel_pipe_contract_spec.spl` 44/44 |
 | G10 CPU fallback | `cpu_kernel_run_1d` + state-backed index intrinsics (1D, serial; no cross-thread shared-mem exchange) | `gpu_queue_usm_spec.spl` |
-| G11 vec types | vec2/vec4 f32 load/store intrinsics (vloadN/vstoreN, `ld/st.global.vN.f32`) | in flight at time of writing — see plan Status |
+| G11 vec types | vec2/vec4 f32 load/store intrinsics (vloadN/vstoreN, `ld/st.global.vN.f32`) | `vec_types_contract_spec.spl` 22/22 |
 | G12 profiling/errors | `enable_profiling` + `elapsed_ms`, `wait_result() -> Result` | `gpu_queue_usm_spec.spl` |
 
 Residual follow-ups (tracked in plan Status): W2.1 compiler-side descriptive
