@@ -99,10 +99,14 @@ JIT-crash hazards now converted to correct interpreter fallback.
    `use a.b.c.{Class}` / `.*`), so imported class methods JIT/AOT natively
    instead of falling back. (`should_flatten_nested_import`,
    `pipeline/module_loader.rs`.)
-2. **Self-mutation lowering:** with a flattening import, JIT then fails with
-   `cannot modify self in immutable fn method 'RtStringBuilder.finish'` because
-   `finish()`/`free()` do `me.handle = 0`. Self-mutating methods need to lower
-   correctly. Blocks native `RtStringBuilder` even once flattened.
+2. **Self-mutation lowering:** ~~with a flattening import, JIT fails with
+   `cannot modify self in immutable fn method 'RtStringBuilder.finish'`~~ —
+   **NOT a compiler bug; FIXED in source.** Simple has two method forms by
+   design (`is_me_method`): `fn name()` = immutable self, `me name()` = mutable
+   self. `finish()`/`free()` assign `me.handle = 0`, so they must be declared
+   `me finish()` / `me free()`. Fixed in `src/lib/common/string_builder.spl`.
+   With a flattening (group/`*`) import, `RtStringBuilder` now JITs **and** AOTs
+   **natively** (verified `hi`, exit 0, no fallback; existing spec 24/24).
 3. **`rt_dict_insert`:** ~~MIR lowering emits a symbol the runtime does not
    define~~ — **FIXED** via `sffi_alias_target` alias to `rt_dict_set`. Dict
    literals with statically-typed values now JIT natively. (Dynamic-value dicts
@@ -112,10 +116,12 @@ JIT-crash hazards now converted to correct interpreter fallback.
 
 - JIT no longer crashes on an undefined cross-module symbol — it falls back to
   the interpreter (correct output, slower). No more exit-139.
-- Native/JIT use of imported class **methods** still needs follow-ups 1+2; until
-  then such code runs correctly under the interpreter. Do **not** wire
-  `RtStringBuilder` into JIT/native hot paths (e.g. the MCP JSON builders) —
-  see `rt_string_concat_quadratic_2026-06-12.md`.
+- `RtStringBuilder` now JITs/AOTs **natively** when imported with a flattening
+  form — `use std.common.string_builder.{RtStringBuilder}` or `.*` (follow-up #2
+  fixed). Only the whole-module `use std.common.string_builder` form still falls
+  back (flatten gap, follow-up #1) — safe (correct output via interpreter). The
+  MCP JSON builders may now use `RtStringBuilder` **if** imported via the
+  group/glob form; cf. `rt_string_concat_quadratic_2026-06-12.md`.
 
 ## Cross-references
 
