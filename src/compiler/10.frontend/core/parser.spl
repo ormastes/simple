@@ -69,6 +69,11 @@ var par_kind_slot: [i64] = [0]
 var par_text_slot: [text] = [""]
 var par_line_slot: [i64] = [0]
 var par_col_slot: [i64] = [0]
+# Perf: whole-source cache for parser_token_text_from_offsets, keyed on a
+# generation counter bumped at every LEX_SOURCE set-site. Avoids the O(N^2)
+# rt_env_get(LEX_SOURCE) whole-source fetch per token (one per parser_advance).
+var par_src_cache_slot: [text] = [""]
+var par_src_cache_gen_slot: [i64] = [-1]
 
 extern fn rt_is_debug_mode_enabled() -> bool
 
@@ -90,6 +95,36 @@ fn parser_env_i64(key: text) -> i64:
         return 0 - value
     value
 
+fn parser_lex_source_gen_bump():
+    # Invalidate the whole-source cache: called at every LEX_SOURCE set-site.
+    val cur = parser_env_i64("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
+    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN", "{cur + 1}")
+
+fn parser_lex_source_cached() -> text:
+    # Serve the source from a generation-keyed module-var cache so per-token
+    # callers pay one small-int env read instead of re-fetching the whole O(N)
+    # source via rt_env_get each time (the per-token path was O(N^2)). Module
+    # slots persist across calls in compiled stage4; the interpreter falls back
+    # to a refetch each call (cache slot does not persist) — slow but correct.
+    val gen = parser_env_i64("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
+    if (par_src_cache_slot != nil and par_src_cache_gen_slot != nil and
+            par_src_cache_slot.len() > 0 and par_src_cache_gen_slot.len() > 0):
+        if par_src_cache_gen_slot[0] == gen and par_src_cache_slot[0] != "":
+            return par_src_cache_slot[0]
+    val inline_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
+    var src = inline_source
+    if src == "":
+        val path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+        if path != "":
+            src = rt_file_read_text(path) ?? ""
+    if par_src_cache_slot == nil:
+        par_src_cache_slot = [""]
+    if par_src_cache_gen_slot == nil:
+        par_src_cache_gen_slot = [-1]
+    par_src_cache_slot[0] = src
+    par_src_cache_gen_slot[0] = gen
+    src
+
 fn parser_token_text_from_offsets(kind: i64) -> text:
     if kind == 180 or kind == 181 or kind == 182 or kind == 190:
         return ""
@@ -97,12 +132,7 @@ fn parser_token_text_from_offsets(kind: i64) -> text:
     val end = parser_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_END")
     if end <= start:
         return ""
-    val inline_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
-    var source = inline_source
-    if source == "":
-        val path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
-        if path != "":
-            source = rt_file_read_text(path) ?? ""
+    val source = parser_lex_source_cached()
     if source == "":
         return ""
     if start < 0 or end > source.len():
@@ -484,6 +514,7 @@ fn parse_module(source: text, path: text):
     parse_module_body()
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    parser_lex_source_gen_bump()
 
 fn parse_module_file(source: text, path: text):
     # Parse additional file without resetting AST
@@ -504,6 +535,7 @@ fn parse_module_file(source: text, path: text):
     parse_module_body()
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    parser_lex_source_gen_bump()
 
 fn parser_has_errors() -> bool:
     par_had_error_get()
