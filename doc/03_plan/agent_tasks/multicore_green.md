@@ -327,32 +327,36 @@ Each agent reports:
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 - unresolved blockers or files intentionally left untouched.
 
-## Current Sync Status (2026-06-12)
+## Current Sync Status (2026-06-13)
 
-- This refresh follows the pushed thread-spawn native regression sync
-  (`test: keep thread spawn native regression green`) and records the current
-  multicore-green lane evidence after rebasing onto the latest `origin/main`.
-- Focused current-source checks on 2026-06-12 passed for the thread-spawn
-  native regression, multicore-green helper handles, resumable-stepper blocker
-  boundary, worker callback registry, channel struct send, callable field,
-  fairness/preemption gap docs, thread-yield gap docs, blocking compensation,
-  parallelism bound, host parity tracking, native function-value loop return,
-  native function-value param-array, native struct-array, hosted SimpleOS
-  cooperative green, hosted SimpleOS multicore green, hosted SimpleOS green
-  channel wake, profile report contract, and cross-language gate.
-- The multicore-green lane has also synced:
-  - Docker auto-binary selection preferring `bin/simple` / `bin/release/simple`
-    while leaving `src/compiler_rust/target/debug/simple` as an explicit
-    regression override;
-  - Docker isolation contract coverage that stubs the container handoff and
-    checks `PROFILE_DOCKER_ISOLATION=1`, `--network=none`, UID/GID mapping,
-    resource limits, workspace mounting, and environment propagation;
-  - the fixed generated `fanout_stress_multicore_green.spl` source shape;
-  - refreshed Go-vs-Simple research and SimpleOS evidence docs;
-  - closure-aligned architecture, design, tracker, and report text for the
-    final SimpleOS AP ring/user handoff lane;
-  - handle-array native lowering and thread-spawn native regression coverage.
-- The shared workspace remains dirty outside this lane because other sessions
-  are active in the checkout; future multicore-green syncs must keep unrelated
-  files out of lane commits unless the user explicitly asks for an integration
-  commit.
+- Latest pushed multicore-green lane sync:
+  `1602 docs: map multicore profile gates`, rebased onto the later
+  `218 perf(gui): avoid compound class split` mainline before this refresh.
+- The latest docs/spec slice made `test/05_perf/README.md` point at every
+  active profile-script gate for this lane: the canonical profile report
+  contract, negative mutation contract, binary auto-selection regression,
+  Docker isolation contract, concurrency API misuse contract, and
+  `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`.
+- The tracking SSpec and generated manual now assert that the README keeps the
+  large Go fanout, Simple multicore-green runtime-pool evidence,
+  `queue_model=work_stealing`, and numeric-suffix API-alias rejection visible.
+- Focused checks from the latest pushed slice passed:
+  - `test/03_system/feature/usage/multicore_green_tracking_spec.spl`
+  - `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`
+  - `test/05_perf/profile_scripts/profile_report_contract_test.shs`
+  - `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
+  - `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`
+  - `doc/08_tracking/feature/feature_db.sdn` lint
+  - `/sp_dev` wiring check
+  - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
+- Prior 2026-06-12/early-2026-06-13 evidence remains valid for Docker
+  auto-binary selection, Docker isolation, the fixed generated
+  `fanout_stress_multicore_green.spl` source shape, Go-vs-Simple research,
+  SimpleOS evidence docs, final SimpleOS AP ring/user handoff wording,
+  handle-array native lowering, thread-spawn native regression coverage, and
+  the concurrency API misuse inventory (`positive_fixtures=6`,
+  `checked_in_misuse_fixtures=26`, `total_misuse_fixtures=37`).
+- The shared default checkout remains dirty outside this lane because other
+  sessions are active in WebGPU/UI/loader work. Multicore-green syncs continue
+  in the separate jj workspace and must keep unrelated files out of lane
+  commits unless the user explicitly asks for an integration commit.

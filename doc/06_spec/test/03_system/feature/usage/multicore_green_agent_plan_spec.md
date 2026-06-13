@@ -327,12 +327,13 @@ expect(plan).to_contain("Do not use numbered API names to distinguish behavior."
 - Verify the guide-boundary scenario remains executable and visible
 - Verify the scenario still protects cooperative green from M:N claims
 - Verify the scenario still protects multicore-green runtime-pool evidence
+- Verify the profile-gate README alignment is tracked
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -351,6 +352,12 @@ expect(tracker).to_contain("handle.used_runtime_pool()")
 expect(tracker).to_contain("GOMAXPROCS=$CPU_WORKERS")
 expect(manual).to_contain("handle.used_runtime_pool()")
 expect(manual).to_contain("GOMAXPROCS=$CPU_WORKERS")
+step("Verify the profile-gate README alignment is tracked")
+expect(tracker).to_contain("Verify the performance README maps all profile-script gates")
+expect(manual).to_contain("Verify the performance README maps all profile-script gates")
+expect(tracker).to_contain("stress/multicore_green_large_profile_gate_spec.spl")
+expect(manual).to_contain("stress/multicore_green_large_profile_gate_spec.spl")
+expect(tracker).to_contain("numeric-suffix concurrency aliases")
 ```
 
 </details>
