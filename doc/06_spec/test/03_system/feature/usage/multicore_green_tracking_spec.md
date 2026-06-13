@@ -642,7 +642,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 90 lines folded for reproduction.
+Runnable source: 93 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -695,6 +695,9 @@ expect(profile_contract).to_contain("\"extern fn rt_pool_join\"")
 expect(profile_contract).to_contain("\"rt_pool_join(\"")
 expect(profile_contract).to_contain("\"val handle = handles[index]\"")
 expect(profile_contract).to_contain("\"total = total + handle.join()\"")
+expect(profile_contract).to_contain("canonical_checked_report=1")
+expect(profile_contract).to_contain("report_index=\"doc/09_report/README.md\"")
+expect(profile_contract).to_contain("report_index_checked=doc/09_report/README.md")
 expect(sys_test_plan).to_contain("Generated multicore-green profile code must store `MulticoreGreenHandle` values")
 expect(sys_test_plan).to_contain("must not import `rt_pool_join` directly")
 expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row")
