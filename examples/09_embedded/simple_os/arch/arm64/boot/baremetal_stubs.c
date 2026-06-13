@@ -137,13 +137,6 @@ static size_t _heap_off = 0;
 static void *_heap_alloc(size_t sz)
 {
     sz = (sz + 15) & ~(size_t)15;
-    if (sz >= 0x100000) {
-        serial_puts("[heaptrace] sz=");
-        serial_put_dec((int64_t)sz);
-        serial_puts(" used=");
-        serial_put_dec((int64_t)_heap_off);
-        serial_puts("\r\n");
-    }
     if (_heap_off + sz > sizeof(_heap)) {
         serial_puts("[PANIC] heap exhausted requested=");
         serial_put_dec((int64_t)sz);
