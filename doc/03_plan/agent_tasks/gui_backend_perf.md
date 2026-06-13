@@ -615,3 +615,6 @@ Updated: 2026-06-11
 - Simple Web Draw IR first-command reuse: Draw IR command collection now keeps
   the prebuilt first visible command and starts the fill loop at the next node,
   avoiding duplicate command construction for the first rendered element.
+- Simple Web scroll crop loop tightening: scroll viewport cropping now advances
+  source and destination row bases incrementally and removes the per-row bounds
+  branch that is implied by `virtual_h = height + clamp_scroll`.
