@@ -218,13 +218,13 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 - Verify the plan still names the canonical deliverable and evidence sections
 - Verify profile and runtime-pool acceptance uses current-source evidence while release wrapper is stale
 - Verify host-fairness acceptance uses current-source evidence while release wrapper is stale
-- Verify the current sync status records the latest coding skill API gate
+- Verify the current sync status records durable lane state
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -259,11 +259,13 @@ step("Verify host-fairness acceptance uses current-source evidence while release
 expect(plan).to_contain("src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl")
 expect(plan).to_contain("src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl")
 expect(plan).to_contain("src/compiler_rust/target/debug/simple lint doc/08_tracking/feature/feature_db.sdn")
-step("Verify the current sync status records the latest coding skill API gate")
-expect(plan).to_contain("473 docs: align coding skill api gate")
-expect(plan).to_contain("f911 feat(gui): default pure simple web to auto backend")
+step("Verify the current sync status records durable lane state")
+expect(plan).to_contain("Current multicore-green lane state is rebased on the latest shared mainline")
+expect(plan).to_contain("small jj slices")
 expect(plan).to_contain(".codex/skills/coding/SKILL.md")
 expect(plan).to_contain("cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(plan).to_contain("The report index now promotes")
+expect(plan).to_contain("older Docker contract report historical")
 expect(plan).to_contain("The NFR verification gates now include")
 expect(plan).to_contain("numeric-suffix API-alias rejection")
 ```

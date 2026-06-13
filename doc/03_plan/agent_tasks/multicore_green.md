@@ -330,10 +330,9 @@ Each agent reports:
 
 ## Current Sync Status (2026-06-13)
 
-- Latest pushed multicore-green lane sync:
-  `473 docs: align coding skill api gate`, rebased onto the later
-  `f911 feat(gui): default pure simple web to auto backend` mainline before
-  this refresh.
+- Current multicore-green lane state is rebased on the latest shared mainline
+  and uses small jj slices for doc/spec/evidence refreshes so other-agent work
+  remains separate.
 - The latest docs/spec slice made `test/05_perf/README.md` point at every
   active profile-script gate for this lane: the canonical profile report
   contract, negative mutation contract, binary auto-selection regression,
@@ -343,6 +342,9 @@ Each agent reports:
   `.codex/skills/coding/SKILL.md` with the same concurrency API contract gate,
   and refreshed the architecture evidence path to
   `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
+- The report index now promotes
+  `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+  as current evidence and keeps the older Docker contract report historical.
 - The tracking SSpec and generated manual now assert that the README keeps the
   large Go fanout, Simple multicore-green runtime-pool evidence,
   `queue_model=work_stealing`, and numeric-suffix API-alias rejection visible.
