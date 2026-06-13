@@ -73,7 +73,12 @@ Runtime externs needed (Rust seed additions → require `scripts/bootstrap/boots
 - [x] W4.2 (host path) — `GpuEvent.elapsed_nanos`/`elapsed_ms` + `GpuQueue.enable_profiling`; device timers pending native stream binding
 - [x] W2.3 Group algorithms — gpu_warp_reduce_add/broadcast/scan_add; OpenCL `sub_group_reduce_add`/`broadcast`/`scan_inclusive_add` + PTX butterfly/idx/up shuffle sequences with predicated adds; contract spec 21/21 (`group_algorithms_contract_spec.spl`); G7 closed at kernel level
 - [x] W4.1 Generic CPU executor — `cpu_kernel_run_1d` + state-backed gpu_* index intrinsics in `gpu_ops.spl`; any kernel-shaped body runs a real 1D ndrange on host (serial; shared-mem/syncthreads exchange unsupported, documented); G10 closed for 1D
-- [ ] W2.1/W2.5/W2.6 — W2.5 in flight (agent), W2.1/W2.6 pending
+- [x] W2.5 Spec constants — `gpu_spec_const_i64(name, default)` intrinsic + `SpecConstRegistry` (set/clear/resolve), folded literals in OpenCL + PTX `mov.s64`; 13/13 (`spec_constants_contract_spec.spl`); G8 closed
+- [x] W3.2 FPGA attributes — `VhdlKernelAttrs` (unroll_factor / pipeline_ii / memory_banks) shape kernel-entity VHDL (structural unroll, `GENERIC (II ...)`, banked port groups), fail-closed `VHDL-KERNEL-ATTR-INVALID`; 20/20 (`vhdl_kernel_attrs_contract_spec.spl`); G9 closed at backend level. TODO(W3.2-frontend): wire parsed `@unroll`/`@pipeline`/`@memory` decorators into `VhdlKernelAttrs` (v1 passes the options struct explicitly)
+- [x] W3.3 Pipes — both halves: `GpuPipe` host FIFO (`src/lib/nogc_sync_mut/gpu/pipe.spl`) + VHDL FIFO entity/endpoints/topology (`vhdl_kernel_pipe.spl`, 44/44 `vhdl_kernel_pipe_contract_spec.spl`)
+- [x] W4.3 Error model — `GpuQueue.wait_result() -> Result<i64, text>`, first-failure capture, no aborts
+- [ ] W2.6 vec types — in flight (agent); W2.1 descriptive kernel lowering — pending (compiler frontend)
+- [ ] W3.4 board flow, G4 shared/managed seed externs, W3.2 frontend decorator wiring — follow-ups
 - Found during W1: `grid` named-arg parser bug (P2) — `doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md`; API uses grid_dim/block_dim until fixed
 - [ ] W3.x — pending (headline)
 - [ ] W4.x — pending

@@ -140,6 +140,34 @@ Simple does not need to clone SYCL's buffer/accessor C++ API. It needs the
 Each closure should land with sspec coverage and fail-closed backend contracts,
 preserving the axes where Simple already leads.
 
+## 5a. Status update — gap closures landed 2026-06-13 (same day)
+
+Implementation of the companion plan closed the BEHIND rows as follows (every
+closure has a green spec; counts are per-example, re-verified independently of
+the implementing agent):
+
+| Gap | Closure | Evidence |
+|-----|---------|----------|
+| G1 single source GPU+FPGA | `@gpu_kernel` MIR → VHDL entity lane (counter-driven loop process, fail-closed subset) | `vhdl_kernel_entity_contract_spec.spl` 14/14 |
+| G2 queue/event | `GpuQueue`/`GpuEvent`, `submit_after` deps fail-closed | `gpu_queue_usm_spec.spl` |
+| G3 implicit DAG | `GpuAccessGraph` RAW/WAW/WAR derivation from access sets | same spec |
+| G4 USM | trio API; device kind CUDA-backed (`rt_cuda_mem_alloc`); shared/managed = seed-extern follow-up | same spec |
+| G5 descriptive parallel_for | library `parallel_for` with implicit bounds + `cpu_kernel_run_1d`; compiler kernel-form (W2.1) still pending | same spec |
+| G6 sub-group ops | 8 intrinsics, PTX `shfl.sync.*`/`vote.sync.ballot` + OpenCL `sub_group_*`; warp-sync comment placeholders removed | `subgroup_intrinsics_contract_spec.spl` 24/24 |
+| G7 group algorithms | warp reduce_add/broadcast/scan_add (PTX butterfly/idx/up sequences, OpenCL `sub_group_reduce_add` etc.) + launch-level `parallel_reduce_i64` | `group_algorithms_contract_spec.spl` 21/21 |
+| G8 spec constants | `gpu_spec_const_i64` + `SpecConstRegistry`, folded at emission | `spec_constants_contract_spec.spl` 13/13 |
+| G9 FPGA tuning | `VhdlKernelAttrs` unroll/II/banking + pipes (VHDL FIFO/endpoints/topology + `GpuPipe` host half) | `vhdl_kernel_attrs_contract_spec.spl` 20/20, `vhdl_kernel_pipe_contract_spec.spl` 44/44 |
+| G10 CPU fallback | `cpu_kernel_run_1d` + state-backed index intrinsics (1D, serial; no cross-thread shared-mem exchange) | `gpu_queue_usm_spec.spl` |
+| G11 vec types | vec2/vec4 f32 load/store intrinsics (vloadN/vstoreN, `ld/st.global.vN.f32`) | in flight at time of writing — see plan Status |
+| G12 profiling/errors | `enable_profiling` + `elapsed_ms`, `wait_result() -> Result` | `gpu_queue_usm_spec.spl` |
+
+Residual follow-ups (tracked in plan Status): W2.1 compiler-side descriptive
+kernel lowering, W3.2 frontend decorator wiring, W3.4 board bundle flow, G4
+shared/managed seed externs, GHDL-simulated end-to-end kernel testbench.
+Language bugs found and recorded during the work:
+`grid_identifier_named_arg_parse_failure_2026-06-13.md`,
+`dict_struct_key_iteration_single_entry_2026-06-13.md`.
+
 ## 6. Sources
 
 - khronos.org/sycl — indexed `khronos-sycl-overview` (SYCL 2020 rev 11, UXL/oneAPI ecosystem)
