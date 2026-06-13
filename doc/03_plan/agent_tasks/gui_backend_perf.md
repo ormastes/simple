@@ -667,3 +667,6 @@ Updated: 2026-06-11
   unquoted attribute value parsing, and class-token counting now use `char_at`
   plus original-string slice offsets instead of allocating one-character and
   tail substrings for every parsed element.
+- Simple Web numeric parser substring removal: CSS integer, nth-integer, and
+  opacity fraction scans now use `char_at` instead of allocating a substring for
+  every scanned digit during style application.
