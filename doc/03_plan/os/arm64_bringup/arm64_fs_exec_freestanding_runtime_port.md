@@ -67,6 +67,26 @@ re-implemented over arm64 virtio-mmio-blk (cf. riscv64's `virtio_blk_init/read_s
 5. **Slice 5:** boot in QEMU `virt`; debug first-ever arm64 nvme/dbfs/async/fat32 runtime;
    iterate to the fs-exec markers. Then flip the system test from diagnosed-RED to live-pass.
 
+## PROGRESS (2026-06-13)
+- **Slice 1 DONE + pushed** (origin tip): 11 MMIO/barrier C stubs + `.S` include-path fix. 48 → 35.
+- **Slice 2 DONE + pushed** (origin tip `9ca41bea285`): 24 portable runtime helpers in arm64
+  `baremetal_stubs.c`. 35 → 11. `rt_for_iterable` found = identity passthrough
+  (`src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`). `rt_hash_text` authored (FNV-1a;
+  x86 was a no-op stub). `rt_getpid`→1, `rt_time_now_unix_micros`→0 (no arm64 CNTVCT wired — TODO).
+- **Remaining 11:** `simpleos_nvme_init/read_sector/write_sector`, `simpleos_fat32_read_path[_array/_size]`,
+  `simpleos_fat32_path_read_buffer_addr` (Class B), `services__vfs__vfs_{boot_init,init,write_ops}__NvfsHostedDriver`,
+  `VIRTQUEUE_SIZE_dot_to_u32` (Class C).
+
+## KEY ABI FINDING (resolved 2026-06-13) — affects Slice 5 boot
+Baremetal cranelift codegen passes **tagged `RuntimeValue`** args to compiler-runtime-helper
+externs — PROVEN by x86_64 `primitives.c` `f32_from_bits`: comment `/* bits is ENCODE_INT(...) */`
++ `DECODE_INT(bits)` on a `u32`-typed extern arg. So Slice 2's `DECODE_INT` on `rt_bytes_from_raw`
+(ptr,len) etc. is CORRECT (not raw). **OPEN/UNVALIDATED:** the Slice-1 MMIO `rt_volatile_*` were
+written RAW (matching x86_64 `rt_extras.c`), but x86 never exercises MMIO serial (uses port I/O),
+so that's untested — on arm64 the addr/value args may actually arrive TAGGED like every other
+helper. **If Slice-5 boot produces ZERO serial, flip rt_volatile_*/barriers to DECODE_INT(addr)/
+DECODE_INT(val)** (one-line each in baremetal_stubs.c) — that is the prime suspect. Boot is the oracle.
+
 ## Verification protocol (per advisor)
 - Build via the PROPER path (no `SIMPLE_ALLOW_FREESTANDING_STUBS`) so the link fails loudly;
   `freestanding_weak_boot_defsyms` (linker.rs:1393) injects weak no-ops unconditionally, so
