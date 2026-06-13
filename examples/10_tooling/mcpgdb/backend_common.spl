@@ -2,14 +2,11 @@
 @allow(unnamed_duplicate_typed_args)
 # mcpgdb MCP — persistent backend helpers
 
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
-extern fn rt_file_size(path: text) -> i64
 extern fn rt_env_cwd() -> text
 
-use std.io_runtime.{read_file, write_file, file_exists, process_run}
+use std.io_runtime.{read_file, write_file, file_exists, process_run, dir_create, file_delete, file_size}
 use examples.mcpgdb.json_helpers.{shell_bin, shell_quote, shell_sleep, find_binary, LB, RB, jp, js, jo0}
 use examples.mcpgdb.state.{DebugSession, WorkspaceState, MCPGDB_WORKSPACE, MCPGDB_OPEN_FILES}
 
@@ -68,7 +65,7 @@ fn init_debugger_session(session: DebugSession) -> DebugSession:
 
 fn create_debugger_process(session: DebugSession) -> (DebugSession, text):
     var updated = session
-    rt_dir_create(updated.session_dir, true)
+    dir_create(updated.session_dir, true)
     val launch = debugger_launch_command(updated)
     if launch == "":
         return (updated, "required debugger binary not found for backend " + updated.backend)
@@ -103,7 +100,7 @@ fn send_fifo_line(fifo_path: text, line: text) -> text:
     ""
 
 fn read_output_delta(path: text, offset: i64) -> text:
-    val current = rt_file_size(path)
+    val current = file_size(path)
     if current <= offset:
         return ""
     rt_file_read_text_at(path, offset, current - offset) ?? ""
@@ -121,7 +118,7 @@ fn strip_prompt(output: text, prompt: text) -> text:
 fn run_session_command(session: DebugSession, command: text, allow_timeout: bool) -> text:
     if session.process_pid == "" or not ps_is_alive(session.process_pid):
         return LB() + jp("status", js("error")) + "," + jp("message", js("session process is not alive")) + RB()
-    val before = rt_file_size(session.output_path)
+    val before = file_size(session.output_path)
     val err_text = send_fifo_line(session.input_path, command)
     if err_text != "":
         return LB() + jp("status", js("error")) + "," + jp("message", js(err_text)) + RB()
@@ -196,7 +193,7 @@ fn start_clangd_workspace(root: text, compile_dir: text) -> text:
     if binary == "":
         return "clangd binary not found"
     val dir = "/tmp/mcpgdb_clangd_" + root.replace("/", "_")
-    rt_dir_create(dir, true)
+    dir_create(dir, true)
     val input_path = dir + "/stdin.fifo"
     val output_path = dir + "/stdout.log"
     val error_path = dir + "/stderr.log"
@@ -271,7 +268,7 @@ fn read_clangd_until_id(request_id: text, timeout_ticks: i64) -> text:
         shell_sleep("0.05")
         val chunk = read_output_delta(MCPGDB_WORKSPACE.clangd_output_path, MCPGDB_WORKSPACE.clangd_output_offset)
         if chunk != "":
-            MCPGDB_WORKSPACE.clangd_output_offset = rt_file_size(MCPGDB_WORKSPACE.clangd_output_path)
+            MCPGDB_WORKSPACE.clangd_output_offset = file_size(MCPGDB_WORKSPACE.clangd_output_path)
             val msg = find_lsp_message_for_id(chunk, request_id)
             if msg != "":
                 return msg
