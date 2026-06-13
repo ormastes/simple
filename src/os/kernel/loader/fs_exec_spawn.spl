@@ -10,8 +10,7 @@ use os.kernel.loader.process_image.{build_user_process_image_unchecked}
 use os.kernel.loader.cap_exec_gate.{exec_cap_check}
 use os.kernel.scheduler.scheduler_types.{
     Scheduler, SchedulerBootstrapUserTaskResult,
-    TaskControlBlock, ReadyQueue, CpuRunQueue,
-    MAX_TASKS, PRIORITY_LEVELS
+    TaskControlBlock, ReadyQueue, CpuRunQueue
 }
 use os.kernel.scheduler.green_carrier.{green_carrier_execution_state_new}
 use os.kernel.scheduler.scheduler_arm_bootstrap.{scheduler_create_bootstrap_user_task_pid}
@@ -93,14 +92,22 @@ pub struct FsExecPrepareResult:
 
 fn _fs_exec_new_bootstrap_scheduler() -> Scheduler:
     """Create the one-CPU scheduler state fs-exec needs without importing the full scheduler hub."""
+    # NOTE: module-level `pub val MAX_TASKS`/`PRIORITY_LEVELS` (scheduler_types.spl)
+    # read as 0 on baremetal LLVM/cranelift targets — BSS clearing wipes
+    # runtime-initialized globals. A 0 bound makes the loops below run zero times,
+    # leaving `tasks`/`queues` empty so `tasks[0]` is an OOB garbage read that
+    # mis-reports the bootstrap slot as busy. Use function-local literal bounds
+    # (mirroring the canonical scheduler_types.spl values) to stay correct on bare metal.
+    val local_max_tasks: i32 = 256
+    val local_priority_levels: i32 = 5
     var tasks: [TaskControlBlock?] = []
     var i = 0
-    while i < MAX_TASKS:
+    while i < local_max_tasks:
         tasks.push(nil)
         i = i + 1
     var queues: [ReadyQueue] = []
     var p = 0
-    while p < PRIORITY_LEVELS:
+    while p < local_priority_levels:
         queues.push(ReadyQueue.new())
         p = p + 1
     Scheduler(
