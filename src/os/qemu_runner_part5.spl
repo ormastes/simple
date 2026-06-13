@@ -58,6 +58,7 @@ use os.toolchain_vfs_probe_contract.{
     toolchain_vfs_probe_serial_accepts_completion
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe, run_rv64_ssh_probe}
+use os.fs_exec_fallback_contract.{fs_exec_serial_has_fallback}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -646,10 +647,22 @@ fn _scenario_uses_catalog_completion_contract(scenario: QemuScenario) -> bool:
         return true
     false
 
+fn _scenario_rejects_resident_fallback(scenario: QemuScenario) -> bool:
+    """fs-exec lanes must fail closed: resident-manifest fallback is never completion evidence."""
+    if scenario.name == "arm64-wm-ramfb" or scenario.name == "riscv64-hosted":
+        return true
+    if _is_arm_fs_exec_scenario(scenario):
+        return true
+    if _is_riscv_fs_exec_scenario(scenario):
+        return true
+    false
+
 fn _scenario_serial_accepts_completion(scenario: QemuScenario, serial_output: text) -> bool:
     for marker in _scenario_required_marker_fragments(scenario):
         if not serial_output.contains(marker):
             return false
+    if _scenario_rejects_resident_fallback(scenario) and fs_exec_serial_has_fallback(serial_output):
+        return false
     true
 
 fn _scenario_serial_accepts_completion_with_optional_protection(scenario: QemuScenario, serial_output: text) -> bool:
@@ -664,6 +677,8 @@ pub fn qemu_scenario_serial_acceptance_reason(scenario: QemuScenario, mode_text:
     for marker in _scenario_required_marker_fragments(scenario):
         if not serial_output.contains(marker):
             return "missing-marker:" + marker
+    if _scenario_rejects_resident_fallback(scenario) and fs_exec_serial_has_fallback(serial_output):
+        return "resident-fallback-rejected"
     if mode_text == "" or mode_text == "off":
         return "ready"
     qemu_scenario_protection_serial_reason(scenario, mode_text, serial_output)
