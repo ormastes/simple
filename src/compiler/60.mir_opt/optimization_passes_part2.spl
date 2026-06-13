@@ -574,6 +574,229 @@ fn optimize_bulk_copy(func: MirFunction, stats: OptimizationStats) -> MirFunctio
     else:
         func
 
+# ── SG-1.3 SOUND bulk-copy elision (C backend + SIMPLE_MIR_BULK_OPS=1 only) ──────────────
+# Replaces a canonical element-copy run with the active `bulk_copy` intrinsic that the C
+# backend lowers to a real memmove. SOUND BY STRICTNESS — fires ONLY when ALL hold:
+#   (struct)   consecutive 4-instr units `GEP gs=src[i]; Load ld=*gs; GEP gd=dst[i]; Store *gd=ld`
+#              for i=0..k-1, k>=2, same src_base != dst_base, indices contiguous from 0, di==si==i;
+#   (H1)       every unit temp (gs/ld/gd) is DEAD outside the matched run — no other instruction
+#              or terminator references it (else deleting its def is a dangling-local miscompile);
+#   (H2)       every loaded element is EXACTLY 8 bytes — the memmove copies count*8 bytes, but a
+#              sub-8-byte element Store writes only sizeof(ty), so memmove would clobber gap bytes.
+# H1/H2 were surfaced by adversarial review; the non-firing specs in bulk_copy_elision_spec.spl
+# exercise each guard. Erring toward NOT firing is safe (a miss is a perf miss, never a miscompile).
+
+struct CopyUnit:
+    ok: bool
+    src_base: i64
+    dst_base: i64
+    gs: i64
+    ld: i64
+    gd: i64
+
+fn elide_operand_local(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Copy(local) | Move(local):
+            local.id
+        case _:
+            -1
+
+fn elide_single_const_index(indices: [MirOperand]) -> i64:
+    if indices.len() != 1:
+        -1
+    else:
+        match indices[0].kind:
+            case Const(cv, _):
+                match cv:
+                    case Int(n): n
+                    case _: -1
+            case _: -1
+
+fn elide_any_op(ops: [MirOperand], consumed: Dict<i64, bool>) -> bool:
+    var found = false
+    var i = 0
+    while i < ops.len():
+        if consumed.has(elide_operand_local(ops[i])):
+            found = true
+        i = i + 1
+    found
+
+# True if `inst` references any local id in `consumed`. Conservative: instruction kinds whose
+# operands are not enumerated here fall to `case _: true` (treated as a potential reference, so
+# the elision is blocked) — sound, never optimistic.
+fn elide_inst_refs(inst: MirInst, consumed: Dict<i64, bool>) -> bool:
+    match inst.kind:
+        case Copy(_, src): consumed.has(src.id)
+        case Move(_, src): consumed.has(src.id)
+        case BinOp(_, _, l, r): consumed.has(elide_operand_local(l)) or consumed.has(elide_operand_local(r))
+        case CheckedBinOp(_, _, l, r): consumed.has(elide_operand_local(l)) or consumed.has(elide_operand_local(r))
+        case UnaryOp(_, _, o): consumed.has(elide_operand_local(o))
+        case Load(_, ptr): consumed.has(elide_operand_local(ptr))
+        case Store(ptr, v): consumed.has(elide_operand_local(ptr)) or consumed.has(elide_operand_local(v))
+        case GetElementPtr(_, base, idxs): consumed.has(elide_operand_local(base)) or elide_any_op(idxs, consumed)
+        case Call(_, f, args): consumed.has(elide_operand_local(f)) or elide_any_op(args, consumed)
+        case CallIndirect(_, ptr, args, _): consumed.has(elide_operand_local(ptr)) or elide_any_op(args, consumed)
+        case Cast(_, o, _): consumed.has(elide_operand_local(o))
+        case Bitcast(_, o, _): consumed.has(elide_operand_local(o))
+        case Aggregate(_, _, ops): elide_any_op(ops, consumed)
+        case GetField(_, base, _): consumed.has(elide_operand_local(base))
+        case SetField(base, _, v): consumed.has(elide_operand_local(base)) or consumed.has(elide_operand_local(v))
+        case Intrinsic(_, _, args): elide_any_op(args, consumed)
+        case PipeForward(_, v, f): consumed.has(elide_operand_local(v)) or consumed.has(elide_operand_local(f))
+        case Const(_, _, _): false
+        case Alloc(_, _): false
+        case _: true
+
+fn elide_term_refs(term: MirTerminator, consumed: Dict<i64, bool>) -> bool:
+    match term:
+        case Goto(_): false
+        case Unreachable: false
+        case Abort(_): false
+        case Ret(v):
+            if v.?: consumed.has(elide_operand_local(v.unwrap())) else: false
+        case If(cond, _, _): consumed.has(elide_operand_local(cond))
+        case Switch(value, _, _): consumed.has(elide_operand_local(value))
+        case _: true
+
+# H1: true iff none of the run's temporaries are referenced anywhere outside the matched range
+# [lo,hi) in block `bi_run` — across all blocks' instructions and terminators.
+fn elide_run_dead_out(func: MirFunction, bi_run: i64, lo: i64, hi: i64, consumed: Dict<i64, bool>) -> bool:
+    var clean = true
+    var b = 0
+    while b < func.blocks.len():
+        val blk = func.blocks[b]
+        var ix = 0
+        while ix < blk.instructions.len():
+            if b == bi_run and ix >= lo and ix < hi:
+                pass
+            else:
+                if elide_inst_refs(blk.instructions[ix], consumed):
+                    clean = false
+            ix = ix + 1
+        if elide_term_refs(blk.terminator, consumed):
+            clean = false
+        b = b + 1
+    clean
+
+# H2: true iff the local's element type is POSITIVELY confirmed to be exactly 8 bytes. Default
+# is false (require proof): an absent/non-primitive/sub-8-byte type blocks the elision, because
+# the C lowering hardcodes a count*8 memmove and a sub-8-byte element Store writes fewer bytes.
+# Erring toward not-firing is the safe direction.
+fn elide_value_is_8byte(func: MirFunction, id: i64) -> bool:
+    var result = false
+    for local in func.locals:
+        if local.id.id == id:
+            match local.type_.primitive_size():
+                case Some(n): result = n == 8
+                case _: result = false
+    result
+
+fn elide_match_copy_unit(insts: [MirInst], p: i64, ei: i64) -> CopyUnit:
+    val fail = CopyUnit(ok: false, src_base: -1, dst_base: -1, gs: -1, ld: -1, gd: -1)
+    if p + 3 >= insts.len():
+        fail
+    else:
+        match insts[p].kind:
+            case GetElementPtr(gs_dest, base_s, idx_s):
+                val src_local = elide_operand_local(base_s)
+                val si = elide_single_const_index(idx_s)
+                if src_local < 0 or si != ei:
+                    fail
+                else:
+                    match insts[p + 1].kind:
+                        case Load(ld_dest, ptr_l):
+                            if elide_operand_local(ptr_l) != gs_dest.id:
+                                fail
+                            else:
+                                match insts[p + 2].kind:
+                                    case GetElementPtr(gd_dest, base_d, idx_d):
+                                        val dst_local = elide_operand_local(base_d)
+                                        val di = elide_single_const_index(idx_d)
+                                        if dst_local < 0 or di != ei or dst_local == src_local:
+                                            fail
+                                        else:
+                                            match insts[p + 3].kind:
+                                                case Store(ptr_st, sval):
+                                                    if elide_operand_local(ptr_st) == gd_dest.id and elide_operand_local(sval) == ld_dest.id:
+                                                        CopyUnit(ok: true, src_base: src_local, dst_base: dst_local, gs: gs_dest.id, ld: ld_dest.id, gd: gd_dest.id)
+                                                    else:
+                                                        fail
+                                                case _: fail
+                                    case _: fail
+                        case _: fail
+            case _: fail
+
+fn elide_bulk_copy(func: MirFunction, stats: OptimizationStats) -> MirFunction:
+    var new_blocks: [MirBlock] = []
+    var modified = false
+    var bi = 0
+    while bi < func.blocks.len():
+        val block = func.blocks[bi]
+        var new_insts: [MirInst] = []
+        var j = 0
+        while j < block.instructions.len():
+            val first = elide_match_copy_unit(block.instructions, j, 0)
+            if first.ok:
+                val src_b = first.src_base
+                val dst_b = first.dst_base
+                var units: [CopyUnit] = []
+                units = units.push(first)
+                var k = 1
+                var cont = true
+                while cont:
+                    val nxt = elide_match_copy_unit(block.instructions, j + k * 4, k)
+                    if nxt.ok and nxt.src_base == src_b and nxt.dst_base == dst_b:
+                        units = units.push(nxt)
+                        k = k + 1
+                    else:
+                        cont = false
+                var fire = k >= 2
+                # H2 — every loaded element is exactly 8 bytes.
+                if fire:
+                    var u2 = 0
+                    while u2 < units.len():
+                        if not elide_value_is_8byte(func, units[u2].ld):
+                            fire = false
+                        u2 = u2 + 1
+                # H1 — run temporaries dead outside the matched range.
+                if fire:
+                    var consumed: Dict<i64, bool> = {}
+                    var u1 = 0
+                    while u1 < units.len():
+                        consumed[units[u1].gs] = true
+                        consumed[units[u1].ld] = true
+                        consumed[units[u1].gd] = true
+                        u1 = u1 + 1
+                    if not elide_run_dead_out(func, bi, j, j + k * 4, consumed):
+                        fire = false
+                if fire:
+                    val src_op = MirOperand(kind: MirOperandKind.Copy(LocalId(id: src_b)))
+                    val dst_op = MirOperand(kind: MirOperandKind.Copy(LocalId(id: dst_b)))
+                    val cnt_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(k), MirType.i64()))
+                    var bargs: [MirOperand] = []
+                    bargs = bargs.push(src_op)
+                    bargs = bargs.push(dst_op)
+                    bargs = bargs.push(cnt_op)
+                    val bc = MirInst(kind: MirInstKind.Intrinsic(nil, "bulk_copy", bargs), span: nil)
+                    new_insts = new_insts.push(bc)
+                    modified = true
+                    j = j + k * 4
+                else:
+                    new_insts = new_insts.push(block.instructions[j])
+                    j = j + 1
+            else:
+                new_insts = new_insts.push(block.instructions[j])
+                j = j + 1
+        new_blocks = new_blocks.push(MirBlock(
+            id: block.id, label: block.label,
+            instructions: new_insts, terminator: block.terminator
+        ))
+        bi = bi + 1
+    if modified:
+        MirFunction.with_blocks(func, new_blocks)
+    else:
+        func
+
 fn count_bulk_copy(func: MirFunction) -> i64:
     var count = 0
     var bi = 0
@@ -1358,6 +1581,7 @@ fn count_endian_store(func: MirFunction) -> i64:
 
 export optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch
 export optimize_bulk_copy, optimize_bulk_fill, optimize_bulk_cmp
+export elide_bulk_copy
 export optimize_endian_load, optimize_endian_store
 export count_write_coalesce, count_read_ahead_hoist, count_syscall_batch
 export count_bulk_copy, count_bulk_fill, count_bulk_cmp

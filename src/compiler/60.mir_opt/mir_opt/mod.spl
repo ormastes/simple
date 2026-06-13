@@ -46,7 +46,8 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizerBackendKind
 }
 use compiler.backend.feature_caps.{X86Caps, TargetCapsKind}
-use compiler.mir_opt.optimization_passes.{OptimizationStats, optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch, optimize_bulk_copy, optimize_bulk_fill, optimize_bulk_cmp}
+use compiler.mir_opt.optimization_passes.{OptimizationStats, optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch}
+use compiler.mir_opt.optimization_passes_part2.{elide_bulk_copy}
 
 # ============================================================================
 # Target Optimization Context
@@ -688,28 +689,29 @@ fn mir_bulk_ops_enabled() -> bool:
     rt_env_get("SIMPLE_MIR_BULK_OPS") == "1"
 
 fn apply_bulk_recognizers(module: MirModule) -> MirModule:
-    # Apply the additive bulk-op recognizers (copy/fill/cmp) to every function.
-    # Each preserves all original Load/Store/GEP and only inserts advisory hints,
-    # which the C backend drops — so this is semantics-preserving (see
-    # bulk_ops_recognizer_spec.spl + c_backend_bulk_hint_spec.spl).
+    # SG-1.3 SOUND bulk-copy elision (C backend + SIMPLE_MIR_BULK_OPS=1 only). For each
+    # function, replace a canonical contiguous element-copy run with one active `bulk_copy`
+    # intrinsic (the C backend lowers it to memmove). Sound by strictness: fires only on a
+    # consecutive `GEP/Load/GEP/Store` run with contiguous-from-0 matching indices, k>=2,
+    # AND with the temp-liveness (H1) and 8-byte-element (H2) guards satisfied — else the
+    # function is returned unchanged. Twice adversarially reviewed; non-firing safety proof
+    # in bulk_copy_elision_spec.spl. (fill/cmp are NOT elided — only copy is sound here.)
     var result = module
     for sym in result.functions.keys():
         var stats = OptimizationStats.create()
         var f = result.functions[sym]
-        f = optimize_bulk_copy(f, stats)
-        f = optimize_bulk_fill(f, stats)
-        f = optimize_bulk_cmp(f, stats)
+        f = elide_bulk_copy(f, stats)
         result.functions[sym] = f
     result
 
 fn optimize_module_for_backend(module: MirModule, level: OptLevel, backend_name: text) -> MirModule:
     val pipeline = optimizationpipeline_for_backend(level, backend_name)
     var optimized = pipeline_optimize(pipeline, module)
-    # SG-1.3 (default-OFF, C-backend-scoped): emit advisory bulk-op hints only when
-    # SIMPLE_MIR_BULK_OPS=1 AND targeting the C backend (the only backend with no-op
-    # hint lowering), so the hints can never reach a backend that would trap on them.
-    # No-op scaffolding — identical codegen to flag-off; real memcpy lowering is the
-    # separately-authorized, perf-bearing step.
+    # SG-1.3 (default-OFF, C-backend-scoped): run the SOUND bulk-copy elision only when
+    # SIMPLE_MIR_BULK_OPS=1 AND targeting the C backend (the only backend that lowers the
+    # active `bulk_copy` intrinsic, to memmove). The pass is conservative — it only fires on
+    # a fully-verified canonical contiguous 8-byte-element copy with dead temporaries, else
+    # it is the identity. Default (flag off) = exact passthrough.
     if backend_name == "c" and mir_bulk_ops_enabled():
         optimized = apply_bulk_recognizers(optimized)
     optimized

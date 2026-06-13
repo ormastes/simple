@@ -2,11 +2,13 @@
 #
 # Verifies the wiring in optimize_module_for_backend:
 #   - the flag (SIMPLE_MIR_BULK_OPS) is read correctly (default OFF);
-#   - the enabled path (apply_bulk_recognizers) is additive — inserts a hint;
+#   - the enabled path (apply_bulk_recognizers) runs the SOUND elision — a canonical copy
+#     run is replaced by an active `bulk_copy` intrinsic and the element ops are removed;
 #   - the disabled path is a no-op — the hook is skipped, module unchanged.
-# (The hook is C-backend-scoped: `if backend=="c" and mir_bulk_ops_enabled()`.
-#  The full 20-pass pipeline is not runnable on synthetic modules under the seed
-#  interpreter, so the off-path is verified at unit level; see the last `it`.)
+# (The hook is C-backend-scoped: `if backend=="c" and mir_bulk_ops_enabled()`. The full
+#  20-pass pipeline is not runnable on synthetic modules under the seed interpreter, so the
+#  off-path is verified at unit level; see the last `it`. Detailed firing/non-firing safety
+#  coverage lives in bulk_copy_elision_spec.spl.)
 #
 # Run:  bin/simple run src/compiler/60.mir_opt/bulk_ops_flag_spec.spl
 
@@ -15,7 +17,7 @@ use compiler.mir.mir_instructions.{
     MirTerminator, MirOperand, MirOperandKind, BlockId
 }
 use compiler.mir.mir_types.{
-    MirType, MirTypeKind, MirSignature, MirConstValue, LocalId
+    MirType, MirTypeKind, MirSignature, MirConstValue, LocalId, MirLocal, LocalKind
 }
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir_opt.mir_opt.mod.{
@@ -30,6 +32,11 @@ fn _copy_op(id: i64) -> MirOperand:
 fn _const_idx(v: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), MirType(kind: MirTypeKind.I64)))
 
+fn _i64_local(id: i64) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType(kind: MirTypeKind.I64), kind: LocalKind.Temp, is_ghost: false)
+
+# A canonical 2-element copy from base 10 -> base 20 (indices 0,1). The loaded values
+# (locals 2 and 6) are typed i64 so the elision's 8-byte guard (H2) is satisfied.
 fn _module_with_bulk_copy() -> MirModule:
     val i64t = MirType(kind: MirTypeKind.I64)
     val sig = MirSignature(params: [], return_type: i64t, is_variadic: false)
@@ -48,7 +55,7 @@ fn _module_with_bulk_copy() -> MirModule:
     )
     val func = MirFunction(
         symbol: SymbolId.new(0), name: "bulk_copy_fn", signature: sig,
-        locals: [], blocks: [block], entry_block: BlockId.new(0),
+        locals: [_i64_local(2), _i64_local(6)], blocks: [block], entry_block: BlockId.new(0),
         span: nil, generic_params: [], is_generic_template: false,
         specialization_of: nil, type_bindings: {}
     )
@@ -56,8 +63,8 @@ fn _module_with_bulk_copy() -> MirModule:
     fns[SymbolId.new(0)] = func
     MirModule(name: "m", functions: fns, statics: {}, constants: {}, types: {})
 
-fn _module_has_copy_hint(module: MirModule) -> bool:
-    var found = false
+fn _count_kind(module: MirModule, which: text) -> i64:
+    var n = 0
     for sym in module.functions.keys():
         val f = module.functions[sym]
         var bi = 0
@@ -67,12 +74,14 @@ fn _module_has_copy_hint(module: MirModule) -> bool:
             while ii < insts.len():
                 match insts[ii].kind:
                     case Intrinsic(_, nm, _):
-                        if nm == "bulk_copy_hint": found = true
+                        if which == "bulkcopy" and nm == "bulk_copy": n = n + 1
+                    case Store(_, _):
+                        if which == "store": n = n + 1
                     case _:
                         pass
                 ii = ii + 1
             bi = bi + 1
-    found
+    n
 
 describe "SG-1.3 bulk-op flag — default-off, C-backend-scoped":
     it "reads the flag: enabled when SIMPLE_MIR_BULK_OPS=1":
@@ -83,20 +92,18 @@ describe "SG-1.3 bulk-op flag — default-off, C-backend-scoped":
         val _r = rt_env_set("SIMPLE_MIR_BULK_OPS", "0")
         expect(mir_bulk_ops_enabled()).to_equal(false)
 
-    it "enabled path is additive: apply_bulk_recognizers inserts a hint":
+    it "enabled path elides: apply_bulk_recognizers emits bulk_copy and removes element stores":
         val m = _module_with_bulk_copy()
         val out = apply_bulk_recognizers(m)
-        expect(_module_has_copy_hint(out)).to_equal(true)
+        expect(_count_kind(out, "bulkcopy")).to_equal(1)
+        expect(_count_kind(out, "store")).to_equal(0)
 
-    it "disabled path is a no-op: apply not invoked → no hint":
-        # mir_bulk_ops_enabled()==false ⇒ optimize_module_for_backend's hook
-        # (`if backend=="c" and mir_bulk_ops_enabled(): apply_bulk_recognizers`)
-        # is skipped, so the module is returned unchanged. Verified at the unit
-        # level here (the full 20-pass pipeline is not runnable on synthetic
-        # modules under the seed interpreter — it crashes inside pipeline_optimize
-        # with "cannot convert object to int", a pre-existing limitation unrelated
-        # to this flag; the hook is post-pipeline and a no-op when the flag is off).
+    it "disabled path is a no-op: apply not invoked → no bulk_copy, stores intact":
+        # mir_bulk_ops_enabled()==false ⇒ optimize_module_for_backend's hook is skipped,
+        # so the module is returned unchanged. Verified at the unit level (the full 20-pass
+        # pipeline is not runnable on synthetic modules under the seed interpreter).
         val _r = rt_env_set("SIMPLE_MIR_BULK_OPS", "0")
         val m = _module_with_bulk_copy()
         val out = if mir_bulk_ops_enabled(): apply_bulk_recognizers(m) else: m
-        expect(_module_has_copy_hint(out)).to_equal(false)
+        expect(_count_kind(out, "bulkcopy")).to_equal(0)
+        expect(_count_kind(out, "store")).to_equal(2)
