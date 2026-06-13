@@ -5,8 +5,8 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  96 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
-  existing `02_block_boxes` through `96_absolute_percent_height_bottom`, with `96`
+  97 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
+  existing `02_block_boxes` through `97_min_height_definite_parent`, with `97`
   passes, `0` failures, and `blur_or_tolerance_used=false`. This is focused
   structural box evidence, not broad Chromium layout-engine completion.
 - `01_inline_text` is now in the all-pass manifest. The labelled fixture
@@ -967,5 +967,18 @@ Open gaps tied to the active browser objective:
      advance; the focused fixture reports `fixture_count=1`, `pass_count=1`,
      `fail_count=0`, and `blur_or_tolerance_used=false`
    - the default Chrome headless geometry manifest now includes 96 passing
+     fixtures; no blur, tolerance, downscaling, copied Chromium pixels, or
+     resolution adjustment was used
+- Min-height definite parent structural evidence now extends the live Chrome
+  manifest through fixture `97_min_height_definite_parent`:
+   - added a positioned shell using `min-height: 120px`, padding, and border,
+     with an absolute child using `height: 50%`
+   - renderer min-height handling now feeds the definite content-height limit
+     before absolute percentage child layout and clamps final block/flex outer
+     height with CSS content-box semantics
+   - focused live evidence reports `fixture_count=1`, `pass_count=1`,
+     `fail_count=0`, and `blur_or_tolerance_used=false`; the shell is
+     `224x144` and the absolute child is `40x70`
+   - the default Chrome headless geometry manifest now includes 97 passing
      fixtures; no blur, tolerance, downscaling, copied Chromium pixels, or
      resolution adjustment was used
