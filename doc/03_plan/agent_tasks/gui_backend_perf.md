@@ -703,3 +703,7 @@ Updated: 2026-06-11
   `_css_collect_custom_props` now counts root custom properties, fills an
   exact-size entry array, and joins once instead of repeatedly growing the
   collected property text while scanning `:root` blocks.
+- Simple Web multi-style custom-property aggregation allocation removal:
+  `extract_css` now counts non-empty custom-property style blocks, fills an
+  exact-size block array, and joins once instead of repeatedly appending each
+  `<style>` block's collected custom property text.
