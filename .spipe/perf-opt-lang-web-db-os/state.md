@@ -181,7 +181,25 @@ numbers → `doc/09_report/perf/perf_baseline_2026-06-13.md` + `doc/10_metrics/p
 | AC-6 interpreter/compiler first | ◻ STRUCTURAL | P1 shared (AC-7) landed first + per-app benches built; per-app **optimization landing** STAGED, ordering recorded |
 | AC-9 minimize `rt_*` in app view | ◻ STAGED | baseline counts captured (research); reduction sweep = P1 SG-1.2, checklist row |
 | AC-10 cross-mode + cross-language | ◻ PARTIAL | interpreter baseline emitted; smf/native + full cross-language run STAGED (toolchain smf-extern-segfault, native-compile) |
-| AC-11 umbrella completion | ⏳ IN PROGRESS | P0 machinery + AC-7 DONE/verified; P1 opt-landing + P2 + final no-regression diff = tracked staged sub-goals |
+| AC-11 umbrella completion | ⏳ IN PROGRESS | P0 machinery + AC-7 DONE/verified; AC-9 floor advanced (file_write_bytes/dir_remove_all wrappers, origin `e7fdff8`/`af708ca`); SG-1.3 precisely characterized (see below); only-risky-residual = MIR bulk-op *lowering* (unverifiable this session) |
+
+### SG-1.3 (MIR bulk-ops) — precise state, read-only verified 2026-06-13
+Corrects the design's "phases 2-8 unimplemented" shorthand. Ground truth from code:
+- **Recognizers EXIST and are implemented:** `optimize_bulk_copy` (L448), `optimize_bulk_fill`
+  (L624), `optimize_bulk_cmp` (L763) in `src/compiler/60.mir_opt/optimization_passes_part2.spl`.
+- **But they are DORMANT dead code:** zero call sites anywhere (grep `\boptimize_bulk_*\(` → only
+  the 3 `fn` defs, no caller). Not wired into any active MIR pass pipeline.
+- **The emitted `bulk_{copy,fill,cmp}_hint` intrinsics are INERT:** consumed by **no** backend
+  (grep across all `src/` interp/cranelift/LLVM → appear only in the emitter file).
+- **Therefore the current tree CANNOT regress any mode** — SG-1.3 is genuinely un-landed and
+  safely so. The dangerous "already wired + lowered → latent regression" case is RULED OUT.
+- **What "landing" requires (the deferred, risky work):** (a) wire recognizers into the active
+  pass pipeline + (b) implement hint→`memcpy`/`memset` lowering in interp **and** cranelift
+  **and** LLVM. Step (b) is the documented all-mode-regression risk; per the design gate
+  ("gate behind correctness specs first") it must be preceded by cross-mode correctness specs and
+  a full-suite regression pass. **Deliberately NOT attempted** here: unverifiable under this
+  session's constraints (no reliable full-suite run after spend-limit; no rebuild authorized).
+  This is a no-regression-rule hold, not an oversight.
 
 ### Honest completion boundary (advisor-guided, corrected)
 **Fully DONE/verified this session:** AC-1 (plan+design first), AC-2 (checklists), AC-7 (SMF
