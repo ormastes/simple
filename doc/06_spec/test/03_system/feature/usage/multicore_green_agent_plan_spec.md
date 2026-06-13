@@ -27,7 +27,7 @@ multicore_green_agent_plan_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -89,7 +89,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/multicore_green_agent_plan_spec.spl
 Multicore green agent plan contract PASSED
 Files: 1
-Passed: 4
+Passed: 5
 Failed: 0
 ```
 
@@ -150,6 +150,8 @@ Failed: 0
   ring/user hardware context-switch handoff evidence.
 - Hosted SimpleOS multicore evidence must keep the hosted-vs-live boundary
   executable and current.
+- The tracker must keep an independent guide-boundary scenario so profile
+  docs cannot silently lose the cooperative-vs-M:N distinction.
 
 ## Verification Expectations
 
@@ -313,12 +315,46 @@ expect(plan).to_contain("Do not use numbered API names to distinguish behavior."
 
 </details>
 
+#### keeps tracker coverage for guide evidence boundaries
+
+- Read the tracker source and generated manual
+- Verify the guide-boundary scenario remains executable and visible
+- Verify the scenario still protects cooperative green from M:N claims
+- Verify the scenario still protects multicore-green runtime-pool evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the tracker source and generated manual")
+val tracker = tracker_text()
+val manual = tracker_manual_text()
+step("Verify the guide-boundary scenario remains executable and visible")
+expect(tracker).to_contain("keeps guide surfaces honest about M:N evidence boundaries")
+expect(manual).to_contain("keeps guide surfaces honest about M:N evidence boundaries")
+step("Verify the scenario still protects cooperative green from M:N claims")
+expect(tracker).to_contain("not a Go-goroutine equivalent")
+expect(tracker).to_contain("Do not use either cooperative API for Go-style M:N")
+expect(manual).to_contain("not a Go-goroutine equivalent")
+step("Verify the scenario still protects multicore-green runtime-pool evidence")
+expect(tracker).to_contain("handle.used_runtime_pool()")
+expect(tracker).to_contain("GOMAXPROCS=$CPU_WORKERS")
+expect(manual).to_contain("handle.used_runtime_pool()")
+expect(manual).to_contain("GOMAXPROCS=$CPU_WORKERS")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
