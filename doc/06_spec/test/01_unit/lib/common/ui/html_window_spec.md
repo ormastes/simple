@@ -86,17 +86,21 @@ expect(html).to_contain("min-height:24px")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val widget = html_titlebar_button("refresh", "Refresh")
+val widget = html_titlebar_button("refresh", "Refresh") + html_titlebar_text_input("filter", "ready")
 val html = html_window_content_with_titlebar_widgets("Demo", html_pre_block("hello"), widget, ".simple-titlebar-widget{color:lime}")
 
 expect(widget).to_contain("data-simple-titlebar-widget=\"button\"")
+expect(widget).to_contain("data-simple-titlebar-widget=\"input\"")
 expect(widget).to_contain("data-action=\"refresh\"")
+expect(widget).to_contain("data-target-id=\"filter\"")
+expect(widget).to_contain("type=\"text\"")
 expect(html).to_contain("simple-titlebar-widgets")
 expect(html).to_contain("data-action=\"refresh\"")
+expect(html).to_contain(".simple-titlebar-input{width:116px;min-width:96px;font-weight:500;cursor:text;}")
 expect(html).to_contain(".simple-titlebar-widget{color:lime}")
 ```
 
@@ -127,7 +131,7 @@ expect(pic).to_contain("alt=\"Logo\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -140,6 +144,8 @@ expect(pic).to_contain("src=\"x&quot; onerror=&quot;bad\"")
 expect(pic).to_contain("alt=\"A &amp; B\"")
 expect(html_titlebar_button("x\" onclick=\"bad", "A < B")).to_contain("data-action=\"x&quot; onclick=&quot;bad\"")
 expect(html_titlebar_button("ok", "A < B")).to_contain("A &lt; B")
+expect(html_titlebar_text_input("x\" autofocus bad", "A < B")).to_contain("data-target-id=\"x&quot; autofocus bad\"")
+expect(html_titlebar_text_input("ok", "A < B")).to_contain("value=\"A &lt; B\"")
 ```
 
 </details>

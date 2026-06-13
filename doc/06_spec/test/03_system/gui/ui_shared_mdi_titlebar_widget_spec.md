@@ -39,18 +39,18 @@ ui_shared_mdi_titlebar_widget_spec -> app
 
 ### shared MDI titlebar widget HTML
 
-#### keeps Terminal titlebar button, body button, input, and CSS in the shared renderer source
+#### keeps Terminal titlebar button, titlebar input, body controls, and CSS in the shared renderer source
 
 - Render Terminal MDI markup from the side-effect-free shared helper
 - Check the shared MDI window titlebar structure is present
-- Check the titlebar button, body button, and text input survive in the emitted HTML
+- Check the titlebar button, titlebar text input, body button, and body text input survive in the emitted HTML
 - Check custom CSS can style the MDI titlebar widget
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -63,16 +63,19 @@ expect(html).to_contain("simple-titlebar-label")
 expect(html).to_contain("Terminal")
 expect(html).to_contain("simple-titlebar-widgets")
 
-step("Check the titlebar button, body button, and text input survive in the emitted HTML")
+step("Check the titlebar button, titlebar text input, body button, and body text input survive in the emitted HTML")
 expect(html).to_contain("data-simple-titlebar-widget=\"button\"")
+expect(html).to_contain("data-simple-titlebar-widget=\"input\"")
 expect(html).to_contain("data-action=\"mdi_terminal_action\"")
 expect(html).to_contain("<button class=\"simple-titlebar-widget\" data-simple-titlebar-widget=\"button\" data-action=\"mdi_terminal_action\" type=\"button\">Run</button>")
+expect(html).to_contain("<input class=\"simple-titlebar-widget simple-titlebar-input\" data-simple-titlebar-widget=\"input\" data-target-id=\"mdi_terminal_title_input\" type=\"text\" value=\"ready\">")
 expect(html).to_contain("<button data-action=\"mdi_terminal_action\">Run</button>")
 expect(html).to_contain("data-target-id=\"mdi_terminal_input\"")
 expect(html).to_contain("value=\"ready\"")
 
 step("Check custom CSS can style the MDI titlebar widget")
 expect(html).to_contain(".simple-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto;}")
+expect(html).to_contain(".simple-titlebar-input{width:116px;min-width:96px;font-weight:500;cursor:text;}")
 expect(html).to_contain(".simple-titlebar-widget{background:rgb(18,58,52);border-color:rgb(52,211,153);color:rgb(236,254,255);}")
 ```
 

@@ -141,7 +141,7 @@ expect(_capture_fields_are_coherent(wrong_positive_ratio, true)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 155 lines folded for reproduction.
+Runnable source: 159 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -163,6 +163,7 @@ if host_os == "macos":
     expect(stdout).to_contain("macos_gui_live_window_evidence_sample=src/app/ui_shared_mdi/main.spl")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_input_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
@@ -211,6 +212,7 @@ if host_os == "macos":
     expect(report).to_contain("macos_gui_live_window_evidence_status=pass")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_input_markup_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
@@ -235,6 +237,7 @@ else:
     expect(stdout).to_contain("macos_gui_live_window_evidence_sample=src/app/ui_shared_mdi/main.spl")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
+    expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_input_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
     expect(stdout).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
@@ -287,6 +290,7 @@ else:
     expect(report).to_contain("Shared MDI titlebar sample: src/app/ui_shared_mdi/main.spl")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_contract_status=pass")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_button_markup_present=true")
+    expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_input_markup_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_body_button_markup_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_body_input_markup_present=true")
     expect(report).to_contain("macos_gui_live_window_evidence_mdi_titlebar_css_present=true")
