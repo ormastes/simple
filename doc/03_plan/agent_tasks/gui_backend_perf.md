@@ -663,3 +663,7 @@ Updated: 2026-06-11
 - Simple Web parser substring removal: HTML comment detection now uses
   `text_matches_at` and self-closing tag detection uses `char_at`, avoiding
   small substring allocations in the startup parse/count passes.
+- Simple Web attribute parser substring removal: tag-name scans, quoted and
+  unquoted attribute value parsing, and class-token counting now use `char_at`
+  plus original-string slice offsets instead of allocating one-character and
+  tail substrings for every parsed element.
