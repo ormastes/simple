@@ -446,6 +446,16 @@ fn count_syscall_batch(func: MirFunction) -> i64:
 # ============================================================================
 
 fn optimize_bulk_copy(func: MirFunction, stats: OptimizationStats) -> MirFunction:
+    # SG-1.3 WARNING — index-blind recognizer. This pass is ADDITIVE: it inserts the
+    # advisory `bulk_copy_hint` and KEEPS every original GEP/Load/Store, so it is
+    # semantics-preserving by construction (the hint lowers to a NO-OP in the C backend).
+    # It counts Stores of the shape `dst[anyGEP] = Load(src[anyGEP])` (src_base != dst_base)
+    # and fires at count >= 2 — it does NOT verify the indices match (dst[i]==src[i]), are
+    # contiguous 0..count-1, or that the matched ops form a consecutive uninterrupted run.
+    # Therefore the hint must NEVER be renamed/lowered to the active `bulk_copy` intrinsic
+    # (which emits a real memmove) without first adding that guard — doing so would
+    # miscompile e.g. `dst[5]=src[2]; dst[9]=src[7]` into a copy of dst[0..1].
+    # See bug doc sg13_bulk_copy_recognizer_index_blind and emit_bulk_copy's precondition.
     var new_blocks: [MirBlock] = []
     var modified = false
     var bi = 0

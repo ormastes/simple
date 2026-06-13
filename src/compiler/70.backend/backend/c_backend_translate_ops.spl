@@ -126,9 +126,21 @@ impl MirToC:
         collapsed to a single memmove. args = [src_base, dst_base, count]; the element
         stride is 8 bytes, matching the GEP lowering (`(char*)base + idx*8`), so `count`
         elements span `count*8` bytes. memmove (not memcpy) keeps overlapping src/dst
-        well-defined; <cstring> is already included by the impl preamble. The redundant
-        GEP/Load/Store are removed at MIR level before this point, so this memmove is the
-        whole copy, not a duplicate of it."""
+        well-defined; <cstring> is already included by the impl preamble.
+
+        PRECONDITION (the producer of `bulk_copy` MUST guarantee all of these, else this
+        is a silent miscompile):
+          1. the subsumed Stores are exactly `dst[i] = src[i]` for i in 0..count-1
+             (same index on both sides — not dst[5]=src[2]);
+          2. the indices are contiguous from 0 (`memmove` copies bytes [0, count*8));
+          3. the matched GEP/Load/Store form a CONSECUTIVE, uninterrupted run with nothing
+             reading the dst region between steps (else element-wise observes half-copied
+             state that memmove does not — different semantics);
+          4. count is a compile-time constant.
+        WARNING: as of this commit NO sound producer emits `bulk_copy`. The only bulk-op
+        recognizer (optimize_bulk_copy) is index-blind and emits the NO-OP `bulk_copy_hint`,
+        which must NOT be renamed/lowered to `bulk_copy` without first adding the guard
+        above. See bug doc sg13_bulk_copy_recognizer_index_blind."""
         var bc_args: [text] = []
         for arg in args:
             bc_args = bc_args.push(self.translate_operand(arg))

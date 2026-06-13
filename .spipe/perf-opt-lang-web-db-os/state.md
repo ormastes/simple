@@ -224,6 +224,33 @@ any code was written. What landed (all pure-Simple, self-hosted; no seed/C edits
   modules under the seed interpreter (pre-existing crash "cannot convert object to int"), so the
   flag-off path is verified at unit level + the existing pipeline regression spec.
 
+#### SG-1.3 UPDATE 2 — backend memmove primitive LANDED + soundness checkpoint 2026-06-13
+Human authorization via **AskUserQuestion** = "C-backend perf lowering (in-scope, won't move
+benches)" + the follow-up "do parallel tasks with agents… impl tests and logic before blocker done".
+The verification blocker (`--emit-c` emits an SMF, not C, so the seed can't compile+run the
+self-hosted backend) was solved a different way: drive `MirToC` directly under the seed and unit-test
+the emitted C. That exposed — and this session FIXED — the real root blocker:
+- **Root blocker FIXED (latent bug):** `translate_const_value` AND `const_to_i64_expr` bound the
+  **reserved keyword `val`** as a match pattern var (`case Int(val)/Float/Bool/Str`) → seed aborts with
+  `variable 'val' not found`, which blocked driving the C backend under the seed at all. Renamed to `v`.
+  Also found: the `MirToC` impl is split across 5 files; specs must `use …c_backend_translate_ops.*`
+  for `get_local`/`translate_operand` to resolve under the seed.
+- **Backend `bulk_copy` → memmove LANDED + seed-verified** (`b2e2889`, on origin/main): the Intrinsic
+  arm now delegates to `translate_intrinsic`; active `bulk_copy [src,dst,count]` lowers to
+  `memmove((void*)dst,(void*)src,count*8)` (stride 8 = GEP). `*_hint` stays NO-OP (back-compat).
+  Spec `c_backend_bulk_copy_memmove_spec.spl` 5/0 — pins memmove **arg ORDER** (the correctness bit),
+  byte length, false-green guard, and hint back-compat. Existing hint/flag specs still 4/0.
+- **CHECKPOINT — producer NOT landed (advisor-guided, sound).** The perf path also needs a producer of
+  the active `bulk_copy`. The only existing recognizer (`optimize_bulk_copy`) is **index-blind**
+  (counts `dst[anyGEP]=Load(src[anyGEP])`, fires at ≥2; no check that `dst[i]=src[i]`, indices are
+  contiguous 0..k-1, or the matched ops are a consecutive uninterrupted run). Naively lowering its hint
+  to memmove would MISCOMPILE. Filed as bug `sg13_bulk_copy_recognizer_index_blind`; guard comments
+  added at BOTH sites (`optimize_bulk_copy` + `emit_bulk_copy` precondition). A sound elision pass
+  (strict guard, non-firing tests as the safety proof) is the clearly-scoped follow-up — deliberately
+  NOT rushed as a correctness-critical mutating pass in a parallel-reconcile-wiping tree at session end.
+- **Honesty:** the backend primitive is sound by construction but DORMANT (no sound producer wired);
+  it does not move seed-run benchmarks and is not exercised by `bin/simple test` (off the seed path).
+
 ### Honest completion boundary (advisor-guided, corrected)
 **Fully DONE/verified this session:** AC-1 (plan+design first), AC-2 (checklists), AC-7 (SMF
 idle-compile + cache reuse, startup-regression-checked), AC-8 (API/arch guard GREEN, scoped to
