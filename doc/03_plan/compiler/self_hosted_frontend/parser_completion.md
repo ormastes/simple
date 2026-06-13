@@ -698,10 +698,23 @@ Remaining known gap classes (long tail, deferred):
    `1 / nil / 1`. **Runtime-codegen proof is deferred to M12** — once delegation
    is removed and the bridge becomes the universal frontend, the same spec gains
    an executable end-to-end variant.
-7. **ForceUnwrap fidelity** (surfaced by G44): postfix `!` parses as
-   `EXPR_EXISTS_CHECK`, conflating force-unwrap with `?`/`.?`. Add a dedicated
-   ForceUnwrap ExprKind + flat node + bridge mapping so panic-on-None vs
-   nil-on-None is distinguishable. Parser-only acceptance already landed.
+7. **ForceUnwrap fidelity** (surfaced by G44): **DONE 2026-06-13, commit
+   61a7b960baf9.** Postfix `!` parsed as `expr_exists_check`, conflating
+   force-unwrap (panic-on-nil) with `.?` (nil-on-absent) — both collapsed to
+   `ExprKind.ExistsCheck`. Fix adds the full distinct pipeline: `EXPR_FORCE_UNWRAP`
+   (=53) tag + `expr_force_unwrap` constructor; the parser `!` sites (token 57)
+   build force-unwrap; a new AST `ExprKind.ForceUnwrap(Expr)` variant; bridge
+   `EXPR_FORCE_UNWRAP → ExprKind.ForceUnwrap`; and HIR lowering to the existing
+   (until now unproduced) `HirExprKind.Unwrap`. Safe: HIR consumers
+   resolve/effect_pass/safety_checker already match `Unwrap`; narrowing/expr_infer
+   wildcard it; the only AST-level `ExprKind` match (hir_lowering/expressions.spl)
+   got the `ForceUnwrap` case. **Verification (structural, discriminating):**
+   `test/01_unit/compiler/frontend/flat_ast_force_unwrap_spec.spl` walks the bridge
+   output and asserts `x!` → ForceUnwrap, `x.?` → ExistsCheck. Confirmed before/after
+   on the seed: buggy → both `exists-check`; fixed → `force-unwrap` / `exists-check`.
+   **Panic-on-nil codegen of `HirExprKind.Unwrap` is deferred to M12** (same
+   verification ceiling as item 6 — bridge reachable today only via the
+   delegation-guarded `check` path).
 
 ---
 
