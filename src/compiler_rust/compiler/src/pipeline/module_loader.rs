@@ -436,6 +436,31 @@ fn should_flatten_nested_import(use_stmt: &UseStmt, source: &str) -> bool {
     }
 }
 
+/// True when a `Single`/`Aliased` import names a standalone module *file*
+/// directly (e.g. `use std.common.string_builder` resolving to
+/// `common/string_builder.spl`), as opposed to importing one symbol out of a
+/// package aggregator (`__init__.spl`, where the imported name is a symbol
+/// *inside* the package).
+///
+/// `should_flatten_nested_import` only flattens `Group`/`Glob` forms, so a
+/// whole-module `use a.b.c` brings the module's *type* into scope (via the
+/// exports cache) but never compiles its `impl` method bodies into the codegen
+/// unit — imported class methods then fail to link (undefined `Type_dot_m`) and
+/// degrade to the interpreter. When the import targets a module file directly,
+/// flattening that one file's definitions is the same operation `Group`/`Glob`
+/// already perform, just keyed on the resolved path instead of the syntax.
+fn single_import_targets_module_file(target: &ImportTarget, resolved: &Path) -> bool {
+    let name = match target {
+        ImportTarget::Single(name) => name.as_str(),
+        ImportTarget::Aliased { name, .. } => name.as_str(),
+        _ => return false,
+    };
+    if resolved.file_name().is_some_and(|n| n == "__init__.spl") {
+        return false;
+    }
+    resolved.file_stem().and_then(|s| s.to_str()) == Some(name)
+}
+
 fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -> bool {
     if requested_names.is_empty() {
         return true;
@@ -1234,7 +1259,8 @@ fn load_module_with_imports_internal(
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let flatten_this_import = should_flatten_nested_import(use_stmt, &source);
+                    let flatten_this_import = should_flatten_nested_import(use_stmt, &source)
+                        || single_import_targets_module_file(&use_stmt.target, &resolved);
                     let mut imported = load_module_with_imports_internal(
                         &resolved,
                         visited,
