@@ -3613,6 +3613,55 @@ RuntimeValue rt_arm64_enter_recorded_user_live(void)
     return 0;
 }
 
+/* --- genuine EL0 execution: stage REAL aarch64 code and eret into it ---
+ * The disk hello_world.smf is a marker-ELF whose entry points at its own header
+ * (no svc), so it can only be load-proofed, not run. This maps actual EL0
+ * instructions (mov x8,#0; svc #0) into a fresh user address space and eret's
+ * to EL0. The svc traps via vbar_el1 (crt0.S, EC=0x15) into
+ * rt_arm64_handle_user_svc(id=0), which prints [arm-fs-exec] user-svc-exit:ok +
+ * TEST PASSED and exits — proving real EL0 usercode execution + a syscall
+ * round-trip. Returns 0 only if AS setup / preflight fails (no eret taken). */
+RuntimeValue rt_arm64_exec_probe_live_real(void)
+{
+    uint64_t root = (uint64_t)rt_arm64_user_as_create();
+    if (!root) { serial_puts("[arm64-exec] as-create failed\r\n"); return 0; }
+
+    /* first free physical page just past this AS's page-table arena */
+    uint64_t code_phys = root + ARM64_UAS_TABLE_BYTES;
+    arm64_zero_page(code_phys);
+    volatile uint32_t *code = (volatile uint32_t *)(uintptr_t)code_phys;
+    code[0] = 0xD2800008U;  /* mov x8, #0   (syscall id 0 = exit) */
+    code[1] = 0xD4000001U;  /* svc #0 */
+    arm64_sync_icache_range(code_phys, 8ULL);
+
+    uint64_t entry_va = 0x1000ULL;
+    if (!(uint64_t)rt_arm64_user_as_map_page((RuntimeValue)root, (RuntimeValue)entry_va,
+            (RuntimeValue)code_phys, (RuntimeValue)ARM64_VM_USER)) {
+        serial_puts("[arm64-exec] map code failed\r\n");
+        return 0;
+    }
+
+    uint64_t stack_phys = code_phys + 4096ULL;
+    arm64_zero_page(stack_phys);
+    uint64_t stack_va = 0x10000ULL;
+    if (!(uint64_t)rt_arm64_user_as_map_page((RuntimeValue)root, (RuntimeValue)stack_va,
+            (RuntimeValue)stack_phys,
+            (RuntimeValue)(ARM64_VM_USER | ARM64_VM_WRITABLE | ARM64_VM_NO_EXECUTE))) {
+        serial_puts("[arm64-exec] map stack failed\r\n");
+        return 0;
+    }
+    uint64_t sp = stack_va + 4096ULL - 16ULL;
+
+    /* keep preflight's virtual_entry and the record-handoff remap consistent
+     * with this fresh payload (overriding any prior marker-ELF spawn globals) */
+    arm64_last_elf_virtual_entry = entry_va;
+    arm64_last_elf_direct_entry = code_phys;
+
+    serial_puts("[arm64-exec] real svc payload staged; entering EL0\r\n");
+    rt_arm64_record_user_handoff((RuntimeValue)entry_va, (RuntimeValue)sp, (RuntimeValue)root);
+    return rt_arm64_enter_recorded_user_live();
+}
+
 RuntimeValue rt_arm_elf64_pt_load_count(RuntimeValue bytes)
 {
     if (!arm64_elf64_header_ok(bytes)) return 0;

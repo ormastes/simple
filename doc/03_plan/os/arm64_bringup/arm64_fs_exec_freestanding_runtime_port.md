@@ -122,12 +122,25 @@ repo-wide:
 - `rt_time_now_unix_micros` now reads CNTVCT_EL0/CNTFRQ_EL0 (monotonic uptime µs; no RTC →
   not epoch). `rt_getpid`→1 documented honest for the single-process boot.
 
-### Phase 2 (in progress): genuine EL0 execution (arm64-only)
-Author a real minimal arm64 user payload (`mov x0,#0; svc #0`) wrapped as SMF with the loader
-marker, inject into the FAT32 image, wire `rt_arm64_enter_recorded_user_live()` into the entry →
-CPU `eret`s to EL0, runs real code, `svc #0` traps to `rt_arm64_handle_user_svc` → `user-svc-exit:ok`
-+ `TEST PASSED`. First genuine EL0 usercode execution in SimpleOS. If the eret bring-up hits an
-intractable wall, Phase 1 still ships.
+### Phase 2 DONE: genuine EL0 execution (arm64-only) — FIRST IN SimpleOS
+`rt_arm64_exec_probe_live_real()` (arm64 `baremetal_stubs.c`) stages real aarch64 code
+(`mov x8,#0` `=0xD2800008`; `svc #0` `=0xD4000001`) into a fresh user AS (code page USER/exec,
+stack page USER|W|NX), records the handoff, and calls `rt_arm64_enter_recorded_user_live()` →
+preflight (`arm64_user_as_kernel_window_prepare` identity-maps kernel text+UART+vectors+stack into
+the user TTBR0) → `arm64_enter_user_virtual` does the real `eret` to EL0. The EL0 code runs and
+`svc #0` (id in x8=0) traps via `vbar_el1` (crt0.S EC=0x15) into `rt_arm64_handle_user_svc(0)` →
+prints `[arm-fs-exec] user-svc-exit:ok` + `TEST PASSED`. **Worked first boot** (`p2_boot.log`):
+`preflight ok → live virtual eret enter → svc exit ok → user-svc-exit:ok → TEST PASSED`, no fault.
+`arm64_markers()` now REQUIRES `[arm-fs-exec] user-svc-exit:ok` so the lane asserts genuine
+execution. arm64 is the first/only SimpleOS arch to actually `eret` to EL0 and round-trip a syscall;
+riscv64/x86_64 remain load-proof only.
+
+HONEST SCOPE: the EXECUTED payload is **kernel-staged real code**, proving the whole EL0 path
+(AS map + eret + EL0 usercode + svc handler) end-to-end. The disk `hello_world.smf` is still a
+marker-ELF used only for the P1 load-proof — it is NOT the thing executed. Closing the last gap
+(execute the *disk-loaded* program) is a small follow-up: make `scripts/os/make_os_disk.c` emit a
+runnable ELF (real code at a proper entry, not entry-points-at-header) + regenerate `fat32-arm64.img`,
+then route the spawned image's recorded handoff into `rt_arm64_enter_recorded_user_live()`.
 
 ## Verification protocol (per advisor)
 - Build via the PROPER path (no `SIMPLE_ALLOW_FREESTANDING_STUBS`) so the link fails loudly;
