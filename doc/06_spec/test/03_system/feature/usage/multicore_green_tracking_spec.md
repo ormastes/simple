@@ -27,7 +27,7 @@ multicore_green_tracking_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -531,6 +531,50 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 
 </details>
 
+#### keeps guide surfaces honest about M:N evidence boundaries
+
+- Read the public guide and profile guide
+- Verify cooperative green remains documented as single-carrier work
+- Verify hosted M:N claims require runtime-pool and scheduler-width evidence
+- Verify stale release-wrapper guidance stays visible
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the public guide and profile guide")
+val stdlib = rt_file_read_text("doc/07_guide/lib/misc/stdlib.md") ?? ""
+val perf = rt_file_read_text("doc/07_guide/compiler/check_perf.md") ?? ""
+val coding = rt_file_read_text(".codex/skills/coding/SKILL.md") ?? ""
+
+step("Verify cooperative green remains documented as single-carrier work")
+expect(stdlib).to_contain("no preemption or CPU parallelism")
+expect(stdlib).to_contain("not a Go-goroutine equivalent")
+expect(perf).to_contain("not CPU-parallel or preemptive")
+expect(coding).to_contain("no preemption or CPU parallelism")
+expect(coding).to_contain("Do not use either cooperative API for Go-style M:N")
+
+step("Verify hosted M:N claims require runtime-pool and scheduler-width evidence")
+expect(stdlib).to_contain("profile rows require runtime-pool acceptance")
+expect(stdlib).to_contain("handle.used_runtime_pool()")
+expect(stdlib).to_contain("GOMAXPROCS")
+expect(perf).to_contain("used_runtime_pool()")
+expect(perf).to_contain("queue_model=work_stealing")
+expect(perf).to_contain("GOMAXPROCS=$CPU_WORKERS")
+expect(coding).to_contain("assert `used_runtime_pool()`")
+expect(coding).to_contain("Cross-language profile")
+
+step("Verify stale release-wrapper guidance stays visible")
+expect(perf).to_contain("skips a stale release wrapper")
+expect(perf).to_contain("PROFILE_DOCKER_SIMPLE_BINARY=src/compiler_rust/target/debug/simple")
+```
+
+</details>
+
 #### keeps concurrency TUI captures free of runner ordinal labels
 
 - Read source manuals that describe multicore-green evidence
@@ -623,8 +667,8 @@ expect(absent_in_text(row, "resumable-stepper native blocker remains open")).to_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
