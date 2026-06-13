@@ -49,32 +49,52 @@ line numbers) were timeouts against this curve, not loops: all synthetic
 construct probes (banner comments, Option<T> returns, String params,
 open-if-at-EOF) parse instantly.
 
-## Compiled stage4 re-profile (2026-06-13) — superlinear `check` is TYPE INFERENCE, not parse
+## Compiled stage4 re-profile + ROOT CAUSE FOUND & FIXED (2026-06-13) — env-var AST mirror, not type inference
 
 An earlier note claimed compiled-stage4 parse was "CONFIRMED superlinear" because
-`check <file>` timed out. That conflated `check` (parse + full type inference)
-with parse. A clean isolation refutes it. Synthetic standalone files of N trivial
-functions (6 lines each), `SIMPLE_FRONTEND_DELEGATED=1`, host stage4:
+`check <file>` timed out. Re-profiling located the real cause. Synthetic standalone
+files of N trivial functions (6 lines each), `SIMPLE_FRONTEND_DELEGATED=1`, host
+stage4, `check` wall time, BEFORE vs AFTER the fix:
 
-| funcs | lines | `lex` (tokenize-only) userCPU | `check` (parse+infer) wall |
-|-------|-------|-------------------------------|----------------------------|
-| 100   | 600   | 0.25 s                        | 52 s                       |
-| 200   | 1200  | 0.58 s                        | 146 s                      |
-| 400   | 2400  | 0.99 s                        | >300 s (timeout)           |
+| funcs | lines | `lex` only | `check` BEFORE | `check` AFTER |
+|-------|-------|-----------|----------------|---------------|
+| 100   | 600   | 0.25 s    | 52 s           | 15.3 s        |
+| 200   | 1200  | 0.58 s    | 146 s          | 20.4 s        |
+| 400   | 2400  | 0.99 s    | >300 s timeout | 39.4 s        |
 
-- **Lexer is linear and fast** (~2× per 2× size) — not the bottleneck.
-- **`check` is ~200× slower than `lex` and superlinear** — the cost is in a
-  post-lex pass. The help text bills `check` as "Full type inference"; that pass
-  is the prime suspect (not yet pass-isolated, but decisively NOT the parser).
-- **Arithmetic rules out the parse-side fetch as the dominant cost:** perf_100 is
-  ~18 KB / ~2500 tokens; the old per-token whole-source copy totals ~tens of MB
-  ≈ well under 1 s — it cannot produce 52 s. So the 52 s was never parse-dominated,
-  even before the fix.
+200→400 ratio: 2.8×+ (superlinear) BEFORE → 1.9× (linear) AFTER. (An interim guess
+attributed the cost to "type inference" — superseded; the cause is below.)
 
-**Conclusion:** the full src/lib sweep gate (parser_completion.md M12-4) is
-blocked by **type-inference perf, a different subsystem** — out of parser-completion
-scope, a large separate task. Per-gap-class parser iteration is unaffected (tiny
-probes, fast). A dedicated `typecheck_infer_superlinear` task should own it.
+**ROOT CAUSE — per-index env-var AST mirror.** Every `stmt_alloc` wrote 6
+`SIMPLE_BOOTSTRAP_STMT_<idx>_<field>` env vars (`ast_stmt.spl`) and every
+`expr_alloc` ~10 `SIMPLE_BOOTSTRAP_EXPR_<idx>_<field>` (`ast_expr_part1.spl`). The
+keys are per-index unique, so `environ` grows to O(nodes); libc `setenv`/`getenv`
+linear-scan `environ`, so the write side (parse) and the read side
+(`flat_ast_to_module`) are each O(N²). `stmt_reset`/`expr_reset` clear the arrays
+but NOT the env vars, which also explains the interpreter per-call aging (table
+above): `environ` accumulates across `parse_module` calls in one process.
+
+**FIX (committed 2026-06-13).** The parallel module-var arrays (`stmt_*`/`expr_*`)
+are written unconditionally by `alloc` + constructors and are the real store in
+compiled stage4; the `*_get_*` readers are env-first/array-fallback with every
+array populated (verified: `expr_alloc` pushes all 10 arrays; the generic env-only
+`expr_i64_get`/`expr_text_get` have zero consumers — only `expr_get_*` are used).
+So the per-index env writes are now gated behind `SIMPLE_BOOTSTRAP=1` (interpreter
+bootstrap, where module vars don't persist): compiled reads fall back to the
+correct arrays. See `doc/08_tracking/bug/ast_env_var_quadratic_parse_2026-06-13.md`.
+
+**Correctness verified:** compiled stage4 (lean frontend) compiles+runs a
+construct-varied program with exact output (if/elif/else, while, for, val/var,
+binop precedence, ternary, array lit, string interp, calls); g45/g46 parse
+canaries green; `perr=0` on all perf files.
+
+**Conclusion:** the full src/lib sweep gate (parser_completion.md M12-4) prerequisite
+is MET — compiled parse/check is now linear. A latent SECONDARY O(N²) remains but is
+DEAD today: `generalize_all`/`env_free_var_ids` in
+`src/compiler/30.types/type_infer/generalization.spl` (linear-scan `[i64]` sets) —
+`infer_module` is not wired into the driver; fix (Dict-back the sets) when type
+inference is enabled. Also minor/ungated: `module_add_decl` per-decl env key + 128
+slot cap (`ast_part2.spl`) — secondary, only bites files with >128 top-level decls.
 
 ### Parse-side per-token whole-source fetch — FIXED 2026-06-13 (real but minor)
 `parser_token_text_from_offsets` re-fetched the ENTIRE `SIMPLE_BOOTSTRAP_LEX_SOURCE`

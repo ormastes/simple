@@ -268,9 +268,19 @@ fn lexer_cur_suffix2_set(value: text):
 
 fn module_add_decl(decl_idx: i64):
     val count = ast_module_decl_count_get()
-    rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(count), int_to_str(decl_idx))
-    if count < 128:
+    # Perf: the per-index SIMPLE_BOOTSTRAP_MODULE_DECL_<count> env mirror accumulates
+    # one environ entry per top-level decl; across an import closure (parsed into one
+    # AST via parse_module_file) that is thousands of entries -> O(N^2) setenv/getenv.
+    # Gate it behind bootstrap and array-back module_decl_slots unconditionally
+    # (grow past the old 128 cap via push). module_decl_at is env-first/array-fallback
+    # and only reads index < count, so the array is always the populated truth in
+    # compiled stage4. See bug ast_env_var_quadratic_parse_2026-06-13.
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(count), int_to_str(decl_idx))
+    if count < module_decl_slots.len():
         module_decl_slots[count] = decl_idx
+    else:
+        module_decl_slots.push(decl_idx)
     ast_module_decl_count_set(count + 1)
 
 fn module_get_decls() -> [i64]:

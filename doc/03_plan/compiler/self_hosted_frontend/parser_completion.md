@@ -611,21 +611,24 @@ files go through the sspec pipeline, not the core lean parser).
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
 3. Remove `simple_seed` delegation guards from `src/app/cli/check.spl` and lint entry.
 4. **Gate:** `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl` exits 0; full 1855-file sweep reports 0 errors.
-   **PREREQUISITE (perf) — RE-ATTRIBUTED 2026-06-13, NOT a parser task:** the
-   full-sweep gate is blocked by superlinear `check`, but a clean re-profile
-   shows the cost is **type inference, not parse**. Isolated host-stage4
-   measurement (synthetic N-function files): `lex` (tokenize-only) is LINEAR
-   and fast (0.25→0.58→0.99 s for 100→200→400 fns); `check` (parse + full type
-   inference) is ~200× slower and superlinear (52→146→>300 s). Arithmetic rules
-   out the parse-side token-fetch as the dominant cost (perf_100 ≈18KB/2500 tok
-   → tens of MB of copies ≈ <1 s, not 52 s). The parse-side whole-source fetch
-   (`parser_token_text_from_offsets` at parser.spl:100) was nonetheless a real
-   O(N²) and is now **FIXED** (gen-keyed `parser_lex_source_cached`, committed
-   2026-06-13) — real but minor. Remaining blocker is a **separate subsystem**:
-   spin a dedicated `typecheck_infer_superlinear` task (out of parser-completion
-   scope). Per-gap-class parser iteration is NOT blocked (tiny synthetic probes
-   are fast). See doc/08_tracking/bug/interp_parse_superlinear_2026-06-12.md
-   "Compiled stage4 re-profile".
+   **PREREQUISITE (perf) — ROOT CAUSE FOUND & FIXED 2026-06-13:** the superlinear
+   `check` was the **per-index env-var AST mirror**, not type inference (an interim
+   re-profile guessed "type inference" — superseded). Every `stmt_alloc` wrote 6
+   `SIMPLE_BOOTSTRAP_STMT_<idx>_<field>` env vars and `expr_alloc` ~10; the keys are
+   per-index unique so `environ` grows O(nodes) and libc setenv/getenv linear-scan it
+   → O(N²). Across an import closure (one accumulated AST via `parse_module_file`)
+   `module_add_decl`'s per-decl key compounds it. **FIXED** (committed): the per-index
+   env writes (`stmt_*_set`, `expr_*_set`, `module_add_decl`) are gated behind
+   `SIMPLE_BOOTSTRAP=1`; compiled stage4 uses the parallel module-var arrays
+   (`*_get_*` readers are env-first/array-fallback, all arrays populated — verified).
+   Measured (host stage4, synthetic N-function `check` wall): 52→15.3s, 146→20.4s,
+   >300(timeout)→39.4s; 200→400 ratio 2.8×→1.9× = **linear**. Correctness: compiled
+   stage4 compiles+runs a construct-varied program with exact output; g45/g46 green;
+   parse errors=0. **Prerequisite MET — per-file parse/check is now linear.** Latent
+   SECONDARY (dead today): `generalize_all`/`env_free_var_ids` in
+   `30.types/type_infer/generalization.spl` (linear-scan sets) — fix when
+   `infer_module` is wired. See doc/08_tracking/bug/ast_env_var_quadratic_parse_2026-06-13.md
+   and interp_parse_superlinear_2026-06-12.md.
 6. **Bridge if/else fidelity** (surfaced by G42): `EXPR_IF`/`STMT_IF` in
    flat_ast_bridge_part1.spl drop the else branch (pass `nil`) and elif chains;
    `EXPR_IF` reads STMTS but `expr_if_expr` stores then in RIGHT + else in EXTRA.
