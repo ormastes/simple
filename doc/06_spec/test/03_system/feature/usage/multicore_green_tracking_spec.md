@@ -48,7 +48,7 @@ This specification guards the canonical feature tracking row for the multicore-g
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/feature/usage/multicore_green_tracking_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-13 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

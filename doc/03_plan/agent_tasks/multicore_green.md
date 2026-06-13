@@ -1,6 +1,6 @@
 # Multicore Green Parallel Agent Plan
 
-Date: 2026-06-06
+Date: 2026-06-13
 
 ## Current State Snapshot
 
@@ -288,19 +288,24 @@ Acceptance evidence:
 
 ## Merge Sequencing
 
-1. Go Profile Evidence Agent owns profile/report contract changes before any
-   performance claim.
-2. Simple OS-Thread Baseline Agent fixes or tracks OS-thread API blockers
-   before profile rows consume those APIs.
-3. Cooperative Green Semantics Agent and Multicore Green Runtime-Pool Agent can
-   run in parallel because cooperative green and multicore green must stay
-   semantically distinct.
-4. Host Fairness And Blocking Agent keeps the sliced fairness contract and the
-   future ordinary-closure preemption boundary explicit.
-5. SimpleOS Green Carrier Agent consumes stable host/library contracts into
-   SimpleOS and QEMU proof.
-6. Generated manuals and `doc/09_report` are refreshed after executable specs
-   and profile scripts change.
+Profile shape gate: Go Profile Evidence Agent owns profile/report contract
+changes before any performance claim.
+
+OS-thread baseline gate: Simple OS-Thread Baseline Agent fixes or tracks
+OS-thread API blockers before profile rows consume those APIs.
+
+Green-semantics split gate: Cooperative Green Semantics Agent and Multicore
+Green Runtime-Pool Agent can run in parallel because cooperative green and
+multicore green must stay semantically distinct.
+
+Host fairness gate: Host Fairness And Blocking Agent keeps the sliced fairness
+contract and the future ordinary-closure preemption boundary explicit.
+
+SimpleOS carrier gate: SimpleOS Green Carrier Agent consumes stable
+host/library contracts into SimpleOS and QEMU proof.
+
+Manual/report refresh gate: generated manuals and `doc/09_report` are
+refreshed after executable specs and profile scripts change.
 
 ## Conflict Rules
 

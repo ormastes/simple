@@ -48,7 +48,7 @@ This specification keeps the multicore-green parallel-agent plan readable for fu
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-13 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -279,25 +279,40 @@ expect(plan).to_contain("numeric-suffix API-alias rejection")
 #### uses meaningful lane names in sequencing and conflict ownership
 
 - Read the multicore-green parallel-agent plan
-- Verify merge sequencing references the descriptive lane names
+- Verify merge sequencing uses named gates with descriptive lane names
+- Reject numbered merge-sequencing labels
+   - Expected: absent_in_text(plan, "1. Go Profile Evidence Agent") equals `1`
+   - Expected: absent_in_text(plan, "2. Simple OS-Thread Baseline Agent") equals `1`
+   - Expected: absent_in_text(plan, "3. Cooperative Green Semantics Agent") equals `1`
+   - Expected: absent_in_text(plan, "4. Host Fairness And Blocking Agent") equals `1`
+   - Expected: absent_in_text(plan, "5. SimpleOS Green Carrier Agent") equals `1`
+   - Expected: absent_in_text(plan, "6. Generated manuals") equals `1`
 - Verify conflict rules reference the descriptive lane names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Read the multicore-green parallel-agent plan")
 val plan = plan_text()
-step("Verify merge sequencing references the descriptive lane names")
-expect(plan).to_contain("Go Profile Evidence Agent owns profile/report contract changes")
-expect(plan).to_contain("Simple OS-Thread Baseline Agent fixes or tracks OS-thread API blockers")
-expect(plan).to_contain("Cooperative Green Semantics Agent and Multicore Green Runtime-Pool Agent can")
-expect(plan).to_contain("Host Fairness And Blocking Agent keeps the sliced fairness contract")
-expect(plan).to_contain("SimpleOS Green Carrier Agent consumes stable host/library contracts")
+step("Verify merge sequencing uses named gates with descriptive lane names")
+expect(plan).to_contain("Profile shape gate: Go Profile Evidence Agent owns profile/report contract changes")
+expect(plan).to_contain("OS-thread baseline gate: Simple OS-Thread Baseline Agent fixes or tracks")
+expect(plan).to_contain("Green-semantics split gate: Cooperative Green Semantics Agent and Multicore")
+expect(plan).to_contain("Host fairness gate: Host Fairness And Blocking Agent keeps the sliced fairness contract")
+expect(plan).to_contain("SimpleOS carrier gate: SimpleOS Green Carrier Agent consumes stable")
+expect(plan).to_contain("Manual/report refresh gate: generated manuals and `doc/09_report` are")
+step("Reject numbered merge-sequencing labels")
+expect(absent_in_text(plan, "1. Go Profile Evidence Agent")).to_equal(1)
+expect(absent_in_text(plan, "2. Simple OS-Thread Baseline Agent")).to_equal(1)
+expect(absent_in_text(plan, "3. Cooperative Green Semantics Agent")).to_equal(1)
+expect(absent_in_text(plan, "4. Host Fairness And Blocking Agent")).to_equal(1)
+expect(absent_in_text(plan, "5. SimpleOS Green Carrier Agent")).to_equal(1)
+expect(absent_in_text(plan, "6. Generated manuals")).to_equal(1)
 step("Verify conflict rules reference the descriptive lane names")
 expect(plan).to_contain("Go Profile Evidence Agent owns the report shape")
 expect(plan).to_contain("Simple OS-Thread Baseline Agent must update")

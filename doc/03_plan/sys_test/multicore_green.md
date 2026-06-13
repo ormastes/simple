@@ -92,7 +92,7 @@
 - The interpreter unit spec can pass its example and then hang in `spipe-docgen`; this is a test-runner/docgen issue, not a failed multicore-green assertion.
 - The value-index warning currently recommends angle-bracket indexing that fails to parse in expression contexts; tracked in `doc/08_tracking/bug/angle_bracket_index_lint_parse_mismatch_2026-06-06.md`.
 
-## Current Sync Status (2026-06-12)
+## Current Sync Status (2026-06-13)
 
 - This refresh follows the pushed thread-spawn native regression sync
   (`test: keep thread spawn native regression green`) and records the current
