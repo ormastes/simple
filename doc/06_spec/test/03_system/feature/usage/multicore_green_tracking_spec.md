@@ -308,7 +308,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -322,6 +322,8 @@ expect(row).to_contain("doc/03_plan/agent_tasks/multicore_green.md")
 expect(row).to_contain("doc/03_plan/sys_test/multicore_green.md")
 expect(row).to_contain("doc/04_architecture/runtime/multicore_green.md")
 expect(row).to_contain("doc/05_design/multicore_green.md")
+expect(row).to_contain("validates doc/09_report/README.md")
+expect(row).to_contain("report_index_checked=doc/09_report/README.md")
 val architecture = rt_file_read_text("doc/04_architecture/runtime/multicore_green.md") ?? ""
 val design = rt_file_read_text("doc/05_design/multicore_green.md") ?? ""
 val report_index = rt_file_read_text("doc/09_report/README.md") ?? ""
