@@ -51,35 +51,21 @@ Compiled stage4 check of src/app/repl/render_adapter.spl (pre-mitigation
 binary) vs seed-interpreted run of the same parser source on
 `m["k"] = "v"` input: interpreted accepts, compiled rejects.
 
-## Minimal repro (2026-06-13) — narrows the class to NON-SCALAR consts
+## 2026-06-13 investigation — what this bug is and is NOT
 
-The defect is NOT integer-const-specific. A module-level **`text`** const reads
-empty/garbage in JIT; a module-level **`i64`** const reads correctly. So the
-"imported const misevaluates" symptom is the *heap-backed* subset of this class.
+A 2026-06-13 probe initially looked related but turned out to be a **DISTINCT
+bug**, now filed separately as
+`jit_string_method_on_var_receiver_folds_2026-06-13.md`:
 
-```
-val TABLE: text = "ABCDEF"     # heap const (needs rt_string_new at init)
-fn main():
-    print(TABLE.char_at(0))    # JIT/native: empty   | interpreter: A
-    print(TABLE.length())      # JIT/native: -1       | interpreter: 6
-```
-
-```
-val N: i64 = 3                 # scalar const (stored inline)
-fn main():
-    print(3 == N)              # JIT and interpreter both: true  ✓
-```
-
-Concrete fallout: `std.common.base_encoding.base64.base64_encode` returns empty
-in JIT because its module-level `ENCODE_TABLE: text` lookup string reads empty
-(`base64.spl:18`). Tracked also in `interpreter_str_bytes_missing_2026-06-12.md`
-and memory `module-level-text-const-empty-in-jit`.
-
-**Root-cause direction:** heap-backed module globals (`text`, and likely array/
-struct consts) are loaded at the use site before their runtime initializer
-(`rt_string_new`) has run — the global's slot is still its zero/BSS value. The
-fix is to materialize such consts in `__module_init` (run once before first
-entry) rather than relying on a static initializer. See the global-init pass in
-`codegen/common_backend.rs` (`declare_globals` / `global_init_strings`) — verify
-whether `global_init_strings` entries are actually emitted+run for module-level
-(non-`main`) `val text` consts on the cranelift lane.
+- That bug: a **string method** on a local/global string **variable**
+  (`TABLE.char_at(0)`) returns empty in JIT because the receiver is folded into
+  the call name and never loaded. `__module_init` DOES run and materialize the
+  string; it is NOT a global-init ordering problem, and local `val`s fail too
+  (not module-specific). Workaround: route through a `text` param.
+- THIS bug (`stage4_imported_const_compare`): a **comparison** `tag ==
+  IMPORTED_CONST` misevaluates in compiled stage4. A scalar repro
+  (`val N: i64 = 3; print(3 == N)`) currently evaluates **correctly** in JIT, so
+  the original symptom may be specific to the self-hosted stage4 binary and/or
+  cross-module (imported) consts under a shared-prelude closure — still needs a
+  minimal repro that reproduces outside the full stage4 build. Audit imported
+  `EXPR_*`/`STMT_*`/`TOK_*` const comparisons in `src/compiler/10.frontend/`.

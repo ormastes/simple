@@ -25,12 +25,13 @@ path is cranelift).
 
 **Note — a SEPARATE bug surfaced via base64:** `base64_encode` still returns
 empty in JIT, but NOT because of `.bytes()` (that now works). Root cause:
-**module-level `val` *string* constants read empty/garbage in JIT** — minimal
-repro `val T: text = "ABCDEF"` then `T.char_at(0)` → empty, `T.length()` → -1 in
-JIT (interpreter gives `A`/`6`). Integer module consts work; only `text` consts
-fail. This is the `stage4_imported_const_compare` / `baremetal_module_val_zero`
-family (cranelift global-init for non-scalar module consts) — tracked there, not
-here.
+**a string method on a local/global string VARIABLE returns empty in JIT** — the
+receiver is folded into the call name instead of loaded. Minimal repro
+`val T = "ABCDEF"` then `T.char_at(0)` → empty, `T.length()` → -1 (interpreter
+`A`/`6`); also a module-level `val TABLE: text`. NOT global-init and NOT
+module-specific (local vals fail too); params (`s: text`) and literals work.
+Tracked in `jit_string_method_on_var_receiver_folds_2026-06-13.md` (distinct
+from `stage4_imported_const_compare`).
 
 ## Symptom
 
