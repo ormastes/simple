@@ -72,6 +72,14 @@ export VhdlKernelAttrs
 export vhdl_kernel_attrs_default
 export vhdl_kernel_attrs_validate
 
+fn vhdl_kernel_attrs_from_mir(func: MirFunction) -> VhdlKernelAttrs:
+    """Build VhdlKernelAttrs from the FPGA fields threaded through MirFunction (W3.2).
+    Fields that are 0 (absent) map to vhdl_kernel_attrs_default() values (also 0).
+    """
+    VhdlKernelAttrs(unroll_factor: func.unroll_factor, pipeline_ii: func.pipeline_ii, memory_banks: func.memory_banks)
+
+export vhdl_kernel_attrs_from_mir
+
 # ============================================================================
 # Acceptance helpers
 # ============================================================================
@@ -458,7 +466,9 @@ fn emit_vhdl_kernel_entities_for_module(module: MirModule) -> Result<text, Compi
     for symbol in module.functions.keys():
         val func: MirFunction = module.functions[symbol]
         if vhdl_kernel_accepts(func):
-            val result = emit_vhdl_kernel_entity(func)
+            val attrs = vhdl_kernel_attrs_from_mir(func)
+            val has_attrs = attrs.unroll_factor > 0 or attrs.pipeline_ii > 0 or attrs.memory_banks > 0
+            val result = if has_attrs: emit_vhdl_kernel_entity_with_attrs(func, attrs) else: emit_vhdl_kernel_entity(func)
             if result.is_err():
                 return Err(result.unwrap_err())
             if output.len() > 0:
