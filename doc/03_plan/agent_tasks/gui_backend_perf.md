@@ -624,3 +624,6 @@ Updated: 2026-06-11
 - Simple Web final paint visibility hoisting: the final image/icon/text paint
   pass now reuses per-node visibility and widget-mode booleans instead of
   repeating the same display/visibility checks for each branch.
+- Simple Web positive-z paint visibility hoisting: positive z-index painting now
+  reuses per-node visible-box and widget-mode booleans across background,
+  border, panel, and button branches.
