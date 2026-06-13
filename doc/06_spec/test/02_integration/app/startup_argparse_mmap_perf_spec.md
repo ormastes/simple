@@ -80,28 +80,21 @@ enforces a read latency budget.
 
 #### keeps declarative cli startup parsing responsive
 
-1. fail
-
-2. delete if exists
-
-3. delete if exists
+- fail
+- delete if exists
+- delete if exists
    - Expected: write_cli_perf_script(script_path) is true
    - Expected: rt_file_write_text(fixture_path, "fn main(): print \\\"fixture\\\"\\n") is true
-
-4. cleanup tmpdir
-
-5. fail
-
-6. cleanup tmpdir
-
-7. fail
+- cleanup tmpdir
+- fail
+- cleanup tmpdir
+- fail
    - Expected: run.0 contains `expected`
-
-8. cleanup tmpdir
+- cleanup tmpdir
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -147,23 +140,18 @@ expect(avg_elapsed_ms).to_be_less_than(400)
 
 #### keeps file-backed mmap loading responsive
 
-1. fail
-
-2. delete if exists
+- fail
+- delete if exists
    - Expected: rt_file_write_text(fixture_path, payload) is true
-
-3. cleanup tmpdir
-
-4. fail
+- cleanup tmpdir
+- fail
    - Expected: content equals `payload`
-
-5. total elapsed = total elapsed +
-
-6. cleanup tmpdir
+- total elapsed = total elapsed +
+- cleanup tmpdir
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

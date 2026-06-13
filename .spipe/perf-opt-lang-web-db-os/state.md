@@ -206,7 +206,7 @@ verified** tracked sub-goals in the plan + checklists. **No false-green closure.
 4. Add dynsmf + bench public exports to the guard's module set (close the AC-8 scope gap).
 
 ## Phase
-verify-done (P0 + AC-7); optimization sub-goals staged
+verify-done (P0 + AC-7); P1 interp-bug fix IN PROGRESS (user-steered: fix interp_cross_module_struct_return_unit)
 
 ## Log (continued)
 - arch: Opus authored plan + design docs (+tldrs) + state arch section with SDN diagram + module list.
