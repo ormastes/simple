@@ -5,7 +5,7 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  91 fixtures through `94_flex_column_percent_height_main_axis` with `91` passes, `0`
+  92 fixtures through `95_absolute_percent_height_basic` with `92` passes, `0`
   failures, and `blur_or_tolerance_used=false`. This is focused structural box
   evidence, not broad Chromium layout-engine completion.
 - The authoritative current pixel harness in this worktree is
@@ -901,3 +901,17 @@ Open gaps tied to the active browser objective:
      was used
    - scope note: absolute-position percentage heights and min-height-derived
      definiteness remain separate follow-up work
+- Absolute-position percentage height evidence now extends the live Chrome
+  manifest through fixture 95:
+   - added `95_absolute_percent_height_basic`, an absolute-position fixture
+     where `height:50%` resolves against a definite containing block padding
+     box, placing the child at `x=22`, `y=17`, `height=70`
+   - `simple_web_html_layout_renderer.spl` now resolves deferred percentage
+     heights for absolute-position children before layout and bottom-position
+     height calculations, using the containing block padding-box height
+   - live Chrome headless geometry manifest evidence reports `92` fixtures,
+     `92` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
+     tolerance, downscaling, copied Chromium pixels, or resolution adjustment
+     was used
+   - scope note: min-height-derived definiteness and broader absolute
+     containing-block variants remain separate follow-up work

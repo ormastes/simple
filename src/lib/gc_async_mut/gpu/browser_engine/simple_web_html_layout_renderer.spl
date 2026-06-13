@@ -3519,12 +3519,13 @@ fn absolute_outer_width(parent: Style, node: HNode, st: Style, containing_w: i32
         return constrained_outer_width(node, st, explicit_node_w)
     constrained_outer_width(node, st, containing_w)
 
-fn absolute_outer_height(st: Style) -> i32:
+fn absolute_outer_height(st: Style, containing_h: i32) -> i32:
     val border_y = st.border_t + st.border_b
-    if st.height_px > 0:
+    val resolved_h = resolve_percent_height_px(st.height_px, containing_h)
+    if resolved_h > 0:
         if st.border_box:
-            return st.height_px
-        return st.height_px + st.pad_t + st.pad_b + border_y
+            return resolved_h
+        return resolved_h + st.pad_t + st.pad_b + border_y
     style_line_h(st)
 
 fn resolve_horizontal_margin_px(margin_px: i32, containing_w: i32) -> i32:
@@ -3543,11 +3544,16 @@ fn absolute_child_x(parent_x: i32, parent: Style, child_node: HNode, child: Styl
         return parent_x + parent.border_l + padding_box_w - absolute_outer_width(parent, child_node, child, containing_w) - child.right_px
     parent_x + parent.border_l + child.left_px
 
-fn absolute_child_y(parent_y: i32, parent: Style, child: Style) -> i32:
+fn absolute_child_y(parent_y: i32, parent: Style, child: Style, containing_h: i32) -> i32:
     if child.bottom_px >= 0:
-        val padding_box_h = parent.height_px + parent.pad_t + parent.pad_b
-        return parent_y + parent.border_t + padding_box_h - absolute_outer_height(child) - child.bottom_px
+        return parent_y + parent.border_t + containing_h - absolute_outer_height(child, containing_h) - child.bottom_px
     parent_y + parent.border_t + child.top_px
+
+fn absolute_child_styles(styles: [Style], child_index: i32, child: Style, containing_h: i32) -> [Style]:
+    val child_height_px = resolve_percent_height_px(child.height_px, containing_h)
+    if child_height_px > 0 and child_height_px != child.height_px:
+        return styles_with_height(styles, child_index, child_height_px)
+    styles
 
 fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32]) -> LayoutResult:
     var out_bx = bx
@@ -3732,10 +3738,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             while fc_wrap >= 0:
                 val cst = styles[fc_wrap]
                 if cst.position_absolute:
+                    val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
                     val ax = absolute_child_x(x, st, nodes[fc_wrap], cst, iw)
-                    val ay = absolute_child_y(y, st, cst)
+                    val ay = absolute_child_y(y, st, cst, absolute_containing_h)
                     val absolute_w = absolute_outer_width(st, nodes[fc_wrap], cst, iw)
-                    val child = layout(nodes, styles, child_index, fc_wrap, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                    val child_styles = absolute_child_styles(styles, fc_wrap, cst, absolute_containing_h)
+                    val child = layout(nodes, child_styles, child_index, fc_wrap, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
@@ -3904,10 +3912,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             val fc = ordered_flex_children[fc_i]
             val cst = styles[fc]
             if cst.position_absolute:
+                val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
                 val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
-                val ay = absolute_child_y(y, st, cst)
+                val ay = absolute_child_y(y, st, cst, absolute_containing_h)
                 val absolute_w = absolute_outer_width(st, nodes[fc], cst, iw)
-                val child = layout(nodes, styles, child_index, fc, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                val child_styles = absolute_child_styles(styles, fc, cst, absolute_containing_h)
+                val child = layout(nodes, child_styles, child_index, fc, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -4109,10 +4119,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         while flex_c >= 0:
             val cst = styles[flex_c]
             if cst.position_absolute:
+                val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
                 val ax = absolute_child_x(x, st, nodes[flex_c], cst, iw)
-                val ay = absolute_child_y(y, st, cst)
+                val ay = absolute_child_y(y, st, cst, absolute_containing_h)
                 val absolute_w = absolute_outer_width(st, nodes[flex_c], cst, iw)
-                val child = layout(nodes, styles, child_index, flex_c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                val child_styles = absolute_child_styles(styles, flex_c, cst, absolute_containing_h)
+                val child = layout(nodes, child_styles, child_index, flex_c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -4183,10 +4195,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
     while c >= 0:
         val cst = styles[c]
         if cst.position_absolute:
+            val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
             val ax = absolute_child_x(x, st, nodes[c], cst, iw)
-            val ay = absolute_child_y(y, st, cst)
+            val ay = absolute_child_y(y, st, cst, absolute_containing_h)
             val absolute_w = absolute_outer_width(st, nodes[c], cst, iw)
-            val child = layout(nodes, styles, child_index, c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            val child_styles = absolute_child_styles(styles, c, cst, absolute_containing_h)
+            val child = layout(nodes, child_styles, child_index, c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw
