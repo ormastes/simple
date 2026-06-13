@@ -44,16 +44,18 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 
 ## Verification Gates
 
-- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`
+- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs`
 - `sh test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
-- `bin/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter`
-- `bin/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter`
-- `bin/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter`
-- `bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter`
+- `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
+- `sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean`
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter`
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter`
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter`
-- `bin/simple test test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl --mode=interpreter`
+- `src/compiler_rust/target/debug/simple test test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.spl --mode=interpreter --clean`
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter`
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean` when live QEMU hardware/AP evidence is claimed.
 - `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean` when final AP ring/user handoff evidence is claimed; the serial proof must include `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`.

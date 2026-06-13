@@ -257,23 +257,37 @@ expect(absent_in_text(row, "\"done\"")).to_equal(1)
 - Verify deleted option documents are not linked
    - Expected: absent_in_text(row, "doc/02_requirements/feature/multicore_green_options.md") equals `1`
    - Expected: absent_in_text(row, "doc/02_requirements/nfr/multicore_green_options.md") equals `1`
+- Verify requirement evidence points at current profile gates
+   - Expected: absent_in_text(feature_req + nfr_req, "cross_language_perf_2026-06-08_docker_contract.md") equals `1`
+   - Expected: absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_green") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
+val feature_req = rt_file_read_text("doc/02_requirements/feature/multicore_green.md") ?? ""
+val nfr_req = rt_file_read_text("doc/02_requirements/nfr/multicore_green.md") ?? ""
 step("Verify selected requirement documents are linked")
 expect(row).to_contain("doc/02_requirements/feature/multicore_green.md")
 expect(row).to_contain("doc/02_requirements/nfr/multicore_green.md")
 step("Verify deleted option documents are not linked")
 expect(absent_in_text(row, "doc/02_requirements/feature/multicore_green_options.md")).to_equal(1)
 expect(absent_in_text(row, "doc/02_requirements/nfr/multicore_green_options.md")).to_equal(1)
+step("Verify requirement evidence points at current profile gates")
+expect(feature_req).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
+expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_report_contract_test.shs")
+expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(nfr_req).to_contain("src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean")
+expect(absent_in_text(feature_req + nfr_req, "cross_language_perf_2026-06-08_docker_contract.md")).to_equal(1)
+expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_green")).to_equal(1)
 ```
 
 </details>
