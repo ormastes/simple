@@ -302,12 +302,13 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 - Verify plan and design links are present
 - Verify architecture and design name the API misuse gate
    - Expected: absent_in_text(architecture, "cross_language_perf_parallel_smoke.md") equals `1`
+- Verify the report index promotes the current freshbin profile evidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -323,6 +324,7 @@ expect(row).to_contain("doc/04_architecture/runtime/multicore_green.md")
 expect(row).to_contain("doc/05_design/multicore_green.md")
 val architecture = rt_file_read_text("doc/04_architecture/runtime/multicore_green.md") ?? ""
 val design = rt_file_read_text("doc/05_design/multicore_green.md") ?? ""
+val report_index = rt_file_read_text("doc/09_report/README.md") ?? ""
 step("Verify architecture and design name the API misuse gate")
 expect(architecture).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(architecture).to_contain("numbered aliases")
@@ -330,6 +332,11 @@ expect(architecture).to_contain("doc/09_report/cross_language_perf_2026-06-11_th
 expect(absent_in_text(architecture, "cross_language_perf_parallel_smoke.md")).to_equal(1)
 expect(design).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(design).to_contain("numeric-suffix concurrency aliases")
+step("Verify the report index promotes the current freshbin profile evidence")
+expect(report_index).to_contain("cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(report_index).to_contain("Current contract-passing Docker-isolated cross-language profile")
+expect(report_index).to_contain("cross_language_perf_2026-06-08_docker_contract.md")
+expect(report_index).to_contain("Historical")
 ```
 
 </details>
