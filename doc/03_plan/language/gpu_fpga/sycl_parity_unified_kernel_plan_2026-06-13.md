@@ -66,6 +66,8 @@ Runtime externs needed (Rust seed additions → require `scripts/bootstrap/boots
 - [x] W1.3 Range launch math — `launch_shape` in queue.spl
 - [x] W1.4 Task graph lite — `GpuTaskGraph` in queue.spl
 - [x] W1.2 USM trio — `src/lib/nogc_sync_mut/gpu/usm.spl` (None-backend deterministic; CUDA managed/pinned externs = seed work, recorded)
-- [ ] W2.x — pending
+- [x] W2.4 (library layer) — `GpuQueue.parallel_reduce_i64` CPU-deterministic fold; GPU two-pass block reduction still pending behind W2.3
+- [ ] W2.x remainder — pending (compiler-side)
+- Found during W1: `grid` named-arg parser bug (P2) — `doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md`; API uses grid_dim/block_dim until fixed
 - [ ] W3.x — pending (headline)
 - [ ] W4.x — pending
