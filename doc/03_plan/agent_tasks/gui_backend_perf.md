@@ -695,3 +695,7 @@ Updated: 2026-06-11
   now tracks group start offsets and slices top-level comma-separated selector
   groups once instead of rebuilding the current group one character at a time
   during both count and fill passes.
+- Simple Web pseudo selector option splitting allocation removal:
+  `:not`/`:is`/`:where` and `:has` option scanners now keep option start
+  offsets and slice each comma-separated argument once, preserving depth-aware
+  comma handling without per-character string concatenation.
