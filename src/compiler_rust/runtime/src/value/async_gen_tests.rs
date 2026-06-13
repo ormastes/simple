@@ -1,6 +1,6 @@
 //! Tests for async/future functionality
 
-use super::{rt_future_all, rt_future_await, rt_future_is_ready, rt_future_new, rt_future_race, rt_future_resolve};
+use super::{rt_future_all, rt_future_await, rt_future_is_ready, rt_future_new, rt_future_race, rt_future_resolve, rt_future_wrap};
 use crate::executor::{configure_async_mode, AsyncMode};
 use crate::value::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, RuntimeValue};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -267,4 +267,81 @@ fn test_b5_lazy_future_await_returns_body_value() {
     let future = rt_future_new(return_value as *const () as u64, RuntimeValue::from_int(512));
     let result = rt_future_await(future);
     assert_eq!(result.as_int(), 512);
+}
+
+// B5 reconcile (RECONCILED, 2026-06-13) — canonical constructor tests
+//
+// rt_future_wrap is the single intent-named canonical constructor for "I have a
+// resolved value; wrap it for the RuntimeFuture await path."  It is a thin alias
+// for rt_future_resolve, but makes the construction intent unambiguous so future
+// MIR/JIT lowering does not have to choose between rt_future_new/rt_future_resolve.
+//
+// These tests verify: wrap produces a ready future, await extracts the value,
+// parity with rt_future_resolve, nil handling, and nested wrap+await.
+
+#[test]
+fn test_b5_canonical_wrap_int() {
+    // rt_future_wrap(i64) must produce a ready future that await extracts correctly.
+    let wrapped = rt_future_wrap(RuntimeValue::from_int(42));
+    assert_eq!(rt_future_is_ready(wrapped), 1, "rt_future_wrap must produce a ready future");
+    let result = rt_future_await(wrapped);
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn test_b5_canonical_wrap_nil() {
+    // rt_future_wrap(NIL) must produce a ready future; await must return NIL.
+    let wrapped = rt_future_wrap(RuntimeValue::NIL);
+    assert_eq!(rt_future_is_ready(wrapped), 1);
+    let result = rt_future_await(wrapped);
+    assert!(result.is_nil());
+}
+
+#[test]
+fn test_b5_canonical_wrap_parity_with_resolve() {
+    // rt_future_wrap and rt_future_resolve must be behaviorally identical.
+    let val = RuntimeValue::from_int(1234);
+    let via_wrap = rt_future_wrap(val);
+    let via_resolve = rt_future_resolve(val);
+    // Both must be immediately ready
+    assert_eq!(rt_future_is_ready(via_wrap), 1);
+    assert_eq!(rt_future_is_ready(via_resolve), 1);
+    // Both must yield the same value on await
+    assert_eq!(rt_future_await(via_wrap).as_int(), 1234);
+    assert_eq!(rt_future_await(via_resolve).as_int(), 1234);
+}
+
+#[test]
+fn test_b5_canonical_wrap_nested_await() {
+    // await(await(rt_future_wrap(v))) — second await hits the plain extracted int
+    // (identity path), must return the same value, not NIL or crash.
+    let wrapped = rt_future_wrap(RuntimeValue::from_int(99));
+    let first = rt_future_await(wrapped);   // RuntimeFuture → 99
+    let second = rt_future_await(first);    // plain int → identity → 99
+    assert_eq!(second.as_int(), 99);
+}
+
+#[test]
+fn test_b5_canonical_wrap_double_await_cached() {
+    // Awaiting the same rt_future_wrap'd future twice must return the same
+    // cached result (state == 1 path, no body re-execution).
+    let wrapped = rt_future_wrap(RuntimeValue::from_int(7));
+    let r1 = rt_future_await(wrapped);
+    let r2 = rt_future_await(wrapped);
+    assert_eq!(r1.as_int(), 7);
+    assert_eq!(r2.as_int(), 7);
+}
+
+#[test]
+fn test_b5_canonical_single_await_path_for_plain_value() {
+    // The single await path (rt_future_await) handles both:
+    //   (a) a plain non-Future value — identity, not NIL
+    //   (b) an rt_future_wrap'd value — extract, not NIL
+    // Both must produce the same result, confirming the unified extract path.
+    let plain = RuntimeValue::from_int(55);
+    let wrapped = rt_future_wrap(RuntimeValue::from_int(55));
+    let from_plain = rt_future_await(plain);
+    let from_wrapped = rt_future_await(wrapped);
+    assert_eq!(from_plain.as_int(), 55);
+    assert_eq!(from_wrapped.as_int(), 55);
 }

@@ -693,3 +693,66 @@ main = r.unwrap()
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 55);
 }
+
+// ---------------------------------------------------------------------------
+// Generator iteration (S7)
+//
+// `gen f(): yield ...` functions evaluate eagerly in the interpreter: calling
+// one runs the body to completion, collecting every yielded value into a
+// Value::Generator. `for x in f()` then drains those values in order. These
+// tests cover the previously-broken module-scope for-loop path (iter_to_vec in
+// interpreter_helpers/collections.rs), which lacked a Value::Generator arm and
+// failed with "cannot iterate over this type".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn interpreter_generator_for_in_collects_in_order() {
+    // Multi-yield generator iterated by a module-scope for-loop.
+    // Encode visitation order into a single integer: 1,2,3 -> 123.
+    let code = r#"
+gen counter():
+    yield 1
+    yield 2
+    yield 3
+
+var total = 0
+for x in counter():
+    total = total * 10 + x
+main = total
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 123);
+}
+
+#[test]
+fn interpreter_generator_zero_yields_iterates_zero_times() {
+    // A generator that yields nothing must produce zero loop iterations.
+    let code = r#"
+gen empty():
+    return
+
+var count = 0
+for x in empty():
+    count = count + 1
+main = count
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn interpreter_plain_fn_returning_array_still_iterates() {
+    // Regression guard: a non-generator function returning an array must still
+    // be iterable by for-in (the new Generator arm must not disturb arrays).
+    let code = r#"
+fn nums():
+    return [4, 5, 6]
+
+var total = 0
+for x in nums():
+    total = total + x
+main = total
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15);
+}

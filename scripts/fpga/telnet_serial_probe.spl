@@ -18,6 +18,8 @@ extern fn native_tcp_write(handle: i64, data: [i64]) -> Result<i64, text>
 extern fn native_tcp_set_read_timeout(handle: i64, ms: i64) -> Result<i64, text>
 extern fn native_tcp_close(handle: i64) -> i64
 extern fn rt_bytes_to_text(data: [i64]) -> text
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_cli_get_args() -> [text]
 
 fn script_user_args(marker: text) -> [text]:
@@ -56,6 +58,10 @@ fn main():
     print("TELNET_PROBE_CONNECTED addr={addr}")
     native_tcp_set_read_timeout(stream, 200)
 
+    # Wall-clock capture window: read timeouts can fire instantly in the
+    # interpreter (SO_RCVTIMEO not honored on all socket paths), so tick
+    # counting would expire the window too early.
+    val start_us = rt_time_now_unix_micros()
     var received = ""
     var waited = 0
     var found = false
@@ -79,8 +85,10 @@ fn main():
                         if received.contains(expect_text):
                             found = true
             Err(e):
-                # Read timeout tick
-                waited = waited + 200
+                # Read timeout tick — pace explicitly, measure by clock
+                rt_sleep_ms(100)
+        val now_us = rt_time_now_unix_micros()
+        waited = (now_us - start_us) / 1000
 
     native_tcp_close(stream)
     print("TELNET_PROBE_RX_BEGIN")

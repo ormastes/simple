@@ -1,6 +1,6 @@
 # Async/Await Interpreter Crashes - 2026-06-11
 
-Status: partially-fixed (2026-06-12) — B1/B2(await) VERIFIED FIXED; B3(generator SIGILL) FIXED IN SEED (2026-06-12) — exit 132 eliminated, JIT compile_yield emits safe NIL return; B3 for-in SIGSEGV FIXED IN SEED (2026-06-12) — run_file_jit detects Yield in MIR and falls back to interpreter before dereferencing null; B3b(actor HIR scope) FIXED IN SEED — pending redeploy; B4(spawn SIGABRT) VERIFIED FIXED via E6; B5(Promise/FutureValue) DOCUMENTED-CANONICAL — behavior pinned by 7 Rust regression tests (S8, 2026-06-11); B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
+Status: partially-fixed (2026-06-13) — B1/B2(await) VERIFIED FIXED; B3(generator SIGILL) FIXED IN SEED (2026-06-12) — exit 132 eliminated, JIT compile_yield emits safe NIL return; B3 for-in SIGSEGV FIXED IN SEED (2026-06-12) — run_file_jit detects Yield in MIR and falls back to interpreter before dereferencing null; B3b(actor HIR scope) FIXED IN SEED — pending redeploy; B4(spawn SIGABRT) VERIFIED FIXED via E6; B5(Promise/FutureValue) RECONCILED (2026-06-13) — canonical constructor rt_future_wrap added, 6 new test_b5_canonical_* tests, all 13 async_gen test_b5_* green; B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
 
 **Fixed 2026-06-11 (commit 861e29bc99):** the SIGSEGV had already become silent
 corruption (`await f()` always yielded 3 = NIL bit pattern in JIT mode; a
@@ -23,7 +23,7 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 
 **Still open (all Rust-seed-rooted — do NOT fix in .spl):**
 - ~~B3: generator/yield runtime interpreter crash (exit 132 SIGABRT)~~ → **FIXED IN SEED (2026-06-12):** `compile_yield` in `codegen/instr/async_ops.rs` replaced unconditional `trap` (emitting CPU `ud2`/SIGILL) with a safe NIL return when `generator_state_map` is None. JIT path now falls back to interpreter gracefully. Probes exit 0 (not 132). 2 new regression tests in `async_desugar_tests.rs` (HIR→MIR lower succeeds).
-- ~~B5: Promise-vs-FutureValue deep representation reconcile.~~ → **DOCUMENTED-CANONICAL (S8, 2026-06-11):** Representation map written below; behavior pinned by 7 Rust regression tests in `async_gen_tests.rs` (all green). Cross-path behavior is correct under eager-async semantics; no unification required.
+- ~~B5: Promise-vs-FutureValue deep representation reconcile.~~ → **RECONCILED (2026-06-13):** Canonical constructor `rt_future_wrap` added to `runtime/src/value/async_gen.rs` and re-exported from `mod.rs`. `rt_future_wrap` is the single intent-named entry point for "wrap a resolved value for the RuntimeFuture await path" — it replaces the need to choose between `rt_future_new`/`rt_future_resolve` at new MIR/JIT lowering sites. `rt_future_await` remains the single extract path (identity for non-RuntimeFuture, state-extract for RuntimeFuture). 6 new `test_b5_canonical_*` tests added; all 13 `test_b5_*` tests green (34/34 `async_gen` suite). End-to-end probe (`async fn f() -> i64: 42; await f()`) prints 42 in both interpreter and JIT modes. Representation map below updated. **Intentionally dual** (out of runtime scope): the interpreter layer's `Value::Future`/`Value::Object{Promise}` representations remain separate — unifying them requires touching `compiler/src/` and is not needed under eager-async semantics.
 - ~~B3b: actor desugar class not visible in HIR scope~~ → **FIXED IN SEED (S6 batch, pending redeploy):** `Node::Actor` registered in Pass 0 + `register_declarations_from_node` via `register_class`. 5 regression tests green (`hir::lower::tests::async_desugar_tests`). Binary verified: `actor Counter: val count: i64` + no-ctor usage exits 0 cleanly.
 - ~~B6: HIR hardcodes I64 for await result type~~ → **FIXED IN SEED (S5 batch, pending redeploy):** `ty: TypeId::I64` replaced with `ty: operand_ty` (the inner expression's type). Rust tests: `test_await_expr_type_propagates_operand_type` + `test_await_expr_string_type_propagates` both green.
 
@@ -36,7 +36,7 @@ Spec: `test/01_unit/lib/nogc_async_mut/concurrent/green_spawn_deferred_spec.spl`
 | B3 | `yield` / generator runtime interpreter crash (SIGABRT/SIGILL) | (c) Rust-seed | FIXED IN SEED (2026-06-12) | compile_yield safe NIL return; exit 132 eliminated; 2 regression tests green |
 | B3b | `actor` desugar class not visible in HIR scope | (c) Rust-seed | FIXED IN SEED — pending redeploy | S6: `Node::Actor` in Pass 0 + register_class; 5 tests green |
 | B4 | `spawn fn()` closure SIGABRTs (exit 132) at cleanup | (a) Fixed | VERIFIED FIXED | E6 in green_thread_direct_runtime_blockers_2026-06-06.md |
-| B5 | Promise vs FutureValue unreconciled in MIR executor | (c) Rust-seed | DOCUMENTED-CANONICAL (S8, 2026-06-11) | behavior pinned; 7 regression tests in async_gen_tests.rs green |
+| B5 | Promise vs FutureValue unreconciled in MIR executor | (c) Rust-seed | RECONCILED (2026-06-13) | rt_future_wrap canonical constructor added; 13 test_b5_* green (34/34 async_gen suite); interpreter-layer duality intentionally retained |
 | B6 | HIR hardcodes `TypeId::I64` for await result type | (c) Rust-seed | FIXED IN SEED — pending redeploy | S5 batch: `ty: operand_ty`; tests green |
 | C1 | Coverage gap: 7 specs are single-skip placeholders | (b)/(c) mixed | DOCUMENTED | see Coverage section below |
 | C2 | `async_integration_spec` has 21 hollow `expect(1).to_equal(1)` tests | (b) | FILLED (S7, 2026-06-12) | 21/21 honest assertions; generator-blocked tests rewritten to pin declaration-level behaviour; 0 vacuous bodies remain |
@@ -138,10 +138,13 @@ Regression tests added: `src/compiler_rust/compiler/src/hir/lower/tests/async_de
 - `test_actor_methods_lowered_to_hir`
 - `test_actor_usable_after_declaration`
 
-### B5 — Promise vs FutureValue Representation (Rust-seed) — DOCUMENTED-CANONICAL (S8, 2026-06-11)
+### B5 — Promise vs FutureValue Representation (Rust-seed) — RECONCILED (2026-06-13)
 
-**Status: DOCUMENTED-CANONICAL.** Behavior is correct and pinned by Rust regression
-tests. Unification is not required under current eager-async semantics.
+**Status: RECONCILED (2026-06-13).** Canonical constructor `rt_future_wrap` added to the
+runtime layer. `rt_future_await` is the single extract path. 13 `test_b5_*` tests green
+(34/34 `async_gen` suite). Interpreter-layer `Value::Future`/`Value::Object{Promise}`
+duality intentionally retained — unifying those requires touching `compiler/src/` and is
+not needed under eager-async semantics.
 
 #### Representation Map
 
@@ -151,7 +154,7 @@ Three distinct async value types exist across the two layers of the compiler:
 |---|---|---|---|---|
 | **Promise** | `Value::Object { class: "Promise", fields: {state: Enum{PromiseState::Resolved(val)}, callbacks: []} }` | Interpreter (`compiler/src/`) | `wrap_in_promise` in `interpreter_call/core/async_support.rs` | `await_value` in `interpreter/async_support.rs` — matches `Value::Object{class=="Promise"}` and extracts `state.Resolved(inner)` |
 | **FutureValue** | `Value::Future(FutureValue)` | Interpreter (`compiler/src/value_async.rs`) | `FutureValue::new(f)`, `FutureValue::resolved(v)`, `FutureValue::rejected(e)` (also `interpreter_call/builtins.rs`) | `await_value` — matches `Value::Future` and calls `future.await_result()` |
-| **RuntimeFuture** | `RuntimeValue` tagged `HeapObjectType::Future` | Runtime (`runtime/src/value/async_gen.rs`) | `rt_future_new(body_func, ctx)`, `rt_future_resolve(val)` | `rt_future_await` — extracts `RuntimeFuture` via `get_typed_ptr_mut`, executes body on first await |
+| **RuntimeFuture** | `RuntimeValue` tagged `HeapObjectType::Future` | Runtime (`runtime/src/value/async_gen.rs`) | **`rt_future_wrap(val)`** (canonical, 2026-06-13), `rt_future_resolve(val)` (alias), `rt_future_new(body_func, ctx)` (lazy) | `rt_future_await` — single extract path: extracts `RuntimeFuture` via `get_typed_ptr_mut`; identity for non-Future |
 
 #### Await Path Coverage
 
@@ -197,9 +200,11 @@ executes asynchronously), at which point `rt_future_await` would need to
 understand Promise state to resume correctly. That is a future design milestone,
 not a current correctness issue.
 
-#### Regression Tests Added (S8, 2026-06-11)
+#### Regression Tests (S8 + RECONCILED batch)
 
 File: `src/compiler_rust/runtime/src/value/async_gen_tests.rs`
+
+**Original S8 tests (7, added 2026-06-11):**
 
 | Test | What it pins |
 |---|---|
@@ -211,8 +216,18 @@ File: `src/compiler_rust/runtime/src/value/async_gen_tests.rs`
 | `test_b5_promise_object_through_rt_future_await` | non-Future opaque value → identity, not NIL |
 | `test_b5_lazy_future_await_returns_body_value` | lazy future executes body and returns value |
 
-All 7 tests green: `cargo test -p simple-runtime test_b5` → `7 passed; 0 failed` (S8 verification run, 2026-06-11).
-5 pre-existing failures in `executor`, `loader`, and `value::serial` modules are unrelated to B5.
+**RECONCILED canonical-constructor tests (6, added 2026-06-13):**
+
+| Test | What it pins |
+|---|---|
+| `test_b5_canonical_wrap_int` | rt_future_wrap(i64) → ready future, await extracts correctly |
+| `test_b5_canonical_wrap_nil` | rt_future_wrap(NIL) → ready future, await returns NIL |
+| `test_b5_canonical_wrap_parity_with_resolve` | wrap and resolve are behaviorally identical |
+| `test_b5_canonical_wrap_nested_await` | await(await(wrap(v))) → identity on second layer |
+| `test_b5_canonical_wrap_double_await_cached` | second await on same wrapped future returns cached result |
+| `test_b5_canonical_single_await_path_for_plain_value` | plain value and wrapped value yield same result via rt_future_await |
+
+All 13 tests green: `cargo test -p simple-runtime async_gen` → `34 passed; 0 failed` (RECONCILED verification run, 2026-06-13).
 
 #### Binary Verification (S8, 2026-06-11)
 
@@ -284,7 +299,7 @@ in `hir/lower/tests/expression_tests.rs` (both green).
 2. **(DONE)** Interpreter `Expr::Await` passthrough for non-Future values.
 3. **(FIXED IN SEED — B3b, pending redeploy)** Register `Node::Actor` in HIR Pass 0 + `register_declarations_from_node` (S6: `module_pass.rs` +85 lines; 5 regression tests green).
 3b. **(OPEN — Rust)** Fix interpreter executor to handle `HirExprKind::Yield` in generator functions without SIGABRT (B3 — separate from B3b).
-4. **(DOCUMENTED-CANONICAL — S8, 2026-06-11)** Representation map + 7 regression tests pin the B5 cross-path behavior. Unification deferred to lazy-future milestone.
+4. **(RECONCILED — 2026-06-13)** `rt_future_wrap` canonical constructor added; `rt_future_await` is the single extract path. 13 `test_b5_*` tests green (34/34 suite). Interpreter-layer `Value::Future`/`Value::Object{Promise}` duality intentionally retained — unifying requires `compiler/src/` changes not needed under eager-async semantics.
 5. **(FIXED IN SEED — pending redeploy)** Propagate the real operand type for `await` (B6): `ty: TypeId::I64` → `ty: operand_ty` in `hir/lower/expr/mod.rs`. When Future<T> representation is added, this site must extract T instead.
 
 ## Coverage Gap
