@@ -5,7 +5,7 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  88 fixtures through `91_percent_margin_basic` with `88` passes, `0`
+  89 fixtures through `92_percent_height_definite_parent` with `89` passes, `0`
   failures, and `blur_or_tolerance_used=false`. This is focused structural box
   evidence, not broad Chromium layout-engine completion.
 - The authoritative current pixel harness in this worktree is
@@ -860,6 +860,17 @@ Open gaps tied to the active browser objective:
      `88` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
      tolerance, downscaling, copied Chromium pixels, or resolution adjustment
      was used
-- Parallel agent research identified percentage heights inside a definite-height
-  containing block as the next small geometry candidate. Percentage height is
-  likely larger because parent height must flow through more layout paths.
+- Percentage height evidence now extends the live Chrome manifest through
+  fixture 92:
+   - added `92_percent_height_definite_parent`, a normal block fixture where
+     `height:50%` resolves against a parent with definite `height:120px`
+     content height, placing the child at `x=10`, `y=10`, `height=60`
+   - `simple_web_html_layout_renderer.spl` now preserves percentage `height`
+     as a deferred value and resolves it for normal block children when the
+     containing block has a definite content height
+   - live Chrome headless geometry manifest evidence reports `89` fixtures,
+     `89` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
+     tolerance, downscaling, copied Chromium pixels, or resolution adjustment
+     was used
+   - scope note: flex percentage heights, absolute-position percentage heights,
+     and min-height-derived definiteness remain separate follow-up work

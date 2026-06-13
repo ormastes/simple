@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 88
-- pass count: 88
+- fixtures: 89
+- pass count: 89
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -111,6 +111,7 @@ pixels, or text antialiasing normalization.
 | `89_percent_content_box_padding` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/89_percent_content_box_padding_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/89_percent_content_box_padding_structural_report.sdn` |
 | `90_absolute_inset_stretch` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/90_absolute_inset_stretch_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/90_absolute_inset_stretch_structural_report.sdn` |
 | `91_percent_margin_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/91_percent_margin_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/91_percent_margin_basic_structural_report.sdn` |
+| `92_percent_height_definite_parent` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/92_percent_height_definite_parent_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/92_percent_height_definite_parent_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -208,3 +209,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `89_percent_content_box_padding` | 0 | 0.000 | `` |
 | `90_absolute_inset_stretch` | 0 | 0.000 | `` |
 | `91_percent_margin_basic` | 0 | 0.000 | `` |
+| `92_percent_height_definite_parent` | 0 | 0.000 | `` |
