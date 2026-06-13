@@ -107,14 +107,25 @@ fn stmt_count_set(value: i64):
 fn stmt_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_STMT_" + int_to_str(idx) + "_" + field
 
+# Perf: the per-index SIMPLE_BOOTSTRAP_STMT_<idx>_<field> env mirror accumulates
+# 6 environ entries per statement; libc setenv/getenv linear-scan environ, so the
+# mirror is O(N^2) in statement count. The parallel module-var arrays (stmt_tag,
+# stmt_expr, ...) are written unconditionally by the constructors and are the real
+# store in compiled stage4; the env mirror is only needed in the interpreter
+# bootstrap (SIMPLE_BOOTSTRAP=1), where module-var arrays do not persist. Readers
+# are env-first/array-fallback, so skipping the env write here makes them fall
+# back to the (correct) arrays. See bug ast_env_var_quadratic_parse_2026-06-13.
 fn stmt_i64_set(idx: i64, field: text, value: i64):
-    rt_env_set(stmt_key(idx, field), int_to_str(value))
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        rt_env_set(stmt_key(idx, field), int_to_str(value))
 
 fn stmt_text_set(idx: i64, field: text, value: text):
-    rt_env_set(stmt_key(idx, field), value)
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        rt_env_set(stmt_key(idx, field), value)
 
 fn stmt_list_set(idx: i64, field: text, values: [i64]):
-    rt_env_set(stmt_key(idx, field), stmt_i64_list_join(values))
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        rt_env_set(stmt_key(idx, field), stmt_i64_list_join(values))
 
 fn stmt_count() -> i64:
     val env_count = stmt_count_env()
