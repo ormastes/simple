@@ -5,8 +5,8 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  95 fixtures: `00_text_only`, `01_inline_text`, and the existing
-  `02_block_boxes` through `96_absolute_percent_height_bottom`, with `95`
+  96 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
+  existing `02_block_boxes` through `96_absolute_percent_height_bottom`, with `96`
   passes, `0` failures, and `blur_or_tolerance_used=false`. This is focused
   structural box evidence, not broad Chromium layout-engine completion.
 - `01_inline_text` is now in the all-pass manifest. The labelled fixture
@@ -956,5 +956,16 @@ Open gaps tied to the active browser objective:
    - focused live evidence reports `fixture_count=1`, `pass_count=1`,
      `fail_count=0`, and `blur_or_tolerance_used=false` for `01_inline_text`
    - the default Chrome headless geometry manifest now includes 95 passing
+     fixtures; no blur, tolerance, downscaling, copied Chromium pixels, or
+     resolution adjustment was used
+- Inline sibling structural evidence now extends the live Chrome manifest to
+  include fixture `08_inline_siblings`:
+   - preserves single-space inline text nodes between sibling inline elements
+     so the second labelled span lands at Chromium's `x=37` instead of
+     collapsing onto the first span's right edge
+   - distinguishes whitespace-only inline advance from mixed text+space
+     advance; the focused fixture reports `fixture_count=1`, `pass_count=1`,
+     `fail_count=0`, and `blur_or_tolerance_used=false`
+   - the default Chrome headless geometry manifest now includes 96 passing
      fixtures; no blur, tolerance, downscaling, copied Chromium pixels, or
      resolution adjustment was used
