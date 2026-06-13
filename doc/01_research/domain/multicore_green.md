@@ -1,6 +1,6 @@
 # Multicore Green Domain Research
 
-Verified: 2026-06-06 against official Go runtime documentation.
+Verified: 2026-06-13 against official Go runtime documentation.
 
 ## Go Scheduler Model
 
@@ -11,6 +11,22 @@ The same source explains why scalable M:N scheduling avoids centralized state on
 Go 1.14 added asynchronous goroutine preemption, which matters for tight CPU loops that do not voluntarily yield. Source: <https://go.dev/doc/go1.14>.
 
 `GOMAXPROCS` controls how many operating-system threads can execute user-level Go code simultaneously. Current Go runtime documentation says the default can account for logical CPUs, CPU affinity, and Linux cgroup CPU quota, and Go can update the default when those inputs change unless the application overrides it. Source: <https://pkg.go.dev/runtime#GOMAXPROCS>.
+
+## 2026-06-13 Refresh
+
+Official Go sources still describe the scheduler as a G/M/P runtime where ready
+goroutines are distributed over worker threads and each executing worker must
+hold a processor token. The source comments still emphasize distributed
+per-processor queues, spinning workers, park/unpark discipline, and eventual
+maximal CPU utilization.
+
+The current runtime package documentation also makes `GOMAXPROCS` more
+environment-sensitive than a fixed logical-CPU count: absent an explicit
+override, the default can account for logical CPUs, CPU affinity, and Linux
+cgroup CPU quota, and the runtime can update the default as those inputs
+change. Profile evidence for Simple must therefore keep pinning Go with
+`GOMAXPROCS=$CPU_WORKERS` and must record the observed scheduler width before
+claiming a fair Go-like M:N comparison.
 
 ## Implications For Simple
 

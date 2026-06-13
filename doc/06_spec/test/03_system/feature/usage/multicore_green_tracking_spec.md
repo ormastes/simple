@@ -27,7 +27,7 @@ multicore_green_tracking_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,7 +106,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/multicore_green_tracking_spec.spl
 Multicore green tracking contract PASSED
 Files: 1
-Passed: 12
+Passed: 13
 Failed: 0
 ```
 
@@ -123,6 +123,9 @@ Failed: 0
 - The tracking row must not point at deleted requirement option documents.
 - The tracking row must carry local and domain research links so later agents
   can find the Go runtime and Simple runtime comparisons.
+- Domain research must stay fresh enough to reflect current official Go
+  `GOMAXPROCS` default and update behavior, because profile fairness depends on
+  pinning and recording the scheduler width.
 - The tracking row must carry the agent-task and system-test plans so remaining
   hardening work stays discoverable.
 - The tracking row must carry architecture and design links so API semantics
@@ -299,6 +302,42 @@ expect(row).to_contain("doc/03_plan/agent_tasks/multicore_green.md")
 expect(row).to_contain("doc/03_plan/sys_test/multicore_green.md")
 expect(row).to_contain("doc/04_architecture/runtime/multicore_green.md")
 expect(row).to_contain("doc/05_design/multicore_green.md")
+```
+
+</details>
+
+#### keeps Go scheduler research current for profile fairness
+
+- Read the Go scheduler domain research notes
+- Verify the current refresh date and official Go scheduler model are recorded
+- Verify current GOMAXPROCS default/update behavior is captured
+- Verify profile fairness remains pinned and recorded
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the Go scheduler domain research notes")
+val domain = rt_file_read_text("doc/01_research/domain/multicore_green.md") ?? ""
+val comparison = rt_file_read_text("doc/01_research/lib/threading/go_vs_simple_threads.md") ?? ""
+step("Verify the current refresh date and official Go scheduler model are recorded")
+expect(domain).to_contain("Verified: 2026-06-13")
+expect(domain).to_contain("G/M/P runtime")
+expect(domain).to_contain("per-processor queues")
+expect(comparison).to_contain("Verified: 2026-06-13")
+step("Verify current GOMAXPROCS default/update behavior is captured")
+expect(domain).to_contain("logical CPUs, CPU affinity, and Linux")
+expect(domain).to_contain("cgroup CPU quota")
+expect(domain).to_contain("update the default")
+expect(comparison).to_contain("may update automatically")
+step("Verify profile fairness remains pinned and recorded")
+expect(domain).to_contain("GOMAXPROCS=$CPU_WORKERS")
+expect(domain).to_contain("record the observed scheduler width")
+expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 ```
 
 </details>
@@ -733,8 +772,8 @@ expect(absent_in_text(callable, "val SIMPLE_BIN: text = \"bin/release/simple\"")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

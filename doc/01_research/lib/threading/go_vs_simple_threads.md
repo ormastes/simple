@@ -1,6 +1,6 @@
 # Go M:N Scheduler vs Simple Concurrency Surfaces
 
-Verified: 2026-06-11
+Verified: 2026-06-13
 
 ## Scope
 
@@ -25,10 +25,17 @@ Go's scheduler is M:N: many goroutines are multiplexed onto a bounded set of
 OS threads. The important properties for this lane are:
 
 - bounded parallelism through `GOMAXPROCS`
+- current Go defaults may account for logical CPUs, CPU affinity, and Linux
+  cgroup CPU quota, and may update automatically when those inputs change
 - worker ownership of runnable work rather than one-OS-thread-per-task
 - blocking compensation so one blocked task does not collapse the whole runtime
 - work stealing so runnable work can move between workers
 - preemption so tight CPU loops do not monopolize a worker forever
+
+For repeatable profile evidence, this repo pins Go rows with
+`GOMAXPROCS=$CPU_WORKERS` and records the observed `runtime.GOMAXPROCS(0)`
+value in the report. Unpinned container defaults are useful domain context, but
+not fair release evidence for Simple-vs-Go comparisons.
 
 ## Simple Current State
 
