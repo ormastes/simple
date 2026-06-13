@@ -228,6 +228,9 @@ Updated: 2026-06-11
   widget chrome paint passes now reuse the current node plus layout box values
   per iteration instead of repeatedly indexing `nodes`, `bx`, `by`, `bw`, and
   `bh` throughout the startup paint conditions and draw calls.
+- this commit -- Simple Web text/icon paint index hoisting: the final text,
+  widget-image, and icon paint pass now reuses the current node, style, and
+  layout box values per iteration before text wrapping and glyph drawing.
 - this commit -- global widget-store copy removal:
   process-global `upsert_widget_record`, `set_internal_prop`, child
   registration, and widget traversal helpers now avoid per-item array
