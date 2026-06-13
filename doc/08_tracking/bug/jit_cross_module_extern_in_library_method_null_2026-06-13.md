@@ -101,11 +101,21 @@ infeasible in a standalone leaf runtime function — that dispatch includes
 require Simple method resolution the runtime cannot perform. A primitive-only
 `rt_any_add` (int/float/string) would be **strictly worse** than the current
 state: a runtime function cannot fall back, so object operands would yield
-silently-wrong results instead of the guard's correct interpreter fallback. The
-only correct native path is to route `any + any` through the **InterpCall
-bridge** (a `mir/lower` change emitting `MirInst::InterpCall` instead of a direct
-`Call`, so the JIT defers to the interpreter for exact semantics) — a separate,
-non-trivial follow-up. Until then, the guard's fallback is the correct behavior.
+silently-wrong results instead of the guard's correct interpreter fallback.
+
+An `InterpCall` bridge (add `rt_any_add` to the hybrid transform's
+`non_compilable` set + a matching `interpreter_extern` handler — the handler
+DOES have `env/classes/impl_methods`, so object dispatch would be correct) is
+feasible but **likely a perf *loss*, not a win**, and is therefore **not
+recommended**: each `any + any` would pay per-op bridge overhead
+(`seed_interp_definitions_for_current_thread`, the `with_interp_state` lock,
+`runtime_to_value`/`value_to_runtime` marshaling). A function that needs
+`rt_any_add` is dominated by dynamic ops, so the guard's **whole-function**
+interpreter fallback (one transition, then pure interpretation) is the better
+performer as well as the simpler design. **Conclusion: leave `rt_any_add` to the
+guard.** The only thing that would make it natively compilable cheaply is the
+type system narrowing `any` params to concrete types at the call site (then no
+dynamic-add helper is emitted at all) — orthogonal, not this bug.
 
 ## Follow-ups (Open — native codegen feature, NOT the crash)
 
