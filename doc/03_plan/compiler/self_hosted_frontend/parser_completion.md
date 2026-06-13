@@ -611,15 +611,21 @@ files go through the sspec pipeline, not the core lean parser).
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
 3. Remove `simple_seed` delegation guards from `src/app/cli/check.spl` and lint entry.
 4. **Gate:** `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl` exits 0; full 1855-file sweep reports 0 errors.
-   **PREREQUISITE (perf):** the full-sweep gate is INFEASIBLE until the
-   superlinear parse is fixed — confirmed in compiled stage4 2026-06-13
-   (`rt_env_get` whole-source-per-token at parser.spl:100;
-   doc/08_tracking/bug/interp_parse_superlinear_2026-06-12.md, now P1). A
-   single real-file closure check times out at 180-600s. Per-gap-class
-   iteration is NOT blocked (tiny synthetic probes via seed-interp + host
-   stage4 are fast); only the aggregate gate is. Fix sketch in the bug doc
-   (cache source write-once in a module slot). Do this as its own task with
-   its own gate — NOT mid-gap-loop (it is the diagnostic instrument).
+   **PREREQUISITE (perf) — RE-ATTRIBUTED 2026-06-13, NOT a parser task:** the
+   full-sweep gate is blocked by superlinear `check`, but a clean re-profile
+   shows the cost is **type inference, not parse**. Isolated host-stage4
+   measurement (synthetic N-function files): `lex` (tokenize-only) is LINEAR
+   and fast (0.25→0.58→0.99 s for 100→200→400 fns); `check` (parse + full type
+   inference) is ~200× slower and superlinear (52→146→>300 s). Arithmetic rules
+   out the parse-side token-fetch as the dominant cost (perf_100 ≈18KB/2500 tok
+   → tens of MB of copies ≈ <1 s, not 52 s). The parse-side whole-source fetch
+   (`parser_token_text_from_offsets` at parser.spl:100) was nonetheless a real
+   O(N²) and is now **FIXED** (gen-keyed `parser_lex_source_cached`, committed
+   2026-06-13) — real but minor. Remaining blocker is a **separate subsystem**:
+   spin a dedicated `typecheck_infer_superlinear` task (out of parser-completion
+   scope). Per-gap-class parser iteration is NOT blocked (tiny synthetic probes
+   are fast). See doc/08_tracking/bug/interp_parse_superlinear_2026-06-12.md
+   "Compiled stage4 re-profile".
 6. **Bridge if/else fidelity** (surfaced by G42): `EXPR_IF`/`STMT_IF` in
    flat_ast_bridge_part1.spl drop the else branch (pass `nil`) and elif chains;
    `EXPR_IF` reads STMTS but `expr_if_expr` stores then in RIGHT + else in EXTRA.
