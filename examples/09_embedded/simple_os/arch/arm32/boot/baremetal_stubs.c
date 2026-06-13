@@ -81,6 +81,13 @@ static void arm32_harden_print_canary(void)
     serial_puts("\r\n");
 }
 
+/* Public SPL-callable wrapper (extern fn arm32_harden_print_canary()) */
+RuntimeValue arm32_harden_print_canary_spl(void)
+{
+    arm32_harden_print_canary();
+    return NIL_VALUE;
+}
+
 #define TAG_MASK    0x7U
 #define TAG_INT     0x0U
 #define TAG_HEAP    0x1U
