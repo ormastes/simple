@@ -237,6 +237,9 @@ Updated: 2026-06-11
 - this commit -- Simple Web debug style lookup hoisting:
   `simple_web_layout_debug_style_by_id` now reuses the matched node and inline
   style text while serving declaration and parsed numeric debug fields.
+- this commit -- Simple Web close-tag stack copy removal: HTML close-tag
+  handling now trims the parent stack with the array slice primitive instead of
+  manually allocating and copying stack entries on every matched close tag.
 - this commit -- global widget-store copy removal:
   process-global `upsert_widget_record`, `set_internal_prop`, child
   registration, and widget traversal helpers now avoid per-item array
