@@ -42,9 +42,9 @@ This host-adaptive scenario proves that the Chrome/Electron WebGPU processing la
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | N/A |
+| Requirements | .spipe/browser-wasm-webgpu-infra/state.md |
 | Plan | doc/03_plan/platform/webgpu_js_wasm_simple.md |
-| Design | N/A |
+| Design | doc/05_design/browser_wasm_webgpu_infra.md |
 | Research | doc/01_research/local/browser_wasm_webgpu_infra.md |
 | Source | `test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.spl` |
 | Updated | 2026-06-01 |
@@ -65,9 +65,10 @@ shader/pipeline/bind group, one dispatch, queue submission, valid readback, and
 matching output and expected checksums. On a host without support, evidence must
 start with `host-unavailable:` and keep output counters at zero.
 
-**Requirements:** N/A
+**Requirements:** .spipe/browser-wasm-webgpu-infra/state.md
 **Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
-**Design:** N/A
+**Architecture:** doc/04_architecture/browser_wasm_webgpu_infra.md
+**Design:** doc/05_design/browser_wasm_webgpu_infra.md
 **Research:** doc/01_research/local/browser_wasm_webgpu_infra.md
 
 ## Scenarios
@@ -129,7 +130,9 @@ else:
 
 ## Related Documentation
 
+- **Requirements:** [.spipe/browser-wasm-webgpu-infra/state.md](.spipe/browser-wasm-webgpu-infra/state.md)
 - **Plan:** [doc/03_plan/platform/webgpu_js_wasm_simple.md](doc/03_plan/platform/webgpu_js_wasm_simple.md)
+- **Design:** [doc/05_design/browser_wasm_webgpu_infra.md](doc/05_design/browser_wasm_webgpu_infra.md)
 - **Research:** [doc/01_research/local/browser_wasm_webgpu_infra.md](doc/01_research/local/browser_wasm_webgpu_infra.md)
 
 

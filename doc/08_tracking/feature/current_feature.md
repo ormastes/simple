@@ -8,6 +8,7 @@
 | FR-BENCH-BASELINE-001 | nvfs | Run bench harness with real clock and record baseline numbers | - |
 | FR-BENCH-CLOCK-001 | nvfs | Add rt_time_now_ns() for hosted and baremetal targets | - |
 | FR-BENCH-CLOCK-002 | nvfs | Replace PIT-ch2 TSC calibration with HPET/PMTMR | - |
+| BROWSER_WASM_WEBGPU_INFRA_2026_06_13 | browser_webgpu | Implement browser WASM and WebGPU infrastructure | [feature options](doc/02_requirements/feature/browser_wasm_webgpu_infra_options.md); [NFR options](doc/02_requirements/nfr/browser_wasm_webgpu_infra_options.md) |
 | FR-COMPILER-001 | compiler | Fix self-hosted binary missing CompileOptions field accessors | - |
 | FR-COMPILER-002 | compiler_—_import_resolver_/_name-resolution_pass | Fix self-hosted import resolver: same-named structs in different modules shadow each other | - |
 | FR-COMPILER-003 | compiler_—_`src/compiler/20.hir/hir_lowering/`_+_`src/compiler/80.driver/` | Add 2-pass import resolver to self-hosted HIR lowering | - |

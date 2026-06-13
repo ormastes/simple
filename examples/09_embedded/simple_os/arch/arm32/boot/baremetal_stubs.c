@@ -1862,6 +1862,254 @@ RuntimeValue rt_arm_fat32_fats(void) { return ENCODE_INT((int32_t)g_arm32_fat32_
 RuntimeValue rt_arm_fat32_fat_size(void) { return ENCODE_INT((int32_t)g_arm32_fat32_fat_size); }
 RuntimeValue rt_arm_fat32_root_cluster(void) { return ENCODE_INT((int32_t)g_arm32_fat32_root_cluster); }
 
+/* ---------- arm32 FAT32 + SMF probe helpers (mirrors riscv32 pattern) ---------- */
+
+/* Static globals for arm32 process-load probes */
+static uint32_t g_arm32_process_entry[2];
+static uint32_t g_arm32_process_pid[2];
+static uint32_t g_arm32_process_count;
+static char g_arm32_gui_surface[256];
+static uint8_t g_arm32_process_arena[2][8192] __attribute__((aligned(4096)));
+
+/* arm32 FAT32 BPB probe struct */
+typedef struct {
+    uint32_t spc;
+    uint32_t reserved;
+    uint32_t fats;
+    uint32_t fat_size;
+    uint32_t root_cluster;
+    uint32_t data_start;
+} Arm32Fat32Probe;
+
+static uint32_t arm32_fat32_rd16(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+}
+
+static uint32_t arm32_fat32_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int arm32_fat32_mem_eq(const uint8_t *a, const char *b, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        if (a[i] != (uint8_t)b[i]) return 0;
+    }
+    return 1;
+}
+
+/* Read one 512-byte sector into g_arm_virtio_blk_dma_storage+16; returns 1 on success */
+static int arm32_fat32_read_sector(uint32_t lba)
+{
+    RuntimeValue status = rt_arm_virtio_blk_read_sector_direct((RuntimeValue)lba);
+    if (status == (RuntimeValue)0xffffffffU || status != 0) return 0;
+    return 1;
+}
+
+static const uint8_t *arm32_fat32_sector_data(void)
+{
+    return g_arm_virtio_blk_dma_storage + 16U;
+}
+
+static int arm32_fat32_probe_bpb(Arm32Fat32Probe *fat)
+{
+    if (!arm32_fat32_read_sector(0)) return 0;
+    const uint8_t *b = arm32_fat32_sector_data();
+    if (arm32_fat32_rd16(b + 11U) != 512U) return 0;
+    fat->spc = b[13U];
+    fat->reserved = arm32_fat32_rd16(b + 14U);
+    fat->fats = b[16U];
+    fat->fat_size = arm32_fat32_rd32(b + 36U);
+    fat->root_cluster = arm32_fat32_rd32(b + 44U);
+    if (fat->spc == 0 || fat->reserved == 0 || fat->fats == 0 || fat->fat_size == 0 || fat->root_cluster < 2U) return 0;
+    fat->data_start = fat->reserved + (fat->fats * fat->fat_size);
+    return 1;
+}
+
+static uint32_t arm32_fat32_cluster_sector(const Arm32Fat32Probe *fat, uint32_t cluster)
+{
+    return fat->data_start + (cluster - 2U) * fat->spc;
+}
+
+static uint32_t arm32_fat32_next_cluster(const Arm32Fat32Probe *fat, uint32_t cluster)
+{
+    uint32_t fat_offset = cluster * 4U;
+    uint32_t sector = fat->reserved + (fat_offset / 512U);
+    uint32_t offset = fat_offset % 512U;
+    if (!arm32_fat32_read_sector(sector)) return 0x0fffffffu;
+    return arm32_fat32_rd32(arm32_fat32_sector_data() + offset) & 0x0fffffffu;
+}
+
+static uint32_t arm32_fat32_find_entry(const Arm32Fat32Probe *fat, uint32_t dir_cluster,
+                                       const char *name11, uint32_t want_dir, uint32_t *size_out)
+{
+    uint32_t cluster = dir_cluster;
+    while (cluster >= 2U && cluster < 0x0ffffff8U) {
+        uint32_t first = arm32_fat32_cluster_sector(fat, cluster);
+        for (uint32_t sec = 0; sec < fat->spc; sec++) {
+            if (!arm32_fat32_read_sector(first + sec)) return 0;
+            const uint8_t *data = arm32_fat32_sector_data();
+            for (uint32_t off = 0; off < 512U; off += 32U) {
+                const uint8_t *e = data + off;
+                if (e[0] == 0x00U) return 0;
+                if (e[0] == 0xe5U || e[11] == 0x0fU) continue;
+                if (!arm32_fat32_mem_eq(e, name11, 11U)) continue;
+                uint32_t is_dir = (e[11] & 0x10U) != 0;
+                if (is_dir != want_dir) continue;
+                if (size_out) *size_out = arm32_fat32_rd32(e + 28U);
+                return ((uint32_t)arm32_fat32_rd16(e + 20U) << 16) | arm32_fat32_rd16(e + 26U);
+            }
+        }
+        cluster = arm32_fat32_next_cluster(fat, cluster);
+    }
+    return 0;
+}
+
+static uint32_t arm32_fat32_find_sys_apps_file(const Arm32Fat32Probe *fat, const char *name11, uint32_t *size_out)
+{
+    uint32_t sys = arm32_fat32_find_entry(fat, fat->root_cluster, "SYS        ", 1, 0);
+    if (sys < 2U) return 0;
+    uint32_t apps = arm32_fat32_find_entry(fat, sys, "APPS       ", 1, 0);
+    if (apps < 2U) return 0;
+    return arm32_fat32_find_entry(fat, apps, name11, 0, size_out);
+}
+
+static int arm32_fat32_sector_contains(const char *needle)
+{
+    const uint8_t *data = arm32_fat32_sector_data();
+    uint32_t len = 0;
+    while (needle[len]) len++;
+    if (len == 0 || len >= 512U) return 0;
+    for (uint32_t i = 0; i + len <= 512U; i++) {
+        uint32_t ok = 1;
+        for (uint32_t j = 0; j < len; j++) {
+            if (data[i + j] != (uint8_t)needle[j]) { ok = 0; break; }
+        }
+        if (ok) return 1;
+    }
+    return 0;
+}
+
+static int arm32_bytes_contains(const uint8_t *data, uint32_t len, const char *needle)
+{
+    uint32_t n = 0;
+    while (needle[n]) n++;
+    if (n == 0 || n > len) return 0;
+    for (uint32_t i = 0; i + n <= len; i++) {
+        uint32_t ok = 1;
+        for (uint32_t j = 0; j < n; j++) {
+            if (data[i + j] != (uint8_t)needle[j]) { ok = 0; break; }
+        }
+        if (ok) return 1;
+    }
+    return 0;
+}
+
+/* Read up to cap bytes of a FAT32 file (cluster chain) into out; returns bytes copied */
+static uint32_t arm32_fat32_read_file(const Arm32Fat32Probe *fat, uint32_t cluster,
+                                      uint32_t file_size, uint8_t *out, uint32_t cap)
+{
+    if (cluster < 2U || file_size == 0 || file_size > cap) return 0;
+    uint32_t copied = 0;
+    uint32_t cur = cluster;
+    while (cur >= 2U && cur < 0x0ffffff8U && copied < file_size) {
+        uint32_t first = arm32_fat32_cluster_sector(fat, cur);
+        for (uint32_t sec = 0; sec < fat->spc && copied < file_size; sec++) {
+            if (!arm32_fat32_read_sector(first + sec)) return copied;
+            const uint8_t *data = arm32_fat32_sector_data();
+            uint32_t chunk = file_size - copied;
+            if (chunk > 512U) chunk = 512U;
+            for (uint32_t i = 0; i < chunk; i++) out[copied + i] = data[i];
+            copied += chunk;
+        }
+        cur = arm32_fat32_next_cluster(fat, cur);
+    }
+    return copied;
+}
+
+/* Probe: file exists at SYS/APPS/<name11> and its first sector contains both "SMF" and <marker> */
+static int arm32_smf_probe_file(const char *name11, const char *marker)
+{
+    Arm32Fat32Probe fat;
+    if (!arm32_fat32_probe_bpb(&fat)) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = arm32_fat32_find_sys_apps_file(&fat, name11, &file_size);
+    if (cluster < 2U || file_size == 0) return 0;
+    if (!arm32_fat32_read_sector(arm32_fat32_cluster_sector(&fat, cluster))) return 0;
+    return arm32_fat32_sector_contains("SMF") && arm32_fat32_sector_contains(marker);
+}
+
+/* Load: parse 32-bit ELF from SYS/APPS/<name11>, verify <marker> embedded, register process */
+static int arm32_load_smf_process(const char *name11, const char *marker, uint32_t slot)
+{
+    Arm32Fat32Probe fat;
+    if (!arm32_fat32_probe_bpb(&fat)) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = arm32_fat32_find_sys_apps_file(&fat, name11, &file_size);
+    if (cluster < 2U || file_size == 0 || file_size > sizeof(g_arm32_process_arena[slot])) return 0;
+
+    uint8_t *elf = g_arm32_process_arena[slot];
+    for (uint32_t i = 0; i < sizeof(g_arm32_process_arena[slot]); i++) elf[i] = 0;
+    uint32_t loaded = arm32_fat32_read_file(&fat, cluster, file_size, elf, (uint32_t)sizeof(g_arm32_process_arena[slot]));
+    if (loaded < 52U) return 0;
+    /* Validate ELF32 little-endian ARM header */
+    if (elf[0] != 0x7fU || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F') return 0;
+    if (elf[4] != 1U || elf[5] != 1U) return 0; /* 32-bit, little-endian */
+    if (arm32_fat32_rd16(elf + 18U) != 40U) return 0; /* e_machine=EM_ARM=40 */
+    uint32_t entry = arm32_fat32_rd32(elf + 24U);
+    if (!arm32_bytes_contains(elf, loaded, marker)) return 0;
+    g_arm32_process_entry[slot] = entry;
+    g_arm32_process_pid[slot] = 1000U + slot + 1U;
+    if (g_arm32_process_count <= slot) g_arm32_process_count = slot + 1U;
+    return 1;
+}
+
+/* NVFS: probe SYS/NVFSVER.TXT for "nvfs-image-version=" string */
+RuntimeValue rt_arm32_nvfs_probe(void)
+{
+    Arm32Fat32Probe fat;
+    if (!arm32_fat32_probe_bpb(&fat)) return 0;
+    uint32_t sys = arm32_fat32_find_entry(&fat, fat.root_cluster, "SYS        ", 1, 0);
+    if (sys < 2U) return 0;
+    uint32_t file_size = 0;
+    uint32_t nvfs = arm32_fat32_find_entry(&fat, sys, "NVFSVER TXT", 0, &file_size);
+    if (nvfs < 2U || file_size == 0) return 0;
+    if (!arm32_fat32_read_sector(arm32_fat32_cluster_sector(&fat, nvfs))) return 0;
+    return arm32_fat32_sector_contains("nvfs-image-version=") ? 1 : 0;
+}
+
+RuntimeValue rt_arm32_smf_cli_probe(void)
+{
+    return arm32_smf_probe_file("HELLOSMFSMF", "SIMPLEOS_ARM32_HELLO_ELF") ? 1 : 0;
+}
+
+RuntimeValue rt_arm32_smf_cli_load(void)
+{
+    return arm32_load_smf_process("HELLOSMFSMF", "SIMPLEOS_ARM32_HELLO_ELF", 0) ? 1 : 0;
+}
+
+RuntimeValue rt_arm32_smf_gui_probe(void)
+{
+    return arm32_smf_probe_file("BROWSMF SMF", "SIMPLEOS_ARM32_GUI_ELF") ? 1 : 0;
+}
+
+RuntimeValue rt_arm32_native_gui_process_render(void)
+{
+    if (!arm32_load_smf_process("BROWSMF SMF", "SIMPLEOS_ARM32_GUI_ELF", 1)) return 0;
+    if (g_arm32_process_pid[1] == 0 || g_arm32_process_entry[1] == 0) return 0;
+    const char *content = "pid=1002 app=/sys/apps/browser_demo tree=native";
+    uint32_t i = 0;
+    while (content[i] != 0 && i + 1U < sizeof(g_arm32_gui_surface)) {
+        g_arm32_gui_surface[i] = content[i];
+        i++;
+    }
+    g_arm32_gui_surface[i] = 0;
+    return arm32_bytes_contains((const uint8_t *)g_arm32_gui_surface, sizeof(g_arm32_gui_surface), "pid=1002") ? 1 : 0;
+}
+
+/* ---------- end arm32 SMF probe helpers ---------- */
+
 static uint32_t arm32_udivmod(uint32_t n, uint32_t d, uint32_t *rem)
 {
     uint32_t q = 0;

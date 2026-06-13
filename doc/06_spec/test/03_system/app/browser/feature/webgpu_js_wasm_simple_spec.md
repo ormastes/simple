@@ -45,7 +45,7 @@ This executable system manual covers the active GUI hardening JS/WebEngine/WASM 
 | Status | Active |
 | Requirements | .spipe/browser-wasm-webgpu-infra/state.md |
 | Plan | doc/03_plan/platform/webgpu_js_wasm_simple.md |
-| Design | N/A |
+| Design | doc/05_design/browser_wasm_webgpu_infra.md |
 | Research | doc/01_research/local/browser_wasm_webgpu_infra.md |
 | Source | `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
 | Updated | 2026-06-01 |
@@ -72,7 +72,8 @@ being shared with `Uint8Array` and `DataView` views.
 
 **Requirements:** .spipe/browser-wasm-webgpu-infra/state.md
 **Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
-**Design:** N/A
+**Architecture:** doc/04_architecture/browser_wasm_webgpu_infra.md
+**Design:** doc/05_design/browser_wasm_webgpu_infra.md
 **Research:** doc/01_research/local/browser_wasm_webgpu_infra.md
 
 ## Scenarios
@@ -3610,6 +3611,7 @@ match result:
 
 - **Requirements:** [.spipe/browser-wasm-webgpu-infra/state.md](.spipe/browser-wasm-webgpu-infra/state.md)
 - **Plan:** [doc/03_plan/platform/webgpu_js_wasm_simple.md](doc/03_plan/platform/webgpu_js_wasm_simple.md)
+- **Design:** [doc/05_design/browser_wasm_webgpu_infra.md](doc/05_design/browser_wasm_webgpu_infra.md)
 - **Research:** [doc/01_research/local/browser_wasm_webgpu_infra.md](doc/01_research/local/browser_wasm_webgpu_infra.md)
 
 

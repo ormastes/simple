@@ -116,6 +116,11 @@ class MethodResolver:
     trait_solver: TraitSolver
     # Symbol of the function currently being resolved; nil outside a function body
     current_fn_sym: SymbolId?
+    # Module function registry (SymbolId -> HirFunction), populated at the start of
+    # resolve_module. self.symbols is intentionally empty in the resolve pass (see
+    # resolve_methods), so call-site default-argument fill must read callee
+    # signatures (params + defaults) from here. Empty when constructed standalone.
+    module_functions: Dict<SymbolId, HirFunction>
 
     static fn new(symbols: SymbolTable) -> MethodResolver:
         MethodResolver(
@@ -124,7 +129,8 @@ class MethodResolver:
             errors: [],
             trait_impls: {},
             trait_solver: TraitSolver.create(),
-            current_fn_sym: nil
+            current_fn_sym: nil,
+            module_functions: {}
         )
 
     static fn with_trait_solver(symbols: SymbolTable, solver: TraitSolver) -> MethodResolver:
@@ -135,7 +141,8 @@ class MethodResolver:
             errors: [],
             trait_impls: {},
             trait_solver: solver,
-            current_fn_sym: nil
+            current_fn_sym: nil,
+            module_functions: {}
         )
 
 fn create_trait_solver_for_resolution() -> TraitSolver:
@@ -159,7 +166,8 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
         errors: [],
         trait_impls: {},
         trait_solver: create_trait_solver_for_resolution(),
-        current_fn_sym: nil
+        current_fn_sym: nil,
+        module_functions: {}
     )
 
     # ========================================================================
@@ -168,6 +176,9 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
 
     me resolve_module(module: HirModule) -> HirModule:
         """Resolve all method calls in a module."""
+        # Record the module's function registry so call-site default-argument fill
+        # can read callee signatures (params + defaults) during expression resolution.
+        self.module_functions = module.functions
         # Build trait implementation map from impls
         self.build_trait_impls(module.impls)
 
@@ -330,11 +341,14 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
 
                 HirExprKind.MethodCall(resolved_receiver, method, resolved_args, new_resolution)
 
-            # Regular function calls - resolve arguments
+            # Regular function calls - resolve arguments, then fill omitted
+            # trailing default arguments from the callee signature (G50 / M12-3b).
             case Call(callee, args, type_args):
+                val resolved_callee = self.resolve_expr(callee)
+                val resolved_args = self.resolve_call_args(args)
                 HirExprKind.Call(
-                    self.resolve_expr(callee),
-                    self.resolve_call_args(args),
+                    resolved_callee,
+                    self.fill_call_defaults(resolved_callee, resolved_args, expr.span),
                     type_args
                 )
 
@@ -547,6 +561,55 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
                 span: arg.span
             ))
         resolved
+
+    me fill_call_defaults(callee: HirExpr, args: [HirCallArg], call_span: Span) -> [HirCallArg]:
+        """Fill omitted trailing arguments of a direct function call with the
+        callee's declared default values (G50 / M12 item 3b).
+
+        Only direct free-function calls `Var(sym)` whose signature lives in the
+        current module's function registry are handled; cross-module callees are
+        absent from `module_functions` so the call is returned unchanged (safe
+        no-op, never a spurious arity error). Named-argument calls are left
+        untouched because trailing positional fill would misalign them.
+
+        Limitation / deferred runtime-verification target: the lookup keys on the
+        callee `Var` SymbolId matching the definition's `module.functions` key.
+        SymbolId is by-name (`structure SymbolId where name`), so this holds for
+        same-module direct calls; a runtime end-to-end check (omitted-arg call
+        returns the default, not 0) is deferred to M12 delegation removal, since
+        the seed interpreter cannot run the HIR lowering+resolve pipeline."""
+        match callee.kind:
+            case Var(sym):
+                if not self.module_functions.contains_key(sym):
+                    return args
+                # Trailing positional fill is unsound across named args.
+                for a in args:
+                    if a.has_name:
+                        return args
+                val func = self.module_functions[sym]
+                val params = func.params
+                if args.len() >= params.len():
+                    return args
+                var filled: [HirCallArg] = args
+                var i = args.len()
+                while i < params.len():
+                    val p = params[i]
+                    if p.has_default:
+                        filled = filled.push(HirCallArg(
+                            has_name: false,
+                            name: "",
+                            value: self.resolve_expr(p.default),
+                            span: call_span
+                        ))
+                    else:
+                        self.errors = self.errors.push(ResolveError(
+                            message: "too few arguments: missing value for parameter '" + p.name + "' (no default)",
+                            span: call_span
+                        ))
+                    i = i + 1
+                return filled
+            case _("indirect/computed callees have no static signature to fill"):
+                return args
 
     me resolve_comp_clause(clause: HirCompClause) -> HirCompClause:
         """Resolve method calls in comprehension clause."""

@@ -50,7 +50,7 @@ Implement browser infrastructure that lets Chrome and the Simple browser run Sim
 - T10 verify-review: strongest-model review, no-placeholder scan, generated-spec layout guard, and targeted test suite.
 
 ## Phase
-dev-done
+design-implementation-in-progress
 
 ## Log
 - dev: Created state file with 10 acceptance criteria and 10 small tasks (type: feature).
@@ -77,3 +77,15 @@ dev-done
 - review: Strongest available review found and the slice fixed the earlier Simple3D overclaim by replacing `submitted-webgpu-3d-render` with explicit scene-upload bytes/checksum evidence.
 - impl: Replaced unchecked `text/simple` numeric conversion for Simple2D/Simple3D drawing commands with validated decimal parsing and deterministic warning messages.
 - spec: Extended `test/01_unit/lib/common/web/browser_session_simple_script_spec.spl` and regenerated its manual so malformed drawing numbers report warnings instead of silently producing partial evidence.
+- design: Added missing SPipe design artifacts: `doc/04_architecture/browser_wasm_webgpu_infra.md`, `doc/05_design/browser_wasm_webgpu_infra.md`, `doc/05_design/browser_wasm_webgpu_infra_tui.md`, `doc/05_design/browser_wasm_webgpu_infra_gui.md`, and `doc/03_plan/sys_test/browser_wasm_webgpu_infra.md`.
+- gate: Final requirement/NFR docs remain pending user selection from `doc/02_requirements/feature/browser_wasm_webgpu_infra_options.md` and `doc/02_requirements/nfr/browser_wasm_webgpu_infra_options.md`; design currently traces to this state file and the `REQ-WGPU-*` test plan.
+- tracking: Added `BROWSER_WASM_WEBGPU_INFRA_2026_06_13` to `doc/08_tracking/feature/feature_db.sdn` with status `current`, option-doc requirement links, research/plan/architecture/design/spec/source/test/guide coverage, and clean `bin/simple lint doc/08_tracking/feature/feature_db.sdn` evidence.
+- docs: Updated the three browser WebGPU system spec manuals to point at the new architecture and design artifacts instead of `Design: N/A`; regenerated their `doc/06_spec` mirrors.
+- verify: `sh scripts/setup/install-spipe-dev-command.shs --check` passed, `find doc/06_spec -name '*_spec.spl' | wc -l` printed `0`, and the touched system specs passed: `webgpu_js_wasm_simple_spec.spl` 114/114, `browser_webgpu_chrome_draw_evidence_spec.spl` 1/1, `browser_webgpu_chrome_compute_evidence_spec.spl` 1/1.
+- tracking: Repaired the feature DB row to avoid comma-splitting drift, added readable tracking entries in `doc/08_tracking/feature/feature.md`, `doc/08_tracking/feature/current_feature.md`, and `doc/08_tracking/feature/group/browser_webgpu.md`, and verified `bin/simple lint doc/08_tracking/feature/feature_db.sdn`, direct row visibility in the DB/current/group files, and group-summary visibility in `feature.md`.
+- verify: Ran the remaining focused specs from `doc/03_plan/sys_test/browser_wasm_webgpu_infra.md`: `browser_session_wasm_script_spec.spl` 3/3 cached-pass, `browser_session_simple_script_spec.spl` 4/4, `gpu_target_contract_spec.spl` 5/5 cached-pass, `gpu_portable_compute_spec.spl` 24/24, `chrome_webgpu_draw_evidence_spec.spl` 5/5, and `chrome_webgpu_compute_evidence_spec.spl` 6/6 cached-pass.
+- review: Parallel strongest-model review found no placeholder assertions and confirmed BrowserSession WASM/Simple-script coverage, but flagged portable compute auto-order evidence and stale duplicate/generated manuals.
+- impl: Updated `gpu_portable_compute.spl` so auto portable expansion follows the Vulkan dedicated-backend boundary with Metal -> CUDA -> HIP -> OpenCL -> WebGPU/WGSL source, and extended `gpu_portable_compute_spec.spl` to assert that ordering plus the Vulkan-first diagnostic.
+- docs: Regenerated the full lane `doc/06_spec` manual set in one docgen pass, removed stale duplicate manuals under old `doc/06_spec/system/...` and `doc/06_spec/unit/...` paths, expanded the system test plan docgen commands to include all tracked unit specs, and refreshed the spec index date.
+- verify: Broader compiler-change gates: `bin/simple check src/compiler` passed all checked files with existing unresolved-export warnings; `bin/simple check src/app/mcp` passed 30 files; `bin/simple check src/app/simple_lsp_mcp` passed 4 files; `SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter` passed 1/1 from cache.
+- verify-gap: `bin/simple check src/lib` was attempted and failed on unrelated pre-existing broad-tree Skia/export errors, including `src/lib/skia/feature/color_management/icc_writer.spl` missing exported `ICC_MAGIC` and `src/lib/skia/feature/glyph/colrv1_compositor.spl` missing exported `SkColor`; no BrowserSession/WebGPU touched files were reported in the displayed failing tail.

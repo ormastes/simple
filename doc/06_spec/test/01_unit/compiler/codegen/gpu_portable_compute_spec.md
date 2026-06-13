@@ -27,7 +27,7 @@ gpu_portable_compute_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -41,7 +41,7 @@ gpu_portable_compute_spec -> compiler
 #### emits CUDA fill source with PTX artifact label
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect(artifact.source).to_contain("dst[i] = value;")
 #### emits HIP fill source with HSACO artifact label
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -78,7 +78,7 @@ expect(artifact.source).to_contain("blockIdx.x * blockDim.x + threadIdx.x")
 #### emits OpenCL C fill source with SPIR-V artifact label
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -97,7 +97,7 @@ expect(artifact.source).to_contain("get_global_id(0)")
 #### emits Metal fill source with metallib artifact label
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -116,7 +116,7 @@ expect(artifact.source).to_contain("uint gid [[thread_position_in_grid]]")
 #### emits one add kernel shape across all compute targets
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -137,7 +137,7 @@ expect(metal.source).to_contain("out[i] = a[i] + b[i];")
 #### builds target compile plans for source to binary artifacts
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -166,7 +166,7 @@ expect(metal_plan.source_format).to_equal("metal-shading-language")
 #### validates generated binary artifacts by target magic and exported entry
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -194,7 +194,7 @@ expect(metal.summary()).to_contain("valid=true")
 #### fails generated binary evidence closed for missing bytes magic or symbol
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -218,7 +218,7 @@ expect(missing_symbol.reason).to_equal("missing-entry-symbol")
 #### builds deterministic toolchain invocations for target binary generation
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -248,7 +248,7 @@ expect(metal.summary()).to_contain("ready=true")
 #### fails toolchain invocations closed when required tools or paths are missing
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -272,7 +272,7 @@ expect(missing_output.reason).to_equal("missing-output-path")
 #### records toolchain compile results without accepting failed or invalid artifacts
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -301,7 +301,7 @@ expect(failed_artifact.status).to_equal("artifact-magic-mismatch")
 #### emits portable 2D optimization kernels for copy alpha and scroll
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -326,7 +326,7 @@ expect(scroll.source).to_contain("dst[i] = 0u;")
 #### groups Simple-authored 2D optimization kernels per compute target
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -348,7 +348,7 @@ expect(metal[1].source).to_contain("[[buffer(1)]]")
 #### builds one generated 2D optimization module per target with all required entries
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -391,7 +391,7 @@ expect(metal_plan.required_symbols).to_contain("simple_2d_alpha_u32")
 #### requires every generated 2D entry before accepting a module binary
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -415,7 +415,7 @@ expect(missing_scroll.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u3
 #### builds a smoke matrix for CUDA HIP OpenCL and Metal
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -432,6 +432,208 @@ expect(matrix[0].source).to_contain("simple_2d_scroll_u32")
 
 </details>
 
+
+</details>
+
+#### resolves tagged backend order into one portable target request
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cuda_opencl = portable_compute_backend_targets_from_order("cuda,opencl")
+val rocm_cl_cuda = portable_compute_backend_targets_from_order("rocm,cl,cuda")
+val auto_all = portable_compute_backend_targets_from_order("auto")
+val auto_diagnostic = portable_compute_backend_target_diagnostic("auto")
+
+expect(cuda_opencl.ready).to_equal(true)
+expect(cuda_opencl.targets.len()).to_equal(2)
+expect(cuda_opencl.target_names()).to_equal("cuda,opencl")
+expect(cuda_opencl.summary()).to_contain("targets=cuda,opencl")
+expect(rocm_cl_cuda.ready).to_equal(true)
+expect(rocm_cl_cuda.target_names()).to_equal("hip,opencl,cuda")
+expect(auto_all.ready).to_equal(true)
+expect(auto_all.targets.len()).to_equal(5)
+expect(auto_all.target_names()).to_equal("metal,cuda,hip,opencl,webgpu")
+expect(auto_diagnostic.target_name).to_equal("metal,cuda,hip,opencl,webgpu")
+expect(auto_diagnostic.diagnostic).to_contain("first considers Vulkan")
+```
+
+</details>
+
+#### reports explicit backend target diagnostics for accepted and closed targets
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cuda = portable_compute_backend_target_diagnostic("cuda")
+val hip = portable_compute_backend_target_diagnostic("rocm")
+val opencl = portable_compute_backend_target_diagnostic("cl")
+val metal = portable_compute_backend_target_diagnostic("msl")
+val vulkan = portable_compute_backend_target_diagnostic("vulkan")
+
+expect(cuda.accepted).to_equal(true)
+expect(cuda.target_name).to_equal("cuda")
+expect(hip.target_name).to_equal("hip")
+expect(opencl.target_name).to_equal("opencl")
+expect(metal.target_name).to_equal("metal")
+expect(vulkan.accepted).to_equal(false)
+expect(vulkan.status).to_equal("unsupported-vulkan-spirv")
+expect(vulkan.diagnostic).to_contain("Vulkan SPIR-V is compiled by the Vulkan backend")
+expect(vulkan.summary()).to_contain("accepted=false")
+```
+
+</details>
+
+#### reports unsupported portable compute backend names without dropping selected targets
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val request = portable_compute_backend_targets_from_order("cuda,vulkan,opencl")
+
+expect(request.ready).to_equal(false)
+expect(request.targets.len()).to_equal(2)
+expect(request.target_names()).to_equal("cuda,opencl")
+expect(request.unsupported_backend_names).to_equal("vulkan")
+expect(request.diagnostic).to_contain("unsupported portable compute backend")
+```
+
+</details>
+
+#### builds generated 2D optimization artifacts and compile plans from one tagged backend request
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plan = portable_compute_2d_optimization_backend_plan("cuda,opencl", "simple_2d_optimization")
+
+expect(plan.ready).to_equal(true)
+expect(plan.artifacts.len()).to_equal(2)
+expect(plan.plans.len()).to_equal(2)
+expect(plan.target_names()).to_equal("cuda,opencl")
+expect(plan.artifacts[0].source).to_contain("extern \"C\" __global__ void simple_2d_fill_u32")
+expect(plan.artifacts[1].source).to_contain("__kernel void simple_2d_fill_u32")
+expect(plan.plans[0].artifact_path_suffix).to_equal("simple_2d_optimization.ptx")
+expect(plan.plans[1].artifact_path_suffix).to_equal("simple_2d_optimization.spirv")
+expect(plan.plans[0].required_symbols).to_contain("simple_2d_scroll_u32")
+expect(plan.plans[1].required_symbols).to_contain("simple_2d_alpha_u32")
+expect(plan.summary()).to_contain("artifacts=2")
+```
+
+</details>
+
+#### keeps backend artifact plans closed when a tagged request includes unsupported compute backends
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plan = portable_compute_2d_optimization_backend_plan("hip,vulkan", "simple_2d_optimization")
+
+expect(plan.ready).to_equal(false)
+expect(plan.artifacts.len()).to_equal(1)
+expect(plan.plans.len()).to_equal(1)
+expect(plan.target_names()).to_equal("hip")
+expect(plan.diagnostic).to_contain("vulkan")
+```
+
+</details>
+
+#### builds tagged operation metadata for CUDA and OpenCL generated offload requests
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plan = portable_compute_operation_metadata("@gpu", "cuda,opencl", "text_blit", "simple_2d_optimization")
+
+expect(plan.ready).to_equal(true)
+expect(plan.rows.len()).to_equal(2)
+expect(plan.rows[0].target_name).to_equal("cuda")
+expect(plan.rows[0].generated_operation).to_equal("simple_2d_copy_u32")
+expect(plan.rows[0].binary_format).to_equal("ptx")
+expect(plan.rows[0].artifact_path_suffix).to_equal("simple_2d_optimization.ptx")
+expect(plan.rows[0].cpu_preprocess_required).to_equal(true)
+expect(plan.rows[1].target_name).to_equal("opencl")
+expect(plan.rows[1].source_format).to_equal("opencl-c")
+expect(plan.rows[1].binary_format).to_equal("spirv")
+expect(plan.rows[1].entry_symbol).to_equal("simple_2d_copy_u32")
+expect(plan.summary()).to_contain("rows=2")
+```
+
+</details>
+
+#### expands kernel auto operation metadata after Vulkan across Metal CUDA HIP OpenCL and WebGPU
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plan = portable_compute_operation_metadata("kernel", "auto", "vector", "simple_2d_optimization")
+
+expect(plan.ready).to_equal(true)
+expect(plan.rows.len()).to_equal(5)
+expect(plan.target_names()).to_equal("metal,cuda,hip,opencl,webgpu")
+expect(plan.rows[0].generated_operation).to_equal("simple_2d_fill_u32")
+expect(plan.rows[0].binary_format).to_equal("metallib")
+expect(plan.rows[1].binary_format).to_equal("ptx")
+expect(plan.rows[2].binary_format).to_equal("hsaco")
+expect(plan.rows[3].binary_format).to_equal("spirv")
+expect(plan.rows[4].target_name).to_equal("webgpu")
+expect(plan.rows[4].source_format).to_equal("wgsl")
+expect(plan.rows[4].binary_format).to_equal("source")
+expect(plan.rows[4].status).to_equal("metadata-ready")
+```
+
+</details>
+
+#### keeps operation metadata closed for Vulkan SPIR-V and unsupported operation families
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val vulkan = portable_compute_operation_metadata("@gpu", "vulkan", "image_blit", "simple_2d_optimization")
+val unsupported = portable_compute_operation_metadata("@gpu", "cuda", "bezier_path", "simple_2d_optimization")
+
+expect(vulkan.ready).to_equal(false)
+expect(vulkan.rows.len()).to_equal(1)
+expect(vulkan.rows[0].target_name).to_equal("vulkan")
+expect(vulkan.rows[0].status).to_equal("unsupported-vulkan-spirv")
+expect(vulkan.rows[0].diagnostic).to_contain("Vulkan SPIR-V is compiled by the Vulkan backend")
+expect(unsupported.ready).to_equal(false)
+expect(unsupported.rows.len()).to_equal(1)
+expect(unsupported.rows[0].status).to_equal("unsupported-operation-family")
+expect(unsupported.diagnostic).to_contain("unsupported generated 2D operation family")
+```
 
 </details>
 
@@ -454,8 +656,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

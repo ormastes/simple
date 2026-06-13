@@ -44,6 +44,7 @@ Last ID: `STATIC_FILE_COMPRESSION_CACHE_INTEGRATION_2026_05_01`
 | [`src/runtime/startup/baremetal/<arch>/`_+_`src/hardware/<arch>/`](group/_src_runtime_startup_baremetal__arch_______src_hardware__arch___.md) | 1 | 0 | 1 | 0 | 0 | 0 |
 | [`test/01_unit/lib/gc_async_mut/gpu/browser_engine/`](group/_test_01_unit_lib_gc_async_mut_gpu_browser_engine__.md) | 1 | 1 | 0 | 0 | 0 | 0 |
 | [async_http_server,_memory_registration,_and_network_backend_layer](group/async_http_server__memory_registration__and_network_backend_layer.md) | 1 | 0 | 1 | 0 | 0 | 0 |
+| [browser_webgpu](group/browser_webgpu.md) | 1 | 0 | 1 | 0 | 0 | 0 |
 | [compiler](group/compiler.md) | 1 | 0 | 1 | 0 | 0 | 0 |
 | [compiler_(cranelift_jit_/_hir_lowering)](group/compiler__cranelift_jit___hir_lowering_.md) | 1 | 0 | 1 | 0 | 0 | 0 |
 | [compiler_+_`src/lib/common/ui/`_+_browser_renderer](group/compiler____src_lib_common_ui_____browser_renderer.md) | 1 | 0 | 1 | 0 | 0 | 0 |

@@ -42,9 +42,9 @@ This host-adaptive scenario proves that the browser WebGPU drawing lane either d
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | N/A |
+| Requirements | .spipe/browser-wasm-webgpu-infra/state.md |
 | Plan | doc/03_plan/platform/webgpu_js_wasm_simple.md |
-| Design | N/A |
+| Design | doc/05_design/browser_wasm_webgpu_infra.md |
 | Research | doc/01_research/local/browser_wasm_webgpu_infra.md |
 | Source | `test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl` |
 | Updated | 2026-06-01 |
@@ -66,9 +66,10 @@ render pass, one draw call, presentation, a positive checksum, and
 non-background pixels. On a host without Chrome WebGPU support, evidence must
 start with `host-unavailable:` and keep pixel counters at zero.
 
-**Requirements:** N/A
+**Requirements:** .spipe/browser-wasm-webgpu-infra/state.md
 **Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
-**Design:** N/A
+**Architecture:** doc/04_architecture/browser_wasm_webgpu_infra.md
+**Design:** doc/05_design/browser_wasm_webgpu_infra.md
 **Research:** doc/01_research/local/browser_wasm_webgpu_infra.md
 
 ## Scenarios
@@ -121,7 +122,9 @@ else:
 
 ## Related Documentation
 
+- **Requirements:** [.spipe/browser-wasm-webgpu-infra/state.md](.spipe/browser-wasm-webgpu-infra/state.md)
 - **Plan:** [doc/03_plan/platform/webgpu_js_wasm_simple.md](doc/03_plan/platform/webgpu_js_wasm_simple.md)
+- **Design:** [doc/05_design/browser_wasm_webgpu_infra.md](doc/05_design/browser_wasm_webgpu_infra.md)
 - **Research:** [doc/01_research/local/browser_wasm_webgpu_infra.md](doc/01_research/local/browser_wasm_webgpu_infra.md)
 
 
