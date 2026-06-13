@@ -635,7 +635,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 89 lines folded for reproduction.
+Runnable source: 90 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -674,6 +674,7 @@ expect(coding).to_contain("Pure Simple user API")
 expect(coding).to_contain("runtime-seed support")
 expect(coding).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(coding).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
+expect(coding).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(coding).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(coding).to_contain("PROFILE_DOCKER_ISOLATION=1")
 expect(stdlib).to_contain("runtime-seed `rt_pool_submit`")

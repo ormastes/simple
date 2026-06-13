@@ -236,6 +236,10 @@ thread, cooperative green, multicore green, C pthread, Go goroutine, RSS,
 GOMAXPROCS, and `used_runtime_pool()` report evidence;
 `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
 checks the stale/misleading failure cases; and
+`test/05_perf/profile_scripts/concurrency_api_contract_test.shs` checks
+approved public concurrency names, wrong-surface imports, direct runtime-pool
+access, shared mutable green captures, and numeric-suffix aliases across active
+source/profile surfaces;
 `test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
 checks that crash-prone profile runs stay behind the existing
 `PROFILE_DOCKER_ISOLATION=1` Docker boundary instead of using a separate
