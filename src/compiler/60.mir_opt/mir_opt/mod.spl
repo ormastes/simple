@@ -46,7 +46,7 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizerBackendKind
 }
 use compiler.backend.feature_caps.{X86Caps, TargetCapsKind}
-use compiler.mir_opt.optimization_passes.{OptimizationStats, optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch}
+use compiler.mir_opt.optimization_passes.{OptimizationStats, optimize_write_coalesce, optimize_read_ahead_hoist, optimize_syscall_batch, optimize_bulk_copy, optimize_bulk_fill, optimize_bulk_cmp}
 
 # ============================================================================
 # Target Optimization Context
@@ -680,9 +680,39 @@ fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
     val pipeline = optimizationpipeline_for_level(level)
     pipeline_optimize(pipeline, module)
 
+extern fn rt_env_get(key: text) -> text
+
+fn mir_bulk_ops_enabled() -> bool:
+    # SG-1.3: default-OFF. Set SIMPLE_MIR_BULK_OPS=1 to enable the (no-op) bulk-op
+    # recognizer scaffolding on the C-backend path only.
+    rt_env_get("SIMPLE_MIR_BULK_OPS") == "1"
+
+fn apply_bulk_recognizers(module: MirModule) -> MirModule:
+    # Apply the additive bulk-op recognizers (copy/fill/cmp) to every function.
+    # Each preserves all original Load/Store/GEP and only inserts advisory hints,
+    # which the C backend drops — so this is semantics-preserving (see
+    # bulk_ops_recognizer_spec.spl + c_backend_bulk_hint_spec.spl).
+    var result = module
+    for sym in result.functions.keys():
+        var stats = OptimizationStats.create()
+        var f = result.functions[sym]
+        f = optimize_bulk_copy(f, stats)
+        f = optimize_bulk_fill(f, stats)
+        f = optimize_bulk_cmp(f, stats)
+        result.functions[sym] = f
+    result
+
 fn optimize_module_for_backend(module: MirModule, level: OptLevel, backend_name: text) -> MirModule:
     val pipeline = optimizationpipeline_for_backend(level, backend_name)
-    pipeline_optimize(pipeline, module)
+    var optimized = pipeline_optimize(pipeline, module)
+    # SG-1.3 (default-OFF, C-backend-scoped): emit advisory bulk-op hints only when
+    # SIMPLE_MIR_BULK_OPS=1 AND targeting the C backend (the only backend with no-op
+    # hint lowering), so the hints can never reach a backend that would trap on them.
+    # No-op scaffolding — identical codegen to flag-off; real memcpy lowering is the
+    # separately-authorized, perf-bearing step.
+    if backend_name == "c" and mir_bulk_ops_enabled():
+        optimized = apply_bulk_recognizers(optimized)
+    optimized
 
 fn optimize_module_for_backend_budget(module: MirModule, level: OptLevel, backend_name: text, max_cost_class: text) -> MirModule:
     val pipeline = optimizationpipeline_for_backend_budget(level, backend_name, max_cost_class)

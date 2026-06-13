@@ -1,6 +1,6 @@
 # WebGPU JS WASM Simple System Evidence
 
-> This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, software WebGPU command replay, BrowserSession JavaScript integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory.
+> This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, Simple 2D and Simple 3D command facades, software WebGPU command replay, BrowserSession JavaScript and Simple-script integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory.
 
 <!-- sdn-diagram:id=webgpu_js_wasm_simple_spec.arch -->
 <details class="sdn-source">
@@ -28,14 +28,14 @@ webgpu_js_wasm_simple_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 111 | 111 | 0 | 0 |
+| 114 | 114 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # WebGPU JS WASM Simple System Evidence
 
-This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, software WebGPU command replay, BrowserSession JavaScript integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory.
+This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, Simple 2D and Simple 3D command facades, software WebGPU command replay, BrowserSession JavaScript and Simple-script integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory.
 
 ## At a Glance
 
@@ -43,10 +43,10 @@ This executable system manual covers the active GUI hardening JS/WebEngine/WASM 
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | N/A |
-| Plan | doc/03_plan/gui_hardening_current_plan_2026-06-01.md |
-| Design | doc/05_design/gui_color_image_pipeline_8k.md |
-| Research | doc/01_research/local/gui_color_image_pipeline_8k.md |
+| Requirements | .spipe/browser-wasm-webgpu-infra/state.md |
+| Plan | doc/03_plan/platform/webgpu_js_wasm_simple.md |
+| Design | N/A |
+| Research | doc/01_research/local/browser_wasm_webgpu_infra.md |
 | Source | `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -55,7 +55,8 @@ This executable system manual covers the active GUI hardening JS/WebEngine/WASM 
 
 This executable system manual covers the active GUI hardening JS/WebEngine/WASM
 lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior,
-software WebGPU command replay, BrowserSession JavaScript integration,
+Simple 2D and Simple 3D command facades, software WebGPU command replay,
+BrowserSession JavaScript and Simple-script integration,
 WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains,
 bounded WASM exports, traps, memory/table/global export metadata, imported
 function binding, and typed-array/DataView access to WebAssembly.Memory.
@@ -65,13 +66,14 @@ function binding, and typed-array/DataView access to WebAssembly.Memory.
 Representative browser evidence includes `WebAssembly.instantiate` returning
 `status=instantiated`, exported WASM functions returning bounded numeric values
 or fail-closed `wasm-trap:*` strings, fetched `/mod.wasm` bytes flowing through
-`arrayBuffer()` into instantiation, and WebAssembly.Memory bytes being shared
-with `Uint8Array` and `DataView` views.
+`arrayBuffer()` into instantiation, Simple-script `simple2d.*` and `simple3d.*`
+commands becoming structured browser evidence, and WebAssembly.Memory bytes
+being shared with `Uint8Array` and `DataView` views.
 
-**Requirements:** N/A
-**Plan:** doc/03_plan/gui_hardening_current_plan_2026-06-01.md
-**Design:** doc/05_design/gui_color_image_pipeline_8k.md
-**Research:** doc/01_research/local/gui_color_image_pipeline_8k.md
+**Requirements:** .spipe/browser-wasm-webgpu-infra/state.md
+**Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
+**Design:** N/A
+**Research:** doc/01_research/local/browser_wasm_webgpu_infra.md
 
 ## Scenarios
 
@@ -237,6 +239,84 @@ expect(evidence.present_count).to_equal(1)
 expect(evidence.pipeline_valid).to_be(true)
 expect(evidence.canvas2d_json).to_contain("\"op\":\"fillRect\"")
 expect(evidence.summary()).to_contain("render_passes=1")
+```
+
+</details>
+
+#### should expose Simple 3D command evidence beside WebGPU canvas wrappers
+
+- var simple3d = canvas get context simple3d
+- simple3d clear color
+- simple3d camera perspective
+- simple3d triangle
+   - Expected: summary.command_count equals `3`
+   - Expected: summary.triangle_count equals `1`
+   - Expected: summary.last_kind equals `triangle`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var simple3d = canvas_get_context_simple3d(640, 480)
+simple3d.clear_color(255)
+simple3d.camera_perspective(60, 1, 1000)
+simple3d.triangle(0, 1, 0, -1, -1, 0, 1, -1, 0, 65535)
+
+val summary = simple3d.summary()
+expect(summary.command_count).to_equal(3)
+expect(summary.triangle_count).to_equal(1)
+expect(summary.last_kind).to_equal("triangle")
+expect(summary.scene3d_json).to_contain("\"type\":\"simple3d\"")
+expect(summary.scene3d_json).to_contain("\"op\":\"triangle\"")
+expect(summary.scene3d_json).to_contain("\"op\":\"cameraPerspective\"")
+```
+
+</details>
+
+#### should submit encoded Simple 3D scene commands through the WebGPU path
+
+- var simple3d = canvas get context simple3d
+- simple3d clear color
+- simple3d triangle
+   - Expected: evidence.status equals `submitted-webgpu-3d-scene-upload`
+   - Expected: evidence.command_count equals `2`
+   - Expected: evidence.triangle_count equals `1`
+   - Expected: evidence.queue_write_count equals `1`
+   - Expected: evidence.render_pass_count equals `1`
+   - Expected: evidence.draw_call_count equals `1`
+   - Expected: evidence.present_count equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var simple3d = canvas_get_context_simple3d(640, 480)
+simple3d.clear_color(255)
+simple3d.triangle(0, 1, 0, -1, -1, 0, 1, -1, 0, 65535)
+
+val evidence = simple3d.submit_to_webgpu(true)
+expect(evidence.available).to_be(true)
+expect(evidence.submitted).to_be(true)
+expect(evidence.status).to_equal("submitted-webgpu-3d-scene-upload")
+expect(evidence.command_count).to_equal(2)
+expect(evidence.triangle_count).to_equal(1)
+expect(evidence.scene_payload_bytes).to_be_greater_than(0)
+expect(evidence.scene_payload_checksum).to_be_greater_than(0)
+expect(evidence.queue_write_count).to_equal(1)
+expect(evidence.render_pass_count).to_equal(1)
+expect(evidence.draw_call_count).to_equal(1)
+expect(evidence.present_count).to_equal(1)
+expect(evidence.pipeline_valid).to_be(true)
+expect(evidence.scene3d_json).to_contain("\"op\":\"triangle\"")
+expect(evidence.summary()).to_contain("scene_checksum=")
 ```
 
 </details>
@@ -549,6 +629,39 @@ match result:
         expect(session.current_body_html).to_contain("\"op\":\"fillRect\"")
         expect(session.current_body_html).to_contain("\"op\":\"fillText\"")
         expect(session.current_body_html).to_contain("simple 2d")
+        expect(session.warnings.len()).to_equal(0)
+    Err(err):
+        expect("unexpected load error: {err}").to_equal("")
+```
+
+</details>
+
+#### should expose Simple script 3D WebGPU scene upload evidence in the browser session
+
+- var session = BrowserSession new
+- Ok
+   - Expected: session.warnings.len() equals `0`
+- Err
+   - Expected: "unexpected load error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+val html = "<html><body><script type='text/simple'>simple3d.clear_color 255\nsimple3d.camera_perspective 60 1 1000\nsimple3d.triangle 0 1 0 -1 -1 0 1 -1 0 65535\nsimple3d.submit_webgpu</script></body></html>"
+val result = session.open_html("https://example.com/simple-3d.html", html)
+match result:
+    Ok(_):
+        expect(session.current_body_html).to_contain("\"status\":\"submitted-webgpu-3d-scene-upload\"")
+        expect(session.current_body_html).to_contain("\"type\":\"simple3d\"")
+        expect(session.current_body_html).to_contain("\"op\":\"triangle\"")
+        expect(session.current_body_html).to_contain("\"triangles\":1")
+        expect(session.current_body_html).to_contain("\"scenePayloadChecksum\":")
         expect(session.warnings.len()).to_equal(0)
     Err(err):
         expect("unexpected load error: {err}").to_equal("")
@@ -3486,8 +3599,8 @@ match result:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 111 |
-| Active scenarios | 111 |
+| Total scenarios | 114 |
+| Active scenarios | 114 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -3495,9 +3608,9 @@ match result:
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/gui_hardening_current_plan_2026-06-01.md](doc/03_plan/gui_hardening_current_plan_2026-06-01.md)
-- **Design:** [doc/05_design/gui_color_image_pipeline_8k.md](doc/05_design/gui_color_image_pipeline_8k.md)
-- **Research:** [doc/01_research/local/gui_color_image_pipeline_8k.md](doc/01_research/local/gui_color_image_pipeline_8k.md)
+- **Requirements:** [.spipe/browser-wasm-webgpu-infra/state.md](.spipe/browser-wasm-webgpu-infra/state.md)
+- **Plan:** [doc/03_plan/platform/webgpu_js_wasm_simple.md](doc/03_plan/platform/webgpu_js_wasm_simple.md)
+- **Research:** [doc/01_research/local/browser_wasm_webgpu_infra.md](doc/01_research/local/browser_wasm_webgpu_infra.md)
 
 
 </details>

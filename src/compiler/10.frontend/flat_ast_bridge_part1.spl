@@ -15,6 +15,7 @@ use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
 use compiler.core.ast.{decl_is_packed}
+use compiler.core.ast.{elif_get_else}
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
@@ -227,6 +228,25 @@ fn op_kind_to_binop(kind: i64) -> BinOp:
     if kind == 122: return BinOp.BitXor
     BinOp.Add
 
+# Convert an expression-form if/else branch (stored as an EXPR id) into a Block.
+# Block-form branches are EXPR_BLOCK (tag 18) carrying STMTS; ternary/inline
+# branches are a bare expr wrapped as a single expression statement. Used by the
+# EXPR_IF bridge so expression-if then/else bodies are not dropped.
+fn flat_if_branch_block(branch_idx: i64, span: Span) -> Block:
+    if branch_idx < 0:
+        return Block(stmts: [], span: span)
+    if expr_get_tag(branch_idx) == 18:
+        val b_stmts = expr_get_stmts(branch_idx)
+        var b_body: [Stmt] = []
+        var bi = 0
+        while bi < b_stmts.len():
+            b_body.push(convert_flat_stmt(b_stmts[bi]))
+            bi = bi + 1
+        return Block(stmts: b_body, span: span)
+    var single: [Stmt] = []
+    single.push(Stmt(kind: StmtKind.Expr(convert_flat_expr(branch_idx)), span: span))
+    return Block(stmts: single, span: span)
+
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
         return Expr(kind: ExprKind.NilLit, span: make_span())
@@ -318,14 +338,16 @@ fn convert_flat_expr(idx: i64) -> Expr:
             ii = ii + 1
         return Expr(kind: ExprKind.StringLit(expr_get_str(idx), interpolations), span: span)
     elif tag == EXPR_IF:
+        # Expression-form if: parser stores cond in LEFT, the then-branch in
+        # RIGHT and the else-branch in EXTRA (each an EXPR_BLOCK or bare expr;
+        # EXTRA is EXPR_UNIT (tag 33) when there is no else). elif/`else if`
+        # chains arrive as a nested EXPR_IF in EXTRA and recurse naturally.
         val cond = convert_flat_expr(expr_get_left(idx))
-        val then_stmts = expr_get_stmts(idx)
-        var then_body: [Stmt] = []
-        var ti = 0
-        while ti < then_stmts.len():
-            then_body.push(convert_flat_stmt(then_stmts[ti]))
-            ti = ti + 1
-        val then_block = Block(stmts: then_body, span: span)
+        val then_block = flat_if_branch_block(expr_get_right(idx), span)
+        val if_else_idx = expr_get_extra(idx)
+        if if_else_idx >= 0 and expr_get_tag(if_else_idx) != 33:
+            val else_block = flat_if_branch_block(if_else_idx, span)
+            return Expr(kind: ExprKind.If(cond, then_block, else_block), span: span)
         return Expr(kind: ExprKind.If(cond, then_block, nil), span: span)
     elif tag == EXPR_RETURN:
         val ret_expr = convert_flat_expr(expr_get_left(idx))
@@ -472,6 +494,21 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
             then_body.push(convert_flat_stmt(then_stmts[si]))
             si = si + 1
         val then_block = Block(stmts: then_body, span: span)
+        # else/elif fidelity: the parser stores the else body (or a nested
+        # if-stmt for `elif`/`else if` chains) in the elif arena, indexed by
+        # the stmt's TYPE field. elif chains are nested STMT_IF nodes inside
+        # else_stmts and convert recursively. Pass nil (not an empty Block)
+        # when there is no else, so codegen sees None vs Some(empty).
+        val if_elif_idx = stmt_get_type(idx)
+        val if_else_stmts = elif_get_else(if_elif_idx)
+        if if_else_stmts.len() > 0:
+            var if_else_body: [Stmt] = []
+            var ei = 0
+            while ei < if_else_stmts.len():
+                if_else_body.push(convert_flat_stmt(if_else_stmts[ei]))
+                ei = ei + 1
+            val else_block = Block(stmts: if_else_body, span: span)
+            return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, else_block), span: span)), span: span)
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, nil), span: span)), span: span)
     elif tag == STMT_WHILE:
         val cond = convert_flat_expr(stmt_get_expr(idx))

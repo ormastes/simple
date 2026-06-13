@@ -24,7 +24,7 @@ use std.gc_async_mut.web.browser_session_modules.{
 use std.gc_async_mut.web.browser_session_modules_helpers.{
     text_in_list, append_unique_text, remove_text_once
 }
-use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{canvas_get_context_simple2d}
+use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{canvas_get_context_simple2d, canvas_get_context_simple3d}
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 
 fn _append_script_compat_warnings(warnings: [text], block: BrowserScriptBlock) -> [text]:
@@ -191,6 +191,42 @@ fn _simple_script_int(value: text, fallback: i32) -> i32:
         return fallback
     trimmed.to_i32()
 
+fn _simple_script_digit_value(ch: text) -> i32:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+fn _simple_script_int_is_valid(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return false
+    var i = 0
+    if trimmed.slice(0, 1) == "-":
+        if trimmed.len() == 1:
+            return false
+        i = 1
+    while i < trimmed.len():
+        if _simple_script_digit_value(trimmed.slice(i, i + 1)) < 0:
+            return false
+        i = i + 1
+    true
+
+fn _simple_script_args_are_ints(args: [text], count: i32) -> bool:
+    var i = 0
+    while i < count:
+        if not _simple_script_int_is_valid(args[i]):
+            return false
+        i = i + 1
+    true
+
 impl BrowserSession:
 
     me _record_wasm_module(url: text, payload: text, load: BrowserLoadState):
@@ -235,7 +271,10 @@ impl BrowserSession:
 
     me _execute_simple_script(script_source: text, load: BrowserLoadState):
         var simple2d = canvas_get_context_simple2d(320, 240)
+        var simple3d = canvas_get_context_simple3d(320, 240)
         var has_simple2d_commands = false
+        var has_simple3d_commands = false
+        var submit_simple3d_webgpu = false
         for raw_line in script_source.split("\n"):
             val line = raw_line.trim()
             if line == "" or line.starts_with("#"):
@@ -252,34 +291,96 @@ impl BrowserSession:
             if line.starts_with("simple2d.fill_rect "):
                 val args = _simple_script_tail(line, "simple2d.fill_rect ").split(" ")
                 if args.len() >= 5:
-                    simple2d.fill_rect(
-                        _simple_script_int(args[0], 0),
-                        _simple_script_int(args[1], 0),
-                        _simple_script_int(args[2], 0),
-                        _simple_script_int(args[3], 0),
-                        _simple_script_int(args[4], 0)
-                    )
-                    has_simple2d_commands = true
+                    if _simple_script_args_are_ints(args, 5):
+                        simple2d.fill_rect(
+                            _simple_script_int(args[0], 0),
+                            _simple_script_int(args[1], 0),
+                            _simple_script_int(args[2], 0),
+                            _simple_script_int(args[3], 0),
+                            _simple_script_int(args[4], 0)
+                        )
+                        has_simple2d_commands = true
+                    else:
+                        load.warnings.push("simple script error: simple2d.fill_rect numeric argument is invalid")
                 else:
                     load.warnings.push("simple script error: simple2d.fill_rect requires x y w h color")
                 continue
             if line.starts_with("simple2d.text "):
                 val args = _simple_script_tail(line, "simple2d.text ").split("|")
                 if args.len() >= 5:
-                    simple2d.text(
-                        _simple_script_int(args[0], 0),
-                        _simple_script_int(args[1], 0),
-                        _simple_script_unquote(args[2]),
-                        _simple_script_int(args[3], 12),
-                        _simple_script_int(args[4], 0)
-                    )
-                    has_simple2d_commands = true
+                    if _simple_script_int_is_valid(args[0]) and _simple_script_int_is_valid(args[1]) and _simple_script_int_is_valid(args[3]) and _simple_script_int_is_valid(args[4]):
+                        simple2d.text(
+                            _simple_script_int(args[0], 0),
+                            _simple_script_int(args[1], 0),
+                            _simple_script_unquote(args[2]),
+                            _simple_script_int(args[3], 12),
+                            _simple_script_int(args[4], 0)
+                        )
+                        has_simple2d_commands = true
+                    else:
+                        load.warnings.push("simple script error: simple2d.text numeric argument is invalid")
                 else:
                     load.warnings.push("simple script error: simple2d.text requires x|y|text|font_size|color")
+                continue
+            if line.starts_with("simple3d.clear_color "):
+                val args = _simple_script_tail(line, "simple3d.clear_color ").split(" ")
+                if args.len() >= 1:
+                    if _simple_script_args_are_ints(args, 1):
+                        simple3d.clear_color(_simple_script_int(args[0], 0))
+                        has_simple3d_commands = true
+                    else:
+                        load.warnings.push("simple script error: simple3d.clear_color numeric argument is invalid")
+                else:
+                    load.warnings.push("simple script error: simple3d.clear_color requires color")
+                continue
+            if line.starts_with("simple3d.camera_perspective "):
+                val args = _simple_script_tail(line, "simple3d.camera_perspective ").split(" ")
+                if args.len() >= 3:
+                    if _simple_script_args_are_ints(args, 3):
+                        simple3d.camera_perspective(
+                            _simple_script_int(args[0], 60),
+                            _simple_script_int(args[1], 1),
+                            _simple_script_int(args[2], 1000)
+                        )
+                        has_simple3d_commands = true
+                    else:
+                        load.warnings.push("simple script error: simple3d.camera_perspective numeric argument is invalid")
+                else:
+                    load.warnings.push("simple script error: simple3d.camera_perspective requires fov near far")
+                continue
+            if line.starts_with("simple3d.triangle "):
+                val args = _simple_script_tail(line, "simple3d.triangle ").split(" ")
+                if args.len() >= 10:
+                    if _simple_script_args_are_ints(args, 10):
+                        simple3d.triangle(
+                            _simple_script_int(args[0], 0),
+                            _simple_script_int(args[1], 0),
+                            _simple_script_int(args[2], 0),
+                            _simple_script_int(args[3], 0),
+                            _simple_script_int(args[4], 0),
+                            _simple_script_int(args[5], 0),
+                            _simple_script_int(args[6], 0),
+                            _simple_script_int(args[7], 0),
+                            _simple_script_int(args[8], 0),
+                            _simple_script_int(args[9], 0)
+                        )
+                        has_simple3d_commands = true
+                    else:
+                        load.warnings.push("simple script error: simple3d.triangle numeric argument is invalid")
+                else:
+                    load.warnings.push("simple script error: simple3d.triangle requires x1 y1 z1 x2 y2 z2 x3 y3 z3 color")
+                continue
+            if line == "simple3d.submit_webgpu":
+                submit_simple3d_webgpu = true
                 continue
             load.warnings.push("simple script unsupported command: {line}")
         if has_simple2d_commands:
             self._set_simple_script_body_html(simple2d.to_canvas2d_json())
+        if has_simple3d_commands:
+            if submit_simple3d_webgpu:
+                self._set_simple_script_body_html(simple3d.submit_to_webgpu(true).to_json())
+            else:
+                self._set_simple_script_body_html(simple3d.to_scene3d_json())
 
     me _commit_script_response(response: BrowserResponse) -> Result<bool, text>:
         if val Some(load) = self.active_load:

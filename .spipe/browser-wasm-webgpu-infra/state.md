@@ -22,7 +22,7 @@ Implement browser infrastructure that lets Chrome and the Simple browser run Sim
 - AC-4: Chrome can exercise a WebAssembly-backed WebGPU processing/codegen path analogous to the existing CUDA codegen flow, with explicit unsupported-state diagnostics instead of placeholder generated source.
 - AC-5: The Simple browser supports WASM modules beside JavaScript in the same browser session without regressing existing JS execution.
 - AC-6: The Simple browser supports Simple script beside JavaScript with a minimal script execution surface and deterministic failure reporting.
-- AC-7: The Simple browser exposes a Simple 2D interface for Simple script logic and records Draw IR or equivalent object-state evidence for rendered output.
+- AC-7: The Simple browser exposes Simple 2D and Simple 3D interfaces for Simple script logic and records Draw IR or equivalent object-state evidence for rendered output.
 - AC-8: Simple 2D/3D and GPU process codegen backends expose a WebGPU lane while preserving the existing Vulkan, Metal, CUDA/HIP ordering and fallback contracts.
 - AC-9: Executable SSpec coverage and generated `doc/06_spec` manuals prove the critical browser/WASM/WebGPU flows with real assertions and no placeholder passes.
 - AC-10: Verification includes the generated-spec layout guard, relevant browser/WebGPU/WASM specs, and any compiler/lib/MCP smoke gates triggered by touched files.
@@ -44,7 +44,7 @@ Implement browser infrastructure that lets Chrome and the Simple browser run Sim
 - T4 spec-webgpu-draw-process: add SSpec scenarios for Chrome/WebGPU drawing and WebGPU processing codegen.
 - T5 impl-browser-wasm: wire BrowserSession WASM module execution beside JS.
 - T6 impl-simple-script: wire Simple script execution beside JS with deterministic diagnostics.
-- T7 impl-simple-2d-script: expose Simple 2D commands to Simple script and capture Draw IR/object evidence.
+- T7 impl-simple-2d-3d-script: expose Simple 2D/3D commands to Simple script and capture Draw IR/object evidence.
 - T8 impl-webgpu-codegen: add WebGPU processing codegen lane that maps through existing GPU backend contracts and fails closed when unsupported.
 - T9 docs-guides-manuals: refresh architecture, design, guides, generated specs, and feature tracking.
 - T10 verify-review: strongest-model review, no-placeholder scan, generated-spec layout guard, and targeted test suite.
@@ -70,3 +70,8 @@ dev-done
 - impl: Added separate Chrome/Electron WebGPU draw evidence wrapper in `src/lib/gc_async_mut/gpu/browser_engine/chrome_webgpu_draw_evidence.spl` plus Electron app helper `tools/web-render-backend/chromium-webgpu-draw/`.
 - spec: Added parser coverage in `test/01_unit/browser_engine/chrome_webgpu_draw_evidence_spec.spl` and host-adaptive Chrome evidence coverage in `test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl`; this host returned explicit unavailable status because no helper JSON was produced. Review found and the slice fixed empty-capture and fallback-adapter overclaim risks.
 - docs: Updated `doc/03_plan/platform/webgpu_js_wasm_simple.md`, `doc/07_guide/lib/gpu_3d/webgpu_guide.md`, and `doc/07_guide/ui/web_render_backend.md` to make `chrome_webgpu_draw_evidence` the canonical Chrome WebGPU draw probe and keep `WebRenderBackend("chromium")` scoped to HTML pixel parity.
+- impl: Added `canvas_get_context_simple3d`, `Simple3DContext`, command summaries, scene payload bytes/checksum, and WebGPU scene-upload submission evidence beside the existing Simple2D browser facade.
+- impl: Extended BrowserSession `text/simple` execution with `simple3d.clear_color`, `simple3d.camera_perspective`, `simple3d.triangle`, and `simple3d.submit_webgpu` commands.
+- spec: Updated `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` and regenerated `doc/06_spec/test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md`; the evidence intentionally proves encoded scene upload and submission counters, not full semantic 3D rasterization.
+- docs: Updated `doc/03_plan/platform/webgpu_js_wasm_simple.md`, `doc/07_guide/lib/gpu_3d/webgpu_guide.md`, and `doc/07_guide/ui/web_render_backend.md` for the Simple3D facade and its evidence boundary.
+- review: Strongest available review found and the slice fixed the earlier Simple3D overclaim by replacing `submitted-webgpu-3d-render` with explicit scene-upload bytes/checksum evidence.

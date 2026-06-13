@@ -38,6 +38,13 @@ Chrome/Electron WebGPU drawing. That wrapper reports either positive adapter,
 non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a deterministic
 `host-unavailable:*` status without falling back to Simple software replay.
 
+For in-process browser Simple-script drawing evidence, use
+`canvas_get_context_simple2d` or `canvas_get_context_simple3d` from
+`std.gc_async_mut.gpu.browser_engine.script.canvas_api`. Those facades prove the
+Simple browser command capture and software-replayed WebGPU submit path. The
+Simple3D facade records scene payload bytes/checksum and submission counters; it
+does not prove Chrome/Electron hardware-backed WebGPU pixels.
+
 ## Running the sample (macOS)
 
 ```bash

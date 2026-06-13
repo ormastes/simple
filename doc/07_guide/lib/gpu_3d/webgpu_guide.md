@@ -6,12 +6,13 @@ Covers the WebGPU surface in Simple: the 3D engine WebGPU backend, browser WebGP
 
 ## Overview
 
-Simple exposes WebGPU in three places:
+Simple exposes WebGPU in these places:
 
 1. **3D Engine WebGPU Backend** — `std.gpu.engine3d` backend that implements `RenderBackend3D` + `Engine3DExtended` using WebGPU primitives. Works both in-browser (via JS bridge) and natively.
 2. **HTTP Server Asset Middleware** — `std.http_server.webgpu_assets` serves WGSL shaders, SPIR-V binaries, and compressed textures with correct MIME types, plus cross-origin isolation headers required for `SharedArrayBuffer`.
 3. **Browser Canvas Integration** — browser canvas elements support `CANVAS_CONTEXT_WEBGPU`, and 3D transforms route through `composite_to_gpu.spl`.
-4. **Chrome/Electron Draw Evidence** — `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence` launches a dedicated Electron app under `tools/web-render-backend/chromium-webgpu-draw` and records whether real Chrome WebGPU drawing produced pixels or whether the host explicitly lacks browser WebGPU support.
+4. **Browser Simple3D Facade** — `std.gc_async_mut.gpu.browser_engine.script.canvas_api` exposes `canvas_get_context_simple3d` for Simple-script 3D command capture and in-process WebGPU scene-upload evidence.
+5. **Chrome/Electron Draw Evidence** — `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence` launches a dedicated Electron app under `tools/web-render-backend/chromium-webgpu-draw` and records whether real Chrome WebGPU drawing produced pixels or whether the host explicitly lacks browser WebGPU support.
 
 All WebGPU types in the engine mirror the Chrome WebGPU API (`GPUTexture`, `GPUSampler`, `GPURenderPipeline`, etc.) for portability.
 
@@ -104,6 +105,36 @@ val config = GPUCanvasConfiguration(
 )
 canvas.configure(config)
 ```
+
+## Browser Simple3D Facade
+
+**Source:** `src/lib/gc_async_mut/gpu/browser_engine/script/canvas_api.spl`
+
+Use `canvas_get_context_simple3d(width, height)` when browser Simple script or
+tests need a compact 3D command surface beside the lower-level WebGPU canvas
+wrapper. The facade records scene commands as structured JSON and can submit the
+encoded scene payload through the in-process WebGPU command queue used by the
+Simple 2D facade.
+
+```simple
+use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{canvas_get_context_simple3d}
+
+var scene = canvas_get_context_simple3d(640, 480)
+scene.clear_color(255)
+scene.camera_perspective(60, 1, 1000)
+scene.triangle(0, 1, 0, -1, -1, 0, 1, -1, 0, 65535)
+
+val summary = scene.summary()
+val evidence = scene.submit_to_webgpu(true)
+```
+
+The browser `text/simple` loader accepts `simple3d.clear_color`,
+`simple3d.camera_perspective`, `simple3d.triangle`, and
+`simple3d.submit_webgpu`. This proves deterministic browser-engine command
+capture, scene payload upload, and WebGPU submission counters. It does not prove
+full semantic rasterization of arbitrary 3D scene data; use
+`chrome_webgpu_draw_evidence` when the requirement is Chrome/Electron pixel
+evidence.
 
 ## Chrome/Electron Draw Evidence
 
