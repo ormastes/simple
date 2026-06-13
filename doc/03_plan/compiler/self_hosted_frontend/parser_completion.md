@@ -557,7 +557,16 @@ Resolves the M11d WATCH item. Two halves, landed together:
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
 3. Remove `simple_seed` delegation guards from `src/app/cli/check.spl` and lint entry.
 4. **Gate:** `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl` exits 0; full 1855-file sweep reports 0 errors.
-5. **Bridge if/else fidelity** (surfaced by G42): `EXPR_IF`/`STMT_IF` in
+   **PREREQUISITE (perf):** the full-sweep gate is INFEASIBLE until the
+   superlinear parse is fixed — confirmed in compiled stage4 2026-06-13
+   (`rt_env_get` whole-source-per-token at parser.spl:100;
+   doc/08_tracking/bug/interp_parse_superlinear_2026-06-12.md, now P1). A
+   single real-file closure check times out at 180-600s. Per-gap-class
+   iteration is NOT blocked (tiny synthetic probes via seed-interp + host
+   stage4 are fast); only the aggregate gate is. Fix sketch in the bug doc
+   (cache source write-once in a module slot). Do this as its own task with
+   its own gate — NOT mid-gap-loop (it is the diagnostic instrument).
+6. **Bridge if/else fidelity** (surfaced by G42): `EXPR_IF`/`STMT_IF` in
    flat_ast_bridge_part1.spl drop the else branch (pass `nil`) and elif chains;
    `EXPR_IF` reads STMTS but `expr_if_expr` stores then in RIGHT + else in EXTRA.
    Wrap bare-expr then/else as single-stmt blocks and convert both branches +
