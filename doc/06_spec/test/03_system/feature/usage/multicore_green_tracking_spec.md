@@ -356,7 +356,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 75 lines folded for reproduction.
+Runnable source: 86 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -419,22 +419,33 @@ expect(row).to_contain("simple_multicore_stress_slower_than_c")
 expect(row).to_contain("go_stress_slower_than_c")
 expect(row).to_contain("simple_multicore_queue_model_global_fifo")
 expect(row).to_contain("simple_multicore_pool_used_partial")
+expect(row).to_contain("simple_multicore_pool_used_zero")
 expect(row).to_contain("simple_multicore_parallelism_missing")
 expect(row).to_contain("hosted_sliced_fairness_section_missing")
 expect(row).to_contain("hosted_sliced_fairness_marker_corrupt")
 expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
 expect(row).to_contain("cooperative_green_explanation_corrupt")
 expect(row).to_contain("cooperative_green_mn_runtime_pool_label")
+expect(row).to_contain("cooperative_green_profile_row_missing")
 expect(row).to_contain("go_scheduler_width_mismatch")
 expect(row).to_contain("os_thread_profile_row_thread_spawn_with_args")
+expect(row).to_contain("os_thread_profile_row_missing")
+expect(row).to_contain("os_thread_profile_timing_fail")
 expect(row).to_contain("forbidden_number_suffix_api_name")
 step("Verify the system-test plan describes cooperative-green and OS-thread negative profile cases")
 val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 expect(system_plan).to_contain("cooperative-green explanation")
 expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
+expect(system_plan).to_contain("cooperative_green_profile_row_missing")
+expect(system_plan).to_contain("simple_multicore_pool_used_zero")
 expect(system_plan).to_contain("os_thread_profile_row_thread_spawn_with_args")
+expect(system_plan).to_contain("os_thread_profile_row_missing")
+expect(system_plan).to_contain("os_thread_profile_timing_fail")
 expect(system_plan).to_contain("OS-thread-label")
+expect(system_plan).to_contain("OS-thread-presence")
+expect(system_plan).to_contain("OS-thread-timing")
 expect(system_plan).to_contain("cooperative-label")
+expect(system_plan).to_contain("cooperative-presence")
 ```
 
 </details>
