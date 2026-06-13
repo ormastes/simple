@@ -8,7 +8,7 @@ This plan verifies the current WebGPU browser slice across three consumer paths:
 - Simple script APIs: direct Simple imports of WebGPU context/resources/commands and canvas wrappers.
 - WebAssembly path: Simple-to-WASM backend/glue correctness, BrowserSession WASM asset instantiation, JS WebGPU global access in the same session, and a bounded direct WASM import call into a declared WebGPU host binding.
 
-Out of scope until implementation exists: real browser GPU driver execution, pixel-stable triangle rendering, full WebGPU CTS, WebGL compatibility, Three.js/Babylon integration, and a complete WASM-originated WebGPU ABI beyond the declared host-import call contract.
+Out of scope until implementation exists: full WebGPU CTS, WebGL compatibility, Three.js/Babylon integration, and a complete WASM-originated WebGPU ABI beyond the declared host-import call contract. Real Chrome/Electron WebGPU draw probing is now covered by the host-adaptive `chrome_webgpu_draw_evidence` wrapper: hosts with non-fallback WebGPU produce adapter/device/pipeline/draw/pixel evidence, while hosts without it must return `host-unavailable:*` without substituting software replay pixels.
 
 ## Requirements
 
@@ -42,6 +42,8 @@ Out of scope until implementation exists: real browser GPU driver execution, pix
    - `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/wasm_compile_spec.spl --mode=interpreter`
 4. New examples:
    - `src/compiler_rust/target/debug/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/01_unit/browser_engine/chrome_webgpu_draw_evidence_spec.spl --mode=interpreter`
+   - `src/compiler_rust/target/debug/simple test test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl --mode=interpreter`
 
 ## Pass/Fail Criteria
 
@@ -52,7 +54,7 @@ PASS for the current slice requires REQ-WGPU-001 through REQ-WGPU-007 to pass wi
 | REQ | Test File | Test Cases | Coverage |
 |-----|-----------|------------|----------|
 | REQ-WGPU-001 | `navigator_api_spec.spl`, `browser_session_spec.spl`, `webgpu_js_wasm_simple_spec.spl` | 3+ | Full for current metadata API |
-| REQ-WGPU-002 | `canvas_api_spec.spl`, `webgpu_context_spec.spl`, `webgpu_js_wasm_simple_spec.spl` | 3+ | Full for current software-backed API |
+| REQ-WGPU-002 | `canvas_api_spec.spl`, `webgpu_context_spec.spl`, `webgpu_js_wasm_simple_spec.spl`, `browser_webgpu_chrome_draw_evidence_spec.spl` | 4+ | Full for current software-backed API plus host-adaptive Chrome WebGPU draw probing; positive Chrome pixels depend on host WebGPU availability |
 | REQ-WGPU-003 | `webgpu_resources_spec.spl`, `webgpu_commands_spec.spl`, `webgpu_js_wasm_simple_spec.spl` | 3+ | Full for current validation API |
 | REQ-WGPU-004 | `webgpu_software_executor_spec.spl`, `canvas_api_spec.spl`, `webgpu_js_wasm_simple_spec.spl` | 3+ | Full for deterministic executor |
 | REQ-WGPU-005 | `browser_session_spec.spl`, `js_integration_spec.spl`, `webgpu_js_wasm_simple_spec.spl` | 3+ | Full for current JS globals |
@@ -64,4 +66,4 @@ PASS for the current slice requires REQ-WGPU-001 through REQ-WGPU-007 to pass wi
 - Interpreter mode may load specs without exercising every `it` body in some runner paths; use native/full execution where available before release.
 - BrowserSession now proves JS-mediated WASM fetch, `arrayBuffer`, Promise chaining, instantiation, same-session WebGPU global/adapter metadata, nested returned-Promise assimilation for WebGPU callbacks, and a minimal declared `webgpu.requestAdapter` host import callback, but not a complete WebGPU host binding ABI.
 - WASM tests prove backend/glue generation, browser-side instantiation, and bounded import invocation, not real hardware WebGPU execution.
-- Current WebGPU executor is deterministic software simulation, not a hardware GPU backend or CTS-compliant renderer.
+- Current WebGPU executor is deterministic software simulation, not a CTS-compliant renderer. `browser_webgpu_chrome_draw_evidence_spec.spl` is the canonical Chrome/Electron probe for real browser WebGPU draw evidence and must report `host-unavailable:*` when the local host cannot expose non-fallback WebGPU or cannot capture non-background pixels.

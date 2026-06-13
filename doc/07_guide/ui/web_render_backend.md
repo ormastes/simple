@@ -6,6 +6,7 @@ rendered (and compared) by Simple's own renderer or by real Chromium.
 - **API:** `src/lib/gc_async_mut/gpu/browser_engine/web_render_backend.spl`
 - **Sample app:** `examples/06_io/ui/web_render_backend_gui.spl`
 - **Chromium helper:** `tools/web-render-backend/chromium_render.js`
+- **WebGPU draw evidence helper:** `tools/web-render-backend/chromium-webgpu-draw/`
 
 ## The interface
 
@@ -26,6 +27,16 @@ val opened = r.show_live_window(html_path)             # true for chromium (live
 is what the honest bit-level gate uses (pure-Simple ≡ Chromium OSR, `mismatch=0`).
 `show_live_window` opens each backend's native window (chromium = live DOM;
 pure_simple has no live shell and returns false so the caller presents pixels).
+
+## WebGPU evidence boundary
+
+`WebRenderBackend("chromium")` is not the Chrome WebGPU proof path. It renders
+HTML through Electron offscreen and returns comparable pixels for web-renderer
+parity. Use `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence`
+and `tools/web-render-backend/chromium-webgpu-draw/` when the requirement is
+Chrome/Electron WebGPU drawing. That wrapper reports either positive adapter,
+non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a deterministic
+`host-unavailable:*` status without falling back to Simple software replay.
 
 ## Running the sample (macOS)
 

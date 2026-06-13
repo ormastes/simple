@@ -11,6 +11,7 @@ Simple exposes WebGPU in three places:
 1. **3D Engine WebGPU Backend** — `std.gpu.engine3d` backend that implements `RenderBackend3D` + `Engine3DExtended` using WebGPU primitives. Works both in-browser (via JS bridge) and natively.
 2. **HTTP Server Asset Middleware** — `std.http_server.webgpu_assets` serves WGSL shaders, SPIR-V binaries, and compressed textures with correct MIME types, plus cross-origin isolation headers required for `SharedArrayBuffer`.
 3. **Browser Canvas Integration** — browser canvas elements support `CANVAS_CONTEXT_WEBGPU`, and 3D transforms route through `composite_to_gpu.spl`.
+4. **Chrome/Electron Draw Evidence** — `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence` launches a dedicated Electron app under `tools/web-render-backend/chromium-webgpu-draw` and records whether real Chrome WebGPU drawing produced pixels or whether the host explicitly lacks browser WebGPU support.
 
 All WebGPU types in the engine mirror the Chrome WebGPU API (`GPUTexture`, `GPUSampler`, `GPURenderPipeline`, etc.) for portability.
 
@@ -103,6 +104,40 @@ val config = GPUCanvasConfiguration(
 )
 canvas.configure(config)
 ```
+
+## Chrome/Electron Draw Evidence
+
+**Source:** `src/lib/gc_async_mut/gpu/browser_engine/chrome_webgpu_draw_evidence.spl`
+
+Use this wrapper when evidence must come from Chrome/Electron WebGPU rather than
+Simple's deterministic software replay. It returns structured evidence with:
+
+- `status`: `"ok"` or a deterministic `host-unavailable:*` prefix.
+- adapter/device/pipeline flags, fallback-adapter status, render-pass and draw-call counts.
+- pixel checksum, non-background pixel count, capture dimensions.
+- Electron/helper paths and exit code for diagnostics.
+
+The helper path is `tools/web-render-backend/chromium-webgpu-draw`. It enables
+Chrome WebGPU flags, renders a small rectangle to a WebGPU canvas, captures the
+page, and writes compact JSON to `/tmp/simple_chrome_webgpu_draw_evidence.json`
+or `SIMPLE_CHROME_WEBGPU_DRAW_OUT`.
+
+Run the evidence specs with:
+
+```bash
+bin/simple test test/01_unit/browser_engine/chrome_webgpu_draw_evidence_spec.spl --mode=interpreter
+bin/simple test test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl --mode=interpreter
+```
+
+`ok()` requires non-fallback adapter evidence, a configured device, a valid
+pipeline, at least one render pass and draw call, presentation, positive capture
+dimensions, a positive checksum, and non-background pixels. Empty captures and
+fallback adapters are unavailable, not positive WebGPU evidence.
+
+Do not use `WebRenderBackend("chromium")` as WebGPU evidence. That backend is an
+HTML pixel-comparison renderer and can lose the distinction between real WebGPU
+draws, Electron launch failures, fallback adapters, and host WebGPU
+unavailability.
 
 ### Chrome WebGPU Types
 
