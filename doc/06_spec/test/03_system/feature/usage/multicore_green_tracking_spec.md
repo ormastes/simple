@@ -642,7 +642,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 97 lines folded for reproduction.
+Runnable source: 99 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -704,6 +704,8 @@ expect(profile_script).to_contain("CANONICAL_CROSS_LANGUAGE_REPORT")
 expect(profile_script).to_contain("REPORT_PATH=\"${REPORT_PATH:-$CANONICAL_CROSS_LANGUAGE_REPORT}\"")
 expect(sys_test_plan).to_contain("Generated multicore-green profile code must store `MulticoreGreenHandle` values")
 expect(sys_test_plan).to_contain("must not import `rt_pool_join` directly")
+expect(sys_test_plan).to_contain("report_index_checked=doc/09_report/README.md")
+expect(sys_test_plan).to_contain("report index cannot silently point future agents at stale evidence")
 expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row")
 expect(profile_contract).to_contain("require_large_go_fanout_beats_c")
 expect(profile_contract).to_contain("large Go fanout row must be faster than C pthread fanout row")

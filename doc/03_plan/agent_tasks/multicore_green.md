@@ -116,7 +116,7 @@ Deliverables:
 
 Acceptance evidence:
 
-- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+- `sh test/05_perf/profile_scripts/profile_report_contract_test.shs`
 - `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
 - `sh test/05_perf/profile_scripts/concurrency_api_contract_test.shs`
@@ -125,6 +125,9 @@ Acceptance evidence:
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean`
 - report rows proving Go fanout and Go stress fanout both beat C pthreads with
   Go `GOMAXPROCS` pinned to `CPU_WORKERS`.
+- no-arg profile contract output includes
+  `report_index_checked=doc/09_report/README.md`, proving the current report
+  index points at the same canonical freshbin evidence as the profile gate.
 - report row showing Simple multicore green native still beats the C pthread
   large fanout stress baseline while remaining slower than Go until further
   scheduler/runtime work lands.
