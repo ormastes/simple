@@ -691,3 +691,7 @@ Updated: 2026-06-11
   `normalize_child_combinators` now returns the trimmed selector directly when
   no top-level child combinator exists and rebuilds only range chunks around
   `>` combinators otherwise, avoiding per-character output concatenation.
+- Simple Web selector group splitting allocation removal: `split_selector_groups`
+  now tracks group start offsets and slices top-level comma-separated selector
+  groups once instead of rebuilding the current group one character at a time
+  during both count and fill passes.
