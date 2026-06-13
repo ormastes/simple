@@ -3,7 +3,7 @@
 # Drawing backends own framebuffer-visible primitive rendering. Processing
 # backends own compute/offload work that may prepare or transform draw data.
 
-use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order, backend_full_preference_order, backend_preference_summary}
+use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order, backend_full_preference_order, backend_preference_summary, backend_priority}
 
 val ENGINE2D_BACKEND_LANE_DRAWING: text = "drawing"
 val ENGINE2D_BACKEND_LANE_PROCESSING: text = "processing"
@@ -88,32 +88,65 @@ fn engine2d_backend_lane_preference_summary() -> text:
     """Stable backend order summary for lane diagnostics and startup reports."""
     backend_preference_summary()
 
-fn _engine2d_backend_lane_candidate_available(candidates: [text], backend_name: text) -> bool:
-    val canonical = backend_canonical_name(backend_name)
-    for candidate in candidates:
-        if backend_canonical_name(candidate) == canonical:
-            return true
-    false
-
 fn engine2d_backend_lane_preferred_candidate(candidates: [text], include_explicit_native: bool) -> text:
     """Pick the first candidate using the shared native-first Engine2D order."""
-    val order = if include_explicit_native: backend_full_preference_order() else: backend_default_priority_order()
-    for backend_name in order:
-        if _engine2d_backend_lane_candidate_available(candidates, backend_name):
-            return backend_name
-    ""
+    var best_backend = ""
+    var best_priority = 100
+    for candidate in candidates:
+        val canonical = backend_canonical_name(candidate)
+        val priority = backend_priority(canonical)
+        val explicit_native = canonical == "baremetal" or canonical == "virtio_gpu"
+        if priority < 99 and (include_explicit_native or not explicit_native):
+            if priority < best_priority:
+                best_backend = canonical
+                best_priority = priority
+    best_backend
 
 fn engine2d_font_offload_backend_order() -> [text]:
     """Processing-lane preference order for vector and bitmap font offload."""
     ["metal", "cuda", "rocm", "qualcomm", "vulkan", "directx", "opencl", "opengl", "intel", "webgpu", "cpu_simd", "software", "cpu"]
 
+fn _engine2d_font_offload_backend_priority(name: text) -> i32:
+    val canonical = backend_canonical_name(name)
+    if canonical == "metal":
+        return 0
+    if canonical == "cuda":
+        return 1
+    if canonical == "rocm":
+        return 2
+    if canonical == "qualcomm":
+        return 3
+    if canonical == "vulkan":
+        return 4
+    if canonical == "directx":
+        return 5
+    if canonical == "opencl":
+        return 6
+    if canonical == "opengl":
+        return 7
+    if canonical == "intel":
+        return 8
+    if canonical == "webgpu":
+        return 9
+    if canonical == "cpu_simd":
+        return 10
+    if canonical == "software":
+        return 11
+    if canonical == "cpu":
+        return 12
+    99
+
 fn engine2d_backend_lane_preferred_font_offload_candidate(candidates: [text]) -> text:
     """Pick a font offload backend without probing or reordering per glyph."""
-    val order = engine2d_font_offload_backend_order()
-    for backend_name in order:
-        if _engine2d_backend_lane_candidate_available(candidates, backend_name):
-            return backend_name
-    ""
+    var best_backend = ""
+    var best_priority = 100
+    for candidate in candidates:
+        val canonical = backend_canonical_name(candidate)
+        val priority = _engine2d_font_offload_backend_priority(canonical)
+        if priority < 99 and priority < best_priority:
+            best_backend = canonical
+            best_priority = priority
+    best_backend
 
 fn engine2d_operation_lane(operation: text) -> text:
     if operation == "draw_ir" or operation == "primitive_draw" or operation == "present" or operation == "readback":
