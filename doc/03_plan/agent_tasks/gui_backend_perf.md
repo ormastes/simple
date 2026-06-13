@@ -718,3 +718,6 @@ Updated: 2026-06-11
   finds the closing RGB parenthesis in the original string and slices once,
   while CSS attribute unquoting uses `char_at` for quote checks instead of
   allocating first/last-character substrings.
+- Simple Web HTML parser first-character allocation removal: both the node
+  count and fill passes now use `char_at(0)` for tag dispatch instead of
+  allocating a one-character substring for every parsed tag.
