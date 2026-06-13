@@ -77,8 +77,29 @@ current-source seed/native and should stay that way while the higher
 ## Syntax
 
 ```sh
-bin/release/simple test test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=src/compiler_rust/target/debug/simple src/compiler_rust/target/debug/simple test test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl --mode=interpreter --clean
 ```
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl
+native struct array runtime regression PASSED
+Files: 1
+Passed: 1
+Failed: 0
+```
+
+## Traceability Expectations
+
+- The fixture writes a direct array of by-value `Boxed` structs.
+- The same generated source is checked and compiled by `SIMPLE_BIN`.
+- The standalone native output must contain `result=7`.
+- The standalone native exit marker must contain `EXIT=0`.
+- The test command must honor `SIMPLE_BIN` for Docker-isolated runs.
+- The Syntax block must not point at the stale `bin/release/simple` wrapper.
+- The closed native struct-array tracker must remain linked.
 
 ## Scenarios
 
@@ -110,11 +131,11 @@ val (write_out, write_code) = shell("mkdir -p " + BUILD_DIR + " && cat > " + SOU
 expect(write_code).to_equal(0)
 
 step("The generated probe still type-checks under the fresh debug compiler")
-val (_, check_code) = shell(SIMPLE_BIN + " check " + SOURCE_PATH)
+val (_, check_code) = shell(simple_bin() + " check " + SOURCE_PATH)
 expect(check_code).to_equal(0)
 
 step("Hosted native compile still succeeds")
-val (_, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+val (_, compile_code) = shell(simple_bin() + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
 expect(compile_code).to_equal(0)
 
 step("The native probe now returns the expected result boundary")

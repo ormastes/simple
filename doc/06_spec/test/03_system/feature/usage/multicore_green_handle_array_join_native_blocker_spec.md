@@ -75,8 +75,34 @@ empty local handle array is populated with `append`, iterated, and joined.
 ## Syntax
 
 ```sh
-bin/release/simple test test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=src/compiler_rust/target/debug/simple src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl --mode=interpreter --clean
 ```
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl
+multicore green handle-array join native regression PASSED
+Files: 1
+Passed: 1
+Failed: 0
+```
+
+## Traceability Expectations
+
+- The probe imports `multicore_green_spawn` from the multicore-green facade.
+- The probe uses a local inferred handle array.
+- The probe appends a `MulticoreGreenHandle` returned by `multicore_green_spawn`.
+- The probe iterates the handle array and calls `join()`.
+- The generated native binary must print `result=7`.
+- The generated native binary must exit with `EXIT=0`.
+- The tracker must keep the lower handle-array blocker marked closed.
+- The test command must honor `SIMPLE_BIN` for Docker-isolated runs.
+- The Syntax block must not point at the stale `bin/release/simple` wrapper.
+- This regression protects runtime-pool host evidence under the M:N lane.
+- It does not claim ordinary-closure preemption or sliced fairness.
+- The generated manual must keep the native compile/run boundary visible.
 
 ## Scenarios
 
@@ -109,11 +135,11 @@ expect(write_out.len()).to_be_greater_than(-1)
 expect(write_code).to_equal(0)
 
 step("The reduced probe still type-checks under the fresh debug compiler")
-val (_, check_code) = shell(SIMPLE_BIN + " check " + SOURCE_PATH)
+val (_, check_code) = shell(simple_bin() + " check " + SOURCE_PATH)
 expect(check_code).to_equal(0)
 
 step("Hosted native compile succeeds for the helper loop")
-val (_, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+val (_, compile_code) = shell(simple_bin() + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
 expect(compile_code).to_equal(0)
 
 step("The native probe joins the indexed handles and returns the worker result")

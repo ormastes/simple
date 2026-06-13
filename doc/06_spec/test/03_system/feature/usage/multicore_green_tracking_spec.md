@@ -27,7 +27,7 @@ multicore_green_tracking_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,7 +106,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/multicore_green_tracking_spec.spl
 Multicore green tracking contract PASSED
 Files: 1
-Passed: 9
+Passed: 12
 Failed: 0
 ```
 
@@ -680,12 +680,57 @@ expect(absent_in_text(row, "resumable-stepper native blocker remains open")).to_
 
 </details>
 
+#### keeps active native regression syntax off the stale release wrapper
+
+- Read active native regression specs that compile generated probes
+- Reject stale release-wrapper commands in active Syntax examples
+   - Expected: absent_in_text(thread_zero, "bin/release/simple test") equals `1`
+   - Expected: absent_in_text(handle_array, "bin/release/simple test") equals `1`
+   - Expected: absent_in_text(resumable, "bin/release/simple test") equals `1`
+   - Expected: absent_in_text(callable, "bin/release/simple test") equals `1`
+   - Expected: absent_in_text(native_struct, "bin/release/simple test") equals `1`
+- Verify each spec documents caller-selected current-source compiler evidence
+- Verify callable-field regression code itself no longer defaults to the stale wrapper
+   - Expected: absent_in_text(callable, "val SIMPLE_BIN: text = \"bin/release/simple\"") equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read active native regression specs that compile generated probes")
+val thread_zero = read_file("test/03_system/feature/usage/thread_spawn_native_zero_join_blocker_spec.spl")
+val handle_array = read_file("test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl")
+val resumable = read_file("test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl")
+val callable = read_file("test/03_system/feature/usage/multicore_green_callable_field_runtime_regression_spec.spl")
+val native_struct = read_file("test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl")
+step("Reject stale release-wrapper commands in active Syntax examples")
+expect(absent_in_text(thread_zero, "bin/release/simple test")).to_equal(1)
+expect(absent_in_text(handle_array, "bin/release/simple test")).to_equal(1)
+expect(absent_in_text(resumable, "bin/release/simple test")).to_equal(1)
+expect(absent_in_text(callable, "bin/release/simple test")).to_equal(1)
+expect(absent_in_text(native_struct, "bin/release/simple test")).to_equal(1)
+step("Verify each spec documents caller-selected current-source compiler evidence")
+expect(thread_zero).to_contain("SIMPLE_BIN=src/compiler_rust/target/debug/simple")
+expect(handle_array).to_contain("SIMPLE_BIN=src/compiler_rust/target/debug/simple")
+expect(resumable).to_contain("SIMPLE_BIN=src/compiler_rust/target/debug/simple")
+expect(callable).to_contain("SIMPLE_BIN=src/compiler_rust/target/debug/simple")
+expect(native_struct).to_contain("SIMPLE_BIN=src/compiler_rust/target/debug/simple")
+step("Verify callable-field regression code itself no longer defaults to the stale wrapper")
+expect(absent_in_text(callable, "val SIMPLE_BIN: text = \"bin/release/simple\"")).to_equal(1)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

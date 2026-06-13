@@ -77,8 +77,34 @@ compiles to a native binary, and returns the first completion.
 ## Syntax
 
 ```sh
-bin/release/simple test test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=src/compiler_rust/target/debug/simple src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl --mode=interpreter --clean
 ```
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/multicore_green_resumable_stepper_native_blocker_spec.spl
+multicore green resumable stepper native blocker PASSED
+Files: 1
+Passed: 1
+Failed: 0
+```
+
+## Traceability Expectations
+
+- The generated probe models a resumable stepper over multicore-green workers.
+- The probe uses callback ids rather than sharing mutable closures across tasks.
+- The generated source must type-check before native compilation.
+- The standalone native compile must succeed before run evidence is accepted.
+- The run output must include the expected first-completion result.
+- The tracker must keep the historical blocker marked closed.
+- The test command must honor `SIMPLE_BIN` for Docker-isolated runs.
+- The Syntax block must not point at the stale `bin/release/simple` wrapper.
+- This spec is perf-sensitive because it compiles a generated native probe.
+- Short verification may use `simple check` when the full native run is too slow.
+- The supported public fairness API remains `multicore_green_spawn_sliced`.
+- Ordinary `multicore_green_spawn` closure preemption remains future work.
 
 ## Scenarios
 
@@ -110,12 +136,12 @@ val (write_out, write_code) = shell("mkdir -p " + BUILD_DIR + " && cat > " + SOU
 expect(write_code).to_equal(0)
 
 step("The generated probe still type-checks under the fresh debug compiler")
-val (check_out, check_code) = shell(SIMPLE_BIN + " check " + SOURCE_PATH)
+val (check_out, check_code) = shell(simple_bin() + " check " + SOURCE_PATH)
 expect(check_code).to_equal(0)
 expect(check_out).to_contain("All checks passed")
 
 step("Hosted native compile succeeds for the resumable-stepper path")
-val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+val (compile_out, compile_code) = shell(simple_bin() + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
 expect(compile_code).to_equal(0)
 expect(compile_out).to_contain("Compiled")
 

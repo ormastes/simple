@@ -79,8 +79,34 @@ source-run and standalone native.
 Run the regression contract:
 
 ```sh
-bin/release/simple test test/03_system/feature/usage/multicore_green_callable_field_runtime_regression_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=src/compiler_rust/target/debug/simple src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_callable_field_runtime_regression_spec.spl --mode=interpreter --clean
 ```
+
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/multicore_green_callable_field_runtime_regression_spec.spl
+multicore green callable field runtime regression PASSED
+Files: 1
+Passed: 1
+Failed: 0
+```
+
+## Traceability Expectations
+
+- The probe stores a zero-argument function in an object field.
+- The stored callable captures mutable local state through a holder.
+- Source-run evidence must print `a=41` and `b=42`.
+- Standalone native evidence must print the same values.
+- Standalone native evidence must include `EXIT=0`.
+- The tracker must keep the callable-field blocker marked fixed.
+- The test command must honor `SIMPLE_BIN` for Docker-isolated runs.
+- The Syntax block must not point at the stale `bin/release/simple` wrapper.
+- This regression protects function-value runtime behavior used by the M:N lane.
+- It is not a substitute for runtime-pool `used_runtime_pool()` profile evidence.
+- It is not cooperative-green CPU-parallel evidence.
+- The generated manual must keep source-run and native parity visible.
 
 ## Scenarios
 
@@ -112,13 +138,13 @@ expect(mkdir_code).to_equal(0)
 expect(rt_file_write_text(SOURCE_PATH, fixture_source())).to_equal(true)
 
 step("Source-run keeps the expected captured-thunk values")
-val (run_out, run_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
+val (run_out, run_code) = shell(simple_bin() + " run " + SOURCE_PATH)
 expect(run_code).to_equal(0)
 expect(run_out).to_contain("a=41")
 expect(run_out).to_contain("b=42")
 
 step("Standalone native keeps the same escaped captured-callable shape working")
-val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+val (compile_out, compile_code) = shell(simple_bin() + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
 expect(compile_code).to_equal(0)
 expect(compile_out).to_contain("Compiled")
 val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/mcg_callable_field.out 2>&1; code=$?; cat /tmp/mcg_callable_field.out; echo EXIT=$code'")
