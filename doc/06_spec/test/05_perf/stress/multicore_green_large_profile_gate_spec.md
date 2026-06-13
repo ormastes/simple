@@ -1,6 +1,6 @@
 # Multicore Green Large Profile Gate
 
-> This spec gates the dated large cross-language profile generated from the canonical profile harness. It focuses on the large fanout behavior that matters for Go-like M:N evidence: Go goroutines should beat one-pthread-per-task C, and Simple `multicore_green_spawn` should use the runtime pool for every logical task while beating the C pthread fanout baseline.
+> This spec gates the current checked-in cross-language profile generated from the canonical profile harness. It focuses on the large fanout behavior that matters for Go-like M:N evidence: Go goroutines should beat one-pthread-per-task C, and Simple `multicore_green_spawn` should use the runtime pool for every logical task while beating the C pthread fanout baseline.
 
 <!-- sdn-diagram:id=multicore_green_large_profile_gate_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_large_profile_gate_spec -> std
 
 # Multicore Green Large Profile Gate
 
-This spec gates the dated large cross-language profile generated from the canonical profile harness. It focuses on the large fanout behavior that matters for Go-like M:N evidence: Go goroutines should beat one-pthread-per-task C, and Simple `multicore_green_spawn` should use the runtime pool for every logical task while beating the C pthread fanout baseline.
+This spec gates the current checked-in cross-language profile generated from the canonical profile harness. It focuses on the large fanout behavior that matters for Go-like M:N evidence: Go goroutines should beat one-pthread-per-task C, and Simple `multicore_green_spawn` should use the runtime pool for every logical task while beating the C pthread fanout baseline.
 
 ## At a Glance
 
@@ -45,6 +45,7 @@ This spec gates the dated large cross-language profile generated from the canoni
 | Status | Implemented |
 | Requirements | N/A |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
+| Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/lib/threading/go_vs_simple_threads.md |
 | Source | `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl` |
 | Updated | 2026-06-01 |
@@ -52,11 +53,12 @@ This spec gates the dated large cross-language profile generated from the canoni
 
 ## Overview
 
-This spec gates the dated large cross-language profile generated from the
-canonical profile harness. It focuses on the large fanout behavior that matters
-for Go-like M:N evidence: Go goroutines should beat one-pthread-per-task C, and
-Simple `multicore_green_spawn` should use the runtime pool for every logical
-task while beating the C pthread fanout baseline.
+This spec gates the current checked-in cross-language profile generated from
+the canonical profile harness. It focuses on the large fanout behavior that
+matters for Go-like M:N evidence: Go goroutines should beat
+one-pthread-per-task C, and Simple `multicore_green_spawn` should use the
+runtime pool for every logical task while beating the C pthread fanout
+baseline.
 
 ## Requirements
 
@@ -66,9 +68,100 @@ task while beating the C pthread fanout baseline.
 
 **Plan:** doc/03_plan/sys_test/multicore_green.md
 
+## Design
+
+**Design:** doc/05_design/multicore_green.md
+
 ## Research
 
 **Research:** doc/01_research/lib/threading/go_vs_simple_threads.md
+
+## Syntax
+
+Run this companion gate after changing the checked-in cross-language report,
+the profile-report contract, or the large fanout/stress report semantics:
+
+```sh
+src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean
+```
+
+Regenerate this manual after changing the executable SSpec:
+
+```sh
+src/compiler_rust/target/debug/simple spipe-docgen test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --output doc/06_spec
+```
+
+## Examples
+
+The current checked-in report must be:
+
+```text
+doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md
+```
+
+The report dimensions must include:
+
+```text
+CPU workers:** 100
+Fanout workers:** 1000
+Fanout stress workers:** 512
+```
+
+The native multicore-green rows must include runtime-pool evidence:
+
+```text
+pool_used=100/100
+pool_used=1000/1000
+pool_used=512/512
+queue_model=work_stealing
+```
+
+## Traceability Expectations
+
+- This spec is a companion to the no-argument profile-report contract, not a
+  separate profile harness.
+- The profile-report contract checks report shape, row labels, scheduler
+  metadata, Docker isolation metadata, runtime-pool evidence, and negative
+  mutation cases.
+- This SSpec parses the same current checked-in report and keeps the numeric
+  large-fanout comparisons executable in Simple.
+- The older `cross_language_perf_parallel_large_2026-06-07.md` report remains
+  historical evidence only.
+- The current report path must stay
+  `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+  until a newer checked-in report replaces it in the profile contract and
+  feature tracking row.
+- Go rows must remain goroutine rows, not pthread rows.
+- C rows must remain one-pthread-per-task rows in fanout and stress sections.
+- Simple OS-thread rows are checked by the cross-language smoke gate and shell
+  contract; this companion gate focuses on the multicore-green M:N candidate
+  rows.
+- Simple cooperative-green rows are intentionally excluded from M:N numeric
+  comparisons because they are current-carrier cooperative queue evidence.
+- Simple multicore-green native fanout must beat C pthread fanout before it can
+  be cited as useful large-fanout evidence.
+- Go goroutine fanout must beat C pthread fanout so the report still proves the
+  expected Go-vs-pthread scheduling-shape difference.
+- Every Simple multicore-green row used by this gate must carry `pool_used=`
+  evidence so inline fallback cannot pass as M:N work.
+- Every Simple multicore-green fanout row used by this gate must carry
+  `queue_model=work_stealing` evidence.
+- Parallelism evidence must stay visible because the Simple runtime-pool width
+  is the local equivalent of the Go `GOMAXPROCS` comparison limit.
+- The stress section must keep C pthread, Go goroutine, and Simple
+  multicore-green native rows at the same stress task count.
+
+## Verification Expectations
+
+- Run this SSpec after changing the checked-in cross-language report.
+- Run `test/05_perf/profile_scripts/profile_report_contract_test.shs` after
+  changing the profile script or report shape.
+- Run `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
+  after changing profile-report failure semantics.
+- Regenerate
+  `doc/06_spec/test/05_perf/stress/multicore_green_large_profile_gate_spec.md`
+  after changing this SSpec.
+- Keep executable `.spl` specs out of `doc/06_spec`.
 
 ## Scenarios
 
@@ -83,11 +176,11 @@ task while beating the C pthread fanout baseline.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_large_2026-06-07.md") ?? ""
+val report = rt_file_read_text(current_report_path()) ?? ""
 val parallel = section_named(report, "OS Thread Parallel Workers")
 val fanout = section_named(report, "Large Fanout Scheduling")
 val stress = section_named(report, "Simple vs Go vs C Large Fanout Stress")
@@ -95,14 +188,15 @@ val stress = section_named(report, "Simple vs Go vs C Large Fanout Stress")
 step("Check the profile used large worker counts")
 expect(report).to_contain("CPU workers:** 100")
 expect(report).to_contain("Fanout workers:** 1000")
-expect(report).to_contain("Fanout stress workers:** 2000")
+expect(report).to_contain("Fanout stress workers:** 512")
+expect(report).to_contain("Report path:** `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`")
 
 step("Check every multicore-green native row reports runtime-pool usage")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("pool_used=100/100")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("parallelism=64/64")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("pool_used=1000/1000")
-expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("pool_used=2000/2000")
+expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("pool_used=512/512")
 ```
 
 </details>
@@ -119,7 +213,7 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_large_2026-06-07.md") ?? ""
+val report = rt_file_read_text(current_report_path()) ?? ""
 val fanout = section_named(report, "Large Fanout Scheduling")
 val stress = section_named(report, "Simple vs Go vs C Large Fanout Stress")
 
@@ -144,7 +238,7 @@ Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_large_2026-06-07.md") ?? ""
+val report = rt_file_read_text(current_report_path()) ?? ""
 val fanout = section_named(report, "Large Fanout Scheduling")
 val stress = section_named(report, "Simple vs Go vs C Large Fanout Stress")
 
@@ -173,6 +267,7 @@ expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_
 ## Related Documentation
 
 - **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
 - **Research:** [doc/01_research/lib/threading/go_vs_simple_threads.md](doc/01_research/lib/threading/go_vs_simple_threads.md)
 
 
