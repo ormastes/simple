@@ -240,6 +240,9 @@ Updated: 2026-06-11
 - this commit -- Simple Web close-tag stack copy removal: HTML close-tag
   handling now trims the parent stack with the array slice primitive instead of
   manually allocating and copying stack entries on every matched close tag.
+- this commit -- Simple Web widget flag scan hoisting:
+  widget paint-flag detection now reuses current and parent nodes while scanning
+  for widget panels and nonempty widget text before startup paint.
 - this commit -- global widget-store copy removal:
   process-global `upsert_widget_record`, `set_internal_prop`, child
   registration, and widget traversal helpers now avoid per-item array
