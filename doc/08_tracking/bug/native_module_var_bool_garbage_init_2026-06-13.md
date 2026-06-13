@@ -53,6 +53,33 @@ native verification caught it.
 Use i64 0/1 module-level flags; keep bool-returning accessor fns
 (`flag == 1`). Applied in `src/app/mcp/main.spl`.
 
+## Second finding (same session): read+write same fn → read sees nil (BOTH modes)
+
+A fn that both READS and ASSIGNS the same module-level var sees `nil` on the
+read — in interpreter AND native. A read-only getter fn in between fixes it:
+
+```simple
+var F = 0
+fn arm():            # write-only: works, module F becomes 1
+    F = 1
+fn take() -> bool:   # read+write: F read is nil -> false  (BUG, both modes)
+    val v = F == 1
+    F = 0
+    v
+fn take_g() -> bool: # getter-mediated read: works
+    val v = getf() == 1
+    F = 0
+    v
+```
+
+Looks like assignment anywhere in the body makes the name resolve to an
+uninitialized local for reads (Python-style local hoisting without `global`).
+Also observed: string interpolation `"{F}"` of a module-level var prints
+`nil` even in fns that never assign it.
+
+Workaround applied in `src/app/mcp/main.spl`: `_mcp_upgraded_value()` /
+`_mcp_emit_flag_value()` read-only getters.
+
 ## Fix direction (hypothesis — verify against codegen)
 
 Module-level bool initializers likely skip the global-init path that i64
