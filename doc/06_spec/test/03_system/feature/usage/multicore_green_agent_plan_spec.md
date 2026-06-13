@@ -97,7 +97,8 @@ Failed: 0
 
 - The agent plan must keep a lane for Go profile evidence.
 - The Go profile lane owns the cross-language report shape, Go scheduler
-  metadata, Go-vs-C stress comparison, and profile report contract.
+  metadata, Go-vs-C ordinary fanout and stress fanout comparisons, and profile
+  report contract.
 - The agent plan must keep a lane for Simple OS-thread baseline evidence.
 - The OS-thread lane owns `thread_spawn` fork-join evidence and the focused
   `thread_spawn_with_args` native smoke.
@@ -222,7 +223,7 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -232,6 +233,8 @@ step("Verify the plan still names the canonical deliverable and evidence section
 expect(plan).to_contain("Deliverables:")
 expect(plan).to_contain("Acceptance evidence:")
 expect(plan).to_contain("cross-language report with separate rows")
+expect(plan).to_contain("Go fanout")
+expect(plan).to_contain("Go stress")
 expect(plan).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
 expect(plan).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(plan).to_contain("PROFILE_DOCKER_ISOLATION=1")

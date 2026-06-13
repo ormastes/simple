@@ -96,6 +96,7 @@ Primary paths:
 - `test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
+- `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`
 - `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `doc/06_spec/test/05_perf/stress/multicore_green_cross_language_gate_spec.md`
 
@@ -103,7 +104,8 @@ Deliverables:
 
 - cross-language report with separate rows for Simple OS threads, cooperative
   green, multicore green, C pthreads, Go goroutines, RSS, artifact footprint,
-  Simple-vs-Go-vs-C large fanout stress, and hosted sliced-fairness evidence;
+  ordinary large fanout, Simple-vs-Go-vs-C large fanout stress, and hosted
+  sliced-fairness evidence;
 - numeric SPipe gate that rejects `fail`, `n/a`, and missing rows for required
   native evidence;
 - report text that clearly says cooperative green is not Go M:N;
@@ -119,7 +121,8 @@ Acceptance evidence:
 - `sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
 - `src/compiler_rust/target/debug/simple run build/cross_lang_perf/hosted_sliced_fairness.spl --mode=interpreter`
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
-- report row proving Go beats C pthreads in isolated large fanout stress with
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean`
+- report rows proving Go fanout and Go stress fanout both beat C pthreads with
   Go `GOMAXPROCS` pinned to `CPU_WORKERS`.
 - report row showing Simple multicore green native still beats the C pthread
   large fanout stress baseline while remaining slower than Go until further
