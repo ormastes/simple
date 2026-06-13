@@ -69,9 +69,6 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
                 query = raw_path.slice(qmark + 1, raw_path.len())
 
             var headers: [(text, text)] = []
-            var content_length: i32 = 0
-            var content_length_err = ""
-            var chunked = false
             var header_count: i32 = 0
             loop:
                 match stream.read_line():
@@ -91,28 +88,13 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
                             val name = hl.slice(0, colon).trim()
                             val value = hl.slice(colon + 1, hl.len()).trim()
                             headers.push((name, value))
-                            val lname = name.to_lower()
-                            if lname == "content-length":
-                                val parsed_len = content_length_from_text(value)
-                                if parsed_len < 0:
-                                    content_length_err = "400 Invalid Content-Length: {value}"
-                                elif parsed_len > max_body:
-                                    content_length_err = "413 Content-Length too large: {parsed_len}"
-                                else:
-                                    content_length = parsed_len
-                            elif lname == "transfer-encoding":
-                                if value.to_lower().contains("chunked"):
-                                    chunked = true
                     Err(_):
                         break
 
-            if content_length_err != "":
-                return Err(content_length_err)
-
-            # AC-2 (adjusted): chunked Transfer-Encoding is not supported.
-            # Fail closed — never silently misparse a chunked body.
-            if chunked:
-                return Err("501 Transfer-Encoding: chunked is not supported")
+            val decision = headers_decision(headers, max_body)
+            if decision.0 != "":
+                return Err(decision.0)
+            val content_length = decision.1
 
             var body = ""
             if content_length > 0:
@@ -131,6 +113,35 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
                 body: body,
                 remote_addr: ""
             ))
+
+# headers_decision inspects parsed headers and decides how the body must be
+# handled. Returns (err, content_length): err is "" when the request is
+# acceptable, otherwise a status-prefixed message (400/413/501).
+# Pure function over parsed headers — fully unit-testable without a socket.
+# Enforced here (fail closed):
+#   - duplicate Content-Length is a request-smuggling vector -> 400
+#   - invalid (negative/non-numeric/overflow) Content-Length -> 400
+#   - Content-Length above max_body -> 413
+#   - Transfer-Encoding: chunked is unsupported -> 501, never misparsed
+fn headers_decision(headers: [(text, text)], max_body: i32) -> (text, i32):
+    var content_length: i32 = 0
+    var seen_content_length = false
+    for h in headers:
+        val lname = h.0.to_lower()
+        if lname == "content-length":
+            if seen_content_length:
+                return ("400 Duplicate Content-Length header", 0)
+            seen_content_length = true
+            val parsed_len = content_length_from_text(h.1)
+            if parsed_len < 0:
+                return ("400 Invalid Content-Length: {h.1}", 0)
+            if parsed_len > max_body:
+                return ("413 Content-Length too large: {parsed_len}", 0)
+            content_length = parsed_len
+        elif lname == "transfer-encoding":
+            if h.1.to_lower().contains("chunked"):
+                return ("501 Transfer-Encoding: chunked is not supported", 0)
+    ("", content_length)
 
 fn parse_request_line(line: text) -> (text, text, text):
     var method = ""
@@ -186,5 +197,5 @@ fn to_i32_safe(s: text) -> i32:
     return v
 
 export parse_request, parse_request_with_limits, parse_request_line
-export to_i32_safe, content_length_from_text
+export to_i32_safe, content_length_from_text, headers_decision
 export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE

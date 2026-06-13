@@ -157,37 +157,46 @@ fn default_not_found(req: HttpRequest) -> HttpResponse:
 #
 # This is a defence-in-depth guard.  Callers should also normalise paths
 # before serving files from disk.
+fn _decode_traversal_escapes(lower: text) -> text:
+    # Decode only the escapes relevant to traversal so encoded forms like
+    # "..%2f", "%2e%2e/", ".%2e\" are checked in their effective shape.
+    var out = lower.replace("%2e", ".")
+    out = out.replace("%2f", "/")
+    out = out.replace("%5c", "\\")
+    out
+
+fn _has_dotdot_segment(p: text) -> bool:
+    # ".." as a full path segment (slash or backslash separated)
+    if p.contains("/../"):
+        return true
+    if p.ends_with("/.."):
+        return true
+    if p.starts_with("../"):
+        return true
+    if p == "..":
+        return true
+    if p.contains("\\.."):
+        return true
+    if p.contains("..\\"):
+        return true
+    false
+
 fn path_is_safe(path: text) -> bool:
     val lower = path.to_lower()
+    # Check both the raw path and its traversal-decoded form, so "..%2f",
+    # "%2f..", and fully/partially encoded dot-dot segments all fail closed
+    # while legitimate names like "file..txt" or "/foo.%2ebar" stay allowed.
+    val decoded = _decode_traversal_escapes(lower)
 
-    # Double-dot segment: literal "../" or "/.." at end
-    if lower.contains("/../"):
+    if _has_dotdot_segment(lower):
         return false
-    if lower.ends_with("/.."):
-        return false
-    if lower.starts_with("../"):
-        return false
-    if lower == "..":
-        return false
-
-    # URL-encoded variants: %2e%2e (both dots encoded)
-    if lower.contains("%2e%2e"):
-        return false
-
-    # Partially encoded: .%2e or %2e.
-    if lower.contains(".%2e"):
-        return false
-    if lower.contains("%2e."):
-        return false
-
-    # Backslash traversal (Windows-style)
-    if lower.contains("\\.."):
-        return false
-    if lower.contains("..\\"):
+    if _has_dotdot_segment(decoded):
         return false
 
     # Double slash — often used to bypass naive prefix checks
     if lower.contains("//"):
+        return false
+    if decoded.contains("//"):
         return false
 
     # Null byte injection

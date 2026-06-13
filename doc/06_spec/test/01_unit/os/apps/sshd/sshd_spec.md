@@ -41,7 +41,7 @@ sshd_spec -> os
 #### untags positive file descriptors returned by the baremetal net runtime
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,7 +56,7 @@ expect(sshd_decode_net_runtime_i32_for_test(16)).to_equal(2)
 #### preserves zero and negative status codes
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -73,7 +73,7 @@ expect(sshd_decode_net_runtime_i32_for_test(-72)).to_equal(-72)
 #### keeps Ed25519 advertised when an RSA host key is configured
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -90,7 +90,7 @@ expect(host_key_set_advertised_algorithms(host_keys)).to_equal("ssh-ed25519,rsa-
 #### can advertise RSA only for live lanes that disable Ed25519
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -107,7 +107,7 @@ expect(host_key_set_advertised_algorithms(host_keys)).to_equal("rsa-sha2-256,rsa
 #### includes ECDSA in live host key selection when configured
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -123,7 +123,7 @@ expect(host_key_set_advertised_algorithms(host_keys)).to_equal("ssh-ed25519,ecds
 #### advertises daemon-selected host keys and aes256 in production KEXINIT
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -32,13 +32,18 @@ class GpuEvent:
 # ============================================================================
 
 class LaunchShape:
-    """Grid/block decomposition for a 1D range launch."""
-    grid: i64
-    block: i64
+    """Grid/block decomposition for a 1D range launch.
+
+    Fields are grid_dim/block_dim, not grid/block: `grid` as a named
+    constructor argument hits a parser bug — see
+    doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md
+    """
+    grid_dim: i64
+    block_dim: i64
     needs_tail_guard: bool
 
     fn covers(n: i64) -> bool:
-        self.grid * self.block >= n
+        self.grid_dim * self.block_dim >= n
 
 fn launch_shape(n: i64, block_size: i64) -> LaunchShape:
     """Compute grid/block for n work-items with the given block size.
@@ -47,10 +52,10 @@ fn launch_shape(n: i64, block_size: i64) -> LaunchShape:
     body must keep an `if idx < n` guard (descriptive launches inject it).
     """
     if n <= 0 or block_size <= 0:
-        return LaunchShape(grid: 0, block: 0, needs_tail_guard: false)
-    val grid = (n + block_size - 1) / block_size
-    val exact = grid * block_size == n
-    LaunchShape(grid: grid, block: block_size, needs_tail_guard: not exact)
+        return LaunchShape(grid_dim: 0, block_dim: 0, needs_tail_guard: false)
+    val groups = (n + block_size - 1) / block_size
+    val exact = groups * block_size == n
+    LaunchShape(grid_dim: groups, block_dim: block_size, needs_tail_guard: not exact)
 
 fn default_launch_shape(n: i64) -> LaunchShape:
     """Launch shape with the default block size of 256."""
@@ -76,15 +81,14 @@ class GpuQueue:
     completed: i64
 
     static fn create(device: Gpu) -> GpuQueue:
-        GpuQueue(device: device, id: 1, in_order: true,
-                 next_event_id: 1, submitted: 0, completed: 0)
+        GpuQueue(device: device, id: 1, in_order: true, next_event_id: 1, submitted: 0, completed: 0)
 
     static fn create_out_of_order(device: Gpu) -> GpuQueue:
-        GpuQueue(device: device, id: 1, in_order: false,
-                 next_event_id: 1, submitted: 0, completed: 0)
+        GpuQueue(device: device, id: 1, in_order: false, next_event_id: 1, submitted: 0, completed: 0)
 
     me submit(work: fn() -> bool) -> GpuEvent:
-        self.submit_after(work, [])
+        val no_deps: [GpuEvent] = []
+        self.submit_after(work, no_deps)
 
     me submit_after(work: fn() -> bool, deps: [GpuEvent]) -> GpuEvent:
         """Submit work that runs after all deps complete.

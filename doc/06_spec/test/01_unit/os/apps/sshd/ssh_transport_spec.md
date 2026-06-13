@@ -42,7 +42,7 @@ ssh_transport_spec -> os
 #### parses a valid SSH version string
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -58,7 +58,7 @@ expect(version.unwrap()).to_equal("SSH-2.0-SimpleOS_1.0")
 #### returns Err for a version string without CRLF
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -74,7 +74,7 @@ expect(version.err().unwrap()).to_equal("no CRLF terminator in version string")
 #### returns Err for a non-SSH-2.0 version prefix
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -90,7 +90,7 @@ expect(version.err().unwrap()).to_equal("unsupported SSH version")
 #### parses the canonical transport KEXINIT payload
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -115,7 +115,7 @@ expect(kex.compression_server_to_client).to_equal("none")
 #### parses repeated canonical KEXINIT payloads consistently
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -131,13 +131,13 @@ expect(parsed.unwrap().server_host_key_algorithms).to_equal("ssh-ed25519,rsa-sha
 
 #### returns Err for a KEXINIT with the wrong message type
 
-1. var payload = ssh build kexinit
+- var payload = ssh build kexinit
    - Expected: parsed.is_err() is true
    - Expected: parsed.err().unwrap() equals `not a KEXINIT message`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -154,13 +154,13 @@ expect(parsed.err().unwrap()).to_equal("not a KEXINIT message")
 
 #### returns Err for a truncated KEXINIT name-list
 
-1. truncated push
+- truncated push
    - Expected: parsed.is_err() is true
    - Expected: parsed.err().unwrap() equals `KEXINIT: bad lang2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -181,15 +181,14 @@ expect(parsed.err().unwrap()).to_equal("KEXINIT: bad lang2")
 
 #### returns Err for a KEXINIT with trailing bytes after reserved
 
-1. var payload = ssh build kexinit
-
-2. payload push
+- var payload = ssh build kexinit
+- payload push
    - Expected: parsed.is_err() is true
    - Expected: parsed.err().unwrap() equals `KEXINIT: trailing bytes after reserved`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -206,15 +205,14 @@ expect(parsed.err().unwrap()).to_equal("KEXINIT: trailing bytes after reserved")
 
 #### returns Err for a KEXINIT with a truncated reserved field
 
-1. var payload = ssh build kexinit
-
-2. payload pop
+- var payload = ssh build kexinit
+- payload pop
    - Expected: parsed.is_err() is true
    - Expected: parsed.err().unwrap() equals `KEXINIT: truncated reserved`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -231,13 +229,13 @@ expect(parsed.err().unwrap()).to_equal("KEXINIT: truncated reserved")
 
 #### returns Err for a KEXINIT with a non-zero reserved field
 
-1. var payload = ssh build kexinit
+- var payload = ssh build kexinit
    - Expected: parsed.is_err() is true
    - Expected: parsed.err().unwrap() equals `KEXINIT: non-zero reserved`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -258,7 +256,7 @@ expect(parsed.err().unwrap()).to_equal("KEXINIT: non-zero reserved")
 #### honors client preference order for host key algorithms
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -299,7 +297,7 @@ expect(algos.cipher_s2c).to_equal("aes128-gcm@openssh.com")
 #### falls back to ssh-ed25519 when stronger client preferences are unavailable
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -336,7 +334,7 @@ expect(negotiated.unwrap().host_key).to_equal("ssh-ed25519")
 #### accepts OpenSSH MAC lists when AES-GCM is negotiated
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -377,7 +375,7 @@ expect(algos.mac_s2c).to_equal("none")
 #### prefers aes256-gcm when both peers advertise it
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -418,7 +416,7 @@ expect(algos.mac_s2c).to_equal("none")
 #### returns Err when the client and server share no host key algorithm
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
