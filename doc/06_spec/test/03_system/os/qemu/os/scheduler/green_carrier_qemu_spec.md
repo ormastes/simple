@@ -198,12 +198,16 @@ expect(_simple_bin()).to_equal(if rt_file_exists(BOOTSTRAP_SIMPLE_BIN): BOOTSTRA
    - Expected: serial contains `GREEN_USER_ENTRY_BRIDGE_READY_MARKER`
    - Expected: serial contains `GREEN_USER_SYSCALL_BRIDGE_READY_MARKER`
    - Expected: serial contains `GREEN_USER_CR3_READY_MARKER`
+- Verify scheduler-only live lane does not print final hardware handoff markers
+   - Expected: serial does not contain `GREEN_HW_HANDOFF_MARKER`
+   - Expected: serial does not contain `GREEN_USER_ENTRY_MARKER`
+   - Expected: serial does not contain `GREEN_USER_SYSCALL_MARKER`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -232,6 +236,10 @@ else:
     expect(serial.contains(GREEN_USER_ENTRY_BRIDGE_READY_MARKER)).to_equal(true)
     expect(serial.contains(GREEN_USER_SYSCALL_BRIDGE_READY_MARKER)).to_equal(true)
     expect(serial.contains(GREEN_USER_CR3_READY_MARKER)).to_equal(true)
+    step("Verify scheduler-only live lane does not print final hardware handoff markers")
+    expect(serial.contains(GREEN_HW_HANDOFF_MARKER)).to_equal(false)
+    expect(serial.contains(GREEN_USER_ENTRY_MARKER)).to_equal(false)
+    expect(serial.contains(GREEN_USER_SYSCALL_MARKER)).to_equal(false)
 ```
 
 </details>
