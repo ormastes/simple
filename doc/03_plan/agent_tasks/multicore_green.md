@@ -89,6 +89,7 @@ Primary paths:
 
 - `scripts/check/check-cross-language-perf.shs`
 - `test/05_perf/profile_scripts/profile_report_contract_test.shs`
+- `test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 - `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `doc/06_spec/test/05_perf/stress/multicore_green_cross_language_gate_spec.md`
@@ -106,6 +107,7 @@ Deliverables:
 Acceptance evidence:
 
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+- `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `src/compiler_rust/target/debug/simple run build/cross_lang_perf/hosted_sliced_fairness.spl --mode=interpreter`
 - `bin/release/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - report row proving Go beats C pthreads in isolated large fanout stress with
@@ -224,10 +226,10 @@ Deliverables:
 
 Acceptance evidence:
 
-- `bin/release/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean`
-- `bin/release/simple test test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl --mode=interpreter --clean`
-- `bin/release/simple test test/03_system/feature/usage/multicore_green_tracking_spec.spl --mode=interpreter --clean`
-- `bin/release/simple lint doc/08_tracking/feature/feature_db.sdn`
+- `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_tracking_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple lint doc/08_tracking/feature/feature_db.sdn`
 
 ## SimpleOS Green Carrier Agent
 

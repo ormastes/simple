@@ -19,6 +19,7 @@ Benchmarks are used to:
 | `run_duplicate_check.spl` | Duplicate detection performance benchmark | `bin/simple test/perf/run_duplicate_check.spl [path] [options]` |
 | `native_layout_performance_spec.spl` | Native code layout performance tests | Run with test runner |
 | `profile_scripts/profile_report_contract_test.shs` | Common contract test for profile scripts that generate Markdown under `doc/09_report` | Called by profile scripts; can run directly with kind, script path, and report path |
+| `profile_scripts/profile_binary_autoselect_test.shs` | Cross-language profile Simple-binary auto-selection regression | Runs a reduced profile and verifies stale wrappers are skipped |
 
 ## Quick Start
 
@@ -100,6 +101,7 @@ val results = runner.run_all()
 - **Cross-language profile:** `scripts/check/check-cross-language-perf.shs`
 - **GUI profile:** `tools/gui_perf_bench/run_all_benchmarks.shs`
 - **Common report contract:** `test/05_perf/profile_scripts/profile_report_contract_test.shs` (no args checks the canonical checked-in cross-language report; profile wrappers pass kind, script path, and report path explicitly)
+- **Profile binary auto-selection:** `test/05_perf/profile_scripts/profile_binary_autoselect_test.shs` checks that auto mode probes candidates and skips stale release wrappers
 - **Report location:** `doc/09_report/*.md`
 
 ## Benchmark Configuration
