@@ -121,24 +121,72 @@ require_cooperative_green_rows_valid() {
 require_os_thread_rows_valid() {
     file="$1"
     if ! awk -F'|' '
-        /^\|.*Simple \((native|SMF)\)/ {
-            row = $0
-            notes = $4
-            gsub(/^[ \t]+|[ \t]+$/, "", row)
-            gsub(/^[ \t]+|[ \t]+$/, "", notes)
-            if (notes !~ /(thread_spawn fork-join|std thread_spawn|OS-thread fanout)/) {
-                next
-            }
-            if (notes !~ /thread_spawn/) {
+        function trim(s) {
+            gsub(/^[ \t]+|[ \t]+$/, "", s)
+            return s
+        }
+        function check_notes(notes, required) {
+            notes = trim(notes)
+            if (notes !~ required) {
                 bad = 1
             }
             if (notes ~ /(thread_spawn_with_args|cooperative_green|multicore_green|runtime pool|pool_used=|parallelism=|queue_model=|goroutine|M:N)/) {
                 bad = 1
             }
         }
-        END { exit bad ? 1 : 0 }
+        /^## / {
+            parallel = ($0 ~ /OS Thread Parallel Workers/)
+            fanout = ($0 ~ /Large Fanout Scheduling/)
+            next
+        }
+        parallel && /^\| Simple \(SMF loader\)/ {
+            worker_smf = 1
+            check_notes($4, "std thread_spawn fork-join")
+        }
+        parallel && /^\| Simple \(native\)/ {
+            worker_native = 1
+            check_notes($4, "thread_spawn fork-join OS threads")
+        }
+        fanout && /^\| Simple \(SMF loader\)/ {
+            fanout_smf = 1
+            check_notes($4, "std thread_spawn fanout")
+        }
+        fanout && /^\| Simple \(native\)/ {
+            fanout_native = 1
+            check_notes($4, "OS-thread fork-join fanout")
+        }
+        END {
+            if (!worker_smf || !worker_native || !fanout_smf || !fanout_native) {
+                bad = 1
+            }
+            exit bad ? 1 : 0
+        }
     ' "$file"; then
         fail "invalid Simple OS-thread evidence row in $file"
+    fi
+}
+
+require_os_thread_rows_have_positive_timings() {
+    file="$1"
+    if ! awk -F'|' '
+        function trim(s) {
+            gsub(/^[ \t]+|[ \t]+$/, "", s)
+            return s
+        }
+        /^## / {
+            parallel = ($0 ~ /OS Thread Parallel Workers/)
+            fanout = ($0 ~ /Large Fanout Scheduling/)
+            next
+        }
+        (parallel || fanout) && /^\| Simple \((native|SMF loader)\)/ {
+            value = trim($3)
+            if (value == "" || value == "fail" || value == "n/a" || (value + 0) <= 0) {
+                bad = 1
+            }
+        }
+        END { exit bad ? 1 : 0 }
+    ' "$file"; then
+        fail "Simple OS-thread evidence rows must have positive timings in $file"
     fi
 }
 
@@ -317,6 +365,7 @@ case "$kind" in
         require_contains "$report_path" "std thread_spawn"
         require_contains "$report_path" "OS-thread fanout"
         require_os_thread_rows_valid "$report_path"
+        require_os_thread_rows_have_positive_timings "$report_path"
         require_contains "$report_path" "Simple cooperative green"
         require_contains "$report_path" "cooperative_green_spawn"
         require_contains "$report_path" "cooperative queue fanout"
