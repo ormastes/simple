@@ -1,0 +1,178 @@
+# Structured Chrome/Electron WebGPU compute evidence.
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_env_get(key: text) -> text
+
+val _DEFAULT_CHROME_WEBGPU_COMPUTE_OUT: text = "/tmp/simple_chrome_webgpu_compute_evidence.json"
+
+fn _env_or(key: text, fallback: text) -> text:
+    val v = rt_env_get(key) ?? ""
+    if v == "":
+        return fallback
+    v
+
+fn _repo_root() -> text:
+    val lib = rt_env_get("SIMPLE_LIB") ?? ""
+    if lib.ends_with("/src"):
+        return lib[0 : lib.len() - 4]
+    if lib == "" or lib == "src":
+        return _env_or("PWD", ".")
+    lib
+
+fn _shell_quote(s: text) -> text:
+    "'" + s.replace("'", "'\\''") + "'"
+
+fn _json_after_key(json: text, key: text) -> text:
+    val marker = "\"" + key + "\":"
+    val parts = json.split(marker)
+    if parts.len() < 2:
+        return ""
+    parts[1]
+
+fn _json_text(json: text, key: text, fallback: text) -> text:
+    val rest = _json_after_key(json, key).trim()
+    if not rest.starts_with("\""):
+        return fallback
+    val parts = rest[1 : rest.len()].split("\"")
+    if parts.len() < 1:
+        return fallback
+    parts[0]
+
+fn _json_bool(json: text, key: text) -> bool:
+    _json_after_key(json, key).trim().starts_with("true")
+
+fn _json_i64(json: text, key: text) -> i64:
+    val rest = _json_after_key(json, key).trim()
+    if rest == "":
+        return 0
+    val token = rest.split(",")[0].split("}")[0].trim()
+    if token == "":
+        return 0
+    var i = 0
+    if token.starts_with("-"):
+        if token.len() == 1:
+            return 0
+        i = 1
+    while i < token.len():
+        val c = token[i].to_i64()
+        if c < 48 or c > 57:
+            return 0
+        i = i + 1
+    token.to_i64()
+
+fn _json_i32(json: text, key: text) -> i32:
+    _json_i64(json, key).to_i32()
+
+class ChromeWebGPUComputeEvidence:
+    status: text
+    diagnostic_text: text
+    adapter: bool
+    adapter_info: text
+    fallback_adapter: bool
+    device_configured: bool
+    shader_valid: bool
+    pipeline_valid: bool
+    bind_group_valid: bool
+    dispatch_count: i32
+    workgroup_count: i32
+    submitted: bool
+    readback_valid: bool
+    output_count: i32
+    output_checksum: i64
+    expected_checksum: i64
+    output_matches: bool
+    electron_path: text
+    helper_path: text
+    exit_code: i64
+
+impl ChromeWebGPUComputeEvidence:
+    fn ok(self) -> bool:
+        (self.status == "ok" and
+            self.adapter and
+            not self.fallback_adapter and
+            self.device_configured and
+            self.shader_valid and
+            self.pipeline_valid and
+            self.bind_group_valid and
+            self.dispatch_count > 0 and
+            self.workgroup_count > 0 and
+            self.submitted and
+            self.readback_valid and
+            self.output_count > 0 and
+            self.output_checksum > 0 and
+            self.expected_checksum > 0 and
+            self.output_checksum == self.expected_checksum and
+            self.output_matches)
+
+    fn host_unavailable(self) -> bool:
+        self.status.starts_with("host-unavailable:")
+
+    fn summary(self) -> text:
+        "status={self.status} adapter={self.adapter} pipeline={self.pipeline_valid} dispatches={self.dispatch_count} workgroups={self.workgroup_count} submitted={self.submitted} readback={self.readback_valid} output={self.output_count} checksum={self.output_checksum} expected={self.expected_checksum} matches={self.output_matches} exit={self.exit_code}"
+
+pub fn chrome_webgpu_compute_unavailable(reason: text, diagnostic: text, electron_path: text, helper_path: text, exit_code: i64) -> ChromeWebGPUComputeEvidence:
+    ChromeWebGPUComputeEvidence(
+        status: "host-unavailable:" + reason,
+        diagnostic_text: diagnostic,
+        adapter: false,
+        adapter_info: "",
+        fallback_adapter: false,
+        device_configured: false,
+        shader_valid: false,
+        pipeline_valid: false,
+        bind_group_valid: false,
+        dispatch_count: 0,
+        workgroup_count: 0,
+        submitted: false,
+        readback_valid: false,
+        output_count: 0,
+        output_checksum: 0,
+        expected_checksum: 0,
+        output_matches: false,
+        electron_path: electron_path,
+        helper_path: helper_path,
+        exit_code: exit_code
+    )
+
+pub fn chrome_webgpu_compute_evidence_from_json(json: text, diagnostic: text, electron_path: text, helper_path: text, exit_code: i64) -> ChromeWebGPUComputeEvidence:
+    ChromeWebGPUComputeEvidence(
+        status: _json_text(json, "status", "host-unavailable:invalid-json"),
+        diagnostic_text: _json_text(json, "diagnostic_text", diagnostic),
+        adapter: _json_bool(json, "adapter"),
+        adapter_info: _json_text(json, "adapter_info", ""),
+        fallback_adapter: _json_bool(json, "fallback_adapter"),
+        device_configured: _json_bool(json, "device_configured"),
+        shader_valid: _json_bool(json, "shader_valid"),
+        pipeline_valid: _json_bool(json, "pipeline_valid"),
+        bind_group_valid: _json_bool(json, "bind_group_valid"),
+        dispatch_count: _json_i32(json, "dispatch_count"),
+        workgroup_count: _json_i32(json, "workgroup_count"),
+        submitted: _json_bool(json, "submitted"),
+        readback_valid: _json_bool(json, "readback_valid"),
+        output_count: _json_i32(json, "output_count"),
+        output_checksum: _json_i64(json, "output_checksum"),
+        expected_checksum: _json_i64(json, "expected_checksum"),
+        output_matches: _json_bool(json, "output_matches"),
+        electron_path: electron_path,
+        helper_path: helper_path,
+        exit_code: exit_code
+    )
+
+pub fn chrome_webgpu_compute_add_u32_evidence(count: i32) -> ChromeWebGPUComputeEvidence:
+    val root = _repo_root()
+    val electron = _env_or("SIMPLE_WEB_RENDER_ELECTRON", root + "/tools/electron-shell/node_modules/.bin/electron")
+    val helper = _env_or("SIMPLE_CHROME_WEBGPU_COMPUTE_HELPER", root + "/tools/web-render-backend/chromium-webgpu-compute")
+    val out = _env_or("SIMPLE_CHROME_WEBGPU_COMPUTE_OUT", _DEFAULT_CHROME_WEBGPU_COMPUTE_OUT)
+    val cmd = "CWC_OUT=" + _shell_quote(out) +
+        " CWC_COUNT=" + count.to_text() +
+        " " + _shell_quote(electron) + " --no-sandbox " + _shell_quote(helper)
+    val result = rt_process_run("/bin/sh", ["-c", cmd])
+    if result.2 != 0:
+        if result.2 == 127:
+            return chrome_webgpu_compute_unavailable("electron-missing", result.1, electron, helper, result.2)
+        return chrome_webgpu_compute_unavailable("electron-launch", result.1, electron, helper, result.2)
+    val json = rt_file_read_text(out) ?? ""
+    if json.trim() == "":
+        return chrome_webgpu_compute_unavailable("electron-launch", result.1, electron, helper, result.2)
+    chrome_webgpu_compute_evidence_from_json(json, result.1, electron, helper, result.2)
