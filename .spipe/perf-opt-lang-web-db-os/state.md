@@ -205,8 +205,30 @@ verified** tracked sub-goals in the plan + checklists. **No false-green closure.
 3. P1 SG-1.2 rt_* reduction sweep (AC-9) with before/after counts.
 4. Add dynsmf + bench public exports to the guard's module set (close the AC-8 scope gap).
 
+## P1 keystone outcome + recovery (final)
+**P1 bug DIAGNOSED + fixed (workaround) — the "cross-module struct return Unit" framing was
+WRONG.** Real cause = a parameter named `unit` collides with the `Unit` keyword token in the seed
+parser (`identifiers.rs:74` emits capital `"Unit"` in expression context vs lowercase `"unit"` in
+declaration context). `make_bench_result` merely had a `unit: text` param. Verified: rename
+`unit`→`unit_label` makes cross-module struct return work (`value=42`/`unit=ops`).
+- **Workaround LANDED + committed** (pure `.spl`): `bench_harness.spl` + `bench_report.spl`.
+- **Seed source fix staged** (`identifiers.rs:74 "Unit"→"unit"` + TODO) — INERT until a future
+  bootstrap (per user: fix Rust source, do NOT rebuild/deploy). `.spl` workaround stands meanwhile.
+- **Bug docs corrected:** canonical `interp_unit_param_keyword_collision_2026-06-13.md`; old doc
+  marked SUPERSEDED. Separate genuine db bug filed: `interp_run_cross_module_db_option_mutation`.
+
+**4-domain benchmark emission (AC-3):** lang + web + os emit REAL numbers (web ~25.3k ops/sec; os
+fs_write ~31 MB/s, spawn ~2.6 ms); db emits with honest OMITTED rows (the db Option/mutation bug
+above — passes compiled `test` mode 13/13, omitted in interpreter `run`). No fabricated numbers.
+
+**⚠ Concurrency hazard (recorded):** a parallel session (`jj git fetch`/reconcile loop) repeatedly
+RESET this working copy mid-session, clobbering uncommitted work (web/os emit drivers+docs wiped
+twice; this state file reverted). Committed work survived: P0 machinery + AC-7 + keystone are durable
+on HEAD (verified via `git show HEAD:<path>` + `git log -S`). web/os emit drivers/docs need the
+concurrent session paused to land durably — capability is proven, persistence is blocked externally.
+
 ## Phase
-verify-done (P0 + AC-7); P1 interp-bug fix IN PROGRESS (user-steered: fix interp_cross_module_struct_return_unit)
+verify-done (P0 + AC-7 + P1 keystone workaround); seed-fix staged; web/os emit blocked by concurrent-session WC resets
 
 ## Log (continued)
 - arch: Opus authored plan + design docs (+tldrs) + state arch section with SDN diagram + module list.
