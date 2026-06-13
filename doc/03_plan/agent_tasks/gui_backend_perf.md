@@ -633,3 +633,6 @@ Updated: 2026-06-11
 - Simple Web normal-flow paint visibility hoisting: normal-flow background,
   border, panel, and button painting now reuse per-node visible-box and
   widget-mode booleans instead of repeating the same branch predicates.
+- Simple Web paint clip reuse: normal-flow, negative/zero z-index, and
+  positive z-index background/border painting now resolve the node clip once per
+  visible node and reuse it across both draw branches.
