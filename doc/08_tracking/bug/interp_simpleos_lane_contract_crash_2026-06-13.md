@@ -3,7 +3,20 @@
 - **ID:** interp_simpleos_lane_contract_crash
 - **Date:** 2026-06-13
 - **Severity:** P1 (blocks interpreter-mode testing of all catalog-lane QEMU scenarios)
-- **Status:** workaround landed 2026-06-13 (interpreter root cause open)
+- **Status:** workarounds landed 2026-06-13 (interpreter root cause open)
+
+## Two distinct Option-poison sites (both worked around, root cause shared & open)
+1. **Platform catalog** (`simpleos_platform_qemu_smoke_lane` etc.) — `Option<SimpleOsPlatformBuildTarget>` unwrap mis-binds. Fixed by index-based accessors (`_simpleos_platform_target_index`, `*_or_smoke`, `*_direct`) so no Option crosses a boundary.
+2. **Scenario catalog** (`get_all_scenarios()[i].name` / `for s in get_all_scenarios(): s.name`) — the seed interpreter wraps **elements of an imported `[QemuScenario]` list as Option**, so BOTH index AND for-iteration field-access fail with `'name' on Option`. Neither access pattern helps; a single constructor call (`scenario_arm64_virtio_fat32_smf().name`) is clean. Worked around with a name→constructor dispatch in `scenario_exists`/`scenario_by_name_direct` (qemu_runner_part3.spl) covering all 27 scenarios — `bin/simple os build/run/test --scenario=X` now runs without the Option crash.
+
+Note: `simpleos_platform_targets()[0].name` works while `get_all_scenarios()[0].name` does not, despite both being `-> [class]` — the seed's element-type resolution differs by call site. Root cause remains a Rust-seed interpreter bug (document-don't-patch); not chased further this session.
+
+## Build-feasibility blocker for arm64/arm32/riscv32/x86_64 fs-exec kernels (2026-06-13)
+With the scenario Option crash fixed, `os build` now reaches the real walls — TWO independent, environmental, NOT code-fixable this session:
+1. **LLVM backend absent** — arm64/arm32/riscv32 fs-exec lanes use `backend=llvm`; this host's Rust driver was built without the `llvm` feature. Build fails in ~20ms at the backend-availability check: `native backend 'llvm' is not available in this build; rebuild the Rust driver with --features llvm or use --backend cranelift`. (riscv64 builds because it uses `backend=cranelift`.)
+2. **Entry sources absent** — `examples/09_embedded/simple_os/arch/{arm64,arm32,riscv32}/` directories do not exist; only `riscv64/` and `x86_64/` are present (and x86_64 lacks `fs_exec_entry.spl`).
+
+Consequence: the four `sys_qemu_<arch>_fs_exec_spec.spl` system tests for arm64/arm32/riscv32/x86_64 correctly classify as `missing-media` (diagnosed RED, fail-closed) and are NOT flippable to live-pass on this host. riscv64 + x86_32 live-pass. This is the honest live-vs-contract split.
 
 ## Symptom
 Calling `simpleos_platform_qemu_smoke_lane("riscv64")` (src/os/port/simpleos_multiplatform_build_part3.spl:174) in interpreter mode kills the process with exit code 248 and no diagnostic. When reached through spec files (e.g. `test/01_unit/os/qemu_runner_protection_acceptance_spec.spl`), it instead surfaces as:
