@@ -145,6 +145,14 @@ verify
   perturbs the start-timing gates; stale-stamp test uses the same 2-call input.
   Smoke now green: count 151, schema valid, wm_text present, stale reprobe ok,
   second-start ok (verified 3× to rule out timing flake). Deferred follow-up
-  (owner: MCP-SDK perf track): the full-set upgrade build is still ~2.5 s — off
-  the handshake critical path by design, but the full JSON builder is the next
-  rt-string-primitive perf target.
+  (owner: MCP-SDK perf track, NOT touched here): (1) the full-set upgrade build
+  is still ~2.5 s — off the handshake critical path by design, but the full JSON
+  builder is the next rt-string-primitive perf target. (2) the wrapper's own
+  native-probe (bin/simple_mcp_server, reason=missing_wm_text_tools) has the same
+  staleness the validator had — it expects wm_text in the core response; it is
+  NOT currently defeating the probe cache (mcp_probe_cache_hit stays true, perf
+  unaffected), but its tool expectation should track the core-first protocol.
+  Caveats: the validator now schema-checks only the full (superset) frame, not
+  the core-only first response; and the pre-existing mcp_second_start_ok gate
+  (second <= 1.2x first) is flaky at low absolute times (~70-90 ms → sub-ms
+  margins), independent of this change — left as-is, not loosened.
