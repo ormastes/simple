@@ -193,32 +193,24 @@ fn emit_vhdl_kernel_entity(func: MirFunction) -> Result<text, CompileError>:
     builder.emit_port("ndrange_size", "in", "unsigned(31 downto 0)", false)
 
     # Scalar parameter ports + pointer memory-interface ports
+    # done_out is always emitted last (is_last=true); all param ports use is_last=false
     var idx = 0
     while idx < func.signature.params.len():
         val param_type = func.signature.params[idx]
         val param_name = vhdl_kernel_param_name(func, idx)
-        val is_last_param = idx == func.signature.params.len() - 1
         if vhdl_kernel_is_pointer_param(param_type):
-            # Memory interface: addr_out, data_in, data_out, we_out
+            # Memory interface: addr_out, data_in, data_out, we_out (all non-last)
             builder.emit_port("{param_name}_addr_out", "out", "unsigned(31 downto 0)", false)
             builder.emit_port("{param_name}_data_in", "in", "unsigned(31 downto 0)", false)
             builder.emit_port("{param_name}_data_out", "out", "unsigned(31 downto 0)", false)
-            builder.emit_port("{param_name}_we_out", "out", "bit", is_last_param)
+            builder.emit_port("{param_name}_we_out", "out", "bit", false)
         else:
             val vhdl_type = vhdl_kernel_scalar_type_name(param_type)
-            builder.emit_port(param_name, "in", vhdl_type, is_last_param)
+            builder.emit_port(param_name, "in", vhdl_type, false)
         idx = idx + 1
 
-    # done_out: asserted when all work-items are processed (always last port)
-    if func.signature.params.len() == 0:
-        builder.emit_port("done_out", "out", "bit", true)
-    else:
-        # Re-emit done_out — the last param port already had is_last=false in the loop above.
-        # We need done_out as the true last port. To avoid modifying a built line,
-        # emit it explicitly now (params loop uses is_last_param=true on last param to skip
-        # the semicolon, so we need an extra emit here with is_last=true).
-        # WORKAROUND: Always emit done_out after params; params loop uses is_last=false.
-        builder.emit_port("done_out", "out", "bit", true)
+    # done_out: always the last port
+    builder.emit_port("done_out", "out", "bit", true)
 
     builder.emit_port_end()
     builder.emit_entity_end(entity_name)
@@ -230,6 +222,7 @@ fn emit_vhdl_kernel_entity(func: MirFunction) -> Result<text, CompileError>:
     builder.emit_architecture_body_begin()
 
     # Counter-driven loop process: one work-item per rising clock edge
+    # Pattern mirrors AsyncReset in vhdl_backend.spl compile_process.
     builder.emit_clocked_process_begin(Some("kernel_loop"), "clk", Some("rst"))
     builder.emit_process_body_begin()
     # Async reset branch
@@ -237,8 +230,8 @@ fn emit_vhdl_kernel_entity(func: MirFunction) -> Result<text, CompileError>:
     builder.emit_signal_assign("work_counter", "(others => '0')")
     builder.emit_signal_assign("done_reg", "'0'")
     builder.emit_else()
-    # Rising-edge branch
     builder.emit_rising_edge_check("clk")
+    # Inside rising edge: advance counter or mark done
     builder.emit_if_begin("done_reg = '0'")
     builder.emit_if_begin("work_counter < ndrange_size")
     builder.emit_comment("Work item: thread_id = work_counter")
@@ -247,8 +240,8 @@ fn emit_vhdl_kernel_entity(func: MirFunction) -> Result<text, CompileError>:
     builder.emit_signal_assign("done_reg", "'1'")
     builder.emit_if_end()
     builder.emit_if_end()
-    builder.emit_if_end()
-    builder.emit_if_end()
+    builder.emit_if_end()  # closes rising_edge_check
+    builder.emit_if_end()  # closes rst = '1'
     builder.emit_process_end(Some("kernel_loop"))
 
     # done_out assignment
