@@ -224,6 +224,10 @@ Updated: 2026-06-11
   layout renderer now computes source and destination framebuffer row offsets
   once per viewport row while cropping virtual scroll output, avoiding repeated
   `row * width` work in the startup pixel-copy loop.
+- this commit -- Simple Web paint-pass index hoisting: background, border, and
+  widget chrome paint passes now reuse the current node plus layout box values
+  per iteration instead of repeatedly indexing `nodes`, `bx`, `by`, `bw`, and
+  `bh` throughout the startup paint conditions and draw calls.
 - this commit -- global widget-store copy removal:
   process-global `upsert_widget_record`, `set_internal_prop`, child
   registration, and widget traversal helpers now avoid per-item array
