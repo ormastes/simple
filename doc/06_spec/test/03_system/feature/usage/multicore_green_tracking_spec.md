@@ -674,6 +674,10 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 - Read the canonical multicore-green tracking row
 - Verify unresolved runtime blockers remain visible
 - Verify the SimpleOS final handoff closure remains visible
+- Verify the QEMU live spec metadata matches current closed evidence
+   - Expected: absent_in_text(qemu_spec, "**Status:** In Progress") equals `1`
+   - Expected: absent_in_text(qemu_spec, "**Requirements:** N/A") equals `1`
+   - Expected: absent_in_text(qemu_spec, "**Design:** N/A") equals `1`
 - Verify hosted fairness executable proofs are linked
 - Verify stale active-blocker wording is absent
    - Expected: absent_in_text(row, stale_simpleos_handoff_gate_phrase()) equals `1`
@@ -684,7 +688,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -703,6 +707,14 @@ step("Verify the SimpleOS final handoff closure remains visible")
 expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
 expect(row).to_contain("SimpleOS final ring/user handoff is closed")
 expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
+step("Verify the QEMU live spec metadata matches current closed evidence")
+val qemu_spec = read_file("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
+expect(qemu_spec).to_contain("**Status:** Current")
+expect(qemu_spec).to_contain("**Requirements:** doc/02_requirements/feature/multicore_green.md")
+expect(qemu_spec).to_contain("**Design:** doc/05_design/multicore_green.md")
+expect(absent_in_text(qemu_spec, "**Status:** In Progress")).to_equal(1)
+expect(absent_in_text(qemu_spec, "**Requirements:** N/A")).to_equal(1)
+expect(absent_in_text(qemu_spec, "**Design:** N/A")).to_equal(1)
 step("Verify hosted fairness executable proofs are linked")
 expect(row).to_contain("Hosted fairness contract tracking is now explicit")
 expect(row).to_contain("multicore_green_spawn_sliced is the supported hosted CPU-heavy fairness contract")

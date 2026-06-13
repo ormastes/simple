@@ -42,10 +42,10 @@ This opt-in live spec validates the SimpleOS green-carrier AP lane in QEMU. When
 |-------|-------|
 | Feature IDs | #green-simpleos-qemu-carrier |
 | Category | SimpleOS / QEMU / Concurrency |
-| Status | In Progress |
-| Requirements | N/A |
+| Status | Current |
+| Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
-| Design | N/A |
+| Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` |
 | Updated | 2026-06-01 |
@@ -84,10 +84,12 @@ payload reached ring 3.
 Together these current readiness markers prove AP startup plus live guest
 evidence for both the freestanding helper path and the scheduler-owned green
 handoff path without claiming the final ring/user transition.
+The generated manual is therefore current evidence for the SimpleOS part of
+the multicore-green lane, not a placeholder QEMU smoke.
 
 ## Requirements
 
-**Requirements:** N/A
+**Requirements:** doc/02_requirements/feature/multicore_green.md
 
 ## Plan
 
@@ -95,7 +97,7 @@ handoff path without claiming the final ring/user transition.
 
 ## Design
 
-**Design:** N/A
+**Design:** doc/05_design/multicore_green.md
 
 ## Research
 
@@ -294,7 +296,9 @@ else:
 
 ## Related Documentation
 
+- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
 - **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
 - **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 
