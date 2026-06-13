@@ -10,6 +10,13 @@ Handles worktree-aware sync: if on a jj workspace, moves to main, syncs, returns
 2. **NO ORPHAN COMMITS** — cherrypick onto main, never leave detached
 3. **LINEAR HISTORY** — rebase, never merge
 4. **FILE COUNT GUARD** — check file count before/after each rebase; abort if unexpected reduction
+5. **KNOWN PHANTOM CHANGES** — two `git status` artifacts are NOT uncommitted work; do not chase them:
+   - Whole-file `M` diffs on `bin/*.cmd`/`*.bat` are `.gitattributes` CRLF clean-filter
+     renormalization noise. jj snapshots raw bytes and sees no change — `jj commit` of
+     them comes out empty (abandon it).
+   - `??` dirs under `examples/` that contain their own `.git` (e.g.
+     `examples/10_tooling/simple_ide`) are nested git repos; jj/git never snapshot
+     them. Check with `ls <dir>/.git` before assuming lost work.
 
 ---
 
