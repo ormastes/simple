@@ -18,6 +18,22 @@ alwaysApply: false
 - **`bin/release/simple` is fully self-sufficient** — in-process compilation, no subprocess calls
 - External tool calls: `clang`/`clang++`/`cl.exe`, `gcc`, `mold`/`lld`/`link.exe`, `llc`, `uname`/`cmd`, `which`/`where`
 
+## Incremental: rebuild ONLY pure-Simple
+When you changed **only `.spl` sources** (src/compiler, src/lib, src/app) and the
+Rust seed is unchanged, skip the cargo/Rust rebuild and re-run only the
+pure-Simple stages:
+```bash
+scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple
+```
+- Reuses the existing `src/compiler_rust/target/bootstrap/simple` seed + runtime
+  lib; **never runs cargo** (even if it detects stale Rust sources — it prints a
+  note and proceeds). Errors out if no seed exists yet (build one with a full
+  bootstrap first).
+- "If the Rust seed can build the changed pure-Simple" is enforced by Stage 2: the
+  seed recompiles the changed `.spl`. If Stage 2 fails, the new pure-Simple needs
+  a Rust feature the seed lacks — drop `--pure-simple` and run a full bootstrap.
+- Combine with `--deploy` to swap `bin/release/<triple>/simple` (same smoke gate).
+
 ## Bootstrap Commands
 ```bash
 # Full bootstrap (recommended):

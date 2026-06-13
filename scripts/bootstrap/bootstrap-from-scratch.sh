@@ -31,6 +31,11 @@ Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
 Options:
   --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm-lib)
   --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
+  --pure-simple      Incremental: reuse the existing Rust seed and rebuild ONLY
+                     the pure-Simple stages (no cargo / Rust rebuild). Use when
+                     only .spl sources changed. The seed's ability to compile the
+                     changed pure-Simple is proven by Stage 2 — if Stage 2 fails,
+                     drop --pure-simple and run a full (Rust + Simple) bootstrap.
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
   --verbose          Accepted for compatibility
@@ -49,6 +54,7 @@ build_mcp=1
 target=""
 verbose=0
 jobs=""
+pure_simple=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -66,6 +72,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --deploy)
       deploy=1
+      ;;
+    --pure-simple)
+      pure_simple=1
       ;;
     --verbose)
       verbose=1
@@ -227,7 +236,25 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   fi
 fi
 
-if [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}" -eq 1 ]; then
+if [ "${pure_simple}" -eq 1 ]; then
+  # Pure-Simple incremental rebuild: reuse the existing Rust seed and runtime
+  # library, never invoke cargo. Use this when only pure-Simple (.spl) sources
+  # changed. Whether the existing seed CAN build the changed pure-Simple is
+  # proven by Stage 2 below: if the new .spl needs a Rust feature the seed lacks,
+  # Stage 2 fails — drop --pure-simple and run a full (Rust + Simple) bootstrap.
+  if [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ]; then
+    echo "error: --pure-simple needs an existing Rust seed and runtime library:" >&2
+    echo "  seed:    ${seed_bin}" >&2
+    echo "  runtime: ${native_all_lib}" >&2
+    echo "Build them once with a full bootstrap, then re-run with --pure-simple:" >&2
+    echo "  cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" >&2
+    exit 1
+  fi
+  if [ "${seed_stale}" -eq 1 ]; then
+    echo "Note: Rust sources changed but --pure-simple was given; reusing the existing seed and skipping the Rust rebuild."
+  fi
+  echo "Pure-Simple mode: reusing Rust seed, rebuilding only the pure-Simple stages."
+elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}" -eq 1 ]; then
   echo "Building Rust seed compiler + runtime library..."
   # Split into two cargo invocations to defeat feature unification:
   # `simple-native-all` enables `driver-hooks` on `simple-runtime`, which gates
