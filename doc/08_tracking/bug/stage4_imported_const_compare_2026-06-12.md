@@ -50,3 +50,36 @@ underlying global-init gap surfacing in the cranelift lane.
 Compiled stage4 check of src/app/repl/render_adapter.spl (pre-mitigation
 binary) vs seed-interpreted run of the same parser source on
 `m["k"] = "v"` input: interpreted accepts, compiled rejects.
+
+## Minimal repro (2026-06-13) — narrows the class to NON-SCALAR consts
+
+The defect is NOT integer-const-specific. A module-level **`text`** const reads
+empty/garbage in JIT; a module-level **`i64`** const reads correctly. So the
+"imported const misevaluates" symptom is the *heap-backed* subset of this class.
+
+```
+val TABLE: text = "ABCDEF"     # heap const (needs rt_string_new at init)
+fn main():
+    print(TABLE.char_at(0))    # JIT/native: empty   | interpreter: A
+    print(TABLE.length())      # JIT/native: -1       | interpreter: 6
+```
+
+```
+val N: i64 = 3                 # scalar const (stored inline)
+fn main():
+    print(3 == N)              # JIT and interpreter both: true  ✓
+```
+
+Concrete fallout: `std.common.base_encoding.base64.base64_encode` returns empty
+in JIT because its module-level `ENCODE_TABLE: text` lookup string reads empty
+(`base64.spl:18`). Tracked also in `interpreter_str_bytes_missing_2026-06-12.md`
+and memory `module-level-text-const-empty-in-jit`.
+
+**Root-cause direction:** heap-backed module globals (`text`, and likely array/
+struct consts) are loaded at the use site before their runtime initializer
+(`rt_string_new`) has run — the global's slot is still its zero/BSS value. The
+fix is to materialize such consts in `__module_init` (run once before first
+entry) rather than relying on a static initializer. See the global-init pass in
+`codegen/common_backend.rs` (`declare_globals` / `global_init_strings`) — verify
+whether `global_init_strings` entries are actually emitted+run for module-level
+(non-`main`) `val text` consts on the cranelift lane.

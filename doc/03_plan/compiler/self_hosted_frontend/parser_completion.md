@@ -617,8 +617,24 @@ the common/ + nogc_sync_mut/ sample). Two gap classes found and FIXED:
 - **G48 — colon-form inline ternary `if C: T else E`, PARSER DONE + pushed.** ~29
   src/lib sites (e.g. `val s2 = if s < 0: s + N else s`). parse_if_expr's block-path
   else branch now distinguishes block `else:` / `else if` / inline `else EXPR`.
+- **G49 — struct-literal `Name { field: value }`, DONE end-to-end + pushed
+  (2026-06-13, commit 0e63bd973ff).** Was the DOMINANT remaining src/lib parse
+  blocker (import-amplified: 13/24 sampled files). `expr_struct_lit`/EXPR_STRUCT_LIT
+  existed with zero parser callers. Added `parse_struct_lit_tail` in both
+  `parse_postfix`/`parse_postfix_on` loops, fired on `ident/dotted-path` base + `{`
+  (Simple blocks are colon+indent, never brace → unambiguous). Field entries built
+  as `expr_field_access(value,name)` carriers matching the flat-bridge layout.
+  Verified on stage4 lean frontend: `Point{x:3,y:4}`→`p=3,4`, nested
+  `Box{origin:Point{...},w:5}`→`b=10,20,5` at runtime (parse→bridge→HIR→codegen).
+  See `doc/08_tracking/bug/lean_parser_struct_literal_unimplemented_2026-06-13.md`.
 
 Remaining known gap classes (long tail, deferred):
+- **Default parameter values** `fn f(x: f64 = 100.0):` — NEXT gap (surfaced at
+  mcdc.spl:187 after G49). NOT a contained parser fix: `decl_fn`/`CoreDecl` have no
+  param-default slot (only `field_defaults` for class fields), so it's a multi-layer
+  feature — parser + `decl_fn`/`CoreDecl` + flat bridge + `HirParam` + call-site
+  arity/default-application. Parse-and-discard is forbidden (silently breaks callers
+  that omit the arg). Its own focused task.
 - **`extern class Name:` declaration form** — `extern fn` is handled but not
   `extern class` (runtime-type binding with fields). Only ~2 src/lib sites
   (error.spl SimpleError). Low priority.
