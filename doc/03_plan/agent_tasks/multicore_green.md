@@ -55,8 +55,7 @@ Date: 2026-06-06
   `cooperative_green_spawn_value` remains the precomputed-result helper for
   callers that already have a value, and
   `multicore_green_spawn` is the current Pure Simple bounded-worker M:N
-  candidate facade over runtime-seed `rt_pool_*` support, not a combined
-  user-facing API. `multicore_green_spawn_sliced` is the explicit
+  candidate over `rt_pool_*`. `multicore_green_spawn_sliced` is the explicit
   scalar-state fairness API for long Pure Simple work; the public API contract
   must keep the run/join marker `public_multicore_green_sliced_result=19`.
 - Do not use numbered API names to distinguish behavior.

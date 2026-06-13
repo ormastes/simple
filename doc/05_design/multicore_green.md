@@ -51,9 +51,7 @@ preemptive, or Go M:N.
 
 ### Multicore Green Runtime-Pool Candidate
 
-`multicore_green_spawn(task)` is the Pure Simple user-facing facade. On hosted
-native builds it enters runtime-seed `rt_pool_submit(task)` support; user code
-does not import or call `rt_pool_*` directly.
+`multicore_green_spawn(task)` calls `rt_pool_submit(task)`.
 
 Data structure:
 
