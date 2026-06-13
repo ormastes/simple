@@ -118,6 +118,12 @@
   still pass, and the profile report contract plus numeric cross-language gate
   pass against
   `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
+- The 2026-06-13 hosted SimpleOS refresh in
+  `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` reran the
+  cooperative, multicore-green scheduler, and green-channel wake specs in
+  Docker process isolation from `/tmp/simple-mgreen-next-jj-4101862`; it keeps
+  hosted SimpleOS support current without changing the already closed
+  opt-in live-QEMU final-handoff claim.
 - This 2026-06-13 slice used Docker-isolated focused checks with `SIMPLE_BIN`
   pinned to a current-source compiler, passed
   `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` with

@@ -499,13 +499,14 @@ expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 - Verify current SimpleOS evidence commands avoid the stale release wrapper
    - Expected: absent_in_text(report, "bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl") equals `1`
    - Expected: absent_in_text(report, "bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl") equals `1`
+- Verify the hosted SimpleOS refresh is current and Docker-isolated
 - Verify the linked plan and report carry the final live marker triplet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -528,6 +529,18 @@ expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/
 expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
 expect(absent_in_text(report, "bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl")).to_equal(1)
 expect(absent_in_text(report, "bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")).to_equal(1)
+
+step("Verify the hosted SimpleOS refresh is current and Docker-isolated")
+expect(report).to_contain("## 2026-06-13 Hosted Refresh")
+expect(report).to_contain("/tmp/simple-mgreen-next-jj-4101862")
+expect(report).to_contain("Docker process isolation")
+expect(report).to_contain("SIMPLE_BOOTSTRAP_DRIVER=/seed/simple")
+expect(report).to_contain("simpleos_cooperative_green_spec.spl --mode=interpreter --clean")
+expect(report).to_contain("simpleos_multicore_green_spec.spl --mode=interpreter --clean")
+expect(report).to_contain("simpleos_green_channel_wake_spec.spl --mode=interpreter --clean")
+expect(report).to_contain("PASS, 7 scenarios")
+expect(plan).to_contain("The 2026-06-13 hosted SimpleOS refresh")
+expect(plan).to_contain("Docker process isolation")
 
 step("Verify the linked plan and report carry the final live marker triplet")
 expect(plan).to_contain("HW_HANDOFF_PASS=true")

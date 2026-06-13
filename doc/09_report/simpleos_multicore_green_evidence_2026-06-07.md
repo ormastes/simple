@@ -92,6 +92,27 @@ SimpleOS cooperative, multicore-green scheduler, and green-channel wake
 contracts remain current after the profile/API contract documentation updates,
 without changing the already-closed final live-handoff claim.
 
+## 2026-06-13 Hosted Refresh
+
+The hosted SimpleOS feature lane was rerun from
+`/tmp/simple-mgreen-next-jj-4101862` after syncing through
+`873f docs: name multicore green merge gates` and the later shared-main
+`perf(gui): rank backend lane candidates in one pass` sync. The run used
+Docker process isolation with `--network=none`, mounted the current-source
+Simple binary, and pinned `SIMPLE_BOOTSTRAP_DRIVER=/seed/simple`.
+
+- `SIMPLE_BOOTSTRAP_DRIVER=/seed/simple SIMPLE_BIN=/usr/local/bin/simple /usr/local/bin/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`
+  -> PASS, 3 scenarios in 3861ms
+- `SIMPLE_BOOTSTRAP_DRIVER=/seed/simple SIMPLE_BIN=/usr/local/bin/simple /usr/local/bin/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean`
+  -> PASS, 7 scenarios in 11832ms
+- `SIMPLE_BOOTSTRAP_DRIVER=/seed/simple SIMPLE_BIN=/usr/local/bin/simple /usr/local/bin/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
+  -> PASS, 4 scenarios in 11026ms
+
+This refresh does not rerun a live QEMU lane. It keeps the hosted SimpleOS
+cooperative, multicore-green scheduler, and green-channel wake contracts
+current after the profile/manual gate updates, without changing the already
+closed final live-handoff claim.
+
 ## Current Refresh
 
 After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `9b5cb43402`,
