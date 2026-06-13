@@ -643,3 +643,6 @@ Updated: 2026-06-11
   renderer backend normalization now use the shared Engine2D canonicalizer so
   valid native aliases such as `dx11` preserve the `directx` lane before the
   shared resolver runs.
+- Simple Web Engine2D resolver alias convergence: the final Simple Web
+  Engine2D resolver now also uses the shared Engine2D canonicalizer, keeping
+  DirectX, HIP/ROCm, and CPU SIMD aliases aligned across every GUI entrypoint.
