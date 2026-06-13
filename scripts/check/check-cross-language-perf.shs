@@ -401,12 +401,12 @@ write_simple_parallel_cooperative_green() {
 write_simple_parallel_multicore_green() {
     # Pool-backed Simple task path. This is the current Pure Simple candidate
     # for Go-like M:N CPU-parallel work: many logical tasks over bounded runtime
-    # workers when rt_pool_* is linked. It is intentionally separate from the
-    # cooperative green-thread queue and from one-OS-thread-per-task spawn.
+    # workers through runtime-seed rt_pool_* support behind the public facade.
+    # Generated profile code must use MulticoreGreenHandle.join() rather than
+    # importing rt_pool_* directly.
     {
         echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
-        echo 'extern fn rt_pool_join(handle: i64) -> i64'
         echo ''
         echo ''
         echo 'fn worker() -> i64:'
@@ -436,17 +436,17 @@ write_simple_parallel_multicore_green() {
         echo '        rt_exit(76)'
         echo '        return'
         echo '    println("multicore_green_queue_model = work_stealing")'
-        echo '    var native_handles: [i64] = []'
+        echo '    var handles: [MulticoreGreenHandle] = []'
         echo "    for task in 0..${MULTICORE_GREEN_WORKERS}:"
         echo '        var handle = spawn_worker()'
         echo '        if handle.used_runtime_pool():'
-        echo '            native_handles.push(handle.native_handle)'
-        echo '            handle.native_handle = 0'
+        echo '            handles.push(handle)'
         echo '    var pool_used: i64 = 0'
         echo '    var total: i64 = 0'
-        echo '    for index in 0..native_handles.len():'
+        echo '    for index in 0..handles.len():'
+        echo '        val handle = handles[index]'
         echo '        pool_used = pool_used + 1'
-        echo '        total = total + rt_pool_join(native_handles[index])'
+        echo '        total = total + handle.join()'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${MULTICORE_GREEN_WORKERS}:"
         echo '        rt_exit(73)'
@@ -538,7 +538,6 @@ write_simple_fanout_multicore_green() {
     {
         echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
-        echo 'extern fn rt_pool_join(handle: i64) -> i64'
         echo ''
         echo ''
         echo 'fn work() -> i64:'
@@ -568,17 +567,17 @@ write_simple_fanout_multicore_green() {
         echo '        rt_exit(76)'
         echo '        return'
         echo '    println("multicore_green_queue_model = work_stealing")'
-        echo '    var native_handles: [i64] = []'
+        echo '    var handles: [MulticoreGreenHandle] = []'
         echo "    for task in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
         echo '        var handle = spawn_work()'
         echo '        if handle.used_runtime_pool():'
-        echo '            native_handles.push(handle.native_handle)'
-        echo '            handle.native_handle = 0'
+        echo '            handles.push(handle)'
         echo '    var pool_used: i64 = 0'
         echo '    var total: i64 = 0'
-        echo '    for index in 0..native_handles.len():'
+        echo '    for index in 0..handles.len():'
+        echo '        val handle = handles[index]'
         echo '        pool_used = pool_used + 1'
-        echo '        total = total + rt_pool_join(native_handles[index])'
+        echo '        total = total + handle.join()'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${FANOUT_MULTICORE_GREEN_WORKERS}:"
         echo '        rt_exit(73)'
@@ -594,7 +593,6 @@ write_simple_fanout_stress_multicore_green() {
     cat >"$BUILD_DIR/fanout_stress_multicore_green.spl" <<EOF
 use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, MulticoreGreenHandle}
 extern fn rt_exit(code: i32)
-extern fn rt_pool_join(handle: i64) -> i64
 
 fn work() -> i64:
     var x = 1
@@ -623,17 +621,17 @@ fn main():
         rt_exit(76)
         return
     println("multicore_green_queue_model = work_stealing")
-    var native_handles: [i64] = []
+    var handles: [MulticoreGreenHandle] = []
     for task in 0..${FANOUT_STRESS_WORKERS}:
         var handle = spawn_work()
         if handle.used_runtime_pool():
-            native_handles.push(handle.native_handle)
-            handle.native_handle = 0
+            handles.push(handle)
     var pool_used: i64 = 0
     var total: i64 = 0
-    for index in 0..native_handles.len():
+    for index in 0..handles.len():
+        val handle = handles[index]
         pool_used = pool_used + 1
-        total = total + rt_pool_join(native_handles[index])
+        total = total + handle.join()
     println("multicore_green_pool_used = {pool_used}/${FANOUT_STRESS_WORKERS}")
     if pool_used != ${FANOUT_STRESS_WORKERS}:
         rt_exit(73)
