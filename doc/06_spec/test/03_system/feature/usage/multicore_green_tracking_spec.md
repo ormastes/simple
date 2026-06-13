@@ -356,7 +356,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 89 lines folded for reproduction.
+Runnable source: 90 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -376,6 +376,7 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_s
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(row).to_contain("canonical no-arg profile contract")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
+expect(row).to_contain("test/02_integration/simple_wrapper_runtime_probe_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(row).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
@@ -603,7 +604,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 49 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -645,6 +646,10 @@ expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn`/`rt_poo
 step("Verify stale release-wrapper guidance stays visible")
 expect(perf).to_contain("skips a stale release wrapper")
 expect(perf).to_contain("PROFILE_DOCKER_SIMPLE_BINARY=src/compiler_rust/target/debug/simple")
+val sys_test_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
+expect(sys_test_plan).to_contain("test/02_integration/simple_wrapper_runtime_probe_test.shs")
+expect(sys_test_plan).to_contain("bin/sj")
+expect(sys_test_plan).to_contain("bin/simple-interp")
 
 step("Verify forbidden numbered API-name scans cover the public concurrency family")
 expect(profile_contract).to_contain("thread_spawn_with_args")
