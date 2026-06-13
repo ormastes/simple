@@ -81,7 +81,7 @@ Primary paths:
 - `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`
 - `test/05_perf/stress/multicore_green_fanout_spec.spl`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
-- `doc/09_report/cross_language_perf_parallel_smoke.md`
+- `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 
 Responsibilities:
 
