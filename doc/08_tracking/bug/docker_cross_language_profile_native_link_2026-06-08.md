@@ -98,9 +98,11 @@ pthread and Go goroutine rows.
 
 The profile wrapper still avoids forwarding a stale host `SIMPLE_BINARY` into
 the isolated container when `PROFILE_DOCKER_SIMPLE_BINARY` was not explicitly
-set. However, Docker auto-selection must prefer `bin/simple` /
-`bin/release/simple` and only fall back to `src/compiler_rust/target/debug/simple`
-when the release wrapper is unavailable. Reproduced on 2026-06-11:
+set. Docker auto-selection must prefer runnable `bin/simple` /
+`bin/release/simple`, but it now probes candidates with `--version` and skips a
+stale release wrapper whose wrapped platform binary is missing. It only falls
+back to `src/compiler_rust/target/debug/simple` when the release wrapper is
+unavailable or stale. Reproduced on 2026-06-11:
 
 ```sh
 docker run --rm --entrypoint /bin/sh --user "$(id -u):$(id -g)" \
@@ -158,9 +160,10 @@ stress rows showed Go `9.260ms`, Simple multicore green native `11.353ms` with
 
 A quick Docker-isolated smoke of the same canonical profile script completed in
 a separate container process without crashing, but all Simple native and SMF
-rows reported `compile failed` because the checked-in release wrapper target is
-missing in this workspace. C and Go still compiled, proving the Docker image and
-profile harness path were usable.
+rows reported `compile failed` because the checked-in release wrapper target was
+missing in this workspace before the auto-selection probe hardened stale-wrapper
+detection. C and Go still compiled, proving the Docker image and profile harness
+path were usable.
 
 Command shape:
 
@@ -187,6 +190,40 @@ Interpretation:
 - This is not a new profile script or C/Go toolchain failure.
 - It is the checked-in release-wrapper stale-artifact state tracked by
   `multicore_green_release_binary_stale_2026-06-11.md`.
+- Auto-selection now treats this broken wrapper as unavailable after a failed
+  `--version` probe instead of selecting it just because the shell file is
+  executable.
 - Contract-gated M:N evidence must continue to cite the checked-in
   `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
   or a fresh report generated with a rebuilt release wrapper.
+
+## 2026-06-13 Auto-Selection Probe Hardening
+
+The profile harness now probes auto-selected Simple binaries with `--version`
+before accepting them. In this workspace, `bin/release/simple` is executable but
+its wrapped platform binary is missing, so auto mode correctly skips it and
+falls back to the current-source debug compiler instead of measuring a stale
+wrapper.
+
+Smoke command shape:
+
+```sh
+SKIP_PROFILE_REPORT_CONTRACT=1 RUNS=1 WARM_IN_PROCESS=1 CPU_WORKERS=1 \
+OS_THREAD_WORKERS=1 MULTICORE_GREEN_WORKERS=1 COOPERATIVE_GREEN_WORKERS=1 \
+FANOUT_WORKERS=2 FANOUT_MULTICORE_GREEN_WORKERS=2 \
+FANOUT_COOPERATIVE_GREEN_WORKERS=2 FANOUT_STRESS_WORKERS=2 \
+FANOUT_ITERS=1 FANOUT_STRESS_ITERS=1 RUN_TIMEOUT=5 \
+BUILD_DIR=build/tmp/cross_lang_autoselect_smoke \
+REPORT_PATH=build/tmp/cross_lang_autoselect_smoke.md \
+sh scripts/check/check-cross-language-perf.shs
+```
+
+Observed report marker:
+
+```text
+Simple binary: `src/compiler_rust/target/debug/simple`
+```
+
+This does not close the debug-native linker blocker for Docker contract reports;
+it only prevents an executable stale wrapper from being selected as if it were a
+runnable release path.

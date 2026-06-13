@@ -573,7 +573,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -593,8 +593,12 @@ expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_swit
 expect(row).to_contain("SimpleOS final ring/user handoff is closed")
 expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
 step("Verify hosted fairness executable proofs are linked")
+expect(row).to_contain("test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl")
+expect(row).to_contain("test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl")
+expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.md")
+expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.md")
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.md")
 expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.md")
 step("Verify stale active-blocker wording is absent")
