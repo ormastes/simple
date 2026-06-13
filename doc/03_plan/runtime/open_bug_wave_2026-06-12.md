@@ -45,11 +45,34 @@ file-not-found) for missing paths.
 - Seed redeployed (backup `simple_seed.bak.2026-06-12-preWave2`); smoke:
   all probes + math_spec 13/13 via stage4 delegation.
 
+## S7 + B5 wave closed 2026-06-13
+
+- **S7 interpreter generators**: CLOSED — `for x in counter()` over a `gen fn`
+  now works in the interpreter. Root cause was on the *consumption* side: the
+  module-scope for-loop path (`interpreter_control::exec_for` →
+  `interpreter_helpers/collections.rs::iter_to_vec`) lacked a `Value::Generator`
+  arm that its sibling helper (`block_execution::get_iterator_values`) already
+  had, so a generator fell into the catch-all and errored. Added the missing
+  arm (`Value::Generator(gen) => Ok(gen.collect_remaining())`). +3 Rust tests
+  (`interpreter_advanced_features_tests`) + new spec
+  `test/01_unit/compiler/interpreter/generator_for_in_iteration_spec.spl` (3/3).
+  Semantics are eager (gen runs to completion at call time, buffers yields);
+  lazy/infinite generators remain unimplemented. Landed on main via foreign
+  sweep (`e6bac1074dd`); probe prints `1 2 3` exit 0 in both interpreter and
+  JIT→fallback modes.
+- **B5 eager-async**: CLOSED (reconciled) — added `rt_future_wrap` as the
+  canonical "wrap a resolved value for the RuntimeFuture path" constructor
+  (thin alias of `rt_future_resolve`), completing the runtime-layer
+  single-constructor + single-await (`rt_future_await`) picture. The 7
+  `test_b5_*` behavior tests stay green unchanged; +6 `test_b5_canonical_*`
+  tests (async_gen 34/34). Interpreter-layer `Value::Future`/`Promise` duality
+  intentionally retained (no behavior need under eager-async; full collapse is
+  a compiler/src code-org follow-up). Landed on main via foreign sweep
+  (`ea603573381`); bug doc updated DOCUMENTED-CANONICAL → RECONCILED.
+- Seed redeployed (backup `simple_seed.bak.2026-06-13-preWave3`); smoke: both
+  probes exit 0 through the deployed seed, no stray processes.
+
 ## Open follow-ups (not in this wave)
 
-- **B5 eager-async**: DOCUMENTED-CANONICAL, pinned by 7 `test_b5_*` tests
-  (`31fe3a3bede`); no production change planned.
-- **S7 interpreter generators**: `for x in gen fn` in the interpreter errors
-  with "yield called outside of generator" — separate feature track.
 - **Parser completion** (foreign track): lean-parser language coverage, weeks-scale,
   own plan — do not touch its files (`codegen/**`, `mir/lower/**`, `Cargo.toml`, etc.).
