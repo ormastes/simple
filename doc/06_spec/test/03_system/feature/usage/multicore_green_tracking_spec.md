@@ -642,7 +642,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 103 lines folded for reproduction.
+Runnable source: 105 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -718,6 +718,8 @@ expect(profile_contract).to_contain("Go stress fanout row must be faster than C 
 
 step("Verify the performance README maps all profile-script gates")
 expect(perf_readme).to_contain("profile_scripts/profile_report_contract_test.shs")
+expect(perf_readme).to_contain("doc/09_report/README.md")
+expect(perf_readme).to_contain("report_index_checked=doc/09_report/README.md")
 expect(perf_readme).to_contain("profile_scripts/profile_report_contract_negative_test.shs")
 expect(perf_readme).to_contain("profile_scripts/profile_binary_autoselect_test.shs")
 expect(perf_readme).to_contain("profile_scripts/profile_docker_isolation_contract_test.shs")
