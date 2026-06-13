@@ -391,7 +391,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 92 lines folded for reproduction.
+Runnable source: 97 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -404,6 +404,11 @@ expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_green_channe
 expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl")
 expect(row).to_contain("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
 expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
+expect(row).to_contain("2026-06-13 hosted SimpleOS refresh")
+expect(row).to_contain("Docker process isolation")
+val simpleos_report = rt_file_read_text("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md") ?? ""
+expect(simpleos_report).to_contain("## 2026-06-13 Hosted Refresh")
+expect(simpleos_report).to_contain("simpleos_multicore_green_spec.spl --mode=interpreter --clean")
 step("Verify profile stress specs are linked")
 expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
