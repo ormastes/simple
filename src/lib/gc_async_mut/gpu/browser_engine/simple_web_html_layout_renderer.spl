@@ -3492,6 +3492,29 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
     out_widths[i] = width
     IntrinsicWidthResult(width: width, widths: out_widths)
 
+fn inline_text_advance_width(node: HNode, st: Style) -> i32:
+    if node.tag != "#text":
+        return 0
+    val raw = node.text_data
+    var width = 0
+    var i = 0
+    val n = raw.len()
+    val advance = text_advance(st.font_size)
+    var space_advance = advance / 2
+    if space_advance < 1:
+        space_advance = 1
+    while i < n:
+        val ch = raw.char_code_at(i)
+        if ch == 32:
+            width = width + space_advance
+        elif ch == 9 or ch == 10 or ch == 13:
+            if node.text_trimmed != "":
+                width = width + space_advance
+        else:
+            width = width + advance
+        i = i + 1
+    width
+
 fn text_ink_y_offset(fs: i32) -> i32:
     val scale = glyph_scale(fs)
     if scale > 1:
@@ -4260,6 +4283,9 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
     var cy = y + st.border_t + st.pad_t
     var child_count = 0
     var prev_margin_b = 0
+    var in_inline_run = false
+    var inline_x = 0
+    var inline_line_h = 0
     var c = child_index.first_child[i]
     while c >= 0:
         val cst = styles[c]
@@ -4278,6 +4304,46 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
         else:
+            if cst.display == "inline":
+                if not in_inline_run:
+                    in_inline_run = true
+                    inline_x = 0
+                    inline_line_h = style_line_h(cst)
+                val intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
+                out_intrinsic_widths = intrinsic.widths
+                var inline_w = intrinsic.width
+                val text_advance_w = inline_text_advance_width(nodes[c], cst)
+                if text_advance_w > inline_w:
+                    inline_w = text_advance_w
+                if inline_w < 1:
+                    inline_w = 1
+                val child = layout(nodes, styles, child_index, c, ix + inline_x, cy, inline_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
+                out_intrinsic_widths = child.intrinsic_widths
+                if nodes[c].tag == "#text":
+                    out_bh[c] = style_line_h(cst)
+                elif nodes[c].tag == "span" and out_bh[c] > 1:
+                    out_bh[c] = out_bh[c] - 1
+                var inline_contribution_h = out_bh[c]
+                if nodes[c].tag == "button":
+                    inline_contribution_h = inline_contribution_h + 3
+                if inline_contribution_h > inline_line_h:
+                    inline_line_h = inline_contribution_h
+                inline_x = inline_x + out_bw[c]
+                prev_margin_b = 0
+                child_count = child_count + 1
+                c = child_index.next_sibling[c]
+                continue
+            if in_inline_run:
+                cy = cy + inline_line_h
+                in_inline_run = false
+                inline_x = 0
+                inline_line_h = 0
             if child_count > 0:
                 cy = cy + st.gap_px
             val collapsed_margin = if prev_margin_b > cst.margin_t: prev_margin_b else: cst.margin_t
@@ -4314,6 +4380,8 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             child_count = child_count + 1
         c = child_index.next_sibling[c]
     if child_count > 0:
+        if in_inline_run:
+            cy = cy + inline_line_h
         cy = cy + prev_margin_b
     var h = (cy - y) + st.pad_b + st.border_b
     val explicit_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
