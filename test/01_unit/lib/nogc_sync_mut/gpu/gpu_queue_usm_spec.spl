@@ -2,7 +2,7 @@
 # Plan: doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026-06-13.md
 # All cases run on the CPU-deterministic path — no GPU hardware required.
 
-use std.gpu.{GpuQueue, GpuEvent, GpuTaskGraph, launch_shape, default_launch_shape}
+use std.gpu.{GpuQueue, GpuEvent, GpuTaskGraph, GpuAccessGraph, launch_shape, default_launch_shape}
 use std.gpu.{UsmBuffer, usm_malloc_device, usm_malloc_host, usm_malloc_shared}
 use std.gpu.{gpu_none}
 
@@ -148,6 +148,52 @@ describe "GpuTaskGraph (W1.4 record/replay)":
         expect(order.len()).to_equal(0)
         val done = g.replay_with(replay_exec)
         expect(done).to_equal(0)
+
+describe "GpuAccessGraph implicit DAG (G3 buffer/accessor equivalent)":
+
+    it "derives RAW edges into a diamond from buffer access sets":
+        var ag = GpuAccessGraph.create()
+        val producer = ag.record_task("write A", [], [0])
+        val left = ag.record_task("A -> B", [0], [1])
+        val right = ag.record_task("A -> C", [0], [2])
+        val consumer = ag.record_task("B+C -> D", [1, 2], [3])
+        val g = ag.build()
+        val order = g.schedule()
+        expect(order.len()).to_equal(4)
+        expect(order[0]).to_equal(producer)
+        expect(order[3]).to_equal(consumer)
+
+    it "derives WAR and WAW edges so rewrites wait for readers":
+        var ag = GpuAccessGraph.create()
+        val w0 = ag.record_task("write A", [], [0])
+        val r0 = ag.record_task("read A", [0], [])
+        val w1 = ag.record_task("rewrite A", [], [0])
+        val g = ag.build()
+        val order = g.schedule()
+        expect(order.len()).to_equal(3)
+        expect(order[0]).to_equal(w0)
+        expect(order[1]).to_equal(r0)
+        expect(order[2]).to_equal(w1)
+
+    it "leaves independent tasks unordered but schedulable":
+        var ag = GpuAccessGraph.create()
+        val t0 = ag.record_task("write A", [], [0])
+        val t1 = ag.record_task("write B", [], [1])
+        val g = ag.build()
+        expect(g.schedule().len()).to_equal(2)
+        expect(t0 != t1).to_equal(true)
+
+describe "GpuEvent profiling (W4.2 host path)":
+
+    it "records elapsed time only when profiling is enabled":
+        var q = GpuQueue.create(gpu_none())
+        val cold = q.submit(work_ok)
+        expect(cold.elapsed_nanos).to_equal(0)
+        q.enable_profiling()
+        val warm = q.parallel_for(1000, pf_accumulate)
+        expect(warm.is_complete()).to_equal(true)
+        expect(warm.elapsed_nanos >= 0).to_equal(true)
+        expect(warm.elapsed_ms() >= 0.0).to_equal(true)
 
 describe "USM allocation trio (W1.2, fallback path)":
 

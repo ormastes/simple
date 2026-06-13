@@ -19,6 +19,20 @@ seed bootstrap redeploy lands; the API here is final.
 
 use std.common.gpu.device.{Gpu, GpuBackend}
 
+# Native CUDA runtime exports (same ABI as src/lib/nogc_sync_mut/cuda/sffi.spl).
+extern fn rt_cuda_available() -> i64
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
+
+fn _is_cuda(gpu: Gpu) -> bool:
+    match gpu.backend:
+        case GpuBackend.Cuda: true
+        case GpuBackend.Vulkan: false
+        case GpuBackend.Rocm: false
+        case GpuBackend.Oneapi: false
+        case GpuBackend.Metal: false
+        case GpuBackend.None_: false
+
 # ============================================================================
 # UsmBuffer
 # ============================================================================
@@ -80,6 +94,9 @@ class UsmBuffer:
     me free() -> bool:
         if not self.valid:
             return false
+        if self.ptr != 0:
+            rt_cuda_mem_free(self.ptr)
+            self.ptr = 0
         self.valid = false
         self.storage = []
         self.bytes = 0
@@ -102,7 +119,15 @@ fn _usm_alloc(kind: text, device_id: i64, bytes: i64) -> UsmBuffer:
               bytes: bytes, storage: storage, valid: true)
 
 fn usm_malloc_device(gpu: Gpu, bytes: i64) -> UsmBuffer:
-    """Allocate device memory (SYCL malloc_device equivalent)."""
+    """Allocate device memory (SYCL malloc_device equivalent).
+
+    Backed by rt_cuda_mem_alloc when the device is CUDA and the runtime
+    reports availability; deterministic host fallback otherwise.
+    """
+    if bytes > 0 and _is_cuda(gpu) and rt_cuda_available() == 1:
+        val ptr = rt_cuda_mem_alloc(bytes)
+        if ptr != 0:
+            return UsmBuffer(kind: "device", device_id: gpu.device_id, ptr: ptr, bytes: bytes, storage: [], valid: true)
     _usm_alloc("device", gpu.device_id, bytes)
 
 fn usm_malloc_host(bytes: i64) -> UsmBuffer:
