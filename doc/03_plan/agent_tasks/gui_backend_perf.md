@@ -728,3 +728,7 @@ Updated: 2026-06-11
   comma-delimited `rgb(...)` components from the original string ranges instead
   of allocating an inner substring and `split(",")` array during style
   resolution.
+- Simple Web selector tail allocation removal: base selector matching, selector
+  bucket key extraction, and specificity scoring now use absolute offsets for
+  `tag#id.class` and class-tail scans instead of allocating intermediate tail
+  strings during cascade setup and matching.
