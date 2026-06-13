@@ -48,7 +48,7 @@ This specification guards the canonical feature tracking row for the multicore-g
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/feature/usage/multicore_green_tracking_spec.spl` |
-| Updated | 2026-06-13 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -642,7 +642,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 105 lines folded for reproduction.
+Runnable source: 107 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -682,6 +682,8 @@ expect(coding).to_contain("Cross-language profile")
 expect(coding).to_contain("Pure Simple user API")
 expect(coding).to_contain("runtime-seed support")
 expect(coding).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
+expect(coding).to_contain("doc/09_report/README.md")
+expect(coding).to_contain("report_index_checked=doc/09_report/README.md")
 expect(coding).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
 expect(coding).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(coding).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")

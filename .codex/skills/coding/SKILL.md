@@ -233,7 +233,9 @@ Live pools can grow but do not claim shrink/preemption behavior yet.
 Use the canonical profile gates when changing these surfaces:
 `test/05_perf/profile_scripts/profile_report_contract_test.shs` checks OS
 thread, cooperative green, multicore green, C pthread, Go goroutine, RSS,
-GOMAXPROCS, and `used_runtime_pool()` report evidence;
+GOMAXPROCS, `used_runtime_pool()` report evidence, and in no-arg canonical mode
+the `doc/09_report/README.md` report index via
+`report_index_checked=doc/09_report/README.md`;
 `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
 checks the stale/misleading failure cases; and
 `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` checks

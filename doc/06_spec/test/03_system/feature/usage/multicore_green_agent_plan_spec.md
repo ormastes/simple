@@ -48,7 +48,7 @@ This specification keeps the multicore-green parallel-agent plan readable for fu
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` |
-| Updated | 2026-06-13 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
