@@ -1,6 +1,6 @@
 # MCP Tool-Set Selection Specification
 
-> Opt-in smaller tool-surface via SIMPLE_MCP_TOOL_SET env var or --tool-set= flag. Default is "all" (151 tools, byte-identical to pre-feature behaviour). "core" serves a smaller subset via the T1 contract function _mcp_tools_list_json_for_set.
+> Opt-in smaller tool-surface via SIMPLE_MCP_TOOL_SET env var or --tool-set= flag. Default is "auto" (core first, then upgrades to full 151 via list_changed). "core" serves a strict smaller subset via the T1 contract function _mcp_tools_list_json_for_set. "all" serves all 151 tools directly.
 
 <!-- sdn-diagram:id=mcp_tool_set_spec.arch -->
 <details class="sdn-source">
@@ -28,14 +28,14 @@ mcp_tool_set_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # MCP Tool-Set Selection Specification
 
-Opt-in smaller tool-surface via SIMPLE_MCP_TOOL_SET env var or --tool-set= flag. Default is "all" (151 tools, byte-identical to pre-feature behaviour). "core" serves a smaller subset via the T1 contract function _mcp_tools_list_json_for_set.
+Opt-in smaller tool-surface via SIMPLE_MCP_TOOL_SET env var or --tool-set= flag. Default is "auto" (core first, then upgrades to full 151 via list_changed). "core" serves a strict smaller subset via the T1 contract function _mcp_tools_list_json_for_set. "all" serves all 151 tools directly.
 
 ## At a Glance
 
@@ -53,9 +53,9 @@ Opt-in smaller tool-surface via SIMPLE_MCP_TOOL_SET env var or --tool-set= flag.
 ## Overview
 
 Opt-in smaller tool-surface via SIMPLE_MCP_TOOL_SET env var or --tool-set= flag.
-Default is "all" (151 tools, byte-identical to pre-feature behaviour).
-"core" serves a smaller subset via the T1 contract function
-_mcp_tools_list_json_for_set.
+Default is "auto" (core first, then upgrades to full 151 via list_changed).
+"core" serves a strict smaller subset via the T1 contract function
+_mcp_tools_list_json_for_set. "all" serves all 151 tools directly.
 
 ## Dispatch constraint
 
@@ -70,7 +70,7 @@ only tools/list advertisement. Dispatch remains unfiltered.
 
 ## Scenarios
 
-### MCP tool-set — default (all)
+### MCP tool-set — default (auto)
 
 #### serves 151 tools in full list
 
@@ -296,10 +296,30 @@ expect(_mcp_get_tool_set()).to_equal("all")
 
 </details>
 
-#### invalid tool-set value is ignored (stays all)
+#### --tool-set=auto switches the active set to auto
 
 -  mcp init tool set
-   - Expected: _mcp_get_tool_set() equals `all`
+   - Expected: _mcp_get_tool_set() equals `auto`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = ["--tool-set=auto"]
+_mcp_init_tool_set(args)
+expect(_mcp_get_tool_set()).to_equal("auto")
+```
+
+</details>
+
+#### invalid tool-set value falls back to auto (the default)
+
+-  mcp init tool set
+   - Expected: _mcp_get_tool_set() equals `auto`
 
 
 <details>
@@ -311,7 +331,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val args = ["--tool-set=bogus"]
 _mcp_init_tool_set(args)
-expect(_mcp_get_tool_set()).to_equal("all")
+expect(_mcp_get_tool_set()).to_equal("auto")
 ```
 
 </details>
@@ -338,8 +358,8 @@ expect(stripped[1]).to_equal("x")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

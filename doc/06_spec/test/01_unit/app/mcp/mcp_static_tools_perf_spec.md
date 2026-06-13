@@ -28,7 +28,7 @@ mcp_static_tools_perf_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 27 | 27 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -428,12 +428,93 @@ expect(count_substr(result, "{\"name\":")).to_equal(151)
 
 </details>
 
+### full-list cache
+
+#### first call returns exact length 38114
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = _mcp_static_tools_result_cached()
+expect(result.len()).to_equal(38114)
+```
+
+</details>
+
+#### first call has exactly 151 occurrences of {\
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = _mcp_static_tools_result_cached()
+val tool_count = count_substr(result, "{\"name\":")
+expect(tool_count).to_equal(151)
+```
+
+</details>
+
+#### second call returns exact length 38114 (cached path correctness)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val first = _mcp_static_tools_result_cached()
+val second = _mcp_static_tools_result_cached()
+expect(second.len()).to_equal(38114)
+```
+
+</details>
+
+#### second call equals first call (cache returns same content)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val first = _mcp_static_tools_result_cached()
+val second = _mcp_static_tools_result_cached()
+expect(second).to_equal(first)
+```
+
+</details>
+
+#### cached result equals independent _mcp_static_tools_result() output
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val cached = _mcp_static_tools_result_cached()
+val direct = _mcp_static_tools_result()
+expect(cached).to_equal(direct)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
