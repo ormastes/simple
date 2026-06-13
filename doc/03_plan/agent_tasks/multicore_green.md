@@ -331,14 +331,18 @@ Each agent reports:
 ## Current Sync Status (2026-06-13)
 
 - Latest pushed multicore-green lane sync:
-  `8bb docs: gate concurrency api in nfr`, rebased onto the later
-  `902e feat(os/arm64): genuine ELF_LOAD_OK + SMF_CLI_LAUNCH_OK load-proof + CNTVCT timer`
-  mainline before this refresh.
+  `473 docs: align coding skill api gate`, rebased onto the later
+  `f911 feat(gui): default pure simple web to auto backend` mainline before
+  this refresh.
 - The latest docs/spec slice made `test/05_perf/README.md` point at every
   active profile-script gate for this lane: the canonical profile report
   contract, negative mutation contract, binary auto-selection regression,
   Docker isolation contract, concurrency API misuse contract, and
   `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`.
+- Follow-up slices aligned the agent plan, architecture, design, and
+  `.codex/skills/coding/SKILL.md` with the same concurrency API contract gate,
+  and refreshed the architecture evidence path to
+  `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
 - The tracking SSpec and generated manual now assert that the README keeps the
   large Go fanout, Simple multicore-green runtime-pool evidence,
   `queue_model=work_stealing`, and numeric-suffix API-alias rejection visible.
