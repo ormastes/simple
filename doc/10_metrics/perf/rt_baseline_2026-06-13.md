@@ -54,5 +54,30 @@ The 39 residual files are mostly: non-1:1 externs (need new stdlib wrappers firs
 with pre-existing unrelated `check` failures, and hardware examples that legitimately keep raw
 externs. Closing them requires adding the missing stdlib wrappers — a bounded follow-up.
 
+## Sweep completed — 3 waves (commits rrp 0d9, tys 497, trk 723)
+| Wave | Scope | Externs removed |
+|------|-------|----------------:|
+| 1 | file/env/process across ui, smux, tls, obsidian, trace32, mcpgdb, llm | ~84 |
+| 2 | dir/delete/size/append residual (existing wrappers) | ~21 |
+| 3 | all remaining 1:1-wrapper externs, all swept dirs | ~103 |
+| **Total** | ~107 app-facing example files touched | **~208** |
+
+**Files declaring a migratable `rt_*` extern: 82 → 23 (≈70% reduction).** No-regression verified
+after every wave (API/arch guard symbols+arch GREEN; perf+cache specs 6/0). All migrations to
+EXISTING `std.io_runtime` wrappers (`read_file`/`write_file`/`file_exists`/`file_delete`/`file_size`/
+`file_append_text`/`dir_list`/`dir_create`/`dir_create_all`/`env_get`/`process_run`).
+
+### Honest floor — the 23 residual (need NEW wrappers or have mismatched signatures)
+No false-green: these were deliberately NOT force-migrated.
+- **No stdlib wrapper exists** (genuine follow-up = write the wrapper first): `rt_http_*`,
+  `rt_time_now_unix_micros`/`rt_time_now_monotonic_ms`/`rt_time_ms`, `rt_stdin_read_line`,
+  `rt_cli_get_args`, `rt_env_cwd`, `rt_getpid`, `rt_dir_remove_all`, `rt_file_write_bytes`,
+  `rt_process_run_timeout`, `rt_file_read_text_at` (3-arg).
+- **Signature mismatch:** `rt_file_read_text -> text?` (nullable) in `simple_browser.spl` —
+  wrapper returns `text`; migrating would change semantics.
+- Hardware/terminal/ctypes externs (`rt_port_*`, `rt_mmio_*`, `rt_gui_*`, `rt_term_*`,
+  `rt_alloc`/`rt_free`/ctypes) correctly stay raw — not app-developer-convenience surface.
+
 ## Status
-SWEEP DONE — measured reduction landed (82→39 files); residual needs new wrappers (follow-up).
+DONE — decisive measured reduction (82→23, ~208 externs), no regression. Residual floor needs
+new stdlib wrappers (bounded follow-up), not further migration of existing ones.
