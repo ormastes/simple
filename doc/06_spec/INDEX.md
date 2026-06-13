@@ -4,23 +4,24 @@
 
 ## Quick Stats
 
-- **Total Features:** 2
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 2
-- **Total Lines:** 0
-- **Warnings:** 2
+- **Total Features:** 3
+- **Complete Documentation:** 2 (66%)
+- **Stubs Remaining:** 1
+- **Total Lines:** 40
+- **Warnings:** 3
 
 ---
 
-## Standard Library (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Browser Session Simple Script Specification](test/01_unit/lib/common/web/browser_session_simple_script_spec.md) | Auto-generated | N/A | 4 | 0% | 0 lines |
+| [Chrome WebGPU Compute Evidence Parser](test/01_unit/browser_engine/chrome_webgpu_compute_evidence_spec.md) | Minimal | N/A | 6 | 20% | 19 lines |
 
-## Application (1 features)
+## Application (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
+| [Browser Chrome WebGPU Compute Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.md) | Minimal | N/A | 1 | 20% | 21 lines |
 

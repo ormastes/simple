@@ -75,3 +75,5 @@ dev-done
 - spec: Updated `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` and regenerated `doc/06_spec/test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md`; the evidence intentionally proves encoded scene upload and submission counters, not full semantic 3D rasterization.
 - docs: Updated `doc/03_plan/platform/webgpu_js_wasm_simple.md`, `doc/07_guide/lib/gpu_3d/webgpu_guide.md`, and `doc/07_guide/ui/web_render_backend.md` for the Simple3D facade and its evidence boundary.
 - review: Strongest available review found and the slice fixed the earlier Simple3D overclaim by replacing `submitted-webgpu-3d-render` with explicit scene-upload bytes/checksum evidence.
+- impl: Replaced unchecked `text/simple` numeric conversion for Simple2D/Simple3D drawing commands with validated decimal parsing and deterministic warning messages.
+- spec: Extended `test/01_unit/lib/common/web/browser_session_simple_script_spec.spl` and regenerated its manual so malformed drawing numbers report warnings instead of silently producing partial evidence.

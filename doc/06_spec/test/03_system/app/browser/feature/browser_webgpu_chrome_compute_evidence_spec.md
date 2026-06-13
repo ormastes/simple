@@ -79,7 +79,7 @@ start with `host-unavailable:` and keep output counters at zero.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -88,23 +88,30 @@ val evidence = chrome_webgpu_compute_add_u32_evidence(8)
 if evidence.ok():
     expect(evidence.status).to_equal("ok")
     expect(evidence.adapter).to_be(true)
+    expect(evidence.backend_target).to_equal("webgpu")
+    expect(evidence.source_format).to_equal("wgsl")
+    expect(evidence.binary_format).to_equal("source")
+    expect(evidence.tool_hint).to_equal("browser-webgpu-host-import")
+    expect(evidence.entry_name).to_equal("simple_webgpu_add_u32")
     expect(evidence.fallback_adapter).to_be(false)
     expect(evidence.device_configured).to_be(true)
-    expect(evidence.shader_valid).to_be(true)
+    expect(evidence.shader_module_valid).to_be(true)
     expect(evidence.pipeline_valid).to_be(true)
     expect(evidence.bind_group_valid).to_be(true)
-    expect(evidence.dispatch_count).to_equal(1)
-    expect(evidence.workgroup_count).to_equal(1)
-    expect(evidence.submitted).to_be(true)
+    expect(evidence.compute_pass_count).to_equal(1)
+    expect(evidence.dispatch_call_count).to_equal(1)
+    expect(evidence.dispatched_workgroups).to_equal(1)
+    expect(evidence.queue_submit_count).to_equal(1)
     expect(evidence.readback_valid).to_be(true)
-    expect(evidence.output_count).to_equal(8)
-    expect(evidence.output_checksum).to_equal(evidence.expected_checksum)
-    expect(evidence.output_matches).to_be(true)
+    expect(evidence.readback_byte_count).to_equal(32)
+    expect(evidence.result_checksum).to_equal(evidence.expected_checksum)
+    expect(evidence.mismatch_count).to_equal(0)
+    expect(evidence.hardware_acceleration_verified).to_be(false)
 else:
     expect(evidence.host_unavailable()).to_be(true)
     expect(evidence.status).to_start_with("host-unavailable:")
-    expect(evidence.output_count).to_equal(0)
-    expect(evidence.output_checksum).to_equal(0)
+    expect(evidence.readback_byte_count).to_equal(0)
+    expect(evidence.result_checksum).to_equal(0)
 ```
 
 </details>
