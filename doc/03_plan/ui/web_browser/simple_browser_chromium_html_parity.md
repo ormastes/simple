@@ -5,10 +5,12 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  98 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
-  existing `02_block_boxes` through `98_absolute_percent_width_right`, with `98`
+  99 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
+  existing `02_block_boxes` through `100_relative_offset_basic`, with `99`
   passes, `0` failures, and `blur_or_tolerance_used=false`. This is focused
   structural box evidence, not broad Chromium layout-engine completion.
+  Fixture number `99` is intentionally skipped in this manifest lane to avoid
+  colliding with the existing `99_policy_probe` baseline namespace.
 - `01_inline_text` is now in the all-pass manifest. The labelled fixture
   verifies direct inline child placement and inline span bounds against
   Chromium: paragraph `x=8 y=16 width=304 height=18`, span
@@ -16,6 +18,10 @@ Current state as of 2026-06-11:
 - `98_absolute_percent_width_right` is now in the all-pass manifest. The
   labelled fixture verifies absolute percentage width resolution against the
   containing block padding box: child `x=92 y=17 width=110 height=30`.
+- `100_relative_offset_basic` is now in the all-pass manifest. The labelled
+  fixture verifies `position:relative` shifts the child visual box to
+  `x=27 y=20` while preserving the following sibling's normal-flow position at
+  `x=12 y=42`.
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
   layers `10..17`, flex rows `18..26`, absolute positioning fixture `27`, and

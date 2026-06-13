@@ -3374,6 +3374,29 @@ class LayoutResult:
     intrinsic_widths: [i32]
     height: i32
 
+class PositionOffsetResult:
+    bx: [i32]
+    by: [i32]
+
+fn offset_layout_subtree(child_index: HtmlChildIndex, node_index: i32, dx: i32, dy: i32, bx: [i32], by: [i32]) -> PositionOffsetResult:
+    var out_bx = bx
+    var out_by = by
+    out_bx[node_index] = out_bx[node_index] + dx
+    out_by[node_index] = out_by[node_index] + dy
+    var child = child_index.first_child[node_index]
+    while child >= 0:
+        val shifted = offset_layout_subtree(child_index, child, dx, dy, out_bx, out_by)
+        out_bx = shifted.bx
+        out_by = shifted.by
+        child = child_index.next_sibling[child]
+    PositionOffsetResult(bx: out_bx, by: out_by)
+
+fn relative_layout_result(child_index: HtmlChildIndex, node_index: i32, st: Style, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], height: i32) -> LayoutResult:
+    if st.position_relative and (st.left_px != 0 or st.top_px != 0):
+        val shifted = offset_layout_subtree(child_index, node_index, st.left_px, st.top_px, bx, by)
+        return LayoutResult(bx: shifted.bx, by: shifted.by, bw: bw, bh: bh, wrap_starts: wrap_starts, wrap_ends: wrap_ends, intrinsic_widths: intrinsic_widths, height: height)
+    LayoutResult(bx: bx, by: by, bw: bw, bh: bh, wrap_starts: wrap_starts, wrap_ends: wrap_ends, intrinsic_widths: intrinsic_widths, height: height)
+
 class TextWrapCache:
     starts: [[i32]]
     ends: [[i32]]
@@ -3710,7 +3733,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
     if st.display == "none":
         out_bw[i] = 0
         out_bh[i] = 0
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: 0)
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, 0)
     if st.display == "contents":
         out_bw[i] = w
         var cy_contents = y
@@ -3744,7 +3767,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             cy_contents = cy_contents + prev_margin_b_contents
         val h_contents = cy_contents - y
         out_bh[i] = h_contents
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: h_contents)
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h_contents)
     val border_x = st.border_l + st.border_r
     val border_y = st.border_t + st.border_b
     val explicit_node_w = css_outer_width(node, st, st.width_px)
@@ -3781,12 +3804,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         val lines = out_wrap_starts[i].len()
         val h = lines * style_line_h(st)
         out_bh[i] = h
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: h)
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
     if node.tag == "img" or node.tag == "input":
         val explicit_node_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         val h = if st.height_px > 0: explicit_node_h else: style_line_h(st)
         out_bh[i] = h
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: h)
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
     val ix = x + st.border_l + st.pad_l
     var iw = node_w - st.pad_l - st.pad_r - border_x
     if iw < 1:
@@ -3933,7 +3956,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             if flex_h_wrap < 1:
                 flex_h_wrap = 1
             out_bh[i] = flex_h_wrap
-            return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: flex_h_wrap)
+            return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h_wrap)
         # Pre-pass: distribute the inner width across flex children. Children with an
         # explicit width (px or %) take it; the leftover space is shared by flex-grow
         # weight using left-to-right cumulative rounding so integer remainders stay
@@ -4197,7 +4220,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         if flex_h < 1:
             flex_h = 1
         out_bh[i] = flex_h
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: flex_h)
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h)
     if st.display == "flex" and st.flex_direction == "column":
         var col_nonabs_count = 0
         var col_run_h = 0
@@ -4327,7 +4350,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         if flex_h_col < 1:
             flex_h_col = 1
         out_bh[i] = flex_h_col
-        return LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: flex_h_col)
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h_col)
     var cy = y + st.border_t + st.pad_t
     var child_count = 0
     var prev_margin_b = 0
@@ -4447,7 +4470,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
     if h < 1:
         h = 1
     out_bh[i] = h
-    LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: out_wrap_starts, wrap_ends: out_wrap_ends, intrinsic_widths: out_intrinsic_widths, height: h)
+    relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
 
 fn has_visible_overflow_clip(styles: [Style]) -> bool:
     var i = 0
