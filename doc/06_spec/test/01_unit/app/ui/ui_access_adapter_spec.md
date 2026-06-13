@@ -128,10 +128,10 @@ expect(envelope.issues.len()).to_equal(0)
 
 #### registers and resolves adapter targets in the registry
 
-1. var registry = ui access adapter registry new
+- var registry = ui access adapter registry new
    - Expected: registry.entry_count() equals `0`
    - Expected: registry.has_target(target) is false
-2. registry register target
+- registry register target
    - Expected: registry.entry_count() equals `1`
    - Expected: registry.has_target(target) is true
    - Expected: registry.adapter_name_for(target) equals `ui_access_null_adapter`
@@ -177,9 +177,9 @@ expect(envelope.issues.len()).to_equal(0)
 
 #### replaces an existing registry entry for the same source and operation
 
-1. var registry = UiAccessAdapterRegistry new
-2. registry register target
-3. registry register target
+- var registry = UiAccessAdapterRegistry new
+- registry register target
+- registry register target
    - Expected: registry.entry_count() equals `1`
    - Expected: registry.adapter_name_for(target) equals `ui_access_null_adapter_v2`
    - Expected: registry.adapter_kind_for(target) equals `null`
