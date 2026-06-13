@@ -5,14 +5,17 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  97 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
-  existing `02_block_boxes` through `97_min_height_definite_parent`, with `97`
+  98 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
+  existing `02_block_boxes` through `98_absolute_percent_width_right`, with `98`
   passes, `0` failures, and `blur_or_tolerance_used=false`. This is focused
   structural box evidence, not broad Chromium layout-engine completion.
 - `01_inline_text` is now in the all-pass manifest. The labelled fixture
   verifies direct inline child placement and inline span bounds against
   Chromium: paragraph `x=8 y=16 width=304 height=18`, span
   `x=23 y=16 width=11 height=17`.
+- `98_absolute_percent_width_right` is now in the all-pass manifest. The
+  labelled fixture verifies absolute percentage width resolution against the
+  containing block padding box: child `x=92 y=17 width=110 height=30`.
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
   layers `10..17`, flex rows `18..26`, absolute positioning fixture `27`, and
