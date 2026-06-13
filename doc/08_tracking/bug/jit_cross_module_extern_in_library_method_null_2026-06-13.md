@@ -89,8 +89,23 @@ back already did so pre-guard for unrelated reasons.
 
 Remaining unregistered codegen helpers that the guard now safely defers (NOT
 chased individually — the guard handles the whole class): e.g. `rt_any_add`
-(dynamic `any + any`, e.g. `dict[k] + dict[k]`). These are pre-existing
-JIT-crash hazards now converted to correct interpreter fallback.
+(dynamic `any + any`, emitted by `mir/lower/lowering_expr_ops.rs:87` when both
+operands are statically `ANY`-typed, e.g. untyped fn params). These are
+pre-existing JIT-crash hazards now converted to correct interpreter fallback.
+
+**Why `rt_any_add` is deliberately left to the guard (do NOT ship a partial
+impl):** the runtime function was never implemented, and fully matching the
+interpreter's `BinOp::Add` on `Value` (`interpreter/expr/ops.rs:638`) is
+infeasible in a standalone leaf runtime function — that dispatch includes
+`add_scalar`/`__add__` **object-method calls** and `to_display_string`, which
+require Simple method resolution the runtime cannot perform. A primitive-only
+`rt_any_add` (int/float/string) would be **strictly worse** than the current
+state: a runtime function cannot fall back, so object operands would yield
+silently-wrong results instead of the guard's correct interpreter fallback. The
+only correct native path is to route `any + any` through the **InterpCall
+bridge** (a `mir/lower` change emitting `MirInst::InterpCall` instead of a direct
+`Call`, so the JIT defers to the interpreter for exact semantics) — a separate,
+non-trivial follow-up. Until then, the guard's fallback is the correct behavior.
 
 ## Follow-ups (Open — native codegen feature, NOT the crash)
 
