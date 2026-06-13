@@ -4,6 +4,10 @@ Feature: `simple_browser_chromium_html_parity`
 
 Current state as of 2026-06-11:
 
+- 2026-06-13 update: the live Chrome structural geometry manifest now covers
+  87 fixtures through `90_absolute_inset_stretch` with `87` passes, `0`
+  failures, and `blur_or_tolerance_used=false`. This is focused structural box
+  evidence, not broad Chromium layout-engine completion.
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
   layers `10..17`, flex rows `18..26`, absolute positioning fixture `27`, and
@@ -831,3 +835,20 @@ Open gaps tied to the active browser objective:
      `86` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
      tolerance, downscaling, copied Chromium pixels, or resolution adjustment
      was used
+- Absolute inset stretch evidence now extends the live Chrome manifest through
+  fixture 90:
+   - added `90_absolute_inset_stretch`, which compares an absolutely positioned
+     child with `left:20px`, `right:30px`, no authored width, and a definite
+     containing block
+   - `simple_web_html_layout_renderer.spl` now resolves auto-width absolute
+     children with both horizontal insets against the containing block padding
+     box, so the child width matches Chrome's `130px` structural box
+   - live Chrome headless geometry manifest evidence reports `87` fixtures,
+     `87` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
+     tolerance, downscaling, copied Chromium pixels, or resolution adjustment
+     was used
+- Parallel agent research identified two next small geometry candidates:
+  percentage margins resolved against the containing block inline size, and
+  percentage heights inside a definite-height containing block. Percentage
+  height is likely larger because parent height must flow through more layout
+  paths.
