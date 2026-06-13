@@ -5,7 +5,7 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  92 fixtures through `95_absolute_percent_height_basic` with `92` passes, `0`
+  93 fixtures through `96_absolute_percent_height_bottom` with `93` passes, `0`
   failures, and `blur_or_tolerance_used=false`. This is focused structural box
   evidence, not broad Chromium layout-engine completion.
 - The authoritative current pixel harness in this worktree is
@@ -911,6 +911,22 @@ Open gaps tied to the active browser objective:
      height calculations, using the containing block padding-box height
    - live Chrome headless geometry manifest evidence reports `92` fixtures,
      `92` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
+     tolerance, downscaling, copied Chromium pixels, or resolution adjustment
+     was used
+   - scope note: min-height-derived definiteness and broader absolute
+     containing-block variants remain separate follow-up work
+- Absolute-position percentage height bottom-position evidence now extends the
+  live Chrome manifest through fixture 96:
+   - added `96_absolute_percent_height_bottom`, an absolute-position fixture
+     where `height:50%` and `bottom:15px` depend on the same definite
+     containing block padding-box height, placing the child at `x=22`, `y=57`,
+     `height=70`
+   - no renderer code change was required beyond fixture 95; this fixture
+     verifies that `absolute_child_y`, `absolute_outer_height`, and
+     `absolute_child_styles` use the same resolved height for bottom
+     positioning and recursive layout
+   - live Chrome headless geometry manifest evidence reports `93` fixtures,
+     `93` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
      tolerance, downscaling, copied Chromium pixels, or resolution adjustment
      was used
    - scope note: min-height-derived definiteness and broader absolute

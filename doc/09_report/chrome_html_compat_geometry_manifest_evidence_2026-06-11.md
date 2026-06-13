@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 92
-- pass count: 92
+- fixtures: 93
+- pass count: 93
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -115,6 +115,7 @@ pixels, or text antialiasing normalization.
 | `93_flex_percent_height_cross_axis` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/93_flex_percent_height_cross_axis_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/93_flex_percent_height_cross_axis_structural_report.sdn` |
 | `94_flex_column_percent_height_main_axis` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/94_flex_column_percent_height_main_axis_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/94_flex_column_percent_height_main_axis_structural_report.sdn` |
 | `95_absolute_percent_height_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/95_absolute_percent_height_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/95_absolute_percent_height_basic_structural_report.sdn` |
+| `96_absolute_percent_height_bottom` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/96_absolute_percent_height_bottom_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/96_absolute_percent_height_bottom_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -216,3 +217,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `93_flex_percent_height_cross_axis` | 0 | 0.000 | `` |
 | `94_flex_column_percent_height_main_axis` | 0 | 0.000 | `` |
 | `95_absolute_percent_height_basic` | 0 | 0.000 | `` |
+| `96_absolute_percent_height_bottom` | 0 | 0.000 | `` |
