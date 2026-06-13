@@ -636,3 +636,6 @@ Updated: 2026-06-11
 - Simple Web paint clip reuse: normal-flow, negative/zero z-index, and
   positive z-index background/border painting now resolve the node clip once per
   visible node and reuse it across both draw branches.
+- Simple Web text glyph lookup allocation removal: sparse widget text and
+  scaled framebuffer text now use the existing char-code glyph lookup directly
+  in the draw loop instead of allocating a one-character substring fallback.
