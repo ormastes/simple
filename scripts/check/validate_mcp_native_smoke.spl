@@ -237,6 +237,20 @@ fn validate_tool_schema(tool: text) -> bool:
             return false
     true
 
+# Return the last payload that is a tools/list response (contains "tools":).
+# The MCP server's core-first protocol interleaves a
+# notifications/tools/list_changed frame after the core tools/list and serves
+# the full tool-set on the next tools/list, so the tools/list response is no
+# longer guaranteed to be the final frame. Scanning from the end picks the
+# full-set response when present and stays correct for single-frame LSP output.
+fn last_tools_payload(payloads: [text]) -> text:
+    var i: i64 = payloads.len() - 1
+    while i >= 0:
+        if payloads[i].contains("\"tools\":"):
+            return payloads[i]
+        i = i - 1
+    return ""
+
 fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
     val raw = file_read(path)
     val expected_frames: i64 = if prefix == "mcp": 2 else: 1
@@ -246,21 +260,17 @@ fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
     var json_valid = payloads.len() >= expected_frames and frame_count >= expected_frames
     var schema_valid = json_valid
     var tool_count: i64 = 0
-    if payloads.len() == 0:
+    val tools_frame = last_tools_payload(payloads)
+    if tools_frame == "":
         schema_valid = false
     else:
-        val last = payloads[payloads.len() - 1]
-        if not last.contains("\"tools\":"):
+        tool_count = count_occurrences(tools_frame, "\"name\":\"")
+        val schema_count = count_occurrences(tools_frame, "\"inputSchema\":")
+        if tool_count <= 0 or schema_count < tool_count or not tools_frame.contains("\"properties\":") or not tools_frame.contains("\"required\":"):
             schema_valid = false
-        else:
-            tool_count = count_occurrences(last, "\"name\":\"")
-            val schema_count = count_occurrences(last, "\"inputSchema\":")
-            if tool_count <= 0 or schema_count < tool_count or not last.contains("\"properties\":") or not last.contains("\"required\":"):
-                schema_valid = false
     var wm_text_valid = true
     if prefix == "mcp":
-        val last = if payloads.len() > 0: payloads[payloads.len() - 1] else: ""
-        wm_text_valid = last.contains("\"name\":\"play_wm_text_status\"") and last.contains("\"name\":\"play_wm_text_snapshot\"") and last.contains("\"name\":\"play_wm_text_find\"") and last.contains("\"name\":\"play_wm_text_act\"")
+        wm_text_valid = tools_frame.contains("\"name\":\"play_wm_text_status\"") and tools_frame.contains("\"name\":\"play_wm_text_snapshot\"") and tools_frame.contains("\"name\":\"play_wm_text_find\"") and tools_frame.contains("\"name\":\"play_wm_text_act\"")
     SmokeResult(json_valid: json_valid, framing_valid: framing_valid, schema_valid: schema_valid, tool_count: tool_count, wm_text_valid: wm_text_valid)
 
 fn print_result(prefix: text, result: SmokeResult):

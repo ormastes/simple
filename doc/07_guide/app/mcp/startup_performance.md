@@ -201,3 +201,24 @@ overhead per `doc/08_tracking/bug/rt_string_concat_quadratic_2026-06-12.md`),
 `core` = 0.067 s. The full-list JSON cache and one-shot list_changed
 notification combine to save the 1.4 s tools/list JSON build on warm clients
 that upgrade.
+
+### Smoke verification of the core-first protocol
+
+`scripts/check/check-mcp-native-smoke.shs` validates this two-phase behaviour
+without conflating it with the timing gate:
+
+- The **timed** run pipes `initialize` + one `tools/list` and measures only the
+  fast core handshake (`mcp_startup_ms`, gated `<= 5000 ms`).
+- A separate **untimed functional** run pipes `initialize` + **two** `tools/list`
+  calls so the server emits `notifications/tools/list_changed` and serves the
+  full set on the second call. It runs *after* both timed start runs so it never
+  perturbs the start-timing gates.
+- `scripts/check/validate_mcp_native_smoke.spl` selects the **last frame
+  containing `"tools":`** (`last_tools_payload`) rather than the final frame, so
+  the trailing `list_changed` notification does not hide the full tool list. The
+  full-set assertions (`mcp_tools_count` = 151, schema valid, `play_wm_text_*`
+  present) and the stale-stamp re-probe check all read this functional capture.
+
+A validator that assumes the tools/list response is the final frame reports
+`mcp_tools_count=0` against a core-first server even though the output is valid;
+the content-based frame selection above is the robust fix.

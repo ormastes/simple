@@ -117,6 +117,23 @@ MCP_END2_MS="$(now_ms)"
 set -e
 MCP_SECOND_START_MS=$((MCP_END2_MS - MCP_START2_MS))
 
+# Functional run (untimed, after both timed runs so it never perturbs the
+# start-timing gates): the MCP server serves a small "core" tool-set on the
+# first tools/list for a fast handshake, then emits notifications/tools/list_changed
+# and serves the full tool-set on the SECOND tools/list (cached full upgrade).
+# This drives the full-set upgrade so the validator can assert the complete tool
+# list (tool count, schema, and play_wm_text_* presence all live in the full set).
+mcp_tools_list2='{"jsonrpc":"2.0","id":"3","method":"tools/list","params":{}}'
+{
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_init}" "$mcp_init"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_initialized}" "$mcp_initialized"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_tools_list}" "$mcp_tools_list"
+    printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_tools_list2}" "$mcp_tools_list2"
+} > "$TMPDIR/mcp_func.in"
+set +e
+SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_func.jsonl" 2>> "$TMPDIR/mcp.err"
+set -e
+
 # Detect cache hit on second run
 MCP_PROBE_CACHE_HIT=false
 if [ -f "$MCP_STARTUP_LOG" ] && grep -q 'probe_cache_hit wrapper=simple_mcp_server' "$MCP_STARTUP_LOG"; then
@@ -188,7 +205,7 @@ if [ -d "${_mcp_probe_cache_dir}" ]; then
     if [ -n "${_stale_stamp}" ]; then
         printf 'corrupted_stamp_for_test\n' > "${_stale_stamp}"
         set +e
-        SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp_stale.jsonl" 2>> "$TMPDIR/mcp.err"
+        SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_stale.jsonl" 2>> "$TMPDIR/mcp.err"
         _stale_rc=$?
         set -e
         if [ "$_stale_rc" -eq 0 ] && grep -q '"play_wm_text_status"' "$TMPDIR/mcp_stale.jsonl" 2>/dev/null; then
@@ -207,7 +224,7 @@ echo "mcp_stale_stamp_reprobe_ok=$MCP_STALE_STAMP_OK"
 
 set +e
 "$SIMPLE_BINARY" run scripts/check/validate_mcp_native_smoke.spl --mode=interpreter \
-    --mcp-out "$TMPDIR/mcp.jsonl" \
+    --mcp-out "$TMPDIR/mcp_func.jsonl" \
     --lsp-out "$TMPDIR/lsp.out" \
     --rt-forward-cache "$RT_FORWARD_CACHE_FILE"
 VALIDATE_RC=$?

@@ -127,3 +127,24 @@ verify
   mcp_startup_perf_small_tasks_2026-06-12.md; guide updated (2026-06-12 section).
   Remaining: build-time literal tools/list manifest, rt string primitive perf
   (concat/char_at), mcp-package rebuild + re-measure, tool_set core|all split.
+- verify (2026-06-13): AC-5 re-measured live on the native wrapper. The landed
+  core-first tool-set state machine (commit 7dc3550: serve ~20-tool "core" set on
+  the first tools/list for a fast handshake, emit one-shot
+  notifications/tools/list_changed, serve the full 151-tool set on the next
+  tools/list) is confirmed working: core handshake mcp_startup_ms ~80 ms
+  (<< 553 ms baseline, << 5000 ms gate), full set 151 tools incl. play_wm_text_*
+  on the 2nd call. Fixed a stale-test regression this introduced:
+  check-mcp-native-smoke.shs + validate_mcp_native_smoke.spl assumed the
+  tools/list response was the FINAL frame and saw only the core set, reporting
+  mcp_tools_count=0 / schema_valid=false / wm_text_present=false / stale_reprobe=false
+  despite valid output. Fix (scripts/check/, test-infra only — no server src
+  touched): (a) validator now selects the LAST frame containing "tools:" via
+  last_tools_payload(), robust to the trailing list_changed notification;
+  (b) harness adds an untimed functional run (init + 2× tools/list) so full-set
+  assertions see the upgraded set, placed AFTER both timed start runs so it never
+  perturbs the start-timing gates; stale-stamp test uses the same 2-call input.
+  Smoke now green: count 151, schema valid, wm_text present, stale reprobe ok,
+  second-start ok (verified 3× to rule out timing flake). Deferred follow-up
+  (owner: MCP-SDK perf track): the full-set upgrade build is still ~2.5 s — off
+  the handshake critical path by design, but the full JSON builder is the next
+  rt-string-primitive perf target.
