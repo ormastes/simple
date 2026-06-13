@@ -27,8 +27,8 @@ pub struct JitCompiler {
     backend: CodegenBackend<JITModule>,
     /// Map of function names to their native function pointers
     compiled_funcs: HashMap<String, *const u8>,
-    /// Runtime symbol provider (kept alive for the lifetime of the compiler)
-    #[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
+    /// Runtime symbol provider (kept alive for the lifetime of the compiler;
+    /// also queried by `first_unresolved_import` to detect NULL-jump imports).
     provider: Arc<dyn RuntimeSymbolProvider>,
     /// Heap-backed global initialization runs once before the first JIT entry call.
     module_init_ran: AtomicBool,
@@ -86,6 +86,24 @@ impl JitCompiler {
         // Compile all functions
         let functions = self.backend.compile_all_functions(mir)?;
 
+        // Pre-finalize guard against NULL-jump crashes.
+        //
+        // cranelift-jit fills the GOT slot of an undefined `Linkage::Import`
+        // with `lookup_symbol(name).unwrap_or(std::ptr::null())`
+        // (vendor/cranelift-jit/src/backend.rs `declare_function`). An import
+        // that resolves to neither a registered runtime symbol nor a dlsym
+        // entry therefore finalizes to a NULL slot and SIGSEGVs when called.
+        // This happens for cross-module Simple method symbols (e.g.
+        // `Type_dot_new`) pulled in by a non-flattening `use` import: AOT
+        // reports these as a clean "undefined symbol" relocation error, but
+        // JIT would crash. Detect them here and fail the JIT compile so the
+        // driver's interpreter fallback runs instead (matching AOT behaviour).
+        if let Some(name) = self.first_unresolved_import() {
+            return Err(BackendError::ModuleError(format!(
+                "unresolved external symbol '{name}' would NULL-jump in JIT; deferring to interpreter"
+            )));
+        }
+
         // Finalize all functions (make them executable)
         self.backend
             .module
@@ -112,6 +130,27 @@ impl JitCompiler {
         }
 
         Ok(())
+    }
+
+    /// Return the name of a declared `Linkage::Import` function that will not
+    /// resolve to a real address at finalize time, if any.
+    ///
+    /// Mirrors cranelift-jit's own `lookup_symbol` (registered runtime symbols
+    /// plus a `dlsym(RTLD_DEFAULT)` fallback). Any import for which both miss
+    /// would be bound to a NULL GOT slot; see `compile_module`.
+    fn first_unresolved_import(&self) -> Option<String> {
+        use cranelift_module::{Linkage, Module};
+        for (_id, decl) in self.backend.module.declarations().get_functions() {
+            if decl.linkage != Linkage::Import {
+                continue;
+            }
+            if let Some(name) = decl.name.as_deref() {
+                if !jit_import_resolves(self.provider.as_ref(), name) {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Get the native function pointer for a compiled function.
@@ -205,6 +244,39 @@ fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &d
             builder.symbol(name, ptr);
         }
     }
+}
+
+/// True if a `Linkage::Import` symbol named `name` will resolve to a real
+/// address at JIT finalize time — i.e. it is a registered runtime symbol or is
+/// `dlsym`-resolvable in the current process. This is exactly the resolution
+/// cranelift-jit performs in `lookup_symbol` (registered symbols, then
+/// `lookup_with_dlsym`); an import resolving to neither is bound to a NULL GOT
+/// slot and would SIGSEGV when called.
+fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
+    if provider.get_symbol(name).is_some() {
+        return true;
+    }
+    dlsym_resolves(name)
+}
+
+#[cfg(not(windows))]
+fn dlsym_resolves(name: &str) -> bool {
+    let Ok(c_name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    // SAFETY: `dlsym(RTLD_DEFAULT, ..)` with a valid C string; this is the same
+    // call cranelift-jit's `lookup_with_dlsym` makes to resolve the symbol.
+    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr()) };
+    !sym.is_null()
+}
+
+#[cfg(windows)]
+fn dlsym_resolves(_name: &str) -> bool {
+    // Conservative on Windows: assume resolvable so the guard never forces an
+    // unnecessary interpreter fallback. The cross-module NULL-jump this guards
+    // is observed on the System V/ELF JIT path; Windows uses a different
+    // (GetProcAddress-based) resolver and is out of scope for this guard.
+    true
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
