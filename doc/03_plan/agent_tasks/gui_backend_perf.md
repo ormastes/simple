@@ -609,3 +609,6 @@ Updated: 2026-06-11
 - Simple Web flex order allocation tightening: `flex_ordered_children` now
   collects children into an exact-size array and stable-sorts in place instead
   of rebuilding a replacement array for every ordered insertion.
+- Simple Web ordered flex loop length hoisting: non-wrapping flex layout now
+  reuses the ordered child count across sizing, baseline, and placement passes
+  instead of asking the ordered child array for its length in every loop test.
