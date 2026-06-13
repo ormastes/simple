@@ -8,7 +8,7 @@
   - validates reports are Markdown files under `doc/09_report`
   - validates methodology, environment, reproducibility, limitations, profile script, and report path fields
   - validates cross-language report sections for startup, warm throughput, OS-thread parallel work, large fanout, artifact footprint, RSS, and TUI startup scope
-  - validates cross-language concurrency evidence for Simple OS threads, Simple cooperative green, Simple multicore green, C pthreads, Go goroutines, `used_runtime_pool()`, and inline-fallback classification
+  - validates cross-language concurrency evidence for Simple OS threads, Simple cooperative green current-OS-thread rows, Simple multicore green, C pthreads, Go goroutines, `used_runtime_pool()`, and inline-fallback classification
   - validates GUI report sections for backend results, resolution, and TUI startup scope
 
 ## Wrapper Evidence

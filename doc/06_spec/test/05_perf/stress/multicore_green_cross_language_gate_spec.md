@@ -117,8 +117,8 @@ Failed: 0
   checked-in report.
 - `thread_spawn_with_args` must remain covered by the focused native smoke, not
   by the scheduler/fanout profile row.
-- Cooperative green rows must stay labeled as current-carrier cooperative queue
-  work.
+- Cooperative green rows must stay labeled as current-carrier/current OS thread
+  cooperative queue work.
 - Cooperative green rows must not be described as Go-style M:N CPU parallelism.
 - Multicore green rows must contain `parallelism=` evidence.
 - Multicore green rows must contain `pool_used=` evidence before being used as
@@ -180,7 +180,7 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -208,6 +208,7 @@ step("Verify multicore-green stays inside the current worker-shape smoke thresho
 expect(multicore).to_be_less_than(native_baseline * 20 + 1)
 step("Verify concurrency model labels preserve semantic distinctions")
 expect(model_text(row_for_label(parallel, "Simple cooperative green (native)"))).to_contain("cooperative")
+expect(model_text(row_for_label(parallel, "Simple cooperative green (native)"))).to_contain("current OS thread")
 expect(model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("pool_used=")).to_equal(-1)
 expect(model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("parallelism=")).to_equal(-1)
 expect(model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("M:N")).to_equal(-1)
@@ -241,7 +242,7 @@ expect(report).to_contain("used_runtime_pool()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -271,6 +272,7 @@ step("Verify fanout model labels are explicit")
 expect(model_text(row_for_label(fanout, "C (pthreads)"))).to_contain("one OS thread per tiny task")
 expect(model_text(row_for_label(fanout, "Go"))).to_contain("goroutine per tiny task + channel")
 expect(model_text(row_for_label(fanout, "Simple cooperative green (native)"))).to_contain("cooperative queue fanout")
+expect(model_text(row_for_label(fanout, "Simple cooperative green (native)"))).to_contain("current OS thread")
 expect(model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("pool_used=")).to_equal(-1)
 expect(model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("parallelism=")).to_equal(-1)
 expect(model_text(row_for_label(fanout, "Simple cooperative green (native)")).find("M:N")).to_equal(-1)
