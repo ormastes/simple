@@ -660,3 +660,6 @@ Updated: 2026-06-11
 - Simple Web dead CSS helper removal: removed the unused `flatten_at_blocks`
   helper whose unresolved local symbols forced renderer module JIT lowering to
   fall back to the interpreter during focused startup/layout tests.
+- Simple Web parser substring removal: HTML comment detection now uses
+  `text_matches_at` and self-closing tag detection uses `char_at`, avoiding
+  small substring allocations in the startup parse/count passes.
