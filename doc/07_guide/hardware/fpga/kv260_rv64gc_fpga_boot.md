@@ -356,7 +356,45 @@ No merged USB channel has been proven to provide PL UART access for this generat
 | xsdb can't read PL | PS↔PL AXI disabled | Clock-only PS; no debug path from A53 to NaxRiscv bus |
 | LUT utilization >100% | RV64GC too large for K26 | Disable M-ext/A-ext or use multi-cycle datapath |
 
-## 8. DE10-Nano (Cyclone V) Notes
+## 8. Telnet-over-Serial System Test
+
+A serial console (FPGA PL UART, or a SimpleOS/RISC-V boot console) can be
+exposed as a telnet server so system tests drive it with any telnet client.
+The bridge lives at `std.nogc_sync_mut.io.telnet_serial_bridge`
+(spec: `src/lib/nogc_sync_mut/io/test/telnet_serial_bridge_spec.spl`, 10/10;
+mirror: `doc/06_spec/test/telnet_serial_bridge_spec.md`). It relays a serial
+capture file ⇄ TCP with full RFC 854 IAC negotiation.
+
+```
+serial device --dd--> rx capture file --> bridge --RFC 854--> telnet client
+serial device <------- append writes <--- bridge <----------- telnet client
+```
+
+Two ready-made harnesses:
+
+| Test | What it proves | Status |
+|------|----------------|--------|
+| `scripts/fpga/check_kv260_telnet_serial_system.shs` | Bridge **transport** on physical KV260 (synthetic marker injected over JTAG into PS UART1) | PASS — transport only |
+| `scripts/qemu/check_simpleos_riscv_telnet_serial.shs` | **Real SimpleOS/RISC-V** boot: SimpleOS RV64 on `qemu-system-riscv64` (OpenSBI), kernel console relayed through the bridge, telnet client observes `SimpleOS RV64` | PASS — genuine OS output |
+
+**Physical softcore is not yet observable over telnet-serial on this bitstream.**
+The loaded `xilinx_kv260.v` (LiteX BaseSoC + NaxRiscv) top module exposes only
+`serial_rx`/`serial_tx` (→ PMOD H12/E10): no PS→PL AXI bridge, no JTAG-AXI, no
+RISC-V JTAG debug module (matches the "xsdb can't read PL" troubleshooting row).
+To bring a real SimpleOS/RISC-V console over telnet-serial on silicon, either
+wire a 3.3V adapter to PMOD J2 (Section 6.2) and point `SERIAL_PORT` at it, or
+resynthesize per the unblock options in
+`doc/08_tracking/bug/kv260_naxriscv_bitstream_no_jtag_observability.md`
+(A: UART → merged-USB channel; B: PS-HPM→wishbone bridge; C: JTAG debug module).
+
+Interpreter caveats the bridge works around (see the bug doc
+`interpreter_serial_net_sffi_dispatch_gap.md`): the interpreter has no
+`rt_serial_*` dispatch, so the serial side is file-based; accepted-socket read
+timeouts fire instantly, so idle is paced by wall clock; run the bridge via the
+seed binary (`bin/release/.../simple_seed`), not stage4 `bin/simple`, for live
+stdout markers.
+
+## 9. DE10-Nano (Cyclone V) Notes
 
 **Status: Deferred** — Quartus not installed.
 

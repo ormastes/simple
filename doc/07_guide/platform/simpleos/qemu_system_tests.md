@@ -45,6 +45,20 @@ Serial output must contain ALL of these to qualify as a pass:
 
 See `src/os/fs_exec_fallback_contract.spl` for the full fallback contract.
 
+## Telnet-over-Serial Observation
+
+A system test can observe the guest console over a telnet socket instead of
+reading the serial file directly, exercising the same path a real board would
+use. `scripts/qemu/check_simpleos_riscv_telnet_serial.shs` boots SimpleOS RV64
+on `qemu-system-riscv64 -machine virt` (OpenSBI) with `-serial file:$rx`, then
+the telnet-over-serial bridge (`std.nogc_sync_mut.io.telnet_serial_bridge`)
+relays `$rx` to a TCP telnet port where a telnet client waits for a real kernel
+marker (`SimpleOS RV64`). The QEMU `-serial file:` output *is* the bridge's
+read path — no glue needed. This is the emulation counterpart of the physical
+KV260 path in `doc/07_guide/hardware/fpga/kv260_rv64gc_fpga_boot.md` (Section 8);
+point `QEMU_RX`/`SERIAL_PORT` at a real tty to validate silicon with the same
+harness.
+
 ## Known Blockers
 
 The `/bin/simple os` subcommands (e.g., `bin/simple os test`) are currently broken per `doc/08_tracking/bug/interp_simpleos_lane_contract_crash_2026-06-13.md`. System tests therefore boot `qemu-system-*` directly rather than through the compiler tool.
