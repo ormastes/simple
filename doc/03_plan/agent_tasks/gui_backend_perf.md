@@ -639,3 +639,7 @@ Updated: 2026-06-11
 - Simple Web text glyph lookup allocation removal: sparse widget text and
   scaled framebuffer text now use the existing char-code glyph lookup directly
   in the draw loop instead of allocating a one-character substring fallback.
+- Browser/Simple Web backend alias convergence: UI browser and Simple Web
+  renderer backend normalization now use the shared Engine2D canonicalizer so
+  valid native aliases such as `dx11` preserve the `directx` lane before the
+  shared resolver runs.
