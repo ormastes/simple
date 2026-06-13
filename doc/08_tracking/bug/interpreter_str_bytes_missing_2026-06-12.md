@@ -2,8 +2,35 @@
 
 **ID:** interpreter_str_bytes_missing_2026-06-12
 **Severity:** P2
-**Status:** open (workaround in place)
+**Status:** FIXED 2026-06-13 (JIT/AOT `.bytes()`/`.chars()` added). Original
+interpreter symptom no longer reproduces (interpreter already handles `bytes`).
 **Date:** 2026-06-12
+
+## Fix landed (2026-06-13)
+
+The doc was stale/inverted: the interpreter ALREADY handles `bytes`
+(`interpreter_method/string.rs:28`) and prints correctly. The live gap was the
+**JIT/native** path — `.bytes()` (and `.chars()`) were not mapped, so compiled
+code hit `Runtime error: Function 'str.bytes' not found`. Added runtime fns
+`rt_string_bytes` / `rt_string_chars` (`runtime/src/value/collections.rs`,
+modeled on `rt_string_split`) returning an int-array / string-array, and wired
+them at the same sites `rt_string_split` uses: `runtime/src/value/mod.rs`
+re-export, `codegen/runtime_sffi.rs` RuntimeFuncSpec, `common/runtime_symbols.rs`
+RUNTIME_SYMBOL_NAMES, the cranelift method maps (`codegen/instr/calls.rs`,
+`closures_structs.rs`), and `method_registry/builtins.rs`. Verified in
+JIT/AOT/interp: `"Hi".bytes()` → `[72, 105]`, `"Hi".chars()` → `["H","i"]`;
+base_encoding specs 21/1 unchanged (1 pre-existing failure, identical on the
+pre-fix seed). LLVM-backend method maps are a sibling parity follow-up (default
+path is cranelift).
+
+**Note — a SEPARATE bug surfaced via base64:** `base64_encode` still returns
+empty in JIT, but NOT because of `.bytes()` (that now works). Root cause:
+**module-level `val` *string* constants read empty/garbage in JIT** — minimal
+repro `val T: text = "ABCDEF"` then `T.char_at(0)` → empty, `T.length()` → -1 in
+JIT (interpreter gives `A`/`6`). Integer module consts work; only `text` consts
+fail. This is the `stage4_imported_const_compare` / `baremetal_module_val_zero`
+family (cranelift global-init for non-scalar module consts) — tracked there, not
+here.
 
 ## Symptom
 
