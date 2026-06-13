@@ -170,3 +170,34 @@ Startup gates (5000 ms in `check-mcp-native-smoke.shs`) bound *startup*, never
 add read timeouts to transport reads, and never route script startup through
 compile/JIT as a workaround for a slow fast path — fix the fast path or file
 a bug.
+
+## 2026-06-13 — core-default + dynload upgrade
+
+The tools list now defaults to an `auto` mode that cuts handshake time by
+erasing the tools/list JSON build from the critical path. The initialize
+response declares `"tools":{"listChanged":true}`, then the first tools/list
+serves only the 20-tool core set (~0.07 s), and the server emits a single
+`notifications/tools/list_changed` once that notification is flushed.
+Clients respecting the notification upgrade to the full 151-tool list on
+the next tools/list call, which now returns a cached result (built once per
+process in `main_static_tools.spl`).
+
+Three tool-set modes are choosable via `--tool-set=` flag or env
+`SIMPLE_MCP_TOOL_SET` (note: env path currently broken in the native binary;
+see `doc/08_tracking/bug/native_env_get_raw_pointer_2026-06-12.md`):
+
+| Mode | First tools/list | Behavior | Use case |
+|------|------------------|----------|----------|
+| `auto` (default) | core 20 tools | upgrades to full 151 after emit list_changed | MCP clients that handle dynamic list updates |
+| `all` | full 151 tools | static; no list_changed | simplifies client stubs, pays full JSON cost upfront |
+| `core` | core 20 tools | never upgrades | minimal surface, e.g., lightweight embedded clients |
+
+Dispatch remains unfiltered: all 151 tools stay callable by name in every
+mode, so stale clients are still safe. Invalid set values default to `auto`.
+
+Measured on 2026-06-13 (`build/bootstrap/mcp-package/simple_mcp_server`):
+`auto` = 0.067 s handshake, `all` = 1.504 s (dominated by native rt-call
+overhead per `doc/08_tracking/bug/rt_string_concat_quadratic_2026-06-12.md`),
+`core` = 0.067 s. The full-list JSON cache and one-shot list_changed
+notification combine to save the 1.4 s tools/list JSON build on warm clients
+that upgrade.
