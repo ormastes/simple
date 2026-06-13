@@ -76,14 +76,22 @@ fn ws_read_exact(stream: TcpStream, n: i64) -> [u8]:
     """Read exactly n bytes via read() (not peek). Returns [] on EOF/error.
     Peek-based reads break subsequent writes in the interpreter, so the WS
     frame reader must use read()."""
-    var buf: [u8] = []
-    while (buf.len() as i64) < n:
-        val remaining = n - (buf.len() as i64)
+    if n <= 0:
+        return []
+    var buf: [u8] = [0u8; n]
+    var filled = 0
+    while filled < n:
+        val remaining = n - filled
         match stream.read(remaining):
             Ok(chunk):
-                if chunk.len() == 0:
+                val chunk_len = chunk.len()
+                if chunk_len == 0:
                     return []
-                buf = buf + chunk
+                var chunk_idx = 0
+                while chunk_idx < chunk_len:
+                    buf[filled + chunk_idx] = chunk[chunk_idx]
+                    chunk_idx = chunk_idx + 1
+                filled = filled + chunk_len
             Err(_):
                 return []
     return buf
@@ -121,11 +129,12 @@ fn ws_read_text_frame(stream: TcpStream) -> text?:
     if plen == 0:
         return ""
     var payload = ws_read_exact(stream, plen)
-    if payload.len() < plen:
+    val payload_len = payload.len()
+    if payload_len < plen:
         return nil
     if masked:
         var i = 0
-        while i < payload.len():
+        while i < payload_len:
             payload[i] = payload[i] ^ maskkey[i % 4]
             i = i + 1
     return rt_bytes_to_text(payload)
@@ -231,10 +240,11 @@ class WebServer:
             var end = off + 8192
             if end > total:
                 end = total
-            var chunk: [u8] = []
+            val chunk_len = end - off
+            var chunk: [u8] = [0u8; chunk_len]
             var j = off
             while j < end:
-                chunk.push(bytes[j])
+                chunk[j - off] = bytes[j]
                 j = j + 1
             match stream.write_all(chunk):
                 Err(_):
@@ -275,12 +285,13 @@ class WebServer:
         val sep = raw.index_of("\r\n\r\n")
         val head = if sep >= 0: raw[0:sep] else: raw
         val head_lines = head.split("\r\n")
-        val request_line = if head_lines.len() > 0: head_lines[0] else: ""
+        val head_line_count = head_lines.len()
+        val request_line = if head_line_count > 0: head_lines[0] else: ""
         val request = parse_request_line(request_line)
         var headers = ""
         var is_ws = false
         var hi = 1
-        while hi < head_lines.len():
+        while hi < head_line_count:
             val header_line = head_lines[hi]
             headers = "{headers}{header_line}\n"
             if header_line.contains("Upgrade: websocket"):

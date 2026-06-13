@@ -476,6 +476,10 @@ Updated: 2026-06-11
   Websocket route payload unmasking now writes into an exact-size byte buffer
   and uses direct four-byte mask slots instead of per-byte mask scans and
   push-growth; JSON helper scans also reuse stable text lengths.
+- this commit -- UI web server response/frame buffer tightening:
+  WebServer websocket exact reads and HTTP response chunk writes now fill
+  pre-sized byte buffers by index, and stable websocket/header lengths are
+  reused inside the startup request and frame loops.
 
 ## Current remaining work
 
