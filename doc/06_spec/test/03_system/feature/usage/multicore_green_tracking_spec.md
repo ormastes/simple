@@ -356,7 +356,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 86 lines folded for reproduction.
+Runnable source: 89 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -424,6 +424,7 @@ expect(row).to_contain("simple_multicore_parallelism_missing")
 expect(row).to_contain("hosted_sliced_fairness_section_missing")
 expect(row).to_contain("hosted_sliced_fairness_marker_corrupt")
 expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
+expect(row).to_contain("pure_simple_runtime_seed_boundary_corrupt")
 expect(row).to_contain("cooperative_green_explanation_corrupt")
 expect(row).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(row).to_contain("cooperative_green_profile_row_missing")
@@ -435,6 +436,8 @@ expect(row).to_contain("forbidden_number_suffix_api_name")
 step("Verify the system-test plan describes cooperative-green and OS-thread negative profile cases")
 val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 expect(system_plan).to_contain("cooperative-green explanation")
+expect(system_plan).to_contain("pure_simple_runtime_seed_boundary_corrupt")
+expect(system_plan).to_contain("Pure-Simple-boundary")
 expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(system_plan).to_contain("cooperative_green_profile_row_missing")
 expect(system_plan).to_contain("simple_multicore_pool_used_zero")
@@ -592,6 +595,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 - Read the public guide and profile guide
 - Verify cooperative green remains documented as single-carrier work
 - Verify hosted M:N claims require runtime-pool and scheduler-width evidence
+- Verify Pure Simple facade wording stays separate from runtime seed support
 - Verify stale release-wrapper guidance stays visible
 - Verify forbidden numbered API-name scans cover the public concurrency family
 
@@ -599,7 +603,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -627,6 +631,10 @@ expect(perf).to_contain("GOMAXPROCS=$CPU_WORKERS")
 expect(perf).to_contain("contract-gated reports must keep")
 expect(coding).to_contain("assert `used_runtime_pool()`")
 expect(coding).to_contain("Cross-language profile")
+
+step("Verify Pure Simple facade wording stays separate from runtime seed support")
+expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn` facade over runtime-seed")
+expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row")
 
 step("Verify stale release-wrapper guidance stays visible")
 expect(perf).to_contain("skips a stale release wrapper")
