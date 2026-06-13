@@ -139,3 +139,14 @@
   future agents cannot use `bin/release/simple` as authoritative
   multicore-green native evidence unless its platform delegate exists and
   passes `--version`.
+- The later 2026-06-13 cross-language profile gate hardening requires
+  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` and the
+  generated manual to assert that every checked-in cooperative-green worker and
+  fanout row says `current OS thread`, while still rejecting `pool_used=`,
+  `parallelism=`, and `M:N` wording for that API.
+- The later 2026-06-13 SimpleOS QEMU guard hardening requires
+  `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl` and the
+  generated manual to prove the scheduler-only live lane does not print
+  `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
+  `USER_SYSCALL_PASS=true`; those final markers remain exclusive to the
+  `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` lane.
