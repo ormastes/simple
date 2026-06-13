@@ -618,3 +618,6 @@ Updated: 2026-06-11
 - Simple Web scroll crop loop tightening: scroll viewport cropping now advances
   source and destination row bases incrementally and removes the per-row bounds
   branch that is implied by `virtual_h = height + clamp_scroll`.
+- Simple Web Draw IR first-visible scan removal: Draw IR command collection now
+  records the first visible node during the count pass instead of scanning the
+  node list a second time before filling the exact-size command array.
