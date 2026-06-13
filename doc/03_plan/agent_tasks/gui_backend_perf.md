@@ -653,3 +653,7 @@ Updated: 2026-06-11
   `decl_last_pos` now scan declaration blocks by original-string positions
   instead of allocating tail/raw substrings for every property lookup during
   startup style resolution.
+- Simple Web CSS variable replacement guard: `_css_resolve_vars` now stops once
+  no `var(` tokens remain and skips full-buffer replacement for unused root
+  custom properties; style computation also avoids a duplicate candidate-count
+  length read.
