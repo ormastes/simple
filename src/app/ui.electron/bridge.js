@@ -568,7 +568,7 @@ function maybeWriteMdiProof(win) {
                             bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
                         }
 
-                        var appInput = body.querySelector('input[data-target-id], textarea[data-target-id], select[data-target-id], [contenteditable][data-target-id]');
+                        var appInput = body.querySelector('input[data-target-id]:not([data-simple-titlebar-widget]), textarea[data-target-id]:not([data-simple-titlebar-widget]), select[data-target-id]:not([data-simple-titlebar-widget]), [contenteditable][data-target-id]:not([data-simple-titlebar-widget])');
                         appInputControlFound = !!appInput;
                         if (appInput) {
                             var targetId = appInput.getAttribute('data-target-id') || appInput.id || '';
