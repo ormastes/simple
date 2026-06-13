@@ -736,3 +736,7 @@ Updated: 2026-06-11
   vector-font, bitmap-font, glyph raster/blit, and generic font offload
   operations as processing-lane work so preferred font offload backends are not
   hidden behind the combined fallback lane.
+- Pure Simple web renderer auto default: `SimpleWebRenderer.create(...)` and
+  the `simple_web_render_html_to_pixels(...)` facade now use the Engine2D
+  `auto` backend path so generic layout rendering follows the native-first
+  order before CPU fallbacks while explicit `software` remains available.

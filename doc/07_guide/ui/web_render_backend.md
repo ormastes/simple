@@ -20,7 +20,7 @@ val opened = r.show_live_window(html_path)             # true for chromium (live
 
 | backend | display | nature |
 |---------|---------|--------|
-| `pure_simple` | software raster frame in a winit window | Simple's HTML layout → Engine2D `cpu_simd`. No browser. |
+| `pure_simple` | Engine2D raster frame in a winit window | Simple's HTML layout → Engine2D `auto` (Metal, CUDA/HIP, Vulkan, then CPU fallbacks). No browser. |
 | `chromium` | **live, interactive** Electron `BrowserWindow` | real Chromium renders the live DOM. |
 
 `render_html_to_pixels` produces a comparable buffer from **both** engines — this
@@ -41,7 +41,7 @@ non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a 
 ## Running the sample (macOS)
 
 ```bash
-# pure-Simple raster window (software renderer)
+# pure-Simple raster window (Engine2D auto backend; explicit software remains available)
 scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_backend_gui.spl pure_simple 384x288
 # live Chromium window (real DOM, interactive) — viewport arg sets CSS width
 scripts/gui/macos-gui-run.shs examples/06_io/ui/web_render_backend_gui.spl chromium 1280x960
