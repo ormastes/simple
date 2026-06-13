@@ -673,3 +673,6 @@ Updated: 2026-06-11
 - Simple Web selector scanner substring removal: pseudo-list, `:has`, selector
   group splitting, child-combinator normalization, and selector tokenization
   loops now use `char_at` instead of allocating one-character substrings.
+- Simple Web color parser substring removal: direct `#rgb`, `#rrggbb`, and
+  `rgb(...)` prefix parsing now uses `char_at`/`text_matches_at` instead of
+  allocating tiny substrings during CSS color resolution.
