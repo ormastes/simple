@@ -627,3 +627,6 @@ Updated: 2026-06-11
 - Simple Web positive-z paint visibility hoisting: positive z-index painting now
   reuses per-node visible-box and widget-mode booleans across background,
   border, panel, and button branches.
+- Simple Web final text metric deferral: the final text paint pass now computes
+  glyph scale, advance, and ink offsets only in the non-widget branch that uses
+  them, avoiding unused metric work for widget text and Chrome text overlays.
