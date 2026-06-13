@@ -698,12 +698,26 @@ RuntimeValue rt_for_iterable(RuntimeValue collection)
     return collection;
 }
 
-/* --- process / time stubs --- */
+/* --- process / time --- */
+/* Single-process boot path: the fs-exec entry runs as the sole kernel-origin
+ * task, so pid 1 is the honest current pid here. */
 RuntimeValue rt_getpid(void) { return ENCODE_INT(1); }
-/* No arm64 generic timer is wired into this boot path yet, so report 0.
- * LOW-CONFIDENCE placeholder: replace with CNTVCT_EL0-based microseconds
- * once a timer is initialized. */
-RuntimeValue rt_time_now_unix_micros(void) { return ENCODE_INT(0); }
+/* Microseconds from the ARM generic timer (CNTVCT_EL0 / CNTFRQ_EL0). CNTVCT is
+ * confirmed readable in this boot path (see rt_arm64_harden_canary_value). No
+ * RTC is wired on this baremetal target, so this is monotonic uptime-since-boot,
+ * not a Unix epoch — the honest best available without an RTC. The split
+ * quotient/remainder scaling avoids u64 overflow on (cntvct * 1e6). */
+RuntimeValue rt_time_now_unix_micros(void)
+{
+    uint64_t cntvct = 0;
+    uint64_t cntfrq = 0;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cntvct));
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+    if (cntfrq == 0) return ENCODE_INT(0);
+    uint64_t micros = (cntvct / cntfrq) * 1000000ULL
+                    + ((cntvct % cntfrq) * 1000000ULL) / cntfrq;
+    return ENCODE_INT((int64_t)(micros & 0x7FFFFFFFFFFFFFFFULL));
+}
 
 /* --- value-as-int (from x86_64 rt_extras.c) --- */
 RuntimeValue rt_value_as_int(RuntimeValue v)

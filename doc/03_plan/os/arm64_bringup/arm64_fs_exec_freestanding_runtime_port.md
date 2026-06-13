@@ -72,7 +72,7 @@ re-implemented over arm64 virtio-mmio-blk (cf. riscv64's `virtio_blk_init/read_s
 - **Slice 2 DONE + pushed** (origin tip `9ca41bea285`): 24 portable runtime helpers in arm64
   `baremetal_stubs.c`. 35 → 11. `rt_for_iterable` found = identity passthrough
   (`src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`). `rt_hash_text` authored (FNV-1a;
-  x86 was a no-op stub). `rt_getpid`→1, `rt_time_now_unix_micros`→0 (no arm64 CNTVCT wired — TODO).
+  x86 was a no-op stub). `rt_getpid`→1, `rt_time_now_unix_micros`→0 (CNTVCT wired in Phase 1 below).
 - **Remaining 11:** `simpleos_nvme_init/read_sector/write_sector`, `simpleos_fat32_read_path[_array/_size]`,
   `simpleos_fat32_path_read_buffer_addr` (Class B), `services__vfs__vfs_{boot_init,init,write_ops}__NvfsHostedDriver`,
   `VIRTQUEUE_SIZE_dot_to_u32` (Class C).
@@ -86,6 +86,48 @@ written RAW (matching x86_64 `rt_extras.c`), but x86 never exercises MMIO serial
 so that's untested — on arm64 the addr/value args may actually arrive TAGGED like every other
 helper. **If Slice-5 boot produces ZERO serial, flip rt_volatile_*/barriers to DECODE_INT(addr)/
 DECODE_INT(val)** (one-line each in baremetal_stubs.c) — that is the prime suspect. Boot is the oracle.
+
+## EXECUTION PHASE (2026-06-13) — what "actual execution" actually costs
+
+After the lane went green at spawn scope, the user asked to implement actual process
+execution. Investigation of the working reference lanes settled what the markers mean
+repo-wide:
+- **riscv64 `ELF_LOAD_OK`/`SMF_CLI_LAUNCH_OK` are a genuine LOAD, not execution.**
+  `rt_riscv_smf_cli_load` → `riscv_load_smf_process` → `riscv_load_elf_process`
+  (`riscv64/boot/baremetal_stubs.c:993`) validates ELF magic/class/machine, parses
+  entry+phdrs, copies PT_LOAD into a process arena, requires entry-in-segment, checks a
+  marker string, records `entry`+`pid`. It never `eret`s into the image.
+- **arm64's loader is comparably genuine (and stronger).** `rt_arm_elf64_entry`/
+  `rt_arm_elf64_pt_load_*` read real header fields; the scheduler additionally stages
+  PT_LOAD to phys (`rt_arm_stage_elf64_load_image`) and maps them into a user AS with W^X
+  (`rt_arm64_user_as_map_elf64`), verifying entry translation (`[scheduler-arm] mapped-entry=`).
+- **DECISIVE: the on-disk `hello_world.smf` is a MARKER-ELF, not a runnable program.**
+  273-byte SMF → 145-byte ELF; its single PT_LOAD maps the whole file at vaddr 0x1000 and
+  `e_entry=0x1000` points AT the ELF header (`0x1000: 0x464c457f` = the `\x7fELF` magic). No
+  `svc` anywhere; the tail is just `SIMPLEOS_ARM64_HELLO_ELF`. `eret`ing to it would execute
+  the header as a bogus instruction and fault. **True EL0 usercode execution is unimplemented
+  on ALL arches** — every lane is load+launch-proof against synthetic marker-ELFs.
+- arm64 UNIQUELY already has the rest of a real EL0 path: `arm64_enter_user_virtual` does a
+  real `eret` (msr sp_el0/elr_el1/spsr_el1), `rt_arm64_handle_user_svc` is the EL0 exit
+  syscall (crt0.S vbar_el1 → EC=0x15 → handler prints `user-svc-exit:ok` + `TEST PASSED`),
+  and the scheduler records the handoff. The ONE missing wire is `rt_arm64_enter_recorded_user_live()`
+  (the actual eret), left gated in `user_entry.spl` ("live `eret` remains gated on the ARM64
+  exception/syscall runtime" — now stale: the runtime exists).
+
+### Phase 1 DONE (load+launch-proof parity + timer; honest, committable)
+- `FsExecPrepareResult` gains `entry: i64` (real `user_process_image_entry`); arm64 entry emits
+  genuine `ELF_LOAD_OK arch=aarch64 ... entry=` + `SMF_CLI_LAUNCH_OK ... pid=` from real parse+pid
+  (`arm64_fs_exec_load_and_launch_hello_world`).
+- `arm64_markers()` adds both; comments state this is load+launch proof, NOT EL0 execution.
+- `rt_time_now_unix_micros` now reads CNTVCT_EL0/CNTFRQ_EL0 (monotonic uptime µs; no RTC →
+  not epoch). `rt_getpid`→1 documented honest for the single-process boot.
+
+### Phase 2 (in progress): genuine EL0 execution (arm64-only)
+Author a real minimal arm64 user payload (`mov x0,#0; svc #0`) wrapped as SMF with the loader
+marker, inject into the FAT32 image, wire `rt_arm64_enter_recorded_user_live()` into the entry →
+CPU `eret`s to EL0, runs real code, `svc #0` traps to `rt_arm64_handle_user_svc` → `user-svc-exit:ok`
++ `TEST PASSED`. First genuine EL0 usercode execution in SimpleOS. If the eret bring-up hits an
+intractable wall, Phase 1 still ships.
 
 ## Verification protocol (per advisor)
 - Build via the PROPER path (no `SIMPLE_ALLOW_FREESTANDING_STUBS`) so the link fails loudly;
