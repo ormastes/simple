@@ -1,0 +1,222 @@
+"""GPU Queue / Event / Task Graph (NoGC) — SYCL-parity async model.
+
+Wave 1 (W1.1/W1.3/W1.4) of
+doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026-06-13.md
+
+CPU-deterministic core: on backends without an async runtime binding the
+queue executes submissions synchronously in dependency order, so every
+spec runs without GPU hardware. The API is fixed here so code written
+against GpuQueue does not change when native stream bindings land.
+
+TODO(W1.1-cuda): bind GpuQueue to CudaStream/CudaEvent when backend is
+GpuBackend.Cuda so submissions overlap on hardware.
+"""
+
+use std.common.gpu.device.{Gpu, GpuBackend}
+
+# ============================================================================
+# GpuEvent
+# ============================================================================
+
+class GpuEvent:
+    """Completion marker for a queue submission (SYCL event equivalent)."""
+    id: i64
+    queue_id: i64
+    complete: bool
+
+    fn is_complete() -> bool:
+        self.complete
+
+# ============================================================================
+# Launch shape — descriptive range → prescriptive grid/block
+# ============================================================================
+
+class LaunchShape:
+    """Grid/block decomposition for a 1D range launch."""
+    grid: i64
+    block: i64
+    needs_tail_guard: bool
+
+    fn covers(n: i64) -> bool:
+        self.grid * self.block >= n
+
+fn launch_shape(n: i64, block_size: i64) -> LaunchShape:
+    """Compute grid/block for n work-items with the given block size.
+
+    needs_tail_guard is true when grid*block overshoots n, i.e. the kernel
+    body must keep an `if idx < n` guard (descriptive launches inject it).
+    """
+    if n <= 0 or block_size <= 0:
+        return LaunchShape(grid: 0, block: 0, needs_tail_guard: false)
+    val grid = (n + block_size - 1) / block_size
+    val exact = grid * block_size == n
+    LaunchShape(grid: grid, block: block_size, needs_tail_guard: not exact)
+
+fn default_launch_shape(n: i64) -> LaunchShape:
+    """Launch shape with the default block size of 256."""
+    launch_shape(n, 256)
+
+# ============================================================================
+# GpuQueue
+# ============================================================================
+
+class GpuQueue:
+    """Ordered submission queue bound to one device (SYCL queue equivalent).
+
+    in_order queues guarantee submission order; out-of-order queues only
+    honor explicit submit_after dependencies. On the CPU-deterministic
+    path both execute synchronously, which trivially satisfies either
+    contract while keeping results bit-identical run to run.
+    """
+    device: Gpu
+    id: i64
+    in_order: bool
+    next_event_id: i64
+    submitted: i64
+    completed: i64
+
+    static fn create(device: Gpu) -> GpuQueue:
+        GpuQueue(device: device, id: 1, in_order: true,
+                 next_event_id: 1, submitted: 0, completed: 0)
+
+    static fn create_out_of_order(device: Gpu) -> GpuQueue:
+        GpuQueue(device: device, id: 1, in_order: false,
+                 next_event_id: 1, submitted: 0, completed: 0)
+
+    me submit(work: fn() -> bool) -> GpuEvent:
+        self.submit_after(work, [])
+
+    me submit_after(work: fn() -> bool, deps: [GpuEvent]) -> GpuEvent:
+        """Submit work that runs after all deps complete.
+
+        Returns an incomplete event (without running the work) if any
+        dependency is incomplete or failed — fail-closed, matching the
+        backend-contract policy.
+        """
+        var deps_ok = true
+        for d in deps:
+            if not d.complete:
+                deps_ok = false
+        val eid = self.next_event_id
+        self.next_event_id = eid + 1
+        self.submitted = self.submitted + 1
+        if not deps_ok:
+            return GpuEvent(id: eid, queue_id: self.id, complete: false)
+        val ok = work()
+        if ok:
+            self.completed = self.completed + 1
+        GpuEvent(id: eid, queue_id: self.id, complete: ok)
+
+    me parallel_for(n: i64, body: fn(i64) -> bool) -> GpuEvent:
+        """Descriptive 1D launch: runs body for each index in [0, n).
+
+        SYCL parallel_for(range) equivalent: the bounds guard is implicit —
+        body is never invoked with an out-of-range index. CPU path executes
+        serially in index order.
+        """
+        val eid = self.next_event_id
+        self.next_event_id = eid + 1
+        self.submitted = self.submitted + 1
+        var all_ok = true
+        var i = 0
+        while i < n:
+            if not body(i):
+                all_ok = false
+            i = i + 1
+        if all_ok:
+            self.completed = self.completed + 1
+        GpuEvent(id: eid, queue_id: self.id, complete: all_ok)
+
+    me wait() -> bool:
+        """Block until all submissions complete; true if all succeeded."""
+        self.completed == self.submitted
+
+# ============================================================================
+# GpuTaskGraph — record/replay dependency graph (SYCL-graph equivalent, lite)
+# ============================================================================
+
+class GpuTaskGraph:
+    """Recorded dependency graph over labeled task nodes.
+
+    Edges are stored flat (edge_from[i] -> edge_to[i]); schedule() returns
+    a Kahn topological order and an empty array for cyclic graphs, so a
+    cycle can never silently execute.
+    """
+    labels: [text]
+    edge_from: [i64]
+    edge_to: [i64]
+
+    static fn create() -> GpuTaskGraph:
+        GpuTaskGraph(labels: [], edge_from: [], edge_to: [])
+
+    me record(label: text) -> i64:
+        val id = self.labels.len()
+        self.labels.push(label)
+        id
+
+    me depends(node: i64, dep: i64):
+        self.edge_from.push(dep)
+        self.edge_to.push(node)
+
+    fn node_count() -> i64:
+        self.labels.len()
+
+    fn schedule() -> [i64]:
+        """Topological execution order; [] when the graph is cyclic or empty."""
+        val n = self.labels.len()
+        if n == 0:
+            return []
+        var indegree: [i64] = []
+        var i = 0
+        while i < n:
+            indegree.push(0)
+            i = i + 1
+        var e = 0
+        while e < self.edge_to.len():
+            val t = self.edge_to[e]
+            indegree[t] = indegree[t] + 1
+            e = e + 1
+        var order: [i64] = []
+        var ready: [i64] = []
+        i = 0
+        while i < n:
+            if indegree[i] == 0:
+                ready.push(i)
+            i = i + 1
+        var head = 0
+        while head < ready.len():
+            val cur = ready[head]
+            head = head + 1
+            order.push(cur)
+            e = 0
+            while e < self.edge_from.len():
+                if self.edge_from[e] == cur:
+                    val t2 = self.edge_to[e]
+                    indegree[t2] = indegree[t2] - 1
+                    if indegree[t2] == 0:
+                        ready.push(t2)
+                e = e + 1
+        if order.len() != n:
+            return []
+        order
+
+    me replay_with(executor: fn(i64) -> bool) -> i64:
+        """Execute nodes in dependency order via executor(node_id).
+
+        Stops at the first failure; returns the number of nodes that ran
+        successfully (node_count() on full success, 0 for cyclic graphs).
+        """
+        val order = self.schedule()
+        var done = 0
+        for nid in order:
+            if not executor(nid):
+                return done
+            done = done + 1
+        done
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GpuEvent, GpuQueue, GpuTaskGraph, LaunchShape
+export launch_shape, default_launch_shape

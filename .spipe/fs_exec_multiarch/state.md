@@ -32,7 +32,8 @@ Derived from qemu_runner_part5.spl and x86_64_fs_loaded_launch_proof.spl:
 | arm64  | arm64_wm_ramfb_required_marker_fragments / catalog lane | NO — same gap              |
 | arm32  | arm_fs_exec_required_marker_fragments / catalog lane | NO — same gap              |
 
-Gap: _scenario_serial_accepts_completion (line 649) only loops over required markers; no arch lane calls has_resident_manifest_fallback. The shared contract introduced in this change provides the fix; arm/riscv lanes must wire fs_exec_serial_rejects_fallback into their serial-acceptance path (out of Track C scope — noted for follow-up).
+Gap: _scenario_serial_accepts_completion (line 649) only loops over required markers; no arch lane calls has_resident_manifest_fallback. The shared contract introduced in this change provides the fix; arm/riscv lanes must wire fs_exec_serial_rejects_fallback into their serial-acceptance path.
+RESOLVED (orchestrator follow-up, same day): qemu_runner_part5.spl now wires fs_exec_serial_has_fallback into both _scenario_serial_accepts_completion and qemu_scenario_serial_acceptance_reason ("resident-fallback-rejected" reason) for all fs-exec lane names via pub fs_exec_lane_name_rejects_resident_fallback; spec test/01_unit/os/qemu_runner_fs_exec_fallback_acceptance_spec.spl (9 pass). Catalog-lane scenario constructors crash in interpreter mode (pre-existing) — filed doc/08_tracking/bug/interp_simpleos_lane_contract_crash_2026-06-13.md; lane coverage is name-based + arm64-wm-ramfb end-to-end.
 
 ## Log
 - dev: Created state file with 4 acceptance criteria (type: code-quality)
