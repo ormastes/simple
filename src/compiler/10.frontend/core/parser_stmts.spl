@@ -182,6 +182,48 @@ fn parse_block() -> [i64]:
     stmts.push(s)
     stmts
 
+# Inline consumer for `use` inside function bodies.
+# Avoids circular dependency: parser_decls_use.spl already imports parse_block from here,
+# so we cannot import parse_use_decl back. Instead, consume the use-path and import list
+# tokens and return a no-op pass statement so the rest of the function body parses cleanly.
+fn parse_use_stmt_inline() -> i64:
+    # Consume 'use' keyword (kind 27)
+    parser_advance()
+    # Skip optional 'lazy' modifier (kind 194)
+    if par_kind_get() == 194:
+        parser_advance()
+    # Consume dotted path: ident(.ident)*
+    for _ui in 0..200:
+        val uk = par_kind_get()
+        val is_ident_seg: bool = uk == 6
+        val is_dot_seg: bool = uk == 164
+        val is_star_seg: bool = uk == 62
+        val is_seg: bool = is_ident_seg or is_dot_seg or is_star_seg
+        if not is_seg:
+            break
+        parser_advance()
+    # Consume optional brace import list: .{name, name, ...} or {name, ...}
+    if par_kind_get() == 142:
+        parser_advance()
+        for _ul in 0..10000:
+            val ulk = par_kind_get()
+            if ulk == 143 or ulk == 190:
+                break
+            parser_advance()
+        if par_kind_get() == 143:
+            parser_advance()
+    # Consume optional paren import list: .(name, name) or (name, ...)
+    if par_kind_get() == 140:
+        parser_advance()
+        for _up in 0..10000:
+            val upk = par_kind_get()
+            if upk == 141 or upk == 190:
+                break
+            parser_advance()
+        if par_kind_get() == 141:
+            parser_advance()
+    stmt_expr_stmt(expr_pass(0), 0)
+
 fn parse_statement() -> i64:
     if par_kind_get() == 21:
         return parse_val_decl_stmt()
@@ -192,6 +234,11 @@ fn parse_statement() -> i64:
 
     if par_kind_get() == 22:
         return parse_var_decl_stmt()
+
+    # use statement inside function body: consume tokens, return pass (no-op)
+    # Avoids circular dep with parser_decls_use.spl (which imports parse_block from here).
+    if par_kind_get() == 27:
+        return parse_use_stmt_inline()
 
     if par_kind_get() == 49:
         parser_advance()
