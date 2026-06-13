@@ -5,8 +5,8 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  99 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
-  existing `02_block_boxes` through `100_relative_offset_basic`, with `99`
+  100 fixtures: `00_text_only`, `01_inline_text`, `08_inline_siblings`, and the
+  existing `02_block_boxes` through `101_max_height_basic`, with `100`
   passes, `0` failures, and `blur_or_tolerance_used=false`. This is focused
   structural box evidence, not broad Chromium layout-engine completion.
   Fixture number `99` is intentionally skipped in this manifest lane to avoid
@@ -22,6 +22,9 @@ Current state as of 2026-06-11:
   fixture verifies `position:relative` shifts the child visual box to
   `x=27 y=20` while preserving the following sibling's normal-flow position at
   `x=12 y=42`.
+- `101_max_height_basic` is now in the all-pass manifest. The labelled fixture
+  verifies `max-height` clamps an explicit `height:90px` child to
+  `x=12 y=12 width=60 height=40` and places the following block at `y=52`.
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
   layers `10..17`, flex rows `18..26`, absolute positioning fixture `27`, and
