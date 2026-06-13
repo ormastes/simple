@@ -9,6 +9,7 @@ enum PortableComputeTarget:
     Hip
     OpenCl
     Metal
+    WebGpu
 
 enum PortableComputeValueType:
     U32
@@ -225,6 +226,7 @@ fn portable_compute_target_name(target: PortableComputeTarget) -> text:
         case Hip: "hip"
         case OpenCl: "opencl"
         case Metal: "metal"
+        case WebGpu: "webgpu"
 
 fn portable_compute_binary_format(target: PortableComputeTarget) -> text:
     match target:
@@ -232,6 +234,7 @@ fn portable_compute_binary_format(target: PortableComputeTarget) -> text:
         case Hip: "hsaco"
         case OpenCl: "spirv"
         case Metal: "metallib"
+        case WebGpu: "source"
 
 fn portable_compute_source_format(target: PortableComputeTarget) -> text:
     match target:
@@ -239,6 +242,7 @@ fn portable_compute_source_format(target: PortableComputeTarget) -> text:
         case Hip: "hip-cpp"
         case OpenCl: "opencl-c"
         case Metal: "metal-shading-language"
+        case WebGpu: "wgsl"
 
 fn portable_compute_tool_hint(target: PortableComputeTarget) -> text:
     match target:
@@ -246,6 +250,7 @@ fn portable_compute_tool_hint(target: PortableComputeTarget) -> text:
         case Hip: "hiprtc-or-hipcc"
         case OpenCl: "opencl-c-to-spirv"
         case Metal: "metal-and-metallib"
+        case WebGpu: "browser-webgpu-host-import"
 
 fn portable_compute_target_names(targets: [PortableComputeTarget]) -> text:
     var names: [text] = []
@@ -273,6 +278,10 @@ fn portable_compute_backend_name_is_metal(name: text) -> bool:
     val clean = name.trim().lower()
     clean == "metal" or clean == "msl" or clean == "metallib" or clean == "metal-shading-language"
 
+fn portable_compute_backend_name_is_webgpu(name: text) -> bool:
+    val clean = name.trim().lower()
+    clean == "webgpu" or clean == "wgpu" or clean == "wgsl" or clean == "webgpu-wgsl"
+
 fn portable_compute_backend_name_is_vulkan(name: text) -> bool:
     val clean = name.trim().lower()
     clean == "vulkan" or clean == "vulkan-spirv"
@@ -296,6 +305,15 @@ fn portable_compute_backend_target_diagnostic(backend_name: text) -> PortableCom
         return PortableComputeBackendTargetDiagnostic(backend_name: backend_name, normalized_backend_name: "opencl", accepted: true, target_name: "opencl", status: "accepted", diagnostic: "")
     if portable_compute_backend_name_is_metal(clean):
         return PortableComputeBackendTargetDiagnostic(backend_name: backend_name, normalized_backend_name: "metal", accepted: true, target_name: "metal", status: "accepted", diagnostic: "")
+    if portable_compute_backend_name_is_webgpu(clean):
+        return PortableComputeBackendTargetDiagnostic(
+            backend_name: backend_name,
+            normalized_backend_name: "webgpu",
+            accepted: true,
+            target_name: "webgpu",
+            status: "accepted-browser-source",
+            diagnostic: "WebGPU emits WGSL source for a browser/WASM host-import bridge; no native binary artifact is produced"
+        )
     if portable_compute_backend_name_is_vulkan(clean):
         return PortableComputeBackendTargetDiagnostic(
             backend_name: backend_name,
@@ -346,6 +364,8 @@ fn portable_compute_backend_targets_from_order(backend_order: text) -> PortableC
             targets = portable_compute_push_target_once(targets, PortableComputeTarget.OpenCl)
         elif portable_compute_backend_name_is_metal(clean):
             targets = portable_compute_push_target_once(targets, PortableComputeTarget.Metal)
+        elif portable_compute_backend_name_is_webgpu(clean):
+            targets = portable_compute_push_target_once(targets, PortableComputeTarget.WebGpu)
         else:
             unsupported.push(clean)
     if saw_auto or backend_order.trim() == "":
@@ -371,6 +391,7 @@ fn portable_compute_expected_artifact_magic(target: PortableComputeTarget) -> te
         case Hip: "ELF"
         case OpenCl: "SPIR-V"
         case Metal: "MTLB"
+        case WebGpu: "WGSL"
 
 fn portable_compute_u32_type(target: PortableComputeTarget) -> text:
     match target:
@@ -378,6 +399,7 @@ fn portable_compute_u32_type(target: PortableComputeTarget) -> text:
         case Hip: "unsigned int"
         case OpenCl: "uint"
         case Metal: "uint"
+        case WebGpu: "u32"
 
 fn portable_compute_global_ptr(target: PortableComputeTarget, ty: text, name: text) -> text:
     match target:
@@ -385,10 +407,12 @@ fn portable_compute_global_ptr(target: PortableComputeTarget, ty: text, name: te
         case Hip: "{ty}* {name}"
         case OpenCl: "__global {ty}* {name}"
         case Metal: "device {ty}* {name} [[buffer(0)]]"
+        case WebGpu: "var<storage, read_write> {name}: array<{ty}>"
 
 fn portable_compute_global_ptr_at(target: PortableComputeTarget, ty: text, name: text, binding: i64) -> text:
     match target:
         case Metal: "device {ty}* {name} [[buffer({binding})]]"
+        case WebGpu: "@group(0) @binding({binding}) var<storage, read_write> {name}: array<{ty}>"
         case _: portable_compute_global_ptr(target, ty, name)
 
 fn portable_compute_const_ptr(target: PortableComputeTarget, ty: text, name: text, binding: i64) -> text:
@@ -397,6 +421,7 @@ fn portable_compute_const_ptr(target: PortableComputeTarget, ty: text, name: tex
         case Hip: "const {ty}* {name}"
         case OpenCl: "__global const {ty}* {name}"
         case Metal: "device const {ty}* {name} [[buffer({binding})]]"
+        case WebGpu: "@group(0) @binding({binding}) var<storage, read> {name}: array<{ty}>"
 
 fn portable_compute_index_expr(target: PortableComputeTarget) -> text:
     match target:
@@ -404,6 +429,7 @@ fn portable_compute_index_expr(target: PortableComputeTarget) -> text:
         case Hip: "blockIdx.x * blockDim.x + threadIdx.x"
         case OpenCl: "get_global_id(0)"
         case Metal: "gid"
+        case WebGpu: "global_id.x"
 
 fn portable_compute_kernel_prefix(target: PortableComputeTarget, name: text, params: text) -> text:
     match target:
@@ -411,6 +437,7 @@ fn portable_compute_kernel_prefix(target: PortableComputeTarget, name: text, par
         case Hip: "extern \"C\" __global__ void {name}({params})"
         case OpenCl: "__kernel void {name}({params})"
         case Metal: "kernel void {name}({params}, uint gid [[thread_position_in_grid]])"
+        case WebGpu: "@compute @workgroup_size(64)\nfn {name}(@builtin(global_invocation_id) global_id: vec3<u32>)"
 
 fn emit_portable_u32_fill_kernel(target: PortableComputeTarget, name: text) -> PortableComputeArtifact:
     val ty = portable_compute_u32_type(target)
