@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-12 01:07:30*
+*Generated: 2026-06-13 09:36:03*
 
-## test/03_system/os
+## test/01_unit/lib/common/web
 
-❌ **rv64_ssh_live_login_in_qemu_spec.spl** (2108ms)
-  - Source: `test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl`
-  - Generated doc: `doc/06_spec/rv64_ssh_live_login_in_qemu_spec.md`
+❌ **browser_session_wasm_script_spec.spl** (5901ms)
+  - Source: `test/01_unit/lib/common/web/browser_session_wasm_script_spec.spl`
+  - Generated doc: `doc/06_spec/browser_session_wasm_script_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 4 ✅
+- **Passed:** 2 ✅
 - **Failed:** 1 ❌
-- **Duration:** 2153ms
+- **Duration:** 5914ms

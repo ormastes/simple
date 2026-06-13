@@ -48,6 +48,7 @@ use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use compiler.core.ast.{expr_binary, expr_unary, expr_call, expr_index}
 use compiler.core.ast.{expr_field_access, expr_method_call, expr_array_lit}
+use compiler.core.ast.{expr_struct_lit}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_range, expr_assign, expr_compound_assign}
@@ -65,6 +66,7 @@ use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_restore}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
 use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
+use compiler.core.parser.{parser_has_errors}
 use compiler.core.parser.{parser_parse_type}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_lambda}
 
@@ -697,6 +699,54 @@ fn try_skip_ident_generic_args():
         lex_snapshot_restore(snap_nums, snap_txts)
         parser_tok_restore(saved_tok_nums, saved_tok_text)
 
+# Struct literal tail: parse `{ field: value, ... }` after a type-path base
+# (bare ident or dotted path).  Simple blocks are colon+indent, never brace, so
+# `Ident {` in expression position is unambiguously a struct literal (a dict
+# literal starts with a bare `{`, with no preceding ident).  Field entries are
+# built via expr_field_access(value, name) — a carrier node whose str=field name
+# and left=value, the exact layout flat_ast_bridge_part1 reads for EXPR_STRUCT_LIT.
+# Fields may be comma- and/or newline-separated (multi-line literals); keyword
+# tokens are accepted as field names (G25), e.g. `type:` / `match:`.
+fn parse_struct_lit_tail(base: i64) -> i64:
+    var sl_type = ""
+    if expr_get_tag(base) == 6:
+        sl_type = expr_get_str(base)
+    else:
+        sl_type = extract_dotted_path(base)
+    parser_advance()  # consume '{'
+    var sl_entries: [i64] = []
+    for sl_i in 0..100000:
+        parser_skip_newlines()
+        # tolerate indent/dedent inside braces for multi-line literals
+        if par_kind_get() == 181 or par_kind_get() == 182:
+            parser_advance()
+            continue
+        if par_kind_get() == 143:
+            parser_advance()  # consume '}'
+            break
+        if par_kind_get() == 190:
+            parser_error("unterminated struct literal")
+            break
+        # field name: ident, or keyword token (G25)
+        var sl_field = par_text_get()
+        val sl_kw_name = tok_kind_name(par_kind_get())
+        val sl_is_kw = keyword_lookup(sl_kw_name) == par_kind_get()
+        if par_kind_get() != 6 and not sl_is_kw:
+            parser_error("expected field name in struct literal")
+            break
+        if sl_is_kw and par_kind_get() != 6:
+            sl_field = sl_kw_name
+        parser_advance()
+        parser_expect(161)  # ':'
+        val sl_value = parse_expr()
+        sl_entries.push(expr_field_access(sl_value, sl_field, 0))
+        if parser_has_errors():
+            break
+        parser_skip_newlines()
+        if par_kind_get() == 160:
+            parser_advance()  # consume ','
+    return expr_struct_lit(sl_type, sl_entries, [], 0)
+
 fn parse_postfix_on(base_expr: i64) -> i64:
     # Continue postfix parsing from an already-parsed base expression
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
@@ -777,6 +827,11 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 base = expr_method_call(base, field_name, call_args, 0)
             else:
                 base = expr_field_access(base, field_name, 0)
+        elif (par_kind_get() == 142 and
+              (expr_get_tag(base) == 6 or expr_get_tag(base) == 11)):
+            # Struct literal: Ident { field: value, ... } (numeric tags 6/11 =
+            # EXPR_IDENT/EXPR_FIELD_ACCESS dodge stage4 imported-const compares)
+            base = parse_struct_lit_tail(base)
         elif par_kind_get() == 144:
             parser_advance()
             if par_kind_get() == 161:
@@ -936,6 +991,11 @@ fn parse_postfix() -> i64:
                 base = expr_method_call(base, field_name, call_args, 0)
             else:
                 base = expr_field_access(base, field_name, 0)
+        elif (par_kind_get() == 142 and
+              (expr_get_tag(base) == 6 or expr_get_tag(base) == 11)):
+            # Struct literal: Ident { field: value, ... } (numeric tags 6/11 =
+            # EXPR_IDENT/EXPR_FIELD_ACCESS dodge stage4 imported-const compares)
+            base = parse_struct_lit_tail(base)
         elif par_kind_get() == 144:
             parser_advance()
             # Check for slice: a[start:end]

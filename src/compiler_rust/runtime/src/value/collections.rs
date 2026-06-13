@@ -1772,6 +1772,53 @@ pub extern "C" fn rt_string_split(string: RuntimeValue, delimiter: RuntimeValue)
     }
 }
 
+/// Return the UTF-8 bytes of a string as an array of ints (one per byte).
+/// Mirrors the interpreter's `text.bytes()` (`interpreter_method/string.rs`)
+/// so JIT/native code can call `.bytes()` instead of only the interpreter.
+#[no_mangle]
+pub extern "C" fn rt_string_bytes(string: RuntimeValue) -> RuntimeValue {
+    let str_len = rt_string_len(string);
+    if str_len <= 0 {
+        return rt_array_new(0);
+    }
+    let str_data = rt_string_data(string);
+    if str_data.is_null() {
+        return rt_array_new(0);
+    }
+    unsafe {
+        let bytes = std::slice::from_raw_parts(str_data, str_len as usize);
+        let result = rt_array_new(bytes.len() as u64);
+        for &b in bytes {
+            rt_array_push(result, RuntimeValue::from_int(b as i64));
+        }
+        result
+    }
+}
+
+/// Return the characters of a string as an array of single-character strings.
+/// Mirrors the interpreter's `text.chars()` (`interpreter_method/string.rs`).
+#[no_mangle]
+pub extern "C" fn rt_string_chars(string: RuntimeValue) -> RuntimeValue {
+    let str_len = rt_string_len(string);
+    if str_len <= 0 {
+        return rt_array_new(0);
+    }
+    let str_data = rt_string_data(string);
+    if str_data.is_null() {
+        return rt_array_new(0);
+    }
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
+        let result = rt_array_new(s.chars().count() as u64);
+        for c in s.chars() {
+            let mut buf = [0u8; 4];
+            let cs = c.encode_utf8(&mut buf);
+            rt_array_push(result, rt_string_new(cs.as_ptr(), cs.len() as u64));
+        }
+        result
+    }
+}
+
 /// Replace all occurrences of a pattern in a string
 #[no_mangle]
 pub extern "C" fn rt_string_replace(

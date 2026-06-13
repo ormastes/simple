@@ -297,6 +297,20 @@ pub static STRING_METHODS: &[MethodInfo] = &[
         description: "splits by delimiter",
     },
     MethodInfo {
+        name: "bytes",
+        runtime_fn: RuntimeFn::Simple("rt_string_bytes"),
+        param_count: 0,
+        is_mutating: false,
+        description: "returns UTF-8 bytes as an int array",
+    },
+    MethodInfo {
+        name: "chars",
+        runtime_fn: RuntimeFn::Simple("rt_string_chars"),
+        param_count: 0,
+        is_mutating: false,
+        description: "returns characters as a string array",
+    },
+    MethodInfo {
         name: "replace",
         runtime_fn: RuntimeFn::Simple("rt_string_replace"),
         param_count: 2,

@@ -1,5 +1,40 @@
 # WebGPU JS WASM Simple System Evidence
 
+> This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, software WebGPU command replay, BrowserSession JavaScript integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory.
+
+<!-- sdn-diagram:id=webgpu_js_wasm_simple_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=webgpu_js_wasm_simple_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+webgpu_js_wasm_simple_spec -> std
+webgpu_js_wasm_simple_spec -> compiler
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=webgpu_js_wasm_simple_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 111 | 111 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# WebGPU JS WASM Simple System Evidence
+
 This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, software WebGPU command replay, BrowserSession JavaScript integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory.
 
 ## At a Glance
@@ -11,7 +46,7 @@ This executable system manual covers the active GUI hardening JS/WebEngine/WASM 
 | Requirements | N/A |
 | Plan | doc/03_plan/gui_hardening_current_plan_2026-06-01.md |
 | Design | doc/05_design/gui_color_image_pipeline_8k.md |
-| Research | doc/01_research/ui/gui_color_image_pipeline_8k.md |
+| Research | doc/01_research/local/gui_color_image_pipeline_8k.md |
 | Source | `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -36,7 +71,7 @@ with `Uint8Array` and `DataView` views.
 **Requirements:** N/A
 **Plan:** doc/03_plan/gui_hardening_current_plan_2026-06-01.md
 **Design:** doc/05_design/gui_color_image_pipeline_8k.md
-**Research:** doc/01_research/ui/gui_color_image_pipeline_8k.md
+**Research:** doc/01_research/local/gui_color_image_pipeline_8k.md
 
 ## Scenarios
 
@@ -46,19 +81,16 @@ with `Uint8Array` and `DataView` views.
 
 #### should expose navigator gpu metadata to secure JavaScript pages
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:object:true`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -79,19 +111,16 @@ match result:
 
 #### should hide navigator gpu from insecure JavaScript pages
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `false:undefined`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -112,19 +141,16 @@ match result:
 
 #### should expose requestAdapter as a JavaScript function shape
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `available:function`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -145,9 +171,94 @@ match result:
 
 ### REQ-WGPU-002: canvas WebGPU context
 
+#### should expose Simple 2D drawing evidence beside WebGPU canvas wrappers
+
+- var simple2d = canvas get context simple2d
+- simple2d fill rect
+- simple2d text
+   - Expected: summary.command_count equals `2`
+   - Expected: summary.last_kind equals `text`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var simple2d = canvas_get_context_simple2d(320, 240)
+simple2d.fill_rect(8, 12, 40, 24, 0xFF336699)
+simple2d.text(16, 32, "simple wasm webgpu", 14, 0xFFFFFFFF)
+
+val summary = simple2d.summary()
+expect(summary.command_count).to_equal(2)
+expect(summary.last_kind).to_equal("text")
+expect(summary.canvas2d_json).to_contain("\"op\":\"fillRect\"")
+expect(summary.canvas2d_json).to_contain("\"op\":\"fillText\"")
+expect(summary.canvas2d_json).to_contain("simple wasm webgpu")
+```
+
+</details>
+
+#### should submit Simple 2D commands through the WebGPU render path
+
+- var simple2d = canvas get context simple2d
+- simple2d fill rect
+- simple2d text
+   - Expected: evidence.status equals `submitted-webgpu-render`
+   - Expected: evidence.command_count equals `2`
+   - Expected: evidence.queue_write_count equals `1`
+   - Expected: evidence.render_pass_count equals `1`
+   - Expected: evidence.draw_call_count equals `1`
+   - Expected: evidence.present_count equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var simple2d = canvas_get_context_simple2d(320, 240)
+simple2d.fill_rect(8, 12, 40, 24, 0xFF336699)
+simple2d.text(16, 32, "simple wasm webgpu", 14, 0xFFFFFFFF)
+
+val evidence = simple2d.submit_to_webgpu(true)
+expect(evidence.available).to_be(true)
+expect(evidence.submitted).to_be(true)
+expect(evidence.status).to_equal("submitted-webgpu-render")
+expect(evidence.command_count).to_equal(2)
+expect(evidence.queue_write_count).to_equal(1)
+expect(evidence.render_pass_count).to_equal(1)
+expect(evidence.draw_call_count).to_equal(1)
+expect(evidence.present_count).to_equal(1)
+expect(evidence.pipeline_valid).to_be(true)
+expect(evidence.canvas2d_json).to_contain("\"op\":\"fillRect\"")
+expect(evidence.summary()).to_contain("render_passes=1")
+```
+
+</details>
+
+#### should not silently report WebGPU for BrowserRenderer fallback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val renderer = BrowserRenderer.create_with_backend(320, 240, "webgpu")
+expect(renderer.backend_name()).to_equal("software")
+```
+
+</details>
+
 #### should configure and present a secure WebGPU canvas
 
-1. var ctx = canvas get context webgpu
+- var ctx = canvas get context webgpu
    - Expected: ctx.is_available() is true
    - Expected: ctx.request_device() is true
    - Expected: ctx.configure() is true
@@ -156,7 +267,7 @@ match result:
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -174,13 +285,13 @@ expect(ctx.gpu.present_count).to_equal(1)
 
 #### should reject WebGPU canvas device requests from insecure pages
 
-1. var ctx = canvas get context webgpu
+- var ctx = canvas get context webgpu
    - Expected: ctx.is_available() is false
    - Expected: ctx.request_device() is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -195,7 +306,7 @@ expect(ctx.request_device()).to_equal(false)
 
 #### should create render and compute pipeline handles through the canvas wrapper
 
-1. var ctx = canvas get context webgpu
+- var ctx = canvas get context webgpu
    - Expected: ctx.request_device() is true
    - Expected: ctx.configure() is true
    - Expected: rp.valid is true
@@ -203,7 +314,7 @@ expect(ctx.request_device()).to_equal(false)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -228,13 +339,12 @@ expect(cp.valid).to_equal(true)
 
 #### should execute a Simple-script compute upload through the software executor
 
-1. var ctx = canvas get context webgpu
+- var ctx = canvas get context webgpu
    - Expected: ctx.request_device() is true
    - Expected: ctx.configure() is true
    - Expected: cp.valid is true
    - Expected: gpu_ctx.queue_write_buffer(buffer.id, 0, 32) is true
-
-2. var encoder = gpu ctx create command encoder
+- var encoder = gpu ctx create command encoder
    - Expected: encoder.begin_compute_pass() is true
    - Expected: encoder.set_pipeline(cp.id) is true
    - Expected: encoder.dispatch_workgroups(4, 1, 1) is true
@@ -247,7 +357,7 @@ expect(cp.valid).to_equal(true)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -259,7 +369,7 @@ expect(ctx.configure()).to_equal(true)
 
 var gpu_ctx: WebGPUContext = ctx.gpu
 var resources = gpu_ctx.resources
-val buffer = resources.create_buffer("storage", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+val buffer = resources.create_buffer("storage", 64, WEBGPU_BUFFER_USAGE_COPY_DST_FOR_SPEC)
 gpu_ctx.resources = resources
 
 val cs = ctx.create_shader_module("cs", "@compute @workgroup_size(1) fn main() { }")
@@ -287,14 +397,14 @@ expect(result.dispatched_workgroups).to_equal(4)
 
 #### should reject invalid Simple-script queue writes before executor replay
 
-1. var ctx = canvas get context webgpu
+- var ctx = canvas get context webgpu
    - Expected: ctx.request_device() is true
    - Expected: ctx.configure() is true
    - Expected: gpu_ctx.queue_write_buffer(999, 0, 32) is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -313,16 +423,15 @@ expect(gpu_ctx.last_error).to_contain("does not exist")
 
 #### should reject command submission after device loss
 
-1. var ctx = canvas get context webgpu
+- var ctx = canvas get context webgpu
    - Expected: ctx.request_device() is true
    - Expected: lost.lost is true
-
-2. var encoder = ctx gpu create command encoder
+- var encoder = ctx gpu create command encoder
    - Expected: ctx.gpu.queue_submit([command_buffer]) is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -345,19 +454,16 @@ expect(ctx.gpu.last_error).to_contain("device is lost")
 
 #### should run ordinary JavaScript beside WebGPU globals
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `42:bgra8unorm`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -376,20 +482,92 @@ match result:
 
 </details>
 
+#### should run Simple script beside JavaScript and WebAssembly globals
+
+- var session = BrowserSession new
+- Ok
+   - Expected: session.current_title equals `SimpleScriptReady`
+   - Expected: session.current_body_html equals `simple script beside js`
+   - Expected: session.warnings.len() equals `0`
+- Err
+   - Expected: "unexpected load error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `object:function:42`
+- Err
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+val html = "<html><body><script>var js_ok = 40 + 2;</script><script type='text/simple'>title \"SimpleScriptReady\"\nbody_text \"simple script beside js\"</script></body></html>"
+val result = session.open_html("https://example.com/simple-script.html", html)
+match result:
+    Ok(_):
+        expect(session.current_title).to_equal("SimpleScriptReady")
+        expect(session.current_body_html).to_equal("simple script beside js")
+        expect(session.warnings.len()).to_equal(0)
+    Err(err):
+        expect("unexpected load error: {err}").to_equal("")
+
+val wasm_result = session.eval_script("typeof WebAssembly + ':' + typeof WebAssembly.instantiate + ':' + js_ok")
+match wasm_result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("object:function:42")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
+#### should expose Simple script 2D command evidence in the browser session
+
+- var session = BrowserSession new
+- Ok
+   - Expected: session.warnings.len() equals `0`
+- Err
+   - Expected: "unexpected load error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+val html = "<html><body><script type='text/simple'>simple2d.fill_rect 4 6 20 10 255\nsimple2d.text 8|16|\"simple 2d\"|12|16777215</script></body></html>"
+val result = session.open_html("https://example.com/simple-2d.html", html)
+match result:
+    Ok(_):
+        expect(session.current_body_html).to_contain("\"op\":\"fillRect\"")
+        expect(session.current_body_html).to_contain("\"op\":\"fillText\"")
+        expect(session.current_body_html).to_contain("simple 2d")
+        expect(session.warnings.len()).to_equal(0)
+    Err(err):
+        expect("unexpected load error: {err}").to_equal("")
+```
+
+</details>
+
 ### REQ-WGPU-006: WASM backend smoke
 
 #### should compile an empty Simple MIR module to WAT for wasm32
 
-1. var adapter = WasmCodegenAdapter
-
-2. Ok
-
-3. Err
+- var adapter = WasmCodegenAdapter
+- Ok
+- Err
    - Expected: "compilation failed: {err.message}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -408,12 +586,12 @@ match result:
 
 #### should report wasm32 target support in the adapter
 
-1. var adapter = WasmCodegenAdapter
+- var adapter = WasmCodegenAdapter
    - Expected: adapter.supports_target(CodegenTarget.Wasm32) is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -427,12 +605,12 @@ expect(adapter.supports_target(CodegenTarget.Wasm32)).to_equal(true)
 
 #### should reject x86_64 target support in the wasm adapter
 
-1. var adapter = WasmCodegenAdapter
+- var adapter = WasmCodegenAdapter
    - Expected: adapter.supports_target(CodegenTarget.X86_64) is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -448,19 +626,16 @@ expect(adapter.supports_target(CodegenTarget.X86_64)).to_equal(false)
 
 #### should expose the browser WebAssembly host object beside WebGPU
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `object:function:function:function:available:bgra8unorm`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -480,19 +655,16 @@ match result:
 
 #### should validate and instantiate WASM inputs through the hardened JS host
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:false:false:instantiated:invalid`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -512,19 +684,16 @@ match result:
 
 #### should validate and instantiate byte-array WASM inputs through the JS host
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:false:instantiated`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -544,19 +713,16 @@ match result:
 
 #### should validate Uint8Array WASM inputs through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `function:function:true:8`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -576,19 +742,16 @@ match result:
 
 #### should validate TextEncoder-produced WASM bytes through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `function:function:wasm:true`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -608,19 +771,16 @@ match result:
 
 #### should validate TextEncoder encodeInto WASM bytes through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `8:8:true`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -640,19 +800,16 @@ match result:
 
 #### should expose bounded WASM section metadata through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `1:true:invalid-wasm-section`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -672,19 +829,16 @@ match result:
 
 #### should expose bounded Module and Instance constructors through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `1:true:instantiated:object`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -704,19 +858,16 @@ match result:
 
 #### should expose thenable WebAssembly.instantiate result shape through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `function:function:instantiated:1:object`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -736,19 +887,16 @@ match result:
 
 #### should resolve WebAssembly.instantiate then callbacks through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `instantiated:1:object`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -768,41 +916,31 @@ match result:
 
 #### should chain fetch arrayBuffer bytes into WebAssembly.instantiate through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `queued`
-
-4. Err
+- Err
    - Expected: "unexpected queue error: {err}" equals ``
-
-5. Ok
+- Ok
    - Expected: _display_js(value) equals ``
-
-6. Err
+- Err
    - Expected: "unexpected pre-commit js error: {err}" equals ``
-
-7. Some
+- Some
    - Expected: request.kind equals `fetch`
    - Expected: request.url equals `https://example.com/mod.wasm`
-
-8. Ok
-
-9. Ok
+- Ok
+- Ok
    - Expected: _display_js(value) equals `fetch>arrayBuffer:11>instantiate:instantiated:11:1:object`
-
-10. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
-
-11. Err
+- Err
    - Expected: "unexpected commit error: {err}" equals ``
    - Expected: "missing fetch request" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -853,53 +991,39 @@ match session.take_pending_request():
 
 #### should chain fetched WASM instantiation into JS WebGPU globals through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `queued`
-
-4. Err
+- Err
    - Expected: "unexpected queue error: {err}" equals ``
-
-5. Ok
+- Ok
    - Expected: _display_js(value) equals ``
-
-6. Err
+- Err
    - Expected: "unexpected pre-commit js error: {err}" equals ``
-
-7. Some
+- Some
    - Expected: request.kind equals `fetch`
    - Expected: request.url equals `https://example.com/mod.wasm`
-
-8. Ok
-
-9. Ok
+- Ok
+- Ok
    - Expected: _display_js(value) equals `instantiated:11:true:bgra8unorm:function`
-
-10. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
-
-11. Ok
+- Ok
    - Expected: _display_js(value) equals ``
-
-12. Err
+- Err
    - Expected: "unexpected adapter queue error: {err}" equals ``
-
-13. Ok
+- Ok
    - Expected: _display_js(value) equals `Simple WebGPU Software Adapter:true`
-
-14. Err
+- Err
    - Expected: "unexpected adapter js error: {err}" equals ``
-
-15. Err
+- Err
    - Expected: "unexpected commit error: {err}" equals ``
    - Expected: "missing fetch request" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -960,41 +1084,31 @@ match session.take_pending_request():
 
 #### should assimilate nested WebGPU promises returned from fetched WASM instantiation callbacks
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `queued`
-
-4. Err
+- Err
    - Expected: "unexpected queue error: {err}" equals ``
-
-5. Ok
+- Ok
    - Expected: _display_js(value) equals ``
-
-6. Err
+- Err
    - Expected: "unexpected pre-commit js error: {err}" equals ``
-
-7. Some
+- Some
    - Expected: request.kind equals `fetch`
    - Expected: request.url equals `https://example.com/mod.wasm`
-
-8. Ok
-
-9. Ok
+- Ok
+- Ok
    - Expected: _display_js(value) equals `Simple WebGPU Software Adapter:true:available`
-
-10. Err
+- Err
    - Expected: "unexpected adapter js error: {err}" equals ``
-
-11. Err
+- Err
    - Expected: "unexpected commit error: {err}" equals ``
    - Expected: "missing fetch request" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1044,19 +1158,16 @@ match session.take_pending_request():
 
 #### should expose thenable WebAssembly.compile result shape through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `function:function:compiled:1:true`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1076,19 +1187,16 @@ match result:
 
 #### should fail closed on invalid WebAssembly.compile bytes through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `invalid:invalid-wasm-header`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1108,19 +1216,16 @@ match result:
 
 #### should expose bounded memory exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:1:1:memory:memory:65536`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1140,19 +1245,16 @@ match result:
 
 #### should expose bounded callable function exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:run:1:function:undefined`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1172,19 +1274,16 @@ match result:
 
 #### should expose all bounded callable function exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `2:init:render:function:function:undefined:undefined`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1204,19 +1303,16 @@ match result:
 
 #### should execute a bounded i32.const WASM function export through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1236,19 +1332,16 @@ match result:
 
 #### should execute a bounded signed i32.const WASM function export through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1268,19 +1361,16 @@ match result:
 
 #### should execute a bounded i32.add WASM function export through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1300,19 +1390,16 @@ match result:
 
 #### should execute bounded WASM function exports with call arguments through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1332,19 +1419,16 @@ match result:
 
 #### should execute bounded i32 local.set WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1364,19 +1448,16 @@ match result:
 
 #### should execute bounded i32 local.tee WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1396,19 +1477,16 @@ match result:
 
 #### should execute bounded i32 global.get WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `40:run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1428,19 +1506,16 @@ match result:
 
 #### should execute bounded signed i32 global.get WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `-1:run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1460,19 +1535,16 @@ match result:
 
 #### should execute bounded mutable i32 global.set WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `42:44:44`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1492,19 +1564,16 @@ match result:
 
 #### should execute bounded memory.grow and memory.size WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `2:3:3`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1524,19 +1593,16 @@ match result:
 
 #### should reject WASM memory.grow beyond declared maximum through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `-1:1:2`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1556,19 +1622,16 @@ match result:
 
 #### should execute bounded memory.fill WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1588,19 +1651,16 @@ match result:
 
 #### should fail closed on bounded memory.fill traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1620,19 +1680,16 @@ match result:
 
 #### should execute bounded memory.copy WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1652,19 +1709,16 @@ match result:
 
 #### should fail closed on bounded memory.copy traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1684,19 +1738,16 @@ match result:
 
 #### should execute bounded memory.init WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1716,19 +1767,16 @@ match result:
 
 #### should fail closed on bounded memory.init traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1748,19 +1796,16 @@ match result:
 
 #### should execute bounded data.drop zero-length memory.init through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1780,19 +1825,16 @@ match result:
 
 #### should fail closed on memory.init after data.drop through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1812,19 +1854,16 @@ match result:
 
 #### should execute bounded i32.store and i32.load WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1844,19 +1883,16 @@ match result:
 
 #### should fail closed on WASM out-of-bounds memory traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `wasm-trap:out-of-bounds-memory-access:wasm-trap:out-of-bounds-memory-access`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1876,19 +1912,16 @@ match result:
 
 #### should execute bounded i32.store8 and i32.load8_u WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1908,19 +1941,16 @@ match result:
 
 #### should execute bounded i32.load8_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:run:function:-86`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1940,19 +1970,16 @@ match result:
 
 #### should execute bounded i32.store16 and i32.load16_u WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:run:function:4660`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1972,19 +1999,16 @@ match result:
 
 #### should execute bounded i32.load16_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:run:function:-128`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2004,19 +2028,16 @@ match result:
 
 #### should execute bounded internal function call WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2036,19 +2057,16 @@ match result:
 
 #### should execute bounded internal function call WASM exports with arguments through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2068,19 +2086,16 @@ match result:
 
 #### should execute bounded early return WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2100,19 +2115,16 @@ match result:
 
 #### should execute bounded drop WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2132,19 +2144,16 @@ match result:
 
 #### should execute bounded select WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2164,19 +2173,16 @@ match result:
 
 #### should execute bounded if else WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `42:7`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2196,19 +2202,16 @@ match result:
 
 #### should execute bounded br_if block WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `42:7`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2231,19 +2234,16 @@ match result:
 
 #### should execute bounded loop br_if WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2266,19 +2266,16 @@ match result:
 
 #### should execute bounded i32.mul and i32.sub WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2298,19 +2295,16 @@ match result:
 
 #### should wrap bounded i32 arithmetic overflow through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `-2147483648:2147483647:0`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2330,19 +2324,16 @@ match result:
 
 #### should execute bounded i32.div_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2362,19 +2353,16 @@ match result:
 
 #### should execute bounded i32.rem_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:2`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2394,19 +2382,16 @@ match result:
 
 #### should execute bounded i32.rem_u WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:2`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2426,19 +2411,16 @@ match result:
 
 #### should fail closed on WASM divide by zero traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:wasm-trap:integer-divide-by-zero`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2458,19 +2440,16 @@ match result:
 
 #### should fail closed on WASM signed division overflow traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:wasm-trap:integer-overflow`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2490,19 +2469,16 @@ match result:
 
 #### should fail closed on WASM remainder divide by zero traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:wasm-trap:integer-divide-by-zero`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2522,19 +2498,16 @@ match result:
 
 #### should fail closed on WASM unsigned remainder divide by zero traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:wasm-trap:integer-divide-by-zero`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2554,19 +2527,16 @@ match result:
 
 #### should fail closed on WASM unreachable traps through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:wasm-trap:unreachable`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2586,19 +2556,16 @@ match result:
 
 #### should execute bounded i32 bitwise WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2618,19 +2585,16 @@ match result:
 
 #### should execute bounded i32.shl WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:40`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2650,19 +2614,16 @@ match result:
 
 #### should execute bounded i32.shr_u WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:5`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2682,19 +2643,16 @@ match result:
 
 #### should execute bounded i32.shr_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:5`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2714,19 +2672,16 @@ match result:
 
 #### should execute bounded i32 sign-extension WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:-1:-1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2746,19 +2701,16 @@ match result:
 
 #### should execute bounded i32.eqz WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2778,19 +2730,16 @@ match result:
 
 #### should execute bounded i32.eq WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2810,19 +2759,16 @@ match result:
 
 #### should execute bounded i32.ne WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2842,19 +2788,16 @@ match result:
 
 #### should execute bounded i32.lt_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2874,19 +2817,16 @@ match result:
 
 #### should execute bounded i32.gt_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2906,19 +2846,16 @@ match result:
 
 #### should execute bounded i32.le_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2938,19 +2875,16 @@ match result:
 
 #### should execute bounded i32.ge_s WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2970,19 +2904,16 @@ match result:
 
 #### should execute bounded i32.lt_u WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3002,19 +2933,16 @@ match result:
 
 #### should execute bounded i32.gt_u WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3034,19 +2962,16 @@ match result:
 
 #### should execute bounded i32.le_u WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3066,19 +2991,16 @@ match result:
 
 #### should execute bounded i32.ge_u WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `run:function:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3098,19 +3020,16 @@ match result:
 
 #### should execute bounded i32 div_u and unsigned-order comparisons through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `2147483647:0:1:1:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3130,19 +3049,16 @@ match result:
 
 #### should execute bounded i32 clz ctz and popcnt WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `27:4:3`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3162,19 +3078,16 @@ match result:
 
 #### should execute bounded i32 rotate WASM exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `8:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3194,19 +3107,16 @@ match result:
 
 #### should wrap bounded i32 shift and rotate overflow through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `-2147483648:-2147483648`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3226,19 +3136,16 @@ match result:
 
 #### should expose bounded table and global exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `table:tbl:1:answer:42:table:1:global:42`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3258,19 +3165,16 @@ match result:
 
 #### should expose bounded signed global exports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `answer:-1:global:-1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3290,19 +3194,16 @@ match result:
 
 #### should fail closed on unsupported WASM imports through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:invalid:unsupported-wasm-imports:invalid:unsupported-wasm-imports`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3322,19 +3223,16 @@ match result:
 
 #### should invoke a declared WebGPU host import from WASM through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `true:webgpu:requestAdapter:function:instantiated:0:7:1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3354,19 +3252,16 @@ match result:
 
 #### should construct bounded WebAssembly.Memory through BrowserSession
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `function:1:2:131072:-1`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3386,19 +3281,16 @@ match result:
 
 #### should share WebAssembly.Memory bytes with BrowserSession Uint8Array views
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `4:4:255:7:65536:65536`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3418,19 +3310,16 @@ match result:
 
 #### should window WebAssembly.Memory bytes with BrowserSession Uint8Array subarray views
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `1:2:42:77`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3450,19 +3339,16 @@ match result:
 
 #### should set WebAssembly.Memory bytes from BrowserSession Uint8Array views
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `7:8`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3482,19 +3368,16 @@ match result:
 
 #### should set WebAssembly.Memory bytes from computed Uint8Array set calls
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `9`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3514,19 +3397,16 @@ match result:
 
 #### should set WebAssembly.Memory bytes from Uint8Array prototype set call dispatch
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `11:12`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3546,19 +3426,16 @@ match result:
 
 #### should set WebAssembly.Memory bytes from Uint8Array prototype set apply dispatch
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `21:22`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3578,19 +3455,16 @@ match result:
 
 #### should read and write WebAssembly.Memory bytes from DataView glue methods
 
-1. var session = BrowserSession new
-
-2. session open html
-
-3. Ok
+- var session = BrowserSession new
+- session open html
+- Ok
    - Expected: _display_js(value) equals `4:3:2:1:16909060:772:-2`
-
-4. Err
+- Err
    - Expected: "unexpected js error: {err}" equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -3612,8 +3486,8 @@ match result:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 106 |
-| Active scenarios | 106 |
+| Total scenarios | 111 |
+| Active scenarios | 111 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -3623,5 +3497,7 @@ match result:
 
 - **Plan:** [doc/03_plan/gui_hardening_current_plan_2026-06-01.md](doc/03_plan/gui_hardening_current_plan_2026-06-01.md)
 - **Design:** [doc/05_design/gui_color_image_pipeline_8k.md](doc/05_design/gui_color_image_pipeline_8k.md)
-- **Research:** [doc/01_research/ui/gui_color_image_pipeline_8k.md](doc/01_research/ui/gui_color_image_pipeline_8k.md)
+- **Research:** [doc/01_research/local/gui_color_image_pipeline_8k.md](doc/01_research/local/gui_color_image_pipeline_8k.md)
 
+
+</details>

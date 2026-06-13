@@ -446,6 +446,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cstring_to_text",
     "rt_string_char_at",
     "rt_string_split",
+    "rt_string_bytes",
+    "rt_string_chars",
     "rt_string_replace",
     "rt_string_trim",
     "rt_string_join",

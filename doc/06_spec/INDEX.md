@@ -5,22 +5,17 @@
 ## Quick Stats
 
 - **Total Features:** 2
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 2
-- **Total Lines:** 0
-- **Warnings:** 2
+- **Complete Documentation:** 1 (50%)
+- **Stubs Remaining:** 1
+- **Total Lines:** 23
+- **Warnings:** 5
 
 ---
 
-## Compiler (1 features)
-
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Gpu Target Contract Specification](test/01_unit/compiler/semantics/gpu_target_contract_spec.md) | Auto-generated | N/A | 5 | 0% | 0 lines |
-
-## Application (1 features)
+## Application (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
+| [WebGPU JS WASM Simple System Evidence](test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Minimal | N/A | 111 | 20% | 23 lines |
 

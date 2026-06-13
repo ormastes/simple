@@ -3007,6 +3007,8 @@ pub fn compile_call<M: Module>(
                 "trim_start" => Some("rt_string_trim_start"),
                 "trim_end" => Some("rt_string_trim_end"),
                 "split" => Some("rt_string_split"),
+                "bytes" => Some("rt_string_bytes"),
+                "chars" => Some("rt_string_chars"),
                 "replace" => Some("rt_string_replace"),
                 "to_upper" | "upper" => Some("rt_string_to_upper"),
                 "to_lower" | "lower" => Some("rt_string_to_lower"),

@@ -11,7 +11,7 @@
 
 use std.js.types.pair.{Pair}
 use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
 use std.gc_async_mut.web.browser_session_cookies.{parse_cookie_line, upsert_cookie}
@@ -37,6 +37,57 @@ fn _append_unique_warning(warnings: [text], warning: text) -> [text]:
     var out = warnings
     out.push(warning)
     out
+
+fn _script_type_is_wasm(script_type: text) -> bool:
+    val clean = script_type.trim().lower()
+    clean == "application/wasm" or clean == "application/wasm; charset=utf-8" or clean == "webassembly" or clean == "wasm"
+
+fn _hex_digit_value(ch: text) -> i32:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    if ch == "a" or ch == "A": return 10
+    if ch == "b" or ch == "B": return 11
+    if ch == "c" or ch == "C": return 12
+    if ch == "d" or ch == "D": return 13
+    if ch == "e" or ch == "E": return 14
+    if ch == "f" or ch == "F": return 15
+    -1
+
+fn _wasm_hex_byte_at(clean_hex: text, index: i32) -> i32:
+    val pos = index * 2
+    if pos + 1 >= clean_hex.len():
+        return -1
+    val hi = _hex_digit_value(clean_hex.slice(pos, pos + 1))
+    val lo = _hex_digit_value(clean_hex.slice(pos + 1, pos + 2))
+    if hi < 0 or lo < 0:
+        return -1
+    hi * 16 + lo
+
+fn _wasm_payload_byte_length(payload: text) -> i32:
+    var clean = payload.trim()
+    clean = clean.replace(" ", "")
+    clean = clean.replace("\n", "")
+    clean = clean.replace("\t", "")
+    if clean.len() % 2 != 0:
+        return 0
+    clean.len() / 2
+
+fn _wasm_payload_has_valid_header(payload: text) -> bool:
+    var clean = payload.trim()
+    clean = clean.replace(" ", "")
+    clean = clean.replace("\n", "")
+    clean = clean.replace("\t", "")
+    if clean.len() < 16 or clean.len() % 2 != 0:
+        return false
+    _wasm_hex_byte_at(clean, 0) == 0 and _wasm_hex_byte_at(clean, 1) == 97 and _wasm_hex_byte_at(clean, 2) == 115 and _wasm_hex_byte_at(clean, 3) == 109 and _wasm_hex_byte_at(clean, 4) == 1 and _wasm_hex_byte_at(clean, 5) == 0 and _wasm_hex_byte_at(clean, 6) == 0 and _wasm_hex_byte_at(clean, 7) == 0
 
 fn _url_search_params_query(url: text) -> text:
     val q = url.index_of("?")
@@ -141,6 +192,24 @@ fn _simple_script_int(value: text, fallback: i32) -> i32:
     trimmed.to_i32()
 
 impl BrowserSession:
+
+    me _record_wasm_module(url: text, payload: text, load: BrowserLoadState):
+        val valid = _wasm_payload_has_valid_header(payload)
+        val byte_length = _wasm_payload_byte_length(payload)
+        val status = if valid: "validated" else: "invalid-wasm-header"
+        self.wasm_modules.push(BrowserWasmModuleRecord.create(url, byte_length, valid, status))
+        if not valid:
+            load.warnings.push("wasm module error: {status} at {url}")
+
+    me _commit_wasm_response(response: BrowserResponse) -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            if response.error != "":
+                load.warnings.push("wasm module load error: {response.error}")
+            else:
+                self._apply_response_headers(response.headers)
+                self._record_wasm_module(response.url, response.body, load)
+            return self._advance_script_loading()
+        Err("no active wasm load")
 
     me _set_simple_script_body_text(value: text):
         self.current_body_html = value
@@ -306,6 +375,8 @@ impl BrowserSession:
                                     return Ok(true)
                             Err(e):
                                 load.warnings.push("inline module error: {e}")
+                    else if _script_type_is_wasm(block.script_type):
+                        self._record_wasm_module(load.document_url, block.content, load)
                     else if block.script_type == "text/simple":
                         self._execute_simple_script(block.content, load)
                     else if val Some(state) = self.runtime_state:
@@ -350,7 +421,9 @@ impl BrowserSession:
                                 load.warnings.push("module load error: {e}")
                         continue
                     if val Some(override_body) = pair_value(self.resource_overrides, resolved):
-                        if block.script_type == "text/simple":
+                        if _script_type_is_wasm(block.script_type):
+                            self._record_wasm_module(resolved, override_body, load)
+                        else if block.script_type == "text/simple":
                             self._execute_simple_script(override_body, load)
                         else if val Some(state) = self.runtime_state:
                             var runtime = state.runtime
@@ -364,7 +437,11 @@ impl BrowserSession:
                                 Err(e):
                                     load.warnings.push("external script error: {e.message}")
                         continue
-                    self.pending_requests.push(self._build_request("script", resolved, "GET", "", "", ""))
+                    if _script_type_is_wasm(block.script_type):
+                        self.active_load = Some(load)
+                        self.pending_requests.push(self._build_request("wasm", resolved, "GET", "", "", "application/wasm"))
+                    else:
+                        self.pending_requests.push(self._build_request("script", resolved, "GET", "", "", ""))
                     return Ok(true)
             self._finalize_active_load(load)
             self.active_load = nil

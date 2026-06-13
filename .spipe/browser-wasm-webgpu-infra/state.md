@@ -59,3 +59,11 @@ dev-done
 - spec: Added `test/01_unit/lib/common/web/browser_session_simple_script_spec.spl` and generated `doc/06_spec/test/01_unit/lib/common/web/browser_session_simple_script_spec.md`.
 - impl: Added compiler GPU target metadata for `metal` and `webgpu` aliases, with `auto` ordering Vulkan -> Metal -> CUDA/HIP -> OpenCL and explicit WebGPU browser/WASM bridge reasoning.
 - spec: Updated `test/01_unit/compiler/semantics/gpu_target_contract_spec.spl` and regenerated `doc/06_spec/test/01_unit/compiler/semantics/gpu_target_contract_spec.md`.
+- impl: Added explicit opt-in WebGPU/WGSL portable compute target with source-only compile plans, browser host-import diagnostics, dedicated WGSL fill/add and Simple 2D generated-kernel emitters, and backend init exports.
+- spec: Updated `test/01_unit/compiler/codegen/gpu_portable_compute_spec.spl` for WebGPU source-only evidence and regenerated `doc/06_spec/test/01_unit/compiler/codegen/gpu_portable_compute_spec.md`.
+- review: Strongest available review lane confirmed WebGPU should remain metadata/source-plan only and must not be promoted into `BackendKind` or `vulkan_backend.spl` in this slice.
+- impl: Added BrowserSession `application/wasm` script resource handling with inline/external WASM module records, validation status, separate `wasm` pending request kind, and ordered resume of later JavaScript.
+- spec: Added `test/01_unit/lib/common/web/browser_session_wasm_script_spec.spl` and generated `doc/06_spec/test/01_unit/lib/common/web/browser_session_wasm_script_spec.md`.
+- impl: Added Simple2D-to-WebGPU render submission evidence with render-pass/draw-call counters in the browser WebGPU command model and software replay result.
+- spec: Updated `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` for Simple2D WebGPU render submission and a guard that `BrowserRenderer.create_with_backend("webgpu")` still reports software fallback instead of overclaiming.
+- review: Strongest available review lane confirmed this proves deterministic in-process WebGPU command replay only; true Chrome/Electron pixel-backed WebGPU evidence remains a separate required slice.

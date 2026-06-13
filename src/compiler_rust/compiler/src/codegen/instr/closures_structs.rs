@@ -1100,6 +1100,8 @@ fn try_compile_builtin_method_call<M: Module>(
         "trim_start" => "rt_string_trim_start",
         "trim_end" => "rt_string_trim_end",
         "split" => "rt_string_split",
+        "bytes" => "rt_string_bytes",
+        "chars" => "rt_string_chars",
         "replace" => "rt_string_replace",
         "to_upper" | "upper" => "rt_string_to_upper",
         "to_lower" | "lower" => "rt_string_to_lower",
