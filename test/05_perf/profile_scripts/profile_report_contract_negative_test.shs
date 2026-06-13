@@ -56,6 +56,34 @@ printf '%s\n' "$output" | grep -Fq "large Simple multicore-green fanout row must
 cp "$source_report" "$tmp_report"
 
 awk '
+    /\*\*Fanout workers:\*\*/ {
+        sub(/\*\*Fanout workers:\*\* [0-9]+/, "**Fanout workers:** 1000")
+    }
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Go[ \t]*\|/ {
+        sub(/\|[ \t]*[0-9]+\.[0-9]+[ \t]*\|/, "|      999.999 |")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated large Go fanout row unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "large Go fanout row must be faster than C pthread fanout row" ||
+    fail "missing expected large Go fanout failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
     /^## / {
         in_stress = ($0 ~ /^## Simple vs Go vs C Large Fanout Stress/)
     }
@@ -479,6 +507,7 @@ printf '%s\n' "$output" | grep -Fq "forbidden number-suffix API name" ||
 
 echo "profile_report_contract_negative=true"
 echo "case=large_simple_multicore_fanout_slower_than_c"
+echo "case=large_go_fanout_slower_than_c"
 echo "case=simple_multicore_stress_slower_than_c"
 echo "case=go_stress_slower_than_c"
 echo "case=simple_multicore_queue_model_global_fifo"

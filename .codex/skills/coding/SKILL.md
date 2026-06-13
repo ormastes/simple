@@ -230,6 +230,16 @@ Call `multicore_green_set_parallelism(workers)` before the first
 record `multicore_green_parallelism()` in evidence. Cross-language profile
 evidence must also show Go `GOMAXPROCS` pinned to the same `CPU_WORKERS` value.
 Live pools can grow but do not claim shrink/preemption behavior yet.
+Use the canonical profile gates when changing these surfaces:
+`test/05_perf/profile_scripts/profile_report_contract_test.shs` checks OS
+thread, cooperative green, multicore green, C pthread, Go goroutine, RSS,
+GOMAXPROCS, and `used_runtime_pool()` report evidence;
+`test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
+checks the stale/misleading failure cases; and
+`test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
+checks that crash-prone profile runs stay behind the existing
+`PROFILE_DOCKER_ISOLATION=1` Docker boundary instead of using a separate
+harness.
 
 Do not use numeric-suffix concurrency aliases. They are rejected by
 `simple check` with `E-PAR-002`; use `thread_spawn_with_args`,

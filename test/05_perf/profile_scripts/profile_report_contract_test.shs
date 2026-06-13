@@ -236,6 +236,35 @@ require_go_stress_beats_c() {
     fi
 }
 
+require_large_go_fanout_beats_c() {
+    file="$1"
+    if ! grep -Fq "Fanout workers:** 1000" "$file"; then
+        return
+    fi
+    if ! awk -F'|' '
+        /^## / {
+            fanout = ($0 ~ /Large Fanout Scheduling/)
+            next
+        }
+        fanout && /C \(pthreads\)/ {
+            c = $3
+            gsub(/^[ \t]+|[ \t]+$/, "", c)
+        }
+        fanout && /\| Go[ \t]*\|/ {
+            go = $3
+            gsub(/^[ \t]+|[ \t]+$/, "", go)
+        }
+        END {
+            if (go == "" || c == "" || go == "fail" || c == "fail" || go == "n/a" || c == "n/a") {
+                exit 1
+            }
+            exit ((go + 0) < (c + 0)) ? 0 : 1
+        }
+    ' "$file"; then
+        fail "large Go fanout row must be faster than C pthread fanout row in $file"
+    fi
+}
+
 require_simple_multicore_stress_beats_c() {
     file="$1"
     if ! awk -F'|' '
@@ -399,6 +428,7 @@ case "$kind" in
         require_contains "$report_path" "goroutines + chan result (M:N)"
         require_contains "$report_path" "goroutine per tiny task + channel"
         require_contains "$report_path" "goroutine per stress task (M:N)"
+        require_large_go_fanout_beats_c "$report_path"
         require_go_stress_beats_c "$report_path"
         require_simple_multicore_stress_beats_c "$report_path"
         require_large_simple_multicore_fanout_beats_c "$report_path"

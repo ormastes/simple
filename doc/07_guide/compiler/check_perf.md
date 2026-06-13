@@ -140,6 +140,8 @@ recorded Go scheduler width equal to `CPU_WORKERS` so Go goroutine rows and
 Simple `multicore_green_set_parallelism(CPU_WORKERS)` rows use the same limit.
 Explicit `GOMAXPROCS` overrides are exploratory unless they preserve that
 equality.
+Current checked cross-language evidence is recorded in
+`doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
 Generated Simple concurrency workloads compute an expected checksum and exit
 nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
 bugs, or wrong joins are classified as failed rows instead of performance wins.
