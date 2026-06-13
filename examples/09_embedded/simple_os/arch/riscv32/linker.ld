@@ -1,23 +1,21 @@
-/* RISC-V 64 SimpleOS Linker Script — S-mode with OpenSBI
+/* RISC-V 32 Linker Script — QEMU virt machine (M-mode, no OpenSBI)
  *
- * Kernel is loaded at 0x80200000 by OpenSBI as an S-mode payload.
- * OpenSBI occupies 0x80000000..0x801FFFFF (2MB).
- *
- * Memory layout (QEMU virt, 512MB RAM):
- *   0x80000000 - 0x801FFFFF : OpenSBI (2MB, reserved)
- *   0x80200000 - onwards    : Kernel image
+ * Kernel loaded at 0x80000000 — direct M-mode boot with -bios none.
+ * RAM: 0x80000000 .. 0x8FFFFFFF (256MB total with -m 256M).
+ * No OpenSBI firmware; kernel starts at RAM base.
  *
  * Stack: 8 MB (Simple code uses large stack frames)
  * Heap: 64 MB (bump allocator for runtime objects)
  *
- * Sections are 4KB-aligned for page table compatibility (Sv39).
+ * Output format: ELF32 little-endian RISC-V.
  */
+
 OUTPUT_ARCH(riscv)
-OUTPUT_FORMAT("elf64-littleriscv")
+OUTPUT_FORMAT("elf32-littleriscv")
 ENTRY(_start)
 
 MEMORY {
-    RAM (rwx) : ORIGIN = 0x80200000, LENGTH = 510M
+    RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 256M
 }
 
 SECTIONS {

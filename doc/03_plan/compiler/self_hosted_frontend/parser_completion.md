@@ -589,6 +589,23 @@ bang_field_cmp → false; prefix_not (`if not done:`) unregressed; control true.
   force(panic)-vs-exists(nil) distinction needs a dedicated ForceUnwrap
   ExprKind — tracked M12 item 7. G44 is "parser accepts `!`", not full fidelity.
 
+#### Broad construct sweep — src/lib parse coverage CLEAN 2026-06-13
+After G42–G45, a 12-construct synthetic sweep (tmp/site12/g46_sweep.spl,
+seed-interpreted) parses CLEAN for: list comprehension (+ `if` filter), dict
+literal, lambda `fn(x)->T:`, nested generics `Map<K,List<V>>`, single method
+chain, multiline-paren expr, match expression, string escapes, `??`, `?.`.
+Cross-checked against the post-G42 wm_quality_contract residue (58 ctx errors,
+ALL src/app): every non-spec-DSL error was a G43 (`query_* [N..]`), G44
+(`dwarf* !.`), or G45 (`native else:`) class — all now fixed. The leftover
+src/app residue is spec-DSL (`describe`/`it`, vscode examples, lint_spec) +
+`m{…}` math blocks, which are OUT OF SCOPE for the src/lib gate (test/spec
+files go through the sspec pipeline, not the core lean parser).
+- **G46 — set literal `s{1,2,3}` — SKIPPED (not a gate blocker):** the only
+  sweep construct that fails. `SetLit` exists in the AST but the `s{…}` form is
+  effectively unused in src/lib (3 grep hits, all false positives — docstrings/
+  config). If a real src/lib use surfaces later, add `s{`/`m{` as allowlisted
+  prefix-block literals (see memory: never "any ident + `{`").
+
 #### M12 remaining
 1. Interpreted `flat_ast_to_module` entry OOB (see above) — diagnose/fix.
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
