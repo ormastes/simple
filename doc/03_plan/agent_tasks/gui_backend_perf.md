@@ -699,3 +699,7 @@ Updated: 2026-06-11
   `:not`/`:is`/`:where` and `:has` option scanners now keep option start
   offsets and slice each comma-separated argument once, preserving depth-aware
   comma handling without per-character string concatenation.
+- Simple Web CSS custom-property collection allocation removal:
+  `_css_collect_custom_props` now counts root custom properties, fills an
+  exact-size entry array, and joins once instead of repeatedly growing the
+  collected property text while scanning `:root` blocks.
