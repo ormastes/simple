@@ -317,7 +317,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 69 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -356,6 +356,7 @@ step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=11")
 expect(row).to_contain("checked_in_misuse_fixtures=25")
+expect(row).to_contain("total_misuse_fixtures=36")
 expect(absent_in_text(row, "misuse_fixtures=611")).to_equal(1)
 expect(row).to_contain("task_spawn approved")
 expect(row).to_contain("thread_spawn_with_args_wrong_surface_import.spl rejects cooperative-green facade")
@@ -393,29 +394,32 @@ expect(system_plan).to_contain("cooperative-label")
 
 </details>
 
-#### keeps generated and checked-in misuse fixture counts distinct in the plan
+#### keeps generated checked-in and total misuse fixture counts distinct in the plan
 
 - Read the multicore-green system-test plan
 - Verify the generated profile-script count is named separately
 - Verify the checked-in misuse fixture inventory is named separately
+- Verify the shell-enforced total cannot silently omit checked-in fixtures
    - Expected: absent_in_text(plan, "misuse_fixtures=611") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Read the multicore-green system-test plan")
 val plan = read_sys_test_plan()
 step("Verify the generated profile-script count is named separately")
-expect(plan).to_contain("generated profile-script contract")
+expect(plan).to_contain("generated misuse contract")
 expect(plan).to_contain("misuse_fixtures=11")
 step("Verify the checked-in misuse fixture inventory is named separately")
-expect(plan).to_contain("checked-in misuse fixture inventory")
+expect(plan).to_contain("checked-in fixture contract")
 expect(plan).to_contain("checked_in_misuse_fixtures=25")
+step("Verify the shell-enforced total cannot silently omit checked-in fixtures")
+expect(plan).to_contain("total shell-enforced `total_misuse_fixtures=36`")
 expect(absent_in_text(plan, "misuse_fixtures=611")).to_equal(1)
 ```
 

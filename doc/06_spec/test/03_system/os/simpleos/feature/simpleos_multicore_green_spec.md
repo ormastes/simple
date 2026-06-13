@@ -494,13 +494,16 @@ expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 - Verify hosted evidence does not claim to be the live AP or final handoff lane
    - Expected: absent_in_text(self_doc, "guest-visible AP execution is available") equals `1`
    - Expected: absent_in_text(self_doc, "Final hardware context-switch handoff remains tracked until live guest proof") equals `1`
+- Verify current SimpleOS evidence commands avoid the stale release wrapper
+   - Expected: absent_in_text(report, "bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl") equals `1`
+   - Expected: absent_in_text(report, "bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl") equals `1`
 - Verify the linked plan and report carry the final live marker triplet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -516,6 +519,13 @@ expect(self_doc).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1")
 expect(self_doc).to_contain("Passed: 7")
 expect(absent_in_text(self_doc, "guest-visible AP execution is available")).to_equal(1)
 expect(absent_in_text(self_doc, "Final hardware context-switch handoff remains tracked until live guest proof")).to_equal(1)
+
+step("Verify current SimpleOS evidence commands avoid the stale release wrapper")
+expect(report).to_contain("src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl")
+expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
+expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
+expect(absent_in_text(report, "bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl")).to_equal(1)
+expect(absent_in_text(report, "bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")).to_equal(1)
 
 step("Verify the linked plan and report carry the final live marker triplet")
 expect(plan).to_contain("HW_HANDOFF_PASS=true")

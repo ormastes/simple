@@ -88,7 +88,7 @@ Run the blocker contract:
 The final live QEMU lane is separate and opt-in:
 
 ```sh
-SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples
@@ -293,12 +293,13 @@ expect(probe).to_contain("USER_CR3_READY")
 - Verify requirement docs require the final marker triplet
 - Verify the QEMU spec owns the explicit final live gate
 - Verify the evidence report claims final ring/user handoff through live markers
+   - Expected: absent_in_text(report, "SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -328,6 +329,8 @@ expect(report).to_contain("final hardware handoff blocker contract: 3 scenarios"
 expect(report).to_contain("Final Ring/User Handoff PASS")
 expect(report).to_contain("final live green-carrier QEMU lane now proves the real AP ring/user path")
 expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1")
+expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
+expect(absent_in_text(report, "SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")).to_equal(1)
 expect(report).to_contain("[green-carrier-qemu] HW_HANDOFF_PASS=true")
 expect(report).to_contain("[green-carrier-qemu] USER_ENTRY_PASS=true")
 expect(report).to_contain("[green-carrier-qemu] USER_SYSCALL_PASS=true")

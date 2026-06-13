@@ -102,7 +102,7 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 - `task_spawn` must stay available as the pool-backed native task API.
 - `thread_spawn_with_args` must stay on the OS-thread surface.
 - The profile-script API contract checks approved public names before checking
-  misuse fixtures.
+  generated misuse fixtures and the checked-in misuse fixture inventory.
 
 ## Scenarios
 
@@ -137,7 +137,7 @@ expect(fixture_count()).to_equal(25)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -150,6 +150,8 @@ expect(output).to_contain("public_multicore_green_sliced_result=19")
 expect(output).to_contain("positive_fixtures=6")
 expect(output).to_contain("fixtures=11")
 expect(output).to_contain("misuse_fixtures=11")
+expect(output).to_contain("checked_in_misuse_fixtures=25")
+expect(output).to_contain("total_misuse_fixtures=36")
 ```
 
 </details>

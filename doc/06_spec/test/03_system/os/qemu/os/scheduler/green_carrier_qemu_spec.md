@@ -27,7 +27,7 @@ green_carrier_qemu_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,20 +106,20 @@ handoff path without claiming the final ring/user transition.
 Run the fast cached/default lane:
 
 ```sh
-bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter
+src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter
 ```
 
 Run the live QEMU lane:
 
 ```sh
-SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
 Run the future final hardware handoff lane after the AP ring/user proof markers
 exist:
 
 ```sh
-SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples
@@ -149,6 +149,29 @@ The future final hardware handoff lane must additionally include all of:
 
 ### SimpleOS green carrier live QEMU proof
 _Live green-carrier validation, disabled unless SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1._
+
+#### uses current-source Simple compiler for default live evidence
+
+- Verify the default Simple binary does not point at the stale release wrapper
+   - Expected: DEFAULT_SIMPLE_BIN equals `src/compiler_rust/target/debug/simple`
+- Verify explicit live runs can still override the compiler path
+   - Expected: _simple_bin() equals `if rt_file_exists(BOOTSTRAP_SIMPLE_BIN): BOOTSTRAP_SIMPLE_BIN else: DEFAULT_S... (full value in folded executable source)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify the default Simple binary does not point at the stale release wrapper")
+expect(DEFAULT_SIMPLE_BIN).to_equal("src/compiler_rust/target/debug/simple")
+step("Verify explicit live runs can still override the compiler path")
+expect(_simple_bin()).to_equal(if rt_file_exists(BOOTSTRAP_SIMPLE_BIN): BOOTSTRAP_SIMPLE_BIN else: DEFAULT_SIMPLE_BIN)
+```
+
+</details>
 
 #### boots two CPUs and dispatches green work through the scheduler-owned AP carrier
 
@@ -262,8 +285,8 @@ else:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
