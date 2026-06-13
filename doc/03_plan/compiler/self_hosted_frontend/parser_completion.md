@@ -629,12 +629,16 @@ the common/ + nogc_sync_mut/ sample). Two gap classes found and FIXED:
   See `doc/08_tracking/bug/lean_parser_struct_literal_unimplemented_2026-06-13.md`.
 
 Remaining known gap classes (long tail, deferred):
-- **Default parameter values** `fn f(x: f64 = 100.0):` — NEXT gap (surfaced at
-  mcdc.spl:187 after G49). NOT a contained parser fix: `decl_fn`/`CoreDecl` have no
-  param-default slot (only `field_defaults` for class fields), so it's a multi-layer
-  feature — parser + `decl_fn`/`CoreDecl` + flat bridge + `HirParam` + call-site
-  arity/default-application. Parse-and-discard is forbidden (silently breaks callers
-  that omit the arg). Its own focused task.
+- **G50 — default parameter values `fn f(x: T = expr)` — PARSER + IR-capture DONE
+  + pushed (2026-06-13, commit fce662c707d1); call-site application is a
+  DEPLOY-BLOCKER (open).** Parser accepts `= expr` in both param sites
+  (parse_fn_decl + parse_class_body_method); defaults captured via
+  `decl_set_param_defaults` → flat bridge `Param.has_default/default` → `HirParam`
+  (faithful capture, not discarded). Cleared mcdc.spl:187. Explicit-arg calls
+  correct on stage4 (`greet("hi",5)=10`). **BUT omitted-arg calls silently pass 0**
+  (`greet("hi")=0`, not 6) — the self-hosted path has no value-arg arity check or
+  call-signature resolution to fill defaults; that is its own milestone and a
+  deploy-blocker (see M12 gate + `doc/08_tracking/bug/lean_parser_default_param_call_fill_2026-06-13.md`).
 - **`extern class Name:` declaration form** — `extern fn` is handled but not
   `extern class` (runtime-type binding with fields). Only ~2 src/lib sites
   (error.spl SimpleError). Low priority.
@@ -646,6 +650,13 @@ Remaining known gap classes (long tail, deferred):
 1. Interpreted `flat_ast_to_module` entry OOB (see above) — diagnose/fix.
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
 3. Remove `simple_seed` delegation guards from `src/app/cli/check.spl` and lint entry.
+3b. **DEPLOY-BLOCKER — default-param call-site application.** Default param VALUES
+    now parse + capture into the IR (G50), but omitted-arg calls silently pass 0
+    because the self-hosted path has no call-resolution/arity-fill. Implement
+    call-site default-fill (clone `HirParam.default` for missing trailing args;
+    error if a missing param has no default) and confirm `g51_defparam` omit-call
+    returns 6 BEFORE removing delegation. Else deployed omit-calls miscompile.
+    Bug: `doc/08_tracking/bug/lean_parser_default_param_call_fill_2026-06-13.md`.
 4. **Gate:** `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl` exits 0; full 1855-file sweep reports 0 errors.
    **PREREQUISITE (perf) — ROOT CAUSE FOUND & FIXED 2026-06-13:** the superlinear
    `check` was the **per-index env-var AST mirror**, not type inference (an interim
