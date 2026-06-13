@@ -13,6 +13,10 @@ use app.optimize.executable_layout.{
 }
 use app.compile.native_layout_section_map.{native_layout_apply_c_section_map}
 use app.optimize.sprof_loader.{SprofCounterRecord, sprof_load_profile_text}
+use compiler.interp.execution.sprof_hotspot_bridge.{
+    SprofHotspot, sprof_hotspot_new, sprof_hotspots_above_threshold
+}
+use compiler.interp.execution.tiered_jit.{TieredJitConfig}
 use std.io.{file_exists, file_read, file_write}
 
 struct ProfileLayoutBridgeResult:
@@ -169,6 +173,23 @@ pub fn profile_layout_parse_sprof_functions(
 ) -> [ExecutableLayoutFunctionProfile]:
     val loaded = sprof_load_profile_text(profile_text, "", "")
     profile_layout_profiles_from_sprof_records(loaded.records, entries)
+
+# profile_layout_jit_hotspots feeds loaded .sprof function records into the
+# compiler-side JIT hotspot bridge and returns the candidates that meet the
+# configured tier-1 threshold. This is the production sprof -> JIT wiring:
+# the layout CLI owns the .sprof data and the tiered JIT consumes the plan.
+pub fn profile_layout_jit_hotspots(profile_text: text, config: TieredJitConfig) -> [SprofHotspot]:
+    val loaded = sprof_load_profile_text(profile_text, "", "")
+    var hotspots: [SprofHotspot] = []
+    var i = 0
+    while i < loaded.records.len():
+        val record = loaded.records[i]
+        if record.record_kind == "function":
+            val symbol = _profile_layout_function_from_key(record.key)
+            if symbol != "" and record.count > 0:
+                hotspots.push(sprof_hotspot_new(symbol, record.count))
+        i = i + 1
+    sprof_hotspots_above_threshold(hotspots, config)
 
 pub fn profile_layout_build_manifest(
     executable_manifest_text: text,

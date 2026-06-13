@@ -256,8 +256,7 @@ class CudaBackend:
                     case Device:
                         builder.emit_membar_gl()
                     case Subgroup:
-                        # Warp-level sync (implicit in CUDA, explicit only needed for independent thread scheduling)
-                        builder.emit_comment("warp sync")
+                        builder.emit_line("bar.warp.sync 0xffffffff;")
 
             case GpuMemFence(scope):
                 match scope:
@@ -622,6 +621,48 @@ class CudaBackend:
                 val cmp_reg = self.operand_to_reg(builder, args[1])
                 val val_reg = self.operand_to_reg(builder, args[2])
                 builder.emit_atomic_cas(d, PrimitiveType.I64, ptr_reg, cmp_reg, val_reg, MemorySpace.Global)
+            # Sub-group / warp intrinsics
+            case "gpu_lane_id":
+                val d2 = "%r{dest.unwrap().id}"
+                builder.emit_reg_decl(d2, PrimitiveType.I32)
+                builder.emit_line("mov.u32 {d2}, %laneid;")
+            case "gpu_warp_id":
+                val d3 = "%r{dest.unwrap().id}"
+                builder.emit_reg_decl(d3, PrimitiveType.I32)
+                builder.emit_line("mov.u32 {d3}, %warpid;")
+            case "gpu_warp_size":
+                val d4 = "%r{dest.unwrap().id}"
+                builder.emit_reg_decl(d4, PrimitiveType.I32)
+                builder.emit_line("mov.u32 {d4}, %WARP_SZ;")
+            case "gpu_warp_shuffle":
+                val d5 = "%r{dest.unwrap().id}"
+                val src5 = self.operand_to_reg(builder, args[0])
+                val lane5 = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(d5, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.idx.b32 {d5}, {src5}, {lane5}, 0x1f, 0xffffffff;")
+            case "gpu_warp_shuffle_down":
+                val d6 = "%r{dest.unwrap().id}"
+                val src6 = self.operand_to_reg(builder, args[0])
+                val delta6 = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(d6, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.down.b32 {d6}, {src6}, {delta6}, 0x1f, 0xffffffff;")
+            case "gpu_warp_shuffle_up":
+                val d7 = "%r{dest.unwrap().id}"
+                val src7 = self.operand_to_reg(builder, args[0])
+                val delta7 = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(d7, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.up.b32 {d7}, {src7}, {delta7}, 0x0, 0xffffffff;")
+            case "gpu_warp_shuffle_xor":
+                val d8 = "%r{dest.unwrap().id}"
+                val src8 = self.operand_to_reg(builder, args[0])
+                val mask8 = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(d8, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.bfly.b32 {d8}, {src8}, {mask8}, 0x1f, 0xffffffff;")
+            case "gpu_warp_ballot":
+                val d9 = "%r{dest.unwrap().id}"
+                val pred9 = self.operand_to_reg(builder, args[0])
+                builder.emit_reg_decl(d9, PrimitiveType.I32)
+                builder.emit_line("vote.sync.ballot.b32 {d9}, {pred9}, 0xffffffff;")
             case _:
                 builder.emit_comment("Unknown intrinsic: {name}")
 
@@ -776,7 +817,7 @@ impl GpuCodegen for CudaBackend:
         match scope:
             case Workgroup: "bar.sync 0;"
             case Device: "membar.gl;"
-            case Subgroup: "// warp sync"
+            case Subgroup: "bar.warp.sync 0xffffffff;"
 
     fn compile_atomic(op: GpuAtomicOpKind, dest: LocalId, ptr: MirOperand, value: MirOperand) -> text:
         "// atomic op"

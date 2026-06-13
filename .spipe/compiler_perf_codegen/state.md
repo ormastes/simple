@@ -52,9 +52,14 @@ Behavioral evidence:
 - `bin/simple check` clean on all 5 touched files
 - Bridge spec: 24/24 tests passing in interpreter mode
 - The sprint plan gap ("zero external callers for JitHotspotPlan from sprof data in
-  the compiler layer") is now closed: `sprof_hotspot_to_profile` converts
-  (function_name, call_count) primitives to FunctionProfile and calls
-  `jit_hotspot_plan_from_profile` — first compiler-side sprof→JIT wiring.
+  the compiler layer"): the bridge converts (function_name, call_count) primitives
+  to FunctionProfile and calls `jit_hotspot_plan_from_profile`. Opus review
+  (2026-06-13) found the bridge initially had ZERO production callers (scaffolding
+  only, overclaimed as "closed") — fixed same day: `profile_layout_jit_hotspots` in
+  src/app/optimize/profile_layout_cli.spl feeds loaded .sprof records through the
+  bridge (threshold-filtered) and profile_layout_native_smoke_run consumes it
+  (jit-hotspot-candidates evidence line). Spec:
+  test/01_unit/app/optimize/profile_layout_jit_hotspots_spec.spl (4/4).
 - No circular import: bridge accepts primitive text/i64 (not app.SprofCounterRecord).
 
 ### AC-3: riscv64 and arm64 codegen specs

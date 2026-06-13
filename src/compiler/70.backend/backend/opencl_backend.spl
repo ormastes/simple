@@ -718,6 +718,23 @@ class OpenClBackend:
             return OpenClBackend.emit_atomic_intrinsic(func, dest, "atomic_max", name, args)
         if name == "gpu_atomic_cas_i64":
             return OpenClBackend.emit_atomic_cas_intrinsic(func, dest, name, args)
+        # Sub-group / warp intrinsics (OpenCL 2.0+ cl_khr_subgroups)
+        if name == "gpu_lane_id":
+            return OpenClBackend.emit_subgroup_no_arg(func, dest, "get_sub_group_local_id()")
+        if name == "gpu_warp_id":
+            return OpenClBackend.emit_subgroup_no_arg(func, dest, "get_sub_group_id()")
+        if name == "gpu_warp_size":
+            return OpenClBackend.emit_subgroup_no_arg(func, dest, "get_sub_group_size()")
+        if name == "gpu_warp_shuffle":
+            return OpenClBackend.emit_subgroup_shuffle(func, dest, "sub_group_shuffle", name, args)
+        if name == "gpu_warp_shuffle_down":
+            return OpenClBackend.emit_subgroup_shuffle(func, dest, "sub_group_shuffle_down", name, args)
+        if name == "gpu_warp_shuffle_up":
+            return OpenClBackend.emit_subgroup_shuffle(func, dest, "sub_group_shuffle_up", name, args)
+        if name == "gpu_warp_shuffle_xor":
+            return OpenClBackend.emit_subgroup_shuffle(func, dest, "sub_group_shuffle_xor", name, args)
+        if name == "gpu_warp_ballot":
+            return OpenClBackend.emit_subgroup_ballot(func, dest, name, args)
         "// unsupported OpenCL intrinsic: {name}"
 
     static fn emit_atomic_intrinsic(func: MirFunction, dest, builtin: text, name: text, args: [MirOperand]) -> text:
@@ -738,6 +755,31 @@ class OpenClBackend:
         val type_ = OpenClBackend.local_id_type(func, dest_id)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = atomic_cmpxchg({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])}, {OpenClBackend.emit_operand(func, args[2])});"
 
+    static fn emit_subgroup_no_arg(func: MirFunction, dest, builtin_call: text) -> text:
+        if not dest.?:
+            return "{builtin_call};"
+        val dest_id = dest.unwrap()
+        val type_ = OpenClBackend.local_id_type(func, dest_id)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {builtin_call};"
+
+    static fn emit_subgroup_shuffle(func: MirFunction, dest, builtin: text, name: text, args: [MirOperand]) -> text:
+        if not dest.?:
+            return "// OpenCL subgroup shuffle missing destination: {name}"
+        if args.len() < 2:
+            return "// OpenCL subgroup shuffle missing arguments: {name}"
+        val dest_id = dest.unwrap()
+        val type_ = OpenClBackend.local_id_type(func, dest_id)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {builtin}({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])});"
+
+    static fn emit_subgroup_ballot(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+        if not dest.?:
+            return "// OpenCL subgroup ballot missing destination: {name}"
+        if args.len() < 1:
+            return "// OpenCL subgroup ballot missing arguments: {name}"
+        val dest_id = dest.unwrap()
+        val type_ = OpenClBackend.local_id_type(func, dest_id)
+        "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = sub_group_ballot({OpenClBackend.emit_operand(func, args[0])});"
+
     static fn emit_barrier(scope: GpuBarrierScope) -> text:
         match scope:
             case Workgroup:
@@ -745,7 +787,7 @@ class OpenClBackend:
             case Device:
                 "mem_fence(CLK_GLOBAL_MEM_FENCE);"
             case Subgroup:
-                "// subgroup barrier deferred"
+                "sub_group_barrier(CLK_LOCAL_MEM_FENCE);"
 
     static fn emit_mem_fence(scope: GpuMemoryScope) -> text:
         match scope:
