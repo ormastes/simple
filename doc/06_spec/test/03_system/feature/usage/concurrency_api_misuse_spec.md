@@ -81,12 +81,14 @@ argument types, and direct runtime aliases.
 Run the misuse gate:
 
 ```sh
-bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=src/compiler_rust/target/debug/simple bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples
 
 - `thread_spawn` must be imported from `std.concurrent.thread`.
+- `thread_spawn2` must remain a rejected numbered alias; use
+  `thread_spawn_with_args` for explicit-argument spawning.
 - `thread_spawn_with_args` must stay available as the explicit-argument
   OS-thread API.
 - `cooperative_green_spawn` must stay on the cooperative-green surface.
@@ -104,6 +106,55 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 - The profile-script API contract checks approved public names before checking
   generated misuse fixtures and the checked-in misuse fixture inventory.
 
+## TUI Capture
+
+```text
+Simple Test Runner v1.0.0-beta
+Running: test/03_system/feature/usage/concurrency_api_misuse_spec.spl
+Concurrency API misuse compile errors PASSED
+Files: 1
+Passed: 6
+Failed: 0
+```
+
+## Traceability Expectations
+
+- The misuse spec must run each checked-in fixture through `simple check`.
+- The checked-in fixture inventory must stay explicit so new misuse fixtures
+  cannot appear without updating the public contract count.
+- The numbered-alias fixture proves `E-PAR-002` remains a compile-time error,
+  while active source/profile scans keep numbered API names out of public
+  implementation surfaces.
+- Wrong-surface fixtures prove OS-thread, cooperative-green, low-level green,
+  multicore-green, and task-pool APIs stay separated.
+- Bad-arity and bad-argument fixtures prove spawn APIs fail closed when callers
+  do not pass the required closure, state, step function, or worker count.
+- Shared-mutable-state fixtures prove green-process closures remain
+  share-nothing unless an API explicitly documents a synchronization path.
+- The shell profile contract must pass approved public fixtures before running
+  misuse fixtures so a broken API cannot be hidden by negative-only coverage.
+
+## Manual Review Notes
+
+- Reviewers should treat `thread_spawn2` only as a forbidden input string; it is
+  not an API name that application code may import.
+- The preferred explicit-argument OS-thread name is `thread_spawn_with_args`.
+- Cooperative-green APIs intentionally stay on `std.concurrent.cooperative_green`.
+- Low-level green-thread APIs intentionally stay on `std.concurrent.green_thread`.
+- Multicore-green APIs intentionally stay on `std.concurrent.multicore_green`.
+- `task_spawn` intentionally stays on the lower-level thread-pool surface.
+- The generated shell fixtures exercise positive public API names first.
+- The checked-in fixtures exercise stable misuse paths that need reviewable
+  filenames and generated manual coverage.
+- The fixture count is part of the release-visible contract; changing it means
+  the tracking row, system plan, and generated manual must change together.
+- Docker-isolated runs should pass `SIMPLE_BIN` explicitly when the checkout
+  does not contain a local compiler build artifact.
+- A stale release wrapper must not be used as proof that a fixture passed or
+  failed; the selected compiler must be executable in the test process.
+- Compile-error assertions must check both the diagnostic code and the user
+  action text so regressions remain understandable.
+
 ## Scenarios
 
 ### Concurrency API misuse compile errors
@@ -111,7 +162,7 @@ bin/simple test test/03_system/feature/usage/concurrency_api_misuse_spec.spl --m
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `25`
+   - Expected: fixture_count() equals `26`
 
 
 <details>
@@ -122,7 +173,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(25)
+expect(fixture_count()).to_equal(26)
 ```
 
 </details>
@@ -150,14 +201,16 @@ expect(output).to_contain("public_multicore_green_sliced_result=19")
 expect(output).to_contain("positive_fixtures=6")
 expect(output).to_contain("fixtures=11")
 expect(output).to_contain("misuse_fixtures=11")
-expect(output).to_contain("checked_in_misuse_fixtures=25")
-expect(output).to_contain("total_misuse_fixtures=36")
+expect(output).to_contain("checked_in_misuse_fixtures=26")
+expect(output).to_contain("total_misuse_fixtures=37")
 ```
 
 </details>
 
 #### rejects OS-thread surface misuse
 
+- Reject numbered suffix aliases for OS-thread APIs
+- expect compile error
 - Reject thread_spawn imported from the cooperative-green surface
 - expect compile error
 - Reject thread_spawn_with_args imported from the cooperative-green surface
@@ -173,10 +226,12 @@ expect(output).to_contain("total_misuse_fixtures=36")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Reject numbered suffix aliases for OS-thread APIs")
+expect_compile_error("thread_spawn_number_suffix_alias.spl", "E-PAR-002", "thread_spawn2 is a numbered name")
 step("Reject thread_spawn imported from the cooperative-green surface")
 expect_compile_error("thread_spawn_wrong_surface_import.spl", "E-PAR-003", "thread_spawn belongs to std.concurrent.thread")
 step("Reject thread_spawn_with_args imported from the cooperative-green surface")

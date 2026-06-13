@@ -159,7 +159,7 @@ Failed: 0
 - The tracking row must carry the concurrency API shell contract so approved
   public names remain release-visible.
 - The tracking row must summarize the approved API count, misuse fixture count,
-  `task_spawn` wrong-surface fixture, and `multicore_green_spawn`
+  numbered-suffix alias fixture, `task_spawn` wrong-surface fixture, and `multicore_green_spawn`
   wrong-surface fixture so public API coverage cannot silently shrink.
 - The tracking row and multicore-green plans must not contain merge-conflict
   markers or mechanically merged fixture counts.
@@ -317,7 +317,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -355,8 +355,9 @@ expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green
 step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=11")
-expect(row).to_contain("checked_in_misuse_fixtures=25")
-expect(row).to_contain("total_misuse_fixtures=36")
+expect(row).to_contain("checked_in_misuse_fixtures=26")
+expect(row).to_contain("total_misuse_fixtures=37")
+expect(row).to_contain("thread_spawn_number_suffix_alias.spl rejects numbered API aliases")
 expect(absent_in_text(row, "misuse_fixtures=611")).to_equal(1)
 expect(row).to_contain("task_spawn approved")
 expect(row).to_contain("thread_spawn_with_args_wrong_surface_import.spl rejects cooperative-green facade")
@@ -417,9 +418,9 @@ expect(plan).to_contain("generated misuse contract")
 expect(plan).to_contain("misuse_fixtures=11")
 step("Verify the checked-in misuse fixture inventory is named separately")
 expect(plan).to_contain("checked-in fixture contract")
-expect(plan).to_contain("checked_in_misuse_fixtures=25")
+expect(plan).to_contain("checked_in_misuse_fixtures=26")
 step("Verify the shell-enforced total cannot silently omit checked-in fixtures")
-expect(plan).to_contain("total shell-enforced `total_misuse_fixtures=36`")
+expect(plan).to_contain("total shell-enforced `total_misuse_fixtures=37`")
 expect(absent_in_text(plan, "misuse_fixtures=611")).to_equal(1)
 ```
 
