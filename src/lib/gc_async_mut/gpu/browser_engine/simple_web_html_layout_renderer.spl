@@ -1164,7 +1164,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
             margin_l_v = 0
             margin_l_auto_v = true
         else:
-            margin_l_v = parse_int(ml)
+            margin_l_v = if ml.ends_with("%"): 0 - parse_int(ml) else: parse_int(ml)
             margin_l_auto_v = false
     val mt = decl_get(decls, "margin-top")
     if mt.len() > 0:
@@ -1180,7 +1180,7 @@ fn apply_decls(st: Style, decls: text) -> Style:
             margin_r_v = 0
             margin_r_auto_v = true
         else:
-            margin_r_v = parse_int(mr)
+            margin_r_v = if mr.ends_with("%"): 0 - parse_int(mr) else: parse_int(mr)
             margin_r_auto_v = false
     val mb = decl_get(decls, "margin-bottom")
     if mb.len() > 0:
@@ -3501,6 +3501,11 @@ fn absolute_outer_height(st: Style) -> i32:
         return st.height_px + st.pad_t + st.pad_b + border_y
     style_line_h(st)
 
+fn resolve_horizontal_margin_px(margin_px: i32, containing_w: i32) -> i32:
+    if margin_px < 0:
+        return containing_w * (0 - margin_px) / 100
+    margin_px
+
 fn absolute_child_x(parent_x: i32, parent: Style, child_node: HNode, child: Style, containing_w: i32) -> i32:
     if child.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
@@ -3538,14 +3543,16 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         var prev_margin_b_contents = 0
         while c_contents >= 0:
             val cst = styles[c_contents]
+            val cml = resolve_horizontal_margin_px(cst.margin_l, w)
+            val cmr = resolve_horizontal_margin_px(cst.margin_r, w)
             if child_count_contents > 0:
                 cy_contents = cy_contents + st.gap_px
             val collapsed_margin_contents = if prev_margin_b_contents > cst.margin_t: prev_margin_b_contents else: cst.margin_t
             cy_contents = cy_contents + collapsed_margin_contents
-            var child_w_contents = w - cst.margin_l - cst.margin_r
+            var child_w_contents = w - cml - cmr
             if child_w_contents < 1:
                 child_w_contents = 1
-            val child = layout(nodes, styles, child_index, c_contents, x + cst.margin_l, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            val child = layout(nodes, styles, child_index, c_contents, x + cml, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw
@@ -3628,8 +3635,10 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             while fm >= 0:
                 val cst = styles[fm]
                 if not cst.position_absolute:
+                    val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                    val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
-                    val item_outer_w = cst.margin_l + base_w_wrap + cst.margin_r
+                    val item_outer_w = cml + base_w_wrap + cmr
                     if child_count_measure > 0 and cx_measure + row_wrap_column_gap + item_outer_w > iw:
                         line_heights[line_count] = line_h_measure
                         line_count = line_count + 1
@@ -3699,8 +3708,10 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     out_wrap_ends = child.wrap_ends
                     out_intrinsic_widths = child.intrinsic_widths
                 else:
+                    val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                    val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
-                    val item_outer_w = cst.margin_l + base_w_wrap + cst.margin_r
+                    val item_outer_w = cml + base_w_wrap + cmr
                     if flex_child_count_wrap > 0 and cx_wrap - ix + st.gap_px + item_outer_w > iw:
                         cx_wrap = ix
                         if reverse_wrap:
@@ -3714,7 +3725,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                         line_h_wrap = line_heights[line_index_wrap] + align_content_line_extra
                     if flex_child_count_wrap > 0:
                         cx_wrap = cx_wrap + row_wrap_column_gap
-                    cx_wrap = cx_wrap + cst.margin_l
+                    cx_wrap = cx_wrap + cml
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
                         remaining_w = 1
@@ -3726,7 +3737,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     out_wrap_starts = child.wrap_starts
                     out_wrap_ends = child.wrap_ends
                     out_intrinsic_widths = child.intrinsic_widths
-                    cx_wrap = cx_wrap + out_bw[fc_wrap] + cst.margin_r
+                    cx_wrap = cx_wrap + out_bw[fc_wrap] + cmr
                     flex_child_count_wrap = flex_child_count_wrap + 1
                 fc_wrap = child_index.next_sibling[fc_wrap]
             var flex_h_wrap = if st.height_px > 0:
@@ -3753,6 +3764,8 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             val ps = ordered_flex_children[ps_i]
             val pcst = styles[ps]
             if not pcst.position_absolute:
+                val pml = resolve_horizontal_margin_px(pcst.margin_l, iw)
+                val pmr = resolve_horizontal_margin_px(pcst.margin_r, iw)
                 nonabs_count = nonabs_count + 1
                 var base_w = 0
                 if pcst.flex_basis_px > 0:
@@ -3780,11 +3793,11 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 if pcst.margin_l_auto:
                     auto_main_margin_count = auto_main_margin_count + 1
                 else:
-                    sum_explicit = sum_explicit + pcst.margin_l
+                    sum_explicit = sum_explicit + pml
                 if pcst.margin_r_auto:
                     auto_main_margin_count = auto_main_margin_count + 1
                 else:
-                    sum_explicit = sum_explicit + pcst.margin_r
+                    sum_explicit = sum_explicit + pmr
             ps_i = ps_i + 1
         var gaps_total = 0
         if nonabs_count > 1:
@@ -3861,12 +3874,14 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 out_wrap_ends = child.wrap_ends
                 out_intrinsic_widths = child.intrinsic_widths
             else:
+                val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                 if flex_child_count > 0:
                     cx = cx + st.column_gap_px + justify_gap_extra
-                cx = cx + (if cst.margin_l_auto: auto_main_margin_px else: cst.margin_l)
+                cx = cx + (if cst.margin_l_auto: auto_main_margin_px else: cml)
                 # auto-width child gets its weighted share; %-width resolves against
                 # the container inner width; px-width children ignore this.
-                var remaining_w = iw - (cx - ix) - cst.margin_r
+                var remaining_w = iw - (cx - ix) - cmr
                 var force_used_w = false
                 if shrink_deficit > 0 and shrink_scaled_total > 0 and (cst.width_px > 0 or cst.flex_basis_px > 0):
                     val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
@@ -3971,7 +3986,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 val used_h = cst.margin_t + child.height + cst.margin_b
                 if used_h > max_child_h:
                     max_child_h = used_h
-                cx = cx + out_bw[fc] + (if cst.margin_r_auto: auto_main_margin_px else: cst.margin_r)
+                cx = cx + out_bw[fc] + (if cst.margin_r_auto: auto_main_margin_px else: cmr)
                 flex_child_count = flex_child_count + 1
             fc_i = fc_i + 1
         var flex_h = max_child_h + st.pad_t + st.pad_b + border_y
@@ -4054,27 +4069,29 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 out_wrap_ends = child.wrap_ends
                 out_intrinsic_widths = child.intrinsic_widths
             else:
+                val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                 if flex_child_count_col > 0:
                     cy_flex = cy_flex + st.row_gap_px + col_justify_gap_extra
                 cy_flex = cy_flex + (if cst.margin_t_auto: col_auto_main_margin_px else: cst.margin_t)
                 var child_inner_w = iw
                 if child_inner_w < 1:
                     child_inner_w = 1
-                var child_w = child_inner_w - cst.margin_l - cst.margin_r
+                var child_w = child_inner_w - cml - cmr
                 if child_w < 1:
                     child_w = 1
-                var child_x = ix + cst.margin_l
+                var child_x = ix + cml
                 val col_item_align = flex_item_align(st, cst)
                 val col_child_outer_w = if cst.width_px > 0:
                     if nodes[flex_c].has_widget_class or nodes[flex_c].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
                 else:
                     child_w
-                val col_child_margin_w = cst.margin_l + col_child_outer_w + cst.margin_r
+                val col_child_margin_w = cml + col_child_outer_w + cmr
                 if col_item_align == "center" and iw > col_child_margin_w:
-                    child_x = ix + cst.margin_l + (iw - col_child_margin_w) / 2
+                    child_x = ix + cml + (iw - col_child_margin_w) / 2
                     child_w = col_child_outer_w
                 elif (col_item_align == "flex-end" or col_item_align == "end") and iw > col_child_margin_w:
-                    child_x = ix + cst.margin_l + iw - col_child_margin_w
+                    child_x = ix + cml + iw - col_child_margin_w
                     child_w = col_child_outer_w
                 val child = layout(nodes, styles, child_index, flex_c, child_x, cy_flex, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
                 out_bx = child.bx
@@ -4133,10 +4150,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                 child_inner_w = child_inner_w - scrollbar_gutter
             if child_inner_w < 1:
                 child_inner_w = 1
-            var child_w = child_inner_w - cst.margin_l - cst.margin_r
+            val cml = resolve_horizontal_margin_px(cst.margin_l, child_inner_w)
+            val cmr = resolve_horizontal_margin_px(cst.margin_r, child_inner_w)
+            var child_w = child_inner_w - cml - cmr
             if child_w < 1:
                 child_w = 1
-            val child = layout(nodes, styles, child_index, c, ix + cst.margin_l, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            val child = layout(nodes, styles, child_index, c, ix + cml, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw

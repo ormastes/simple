@@ -5,7 +5,7 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  87 fixtures through `90_absolute_inset_stretch` with `87` passes, `0`
+  88 fixtures through `91_percent_margin_basic` with `88` passes, `0`
   failures, and `blur_or_tolerance_used=false`. This is focused structural box
   evidence, not broad Chromium layout-engine completion.
 - The authoritative current pixel harness in this worktree is
@@ -847,8 +847,19 @@ Open gaps tied to the active browser objective:
      `87` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
      tolerance, downscaling, copied Chromium pixels, or resolution adjustment
      was used
-- Parallel agent research identified two next small geometry candidates:
-  percentage margins resolved against the containing block inline size, and
-  percentage heights inside a definite-height containing block. Percentage
-  height is likely larger because parent height must flow through more layout
-  paths.
+- Percentage horizontal margin evidence now extends the live Chrome manifest
+  through fixture 91:
+   - added `91_percent_margin_basic`, a flex-row fixture where
+     `margin-left:10%` and `margin-right:5%` resolve against a 200px containing
+     block inline size, placing the first child at `x=20` and the following
+     child at `x=70`
+   - `simple_web_html_layout_renderer.spl` now preserves percentage
+     `margin-left` / `margin-right` as deferred values and resolves them at
+     horizontal layout-use sites instead of treating `10%` as `10px`
+   - live Chrome headless geometry manifest evidence reports `88` fixtures,
+     `88` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
+     tolerance, downscaling, copied Chromium pixels, or resolution adjustment
+     was used
+- Parallel agent research identified percentage heights inside a definite-height
+  containing block as the next small geometry candidate. Percentage height is
+  likely larger because parent height must flow through more layout paths.
