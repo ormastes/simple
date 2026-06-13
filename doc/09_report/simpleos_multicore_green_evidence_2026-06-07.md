@@ -149,6 +149,22 @@ alignment scenario:
 - QEMU default gate lane: 2 scenarios
 - final live hardware handoff lane remained opt-in and unclaimed at that point
 
+## 2026-06-13 Hosted Recheck After `a61`
+
+After syncing `/tmp/simple-mgreen-sliced-jj-1000` to `main@origin` at `a61
+perf(gui): escape html window text in one pass`, the hosted SimpleOS green
+evidence was rerun without opt-in QEMU live mode:
+
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`: PASS, 3 assertions
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean`: PASS, 7 assertions
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`: PASS, 4 assertions
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean`: PASS, 3 assertions
+
+This recheck keeps the hosted SimpleOS cooperative, multicore-green scheduler,
+channel wake, and final-handoff blocker documentation current on the shared
+mainline. It does not replace the separate opt-in live QEMU evidence for AP
+ring/user handoff.
+
 This refresh predates final closure. The blocker was closed later by the live
 QEMU final-handoff lane and remains documented in
 `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.

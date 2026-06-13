@@ -223,6 +223,19 @@ Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `GOMAXPROCS`, `OS_THREAD_WORKERS`,
 `PROFILE_DOCKER_IMAGE`, `PROFILE_DOCKER_MEMORY`, `PROFILE_DOCKER_CPUS`, and
 `PROFILE_DOCKER_SIMPLE_BINARY`.
 
+## 2026-06-13 Evidence Recheck
+
+After syncing `/tmp/simple-mgreen-sliced-jj-1000` to `main@origin` at `a61
+perf(gui): escape html window text in one pass`, the checked-in report was
+revalidated without changing benchmark measurements:
+
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`: PASS, 3 assertions
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean`: PASS, 3 assertions
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`: PASS, 3 assertions
+
+This is a report-contract recheck of the checked-in evidence. It is not a fresh
+benchmark run and does not change the timing tables above.
+
 ## Limitations
 
 - Different runtimes have different startup and warmup models; the report labels

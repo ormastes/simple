@@ -341,6 +341,16 @@ Each agent reports:
 - Current multicore-green lane state is rebased on the latest shared mainline
   and uses small jj slices for doc/spec/evidence refreshes so other-agent work
   remains separate.
+- Recheck after syncing the scratch jj workspace to `a61
+  perf(gui): escape html window text in one pass` passed the checked-in
+  cross-language evidence gates:
+  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`,
+  `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`, and
+  `test/05_perf/stress/multicore_green_fanout_spec.spl`.
+- The same recheck reran hosted SimpleOS green evidence without the opt-in QEMU
+  live lane: `simpleos_cooperative_green_spec.spl`,
+  `simpleos_multicore_green_spec.spl`, `simpleos_green_channel_wake_spec.spl`,
+  and `simpleos_green_hardware_handoff_blocker_spec.spl` all passed.
 - The latest docs/spec slice made `test/05_perf/README.md` point at every
   active profile-script gate for this lane: the canonical profile report
   contract, negative mutation contract, binary auto-selection regression,
