@@ -5,9 +5,15 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  93 fixtures through `96_absolute_percent_height_bottom` with `93` passes, `0`
-  failures, and `blur_or_tolerance_used=false`. This is focused structural box
-  evidence, not broad Chromium layout-engine completion.
+  94 fixtures: `00_text_only` plus the existing `02_block_boxes` through
+  `96_absolute_percent_height_bottom`, with `94` passes, `0` failures, and
+  `blur_or_tolerance_used=false`. This is focused structural box evidence, not
+  broad Chromium layout-engine completion.
+- `01_inline_text` is deliberately not in the all-pass manifest yet. The
+  labelled fixture exposes a real inline layout mismatch tracked in
+  `doc/08_tracking/bug/html_compat_inline_span_structural_geometry_mismatch_2026-06-13.md`:
+  Chromium places the span at `x=23 y=16 width=11 height=17`, while Simple
+  currently emits `x=8 y=34 width=304 height=18`.
 - The authoritative current pixel harness in this worktree is
   `src/app/wm_compare/html_compat.spl`, now covering fixtures `00..07`, CSS
   layers `10..17`, flex rows `18..26`, absolute positioning fixture `27`, and
@@ -931,3 +937,15 @@ Open gaps tied to the active browser objective:
      was used
    - scope note: min-height-derived definiteness and broader absolute
      containing-block variants remain separate follow-up work
+- Text-only paragraph structural evidence now extends the live Chrome manifest
+  to include fixture `00_text_only`:
+   - added non-visual `id` and `data-geom-label` markers to the existing
+     paragraphs in `00_text_only.html`
+   - `html_compat_geometry_probe.spl` maps `text_hello` and `text_world` and
+     fills their text metadata so structural comparison covers both geometry
+     and element text
+   - focused live evidence reports `fixture_count=1`, `pass_count=1`,
+     `fail_count=0`, and `blur_or_tolerance_used=false` for `00_text_only`
+   - the default Chrome headless geometry manifest now includes 94 passing
+     fixtures; `01_inline_text` remains excluded until the inline span layout
+     blocker is fixed
