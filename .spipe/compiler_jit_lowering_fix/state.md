@@ -20,7 +20,17 @@ Spec files JIT-compile instead of silently falling back to the interpreter: the 
 No Rust seed changes. No new JIT features — fix the lowering failure only.
 
 ## Phase
-dev-done
+done
+
+## AC Status
+- AC-1: DONE — root cause: `stmt_lowering.rs:606` ignores nested `fn` as `Ok(vec![])`, name never enters scope; error comes from `expr/mod.rs:315` format string
+- AC-2: DONE — `val decorator = fn(...)` in `src/lib/nogc_sync_mut/spec/decorators.spl` (4 occurrences: skip, ignore, only_on, skip_if); decorator fallback eliminated on all 4 target specs
+- AC-3: DONE — before/after medians: parser_limits 225→224ms, path_safety 187→172ms, fs_exec 192→179ms; ~10-15ms improvement (JIT attempt overhead eliminated); specs still interpreter-executed (other HIR limits); honest result
+- AC-4: DONE — all 16 wave-1 specs green (6 sshd + 4 http_server + fs_exec + smf_bounds + qemu_runner + sprof + riscv64/arm64_abi + profile_layout)
+- AC-5: DONE — bug doc at `doc/08_tracking/bug/hir_nested_fn_not_lowered_as_variable_2026-06-13.md`; Rust seed not touched
 
 ## Log
 - dev: Created state file with 5 acceptance criteria (type: bug)
+- dev: Fixed `src/lib/nogc_sync_mut/spec/decorators.spl` — 4x `fn decorator` → `val decorator = fn(...)` to avoid HIR Unknown variable error
+- dev: Created bug doc for Rust seed nested-fn HIR gap
+- dev: All AC-4 regression specs pass; check clean on touched file

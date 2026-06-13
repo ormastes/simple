@@ -19,7 +19,22 @@ SSpec system tests under test/03_system/os/qemu/ boot real QEMU per architecture
 No qemu_runner_part*.spl changes. No src/os/port/** changes (Track A owns the P1 fix). No kernel builds.
 
 ## Phase
-dev-done
+done
+
+## Per-Arch Live Results (2026-06-13)
+
+| Arch    | Kernel ELF Present | Image Present | Spec Result | Classification |
+|---------|--------------------|---------------|-------------|----------------|
+| riscv64 | YES                | YES           | LIVE PASS   | pass |
+| riscv32 | NO                 | YES           | RED (expected) | missing-media:build/os/simpleos_riscv32_smf_fs.elf |
+| arm64   | NO                 | YES           | RED (expected) | missing-media:build/os/simpleos_arm64_fs_exec.elf |
+| arm32   | NO                 | YES           | RED (expected) | missing-media:build/os/simpleos_arm32_fs_exec.elf |
+| x86_64  | NO                 | YES           | RED (expected) | missing-media:build/os/simpleos_x86_64_fs_exec.elf |
+| x86_32  | YES                | YES           | LIVE PASS   | pass |
+
+Unit tests: 13/13 green (classify_serial — pure logic, no QEMU).
+Lint: bin/simple build lint src/os/qemu_systest_contract.spl — clean.
 
 ## Log
 - dev: Created state file with 4 acceptance criteria (type: feature)
+- done: Implemented src/os/qemu_systest_contract.spl, 6 system specs, 1 unit spec; riscv64+x86_32 live PASS; riscv32/arm64/arm32/x86_64 correctly diagnosed as missing-media RED
