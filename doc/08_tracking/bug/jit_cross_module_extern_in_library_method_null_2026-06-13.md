@@ -94,11 +94,17 @@ JIT-crash hazards now converted to correct interpreter fallback.
 
 ## Follow-ups (Open — native codegen feature, NOT the crash)
 
-1. **Import flattening:** make a whole-module `use a.b.c` import flatten the
-   used class's `impl` method bodies into the codegen unit (or require
-   `use a.b.c.{Class}` / `.*`), so imported class methods JIT/AOT natively
-   instead of falling back. (`should_flatten_nested_import`,
-   `pipeline/module_loader.rs`.)
+1. **Import flattening:** ~~make a whole-module `use a.b.c` import flatten the
+   class's `impl` method bodies into the codegen unit~~ — **FIXED.**
+   `single_import_targets_module_file` (`pipeline/module_loader.rs`) now flattens
+   a `Single`/`Aliased` import whose resolved path is a standalone module *file*
+   (basename == imported name, not `__init__.spl`) — the same flatten operation
+   `Group`/`Glob` already perform, keyed on the resolved path instead of the
+   syntax. Package-symbol imports (resolving to `__init__.spl`) are unchanged, so
+   whole packages are never pulled in. `use std.common.string_builder;
+   RtStringBuilder.new()` now JITs **and** AOTs natively. Blast radius measured
+   (60 examples + ~9.5k specs across lib/common + mcp_unit + full lib): 0
+   regressions.
 2. **Self-mutation lowering:** ~~with a flattening import, JIT fails with
    `cannot modify self in immutable fn method 'RtStringBuilder.finish'`~~ —
    **NOT a compiler bug; FIXED in source.** Simple has two method forms by
@@ -116,12 +122,11 @@ JIT-crash hazards now converted to correct interpreter fallback.
 
 - JIT no longer crashes on an undefined cross-module symbol — it falls back to
   the interpreter (correct output, slower). No more exit-139.
-- `RtStringBuilder` now JITs/AOTs **natively** when imported with a flattening
-  form — `use std.common.string_builder.{RtStringBuilder}` or `.*` (follow-up #2
-  fixed). Only the whole-module `use std.common.string_builder` form still falls
-  back (flatten gap, follow-up #1) — safe (correct output via interpreter). The
-  MCP JSON builders may now use `RtStringBuilder` **if** imported via the
-  group/glob form; cf. `rt_string_concat_quadratic_2026-06-12.md`.
+- `RtStringBuilder` now JITs/AOTs **natively** with **any** import form —
+  whole-module `use std.common.string_builder`, group `.{RtStringBuilder}`, or
+  glob `.*` (follow-ups #1 and #2 both fixed). The MCP JSON builders may now use
+  `RtStringBuilder` on the native/JIT path; cf.
+  `rt_string_concat_quadratic_2026-06-12.md`.
 
 ## Cross-references
 
