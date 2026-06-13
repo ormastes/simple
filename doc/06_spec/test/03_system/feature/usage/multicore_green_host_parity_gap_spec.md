@@ -77,7 +77,7 @@ host-runtime work rather than being implied closed by SimpleOS-only proofs.
 ## Syntax
 
 ```sh
-bin/release/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean
+src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean
 ```
 
 ## Examples

@@ -78,7 +78,7 @@ source-run and standalone native paths.
 ## Syntax
 
 ```sh
-bin/release/simple test test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl --mode=interpreter --clean
+src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl --mode=interpreter --clean
 ```
 
 ## Scenarios

@@ -212,13 +212,14 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 
 - Read the multicore-green parallel-agent plan
 - Verify the plan still names the canonical deliverable and evidence sections
+- Verify profile and runtime-pool acceptance uses current-source evidence while release wrapper is stale
 - Verify host-fairness acceptance uses current-source evidence while release wrapper is stale
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -237,6 +238,10 @@ expect(plan).to_contain("public_multicore_green_sliced_result=19")
 expect(plan).to_contain("live QEMU proof for AP startup plus scheduler-visible CPU1 green dispatch")
 expect(plan).to_contain("hosted SimpleOS multicore evidence keeps the model/live boundary executable")
 expect(plan).to_contain("the hosted spec has 7 scenarios")
+step("Verify profile and runtime-pool acceptance uses current-source evidence while release wrapper is stale")
+expect(plan).to_contain("src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl")
+expect(plan).to_contain("src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl")
+expect(plan).to_contain("src/compiler_rust/target/debug/simple check test/01_unit/lib/nogc_async_mut/multicore_green_native.spl")
 step("Verify host-fairness acceptance uses current-source evidence while release wrapper is stale")
 expect(plan).to_contain("src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl")
 expect(plan).to_contain("src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl")

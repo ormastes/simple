@@ -109,7 +109,7 @@ Acceptance evidence:
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `src/compiler_rust/target/debug/simple run build/cross_lang_perf/hosted_sliced_fairness.spl --mode=interpreter`
-- `bin/release/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - report row proving Go beats C pthreads in isolated large fanout stress with
   Go `GOMAXPROCS` pinned to `CPU_WORKERS`.
 - report row showing Simple multicore green native still beats the C pthread
@@ -138,7 +138,7 @@ Deliverables:
 
 Acceptance evidence:
 
-- `bin/release/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
 - `sh scripts/check/check-thread-spawn-with-args-native.shs`
 
 ## Cooperative Green Semantics Agent
@@ -190,10 +190,10 @@ Deliverables:
 
 Acceptance evidence:
 
-- `bin/release/simple check test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
+- `src/compiler_rust/target/debug/simple check test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
 - native build/run of `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
   exits `0`, proving every handle reported `used_runtime_pool()`;
-- `bin/release/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
 - cross-language report contains `used_runtime_pool()` evidence text.
 
 ## Host Fairness And Blocking Agent
