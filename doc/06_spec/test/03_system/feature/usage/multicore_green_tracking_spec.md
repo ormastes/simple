@@ -356,7 +356,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 90 lines folded for reproduction.
+Runnable source: 91 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -376,6 +376,7 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_s
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(row).to_contain("canonical no-arg profile contract")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
+expect(row).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(row).to_contain("test/02_integration/simple_wrapper_runtime_probe_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
@@ -604,7 +605,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -650,6 +651,9 @@ val sys_test_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md")
 expect(sys_test_plan).to_contain("test/02_integration/simple_wrapper_runtime_probe_test.shs")
 expect(sys_test_plan).to_contain("bin/sj")
 expect(sys_test_plan).to_contain("bin/simple-interp")
+expect(sys_test_plan).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(sys_test_plan).to_contain("--network=none")
+expect(sys_test_plan).to_contain("separate process/container boundary")
 
 step("Verify forbidden numbered API-name scans cover the public concurrency family")
 expect(profile_contract).to_contain("thread_spawn_with_args")
