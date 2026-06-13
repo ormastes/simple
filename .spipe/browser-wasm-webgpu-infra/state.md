@@ -54,3 +54,8 @@ dev-done
 
 ## Log
 - dev: Created state file with 10 acceptance criteria and 10 small tasks (type: feature).
+- impl: Added first Simple 2D browser facade and SSpec evidence in `canvas_api.spl` and `webgpu_js_wasm_simple_spec.spl`.
+- impl: Added BrowserSession `type="text/simple"` command execution for title/body/Simple2D evidence with deterministic unsupported-command warnings.
+- spec: Added `test/01_unit/lib/common/web/browser_session_simple_script_spec.spl` and generated `doc/06_spec/test/01_unit/lib/common/web/browser_session_simple_script_spec.md`.
+- impl: Added compiler GPU target metadata for `metal` and `webgpu` aliases, with `auto` ordering Vulkan -> Metal -> CUDA/HIP -> OpenCL and explicit WebGPU browser/WASM bridge reasoning.
+- spec: Updated `test/01_unit/compiler/semantics/gpu_target_contract_spec.spl` and regenerated `doc/06_spec/test/01_unit/compiler/semantics/gpu_target_contract_spec.md`.

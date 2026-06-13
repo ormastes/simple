@@ -12,11 +12,11 @@
 
 ---
 
-## Standard Library (1 features)
+## Compiler (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Telnet Serial Bridge Specification](test/telnet_serial_bridge_spec.md) | Auto-generated | N/A | 10 | 0% | 0 lines |
+| [Gpu Target Contract Specification](test/01_unit/compiler/semantics/gpu_target_contract_spec.md) | Auto-generated | N/A | 5 | 0% | 0 lines |
 
 ## Application (1 features)
 

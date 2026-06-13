@@ -661,6 +661,203 @@ RuntimeValue rt_store_barrier(void) {
     return NIL_VALUE;
 }
 
+/* ===================================================================
+ * Slice 2: portable runtime-ABI symbols.
+ * Bodies sourced from the x86_64 boot stubs and the riscv64
+ * freestanding runtime (same tagged-RuntimeValue model as this file);
+ * hosted-runtime variants (runtime_native.c) were adapted to the
+ * baremetal RuntimeString/RuntimeArray model below.
+ * =================================================================== */
+
+/* Forward decls for array helpers defined later in this file. */
+RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val);
+RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx);
+RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val);
+
+/* --- float bit reinterpret (from x86_64 primitives.c) --- */
+RuntimeValue f32_from_bits(RuntimeValue bits)
+{
+    uint32_t fbits = (uint32_t)(DECODE_INT(bits) & 0xFFFFFFFF);
+    return (RuntimeValue)(((uint64_t)fbits << 3) | TAG_FLOAT);
+}
+RuntimeValue f64_from_bits(RuntimeValue bits)
+{
+    uint64_t fbits = (uint64_t)DECODE_INT(bits);
+    return (RuntimeValue)((fbits << 3) | TAG_FLOAT);
+}
+
+/* --- any-add (from x86_64 baremetal_stubs.c) --- */
+int64_t rt_any_add(int64_t left, int64_t right)
+{
+    return left + right;
+}
+
+/* --- for-loop iterable passthrough (from riscv64 freestanding_runtime.c) --- */
+RuntimeValue rt_for_iterable(RuntimeValue collection)
+{
+    return collection;
+}
+
+/* --- process / time stubs --- */
+RuntimeValue rt_getpid(void) { return ENCODE_INT(1); }
+/* No arm64 generic timer is wired into this boot path yet, so report 0.
+ * LOW-CONFIDENCE placeholder: replace with CNTVCT_EL0-based microseconds
+ * once a timer is initialized. */
+RuntimeValue rt_time_now_unix_micros(void) { return ENCODE_INT(0); }
+
+/* --- value-as-int (from x86_64 rt_extras.c) --- */
+RuntimeValue rt_value_as_int(RuntimeValue v)
+{
+    if (IS_INT(v)) return DECODE_INT(v);
+    return 0;
+}
+
+/* --- text hashing: FNV-1a over the string bytes (adapted to RuntimeString) --- */
+RuntimeValue rt_hash_text(RuntimeValue str)
+{
+    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(str);
+    if (!h || h->type != HEAP_STRING) return ENCODE_INT(0);
+    RuntimeString *s = (RuntimeString *)h;
+    uint64_t hash = 1469598103934665603ULL; /* FNV offset basis */
+    for (uint32_t i = 0; i < s->len; i++) {
+        hash ^= (uint64_t)(uint8_t)s->data[i];
+        hash *= 1099511628211ULL; /* FNV prime */
+    }
+    return ENCODE_INT((int64_t)(hash & 0x7FFFFFFFFFFFFFFFULL));
+}
+
+/* --- string char code (adapted from riscv64 freestanding_runtime.c) --- */
+RuntimeValue rt_string_char_code_at(RuntimeValue value, RuntimeValue index_value)
+{
+    if (!IS_HEAP(value)) return ENCODE_INT(-1);
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+    if (!h || h->type != HEAP_STRING) return ENCODE_INT(-1);
+    RuntimeString *s = (RuntimeString *)h;
+    int64_t index = DECODE_INT(index_value);
+    if (index < 0) index = (int64_t)s->len + index;
+    if (index < 0 || (uint32_t)index >= s->len) return ENCODE_INT(-1);
+    return ENCODE_INT((int64_t)(uint8_t)s->data[index]);
+}
+
+/* --- bytes <-> text. arrays here are RuntimeArray of ENCODE_INT(byte). --- */
+RuntimeValue rt_bytes_from_raw(RuntimeValue ptr, RuntimeValue len)
+{
+    uint8_t *p = (uint8_t *)(uintptr_t)DECODE_INT(ptr);
+    int64_t n = DECODE_INT(len);
+    if (!p || n <= 0) return rt_array_new(ENCODE_INT(0));
+    RuntimeValue arr = rt_array_new(ENCODE_INT(n));
+    for (int64_t i = 0; i < n; i++) {
+        rt_array_push(arr, ENCODE_INT((int64_t)p[i]));
+    }
+    return arr;
+}
+
+RuntimeValue rt_bytes_to_text(RuntimeValue arr_rv)
+{
+    if (!IS_HEAP(arr_rv)) return rt_string_from_cstr("");
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0) return rt_string_from_cstr("");
+    RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + a->len + 1);
+    if (!s) return NIL_VALUE;
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + a->len + 1);
+    s->len = a->len;
+    for (uint32_t i = 0; i < a->len; i++) {
+        s->data[i] = (char)(int64_t)DECODE_INT(a->items[i]);
+    }
+    s->data[a->len] = '\0';
+    return ENCODE_PTR(s);
+}
+
+/* bytes_to_string is the same conversion as rt_bytes_to_text */
+RuntimeValue bytes_to_string(RuntimeValue arr_rv)
+{
+    return rt_bytes_to_text(arr_rv);
+}
+
+/* --- typed array helpers --- */
+RuntimeValue rt_array_new_with_cap_u64(RuntimeValue cap)
+{
+    return rt_array_new_with_cap(cap);
+}
+
+/* [text] arrays share the generic RuntimeArray storage of tagged values. */
+RuntimeValue rt_array_get_text(RuntimeValue arr, RuntimeValue idx)
+{
+    return rt_array_get(arr, idx);
+}
+RuntimeValue rt_array_set_text(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
+{
+    rt_array_set(arr, idx, val);
+    return TRUE_VALUE;
+}
+/* data_ptr -> address of the first element slot in the RuntimeArray. */
+RuntimeValue rt_array_data_ptr_text(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return ENCODE_INT(0);
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    return ENCODE_INT((int64_t)(uintptr_t)a->items);
+}
+RuntimeValue rt_array_data_ptr_u8(RuntimeValue arr)
+{
+    return rt_array_data_ptr_text(arr);
+}
+RuntimeValue rt_array_set_len_known_text(RuntimeValue arr, RuntimeValue len)
+{
+    if (!IS_HEAP(arr)) return FALSE_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return FALSE_VALUE;
+    int64_t n = DECODE_INT(len);
+    if (n < 0 || (uint32_t)n > a->cap) return FALSE_VALUE;
+    a->len = (uint32_t)n;
+    return TRUE_VALUE;
+}
+
+/* typed-words accessors over the generic RuntimeArray (values stored tagged). */
+RuntimeValue rt_typed_words_u32_at(RuntimeValue arr, RuntimeValue idx)
+{
+    if (!IS_HEAP(arr)) return ENCODE_INT(0);
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    int64_t i = DECODE_INT(idx);
+    if (i < 0 || (uint32_t)i >= a->len) return ENCODE_INT(0);
+    return ENCODE_INT((int64_t)(uint32_t)DECODE_INT(a->items[i]));
+}
+RuntimeValue rt_typed_words_u32_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
+{
+    return rt_array_set(arr, idx, val);
+}
+RuntimeValue rt_typed_words_u64_at(RuntimeValue arr, RuntimeValue idx)
+{
+    if (!IS_HEAP(arr)) return ENCODE_INT(0);
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    int64_t i = DECODE_INT(idx);
+    if (i < 0 || (uint32_t)i >= a->len) return ENCODE_INT(0);
+    return a->items[i];
+}
+int8_t rt_typed_words_u64_push(RuntimeValue arr, int64_t val)
+{
+    rt_array_push(arr, ENCODE_INT(val));
+    return 1;
+}
+int8_t rt_typed_words_u64_set(RuntimeValue arr, int64_t idx, int64_t val)
+{
+    rt_array_set(arr, ENCODE_INT(idx), ENCODE_INT(val));
+    return 1;
+}
+
+/* --- interpreter call bridge: not reachable on the native boot path. --- */
+RuntimeValue rt_interp_call(RuntimeValue a, RuntimeValue b, RuntimeValue c,
+                            RuntimeValue d, RuntimeValue e, RuntimeValue f,
+                            RuntimeValue g, RuntimeValue h)
+{
+    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h;
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
 {
     if (a == b) return 1;

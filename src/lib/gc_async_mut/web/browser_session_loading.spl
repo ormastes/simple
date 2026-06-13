@@ -24,6 +24,7 @@ use std.gc_async_mut.web.browser_session_modules.{
 use std.gc_async_mut.web.browser_session_modules_helpers.{
     text_in_list, append_unique_text, remove_text_once
 }
+use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{canvas_get_context_simple2d}
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 
 fn _append_script_compat_warnings(warnings: [text], block: BrowserScriptBlock) -> [text]:
@@ -119,21 +120,116 @@ fn _url_search_params_set(query: text, name: text, value: text) -> text:
         out = _url_search_params_append(out, name, value)
     out
 
+fn _simple_script_unquote(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() >= 2:
+        val first = trimmed.slice(0, 1)
+        val last = trimmed.slice(trimmed.len() - 1, trimmed.len())
+        if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+            return trimmed.slice(1, trimmed.len() - 1)
+    trimmed
+
+fn _simple_script_tail(line: text, prefix: text) -> text:
+    if line.starts_with(prefix):
+        return line.slice(prefix.len(), line.len()).trim()
+    ""
+
+fn _simple_script_int(value: text, fallback: i32) -> i32:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return fallback
+    trimmed.to_i32()
+
 impl BrowserSession:
+
+    me _set_simple_script_body_text(value: text):
+        self.current_body_html = value
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            runtime.set_host_property(state.body_id, "textContent", JsValue.String(v: value))
+            var interpreter = runtime.interpreter
+            interpreter.host_body_text_content_value = JsValue.String(v: value)
+            runtime.interpreter = interpreter
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+
+    me _set_simple_script_body_html(value: text):
+        self.current_body_html = value
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            runtime.set_host_property(state.body_id, "innerHTML", JsValue.String(v: value))
+            var interpreter = runtime.interpreter
+            interpreter.host_body_inner_html_value = JsValue.String(v: value)
+            runtime.interpreter = interpreter
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+
+    me _execute_simple_script(script_source: text, load: BrowserLoadState):
+        var simple2d = canvas_get_context_simple2d(320, 240)
+        var has_simple2d_commands = false
+        for raw_line in script_source.split("\n"):
+            val line = raw_line.trim()
+            if line == "" or line.starts_with("#"):
+                continue
+            if line.starts_with("title "):
+                self.current_title = _simple_script_unquote(_simple_script_tail(line, "title "))
+                continue
+            if line.starts_with("body_text "):
+                self._set_simple_script_body_text(_simple_script_unquote(_simple_script_tail(line, "body_text ")))
+                continue
+            if line.starts_with("body_html "):
+                self._set_simple_script_body_html(_simple_script_unquote(_simple_script_tail(line, "body_html ")))
+                continue
+            if line.starts_with("simple2d.fill_rect "):
+                val args = _simple_script_tail(line, "simple2d.fill_rect ").split(" ")
+                if args.len() >= 5:
+                    simple2d.fill_rect(
+                        _simple_script_int(args[0], 0),
+                        _simple_script_int(args[1], 0),
+                        _simple_script_int(args[2], 0),
+                        _simple_script_int(args[3], 0),
+                        _simple_script_int(args[4], 0)
+                    )
+                    has_simple2d_commands = true
+                else:
+                    load.warnings.push("simple script error: simple2d.fill_rect requires x y w h color")
+                continue
+            if line.starts_with("simple2d.text "):
+                val args = _simple_script_tail(line, "simple2d.text ").split("|")
+                if args.len() >= 5:
+                    simple2d.text(
+                        _simple_script_int(args[0], 0),
+                        _simple_script_int(args[1], 0),
+                        _simple_script_unquote(args[2]),
+                        _simple_script_int(args[3], 12),
+                        _simple_script_int(args[4], 0)
+                    )
+                    has_simple2d_commands = true
+                else:
+                    load.warnings.push("simple script error: simple2d.text requires x|y|text|font_size|color")
+                continue
+            load.warnings.push("simple script unsupported command: {line}")
+        if has_simple2d_commands:
+            self._set_simple_script_body_html(simple2d.to_canvas2d_json())
 
     me _commit_script_response(response: BrowserResponse) -> Result<bool, text>:
         if val Some(load) = self.active_load:
             if response.error != "":
                 load.warnings.push("external script error: {response.error}")
-            else if val Some(state) = self.runtime_state:
-                self._apply_response_headers(response.headers)
-                val eval_result = state.runtime.eval(response.body)
-                match eval_result:
-                    Ok(_):
-                        self._flush_runtime_side_effects()
-                        pass_dn
-                    Err(e):
-                        load.warnings.push("external script error: {e.message}")
+            else:
+                val current_idx = load.next_script_idx - 1
+                if current_idx >= 0 and current_idx < load.script_blocks.len() and load.script_blocks[current_idx].script_type == "text/simple":
+                    self._apply_response_headers(response.headers)
+                    self._execute_simple_script(response.body, load)
+                else if val Some(state) = self.runtime_state:
+                    self._apply_response_headers(response.headers)
+                    val eval_result = state.runtime.eval(response.body)
+                    match eval_result:
+                        Ok(_):
+                            self._flush_runtime_side_effects()
+                            pass_dn
+                        Err(e):
+                            load.warnings.push("external script error: {e.message}")
             return self._advance_script_loading()
         Err("no active script load")
 
@@ -210,6 +306,8 @@ impl BrowserSession:
                                     return Ok(true)
                             Err(e):
                                 load.warnings.push("inline module error: {e}")
+                    else if block.script_type == "text/simple":
+                        self._execute_simple_script(block.content, load)
                     else if val Some(state) = self.runtime_state:
                         self._trace_guest("eval inline script start")
                         val script_source = block.content
@@ -252,7 +350,9 @@ impl BrowserSession:
                                 load.warnings.push("module load error: {e}")
                         continue
                     if val Some(override_body) = pair_value(self.resource_overrides, resolved):
-                        if val Some(state) = self.runtime_state:
+                        if block.script_type == "text/simple":
+                            self._execute_simple_script(override_body, load)
+                        else if val Some(state) = self.runtime_state:
                             var runtime = state.runtime
                             val eval_result = runtime.eval(override_body)
                             state.runtime = runtime
