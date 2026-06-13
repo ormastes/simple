@@ -173,22 +173,37 @@ numbers → `doc/09_report/perf/perf_baseline_2026-06-13.md` + `doc/10_metrics/p
 |----|--------|----------|
 | AC-1 plan+design first | ✅ DONE | plan + design + tldrs landed before any opt code |
 | AC-2 checklists | ✅ DONE | `perf_checklists.md`, 6 domains, 58 pass/fail items |
-| AC-3 arch-tagged bench sspec → docs | ✅ DONE | 4 specs tagged via `std.spec.decorators`; baseline docs emitted with real numbers |
-| AC-4 lang script vs compiler separate | ✅ DONE | lang spec + baseline doc separate script/smf/native rows |
-| AC-5 db RAM vs persistent separate | ✅ DONE | db spec proves 3 distinct modes ram/persistent/wal |
-| AC-7 SMF idle compile + cache reuse | ✅ DONE | investigated (verdict table) + built dispatch+content-hash+invalidation spec (7/7); user-script path confirmed pre-existing |
-| AC-8 no API/arch break guard | ✅ DONE | `check-api-arch-guard.shs` symbols=GREEN, arch baseline captured |
+| AC-3 arch-tagged bench sspec → docs | ◻ MACHINERY DONE | 4 specs tagged via `std.spec.decorators`; emit machinery proven, but only **1 of 4 domains (lang-script)** actually emitted a doc — db/web/os doc emission STAGED |
+| AC-4 lang script vs compiler separate | ◻ PARTIAL/STAGED | lang spec has the row structure, but baseline doc emitted **script rows only**; smf/native SKIP (toolchain: smf-extern-segfault, native-compile-required) → compiler side STAGED |
+| AC-5 db RAM vs persistent separate | ◻ CORRECTNESS DONE | db spec proves 3 distinct modes ram/persistent/wal with count==100 oracles; separated **timing emission** STAGED |
+| AC-7 SMF idle compile + cache reuse | ✅ DONE | investigated (verdict table) + built dispatch+content-hash+invalidation spec (7/7); user-script path confirmed pre-existing; **startup regression spec PASSED 2/2** |
+| AC-8 no API/arch break guard | ✅ DONE (scoped) | `check-api-arch-guard.shs` symbols=GREEN + arch=GREEN — **scoped to 11 baseline modules**, which do NOT include the modified files (dynsmf, bench); AC-7's added exports are outside the guarded set and are an additive (manual) judgment, not guard-checked |
 | AC-6 interpreter/compiler first | ◻ STRUCTURAL | P1 shared (AC-7) landed first + per-app benches built; per-app **optimization landing** STAGED, ordering recorded |
 | AC-9 minimize `rt_*` in app view | ◻ STAGED | baseline counts captured (research); reduction sweep = P1 SG-1.2, checklist row |
 | AC-10 cross-mode + cross-language | ◻ PARTIAL | interpreter baseline emitted; smf/native + full cross-language run STAGED (toolchain smf-extern-segfault, native-compile) |
 | AC-11 umbrella completion | ⏳ IN PROGRESS | P0 machinery + AC-7 DONE/verified; P1 opt-landing + P2 + final no-regression diff = tracked staged sub-goals |
 
-### Honest completion boundary (advisor-guided)
-P0 machinery (AC-1,2,3,4,5,8) + AC-7 are **DONE and verified** this session. The
-optimization-landing portions (AC-6 per-app opts, AC-9 rt_* sweep, AC-10 cross-language,
-AC-11 close) are genuinely multi-session: landing + re-measuring perf wins across 4 domains and
-proving no-regression cannot be honestly closed in one session, so they are filed as **staged,
-not verified** tracked sub-goals in the plan + checklists. No false-green closure.
+### Honest completion boundary (advisor-guided, corrected)
+**Fully DONE/verified this session:** AC-1 (plan+design first), AC-2 (checklists), AC-7 (SMF
+idle-compile + cache reuse, startup-regression-checked), AC-8 (API/arch guard GREEN, scoped to
+11 baseline modules). The benchmark **machinery** is built and proven end-to-end on the
+lang-script slice.
+
+**Built but emission/comparison STAGED** (machinery exists; one slice emitted): AC-3 (only
+lang-script of 4 domains emitted a doc), AC-4 (only script side emitted — smf/native blocked by
+toolchain), AC-5 (3 modes proven at correctness level; separated timings not yet emitted).
+
+**Optimization-landing STAGED** (genuinely multi-session): AC-6 per-app opts, AC-9 rt_* sweep,
+AC-10 cross-language + smf/native runs, AC-11 close. Landing + re-measuring across 4 domains and
+proving no-regression cannot be honestly closed in one session. All filed as **staged, not
+verified** tracked sub-goals in the plan + checklists. **No false-green closure.**
+
+### Next concrete steps to advance the staged ACs
+1. Unblock AC-4/3: resolve smf-extern-segfault + native-compile so `bench_baseline_driver`
+   emits smf/native rows; extend driver to db/web/os workloads → 4-domain docs.
+2. Fix P1 bug `interp_cross_module_struct_return_unit` → un-`pending()` the struct-based emit.
+3. P1 SG-1.2 rt_* reduction sweep (AC-9) with before/after counts.
+4. Add dynsmf + bench public exports to the guard's module set (close the AC-8 scope gap).
 
 ## Phase
 verify-done (P0 + AC-7); optimization sub-goals staged
