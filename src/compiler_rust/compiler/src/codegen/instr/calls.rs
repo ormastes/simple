@@ -2585,6 +2585,12 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "sys_exit" => Some("rt_exit"),
         "rt_file_read_text" => Some("rt_file_read_text_rv"),
         "rt_file_delete" => Some("rt_file_remove"),
+        // Dict-literal lowering emits rt_dict_insert(dict, key, value), but the
+        // runtime defines only rt_dict_set (same 3-arg shape); without this the
+        // cranelift path declared an undefined import and dict literals could
+        // not JIT (the LLVM backend has the same remap inline). cf.
+        // mir/lower/lowering_expr_collection.rs, runtime/src/value/dict.rs.
+        "rt_dict_insert" => Some("rt_dict_set"),
         "rt_println" => Some("rt_println_value"),
         "rt_print" => Some("rt_print_value"),
         "len" | "length" => Some("rt_len"),
