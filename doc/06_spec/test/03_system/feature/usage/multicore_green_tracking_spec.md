@@ -642,7 +642,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 99 lines folded for reproduction.
+Runnable source: 103 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -654,6 +654,7 @@ val profile_contract = rt_file_read_text("test/05_perf/profile_scripts/profile_r
 val api_contract = rt_file_read_text("test/05_perf/profile_scripts/concurrency_api_contract_test.shs") ?? ""
 val sys_test_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 val perf_readme = rt_file_read_text("test/05_perf/README.md") ?? ""
+val fanout_runner_bug = rt_file_read_text("doc/08_tracking/bug/multicore_green_fanout_spec_runner_mismatch_2026-06-11.md") ?? ""
 
 step("Verify cooperative green remains documented as single-carrier work")
 expect(stdlib).to_contain("no preemption or CPU parallelism")
@@ -706,6 +707,9 @@ expect(sys_test_plan).to_contain("Generated multicore-green profile code must st
 expect(sys_test_plan).to_contain("must not import `rt_pool_join` directly")
 expect(sys_test_plan).to_contain("report_index_checked=doc/09_report/README.md")
 expect(sys_test_plan).to_contain("report index cannot silently point future agents at stale evidence")
+expect(fanout_runner_bug).to_contain("historical resolved-bug evidence only")
+expect(fanout_runner_bug).to_contain("current reruns use")
+expect(fanout_runner_bug).to_contain("report_index_checked")
 expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row")
 expect(profile_contract).to_contain("require_large_go_fanout_beats_c")
 expect(profile_contract).to_contain("large Go fanout row must be faster than C pthread fanout row")

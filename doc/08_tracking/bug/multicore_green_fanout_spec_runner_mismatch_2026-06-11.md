@@ -25,7 +25,10 @@ regressed relative to the checked-in cross-language report.
 Verified on 2026-06-11 from `/home/ormastes/dev/pub/simple`:
 
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-08_docker_contract.md`
-  -> PASS
+  -> PASS (historical resolved-bug evidence only; current reruns use
+  `sh test/05_perf/profile_scripts/profile_report_contract_test.shs` so the
+  canonical freshbin report and `doc/09_report/README.md` index are checked
+  together)
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
   -> PASS (`Passed: 3`, `Failed: 0`)
 
