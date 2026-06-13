@@ -4557,7 +4557,9 @@ fn eval_range_for_operand(
 
 /// Core match execution logic shared between exec_match and exec_match_expr.
 /// Returns (Control, Option<Value>) where the value is from the matched arm.
-fn exec_match_core(
+/// Unlike exec_match_expr, this does NOT collapse Control::Return — callers
+/// that need to propagate early returns must use this function directly.
+pub(crate) fn exec_match_core(
     match_stmt: &MatchStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -4635,38 +4637,39 @@ pub(super) fn exec_match(
     }
 }
 
-/// Execute an if statement as an expression, returning the branch's implicit value.
-/// Used for implicit return when if is the last statement in a function.
-pub(crate) fn exec_if_expr(
+/// Execute an if statement, returning (Control, Value).
+/// Unlike exec_if_expr, this preserves Control::Return/Break/Continue so that
+/// early returns nested inside match arms (or other block contexts) propagate
+/// correctly up to the enclosing function.
+pub(crate) fn exec_if_core(
     if_stmt: &IfStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Result<Value, CompileError> {
+) -> Result<(Control, Value), CompileError> {
     // Handle if-let: if let PATTERN = EXPR:
     if let Some(pattern) = &if_stmt.let_pattern {
         let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
         let mut bindings = HashMap::new();
         if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-            // Pattern matched - add bindings and execute then block
             for (name, val) in bindings {
                 env.insert(name, val);
             }
             let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
             return match flow {
-                Control::Return(v) => Ok(v),
-                _ => Ok(last_val.unwrap_or(Value::Nil)),
+                Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+                other => Ok((other, Value::Nil)),
             };
         } else if let Some(block) = &if_stmt.else_block {
             let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
             return match flow {
-                Control::Return(v) => Ok(v),
-                _ => Ok(last_val.unwrap_or(Value::Nil)),
+                Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+                other => Ok((other, Value::Nil)),
             };
         }
-        return Ok(Value::Nil);
+        return Ok((Control::Next, Value::Nil));
     }
 
     // Normal if condition
@@ -4680,8 +4683,8 @@ pub(crate) fn exec_if_expr(
     if cond_val.truthy() {
         let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
         return match flow {
-            Control::Return(v) => Ok(v),
-            _ => Ok(last_val.unwrap_or(Value::Nil)),
+            Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+            other => Ok((other, Value::Nil)),
         };
     }
 
@@ -4695,8 +4698,8 @@ pub(crate) fn exec_if_expr(
                 }
                 let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                 return match flow {
-                    Control::Return(v) => Ok(v),
-                    _ => Ok(last_val.unwrap_or(Value::Nil)),
+                    Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+                    other => Ok((other, Value::Nil)),
                 };
             }
         } else {
@@ -4709,8 +4712,8 @@ pub(crate) fn exec_if_expr(
             if elif_val.truthy() {
                 let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
                 return match flow {
-                    Control::Return(v) => Ok(v),
-                    _ => Ok(last_val.unwrap_or(Value::Nil)),
+                    Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+                    other => Ok((other, Value::Nil)),
                 };
             }
         }
@@ -4719,12 +4722,32 @@ pub(crate) fn exec_if_expr(
     if let Some(block) = &if_stmt.else_block {
         let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
         return match flow {
-            Control::Return(v) => Ok(v),
-            _ => Ok(last_val.unwrap_or(Value::Nil)),
+            Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
+            other => Ok((other, Value::Nil)),
         };
     }
 
-    Ok(Value::Nil)
+    Ok((Control::Next, Value::Nil))
+}
+
+/// Execute an if statement as an expression, returning the branch's implicit value.
+/// Used for implicit return when if is the last statement in a function.
+/// NOTE: This collapses Control::Return into the return value. Only use this
+/// when the if-statement is truly being used as a pure expression (not when
+/// it may contain early returns that need to propagate).
+pub(crate) fn exec_if_expr(
+    if_stmt: &IfStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let (flow, val) = exec_if_core(if_stmt, env, functions, classes, enums, impl_methods)?;
+    match flow {
+        Control::Return(v) => Ok(v),
+        _ => Ok(val),
+    }
 }
 
 /// Execute a match statement as an expression, returning the match arm's value.

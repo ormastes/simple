@@ -18,7 +18,7 @@ use super::core_types::{Control, Enums, ImplMethods};
 use super::node_exec::exec_node;
 use super::expr::evaluate_expr;
 use super::macros::{enter_block_scope, exit_block_scope};
-use super::interpreter_control::{exec_match_expr, exec_if_expr};
+use super::interpreter_control::{exec_match_expr, exec_if_expr, exec_match_core, exec_if_core};
 use super::interpreter_helpers::handle_method_call_with_self_update;
 
 pub(crate) fn exec_block(
@@ -89,16 +89,42 @@ pub(crate) fn exec_block_fn(
                 last_expr_value = Some(val);
                 continue;
             }
-            // Handle match as last statement - capture implicit return from match arm
+            // Handle match as last statement - capture implicit return from match arm.
+            // Use exec_match_core (not exec_match_expr) so that explicit `return` statements
+            // inside the arm body propagate up instead of being collapsed into a value.
             if let simple_parser::ast::Node::Match(match_stmt) = stmt {
-                let val = exec_match_expr(match_stmt, env, functions, classes, enums, impl_methods)?;
-                last_expr_value = Some(val);
+                let (flow, last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
+                match flow {
+                    Control::Next => {
+                        last_expr_value = last_val;
+                    }
+                    other @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
+                        let tail_blocks = exit_block_scope();
+                        for tail_block in tail_blocks {
+                            exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
+                        }
+                        return Ok((other, None));
+                    }
+                }
                 continue;
             }
-            // Handle if as last statement - capture implicit return from if/else branches
+            // Handle if as last statement - capture implicit return from if/else branches.
+            // Use exec_if_core (not exec_if_expr) so that explicit `return` statements
+            // inside if branches propagate up instead of being collapsed into a value.
             if let simple_parser::ast::Node::If(if_stmt) = stmt {
-                let val = exec_if_expr(if_stmt, env, functions, classes, enums, impl_methods)?;
-                last_expr_value = Some(val);
+                let (flow, val) = exec_if_core(if_stmt, env, functions, classes, enums, impl_methods)?;
+                match flow {
+                    Control::Next => {
+                        last_expr_value = Some(val);
+                    }
+                    other @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
+                        let tail_blocks = exit_block_scope();
+                        for tail_block in tail_blocks {
+                            exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
+                        }
+                        return Ok((other, None));
+                    }
+                }
                 continue;
             }
         }

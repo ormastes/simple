@@ -28,6 +28,7 @@ pub mod cli_sffi;
 pub mod cargo_sffi;
 // time_sffi and fs_ffi removed - duplicates of ffi/file_io and ffi/env_process
 mod collections;
+pub mod string_builder;
 pub mod log_sffi;
 mod contracts;
 mod core;

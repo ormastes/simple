@@ -28,7 +28,7 @@ qemu_runner_fs_exec_fallback_acceptance_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -146,6 +146,23 @@ expect(fs_exec_lane_name_rejects_resident_fallback("arm64-wm-ramfb")).to_equal(t
 
 </details>
 
+#### rejects on x86_64 fs-exec and desktop lanes (review parity fix)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(fs_exec_lane_name_rejects_resident_fallback("x64-nvme-fat32")).to_equal(true)
+expect(fs_exec_lane_name_rejects_resident_fallback("x64-full-stack")).to_equal(true)
+expect(fs_exec_lane_name_rejects_resident_fallback("x64-desktop-test")).to_equal(true)
+expect(fs_exec_lane_name_rejects_resident_fallback("x64-desktop-uefi")).to_equal(true)
+```
+
+</details>
+
 #### does not apply to non-fs-exec lanes
 
 <details>
@@ -214,8 +231,8 @@ expect(fs_exec_serial_has_fallback(serial)).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

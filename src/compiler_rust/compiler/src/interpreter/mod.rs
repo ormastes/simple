@@ -112,7 +112,7 @@ pub(crate) use interpreter_patterns::{
 #[path = "../interpreter_control.rs"]
 mod interpreter_control;
 use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while};
-pub(crate) use interpreter_control::{exec_if_expr, exec_match_expr};
+pub(crate) use interpreter_control::{exec_if_expr, exec_if_core, exec_match_expr, exec_match_core};
 pub(crate) use interpreter_control::exec_with;
 
 mod expr;

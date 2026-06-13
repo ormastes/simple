@@ -499,6 +499,14 @@ pub use value::{
     RuntimeContractViolation,
 };
 
+// Re-export incremental string builder SFFI functions (bug
+// rt_string_concat_quadratic_2026-06-12: O(1) amortized push instead of O(n^2)
+// acc = acc + piece accumulation).
+pub use value::string_builder::{
+    rt_string_builder_finish, rt_string_builder_free, rt_string_builder_len, rt_string_builder_new,
+    rt_string_builder_push,
+};
+
 // Re-export GPU runtime SFFI functions
 pub use value::{
     execute_kernel_1d,

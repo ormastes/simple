@@ -532,11 +532,32 @@ Resolves the M11d WATCH item. Two halves, landed together:
   affects seed-interpreted bridge only; compiled stage4 check pipeline
   exercises the bridge fine. Track under M12 remaining work.
 
+#### G42 — `if cond then X else Y` ternary expression — PARSER DONE 2026-06-13
+- `parser_stmts.spl parse_if_expr` (:894): after the cond, if the next token
+  is Ident(6) text "then", consume it, parse then-expr, optionally consume
+  `else` (kw 41) + parse else-expr, return `expr_if_expr(cond, then, else, 0)`
+  with all three branches faithfully populated. Block form (`:`) unchanged.
+- Round-2 (orchestrator, tmp/site12/g42_probe.spl): ifthen_val / ifthen_arg /
+  ifthen_calls → false; dict cases stay false; control must-fail true.
+- **NOTE — bridge else/elif fidelity is NOT done** (see M12 item 5). Both
+  `EXPR_IF` (bridge_part1:320) and `STMT_IF` (:466) convert only the then-body
+  and pass `nil` for else, ignoring elif chains; `EXPR_IF` reads the STMTS
+  slot while `expr_if_expr` stores then in RIGHT, so block-form if-EXPRESSIONS
+  bridge to an empty then-block. Latent today — the seed compiles src/compiler,
+  so the lean bridge's if-path isn't exercised in production. Tracked, not
+  worked around: G42 is "parser accepts if-then-else", not "if-then-else DONE".
+
 #### M12 remaining
 1. Interpreted `flat_ast_to_module` entry OOB (see above) — diagnose/fix.
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
 3. Remove `simple_seed` delegation guards from `src/app/cli/check.spl` and lint entry.
 4. **Gate:** `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl` exits 0; full 1855-file sweep reports 0 errors.
+5. **Bridge if/else fidelity** (surfaced by G42): `EXPR_IF`/`STMT_IF` in
+   flat_ast_bridge_part1.spl drop the else branch (pass `nil`) and elif chains;
+   `EXPR_IF` reads STMTS but `expr_if_expr` stores then in RIGHT + else in EXTRA.
+   Wrap bare-expr then/else as single-stmt blocks and convert both branches +
+   elif recursion. Touches a hot compiled path — verify no STMT_IF regression
+   across the full sweep before landing.
 
 ---
 

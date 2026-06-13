@@ -1,6 +1,6 @@
 # rt_string_concat_quadratic: O(n²) string building in MCP JSON layer
 
-**Status:** MITIGATED 2026-06-12 — .spl-level builder rewrites applied; root-cause in Rust rt_string_concat remains open.
+**Status:** ROOT-CAUSE FIX LANDED 2026-06-13 — H1 incremental string-builder runtime primitive implemented (`RtStringBuilder` + `rt_string_builder_*` externs, O(n) builds, Rust-tested ~520x vs naive concat). Requires a seed rebuild to go live; MCP-builder integration is a follow-up. (Earlier: MITIGATED 2026-06-12 — .spl-level builder rewrites applied.)
 **Severity:** High — native MCP server burns ~1.5 s CPU on a single `tools/list` handshake (38 KB JSON).
 **Affected files:**
 - `src/lib/nogc_sync_mut/mcp_sdk/core/json.spl` — `jo1`–`jo5` builders
@@ -130,9 +130,10 @@ most visible victim because it serialises 129 tool entries on every cold start.
 
 These are author hypotheses — not verified against the Rust runtime source:
 
-**H1:** Add `rt_string_builder_new() -> Builder`, `rt_string_builder_push(b, s)`,
-`rt_string_builder_finish(b) -> text` externs backed by a `Vec<u8>` / `String`
-with exponential growth, and expose a `StringBuilder` class in `std.common.text`.
+**H1 — IMPLEMENTED 2026-06-13.** Add `rt_string_builder_new() -> Builder`,
+`rt_string_builder_push(b, s)`, `rt_string_builder_finish(b) -> text` externs
+backed by a `Vec<u8>` / `String` with exponential growth, and expose a
+`StringBuilder` class in `std.common.text`. See **H1 Implementation** below.
 
 **H2:** The compiler could detect left-fold concat trees (`a + b + c + d`) and
 rewrite them to a single `rt_string_join([a, b, c, d])` call. Requires dataflow
@@ -144,8 +145,82 @@ case. Extending to object-pair arrays and rewriting all `.spl` builders to
 push parts into a `[text]` and call `join` at the end would reduce copy work
 to O(n) with constant factor ≈2 (one pass to measure, one to write).
 
+## H1 Implementation (2026-06-13)
+
+Runtime-layer root-cause fix landed. An incremental string builder backed by a
+single heap `String` (which grows capacity exponentially) replaces the
+`O(n^2)` `acc = acc + piece` accumulation with amortized-`O(1)` push, i.e.
+`O(n)` total.
+
+### New runtime externs (`src/compiler_rust/runtime/src/value/string_builder.rs`)
+
+| Extern | Signature | Notes |
+|--------|-----------|-------|
+| `rt_string_builder_new` | `() -> i64` | Returns opaque handle (0 = failure). |
+| `rt_string_builder_push` | `(handle: i64, s: RuntimeValue) -> i64` | Appends `s`; returns 1 ok / 0 fail. Amortized O(len(s)). |
+| `rt_string_builder_finish` | `(handle: i64) -> RuntimeValue` | Consumes handle, returns accumulated text, drops builder (no leak). |
+| `rt_string_builder_len` | `(handle: i64) -> i64` | Current byte length, -1 if invalid. |
+| `rt_string_builder_free` | `(handle: i64)` | Abandon path; releases handle without producing a string. |
+
+**Handle representation:** opaque `i64` = `Box::into_raw(Box<RuntimeStringBuilder>)`,
+following the `gemm_runtime` magic-tagged-handle precedent
+(`SimpleRuntimeMatrixF64` / `matrix_from_handle`). The struct carries a
+`STRING_BUILDER_MAGIC` u64 first field; `builder_from_handle` rejects 0 / stale
+/ corrupt handles instead of dereferencing them. Re-exported in `runtime/src/lib.rs`.
+
+**Lifecycle / leak caveat (no GC):** `finish` reclaims the `Box`, copies bytes
+out via `rt_string_new`, and drops the builder — the normal "build then finish"
+path does **not** leak. `free` covers the abandon path. A builder that is
+`new`'d and then neither `finish`ed nor `free`d **leaks** its backing buffer
+(this runtime has no garbage collector). This matches `gemm_runtime`'s
+explicit-free convention (a builder is a transient owner), not the
+allocate-and-leak convention of interned `rt_string_*` values.
+
+### Stdlib wrapper (`src/lib/common/string_builder.spl`)
+
+Added class `RtStringBuilder` with `new()`, `push(s)`, `push_line(s)`,
+`len() -> i64`, `finish() -> text`, `free()`, plus the matching module-level
+`extern fn` declarations. Uses `me`-receiver methods (cross-module
+`fn(self:)` loses field mutations). The pre-existing array-of-parts
+`StringBuilder` is left intact (callers depend on it).
+
+### Verification (Rust tests, `cargo test -p simple-runtime string_builder`)
+
+8 tests pass, including: empty builder, in-order accumulation, empty-push
+no-op, invalid-handle safety, free/abandon, **byte-for-byte match vs naive
+concatenation** (5 cases incl. unicode + JSON), **large 10 000-piece build
+content check**, and a **timed O(n)-vs-O(n^2) test**:
+
+```
+[string_builder perf] builder N=100000 took 45.8ms;
+  naive concat N=20000 took 2.768s; builder N=20000 took 5.3ms
+  (naive/builder ratio at N=20000 = 521.6x)
+test result: ok. 8 passed; 0 failed
+```
+
+Building 100 000 pieces in ~46 ms (linear) vs naive concat taking 2.77 s for
+only 20 000 pieces (quadratic) — at equal N the builder is ~520x faster.
+
+### Follow-ups (NOT done here)
+
+- **Seed rebuild required:** the new externs are live only after the Rust seed
+  is rebuilt (`scripts/bootstrap/bootstrap-from-scratch.sh --deploy`), since the
+  seed embeds the runtime symbol table. The `.spl` `extern fn` path is
+  self-sufficient and does **not** require editing
+  `compiler/src/codegen/runtime_sffi.rs` (verified: `rt_stderr_flush`,
+  `rt_ptr_write_i32` are used via `extern fn` yet absent from that table).
+  Optionally these names could be added to the `RuntimeFuncSpec` table for
+  allocation-tier/lint classification, but it is not required for correctness.
+- **MCP builder integration:** rewriting `jo1`–`jo5` / `jsonrpc_*` /
+  `main_lazy_json.spl` to use `RtStringBuilder` is a separate change (those
+  files are under concurrent edit) — left as an explicit follow-up.
+
 ## Files Changed
 
+- `src/compiler_rust/runtime/src/value/string_builder.rs` — NEW: 5 externs + 8 tests
+- `src/compiler_rust/runtime/src/value/mod.rs` — register `pub mod string_builder`
+- `src/compiler_rust/runtime/src/lib.rs` — re-export the 5 builder fns
+- `src/lib/common/string_builder.spl` — `RtStringBuilder` class + extern decls
 - `src/lib/nogc_sync_mut/mcp_sdk/core/json.spl` — jo1–jo5 single-expression
 - `src/lib/nogc_sync_mut/mcp_sdk/core/jsonrpc.spl` — 3 builder functions
 - `src/app/mcp/main_lazy_json.spl` — _slice_text, first_n_chars, make_tool_error, added exports
