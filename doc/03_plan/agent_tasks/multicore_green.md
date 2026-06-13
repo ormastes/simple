@@ -119,6 +119,7 @@ Acceptance evidence:
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
+- `sh test/05_perf/profile_scripts/concurrency_api_contract_test.shs`
 - `src/compiler_rust/target/debug/simple run build/cross_lang_perf/hosted_sliced_fairness.spl --mode=interpreter`
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean`
@@ -330,8 +331,9 @@ Each agent reports:
 ## Current Sync Status (2026-06-13)
 
 - Latest pushed multicore-green lane sync:
-  `1602 docs: map multicore profile gates`, rebased onto the later
-  `218 perf(gui): avoid compound class split` mainline before this refresh.
+  `8bb docs: gate concurrency api in nfr`, rebased onto the later
+  `902e feat(os/arm64): genuine ELF_LOAD_OK + SMF_CLI_LAUNCH_OK load-proof + CNTVCT timer`
+  mainline before this refresh.
 - The latest docs/spec slice made `test/05_perf/README.md` point at every
   active profile-script gate for this lane: the canonical profile report
   contract, negative mutation contract, binary auto-selection regression,
@@ -340,6 +342,10 @@ Each agent reports:
 - The tracking SSpec and generated manual now assert that the README keeps the
   large Go fanout, Simple multicore-green runtime-pool evidence,
   `queue_model=work_stealing`, and numeric-suffix API-alias rejection visible.
+- The NFR verification gates now include
+  `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`, so
+  numeric-suffix API-alias rejection and active source/profile scans are part
+  of the selected non-functional gate rather than only tracking commentary.
 - Focused checks from the latest pushed slice passed:
   - `test/03_system/feature/usage/multicore_green_tracking_spec.spl`
   - `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`

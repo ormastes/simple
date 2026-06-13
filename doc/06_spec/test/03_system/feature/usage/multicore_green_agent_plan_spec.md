@@ -218,12 +218,13 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 - Verify the plan still names the canonical deliverable and evidence sections
 - Verify profile and runtime-pool acceptance uses current-source evidence while release wrapper is stale
 - Verify host-fairness acceptance uses current-source evidence while release wrapper is stale
+- Verify the current sync status records the latest NFR gate
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -237,6 +238,7 @@ expect(plan).to_contain("Go fanout")
 expect(plan).to_contain("Go stress")
 expect(plan).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
 expect(plan).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(plan).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(plan).to_contain("PROFILE_DOCKER_ISOLATION=1")
 expect(plan).to_contain("separate process/container boundary")
 expect(plan).to_contain("focused native smoke coverage for `thread_spawn_with_args`")
@@ -257,6 +259,10 @@ step("Verify host-fairness acceptance uses current-source evidence while release
 expect(plan).to_contain("src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl")
 expect(plan).to_contain("src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl")
 expect(plan).to_contain("src/compiler_rust/target/debug/simple lint doc/08_tracking/feature/feature_db.sdn")
+step("Verify the current sync status records the latest NFR gate")
+expect(plan).to_contain("8bb docs: gate concurrency api in nfr")
+expect(plan).to_contain("The NFR verification gates now include")
+expect(plan).to_contain("numeric-suffix API-alias rejection")
 ```
 
 </details>
