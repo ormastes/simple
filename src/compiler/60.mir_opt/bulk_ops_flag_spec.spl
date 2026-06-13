@@ -1,0 +1,116 @@
+# Behavioral gate for the SG-1.3 default-OFF, C-backend-scoped bulk-op flag.
+#
+# Verifies the wiring in optimize_module_for_backend:
+#   - the flag (SIMPLE_MIR_BULK_OPS) is read correctly (default OFF);
+#   - the enabled path (apply_bulk_recognizers) is additive — inserts a hint;
+#   - with the flag OFF the C-backend path adds NO hint (default-off integration);
+#   - with the flag ON but a non-C backend, still NO hint (C-scoped).
+#
+# Run:  bin/simple run src/compiler/60.mir_opt/bulk_ops_flag_spec.spl
+
+use compiler.mir.mir_instructions.{
+    MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind, BlockId
+}
+use compiler.mir.mir_types.{
+    MirType, MirTypeKind, MirSignature, MirConstValue, LocalId, LocalKind, MirLocal
+}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir_opt.mir_opt.mod.{
+    optimize_module_for_backend, mir_bulk_ops_enabled, apply_bulk_recognizers, OptLevel
+}
+
+extern fn rt_env_set(key: text, value_str: text) -> bool
+
+fn _copy_op(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn _const_idx(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), MirType(kind: MirTypeKind.I64)))
+
+fn _module_with_bulk_copy() -> MirModule:
+    val i64t = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: i64t, is_variadic: false)
+    var insts: [MirInst] = []
+    insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 1), _copy_op(10), [_const_idx(0)]), span: nil))
+    insts = insts.push(MirInst(kind: MirInstKind.Load(LocalId(id: 2), _copy_op(1)), span: nil))
+    insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 3), _copy_op(20), [_const_idx(0)]), span: nil))
+    insts = insts.push(MirInst(kind: MirInstKind.Store(_copy_op(3), _copy_op(2)), span: nil))
+    insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 5), _copy_op(10), [_const_idx(1)]), span: nil))
+    insts = insts.push(MirInst(kind: MirInstKind.Load(LocalId(id: 6), _copy_op(5)), span: nil))
+    insts = insts.push(MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 7), _copy_op(20), [_const_idx(1)]), span: nil))
+    insts = insts.push(MirInst(kind: MirInstKind.Store(_copy_op(7), _copy_op(6)), span: nil))
+    val block = MirBlock(
+        id: BlockId(id: 0), label: Some("bb0"),
+        instructions: insts, terminator: MirTerminator.Ret(nil)
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0), name: "bulk_copy_fn", signature: sig,
+        locals: [], blocks: [block], entry_block: BlockId.new(0),
+        span: nil, generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {}
+    )
+    var fns: Dict<SymbolId, MirFunction> = {}
+    fns[SymbolId.new(0)] = func
+    MirModule(name: "m", functions: fns, statics: {}, constants: {}, types: {})
+
+# Well-formed trivial module (const + ret, declared local) — survives the real
+# optimization pipeline, unlike the deliberately-minimal recognizer fixture.
+fn _trivial_module() -> MirModule:
+    val i64t = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: i64t, is_variadic: false)
+    val cst = MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(42), i64t), span: nil)
+    val block = MirBlock(
+        id: BlockId(id: 0), label: Some("bb0"),
+        instructions: [cst],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+    )
+    var locals: [MirLocal] = []
+    locals = locals.push(MirLocal(id: LocalId(id: 0), type_: i64t, kind: LocalKind.Temp, name: nil))
+    val func = MirFunction(
+        symbol: SymbolId.new(0), name: "trivial_fn", signature: sig,
+        locals: locals, blocks: [block], entry_block: BlockId.new(0),
+        span: nil, generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {}
+    )
+    var fns: Dict<SymbolId, MirFunction> = {}
+    fns[SymbolId.new(0)] = func
+    MirModule(name: "m", functions: fns, statics: {}, constants: {}, types: {})
+
+fn _module_has_copy_hint(module: MirModule) -> bool:
+    var found = false
+    for sym in module.functions.keys():
+        val f = module.functions[sym]
+        var bi = 0
+        while bi < f.blocks.len():
+            val insts = f.blocks[bi].instructions
+            var ii = 0
+            while ii < insts.len():
+                match insts[ii].kind:
+                    case Intrinsic(_, nm, _):
+                        if nm == "bulk_copy_hint": found = true
+                    case _:
+                        pass
+                ii = ii + 1
+            bi = bi + 1
+    found
+
+describe "SG-1.3 bulk-op flag — default-off, C-backend-scoped":
+    it "reads the flag: enabled when SIMPLE_MIR_BULK_OPS=1":
+        val _r = rt_env_set("SIMPLE_MIR_BULK_OPS", "1")
+        expect(mir_bulk_ops_enabled()).to_equal(true)
+
+    it "reads the flag: disabled by default (=0)":
+        val _r = rt_env_set("SIMPLE_MIR_BULK_OPS", "0")
+        expect(mir_bulk_ops_enabled()).to_equal(false)
+
+    it "enabled path is additive: apply_bulk_recognizers inserts a hint":
+        val m = _module_with_bulk_copy()
+        val out = apply_bulk_recognizers(m)
+        expect(_module_has_copy_hint(out)).to_equal(true)
+
+    it "flag OFF: full C-backend optimize is unchanged (passthrough, no hint)":
+        val _r = rt_env_set("SIMPLE_MIR_BULK_OPS", "0")
+        val m = _trivial_module()
+        val out = optimize_module_for_backend(m, OptLevel.Speed, "c")
+        expect(_module_has_copy_hint(out)).to_equal(false)

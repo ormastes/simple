@@ -676,12 +676,28 @@ Remaining known gap classes (long tail, deferred):
    `30.types/type_infer/generalization.spl` (linear-scan sets) — fix when
    `infer_module` is wired. See doc/08_tracking/bug/ast_env_var_quadratic_parse_2026-06-13.md
    and interp_parse_superlinear_2026-06-12.md.
-6. **Bridge if/else fidelity** (surfaced by G42): `EXPR_IF`/`STMT_IF` in
-   flat_ast_bridge_part1.spl drop the else branch (pass `nil`) and elif chains;
-   `EXPR_IF` reads STMTS but `expr_if_expr` stores then in RIGHT + else in EXTRA.
-   Wrap bare-expr then/else as single-stmt blocks and convert both branches +
-   elif recursion. Touches a hot compiled path — verify no STMT_IF regression
-   across the full sweep before landing.
+6. **Bridge if/else fidelity** (surfaced by G42): **DONE 2026-06-13, commit
+   2e08f8eddf3d.** `EXPR_IF`/`STMT_IF` in flat_ast_bridge_part1.spl hardcoded the
+   If else slot to `nil`, dropping every else branch and elif chain when the
+   self-hosted lean frontend builds a Module. Fix: STMT_IF reads the else body
+   from the elif arena via `elif_get_else(stmt_get_type(idx))`; EXPR_IF reads
+   then from RIGHT and else from EXTRA, wrapping block-exprs/ternary branches via
+   the new `flat_if_branch_block` helper (`EXPR_BLOCK`=18 → STMTS, bare expr →
+   single-stmt block; `EXPR_UNIT`=33 in EXTRA = no else). `nil` is preserved when
+   there is no else so codegen sees None vs Some(empty); elif chains are nested
+   If nodes that convert recursively.
+   **Verification (structural, discriminating):** the bridge is reachable today
+   only via `check` under the delegation guard (`SIMPLE_FRONTEND_DELEGATED=1`);
+   `run`/`jit`/`aot`/`native-build` use a separate Rust-backed frontend, and the
+   lean `check` is too lenient (no name-resolution / return-type checking) to
+   exercise a dropped else. So verification introspects the bridge's Module
+   output directly: `test/01_unit/compiler/frontend/flat_ast_if_else_bridge_spec.spl`
+   asserts the produced `ExprKind.If` carries an else block (`else-stmts=1`) for
+   if/else and if/elif/else, and `nil` (no spurious empty block) for plain if.
+   Confirmed before/after on the seed: buggy bridge → all `no-else`; fixed →
+   `1 / nil / 1`. **Runtime-codegen proof is deferred to M12** — once delegation
+   is removed and the bridge becomes the universal frontend, the same spec gains
+   an executable end-to-end variant.
 7. **ForceUnwrap fidelity** (surfaced by G44): postfix `!` parses as
    `EXPR_EXISTS_CHECK`, conflating force-unwrap with `?`/`.?`. Add a dedicated
    ForceUnwrap ExprKind + flat node + bridge mapping so panic-on-None vs

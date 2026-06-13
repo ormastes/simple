@@ -27,7 +27,7 @@ browser_session_simple_script_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -141,6 +141,35 @@ match result:
 
 </details>
 
+#### reports malformed Simple drawing numbers without partial evidence
+
+- var session = BrowserSession new
+- Ok
+   - Expected: session.warnings.len() equals `1`
+- Err
+   - Expected: "unexpected load error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+val html = "<html><body><script type='text/simple'>body_text \"safe\"\nsimple2d.fill_rect 4 nope 20 10 255</script></body></html>"
+val result = session.open_html("https://example.com/simple-script-numeric-error.html", html)
+match result:
+    Ok(_):
+        expect(session.warnings.len()).to_equal(1)
+        expect(session.warnings[0]).to_contain("simple2d.fill_rect numeric argument is invalid")
+    Err(err):
+        expect("unexpected load error: {err}").to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -160,8 +189,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
