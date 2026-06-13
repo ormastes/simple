@@ -220,6 +220,10 @@ Updated: 2026-06-11
   `WidgetStore.upsert_record` and `WidgetStore.set_prop` now allocate the exact
   result array once and fill by index instead of rebuilding records and props
   with repeated array concatenation on each append or replacement.
+- this commit -- Simple Web viewport crop offset hoisting: the Pure Simple HTML
+  layout renderer now computes source and destination framebuffer row offsets
+  once per viewport row while cropping virtual scroll output, avoiding repeated
+  `row * width` work in the startup pixel-copy loop.
 - this commit -- global widget-store copy removal:
   process-global `upsert_widget_record`, `set_internal_prop`, child
   registration, and widget traversal helpers now avoid per-item array
