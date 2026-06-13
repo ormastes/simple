@@ -67,7 +67,11 @@ Runtime externs needed (Rust seed additions → require `scripts/bootstrap/boots
 - [x] W1.4 Task graph lite — `GpuTaskGraph` in queue.spl
 - [x] W1.2 USM trio — `src/lib/nogc_sync_mut/gpu/usm.spl` (None-backend deterministic; CUDA managed/pinned externs = seed work, recorded)
 - [x] W2.4 (library layer) — `GpuQueue.parallel_reduce_i64` CPU-deterministic fold; GPU two-pass block reduction still pending behind W2.3
-- [ ] W2.x remainder — pending (compiler-side)
+- [x] W2.2 Sub-group intrinsics — gpu_lane_id/warp_id/warp_size, 4 shuffle variants, ballot; PTX (`shfl.sync.*`, `vote.sync.ballot`) + OpenCL (`sub_group_*`) lanes, fail-closed; both `// warp sync` placeholders replaced with `bar.warp.sync`; contract spec 24/24 (`test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl`)
+- [x] G3 (library layer) — `GpuAccessGraph` implicit RAW/WAW/WAR DAG from declared buffer access sets
+- [x] G4 (device kind) — `usm_malloc_device` CUDA-backed via `rt_cuda_mem_alloc`/`rt_cuda_mem_free`; shared/managed still needs seed externs
+- [x] W4.2 (host path) — `GpuEvent.elapsed_nanos`/`elapsed_ms` + `GpuQueue.enable_profiling`; device timers pending native stream binding
+- [ ] W2.1/W2.3/W2.5/W2.6 — pending (compiler-side)
 - Found during W1: `grid` named-arg parser bug (P2) — `doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md`; API uses grid_dim/block_dim until fixed
 - [ ] W3.x — pending (headline)
 - [ ] W4.x — pending

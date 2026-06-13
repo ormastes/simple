@@ -5,6 +5,7 @@
 use std.gpu.{GpuQueue, GpuEvent, GpuTaskGraph, GpuAccessGraph, launch_shape, default_launch_shape}
 use std.gpu.{UsmBuffer, usm_malloc_device, usm_malloc_host, usm_malloc_shared}
 use std.gpu.{gpu_none}
+use std.gpu.{cpu_kernel_run_1d, gpu_global_id_x, gpu_block_dim_x, gpu_grid_dim_x}
 
 # Module-level state for closure-free kernels (nested closures cannot
 # mutate captured locals; module vars + module fns work everywhere).
@@ -33,6 +34,14 @@ fn add(a: i64, b: i64) -> i64:
 
 fn maxv(a: i64, b: i64) -> i64:
     if a > b: a else: b
+
+# Kernel-shaped function for the W4.1 CPU executor: same indexing idiom a
+# @gpu_kernel body uses (global id from block/thread intrinsics).
+var kernel_hits: [i64] = []
+
+fn mark_kernel():
+    val idx = gpu_global_id_x()
+    kernel_hits.push(idx)
 
 describe "launch_shape (W1.3 descriptive range math)":
 
@@ -194,6 +203,35 @@ describe "GpuEvent profiling (W4.2 host path)":
         expect(warm.is_complete()).to_equal(true)
         expect(warm.elapsed_nanos >= 0).to_equal(true)
         expect(warm.elapsed_ms() >= 0.0).to_equal(true)
+
+describe "cpu_kernel_run_1d generic CPU executor (W4.1)":
+
+    it "runs a kernel-shaped body once per work-item with correct global ids":
+        kernel_hits = []
+        val executed = cpu_kernel_run_1d(10, 4, mark_kernel)
+        expect(executed).to_equal(10)
+        expect(kernel_hits.len()).to_equal(10)
+        expect(kernel_hits[0]).to_equal(0)
+        expect(kernel_hits[9]).to_equal(9)
+
+    it "skips ragged tail items beyond total":
+        kernel_hits = []
+        val executed = cpu_kernel_run_1d(5, 4, mark_kernel)
+        expect(executed).to_equal(5)
+        expect(kernel_hits.len()).to_equal(5)
+        expect(kernel_hits[4]).to_equal(4)
+
+    it "restores single-thread intrinsic defaults after the launch":
+        kernel_hits = []
+        val executed = cpu_kernel_run_1d(3, 2, mark_kernel)
+        expect(executed).to_equal(3)
+        expect(gpu_global_id_x()).to_equal(0)
+        expect(gpu_block_dim_x()).to_equal(1)
+        expect(gpu_grid_dim_x()).to_equal(1)
+
+    it "fails closed on invalid shapes":
+        expect(cpu_kernel_run_1d(0, 4, mark_kernel)).to_equal(0)
+        expect(cpu_kernel_run_1d(4, 0, mark_kernel)).to_equal(0)
 
 describe "USM allocation trio (W1.2, fallback path)":
 

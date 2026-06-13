@@ -240,13 +240,21 @@ fn gpu_copy(dst: GpuPtr, src: GpuPtr, bytes: i64) -> Result<(), GpuError>:
 
 # ============================================================================
 # GPU Intrinsic Stubs (interpreter mode)
-# These are recognized as intrinsics by the MIR->PTX backend at compile time.
-# In interpreter mode, they return dummy values for testing.
+# These are recognized as intrinsics by the MIR->PTX backend at compile time
+# (backends replace the calls), so the host bodies below only execute on the
+# CPU path. They read executor state so cpu_kernel_run_1d (W4.1) can run any
+# kernel-shaped function over a real 1D ndrange; at rest the state holds the
+# single-thread defaults (ids 0, dims 1) the old constant stubs returned.
 # ============================================================================
+
+var _exec_block_id_x = 0
+var _exec_local_id_x = 0
+var _exec_block_dim_x = 1
+var _exec_grid_dim_x = 1
 
 fn gpu_block_id_x() -> i64:
     """Block ID in X dimension. PTX: %ctaid.x"""
-    0
+    _exec_block_id_x
 
 fn gpu_block_id_y() -> i64:
     """Block ID in Y dimension. PTX: %ctaid.y"""
@@ -258,7 +266,7 @@ fn gpu_block_id_z() -> i64:
 
 fn gpu_block_dim_x() -> i64:
     """Block dimension in X. PTX: %ntid.x"""
-    1
+    _exec_block_dim_x
 
 fn gpu_block_dim_y() -> i64:
     """Block dimension in Y. PTX: %ntid.y"""
@@ -270,7 +278,7 @@ fn gpu_block_dim_z() -> i64:
 
 fn gpu_local_id_x() -> i64:
     """Thread ID within block, X. PTX: %tid.x"""
-    0
+    _exec_local_id_x
 
 fn gpu_local_id_y() -> i64:
     """Thread ID within block, Y. PTX: %tid.y"""
@@ -294,7 +302,7 @@ fn gpu_thread_id_z() -> i64:
 
 fn gpu_grid_dim_x() -> i64:
     """Grid dimension in X. PTX: %nctaid.x"""
-    1
+    _exec_grid_dim_x
 
 fn gpu_grid_dim_y() -> i64:
     """Grid dimension in Y. PTX: %nctaid.y"""
@@ -306,7 +314,7 @@ fn gpu_grid_dim_z() -> i64:
 
 fn gpu_global_id_x() -> i64:
     """Global thread ID in X = blockIdx.x * blockDim.x + threadIdx.x"""
-    0
+    _exec_block_id_x * _exec_block_dim_x + _exec_local_id_x
 
 fn gpu_global_id_y() -> i64:
     """Global thread ID in Y = blockIdx.y * blockDim.y + threadIdx.y"""
@@ -323,6 +331,42 @@ fn gpu_syncthreads():
 fn gpu_barrier():
     """Block-level barrier synchronization."""
     pass_dn
+
+fn cpu_kernel_run_1d(total: i64, block_size: i64, kernel: fn()) -> i64:
+    """Generic CPU executor (W4.1): run a kernel-shaped function over a 1D
+    ndrange. While kernel() runs, gpu_block_id_x/gpu_local_id_x/
+    gpu_block_dim_x/gpu_grid_dim_x/gpu_global_id_x reflect the current
+    work-item, so the same body that compiles to PTX/OpenCL executes
+    correctly on the host. Tail items beyond total are not invoked.
+
+    Serial semantics: kernels that exchange data across threads via shared
+    memory + gpu_syncthreads are NOT supported on this path (syncthreads is
+    a no-op when execution is one item at a time).
+
+    Returns the number of work-items executed (0 for invalid shapes).
+    """
+    if total <= 0 or block_size <= 0:
+        return 0
+    val blocks = (total + block_size - 1) / block_size
+    _exec_grid_dim_x = blocks
+    _exec_block_dim_x = block_size
+    var executed = 0
+    var b = 0
+    while b < blocks:
+        _exec_block_id_x = b
+        var t = 0
+        while t < block_size:
+            if b * block_size + t < total:
+                _exec_local_id_x = t
+                kernel()
+                executed = executed + 1
+            t = t + 1
+        b = b + 1
+    _exec_block_id_x = 0
+    _exec_local_id_x = 0
+    _exec_block_dim_x = 1
+    _exec_grid_dim_x = 1
+    executed
 
 fn gpu_load_f32(ptr: GpuPtr, index: i64) -> f32:
     """Load f32 from device memory at index. PTX: ld.global.f32"""
@@ -525,6 +569,7 @@ export gpu_download_i32, gpu_download_i64, gpu_download_f64
 export gpu_alloc_f32, gpu_alloc_i32, gpu_alloc_i64, gpu_alloc_f64
 export gpu_memset_f32, gpu_memset_i32, gpu_copy_f32, gpu_copy_i32, gpu_copy
 export gpu_thread_id_x, gpu_thread_id_y, gpu_thread_id_z
+export cpu_kernel_run_1d
 export gpu_block_id_x, gpu_block_id_y, gpu_block_id_z
 export gpu_block_dim_x, gpu_block_dim_y, gpu_block_dim_z
 export gpu_grid_dim_x, gpu_grid_dim_y, gpu_grid_dim_z
