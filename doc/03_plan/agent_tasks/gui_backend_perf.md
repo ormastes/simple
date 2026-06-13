@@ -714,3 +714,7 @@ Updated: 2026-06-11
 - Simple Web child-combinator chunk join allocation removal:
   `normalize_child_combinators` now uses `chunks.join("")` after range slicing
   instead of appending each chunk into an output string.
+- Simple Web color/attribute micro-allocation removal: `parse_color_any` now
+  finds the closing RGB parenthesis in the original string and slices once,
+  while CSS attribute unquoting uses `char_at` for quote checks instead of
+  allocating first/last-character substrings.
