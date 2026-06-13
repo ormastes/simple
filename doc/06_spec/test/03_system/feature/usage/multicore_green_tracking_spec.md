@@ -603,7 +603,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -629,8 +629,14 @@ expect(perf).to_contain("used_runtime_pool()")
 expect(perf).to_contain("queue_model=work_stealing")
 expect(perf).to_contain("GOMAXPROCS=$CPU_WORKERS")
 expect(perf).to_contain("contract-gated reports must keep")
+expect(perf).to_contain("runtime-seed `rt_pool_*` support")
+expect(perf).to_contain("not describe this as a combined Pure Simple")
 expect(coding).to_contain("assert `used_runtime_pool()`")
 expect(coding).to_contain("Cross-language profile")
+expect(coding).to_contain("Pure Simple user API")
+expect(coding).to_contain("runtime-seed support")
+expect(stdlib).to_contain("runtime-seed `rt_pool_submit`")
+expect(stdlib).to_contain("not a combined Pure Simple user-facing API")
 
 step("Verify Pure Simple facade wording stays separate from runtime seed support")
 expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn` facade over runtime-seed")
