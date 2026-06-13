@@ -606,6 +606,26 @@ files go through the sspec pipeline, not the core lean parser).
   config). If a real src/lib use surfaces later, add `s{`/`m{` as allowlisted
   prefix-block literals (see memory: never "any ident + `{`").
 
+#### Post-perf gap-class wave (2026-06-13) — sweep unblocked by the env-mirror perf fix
+With compiled parse now linear (M12-4 prerequisite met), per-file `check` sampling
+(parser resyncs at file boundaries → primary errors, not the cascade-inflated
+text.spl-closure count) shows **most src/lib files already parse clean** (~23/24 in
+the common/ + nogc_sync_mut/ sample). Two gap classes found and FIXED:
+- **G47 — `else if` (C-style elif), PARSER DONE + pushed.** 1001 sites across 164
+  src/lib files (the dominant residue). Both if-statement else-handlers now parse a
+  following `if` as a nested if (elif chain) instead of expecting `:`.
+- **G48 — colon-form inline ternary `if C: T else E`, PARSER DONE + pushed.** ~29
+  src/lib sites (e.g. `val s2 = if s < 0: s + N else s`). parse_if_expr's block-path
+  else branch now distinguishes block `else:` / `else if` / inline `else EXPR`.
+
+Remaining known gap classes (long tail, deferred):
+- **`extern class Name:` declaration form** — `extern fn` is handled but not
+  `extern class` (runtime-type binding with fields). Only ~2 src/lib sites
+  (error.spl SimpleError). Low priority.
+- A clean full per-file src/lib sweep (now feasible) is needed to enumerate the
+  rest; the historical text.spl-closure 1238 count is ~10× cascade-inflated and not
+  a class count.
+
 #### M12 remaining
 1. Interpreted `flat_ast_to_module` entry OOB (see above) — diagnose/fix.
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
