@@ -175,13 +175,14 @@ Failed: 0
 
 - Read the blocker and current QEMU green-carrier spec
 - Verify the prerequisite and final markers remain documented separately
+   - Expected: absent_in_text(qemu_spec, "future final hardware handoff lane") equals `1`
 - Verify the guest probe keeps final payload emission behind real final entry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -211,6 +212,7 @@ expect(qemu_spec).to_contain("GREEN_HW_HANDOFF_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_ENTRY_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_MARKER")
 expect(qemu_spec).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE")
+expect(absent_in_text(qemu_spec, "future final hardware handoff lane")).to_equal(1)
 
 step("Verify the guest probe keeps final payload emission behind real final entry")
 expect(probe).to_contain("_make_final_marker_payload")
