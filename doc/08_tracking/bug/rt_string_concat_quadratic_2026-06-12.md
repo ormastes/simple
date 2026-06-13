@@ -1,21 +1,6 @@
 # rt_string_concat_quadratic: O(n²) string building in MCP JSON layer
 
-**Status:** H1 PRIMITIVE LANDED + INTERPRETER-VERIFIED 2026-06-13; JIT class-path BLOCKED.
-The incremental string-builder runtime primitive is implemented and registered
-(`RtStringBuilder` + 5 `rt_string_builder_*` externs; Rust-tested O(n), ~400–520x
-vs naive concat). Externs registered across all resolution sites (`elf_utils.rs`,
-`codegen/runtime_sffi.rs`, `interpreter_extern/sffi_string.rs`+`mod.rs`,
-`common/src/runtime_symbols.rs`). End-to-end `.spl` use via `RtStringBuilder`
-**works in interpreter mode** (`11` / `hello world`, exit 0) — verified on a
-freshly rebuilt binary. **JIT/default mode segfaults** when the class is used
-from an imported library, due to a separate pre-existing codegen bug:
-`doc/08_tracking/bug/jit_cross_module_extern_in_library_method_null_2026-06-13.md`
-(externs referenced only inside an imported-library method body never enter the
-unit's `referenced_names`, so the JIT GOT slot binds NULL). Because the MCP
-server runs JIT/native, MCP-builder integration is GATED on that JIT bug — do
-NOT wire `RtStringBuilder` into the MCP `.spl` builders until the JIT path is
-fixed (it would crash the server). The earlier `.spl`-level mitigations remain
-the live mitigation. (Earlier: MITIGATED 2026-06-12 — .spl-level builder rewrites applied.)
+**Status:** ROOT-CAUSE FIX LANDED 2026-06-13 — H1 incremental string-builder runtime primitive implemented (`RtStringBuilder` + `rt_string_builder_*` externs, O(n) builds, Rust-tested ~520x vs naive concat). Requires a seed rebuild to go live; MCP-builder integration is a follow-up. (Earlier: MITIGATED 2026-06-12 — .spl-level builder rewrites applied.)
 **Severity:** High — native MCP server burns ~1.5 s CPU on a single `tools/list` handshake (38 KB JSON).
 **Affected files:**
 - `src/lib/nogc_sync_mut/mcp_sdk/core/json.spl` — `jo1`–`jo5` builders
