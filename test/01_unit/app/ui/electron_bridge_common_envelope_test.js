@@ -87,5 +87,14 @@ const bridgeSource = require('fs').readFileSync(require('path').join(__dirname, 
 assert(bridgeSource.includes("SIMPLE_UI_BACKEND: 'electron'"));
 assert(bridgeSource.includes("SIMPLE_EXECUTION_MODE"));
 assert(bridgeSource.includes("SIMPLE_TIMEOUT_SECONDS"));
+assert(bridgeSource.includes('mdiProofInputFrames.push(envelope)'));
+assert(bridgeSource.includes('bridgeIpcFrameCount'));
+assert(bridgeSource.includes('bridgeBodyActionFrameRouted'));
+assert(bridgeSource.includes('bridgeMinimizeFrameRouted'));
+assert(bridgeSource.includes('bridgeMaximizeFrameRouted'));
+assert(bridgeSource.includes('bridgeCloseFrameRouted'));
+assert(bridgeSource.includes('trafficMinimizeRouted'));
+assert(bridgeSource.includes('trafficMaximizeRouted'));
+assert(bridgeSource.includes('trafficCloseRouted'));
 
 console.log('electron bridge common envelope contract ok');

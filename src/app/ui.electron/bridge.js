@@ -26,6 +26,7 @@ const {
 
 let mainWindow = null;
 let simpleProcess = null;
+let mdiProofInputFrames = [];
 
 function handleSimpleMessageLine(line, win = mainWindow) {
     try {
@@ -506,6 +507,7 @@ function maybeWriteMdiProof(win) {
     if (!process.env.SIMPLE_ELECTRON_MDI_PROOF_PATH || !win) {
         return;
     }
+    mdiProofInputFrames = [];
     win.webContents.executeJavaScript(`
             (function() {
                 var wm = window.__SIMPLE_ELECTRON_WM__;
@@ -513,6 +515,9 @@ function maybeWriteMdiProof(win) {
                 var bodyClickRouted = false;
                 var bodyInputRouted = false;
                 var bodyKeyRouted = false;
+                var trafficMinimizeRouted = false;
+                var trafficMaximizeRouted = false;
+                var trafficCloseRouted = false;
                 var appActionControlFound = false;
                 var appInputControlFound = false;
                 var dragBefore = null;
@@ -555,6 +560,10 @@ function maybeWriteMdiProof(win) {
                         appActionControlFound = !!appButton;
                         if (appButton) {
                             var actionName = appButton.getAttribute('data-action') || '';
+                            if (typeof PointerEvent === 'function') {
+                                appButton.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 41, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 20, clientY: 20, bubbles: true }));
+                                appButton.dispatchEvent(new PointerEvent('pointerup', { pointerId: 41, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0, clientX: 20, clientY: 20, bubbles: true }));
+                            }
                             appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
                             bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
                         }
@@ -574,6 +583,33 @@ function maybeWriteMdiProof(win) {
                         body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
                         bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
                     }
+                    var minimizeButton = terminal.querySelector('.wm-traffic-lights [data-action="minimize"]');
+                    var maximizeButton = terminal.querySelector('.wm-traffic-lights [data-action="maximize"]');
+                    if (minimizeButton) {
+                        minimizeButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                        trafficMinimizeRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === 'minimize');
+                    }
+                    if (maximizeButton) {
+                        maximizeButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                        trafficMaximizeRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === 'maximize');
+                    }
+                    wm.receiveElectronMessage({
+                        type: 'openWindow',
+                        windowId: 'bridge-proof-close',
+                        title: 'Bridge Close Proof',
+                        appId: 'proof',
+                        x: 24,
+                        y: 24,
+                        width: 180,
+                        height: 120,
+                        html: '<button data-action="proof_body_action">Proof</button>'
+                    });
+                    var closeWin = wm.windows['bridge-proof-close'] && wm.windows['bridge-proof-close'].win;
+                    var closeButton = closeWin ? closeWin.querySelector('.wm-traffic-lights [data-action="close"]') : null;
+                    if (closeButton) {
+                        closeButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                        trafficCloseRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'bridge-proof-close' && wm.lastEvent.action === 'close' && !wm.windows['bridge-proof-close']);
+                    }
                 }
                 return {
             count: window.__SIMPLE_ELECTRON_WM__ ? Object.keys(window.__SIMPLE_ELECTRON_WM__.windows || {}).length : 0,
@@ -589,6 +625,9 @@ function maybeWriteMdiProof(win) {
             bodyClickRouted: bodyClickRouted,
             bodyInputRouted: bodyInputRouted,
             bodyKeyRouted: bodyKeyRouted,
+            trafficMinimizeRouted: trafficMinimizeRouted,
+            trafficMaximizeRouted: trafficMaximizeRouted,
+            trafficCloseRouted: trafficCloseRouted,
             taskbarItemCount: taskbarItems.length,
             taskbarIconCount: taskbarIcons.length,
             taskbarIconsVisible: taskbarIconsVisible,
@@ -601,6 +640,16 @@ function maybeWriteMdiProof(win) {
     `).then(proof => {
         const screenshotPath = process.env.SIMPLE_ELECTRON_MDI_SCREENSHOT_PATH || '';
         const finish = () => {
+            proof.bridgeInputFrames = mdiProofInputFrames.slice();
+            proof.bridgeIpcFrameCount = proof.bridgeInputFrames.length;
+            proof.bridgeBodyActionFrameRouted = proof.bridgeInputFrames.some(frame => frame && frame.surface_id === 'terminal' && frame.event_type === 'action' && frame.value === 'mdi_terminal_action');
+            proof.bridgeBodyInputFrameRouted = proof.bridgeInputFrames.some(frame => frame && frame.surface_id === 'terminal' && frame.event_type === 'input' && frame.target_id === 'mdi_terminal_input' && frame.value === 'ok');
+            proof.bridgeBodyKeyFrameRouted = proof.bridgeInputFrames.some(frame => frame && frame.surface_id === 'terminal' && frame.event_type === 'key' && frame.key === 'Enter');
+            proof.bridgeMouseDownFrameRouted = proof.bridgeInputFrames.some(frame => frame && frame.surface_id === 'terminal' && frame.event_type === 'mouse_down');
+            proof.bridgeMouseUpFrameRouted = proof.bridgeInputFrames.some(frame => frame && frame.surface_id === 'terminal' && frame.event_type === 'mouse_up');
+            proof.bridgeMinimizeFrameRouted = proof.bridgeInputFrames.some(frame => frame && frame.surface_id === 'terminal' && frame.event_type === 'action' && frame.value === 'minimize');
+            proof.bridgeMaximizeFrameRouted = proof.bridgeInputFrames.some(frame => frame && frame.surface_id === 'terminal' && frame.event_type === 'action' && frame.value === 'maximize');
+            proof.bridgeCloseFrameRouted = proof.bridgeInputFrames.some(frame => frame && frame.surface_id === 'bridge-proof-close' && frame.event_type === 'action' && frame.value === 'close');
             fs.writeFileSync(process.env.SIMPLE_ELECTRON_MDI_PROOF_PATH, JSON.stringify(proof));
             if (proof.count >= 4 && app) {
                 app.quit();
@@ -611,13 +660,13 @@ function maybeWriteMdiProof(win) {
                 fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
                 fs.writeFileSync(screenshotPath, image.toPNG());
                 proof.screenshotPath = screenshotPath;
-                finish();
+                setTimeout(finish, 50);
             }).catch(err => {
                 proof.screenshotError = String(err);
-                finish();
+                setTimeout(finish, 50);
             });
         } else {
-            finish();
+            setTimeout(finish, 50);
         }
     }).catch(err => {
         fs.writeFileSync(process.env.SIMPLE_ELECTRON_MDI_PROOF_PATH, JSON.stringify({ error: String(err) }));
@@ -726,6 +775,9 @@ if (ipcMain) ipcMain.handle('show-notification', async (event, { title, body }) 
 });
 
 if (ipcMain) ipcMain.on('simple-input', (event, envelope) => {
+    if (process.env.SIMPLE_ELECTRON_MDI_PROOF_PATH) {
+        mdiProofInputFrames.push(envelope);
+    }
     sendToSimple(envelope);
 });
 
