@@ -182,7 +182,7 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -212,6 +212,8 @@ expect(qemu_spec).to_contain("GREEN_HW_HANDOFF_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_ENTRY_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_MARKER")
 expect(qemu_spec).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE")
+expect(qemu_spec).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1` readiness lane")
+expect(qemu_spec).to_contain("separate final ring/user transition")
 expect(absent_in_text(qemu_spec, "future final hardware handoff lane")).to_equal(1)
 
 step("Verify the guest probe keeps final payload emission behind real final entry")

@@ -372,7 +372,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 91 lines folded for reproduction.
+Runnable source: 92 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -433,6 +433,7 @@ expect(row).to_contain("multicore_green_sliced_shared_var_capture.spl rejects sh
 expect(row).to_contain("multicore_green_direct_rt_pool_access.spl rejects internal runtime-pool symbol")
 step("Verify negative profile contract cases stay release-visible")
 expect(row).to_contain("large_simple_multicore_fanout_slower_than_c")
+expect(row).to_contain("large_go_fanout_slower_than_c")
 expect(row).to_contain("simple_multicore_stress_slower_than_c")
 expect(row).to_contain("go_stress_slower_than_c")
 expect(row).to_contain("simple_multicore_queue_model_global_fifo")
