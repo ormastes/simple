@@ -534,6 +534,10 @@ struct FunctionAttr:
     simd_enable: bool       # @simd(enable) or bare @simd
     simd_disable: bool      # @simd(disable)
     simd_prefer_scalable: bool  # @simd(prefer_scalable)
+    # FPGA kernel attributes (W3.2) — 0 = absent/default
+    unroll_factor: i64      # @unroll(n) — structural unroll factor; 0 = no unroll
+    pipeline_ii: i64        # @pipeline(n) / @pipeline(ii=n) — initiation interval; 0 = no pipeline
+    memory_banks: i64       # @memory(n) / @memory(banks=n) — array port banking; 0 = no banking
 
 impl FunctionAttr:
     static fn default() -> FunctionAttr:
@@ -554,7 +558,10 @@ impl FunctionAttr:
             has_fast_math: false,
             simd_enable: false,
             simd_disable: false,
-            simd_prefer_scalable: false
+            simd_prefer_scalable: false,
+            unroll_factor: 0,
+            pipeline_ii: 0,
+            memory_banks: 0
         )
 
 fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
@@ -576,6 +583,9 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     var simd_enable = false
     var simd_disable = false
     var simd_prefer_scalable = false
+    var unroll_factor: i64 = 0
+    var pipeline_ii: i64 = 0
+    var memory_banks: i64 = 0
 
     for attr in attrs:
         if attr.name == "entry":
@@ -607,6 +617,21 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
                 gpu_backends = parsed.gpu_backends
         elif attr.name == "fast_math":
             has_fast_math = true
+        elif attr.name == "unroll":
+            if attr.args.len() > 0:
+                val n = extract_int_arg(attr.args[0]) ?? 0
+                if n > 0:
+                    unroll_factor = n
+        elif attr.name == "pipeline":
+            if attr.args.len() > 0:
+                val n = extract_fpga_named_or_positional_i64(attr.args[0])
+                if n > 0:
+                    pipeline_ii = n
+        elif attr.name == "memory":
+            if attr.args.len() > 0:
+                val n = extract_fpga_named_or_positional_i64(attr.args[0])
+                if n > 0:
+                    memory_banks = n
         elif attr.name == "simd":
             is_simd = true
             if attr.args.len() == 0:
@@ -637,7 +662,10 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         has_fast_math: has_fast_math,
         simd_enable: simd_enable,
         simd_disable: simd_disable,
-        simd_prefer_scalable: simd_prefer_scalable
+        simd_prefer_scalable: simd_prefer_scalable,
+        unroll_factor: unroll_factor,
+        pipeline_ii: pipeline_ii,
+        memory_banks: memory_banks
     )
 
 struct GpuFunctionAttrArgs:
@@ -666,6 +694,14 @@ fn parse_gpu_function_attr_args(attr: Attribute) -> GpuFunctionAttrArgs:
                     case _: ()
             case _: ()
     GpuFunctionAttrArgs(gpu_target: gpu_target, gpu_backends: gpu_backends)
+
+fn extract_fpga_named_or_positional_i64(expr: Expr) -> i64:
+    """Extract an i64 from a positional integer literal or a named-arg assignment (e.g. ii=3, banks=2)."""
+    match expr.kind:
+        case Assign(left, op, right):
+            extract_int_arg(right) ?? 0
+        case _:
+            extract_int_arg(expr) ?? 0
 
 # ============================================================================
 # Task Attribute Types
