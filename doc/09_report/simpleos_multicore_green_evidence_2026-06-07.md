@@ -19,6 +19,13 @@ It also refreshes the hosted cooperative/multicore feature specs (`simpleos_coop
 and `simpleos_multicore_green_spec`) as current evidence after the green/cooperative
 SSpec-runner mismatch was closed.
 
+Boundary note: `cooperative_green_spawn` runs on the current OS thread, is not
+Go-style M:N CPU parallelism, and carries no `pool_used` runtime-pool evidence.
+Host Go-like M:N evidence remains the Pure Simple `multicore_green_spawn`
+facade over runtime-seed `rt_pool_*` support and must carry
+`used_runtime_pool()` evidence. Hosted SimpleOS scheduler/carrier evidence
+must not be conflated with host runtime-pool profile evidence.
+
 ## Verified Commands
 
 Commands below are the canonical repo-root checks for this lane. The hosted
@@ -112,6 +119,12 @@ This refresh does not rerun a live QEMU lane. It keeps the hosted SimpleOS
 cooperative, multicore-green scheduler, and green-channel wake contracts
 current after the profile/manual gate updates, without changing the already
 closed final live-handoff claim.
+
+The refreshed cooperative spec remains current-thread cooperative scheduling
+only: `cooperative_green_spawn` runs on the current OS thread, is not
+Go-style M:N CPU parallelism, and has no `pool_used` runtime-pool evidence. The
+host runtime-pool boundary remains the Pure Simple `multicore_green_spawn`
+facade over runtime-seed `rt_pool_*` with `used_runtime_pool()` evidence.
 
 ## Current Refresh
 

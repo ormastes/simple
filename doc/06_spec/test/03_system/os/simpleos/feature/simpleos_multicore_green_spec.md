@@ -67,6 +67,13 @@ stays separate from the opt-in live QEMU AP lane and from the final
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 `USER_SYSCALL_PASS=true`.
 
+The hosted SimpleOS scheduler lane also stays separate from host runtime-pool
+profile evidence. Host Go-like M:N evidence belongs to the Pure Simple
+`multicore_green_spawn` facade over runtime-seed `rt_pool_*` support and must
+carry `used_runtime_pool()` evidence. SimpleOS cooperative-green evidence is
+current-thread cooperative scheduling only; it is not Go-style M:N CPU
+parallelism and carries no `pool_used` runtime-pool evidence.
+
 ## Requirements
 
 **Requirements:** doc/02_requirements/feature/multicore_green.md
@@ -154,6 +161,9 @@ This is hosted model evidence; live QEMU/AP execution remains covered by
   `green_carrier_qemu_spec.spl`.
 - The final handoff remains an opt-in live-QEMU gate and is recorded in
   `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`.
+- Public concurrency API names must remain meaningful and unnumbered in this
+  lane; numeric-suffix aliases are forbidden API inputs, not SimpleOS evidence
+  names.
 
 ## TUI Capture
 
@@ -500,13 +510,20 @@ expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
    - Expected: absent_in_text(report, "bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl") equals `1`
    - Expected: absent_in_text(report, "bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl") equals `1`
 - Verify the hosted SimpleOS refresh is current and Docker-isolated
+- Verify SimpleOS evidence preserves host-runtime and cooperative-green boundaries
+- Verify SimpleOS evidence does not introduce numeric-suffix public API names
+   - Expected: absent_in_text(self_doc, forbidden_thread_alias) equals `1`
+   - Expected: absent_in_text(report, forbidden_thread_alias) equals `1`
+   - Expected: absent_in_text(report_index, forbidden_thread_alias) equals `1`
+   - Expected: absent_in_text(self_doc, forbidden_multicore_alias) equals `1`
+   - Expected: absent_in_text(report, forbidden_multicore_alias) equals `1`
 - Verify the linked plan and report carry the final live marker triplet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -514,6 +531,7 @@ step("Read the hosted SimpleOS multicore-green spec and linked evidence docs")
 val self_doc = rt_file_read_text("test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl") ?? ""
 val plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 val report = rt_file_read_text("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md") ?? ""
+val report_index = rt_file_read_text("doc/09_report/README.md") ?? ""
 val blocker = rt_file_read_text("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md") ?? ""
 
 step("Verify hosted evidence does not claim to be the live AP or final handoff lane")
@@ -539,8 +557,28 @@ expect(report).to_contain("simpleos_cooperative_green_spec.spl --mode=interprete
 expect(report).to_contain("simpleos_multicore_green_spec.spl --mode=interpreter --clean")
 expect(report).to_contain("simpleos_green_channel_wake_spec.spl --mode=interpreter --clean")
 expect(report).to_contain("PASS, 7 scenarios")
+expect(report_index).to_contain("2026-06-13 hosted Docker-isolated refresh")
+expect(report_index).to_contain("does not rerun or alter the opt-in live QEMU final-handoff claim")
 expect(plan).to_contain("The 2026-06-13 hosted SimpleOS refresh")
 expect(plan).to_contain("Docker process isolation")
+
+step("Verify SimpleOS evidence preserves host-runtime and cooperative-green boundaries")
+expect(self_doc).to_contain("Pure Simple")
+expect(self_doc).to_contain("used_runtime_pool()")
+expect(report).to_contain("cooperative_green_spawn runs on the current OS thread")
+expect(report).to_contain("not Go-style M:N CPU parallelism")
+expect(report).to_contain("no `pool_used` runtime-pool evidence")
+expect(report).to_contain("Pure Simple `multicore_green_spawn` facade over runtime-seed `rt_pool_*`")
+expect(report).to_contain("used_runtime_pool()")
+
+step("Verify SimpleOS evidence does not introduce numeric-suffix public API names")
+val forbidden_thread_alias = "thread_spawn" + "2"
+val forbidden_multicore_alias = "multicore_green_spawn" + "2"
+expect(absent_in_text(self_doc, forbidden_thread_alias)).to_equal(1)
+expect(absent_in_text(report, forbidden_thread_alias)).to_equal(1)
+expect(absent_in_text(report_index, forbidden_thread_alias)).to_equal(1)
+expect(absent_in_text(self_doc, forbidden_multicore_alias)).to_equal(1)
+expect(absent_in_text(report, forbidden_multicore_alias)).to_equal(1)
 
 step("Verify the linked plan and report carry the final live marker triplet")
 expect(plan).to_contain("HW_HANDOFF_PASS=true")

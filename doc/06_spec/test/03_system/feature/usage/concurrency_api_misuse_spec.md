@@ -1,6 +1,6 @@
 # Concurrency API Misuse System Contract
 
-> This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and direct runtime aliases.
+> This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and direct runtime aliases. The Pure Simple lint at `src/compiler/35.semantics/lint/concurrency_api_misuse.spl` is the authoritative rule map; Rust driver checks are seed compatibility and bootstrap enforcement, not a separate user-facing API source.
 
 <!-- sdn-diagram:id=concurrency_api_misuse_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ concurrency_api_misuse_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Concurrency API Misuse System Contract
 
-This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and direct runtime aliases.
+This system spec proves the public concurrency API surfaces fail closed at compile time while the approved meaningful API names remain usable. The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad argument types, and direct runtime aliases. The Pure Simple lint at `src/compiler/35.semantics/lint/concurrency_api_misuse.spl` is the authoritative rule map; Rust driver checks are seed compatibility and bootstrap enforcement, not a separate user-facing API source.
 
 ## At a Glance
 
@@ -59,6 +59,9 @@ The OS-thread `thread_spawn`, cooperative green queue APIs, low-level green
 thread APIs, `multicore_green_spawn`, `multicore_green_spawn_sliced`, and
 pool-backed `task_spawn` facades must reject wrong imports, wrong arity, bad
 argument types, and direct runtime aliases.
+The Pure Simple lint at `src/compiler/35.semantics/lint/concurrency_api_misuse.spl`
+is the authoritative rule map; Rust driver checks are seed compatibility and
+bootstrap enforcement, not a separate user-facing API source.
 
 ## Requirements
 
@@ -105,6 +108,8 @@ SIMPLE_BIN=src/compiler_rust/target/debug/simple bin/simple test test/03_system/
 - `thread_spawn_with_args` must stay on the OS-thread surface.
 - The profile-script API contract checks approved public names before checking
   generated misuse fixtures and the checked-in misuse fixture inventory.
+- The Pure Simple lint source keeps E-PAR-001 through E-PAR-006 documented in
+  one place and names the Rust checks as seed compatibility only.
 
 ## TUI Capture
 
@@ -113,7 +118,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/feature/usage/concurrency_api_misuse_spec.spl
 Concurrency API misuse compile errors PASSED
 Files: 1
-Passed: 6
+Passed: 7
 Failed: 0
 ```
 
@@ -133,6 +138,9 @@ Failed: 0
   share-nothing unless an API explicitly documents a synchronization path.
 - The shell profile contract must pass approved public fixtures before running
   misuse fixtures so a broken API cannot be hidden by negative-only coverage.
+- The Pure Simple lint source must remain the canonical public concurrency
+  misuse rule map; Rust-side checks are seed compatibility and bootstrap
+  enforcement.
 
 ## Manual Review Notes
 
@@ -174,6 +182,32 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
 expect(fixture_count()).to_equal(26)
+```
+
+</details>
+
+#### keeps Pure Simple lint as the authoritative API misuse rule map
+
+- Open the Pure Simple concurrency API misuse lint
+- Verify the lint documents the Rust seed boundary
+- Verify the lint owns the public concurrency misuse errors
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Open the Pure Simple concurrency API misuse lint")
+val source = read_repo_text("src/compiler/35.semantics/lint/concurrency_api_misuse.spl")
+step("Verify the lint documents the Rust seed boundary")
+expect(source).to_contain("Rule intents (from Rust seed")
+step("Verify the lint owns the public concurrency misuse errors")
+expect(source).to_contain("E-PAR-002: numbered-suffix concurrency alias")
+expect(source).to_contain("E-PAR-003: concurrency symbol imported from wrong module surface")
+expect(source).to_contain("E-PAR-005: direct use of internal rt_pool_* extern symbols outside the facade")
 ```
 
 </details>
@@ -371,8 +405,8 @@ expect_compile_error("multicore_green_sliced_shared_var_capture.spl", "E-PAR-006
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
