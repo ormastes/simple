@@ -222,7 +222,7 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -233,6 +233,9 @@ expect(plan).to_contain("Deliverables:")
 expect(plan).to_contain("Acceptance evidence:")
 expect(plan).to_contain("cross-language report with separate rows")
 expect(plan).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
+expect(plan).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(plan).to_contain("PROFILE_DOCKER_ISOLATION=1")
+expect(plan).to_contain("separate process/container boundary")
 expect(plan).to_contain("focused native smoke coverage for `thread_spawn_with_args`")
 expect(plan).to_contain("current-carrier queue semantics")
 expect(plan).to_contain("handle evidence methods remain stable")

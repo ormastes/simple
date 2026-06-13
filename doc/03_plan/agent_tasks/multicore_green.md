@@ -94,6 +94,7 @@ Primary paths:
 - `scripts/check/check-cross-language-perf.shs`
 - `test/05_perf/profile_scripts/profile_report_contract_test.shs`
 - `test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
+- `test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 - `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `doc/06_spec/test/05_perf/stress/multicore_green_cross_language_gate_spec.md`
@@ -106,12 +107,16 @@ Deliverables:
 - numeric SPipe gate that rejects `fail`, `n/a`, and missing rows for required
   native evidence;
 - report text that clearly says cooperative green is not Go M:N;
+- Docker isolation contract evidence proving crash-prone native, SMF, C, and Go
+  profile runs stay behind a separate process/container boundary while reusing
+  the canonical profile script;
 - reproducibility knobs in the report for worker counts and timeouts.
 
 Acceptance evidence:
 
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
 - `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
+- `sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
 - `src/compiler_rust/target/debug/simple run build/cross_lang_perf/hosted_sliced_fairness.spl --mode=interpreter`
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - report row proving Go beats C pthreads in isolated large fanout stress with
@@ -336,6 +341,9 @@ Each agent reports:
   - Docker auto-binary selection preferring `bin/simple` / `bin/release/simple`
     while leaving `src/compiler_rust/target/debug/simple` as an explicit
     regression override;
+  - Docker isolation contract coverage that stubs the container handoff and
+    checks `PROFILE_DOCKER_ISOLATION=1`, `--network=none`, UID/GID mapping,
+    resource limits, workspace mounting, and environment propagation;
   - the fixed generated `fanout_stress_multicore_green.spl` source shape;
   - refreshed Go-vs-Simple research and SimpleOS evidence docs;
   - closure-aligned architecture, design, tracker, and report text for the
