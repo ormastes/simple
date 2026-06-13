@@ -687,3 +687,7 @@ Updated: 2026-06-11
   now records token start offsets and slices each token once instead of
   rebuilding tokens with per-character string concatenation during selector
   parsing.
+- Simple Web child-combinator normalization allocation removal:
+  `normalize_child_combinators` now returns the trimmed selector directly when
+  no top-level child combinator exists and rebuilds only range chunks around
+  `>` combinators otherwise, avoiding per-character output concatenation.
