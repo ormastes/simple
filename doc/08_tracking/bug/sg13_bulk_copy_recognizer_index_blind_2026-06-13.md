@@ -3,7 +3,10 @@
 - **ID:** sg13_bulk_copy_recognizer_index_blind
 - **Severity:** P2 (latent — not currently reachable; becomes P0 miscompile if wired)
 - **Area:** compiler / 60.mir_opt (self-hosted), C backend lowering
-- **Status:** OPEN (documented, guarded by comments; no sound producer wired)
+- **Status:** RESOLVED 2026-06-13 — a sound, guarded elision producer (`elide_bulk_copy`) was
+  landed and wired into the C-backend perf path (commit 4c8d519). The index-blind
+  `optimize_bulk_copy` is no longer on the pipeline path (kept as a standalone advisory
+  recognizer with guard comments + its own spec).
 - **Date:** 2026-06-13
 
 ## Summary
@@ -79,4 +82,8 @@ and 6 (temp dead-out).
 
 - `bulk_copy` → memmove backend lowering: DONE, seed-verified
   (`test/01_unit/compiler/backend/c_backend_bulk_copy_memmove_spec.spl`, 5/0, pins arg order).
-- sound producer / elision pass: NOT DONE — draft reviewed, 2 HIGH holes found, deferred (this bug).
+- sound producer / elision pass: DONE (commit 4c8d519). `elide_bulk_copy` implements the
+  strict matcher + H1 (temp dead-out) + H2 (8-byte element) guards; wired into the C+flag path.
+  Twice adversarially reviewed (2nd pass caught + fixed a real H1 Copy/Move-instruction hole and
+  an H2 default-too-eager). Specs: bulk_copy_elision_spec 11/0 (firing + non-firing safety proof),
+  bulk_ops_flag_spec 4/0 (elision via the wired flag path).

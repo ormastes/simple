@@ -266,6 +266,23 @@ conditions 5 (8-byte) + 6 (temp dead-out). The review WORKING AS INTENDED — it
 miscompiles — is the outcome, not a failure. A sound producer needs H1+H2 guards + their own non-firing
 specs + re-review; that is the remaining follow-up.
 
+#### SG-1.3 UPDATE 4 — sound producer LANDED, perf path COMPLETE 2026-06-13 (commit 4c8d519)
+The follow-up from UPDATE 3 was built and landed. `elide_bulk_copy` (optimization_passes_part2)
+implements the strict consecutive-run matcher + both guards H1 (temp dead-out: a full operand
+walker over all instructions + terminators, conservative on unknown kinds) and H2 (8-byte element:
+`primitive_size`==8, default-false/require-proof), and is wired into the C+flag path via
+`apply_bulk_recognizers` (replacing the additive no-op recognizer there). It was put through a
+SECOND adversarial Opus review, which caught a REAL bug I introduced — H1 missed `Copy`/`Move`
+INSTRUCTIONS because their `src` is a raw `LocalId` (not a `MirOperand`), so it would have fired
+when a temp was reused via Copy — plus H2 defaulting too eagerly; both were fixed and pinned by
+regression specs, then a third confirmation review verified the fixes sound. Verification (all under
+the seed): bulk_copy_elision_spec 11/0 (firing + non-firing safety proof incl. the H1 Copy-instruction
+and H2 i32/i64 cases), bulk_ops_flag_spec 4/0 (elision through the wired flag path), backend
+c_backend_bulk_copy_memmove 5/0, additive-recognizer + pipeline-construction specs unregressed. Net
+SG-1.3: the C-backend perf path (recognize → elide → bulk_copy → memmove) is COMPLETE, sound, and
+default-OFF; it remains off the seed/`bin/simple test` path (verified at unit level) and moves no
+seed-run benchmark. Bug sg13_bulk_copy_recognizer_index_blind → RESOLVED.
+
 ### Honest completion boundary (advisor-guided, corrected)
 **Fully DONE/verified this session:** AC-1 (plan+design first), AC-2 (checklists), AC-7 (SMF
 idle-compile + cache reuse, startup-regression-checked), AC-8 (API/arch guard GREEN, scoped to
