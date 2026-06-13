@@ -1424,6 +1424,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_stderr_write", io::stderr_write);
     insert_simple!("rt_stdout_write_text", io::stdout_write);
     insert_simple!("rt_string_concat", sffi_string::rt_string_concat_fn);
+    insert_simple!("rt_string_builder_new", sffi_string::rt_string_builder_new_fn);
+    insert_simple!("rt_string_builder_push", sffi_string::rt_string_builder_push_fn);
+    insert_simple!("rt_string_builder_finish", sffi_string::rt_string_builder_finish_fn);
+    insert_simple!("rt_string_builder_len", sffi_string::rt_string_builder_len_fn);
+    insert_simple!("rt_string_builder_free", sffi_string::rt_string_builder_free_fn);
     insert_simple!("rt_string_eq", sffi_string::rt_string_eq_fn);
     insert_simple!("rt_string_len", sffi_string::rt_string_len_fn);
     insert_simple!("rt_string_new", sffi_string::rt_string_new_fn);

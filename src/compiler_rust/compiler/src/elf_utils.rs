@@ -504,6 +504,11 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         // String operations
         "rt_string_new" => simple_runtime::rt_string_new as *const () as usize,
         "rt_string_concat" => simple_runtime::rt_string_concat as *const () as usize,
+        "rt_string_builder_new" => simple_runtime::rt_string_builder_new as *const () as usize,
+        "rt_string_builder_push" => simple_runtime::rt_string_builder_push as *const () as usize,
+        "rt_string_builder_finish" => simple_runtime::rt_string_builder_finish as *const () as usize,
+        "rt_string_builder_len" => simple_runtime::rt_string_builder_len as *const () as usize,
+        "rt_string_builder_free" => simple_runtime::rt_string_builder_free as *const () as usize,
         "rt_string_eq" => simple_runtime::rt_string_eq as *const () as usize,
         "rt_string_char_code_at" => value::rt_string_char_code_at as *const () as usize,
         "rt_cstring_to_text" => simple_runtime::rt_cstring_to_text as *const () as usize,

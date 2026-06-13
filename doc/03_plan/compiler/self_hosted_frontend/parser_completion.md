@@ -552,6 +552,16 @@ Resolves the M11d WATCH item. Two halves, landed together:
   so the lean bridge's if-path isn't exercised in production. Tracked, not
   worked around: G42 is "parser accepts if-then-else", not "if-then-else DONE".
 
+#### G45 — colon-ternary `if X then Y else: Z` — PARSER DONE 2026-06-13
+The colon form (`else:` / `then:`) is MORE common than plain `else` in the
+codebase (154 vs 54 sites; e.g. native.spl:368 `if use_lto then "-flto " else:
+""`), so G42 alone was incomplete. In parse_if_expr's ternary branch, consume
+an optional `:` (161) after `then` and after `else` before parsing each branch
+expr. Round-2 (tmp/site12/g45_colon_seed.spl): else_colon / then_colon_else_
+colon → false; plain `else` (G42) and block-form `if c:\n…\nelse:` BOTH
+unregressed (block form never enters the ternary branch — it has `:` after the
+cond, not `then`); control true.
+
 #### G43 — open-ended slice `arr[N..]` — PARSER DONE 2026-06-13
 `parse_range` (parser_expr.spl:276) always called `parse_addition()` for the
 upper bound, so `arr[1..]` choked on `]` (`parts[1..].join(...)` in
