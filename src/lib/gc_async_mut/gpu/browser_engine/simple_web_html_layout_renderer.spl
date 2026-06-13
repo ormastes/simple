@@ -3642,6 +3642,11 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
             while fm >= 0:
                 val cst = styles[fm]
                 if not cst.position_absolute:
+                    val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
+                    val resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
+                        style_with_height(cst, child_height_px)
+                    else:
+                        cst
                     val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
                     val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
@@ -3656,7 +3661,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     if child_count_measure > 0:
                         cx_measure = cx_measure + row_wrap_column_gap
                     cx_measure = cx_measure + item_outer_w
-                    val used_h = cst.margin_t + (if cst.height_px > 0: cst.height_px else: style_line_h(cst)) + cst.margin_b
+                    val used_h = resolved_cst.margin_t + flex_item_outer_height(nodes[fm], resolved_cst) + resolved_cst.margin_b
                     if used_h > line_h_measure:
                         line_h_measure = used_h
                     child_count_measure = child_count_measure + 1
@@ -3715,6 +3720,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     out_wrap_ends = child.wrap_ends
                     out_intrinsic_widths = child.intrinsic_widths
                 else:
+                    val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
+                    val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
+                        styles_with_height(styles, fc_wrap, child_height_px)
+                    else:
+                        styles
+                    val resolved_cst = child_styles[fc_wrap]
                     val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
                     val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
@@ -3736,7 +3747,7 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
                         remaining_w = 1
-                    val child = layout(nodes, styles, child_index, fc_wrap, cx_wrap, cy_wrap + cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                    val child = layout(nodes, child_styles, child_index, fc_wrap, cx_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
@@ -3932,54 +3943,59 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
                     shrink_width_assigned = cumulative_shrink
                 if remaining_w < 1:
                     remaining_w = 1
-                val item_align = flex_item_align(st, cst)
-                var child_y = y + st.border_t + st.pad_t + cst.margin_t
+                val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
+                var child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
+                    styles_with_height(styles, fc, child_height_px)
+                else:
+                    styles
+                val resolved_cst = child_styles[fc]
+                val item_align = flex_item_align(st, resolved_cst)
+                var child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t
                 val container_cross_auto = if st.height_px > 0:
                     if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
                 else:
                     0
-                val child_outer_h_auto = flex_item_outer_height(nodes[fc], cst)
-                if (cst.margin_t_auto or cst.margin_b_auto) and container_cross_auto > child_outer_h_auto + cst.margin_t + cst.margin_b:
-                    val free_cross_auto = container_cross_auto - child_outer_h_auto - cst.margin_t - cst.margin_b
-                    if cst.margin_t_auto and cst.margin_b_auto:
-                        child_y = y + st.border_t + st.pad_t + cst.margin_t + free_cross_auto / 2
-                    elif cst.margin_t_auto:
-                        child_y = y + st.border_t + st.pad_t + cst.margin_t + free_cross_auto
+                val child_outer_h_auto = flex_item_outer_height(nodes[fc], resolved_cst)
+                if (resolved_cst.margin_t_auto or resolved_cst.margin_b_auto) and container_cross_auto > child_outer_h_auto + resolved_cst.margin_t + resolved_cst.margin_b:
+                    val free_cross_auto = container_cross_auto - child_outer_h_auto - resolved_cst.margin_t - resolved_cst.margin_b
+                    if resolved_cst.margin_t_auto and resolved_cst.margin_b_auto:
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t + free_cross_auto / 2
+                    elif resolved_cst.margin_t_auto:
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t + free_cross_auto
                     else:
-                        child_y = y + st.border_t + st.pad_t + cst.margin_t
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t
                 elif item_align == "baseline":
-                    child_y = y + st.border_t + st.pad_t + max_baseline - style_baseline_offset(cst)
+                    child_y = y + st.border_t + st.pad_t + max_baseline - style_baseline_offset(resolved_cst)
                 elif item_align == "center":
                     val container_cross = if st.height_px > 0:
                         if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
                     else:
                         0
-                    val child_outer_h = flex_item_outer_height(nodes[fc], cst)
-                    val child_margin_h = cst.margin_t + child_outer_h + cst.margin_b
+                    val child_outer_h = flex_item_outer_height(nodes[fc], resolved_cst)
+                    val child_margin_h = resolved_cst.margin_t + child_outer_h + resolved_cst.margin_b
                     if container_cross > child_margin_h:
-                        child_y = y + st.border_t + st.pad_t + cst.margin_t + (container_cross - child_margin_h) / 2
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t + (container_cross - child_margin_h) / 2
                 elif item_align == "flex-end" or item_align == "end":
                     val container_cross_end = if st.height_px > 0:
                         if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
                     else:
                         0
-                    val child_outer_h_end = flex_item_outer_height(nodes[fc], cst)
-                    val child_margin_h_end = cst.margin_t + child_outer_h_end + cst.margin_b
+                    val child_outer_h_end = flex_item_outer_height(nodes[fc], resolved_cst)
+                    val child_margin_h_end = resolved_cst.margin_t + child_outer_h_end + resolved_cst.margin_b
                     if container_cross_end > child_margin_h_end:
-                        child_y = y + st.border_t + st.pad_t + cst.margin_t + container_cross_end - child_margin_h_end
-                var child_styles = styles
-                if (item_align == "stretch" or item_align == "") and st.height_px > 0 and cst.height_px == 0:
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t + container_cross_end - child_margin_h_end
+                if (item_align == "stretch" or item_align == "") and st.height_px > 0 and resolved_cst.height_px == 0:
                     val container_cross_stretch = if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
-                    var stretch_outer_h = container_cross_stretch - cst.margin_t - cst.margin_b
+                    var stretch_outer_h = container_cross_stretch - resolved_cst.margin_t - resolved_cst.margin_b
                     if stretch_outer_h < 1:
                         stretch_outer_h = 1
-                    val child_border_y = cst.border_t + cst.border_b
+                    val child_border_y = resolved_cst.border_t + resolved_cst.border_b
                     var stretch_style_h = stretch_outer_h
-                    if not (nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box):
-                        stretch_style_h = stretch_outer_h - cst.pad_t - cst.pad_b - child_border_y
+                    if not (nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or resolved_cst.border_box):
+                        stretch_style_h = stretch_outer_h - resolved_cst.pad_t - resolved_cst.pad_b - child_border_y
                     if stretch_style_h < 1:
                         stretch_style_h = 1
-                    child_styles = styles_with_height(styles, fc, stretch_style_h)
+                    child_styles = styles_with_height(child_styles, fc, stretch_style_h)
                 val child = layout(nodes, child_styles, child_index, fc, cx, child_y, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
                 out_bx = child.bx
                 out_by = child.by
