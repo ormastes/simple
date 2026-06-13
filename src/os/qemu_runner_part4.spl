@@ -15,6 +15,8 @@ use os.port.simpleos_multiplatform_build.{
     SimpleOsLaneKind,
     simpleos_platform_default_entry,
     simpleos_platform_disk_image_output,
+    simpleos_platform_board_lane_direct,
+    simpleos_platform_has_board_lane,
     simpleos_platform_has_qemu_lane,
     simpleos_platform_linker_script,
     simpleos_platform_native_target,
@@ -76,7 +78,8 @@ fn _is_riscv_fs_exec_scenario(scenario: QemuScenario) -> bool:
     _is_riscv_fs_exec_scenario_name(scenario.name)
 
 fn _catalog_platform_name_for_scenario(scenario: QemuScenario) -> text:
-    if scenario.arch == Architecture.X86_64 and simpleos_platform_qemu_lane("x86_64", scenario.name) != nil:
+    # Workaround: avoid Option<large-struct> comparison (interpreter crash). Use has_qemu_lane.
+    if scenario.arch == Architecture.X86_64 and simpleos_platform_has_qemu_lane("x86_64", scenario.name):
         return "x86_64"
     match scenario.arch:
         Architecture.X86: "x86_32"
@@ -86,6 +89,20 @@ fn _catalog_platform_name_for_scenario(scenario: QemuScenario) -> text:
         Architecture.Riscv32: "riscv32"
         _: ""
 
+fn _catalog_has_lane_for_scenario(scenario: QemuScenario) -> bool:
+    """Return true if the catalog has a lane matching this scenario. Avoids Option<large-struct>."""
+    val platform_name = _catalog_platform_name_for_scenario(scenario)
+    if platform_name != "":
+        return simpleos_platform_has_qemu_lane(platform_name, scenario.name)
+    false
+
+fn _catalog_lane_for_scenario_direct(scenario: QemuScenario) -> SimpleOsLaneContract:
+    """Return the catalog lane for this scenario, or the smoke lane if not found. Never Option."""
+    val platform_name = _catalog_platform_name_for_scenario(scenario)
+    if platform_name != "":
+        return simpleos_platform_qemu_lane_or_smoke(platform_name, scenario.name)
+    simpleos_platform_qemu_smoke_lane("x86_64")
+
 fn _catalog_lane_for_scenario(scenario: QemuScenario) -> SimpleOsLaneContract?:
     val platform_name = _catalog_platform_name_for_scenario(scenario)
     if platform_name != "":
@@ -93,7 +110,7 @@ fn _catalog_lane_for_scenario(scenario: QemuScenario) -> SimpleOsLaneContract?:
     nil
 
 fn _ensure_catalog_scenario_media(scenario: QemuScenario) -> bool?:
-    if _catalog_lane_for_scenario(scenario) == nil:
+    if not _catalog_has_lane_for_scenario(scenario):
         return nil
     if scenario.arch == Architecture.X86_64:
         return ensure_fs_test_disk_image()
@@ -113,21 +130,24 @@ fn scenario_target(scenario: QemuScenario) -> OsTarget:
         return get_arm64_wm_qemu_target()
     val platform_name = _catalog_platform_name_for_scenario(scenario)
     if platform_name != "":
-        if val lane = simpleos_platform_qemu_lane(platform_name, scenario.name):
-            return _lane_to_target(platform_name, lane)
+        # Workaround: avoid if val Option<large-struct> (interpreter crash).
+        if simpleos_platform_has_qemu_lane(platform_name, scenario.name):
+            return _lane_to_target(platform_name, simpleos_platform_qemu_lane_or_smoke(platform_name, scenario.name))
     if _is_arm_fs_exec_scenario(scenario):
-        if val lane = simpleos_platform_qemu_lane(_arm_fs_exec_platform_name(scenario.arch), scenario.name):
-            return _lane_to_target(_arm_fs_exec_platform_name(scenario.arch), lane)
-        return _lane_to_target(_arm_fs_exec_platform_name(scenario.arch), simpleos_platform_qemu_acceptance_lane(_arm_fs_exec_platform_name(scenario.arch)))
+        val arm_platform = _arm_fs_exec_platform_name(scenario.arch)
+        if simpleos_platform_has_qemu_lane(arm_platform, scenario.name):
+            return _lane_to_target(arm_platform, simpleos_platform_qemu_lane_or_smoke(arm_platform, scenario.name))
+        return _lane_to_target(arm_platform, simpleos_platform_qemu_acceptance_lane(arm_platform))
     if scenario.name == "riscv64-hosted":
-        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
-            return _lane_to_target("riscv64", lane)
+        if simpleos_platform_has_qemu_lane("riscv64", "riscv64-hosted"):
+            return _lane_to_target("riscv64", simpleos_platform_qemu_lane_or_smoke("riscv64", "riscv64-hosted"))
         return get_riscv64_hosted_target()
     if scenario.name == "rv64-ssh":
         return get_riscv64_ssh_live_target()
     if _is_riscv_fs_exec_scenario(scenario):
-        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
-            return _lane_to_target(_riscv_fs_exec_platform_name(scenario.arch), lane)
+        val rv_platform = _riscv_fs_exec_platform_name(scenario.arch)
+        if simpleos_platform_has_qemu_lane(rv_platform, scenario.name):
+            return _lane_to_target(rv_platform, simpleos_platform_qemu_lane_or_smoke(rv_platform, scenario.name))
         return _riscv_fs_exec_target(scenario.arch)
     if val desktop_target = _desktop_disk_scenario_target(scenario.name):
         return desktop_target

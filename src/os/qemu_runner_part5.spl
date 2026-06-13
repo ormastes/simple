@@ -20,6 +20,8 @@ use os.port.simpleos_multiplatform_build.{
     simpleos_platform_qemu_acceptance_lane,
     simpleos_platform_qemu_cpu,
     simpleos_platform_qemu_lane,
+    simpleos_platform_qemu_lane_required_markers,
+    simpleos_platform_qemu_lane_timeout_ms,
     simpleos_platform_qemu_machine,
     simpleos_platform_qemu_smoke_lane,
     simpleos_platform_qemu_system,
@@ -614,16 +616,15 @@ pub fn scenario_qemu_exit_success(scenario: QemuScenario, exit_code: i32) -> boo
     exit_code == 0
 
 fn arm_fs_exec_required_marker_fragments(scenario: QemuScenario) -> [text]:
-    val lane_opt = _catalog_lane_for_scenario(scenario)
-    if lane_opt != nil:
-        return lane_opt.required_serial_markers
+    # Workaround: avoid Option<large-struct> field access (interpreter crash).
+    val platform_name = _catalog_platform_name_for_scenario(scenario)
+    if platform_name != "":
+        return simpleos_platform_qemu_lane_required_markers(platform_name, scenario.name)
     []
 
 fn riscv64_hosted_required_marker_fragments() -> [text]:
-    val lane_opt = _catalog_lane_for_scenario(scenario_riscv64_hosted())
-    if lane_opt != nil:
-        return lane_opt.required_serial_markers
-    []
+    # Workaround: avoid Option<large-struct> field access (interpreter crash).
+    simpleos_platform_qemu_lane_required_markers("riscv64", "riscv64-hosted")
 
 fn arm64_wm_ramfb_required_marker_fragments() -> [text]:
     [
@@ -637,15 +638,15 @@ fn arm64_wm_ramfb_required_marker_fragments() -> [text]:
 fn _scenario_required_marker_fragments(scenario: QemuScenario) -> [text]:
     if scenario.name == "arm64-wm-ramfb":
         return arm64_wm_ramfb_required_marker_fragments()
-    val lane_opt = _catalog_lane_for_scenario(scenario)
-    if lane_opt != nil:
-        return lane_opt.required_serial_markers
+    # Workaround: avoid Option<large-struct> field access (interpreter crash).
+    val platform_name = _catalog_platform_name_for_scenario(scenario)
+    if platform_name != "":
+        return simpleos_platform_qemu_lane_required_markers(platform_name, scenario.name)
     []
 
 fn _scenario_uses_catalog_completion_contract(scenario: QemuScenario) -> bool:
-    if _catalog_lane_for_scenario(scenario) != nil:
-        return true
-    false
+    # Workaround: avoid Option<large-struct> nil-check (interpreter crash).
+    _catalog_has_lane_for_scenario(scenario)
 
 pub fn fs_exec_lane_name_rejects_resident_fallback(name: text) -> bool:
     """fs-exec lanes must fail closed: resident-manifest fallback is never completion evidence."""
@@ -739,20 +740,26 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
         return 120000
     val catalog_platform = _catalog_platform_name_for_scenario(scenario)
     if catalog_platform != "":
-        if val lane = simpleos_platform_qemu_lane(catalog_platform, scenario.name):
-            if lane.timeout_ms > 0:
-                return lane.timeout_ms as u64
+        # Workaround: avoid if val Option<large-struct> (interpreter crash).
+        val tms = simpleos_platform_qemu_lane_timeout_ms(catalog_platform, scenario.name)
+        if tms > 0:
+            return tms as u64
     if _is_arm_fs_exec_scenario(scenario):
-        if val lane = simpleos_platform_qemu_lane(_arm_fs_exec_platform_name(scenario.arch), scenario.name):
-            return lane.timeout_ms as u64
+        val arm_platform = _arm_fs_exec_platform_name(scenario.arch)
+        val tms = simpleos_platform_qemu_lane_timeout_ms(arm_platform, scenario.name)
+        if tms > 0:
+            return tms as u64
         return 60000
     if scenario.name == "riscv64-hosted":
-        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
-            return lane.timeout_ms as u64
+        val tms = simpleos_platform_qemu_lane_timeout_ms("riscv64", "riscv64-hosted")
+        if tms > 0:
+            return tms as u64
         return 120000
     if _is_riscv_fs_exec_scenario(scenario):
-        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
-            return lane.timeout_ms as u64
+        val rv_platform = _riscv_fs_exec_platform_name(scenario.arch)
+        val tms = simpleos_platform_qemu_lane_timeout_ms(rv_platform, scenario.name)
+        if tms > 0:
+            return tms as u64
         return 60000
     if val timeout_ms = _desktop_scenario_timeout_ms(scenario.name):
         return timeout_ms
@@ -764,7 +771,8 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
         if val ready = _ensure_desktop_scenario_media(scenario.name):
             return ready
         return false
-    if _catalog_lane_for_scenario(scenario) != nil:
+    # Workaround: avoid Option<large-struct> nil-check (interpreter crash).
+    if _catalog_has_lane_for_scenario(scenario):
         if scenario.arch == Architecture.X86_64:
             return ensure_fs_test_disk_image()
         if scenario.arch == Architecture.X86:
