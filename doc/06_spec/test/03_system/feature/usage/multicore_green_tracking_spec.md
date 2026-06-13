@@ -315,7 +315,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 66 lines folded for reproduction.
+Runnable source: 67 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -333,6 +333,7 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_
 expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_spec.spl")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
+expect(row).to_contain("canonical no-arg profile contract")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(row).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
