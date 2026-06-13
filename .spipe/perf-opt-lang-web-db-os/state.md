@@ -227,8 +227,23 @@ twice; this state file reverted). Committed work survived: P0 machinery + AC-7 +
 on HEAD (verified via `git show HEAD:<path>` + `git log -S`). web/os emit drivers/docs need the
 concurrent session paused to land durably — capability is proven, persistence is blocked externally.
 
+## UPDATE — web/os emission LANDED (AC-3 now 4/4 domains)
+After the concurrency hazard, the web + os emit drivers were re-authored by the orchestrator
+(orchestrator-written, not agents, for atomic write+run+commit) and committed durably on HEAD via a
+tight 0.4s poll-and-commit that caught a lock-free instant. Real numbers:
+- **os** (`perf_baseline_os_2026-06-13.md`): fs_write ~35,561 KB/s, fs_read ~6.25M KB/s (cache-warm),
+  exec_spawn ~3,844 µs — content round-trip oracle (bytes+match) gated before recording.
+- **web** (`perf_baseline_web_2026-06-13.md`): in-memory parse→json→serialize throughput, gated by an
+  HTTP/1.1-200 + body oracle; cold-start row honestly omitted (blocking accept-loop).
+→ **AC-3 = 4/4 domains emit benchmark docs** (lang, web, os real; db honest-omitted). All on HEAD.
+
+Still genuinely STAGED (multi-session): AC-4 compiler-mode lang rows (smf-extern-segfault +
+native-compile toolchain blockers), AC-6/9/10/11 optimization-landing. Note: research established most
+interpreter micro-opts are ALREADY CLOSED in-tree; the remaining opts are risky (MIR bulk-ops) or
+toolchain-blocked, so there is no large body of easy perf wins left to land — only the staged items.
+
 ## Phase
-verify-done (P0 + AC-7 + P1 keystone workaround); seed-fix staged; web/os emit blocked by concurrent-session WC resets
+verify-done (P0 + AC-7 + P1 keystone + 4/4 benchmark emission); compiler-mode + optimization-landing staged
 
 ## Log (continued)
 - arch: Opus authored plan + design docs (+tldrs) + state arch section with SDN diagram + module list.
