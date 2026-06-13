@@ -1,8 +1,8 @@
 # Chrome HTML Compat Geometry Manifest Evidence
 
 - status: pass
-- fixtures: 85
-- pass count: 85
+- fixtures: 86
+- pass count: 86
 - fail count: 0
 - viewport: 320x240
 - build dir: `build/chrome_html_compat_geometry_manifest_evidence`
@@ -108,6 +108,7 @@ pixels, or text antialiasing normalization.
 | `86_flex_row_cross_auto_margin_align_center` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/86_flex_row_cross_auto_margin_align_center_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/86_flex_row_cross_auto_margin_align_center_structural_report.sdn` |
 | `87_flex_row_cross_auto_margin_both_override_end` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/87_flex_row_cross_auto_margin_both_override_end_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/87_flex_row_cross_auto_margin_both_override_end_structural_report.sdn` |
 | `88_flex_order_basic` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/88_flex_order_basic_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/88_flex_order_basic_structural_report.sdn` |
+| `89_percent_content_box_padding` | pass | 0 | `build/chrome_html_compat_geometry_manifest_evidence/89_percent_content_box_padding_chrome_geometry.json` | `build/chrome_html_compat_geometry_manifest_evidence/89_percent_content_box_padding_structural_report.sdn` |
 
 ## Subpixel Diagnostics
 
@@ -202,3 +203,4 @@ the largest distance from an integer CSS pixel among those fields.
 | `86_flex_row_cross_auto_margin_align_center` | 0 | 0.000 | `` |
 | `87_flex_row_cross_auto_margin_both_override_end` | 0 | 0.000 | `` |
 | `88_flex_order_basic` | 0 | 0.000 | `` |
+| `89_percent_content_box_padding` | 0 | 0.000 | `` |

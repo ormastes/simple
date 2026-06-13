@@ -818,3 +818,16 @@ Open gaps tied to the active browser objective:
      `85` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
      tolerance, downscaling, copied Chromium pixels, or resolution adjustment
      was used
+- Percent content-box sizing evidence now extends the live Chrome manifest
+  through fixture 89:
+   - added `89_percent_content_box_padding`, which compares a `width:50%`
+     content-box child with padding/border against a `box-sizing:border-box`
+     percent child in the same 200px container
+   - `simple_web_html_layout_renderer.spl` now resolves percentage widths as
+     CSS content widths before passing them through `css_outer_width`, so
+     content-box percentage children expand by padding and border while
+     border-box percentage children keep the authored border-box width
+   - live Chrome headless geometry manifest evidence reports `86` fixtures,
+     `86` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
+     tolerance, downscaling, copied Chromium pixels, or resolution adjustment
+     was used
