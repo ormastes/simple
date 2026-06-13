@@ -5,7 +5,7 @@ Feature: `simple_browser_chromium_html_parity`
 Current state as of 2026-06-11:
 
 - 2026-06-13 update: the live Chrome structural geometry manifest now covers
-  90 fixtures through `93_flex_percent_height_cross_axis` with `90` passes, `0`
+  91 fixtures through `94_flex_column_percent_height_main_axis` with `91` passes, `0`
   failures, and `blur_or_tolerance_used=false`. This is focused structural box
   evidence, not broad Chromium layout-engine completion.
 - The authoritative current pixel harness in this worktree is
@@ -887,3 +887,17 @@ Open gaps tied to the active browser objective:
      was used
    - scope note: column flex, absolute-position percentage heights, and
      min-height-derived definiteness remain separate follow-up work
+- Flex column percentage height evidence now extends the live Chrome manifest
+  through fixture 94:
+   - added `94_flex_column_percent_height_main_axis`, a column flex fixture
+     where `height:50%` resolves against a definite 120px flex-container
+     content main size, placing the child at `x=10`, `y=10`, `height=60`
+   - `simple_web_html_layout_renderer.spl` now resolves deferred percentage
+     heights for column-flex measurement and layout, so main-axis free-space
+     and child layout use the same definite content height
+   - live Chrome headless geometry manifest evidence reports `91` fixtures,
+     `91` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
+     tolerance, downscaling, copied Chromium pixels, or resolution adjustment
+     was used
+   - scope note: absolute-position percentage heights and min-height-derived
+     definiteness remain separate follow-up work
