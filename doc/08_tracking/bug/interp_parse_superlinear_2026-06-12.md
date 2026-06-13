@@ -1,12 +1,16 @@
 # Lean-parser parse_module is superlinear and degrades per call (interp AND compiled stage4)
 
 - **ID:** interp_parse_superlinear
-- **Severity:** P2→P1 (perf; CONFIRMED in compiled stage4 production frontend
-  2026-06-13 — makes the full src/lib parser-completion sweep gate infeasible
-  until fixed; does not block correctness or per-gap-class iteration)
-- **Date:** 2026-06-12 (compiled confirmation 2026-06-13)
-- **Component:** lean frontend (`src/compiler/10.frontend/core/`), both seed-interpreted AND compiled stage4
-- **Status:** OPEN
+- **Severity:** P2 (perf). The parse-side per-token whole-source fetch is FIXED
+  (2026-06-13). The remaining superlinear `check` cost on compiled stage4 was
+  RE-ATTRIBUTED 2026-06-13 to a non-parse pass (type inference) — see "Compiled
+  stage4 re-profile" below; that is a SEPARATE blocker for the full src/lib sweep
+  gate, NOT a parser bug.
+- **Date:** 2026-06-12 (compiled re-profile + parse fix 2026-06-13)
+- **Component:** lean frontend (`src/compiler/10.frontend/core/`). Parse-side
+  fetch: FIXED. Interpreter parse_module aging: still open (interp-only).
+- **Status:** parse-side fetch FIXED; interp aging OPEN; compiled-`check`
+  superlinearity is type-inference (tracked separately, see below)
 
 ## Symptom
 
@@ -45,35 +49,54 @@ line numbers) were timeouts against this curve, not loops: all synthetic
 construct probes (banner comments, Option<T> returns, String params,
 open-if-at-EOF) parse instantly.
 
-## CONFIRMED in compiled stage4 (2026-06-13) — production frontend, not just interp
+## Compiled stage4 re-profile (2026-06-13) — superlinear `check` is TYPE INFERENCE, not parse
 
-Host stage4 (compiled lean parser, `SIMPLE_FRONTEND_DELEGATED=1`)
-`check src/app/debug/remote/breakpoint_manager.spl` timed out at 180s having
-flushed 0 parser errors — still parsing the import closure. The docker check
-(600s) flushed only a partial 101. Compiling does not change the algorithm.
-This makes the **full src/lib sweep gate infeasible** until fixed — a
-prerequisite for that gate (tracked in parser_completion.md M12) — but it does
-NOT block per-gap-class iteration, which runs on tiny synthetic probes (fast in
-both seed-interpreted and host-stage4-compiled modes).
+An earlier note claimed compiled-stage4 parse was "CONFIRMED superlinear" because
+`check <file>` timed out. That conflated `check` (parse + full type inference)
+with parse. A clean isolation refutes it. Synthetic standalone files of N trivial
+functions (6 lines each), `SIMPLE_FRONTEND_DELEGATED=1`, host stage4:
 
-### Fix sketch (do NOT implement mid-gap-loop — it would corrupt the diagnostic instrument)
-`par_text_get`/`parser_token_text_from_offsets` is the token-text source every
-gap-class diagnosis reads; a subtly-wrong fix in compiled mode reintroduces the
-RW-shadow class and silently corrupts parses → phantom "gap classes". Keep it
-frozen while measuring with it. When ready, as its own task: cache the source
-ONCE per parse in a module-level slot (written when `SIMPLE_BOOTSTRAP_LEX_SOURCE`
-is set), read there instead of `rt_env_get` per token. Make the slot
-WRITE-ONCE / READ-MANY (never read+write in the same fn — that is the RW-shadow
-failure). Validation REQUIRES slow full-closure runs + a correctness re-sweep.
+| funcs | lines | `lex` (tokenize-only) userCPU | `check` (parse+infer) wall |
+|-------|-------|-------------------------------|----------------------------|
+| 100   | 600   | 0.25 s                        | 52 s                       |
+| 200   | 1200  | 0.58 s                        | 146 s                      |
+| 400   | 2400  | 0.99 s                        | >300 s (timeout)           |
 
-## Suspects (not yet profiled)
+- **Lexer is linear and fast** (~2× per 2× size) — not the bottleneck.
+- **`check` is ~200× slower than `lex` and superlinear** — the cost is in a
+  post-lex pass. The help text bills `check` as "Full type inference"; that pass
+  is the prime suspect (not yet pass-isolated, but decisively NOT the parser).
+- **Arithmetic rules out the parse-side fetch as the dominant cost:** perf_100 is
+  ~18 KB / ~2500 tokens; the old per-token whole-source copy totals ~tens of MB
+  ≈ well under 1 s — it cannot produce 52 s. So the 52 s was never parse-dominated,
+  even before the fix.
 
-- `parser_token_text_from_offsets` re-fetches the ENTIRE source from
-  `rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE")` and slices it for EVERY token
-  (`core/parser.spl:100-113`); `parser_advance` calls it per token.
+**Conclusion:** the full src/lib sweep gate (parser_completion.md M12-4) is
+blocked by **type-inference perf, a different subsystem** — out of parser-completion
+scope, a large separate task. Per-gap-class parser iteration is unaffected (tiny
+probes, fast). A dedicated `typecheck_infer_superlinear` task should own it.
+
+### Parse-side per-token whole-source fetch — FIXED 2026-06-13 (real but minor)
+`parser_token_text_from_offsets` re-fetched the ENTIRE `SIMPLE_BOOTSTRAP_LEX_SOURCE`
+via `rt_env_get` and re-sliced it per token (one per `parser_advance`) — a genuine
+O(N²), but minor in absolute terms (see arithmetic above). FIXED: a generation-keyed
+whole-source cache (`parser_lex_source_cached`, module-var slot) keyed on
+`SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN`, bumped at every LEX_SOURCE set-site
+(`lex_init_with_path` + `parse_module`/`parse_module_file` restores). Semantics
+preserved (slice + kind==3 unwrap unchanged). Compiled stage4 persists the slot;
+interpreter falls back to per-call refetch (slow but correct — hence interp
+parse_module aging below remains open). Lexer scanning already holds source in the
+`CoreLexer` struct, so only the parser side needed the cache.
+
+## Suspects for the remaining INTERPRETER parse_module aging (compiled fetch now FIXED)
+
+- ~~`parser_token_text_from_offsets` whole-source re-fetch per token~~ — FIXED
+  (see above); in the interpreter the module-var cache slot does not persist, so
+  this still contributes to interp-only aging.
 - Allocate-and-leak runtime: per-call heap growth degrades all subsequent
   string ops (see also `rt_string_concat_quadratic_2026-06-12.md`, same-day
-  finding in the MCP hot path).
+  finding in the MCP hot path). Likely the dominant cause of the interpreter
+  per-call aging (identical source parsed twice gets slower — table above).
 
 ## Impact / workaround
 
