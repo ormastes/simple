@@ -630,3 +630,6 @@ Updated: 2026-06-11
 - Simple Web final text metric deferral: the final text paint pass now computes
   glyph scale, advance, and ink offsets only in the non-widget branch that uses
   them, avoiding unused metric work for widget text and Chrome text overlays.
+- Simple Web normal-flow paint visibility hoisting: normal-flow background,
+  border, panel, and button painting now reuse per-node visible-box and
+  widget-mode booleans instead of repeating the same branch predicates.
