@@ -1010,6 +1010,9 @@ fn validate_concurrency_call_shape(
     ctx: &ConcurrencyCheckCtx,
     errors: &mut Vec<CheckError>,
 ) {
+    if is_stdlib_concurrency_facade_forwarder(file_path, canonical_name) {
+        return;
+    }
     let Some(rule) = concurrency_call_rule(canonical_name) else {
         return;
     };
@@ -1073,6 +1076,15 @@ fn validate_concurrency_call_shape(
             }
         }
     }
+}
+
+fn is_stdlib_concurrency_facade_forwarder(file_path: &Path, canonical_name: &str) -> bool {
+    if canonical_name != "green_spawn" {
+        return false;
+    }
+    file_path
+        .to_string_lossy()
+        .ends_with("src/lib/nogc_async_mut/concurrent/cooperative_green.spl")
 }
 
 fn concurrency_arg_matches(kind: ConcurrencyArgKind, expr: &Expr) -> bool {

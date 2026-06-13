@@ -138,6 +138,20 @@ pub fn rt_pool_join(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
 }
 
+/// Interpreter mode has no native worker pool; echo a valid requested width.
+pub fn rt_pool_set_parallelism(args: &[Value]) -> Result<Value, CompileError> {
+    let requested = match args.first() {
+        Some(Value::Int(value)) if *value > 0 => *value,
+        _ => 1,
+    };
+    Ok(Value::Int(requested))
+}
+
+/// Interpreter mode runs the fallback path on one carrier.
+pub fn rt_pool_get_parallelism(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(1))
+}
+
 /// Interpreter mode has no native global-FIFO runtime pool.
 pub fn rt_pool_uses_global_fifo_queue(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
