@@ -63,7 +63,14 @@ require_not_matches() {
 require_multicore_green_rows_valid() {
     file="$1"
     if ! awk -F'|' '
+        /^## / {
+            workers = ($0 ~ /OS Thread Parallel Workers/)
+            fanout = ($0 ~ /Large Fanout Scheduling/)
+            stress = ($0 ~ /Simple vs Go vs C Large Fanout Stress/)
+            next
+        }
         /Simple multicore green \((native|SMF)\)/ {
+            row = $0
             value = $3
             notes = $4
             gsub(/^[ \t]+|[ \t]+$/, "", value)
@@ -95,8 +102,28 @@ require_multicore_green_rows_valid() {
             if (notes !~ /parallelism=[0-9]+\/[0-9]+/) {
                 bad = 1
             }
+            if (workers && row ~ /Simple multicore green \(SMF\)/ && notes ~ /multicore_green runtime pool candidate/) {
+                worker_smf = 1
+            }
+            if (workers && row ~ /Simple multicore green \(native\)/ && notes ~ /multicore_green runtime pool candidate/) {
+                worker_native = 1
+            }
+            if (fanout && row ~ /Simple multicore green \(SMF\)/ && notes ~ /multicore_green runtime pool fanout/) {
+                fanout_smf = 1
+            }
+            if (fanout && row ~ /Simple multicore green \(native\)/ && notes ~ /multicore_green runtime pool fanout/) {
+                fanout_native = 1
+            }
+            if (stress && row ~ /Simple multicore green \(native\)/ && notes ~ /multicore_green stress fanout/) {
+                stress_native = 1
+            }
         }
-        END { exit bad ? 1 : 0 }
+        END {
+            if (!worker_smf || !worker_native || !fanout_smf || !fanout_native || !stress_native) {
+                bad = 1
+            }
+            exit bad ? 1 : 0
+        }
     ' "$file"; then
         fail "invalid Simple multicore green evidence row in $file"
     fi

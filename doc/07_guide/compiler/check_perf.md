@@ -192,6 +192,12 @@ than mutating captured `var`s.
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 
+Profile scripts must emit separate checked rows for Simple OS thread
+(`thread_spawn`), Simple cooperative green, Simple multicore green
+(`multicore_green_spawn` with `used_runtime_pool()` and work-stealing
+evidence), C pthread, and Go goroutine; do not merge these into one aggregate
+row.
+
 ### Languages compared
 
 | Language | Execution model | Why included |

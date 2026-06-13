@@ -389,13 +389,14 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 - Verify the public API contract summary remains explicit
    - Expected: absent_in_text(row, "misuse_fixtures=611") equals `1`
 - Verify negative profile contract cases stay release-visible
+- Verify the negative profile script emits the same release-visible cases
 - Verify the system-test plan describes cooperative-green and OS-thread negative profile cases
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 100 lines folded for reproduction.
+Runnable source: 129 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -464,6 +465,8 @@ expect(row).to_contain("large_simple_multicore_fanout_slower_than_c")
 expect(row).to_contain("large_go_fanout_slower_than_c")
 expect(row).to_contain("simple_multicore_stress_slower_than_c")
 expect(row).to_contain("go_stress_slower_than_c")
+expect(row).to_contain("simple_multicore_worker_rows_missing")
+expect(row).to_contain("simple_multicore_smf_fanout_row_missing")
 expect(row).to_contain("simple_multicore_queue_model_global_fifo")
 expect(row).to_contain("simple_multicore_pool_used_partial")
 expect(row).to_contain("simple_multicore_pool_used_zero")
@@ -481,6 +484,31 @@ expect(row).to_contain("os_thread_profile_row_missing")
 expect(row).to_contain("os_thread_profile_timing_fail")
 expect(row).to_contain("docker_simple_binary_probe_wording_corrupt")
 expect(row).to_contain("forbidden_number_suffix_api_name")
+step("Verify the negative profile script emits the same release-visible cases")
+val negative_contract = rt_file_read_text("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs") ?? ""
+expect(negative_contract).to_contain("case=large_simple_multicore_fanout_slower_than_c")
+expect(negative_contract).to_contain("case=large_go_fanout_slower_than_c")
+expect(negative_contract).to_contain("case=simple_multicore_stress_slower_than_c")
+expect(negative_contract).to_contain("case=go_stress_slower_than_c")
+expect(negative_contract).to_contain("case=simple_multicore_worker_rows_missing")
+expect(negative_contract).to_contain("case=simple_multicore_smf_fanout_row_missing")
+expect(negative_contract).to_contain("case=simple_multicore_queue_model_global_fifo")
+expect(negative_contract).to_contain("case=simple_multicore_pool_used_partial")
+expect(negative_contract).to_contain("case=simple_multicore_pool_used_zero")
+expect(negative_contract).to_contain("case=simple_multicore_parallelism_missing")
+expect(negative_contract).to_contain("case=go_scheduler_width_mismatch")
+expect(negative_contract).to_contain("case=hosted_sliced_fairness_section_missing")
+expect(negative_contract).to_contain("case=hosted_sliced_fairness_marker_corrupt")
+expect(negative_contract).to_contain("case=hosted_sliced_fairness_explanation_corrupt")
+expect(negative_contract).to_contain("case=pure_simple_runtime_seed_boundary_corrupt")
+expect(negative_contract).to_contain("case=cooperative_green_explanation_corrupt")
+expect(negative_contract).to_contain("case=cooperative_green_mn_runtime_pool_label")
+expect(negative_contract).to_contain("case=cooperative_green_profile_row_missing")
+expect(negative_contract).to_contain("case=os_thread_profile_row_thread_spawn_with_args")
+expect(negative_contract).to_contain("case=os_thread_profile_row_missing")
+expect(negative_contract).to_contain("case=os_thread_profile_timing_fail")
+expect(negative_contract).to_contain("case=docker_simple_binary_probe_wording_corrupt")
+expect(negative_contract).to_contain("case=forbidden_number_suffix_api_name")
 step("Verify the system-test plan describes cooperative-green and OS-thread negative profile cases")
 val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 expect(system_plan).to_contain("cooperative-green explanation")
@@ -489,6 +517,8 @@ expect(system_plan).to_contain("Pure-Simple-boundary")
 expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(system_plan).to_contain("cooperative_green_profile_row_missing")
 expect(system_plan).to_contain("simple_multicore_pool_used_zero")
+expect(system_plan).to_contain("simple_multicore_worker_rows_missing")
+expect(system_plan).to_contain("simple_multicore_smf_fanout_row_missing")
 expect(system_plan).to_contain("os_thread_profile_row_thread_spawn_with_args")
 expect(system_plan).to_contain("os_thread_profile_row_missing")
 expect(system_plan).to_contain("os_thread_profile_timing_fail")

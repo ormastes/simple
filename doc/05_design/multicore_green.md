@@ -138,7 +138,7 @@ Behavior:
 and text-heavy state for small SimpleOS x86_64 QEMU probes.
 
 Design rule: fixed-slot helpers are proof adapters, not replacements for the
-hosted scheduler-facing API.
+scheduler-facing green-carrier API.
 
 ## Profile Script Design
 
