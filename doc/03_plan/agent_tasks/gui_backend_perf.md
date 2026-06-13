@@ -711,3 +711,6 @@ Updated: 2026-06-11
   now counts valid `<style>` blocks without calling `_css_collect_custom_props`
   during the count pass, so each style block is parsed for root custom
   properties only in the fill pass.
+- Simple Web child-combinator chunk join allocation removal:
+  `normalize_child_combinators` now uses `chunks.join("")` after range slicing
+  instead of appending each chunk into an output string.
