@@ -73,11 +73,11 @@
   worker is joined before post-join work and local result-array return. This
   native compile/run SSpec remains perf-sensitive.
 - `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
-  records that the checked-in `bin/release/simple` wrapper currently points at
-  a missing `bin/release/x86_64-unknown-linux-gnu/simple` target in this
-  workspace. Current-source debug native regression specs are therefore the
-  stronger evidence until the checked-in release wrapper is refreshed to match
-  current source/runtime/compiler behavior.
+  records that `bin/release/simple` is a probe-required wrapper over an ignored,
+  generated platform binary. `scripts/bootstrap/bootstrap-from-scratch.sh
+  --deploy` materializes `bin/release/<platform>/simple`; current-source debug
+  native regression specs are the stronger evidence unless the wrapper's
+  platform delegate exists and passes `--version`.
 - `test/03_system/feature/usage/native_function_value_loop_return_regression_spec.spl`
   regression-covers the standalone-native function-value loop-return path
   beneath the resumable-stepper lane.
@@ -134,7 +134,7 @@
   `test/03_system/feature/usage/concurrency_api_misuse_spec.spl` with six
   scenarios and the same shell-enforced misuse inventory.
 - The checked-in release-binary stale blocker is now part of the canonical
-  feature row and tracking SSpec so future agents cannot use
-  `bin/release/simple` as authoritative multicore-green native evidence until
-  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
-  is closed.
+  feature row and tracking SSpec as a mitigated deploy-artifact boundary, so
+  future agents cannot use `bin/release/simple` as authoritative
+  multicore-green native evidence unless its platform delegate exists and
+  passes `--version`.

@@ -39,10 +39,12 @@ Date: 2026-06-13
 - Current source-built hosted-native fairness evidence is stricter than the
   checked-in `bin/release/simple` binary for this lane. Helper-return probes,
   function-value loop-return, struct-array/runtime, and post-join array-return
-  regressions have focused current-source coverage, while the checked-in
-  release binary remains tracked as stale evidence in
-  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`
-  until it is refreshed to match current source/runtime/compiler behavior.
+  regressions have focused current-source coverage. The release wrapper remains
+  probe-required deploy-artifact evidence in
+  `doc/08_tracking/bug/multicore_green_release_binary_stale_2026-06-11.md`:
+  `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` materializes the
+  ignored platform delegate, and profile/user wrappers must skip stale
+  delegates unless they pass `--version`.
   These native compile/run SSpecs remain perf-sensitive at roughly one minute.
 
 ## Coordination Contract
