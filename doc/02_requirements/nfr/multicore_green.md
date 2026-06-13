@@ -16,7 +16,9 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
   cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout,
   Simple-vs-Go-vs-C stress, hosted `parallelism=requested/actual`,
   Go runtime/scheduler metadata, Go `GOMAXPROCS` pinned to `CPU_WORKERS` unless
-  explicitly overridden, artifact-size, and RSS evidence.
+  explicitly overridden, artifact-size, and RSS evidence. The report contract
+  must also preserve Docker Simple binary auto-selection wording that probes
+  candidates with `--version` and skips stale release wrappers.
 - NFR-MCG-004: Simple native OS-thread and multicore-green rows must stay within
   the documented ratios in `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
   for the checked-in Docker contract profile.
@@ -46,6 +48,7 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs`
 - `sh test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
+  including the `docker_simple_binary_probe_wording_corrupt` failure case
 - `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
 - `sh test/05_perf/profile_scripts/concurrency_api_contract_test.shs`

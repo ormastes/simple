@@ -24,7 +24,10 @@ SimpleOS scheduler work distinct and verifiable.
 - REQ-MCG-004: Profile scripts must keep Simple OS-thread, Simple cooperative
   green, Simple multicore green, C pthread, Go goroutine, artifact-size, RSS,
   and large-fanout stress rows separate. Reports must record the Go runtime and
-  scheduler metadata, including `GOMAXPROCS`, for M:N comparisons.
+  scheduler metadata, including `GOMAXPROCS`, for M:N comparisons. The
+  negative profile contract must also fail closed when Docker Simple binary
+  auto-selection or stale-wrapper probe wording is removed from the checked-in
+  report.
 - REQ-MCG-005: Generated profile workloads must preserve user-facing Simple API
   semantics, use compact loop/handle-array forms where possible, and avoid
   numbered API aliases or generated numbered handle APIs.
@@ -44,12 +47,14 @@ SimpleOS scheduler work distinct and verifiable.
   per-worker queues, hosted `multicore_green_set_parallelism` /
   `multicore_green_parallelism` evidence as the initial Go `GOMAXPROCS`-like
   control, scheduler-owned carrier limits beyond the hosted pool, and
-  the supported hosted fairness contract. For CPU-heavy hosted work, that
-  contract is `multicore_green_spawn_sliced`: tasks expose scalar progress
-  state and requeue between bounded slices. Ordinary `multicore_green_spawn`
-  closures still run to return and must not be described as preempted tight-loop
-  work until compiler-inserted yield points or equivalent runtime preemption
-  have executable evidence.
+  the supported hosted fairness helper contract. For CPU-heavy hosted work,
+  that explicit helper is `multicore_green_spawn_sliced`: tasks expose scalar
+  progress state and requeue between bounded slices. It is separate from the
+  Go-like M:N evidence path through `multicore_green_spawn` with
+  `used_runtime_pool`. Ordinary `multicore_green_spawn` closures still run to
+  return and must not be described as preempted tight-loop work until
+  compiler-inserted yield points or equivalent runtime preemption have
+  executable evidence.
 - REQ-MCG-009: C, Go, and Rust may be used as baselines, research references,
   seed implementations, or runtime/compiler implementation contexts; they must
   not replace Simple user-facing concurrency APIs.
@@ -85,6 +90,10 @@ SimpleOS scheduler work distinct and verifiable.
   `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`, and
   historical companion report
   `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md`.
+  The negative profile contract includes the
+  `docker_simple_binary_probe_wording_corrupt` mutation so Docker binary
+  probing and stale-wrapper fallback cannot silently disappear from release
+  evidence.
 - Hosted parallelism control: `src/runtime/runtime_thread.c`,
   `src/runtime/runtime_thread.h`, and
   `src/lib/nogc_async_mut/concurrent/multicore_green.spl`.

@@ -103,8 +103,9 @@ SimpleOS now has scheduler-facing green-carrier coverage for the same lane:
 - hosted system specs prove remote enqueue, scheduler-owned green execution
   state, topology-bounded carrier limits, runtime/timer/compiler safepoint
   adapters, and green-channel wake integration
-- live QEMU evidence proves AP startup plus CPU1 carrier dispatch/preemption
-  and scheduler-owned handoff readiness
+- hosted specs prove scheduler-owned dispatch/preemption readiness; live QEMU
+  marker evidence separately proves AP startup plus CPU1 carrier marker
+  progress and opt-in scheduler-owned handoff readiness
 - final AP ring/user hardware handoff remains a separate opt-in live lane with
   explicit final markers
 

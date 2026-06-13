@@ -153,7 +153,9 @@ rows:
 - Go-vs-C isolated large-fanout stress
 - RSS and artifact-size evidence
 
-The profile contract test rejects missing model text and missing evidence rows.
+The profile contract test rejects missing model text, missing evidence rows,
+and stale Docker Simple binary probe wording via
+`docker_simple_binary_probe_wording_corrupt`.
 SPipe perf specs parse the checked-in report to keep numeric evidence from
 drifting silently.
 
@@ -203,9 +205,11 @@ Repository guards:
 ## Hosted Fairness Decision
 
 The supported hosted fairness contract for CPU-heavy multicore-green work is
-the explicit sliced API. `multicore_green_spawn_sliced` lets user code expose
-scalar progress state, execute one bounded slice, and requeue itself so other
-runtime-pool work can run even when hosted parallelism is `1`.
+the explicit sliced helper API, separate from the Go-like M:N evidence path
+through `multicore_green_spawn` with `used_runtime_pool`. The
+`multicore_green_spawn_sliced` helper lets user code expose scalar progress
+state, execute one bounded slice, and requeue itself so other runtime-pool work
+can run even when hosted parallelism is `1`.
 
 This is a deliberate API decision rather than an implicit preemption claim:
 ordinary `multicore_green_spawn` closures still run until they return, and the
