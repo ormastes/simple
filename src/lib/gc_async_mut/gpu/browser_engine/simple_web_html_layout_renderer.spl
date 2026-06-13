@@ -1462,31 +1462,59 @@ fn _css_collect_custom_props(css: text) -> text:
     entries.join("")
 
 fn _css_resolve_vars(css: text, props: text) -> text:
-    # Substitute var(--name) with value from props string.
     if props.len() == 0 or css.index_of("var(") < 0:
         return css
-    var out = css
+    var names: [text] = [""; 200]
+    var values: [text] = [""; 200]
+    var prop_count = 0
     val props_len = props.len()
     var pp: i64 = 0
     var pg = 0
     while pp < props_len and pg < 200:
         pg = pg + 1
-        if text_index_of(out, "var(") < 0:
-            break
         val nl = find_from(props, "\n", pp)
         var line_end = nl
         if line_end < 0:
             line_end = props_len
         val line = props.substring(pp, line_end).trim()
         val lc = line.index_of(":")
-        if lc > 0:
-            val prop_name = line.substring(0, lc).trim()
-            val prop_val = line.substring(lc + 1, line.len()).trim()
-            val var_token = "var(" + prop_name + ")"
-            if text_index_of(out, var_token) >= 0:
-                out = out.replace(var_token, prop_val)
+        if lc > 0 and prop_count < names.len():
+            names[prop_count] = line.substring(0, lc).trim()
+            values[prop_count] = line.substring(lc + 1, line.len()).trim()
+            prop_count = prop_count + 1
         pp = if nl >= 0: nl + 1 else: props_len
-    out
+    if prop_count == 0:
+        return css
+    var chunks: [text] = [""; 801]
+    var chunk_count = 0
+    val css_len = css.len()
+    var scan = 0
+    var vg = 0
+    while scan < css_len and vg < 400:
+        vg = vg + 1
+        val open = find_from(css, "var(", scan)
+        if open < 0:
+            break
+        val close = find_from(css, ")", open + 4)
+        if close < 0:
+            break
+        if chunk_count + 2 >= chunks.len():
+            break
+        val prop_name = css.substring(open + 4, close).trim()
+        val prop_idx = text_key_index_count(names, prop_name, prop_count)
+        if prop_idx >= 0:
+            chunks[chunk_count] = css.substring(scan, open)
+            chunk_count = chunk_count + 1
+            chunks[chunk_count] = values[prop_idx]
+            chunk_count = chunk_count + 1
+        else:
+            chunks[chunk_count] = css.substring(scan, close + 1)
+            chunk_count = chunk_count + 1
+        scan = close + 1
+    if scan < css_len and chunk_count < chunks.len():
+        chunks[chunk_count] = css.substring(scan, css_len)
+        chunk_count = chunk_count + 1
+    text_list_prefix(chunks, chunk_count).join("")
 
 fn extract_css(html: text) -> Rules:
     # First pass: collect CSS custom properties from all :root blocks

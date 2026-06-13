@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 52 | 52 | 0 | 0 |
+| 53 | 53 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -130,6 +130,25 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val html = "<html><head><style>.card { width: 80px; height: 40px; background: url(hero.png) #0f8 no-repeat; }</style></head><body><div class='card'></div></body></html>"
 expect(_simple_scene_has_fill_color(html, 0xFF00FF88u32)).to_equal(true)
+```
+
+</details>
+
+#### resolves repeated CSS custom properties without dropping unresolved vars
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>:root{--panel:#1d4ed8;--accent:#f59e0b}.card{width:40px;height:18px;background-color:var(--panel);border:2px solid var(--accent)}.missing{width:8px;height:8px;background-color:var(--missing)}</style></head><body><div class='card'></div><div class='missing'></div></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 80, 48)
+expect(pixels.len()).to_equal(80 * 48)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFF141418u32)).to_equal(0)
 ```
 
 </details>
@@ -1147,8 +1166,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 52 |
-| Active scenarios | 52 |
+| Total scenarios | 53 |
+| Active scenarios | 53 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
