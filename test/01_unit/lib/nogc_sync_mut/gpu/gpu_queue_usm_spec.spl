@@ -6,6 +6,7 @@ use std.gpu.{GpuQueue, GpuEvent, GpuTaskGraph, GpuAccessGraph, launch_shape, def
 use std.gpu.{UsmBuffer, usm_malloc_device, usm_malloc_host, usm_malloc_shared}
 use std.gpu.{gpu_none}
 use std.gpu.{cpu_kernel_run_1d, gpu_global_id_x, gpu_block_dim_x, gpu_grid_dim_x}
+use std.gpu.{GpuPipe}
 
 # Module-level state for closure-free kernels (nested closures cannot
 # mutate captured locals; module vars + module fns work everywhere).
@@ -203,6 +204,61 @@ describe "GpuEvent profiling (W4.2 host path)":
         expect(warm.is_complete()).to_equal(true)
         expect(warm.elapsed_nanos >= 0).to_equal(true)
         expect(warm.elapsed_ms() >= 0.0).to_equal(true)
+
+describe "GpuQueue wait_result error model (W4.3)":
+
+    it "returns Ok with the completed count when all submissions succeed":
+        var q = GpuQueue.create(gpu_none())
+        q.submit(work_ok)
+        q.submit(work_ok)
+        val r = q.wait_result()
+        expect(r.is_ok()).to_equal(true)
+
+    it "returns Err naming the first failed submission":
+        var q = GpuQueue.create(gpu_none())
+        q.submit(work_ok)
+        q.submit(work_fail)
+        val r = q.wait_result()
+        expect(r.is_err()).to_equal(true)
+
+describe "GpuPipe host FIFO (W3.3 emulation half)":
+
+    it "preserves FIFO order through wraparound":
+        var p = GpuPipe.create(3)
+        expect(p.valid).to_equal(true)
+        expect(p.try_write(10)).to_equal(true)
+        expect(p.try_write(20)).to_equal(true)
+        expect(p.read()).to_equal(10)
+        expect(p.try_write(30)).to_equal(true)
+        expect(p.try_write(40)).to_equal(true)
+        expect(p.read()).to_equal(20)
+        expect(p.read()).to_equal(30)
+        expect(p.read()).to_equal(40)
+        expect(p.is_empty()).to_equal(true)
+
+    it "rejects writes when full and reads when empty":
+        var p = GpuPipe.create(2)
+        expect(p.try_write(1)).to_equal(true)
+        expect(p.try_write(2)).to_equal(true)
+        expect(p.is_full()).to_equal(true)
+        expect(p.try_write(3)).to_equal(false)
+        expect(p.read()).to_equal(1)
+        expect(p.read()).to_equal(2)
+        expect(p.can_read()).to_equal(false)
+        expect(p.read()).to_equal(0)
+
+    it "peek does not consume":
+        var p = GpuPipe.create(2)
+        expect(p.try_write(7)).to_equal(true)
+        expect(p.peek()).to_equal(7)
+        expect(p.len()).to_equal(1)
+        expect(p.read()).to_equal(7)
+
+    it "fails closed on non-positive capacity":
+        val bad = GpuPipe.create(0)
+        expect(bad.valid).to_equal(false)
+        var bad2 = GpuPipe.create(-1)
+        expect(bad2.try_write(1)).to_equal(false)
 
 describe "cpu_kernel_run_1d generic CPU executor (W4.1)":
 

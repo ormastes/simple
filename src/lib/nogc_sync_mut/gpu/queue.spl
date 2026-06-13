@@ -90,12 +90,17 @@ class GpuQueue:
     next_event_id: i64
     submitted: i64
     completed: i64
+    first_error: text
 
     static fn create(device: Gpu) -> GpuQueue:
-        GpuQueue(device: device, id: 1, in_order: true, profiling: false, next_event_id: 1, submitted: 0, completed: 0)
+        GpuQueue(device: device, id: 1, in_order: true, profiling: false, next_event_id: 1, submitted: 0, completed: 0, first_error: "")
 
     static fn create_out_of_order(device: Gpu) -> GpuQueue:
-        GpuQueue(device: device, id: 1, in_order: false, profiling: false, next_event_id: 1, submitted: 0, completed: 0)
+        GpuQueue(device: device, id: 1, in_order: false, profiling: false, next_event_id: 1, submitted: 0, completed: 0, first_error: "")
+
+    me _note_failure(eid: i64, why: text):
+        if self.first_error == "":
+            self.first_error = "submission {eid} {why}"
 
     me enable_profiling():
         self.profiling = true
@@ -125,11 +130,14 @@ class GpuQueue:
         self.next_event_id = eid + 1
         self.submitted = self.submitted + 1
         if not deps_ok:
+            self._note_failure(eid, "blocked on incomplete dependency")
             return GpuEvent(id: eid, queue_id: self.id, complete: false, elapsed_nanos: 0)
         val start = if self.profiling: time_now_nanos() else: 0
         val ok = work()
         if ok:
             self.completed = self.completed + 1
+        else:
+            self._note_failure(eid, "work returned failure")
         GpuEvent(id: eid, queue_id: self.id, complete: ok, elapsed_nanos: self._elapsed_since(start))
 
     me parallel_for(n: i64, body: fn(i64) -> bool) -> GpuEvent:
@@ -151,6 +159,8 @@ class GpuQueue:
             i = i + 1
         if all_ok:
             self.completed = self.completed + 1
+        else:
+            self._note_failure(eid, "parallel_for body returned failure")
         GpuEvent(id: eid, queue_id: self.id, complete: all_ok, elapsed_nanos: self._elapsed_since(start))
 
     me parallel_reduce_i64(n: i64, init: i64, item: fn(i64) -> i64, combine: fn(i64, i64) -> i64) -> i64:
@@ -173,6 +183,14 @@ class GpuQueue:
     me wait() -> bool:
         """Block until all submissions complete; true if all succeeded."""
         self.completed == self.submitted
+
+    me wait_result() -> Result<i64, text>:
+        """W4.3 error model: Ok(completed count) when every submission
+        succeeded, Err(first failure description) otherwise — device-side
+        failures surface as values, never as process aborts."""
+        if self.completed == self.submitted:
+            return Ok(self.completed)
+        Err(self.first_error)
 
 # ============================================================================
 # GpuTaskGraph — record/replay dependency graph (SYCL-graph equivalent, lite)
