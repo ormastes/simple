@@ -4,13 +4,10 @@
 # Supports daily notes config from .obsidian/daily-notes.json and
 # variable-substitution templates from the vault's templates/ folder.
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_time_now() -> i64
 extern fn rt_time_format(ts: i64, fmt: text) -> text
 extern fn rt_dir_walk(path: text) -> [text]
+use std.io_runtime.{read_file, write_file, file_exists, process_run}
 
 use src.util.json_helpers.{safe_substr}
 
@@ -38,7 +35,7 @@ fn ensure_parent_dirs(full_path: text) -> bool:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("mkdir", ["-p", dir])
+    (stdout, stderr, rc) = process_run("mkdir", ["-p", dir])
     rc == 0
 
 # --- Date helpers ---
@@ -56,7 +53,7 @@ fn get_today_date() -> text:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("date", ["+%Y-%m-%d"])
+    (stdout, stderr, rc) = process_run("date", ["+%Y-%m-%d"])
     if rc == 0:
         return stdout.trim()
     "1970-01-01"
@@ -171,7 +168,7 @@ fn compute_iso_week(date: text) -> i64:
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
-    (stdout, stderr, rc) = rt_process_run("date", ["-d", date, "+%V"])
+    (stdout, stderr, rc) = process_run("date", ["-d", date, "+%V"])
     if rc == 0 and stdout.trim() != "":
         val week_str = stdout.trim()
         # Parse the two-digit week string
@@ -211,9 +208,9 @@ fn pad_two(n: i64) -> text:
 
 fn read_daily_config_folder(vault_path: text) -> text:
     val config_path = join_path(vault_path, ".obsidian/daily-notes.json")
-    if not rt_file_exists(config_path):
+    if not file_exists(config_path):
         return "daily"
-    val content = rt_file_read_text(config_path) ?? ""
+    val content = read_file(config_path) ?? ""
     if content == "":
         return "daily"
     # Parse simple JSON for "folder" field
@@ -224,9 +221,9 @@ fn read_daily_config_folder(vault_path: text) -> text:
 
 fn read_daily_config_format(vault_path: text) -> text:
     val config_path = join_path(vault_path, ".obsidian/daily-notes.json")
-    if not rt_file_exists(config_path):
+    if not file_exists(config_path):
         return "YYYY-MM-DD"
-    val content = rt_file_read_text(config_path) ?? ""
+    val content = read_file(config_path) ?? ""
     if content == "":
         return "YYYY-MM-DD"
     val fmt = extract_json_string(content, "format")
@@ -308,9 +305,9 @@ Read a daily note's content. Returns "" if the note does not exist.
 */
 fn read_daily_note(vault_path: text, date: text) -> text:
     val path = get_daily_note_path(vault_path, date)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return ""
-    rt_file_read_text(path) ?? ""
+    read_file(path) ?? ""
 
 /**
 Create a daily note. If content is empty, uses a default template.
@@ -323,7 +320,7 @@ fn create_daily_note(vault_path: text, date: text, content: text) -> bool:
     var body = content
     if body == "":
         body = "# " + date + "\n\n## Tasks\n\n- [ ] \n\n## Notes\n\n"
-    rt_file_write_text(path, body)
+    write_file(path, body)
 
 # --- Periodic note functions ---
 
@@ -363,9 +360,9 @@ Read a periodic note's content. Returns "" if not found.
 */
 fn read_periodic_note(vault_path: text, period: text, date: text) -> text:
     val path = get_periodic_note_path(vault_path, period, date)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return ""
-    rt_file_read_text(path) ?? ""
+    read_file(path) ?? ""
 
 /**
 Create a periodic note with given content. Uses default template if content is empty.
@@ -390,7 +387,7 @@ fn create_periodic_note(vault_path: text, period: text, date: text, content: tex
             body = "# " + year + "\n\n## Goals\n\n- [ ] \n\n## Review\n\n"
         else:
             body = "# " + period + " - " + date + "\n\n"
-    rt_file_write_text(path, body)
+    write_file(path, body)
 
 /**
 List recent periodic notes of a given type, sorted by filename descending (most recent first).
@@ -398,7 +395,7 @@ Returns relative paths from the vault root.
 */
 fn list_recent_periodic_notes(vault_path: text, period: text, limit: i64) -> [text]:
     val folder = join_path(vault_path, period)
-    if not rt_file_exists(folder):
+    if not file_exists(folder):
         return []
     val all_files = rt_dir_walk(folder) ?? []
     var md_files: [text] = []
@@ -452,7 +449,7 @@ Returns relative paths from vault root.
 */
 fn list_templates(vault_path: text) -> [text]:
     val templates_dir = join_path(vault_path, "templates")
-    if not rt_file_exists(templates_dir):
+    if not file_exists(templates_dir):
         return []
     val all_files = rt_dir_walk(templates_dir) ?? []
     var result: [text] = []
@@ -477,9 +474,9 @@ Built-in variables (auto-populated if not overridden):
 */
 fn apply_template(vault_path: text, template_path: text, target_path: text, variables: text) -> bool:
     val tmpl_full = join_path(vault_path, template_path)
-    if not rt_file_exists(tmpl_full):
+    if not file_exists(tmpl_full):
         return false
-    val tmpl_content = rt_file_read_text(tmpl_full) ?? ""
+    val tmpl_content = read_file(tmpl_full) ?? ""
     if tmpl_content == "":
         return false
 
@@ -519,7 +516,7 @@ fn apply_template(vault_path: text, template_path: text, target_path: text, vari
     val target_full = join_path(vault_path, target_path)
     if not ensure_parent_dirs(target_full):
         return false
-    rt_file_write_text(target_full, result)
+    write_file(target_full, result)
 
 fn list_contains(items: [text], target: text) -> bool:
     for item in items:
