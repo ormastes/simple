@@ -620,6 +620,47 @@ void rt_framebuffer_write(RuntimeValue addr, RuntimeValue offset, RuntimeValue v
     base[off] = (uint8_t)v;
 }
 
+/* ---- rt_volatile_* (volatile MMIO access) + barriers ----
+ * externs are `rt_volatile_*(addr: i64, value: i64)` — RAW machine i64 at the FFI
+ * boundary (NOT tagged RuntimeValue), matching x86_64/boot/rt_extras.c. */
+RuntimeValue rt_volatile_read_u8(RuntimeValue addr) {
+    return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr;
+}
+RuntimeValue rt_volatile_read_u16(RuntimeValue addr) {
+    return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr;
+}
+RuntimeValue rt_volatile_read_u32(RuntimeValue addr) {
+    return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
+}
+RuntimeValue rt_volatile_read_u64(RuntimeValue addr) {
+    return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr;
+}
+RuntimeValue rt_volatile_write_u8(RuntimeValue addr, RuntimeValue val) {
+    *(volatile uint8_t *)(uintptr_t)(uint64_t)addr = (uint8_t)(uint64_t)val;
+    return NIL_VALUE;
+}
+RuntimeValue rt_volatile_write_u16(RuntimeValue addr, RuntimeValue val) {
+    *(volatile uint16_t *)(uintptr_t)(uint64_t)addr = (uint16_t)(uint64_t)val;
+    return NIL_VALUE;
+}
+RuntimeValue rt_volatile_write_u32(RuntimeValue addr, RuntimeValue val) {
+    *(volatile uint32_t *)(uintptr_t)(uint64_t)addr = (uint32_t)(uint64_t)val;
+    return NIL_VALUE;
+}
+RuntimeValue rt_volatile_write_u64(RuntimeValue addr, RuntimeValue val) {
+    *(volatile uint64_t *)(uintptr_t)(uint64_t)addr = (uint64_t)val;
+    return NIL_VALUE;
+}
+/* arm64 has a weak memory model — real DMB, not a no-op. */
+RuntimeValue rt_load_barrier(void) {
+    __asm__ volatile("dmb ld" ::: "memory");
+    return NIL_VALUE;
+}
+RuntimeValue rt_store_barrier(void) {
+    __asm__ volatile("dmb st" ::: "memory");
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
 {
     if (a == b) return 1;

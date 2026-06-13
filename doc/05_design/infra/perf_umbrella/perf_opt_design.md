@@ -38,16 +38,27 @@ flow {
 | `+ test/02_integration/app/simple/smf_cache_reuse_spec.spl` | AC-7: reuse-on-unchanged + miss-on-changed |
 
 ## Key interface (bench harness — no inheritance, tag descriptor + closure)
+**Two measurement planes** (advisor correction): in-process closure timing can only measure
+**warm micro-throughput**. Cold-start, peak RSS, and binary size are process-launch costs and are
+delegated to the existing process-level harness `scripts/check/check-cross-language-perf.shs`
+(which already measures size + cold startup + warm fib35 + parallel spawn + RSS across
+Simple/Bun/Python/Go/Erlang/Java/C). `bench_harness.spl` does NOT reimplement that; it wraps it
+for the `process` plane and adds the `warm` plane.
+
 ```simple
 struct BenchCase:
     name: text
-    arch_tags: [text]      # e.g. ["x86_64"]; arm/riscv added later, same spec
-    mode: text             # "script" | "smf" | "native" | "ram" | "persistent" | "wal"
+    arch_tags: [text]      # e.g. ["x86_64"]; arm/riscv added later, same spec via tag
+    mode: text             # lang: "script"|"smf"|"native"   db: "ram"|"persistent"|"wal"
+    plane: text            # "warm" (in-process closure) | "process" (cold/RSS/size via cross-lang harness)
     iters: i64
 
-fn bench_run(case: BenchCase, body: fn() -> ()) -> BenchResult   # warm/cold/throughput/peak_rss
+fn bench_run_warm(case: BenchCase, body: fn() -> ()) -> BenchResult    # warm throughput, in-process
+fn bench_run_process(case: BenchCase, argv: [text]) -> BenchResult     # cold/RSS/size, delegates to harness
 fn bench_emit(results: [BenchResult], report_path: text, table_path: text) -> ()
 ```
+AC-4 (script vs compiler) is inherently a `process`-plane comparison (interpreter process vs
+native binary); AC-5 (db ram vs persistent) is mostly `warm`-plane with a `process` cold-start row.
 
 ## Guard contract (AC-8)
 `check-api-arch-guard.shs` is run after every sub-goal: snapshot public symbols → diff vs
