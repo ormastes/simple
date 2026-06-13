@@ -1,7 +1,14 @@
 # Lean parser: struct-literal `Name { field: value }` is unimplemented
 
 - **ID:** lean_parser_struct_literal_unimplemented
-- **Severity:** P2 (parser gap class; ~50 sites / 19 src/lib files)
+- **Severity:** P1 (parser gap class; ~50 direct sites / 19 src/lib files, but
+  IMPORT-AMPLIFIED: a struct-literal in a shared imported module errors for every
+  file that imports it. A 24-file common/+nogc_sync_mut/ sample post-G47 showed
+  11 clean / 13 errored — almost all 13 on this gap, many with an identical
+  `167:58 expected ), got {` from a common imported module. This is the dominant
+  remaining src/lib parse blocker. NOTE: likely also needs flat_ast_bridge
+  support for EXPR_STRUCT_LIT — verify the bridge converts it, since the parser
+  never produced it before.)
 - **Date:** 2026-06-13
 - **Component:** `src/compiler/10.frontend/core/` lean parser
 - **Status:** OPEN (diagnosed, fix deferred to its own focused task)
