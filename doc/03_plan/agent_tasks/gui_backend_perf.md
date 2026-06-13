@@ -679,3 +679,7 @@ Updated: 2026-06-11
 - Simple Web selector specificity substring removal: class/id specificity
   prefix checks and multi-class dot counting now use `char_at`, avoiding
   per-character substring allocation during cascade rule ordering.
+- Simple Web selector bucket prefix allocation removal: base selector matching
+  and selector bucket kind/value resolution now use `char_at` for leading
+  class/id checks, avoiding one-character substring allocation in startup rule
+  bucketing and matching.
