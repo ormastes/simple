@@ -34,6 +34,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`.claude/skills/lib/spipe_diagrams.md`](lib/spipe_diagrams.md) — diagram & concision rules (≤30 lines + ≥1 SDN diagram)
 - [`.claude/skills/lib/spipe_ui.md`](lib/spipe_ui.md) — **UI skill**: the 3 main GUI check apps + framebuffer capture/verify & backend-parity gates
 - [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
+- [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
 
 ## Scenario Manual Quality
 

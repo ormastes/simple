@@ -756,3 +756,197 @@ main = total
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 15);
 }
+
+// =============================================================================
+// Regression: match arm early-return propagation
+// Bug: interp_match_or_pattern_early_return_swallowed_2026-06-13
+// Root cause: exec_block_fn used exec_if_expr/exec_match_expr for last-statement
+// if/match handling, which collapsed Control::Return into a plain value instead
+// of propagating it up to the enclosing function.
+// Fix: use exec_if_core/exec_match_core which preserve Control::Return.
+// =============================================================================
+
+#[test]
+fn interpreter_match_or_pattern_early_return_propagates() {
+    // Regression: return inside if under or-pattern arm was swallowed.
+    // Before fix: exit_code=0 (falls through to post-match return 0).
+    // After fix: exit_code=1 (arm's early return honored).
+    let code = r#"
+enum Color:
+    Red
+    Blue
+    Green
+
+fn test(c: Color) -> i64:
+    match c:
+        Color.Red | Color.Blue:
+            if true:
+                return 1
+    return 0
+
+main = test(Color.Red)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_match_or_pattern_second_variant_early_return_propagates() {
+    // Both variants in the or-pattern must propagate the return.
+    let code = r#"
+enum Color:
+    Red
+    Blue
+    Green
+
+fn test(c: Color) -> i64:
+    match c:
+        Color.Red | Color.Blue:
+            if true:
+                return 1
+    return 0
+
+main = test(Color.Blue)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_match_single_pattern_early_return_propagates() {
+    // Single-pattern arm has the same bug: last stmt is an if with return.
+    // Before fix: exit_code=0. After fix: exit_code=1.
+    let code = r#"
+enum Color:
+    Red
+    Blue
+    Green
+
+fn test(c: Color) -> i64:
+    match c:
+        Color.Red:
+            if true:
+                return 1
+    return 0
+
+main = test(Color.Red)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_match_arm_value_no_early_return_still_works() {
+    // Arm that just produces a value (no explicit return) must still work.
+    let code = r#"
+enum Color:
+    Red
+    Blue
+    Green
+
+fn test(c: Color) -> i64:
+    match c:
+        Color.Red | Color.Blue:
+            42
+        _:
+            0
+
+main = test(Color.Red)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_match_arm_no_match_falls_through_to_post_match_return() {
+    // Non-matching or-pattern arm: must fall through to post-match return.
+    let code = r#"
+enum Color:
+    Red
+    Blue
+    Green
+
+fn test(c: Color) -> i64:
+    match c:
+        Color.Red | Color.Blue:
+            if true:
+                return 1
+    return 0
+
+main = test(Color.Green)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn interpreter_match_arm_false_condition_falls_through() {
+    // If condition is false, must fall through to post-match return (not arm value).
+    let code = r#"
+enum Color:
+    Red
+    Blue
+    Green
+
+fn test(c: Color) -> i64:
+    match c:
+        Color.Red | Color.Blue:
+            if false:
+                return 1
+    return 0
+
+main = test(Color.Red)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn interpreter_match_arm_nested_match_return_propagates() {
+    // Nested match as the last statement of an arm: return must propagate.
+    let code = r#"
+enum Color:
+    Red
+    Blue
+    Green
+
+fn test(c: Color) -> i64:
+    match c:
+        Color.Red | Color.Blue:
+            match c:
+                Color.Red:
+                    return 10
+                _:
+                    return 20
+    return 0
+
+main = test(Color.Red)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn interpreter_match_arm_nested_match_second_branch_return_propagates() {
+    // Same as above but with the second sub-branch.
+    let code = r#"
+enum Color:
+    Red
+    Blue
+    Green
+
+fn test(c: Color) -> i64:
+    match c:
+        Color.Red | Color.Blue:
+            match c:
+                Color.Red:
+                    return 10
+                _:
+                    return 20
+    return 0
+
+main = test(Color.Blue)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 20);
+}
