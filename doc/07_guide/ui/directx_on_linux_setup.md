@@ -114,8 +114,18 @@ directly — no boolean wrappers.
 
 ## Windows
 
-On Windows the `directx` backend routes to native D3D11 (no DXVK needed).
-The `dx_platform_probe()` function returns `platform=windows-native` and
-`leaf=dlopen` when a native D3D11 device is available.  The same spec file
-(`backend_directx_spec.spl`) runs on both platforms — the probe drives which
-evidence strings are expected.
+On Windows the `directx` backend routes to native D3D11 (no DXVK needed) —
+the same device-creation path loads the native `d3d11.dll`.  The
+`dx_platform_probe()` function returns `platform=windows-native`; the leaf is
+`leaf=structured` (the ICD leaf probe checks Linux prefix `.so` paths, which
+do not exist on Windows).  The same spec file (`backend_directx_spec.spl`)
+runs on both platforms — the probe drives which evidence strings are expected.
+
+Validated in CI by `.github/workflows/directx-windows-validation.yml`
+(windows-latest): builds the Rust seed with cargo, runs the spec in
+interpreter mode (18/18, 2026-06-12), and captures probe evidence
+`platform=windows-native leaf=structured device=true` — the D3D11 device is
+created via the WARP software rasterizer on GPU-less runners.  The workflow
+re-runs on any push touching `backend_directx.spl` or its spec, and can be
+triggered manually with
+`gh workflow run directx-windows-validation.yml --ref main`.
