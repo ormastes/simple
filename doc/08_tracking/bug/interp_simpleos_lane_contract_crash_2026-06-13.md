@@ -38,22 +38,40 @@ codegen — there is no source to compile. (The code's own comment warns craneli
 likely still fail at codegen even if sources existed; arm64/arm32 are not in that
 exclusion and are unverified.)
 
-### Binding wall — entry sources were deleted in a bulk reorg
-The four entry `.spl` files (`arch/arm64/fs_exec_entry.spl`,
-`arch/arm32/fs_exec_entry.spl`, `arch/riscv32/smoke_entry.spl`,
-`arch/x86_64/fs_test_entry.spl`) plus their linker scripts and boot stubs were
-**deleted in commit `de204598bfa`** (2026-06-08, a 238,935-file bulk reorg, blank
-message). They are not tracked anywhere in the current tree under any name (only
-`riscv64/ssh_live_entry.spl` and `x86_64/green_carrier_probe_entry.spl` survive;
-the `arm64/arm32/riscv32` arch dirs no longer exist). The riscv64 fs-exec kernel
-already on disk was itself built from a now-deleted `smoke_entry.spl`. Restoring
-them means reviving a deleted subsystem across a major reorg (dependencies/module
-paths changed) — a separate task, out of scope here.
+### Update 2026-06-13 (later): entry sources ARE present; arm64 BUILDS but does not BOOT
+Re-checked: the `arch/` tree (incl. `arm64/fs_exec_entry.spl`, `arm64/boot/baremetal_stubs.c`,
+`arm64/boot/crt0.S`, `common/`, `shared/`) is **tracked at HEAD** — 163 files, `git status`
+clean. The earlier "deleted in `de204598bfa`, not tracked anywhere" framing was stale
+(restored by a parallel session). So the build can now reach codegen.
+
+**arm64 BUILDS to a 1.9MB aarch64 ELF** with `SIMPLE_OS_BUILD_BACKEND=cranelift` +
+`SIMPLE_ALLOW_FREESTANDING_STUBS=1` (`build/os/simpleos_arm64_fs_exec.elf`, native-build
+OK ~30s). **This proves cranelift CAN codegen+link the arm64 freestanding kernel.**
+
+**But the kernel does NOT boot** — QEMU (`qemu-system-aarch64 -machine virt -cpu cortex-a72`,
+loader at 0x40200000) produces **zero serial output** and times out. ELF-symbol root cause:
+- Entry `0x40200000` jumps to raw `.text`; the real arm64 C boot stub was **never linked** —
+  `nm` shows no `_pl011_init`, no `serial_puts_direct`, no `crt0` (only the Simple kernel
+  symbols + `arch__arm64__fs_exec_entry__spl_start` + `_c_start`). So no PL011 init runs.
+- `rt_volatile_write_u32` / `rt_load_barrier` / `rt_store_barrier` resolve to **weak no-op
+  stubs** (`W` at ~0x4037d6xx) injected by `SIMPLE_ALLOW_FREESTANDING_STUBS=1`. The real
+  `...io__volatile_ops__rt_volatile_write_u32__fallback` text bodies are present (`T`) but
+  unreferenced — the global binds to the no-op. Every MMIO write is therefore a no-op →
+  UART never written → silent timeout.
+- arm64 has **no `rt_extras.c`** (only `x86_64/boot/rt_extras.c` exists); that is where x86_64
+  gets its non-weak MMIO-intrinsic definitions.
+
+So a *bootable* arm64 kernel needs (a) the boot-stub allowlist wired so `crt0.S` +
+`baremetal_stubs.c` compile & link as the entry, and (b) a build WITHOUT freestanding stubs
+so `rt_volatile_write_*` bind to the real `_fallback` bodies (or an arm64 `rt_extras.c`). That
+is net-new build/linker wiring (Rust `linker.rs` boot-stub discovery or an arm64 boot profile),
+**not** a source restore — the working riscv64/x86_32 kernels build without the freestanding
+flag because their boot path already wires this; arm64's does not.
 
 Consequence: the four `sys_qemu_<arch>_fs_exec_spec.spl` system tests for
-arm64/arm32/riscv32/x86_64 correctly classify as `missing-media` (diagnosed RED,
-fail-closed) and are NOT flippable to live-pass on this host. riscv64 + x86_32
-live-pass. This is the honest live-vs-contract split.
+arm64/arm32/riscv32/x86_64 correctly classify as `missing-media`/`boot-fail` (diagnosed RED,
+fail-closed) and are NOT flippable to live-pass on this host. riscv64 + x86_32 live-pass.
+This is the honest live-vs-contract split.
 
 ## Symptom
 Calling `simpleos_platform_qemu_smoke_lane("riscv64")` (src/os/port/simpleos_multiplatform_build_part3.spl:174) in interpreter mode kills the process with exit code 248 and no diagnostic. When reached through spec files (e.g. `test/01_unit/os/qemu_runner_protection_acceptance_spec.spl`), it instead surfaces as:
