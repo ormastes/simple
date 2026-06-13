@@ -15,7 +15,7 @@ through `USER_CR3_READY=true`, and the closed final marker triplet
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 `USER_SYSCALL_PASS=true`.
 
-It also refreshes the hosted cooperative/multicore feature specs (`simpleos_cooperative_green_spec`
+It also refreshes the interpreter-run SimpleOS cooperative/multicore feature specs (`simpleos_cooperative_green_spec`
 and `simpleos_multicore_green_spec`) as current evidence after the green/cooperative
 SSpec-runner mismatch was closed.
 
@@ -23,13 +23,13 @@ Boundary note: `cooperative_green_spawn` runs on the current OS thread, is not
 Go-style M:N CPU parallelism, and carries no `pool_used` runtime-pool evidence.
 Host Go-like M:N evidence remains the Pure Simple `multicore_green_spawn`
 facade over runtime-seed `rt_pool_*` support and must carry
-`used_runtime_pool()` evidence. Hosted SimpleOS scheduler/carrier evidence
+`used_runtime_pool()` evidence. Interpreter-run SimpleOS scheduler/carrier evidence
 must not be conflated with host runtime-pool profile evidence.
 
 ## Verified Commands
 
-Commands below are the canonical repo-root checks for this lane. The hosted
-SimpleOS feature specs were rerun from `/home/ormastes/dev/pub/simple` on
+Commands below are the canonical repo-root checks for this lane. The interpreter-run SimpleOS
+feature specs were rerun from `/home/ormastes/dev/pub/simple` on
 2026-06-11.
 
 ```sh
@@ -64,27 +64,26 @@ SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/sim
 | SimpleOS green-carrier QEMU live lane | PASS | 2 |
 | SimpleOS green-carrier QEMU final hardware handoff lane | PASS | 2 |
 
-## 2026-06-11 Hosted Refresh
+## 2026-06-11 Interpreter-Run Refresh
 
-The hosted SimpleOS feature lane was rerun from the main workspace after the
+The interpreter-run SimpleOS feature lane was rerun from the main workspace after the
 cross-language profile-script hardening update:
 
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`
   -> PASS, 3 assertions in 426ms
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean`
-  -> PASS, 7 assertions after the hosted/live evidence-boundary guard was added
+  -> PASS, 7 assertions after the interpreter-run/live evidence-boundary guard was added
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
   -> PASS, 4 assertions in 3780ms
 
-This refresh does not rerun a live QEMU lane. It confirms that the hosted
-SimpleOS cooperative lane, the hosted multicore-green scheduler lane, and the
-hosted green-channel wake bridge still pass after the host/profile-script
+This refresh does not rerun a live QEMU lane. It confirms that the interpreter-run
+SimpleOS cooperative lane, the interpreter-run multicore-green scheduler lane, and the
+interpreter-run green-channel wake bridge still pass after the host/profile-script
 changes, without changing the already-closed final live-handoff claim.
 
-## 2026-06-12 Hosted Refresh
+## 2026-06-12 Interpreter-Run Refresh
 
-The hosted SimpleOS feature lane was rerun from
-`/tmp/simple-mgreen-sliced-jj-1000` after the concurrency API misuse and profile
+The interpreter-run SimpleOS feature lane was rerun from the shared mainline workspace after the concurrency API misuse and profile
 contract tracking refresh:
 
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`
@@ -94,14 +93,14 @@ contract tracking refresh:
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
   -> PASS, 4 scenarios in 10508ms
 
-This refresh does not rerun a live QEMU lane. It confirms that the hosted
+This refresh does not rerun a live QEMU lane. It confirms that the interpreter-run
 SimpleOS cooperative, multicore-green scheduler, and green-channel wake
 contracts remain current after the profile/API contract documentation updates,
 without changing the already-closed final live-handoff claim.
 
-## 2026-06-13 Hosted Refresh
+## 2026-06-13 Interpreter-Run Refresh
 
-The hosted SimpleOS feature lane was rerun from
+The interpreter-run SimpleOS feature lane was rerun from
 `/tmp/simple-mgreen-next-jj-4101862` after syncing through
 `873f docs: name multicore green merge gates` and the later shared-main
 `perf(gui): rank backend lane candidates in one pass` sync. The run used
@@ -115,7 +114,7 @@ Simple binary, and pinned `SIMPLE_BOOTSTRAP_DRIVER=/seed/simple`.
 - `SIMPLE_BOOTSTRAP_DRIVER=/seed/simple SIMPLE_BIN=/usr/local/bin/simple /usr/local/bin/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
   -> PASS, 4 scenarios in 11026ms
 
-This refresh does not rerun a live QEMU lane. It keeps the hosted SimpleOS
+This refresh does not rerun a live QEMU lane. It keeps the interpreter-run SimpleOS
 cooperative, multicore-green scheduler, and green-channel wake contracts
 current after the profile/manual gate updates, without changing the already
 closed final live-handoff claim.
@@ -162,18 +161,18 @@ alignment scenario:
 - QEMU default gate lane: 2 scenarios
 - final live hardware handoff lane remained opt-in and unclaimed at that point
 
-## 2026-06-13 Hosted Recheck After `a61`
+## 2026-06-13 Interpreter-Run Recheck After `a61`
 
-After syncing `/tmp/simple-mgreen-sliced-jj-1000` to `main@origin` at `a61
-perf(gui): escape html window text in one pass`, the hosted SimpleOS green
-evidence was rerun without opt-in QEMU live mode:
+After syncing the shared mainline to `main@origin` at `a61 perf(gui): escape
+html window text in one pass`, the interpreter-run SimpleOS green evidence was
+rerun without opt-in QEMU live mode:
 
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`: PASS, 3 assertions
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean`: PASS, 7 assertions
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`: PASS, 4 assertions
 - `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean`: PASS, 3 assertions
 
-This recheck keeps the hosted SimpleOS cooperative, multicore-green scheduler,
+This recheck keeps the interpreter-run SimpleOS cooperative, multicore-green scheduler,
 channel wake, and final-handoff blocker documentation current on the shared
 mainline. It does not replace the separate opt-in live QEMU evidence for AP
 ring/user handoff.
@@ -274,7 +273,7 @@ user-mode payload has issued or returned from a syscall.
   `[green-carrier-qemu] USER_SYSCALL_PASS=true` are required only when
   `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` is set. A scheduler-only
   probe must not print any of those final markers.
-- The hosted SimpleOS specs prove scheduler-owned green execution state remains
+- The interpreter-run SimpleOS specs prove scheduler-owned green execution state remains
   separate from normal OS task state. The multicore-green SimpleOS contract now
   also proves named runtime, timer-interrupt, and compiler preemption
   safepoint adapters route through active green carriers, and invalid

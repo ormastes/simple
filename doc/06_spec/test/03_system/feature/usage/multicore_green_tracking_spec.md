@@ -385,6 +385,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 
 - Read the canonical multicore-green tracking row
 - Verify SimpleOS green-carrier specs are linked
+   - Expected: absent_in_text(simpleos_report, "hosted SimpleOS") equals `1`
 - Verify profile stress specs are linked
 - Verify the public API contract summary remains explicit
    - Expected: absent_in_text(row, "misuse_fixtures=611") equals `1`
@@ -396,7 +397,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 129 lines folded for reproduction.
+Runnable source: 134 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -409,10 +410,12 @@ expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_green_channe
 expect(row).to_contain("test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl")
 expect(row).to_contain("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
 expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
-expect(row).to_contain("2026-06-13 hosted SimpleOS refresh")
+expect(row).to_contain("2026-06-13 interpreter-run SimpleOS refresh")
 expect(row).to_contain("Docker process isolation")
 val simpleos_report = rt_file_read_text("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md") ?? ""
-expect(simpleos_report).to_contain("## 2026-06-13 Hosted Refresh")
+expect(simpleos_report).to_contain("## 2026-06-13 Interpreter-Run Refresh")
+expect(simpleos_report).to_contain("Interpreter-run SimpleOS scheduler/carrier evidence")
+expect(absent_in_text(simpleos_report, "hosted SimpleOS")).to_equal(1)
 expect(simpleos_report).to_contain("simpleos_multicore_green_spec.spl --mode=interpreter --clean")
 step("Verify profile stress specs are linked")
 expect(row).to_contain("test/05_perf/stress/multicore_green_cross_language_gate_spec.spl")
@@ -477,6 +480,7 @@ expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
 expect(row).to_contain("pure_simple_runtime_seed_boundary_corrupt")
 expect(row).to_contain("cooperative_green_explanation_corrupt")
 expect(row).to_contain("cooperative_green_mn_runtime_pool_label")
+expect(row).to_contain("cooperative_green_current_thread_wording_missing")
 expect(row).to_contain("cooperative_green_profile_row_missing")
 expect(row).to_contain("go_scheduler_width_mismatch")
 expect(row).to_contain("os_thread_profile_row_thread_spawn_with_args")
@@ -503,6 +507,7 @@ expect(negative_contract).to_contain("case=hosted_sliced_fairness_explanation_co
 expect(negative_contract).to_contain("case=pure_simple_runtime_seed_boundary_corrupt")
 expect(negative_contract).to_contain("case=cooperative_green_explanation_corrupt")
 expect(negative_contract).to_contain("case=cooperative_green_mn_runtime_pool_label")
+expect(negative_contract).to_contain("case=cooperative_green_current_thread_wording_missing")
 expect(negative_contract).to_contain("case=cooperative_green_profile_row_missing")
 expect(negative_contract).to_contain("case=os_thread_profile_row_thread_spawn_with_args")
 expect(negative_contract).to_contain("case=os_thread_profile_row_missing")
@@ -515,6 +520,7 @@ expect(system_plan).to_contain("cooperative-green explanation")
 expect(system_plan).to_contain("pure_simple_runtime_seed_boundary_corrupt")
 expect(system_plan).to_contain("Pure-Simple-boundary")
 expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
+expect(system_plan).to_contain("cooperative_green_current_thread_wording_missing")
 expect(system_plan).to_contain("cooperative_green_profile_row_missing")
 expect(system_plan).to_contain("simple_multicore_pool_used_zero")
 expect(system_plan).to_contain("simple_multicore_worker_rows_missing")
@@ -684,7 +690,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 107 lines folded for reproduction.
+Runnable source: 109 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -747,6 +753,8 @@ expect(profile_contract).to_contain("report_index_checked=doc/09_report/README.m
 val profile_script = rt_file_read_text("scripts/check/check-cross-language-perf.shs") ?? ""
 expect(profile_script).to_contain("CANONICAL_CROSS_LANGUAGE_REPORT")
 expect(profile_script).to_contain("REPORT_PATH=\"${REPORT_PATH:-$CANONICAL_CROSS_LANGUAGE_REPORT}\"")
+expect(profile_script).to_contain("cooperative_green_spawn cooperative queue on current OS thread")
+expect(profile_script).to_contain("cooperative queue fanout on current OS thread")
 expect(sys_test_plan).to_contain("Generated multicore-green profile code must store `MulticoreGreenHandle` values")
 expect(sys_test_plan).to_contain("must not import `rt_pool_join` directly")
 expect(sys_test_plan).to_contain("report_index_checked=doc/09_report/README.md")

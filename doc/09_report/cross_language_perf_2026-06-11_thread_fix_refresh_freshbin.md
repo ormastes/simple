@@ -78,9 +78,9 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Simple (interpreter)   |          n/a |          extern thread FFI not supported |
 | Simple (SMF loader)    |      143.006 |    std thread_spawn fork-join (bytecode) |
 | Simple (native)        |      109.410 |        thread_spawn fork-join OS threads |
-| Simple cooperative green (interp) |      138.303 | cooperative_green_spawn cooperative queue |
-| Simple cooperative green (SMF) |       51.207 | cooperative_green_spawn cooperative queue |
-| Simple cooperative green (native) |       22.210 | cooperative_green_spawn cooperative queue |
+| Simple cooperative green (interp) |      138.303 | cooperative_green_spawn cooperative queue on current OS thread |
+| Simple cooperative green (SMF) |       51.207 | cooperative_green_spawn cooperative queue on current OS thread |
+| Simple cooperative green (native) |       22.210 | cooperative_green_spawn cooperative queue on current OS thread |
 | Simple multicore green (SMF) |      150.593 | multicore_green runtime pool candidate (pool_used=100/100, parallelism=64/64, queue_model=work_stealing) |
 | Simple multicore green (native) |      115.270 | multicore_green runtime pool candidate (pool_used=100/100, parallelism=64/64, queue_model=work_stealing) |
 | C (pthreads)           |       15.214 |                               OS threads |
@@ -94,9 +94,9 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Simple (interpreter)   |          n/a |          extern thread FFI not supported |
 | Simple (SMF loader)    |      116.118 |                  std thread_spawn fanout |
 | Simple (native)        |       72.261 |               OS-thread fork-join fanout |
-| Simple cooperative green (interp) |      113.477 |                 cooperative queue fanout |
-| Simple cooperative green (SMF) |       38.594 |                 cooperative queue fanout |
-| Simple cooperative green (native) |        5.836 |                 cooperative queue fanout |
+| Simple cooperative green (interp) |      113.477 |                 cooperative queue fanout on current OS thread |
+| Simple cooperative green (SMF) |       38.594 |                 cooperative queue fanout on current OS thread |
+| Simple cooperative green (native) |        5.836 |                 cooperative queue fanout on current OS thread |
 | Simple multicore green (SMF) |       42.633 | multicore_green runtime pool fanout (pool_used=1000/1000, parallelism=64/64, queue_model=work_stealing) |
 | Simple multicore green (native) |       19.621 | multicore_green runtime pool fanout (pool_used=1000/1000, parallelism=64/64, queue_model=work_stealing) |
 | C (pthreads)           |       53.742 |              one OS thread per tiny task |
@@ -225,9 +225,9 @@ Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `GOMAXPROCS`, `OS_THREAD_WORKERS`,
 
 ## 2026-06-13 Evidence Recheck
 
-After syncing `/tmp/simple-mgreen-sliced-jj-1000` to `main@origin` at `a61
-perf(gui): escape html window text in one pass`, the checked-in report was
-revalidated without changing benchmark measurements:
+After syncing the shared mainline to `main@origin` at `a61 perf(gui): escape
+html window text in one pass`, the checked-in report was revalidated without
+changing benchmark measurements:
 
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`: PASS, 3 assertions
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean`: PASS, 3 assertions

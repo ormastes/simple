@@ -135,7 +135,7 @@ the host and SimpleOS lanes.
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 - Host architecture/design:
   `doc/04_architecture/runtime/multicore_green.md`
-- SimpleOS hosted system specs:
+- SimpleOS interpreter-run system specs:
   `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`
   `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`
   `test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl`

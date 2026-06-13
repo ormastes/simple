@@ -87,9 +87,9 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Simple (interpreter)   |          n/a |          extern thread FFI not supported |
 | Simple (SMF loader)    |      137.602 |    std thread_spawn fork-join (bytecode) |
 | Simple (native)        |       98.080 |        thread_spawn fork-join OS threads |
-| Simple cooperative green (interp) |       69.251 | cooperative_green_spawn cooperative queue |
-| Simple cooperative green (SMF) |       49.667 | cooperative_green_spawn cooperative queue |
-| Simple cooperative green (native) |       22.685 | cooperative_green_spawn cooperative queue |
+| Simple cooperative green (interp) |       69.251 | cooperative_green_spawn cooperative queue on current OS thread |
+| Simple cooperative green (SMF) |       49.667 | cooperative_green_spawn cooperative queue on current OS thread |
+| Simple cooperative green (native) |       22.685 | cooperative_green_spawn cooperative queue on current OS thread |
 | Simple multicore green (SMF) |      128.783 | multicore_green runtime pool candidate (pool_used=100/100, parallelism=64/64, queue_model=work_stealing) |
 | Simple multicore green (native) |       99.848 | multicore_green runtime pool candidate (pool_used=100/100, parallelism=64/64, queue_model=work_stealing) |
 | C (pthreads)           |       11.778 |                               OS threads |
@@ -106,9 +106,9 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Simple (interpreter)   |          n/a |          extern thread FFI not supported |
 | Simple (SMF loader)    |      173.806 |                  std thread_spawn fanout |
 | Simple (native)        |       87.933 |               OS-thread fork-join fanout |
-| Simple cooperative green (interp) |       65.541 |                 cooperative queue fanout |
-| Simple cooperative green (SMF) |       63.627 |                 cooperative queue fanout |
-| Simple cooperative green (native) |       12.043 |                 cooperative queue fanout |
+| Simple cooperative green (interp) |       65.541 |                 cooperative queue fanout on current OS thread |
+| Simple cooperative green (SMF) |       63.627 |                 cooperative queue fanout on current OS thread |
+| Simple cooperative green (native) |       12.043 |                 cooperative queue fanout on current OS thread |
 | Simple multicore green (SMF) |       47.988 | multicore_green runtime pool fanout (pool_used=1000/1000, parallelism=64/64, queue_model=work_stealing) |
 | Simple multicore green (native) |       18.233 | multicore_green runtime pool fanout (pool_used=1000/1000, parallelism=64/64, queue_model=work_stealing) |
 | C (pthreads)           |       72.757 |              one OS thread per tiny task |
