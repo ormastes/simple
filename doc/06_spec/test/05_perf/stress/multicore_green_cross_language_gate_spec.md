@@ -123,6 +123,8 @@ Failed: 0
 - Multicore green rows must contain `parallelism=` evidence.
 - Multicore green rows must contain `pool_used=` evidence before being used as
   M:N evidence.
+- The report must describe `multicore_green_spawn` as the Pure Simple facade and
+  `rt_pool_*` as runtime-seed support, not as one combined Pure Simple API.
 - Multicore green worker, fanout, and stress rows must contain exactly the
   work-stealing queue model in the generated report contract.
 - The large fanout section must include Go and C rows so goroutine fanout can be
@@ -172,12 +174,13 @@ Failed: 0
    - Expected: model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("pool_used=") equals `-1`
    - Expected: model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("parallelism=") equals `-1`
    - Expected: model_text(row_for_label(parallel, "Simple cooperative green (native)")).find("M:N") equals `-1`
+   - Expected: report.find("Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row") equals `-1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -214,6 +217,8 @@ expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).t
 expect(report).to_contain("Go GOMAXPROCS:** 100")
 expect(report).to_contain("Go scheduler: `GOMAXPROCS=100")
 expect(report).to_contain("not a Go M:N goroutine equivalent")
+expect(report).to_contain("Pure Simple `multicore_green_spawn` facade over runtime-seed")
+expect(report.find("Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row")).to_equal(-1)
 expect(report).to_contain("used_runtime_pool()")
 ```
 

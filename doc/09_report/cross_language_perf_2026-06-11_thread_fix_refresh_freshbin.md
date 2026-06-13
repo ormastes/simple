@@ -171,8 +171,9 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 > `cooperative_green_spawn`, which exercises the
 > implemented cooperative green-thread queue on the current OS thread; it does
 > not run in parallel and is not a Go M:N goroutine equivalent. `Simple multicore
-> green` is the Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row for bounded
-> worker-pool scheduling with a hosted parallelism limit; generated multicore-green workloads require every
+> green` is the Pure Simple `multicore_green_spawn` facade over runtime-seed
+> `rt_pool_*` support for bounded worker-pool scheduling with a hosted
+> parallelism limit; generated multicore-green workloads require every
 > handle to report `used_runtime_pool()` so inline fallback cannot masquerade as
 > M:N evidence. The large-fanout multicore-green generated source keeps compact
 > handle-array joins and a capture-free worker kernel so the profile measures
