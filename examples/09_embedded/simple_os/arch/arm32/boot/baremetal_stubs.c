@@ -74,18 +74,18 @@ static uint32_t arm32_harden_canary_value(void)
     return mixed == 0U ? 1U : mixed;
 }
 
-static void arm32_harden_print_canary(void)
+static void arm32_harden_print_canary_impl(void)
 {
     serial_puts("[harden] canary arch=arm32 value=");
     serial_put_u32(arm32_harden_canary_value());
     serial_puts("\r\n");
 }
 
-/* Public SPL-callable wrapper (extern fn arm32_harden_print_canary()) */
-RuntimeValue arm32_harden_print_canary_spl(void)
+/* Public SPL-callable symbol: extern fn arm32_harden_print_canary() */
+RuntimeValue arm32_harden_print_canary(void)
 {
-    arm32_harden_print_canary();
-    return NIL_VALUE;
+    arm32_harden_print_canary_impl();
+    return (RuntimeValue)0;
 }
 
 #define TAG_MASK    0x7U
@@ -1869,6 +1869,81 @@ RuntimeValue rt_arm_fat32_fats(void) { return ENCODE_INT((int32_t)g_arm32_fat32_
 RuntimeValue rt_arm_fat32_fat_size(void) { return ENCODE_INT((int32_t)g_arm32_fat32_fat_size); }
 RuntimeValue rt_arm_fat32_root_cluster(void) { return ENCODE_INT((int32_t)g_arm32_fat32_root_cluster); }
 
+/* ---------- arm32 virtio-blk lazy init for FAT32 probe (C-only, mirrors riscv32) ---------- */
+
+#define ARM32_VIRTIO_MAGIC    0x74726976U
+#define ARM32_VIRTIO_DEV_BLK  2U
+/* QEMU virt places virtio-mmio devices at 0x0a000000 + slot*0x200, up to 32 slots */
+#define ARM32_VIRTIO_BASE     0x0a000000U
+#define ARM32_VIRTIO_STRIDE   0x200U
+#define ARM32_VIRTIO_SLOTS    32U
+
+static volatile uint32_t *g_arm32_blk_mmio = 0;
+static uint32_t g_arm32_virtio_inited = 0;
+static uint32_t g_arm32_blk_version = 0;
+
+static void arm32_dsb(void)
+{
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static int arm32_virtio_blk_init(void)
+{
+    if (g_arm32_virtio_inited) return g_arm32_blk_mmio != 0;
+    g_arm32_virtio_inited = 1;
+
+    /* Scan for virtio-blk device */
+    for (uint32_t slot = 0; slot < ARM32_VIRTIO_SLOTS; slot++) {
+        volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)(ARM32_VIRTIO_BASE + slot * ARM32_VIRTIO_STRIDE);
+        if (mmio[0x000U / 4U] == ARM32_VIRTIO_MAGIC && mmio[0x008U / 4U] == ARM32_VIRTIO_DEV_BLK) {
+            g_arm32_blk_mmio = mmio;
+            g_arm_virtio_blk_mmio_base = ARM32_VIRTIO_BASE + slot * ARM32_VIRTIO_STRIDE;
+            break;
+        }
+    }
+    if (!g_arm32_blk_mmio) return 0;
+
+    volatile uint32_t *mmio = g_arm32_blk_mmio;
+    uint32_t version = mmio[0x004U / 4U];
+    g_arm32_blk_version = version;
+
+    /* Reset */
+    for (uint32_t i = 0; i < sizeof(g_arm_virtq_storage); i++) g_arm_virtq_storage[i] = 0;
+
+    /* Status register offsets for virtio-mmio (device 2 = block) */
+    mmio[0x070U / 4U] = 0U;              /* reset */
+    arm32_dsb();
+    mmio[0x070U / 4U] = 1U;             /* ACKNOWLEDGE */
+    mmio[0x070U / 4U] = 3U;             /* ACKNOWLEDGE|DRIVER */
+    mmio[0x024U / 4U] = 0U;             /* feature select page 0 */
+    mmio[0x020U / 4U] = 0U;             /* ack no features */
+    mmio[0x070U / 4U] = 11U;            /* ACKNOWLEDGE|DRIVER|FEATURES_OK */
+    arm32_dsb();
+    if ((mmio[0x070U / 4U] & 8U) == 0U) return 0;
+
+    /* Configure queue 0 */
+    uint32_t queue_addr = (uint32_t)(uintptr_t)g_arm_virtq_storage;
+    mmio[0x030U / 4U] = 0U;             /* select queue 0 */
+    mmio[0x038U / 4U] = 128U;           /* queue size */
+    if (version == 1U) {
+        mmio[0x028U / 4U] = 4096U;
+        mmio[0x03cU / 4U] = 4096U;
+        mmio[0x040U / 4U] = queue_addr >> 12;
+    } else {
+        mmio[0x080U / 4U] = queue_addr;
+        mmio[0x084U / 4U] = 0U;
+        mmio[0x090U / 4U] = queue_addr + 2048U;
+        mmio[0x094U / 4U] = 0U;
+        mmio[0x0a0U / 4U] = queue_addr + 4096U;
+        mmio[0x0a4U / 4U] = 0U;
+        mmio[0x044U / 4U] = 1U;
+    }
+    g_arm_virtq_last_used_idx = 0;
+    mmio[0x070U / 4U] = 15U;           /* ACKNOWLEDGE|DRIVER|FEATURES_OK|DRIVER_OK */
+    arm32_dsb();
+    return 1;
+}
+
 /* ---------- arm32 FAT32 + SMF probe helpers (mirrors riscv32 pattern) ---------- */
 
 /* Static globals for arm32 process-load probes */
@@ -1909,6 +1984,7 @@ static int arm32_fat32_mem_eq(const uint8_t *a, const char *b, uint32_t n)
 /* Read one 512-byte sector into g_arm_virtio_blk_dma_storage+16; returns 1 on success */
 static int arm32_fat32_read_sector(uint32_t lba)
 {
+    if (!g_arm32_virtio_inited && !arm32_virtio_blk_init()) return 0;
     RuntimeValue status = rt_arm_virtio_blk_read_sector_direct((RuntimeValue)lba);
     if (status == (RuntimeValue)0xffffffffU || status != 0) return 0;
     return 1;
