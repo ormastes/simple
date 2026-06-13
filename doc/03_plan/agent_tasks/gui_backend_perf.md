@@ -721,3 +721,6 @@ Updated: 2026-06-11
 - Simple Web HTML parser first-character allocation removal: both the node
   count and fill passes now use `char_at(0)` for tag dispatch instead of
   allocating a one-character substring for every parsed tag.
+- Simple Web compound-class match allocation removal: `class_has_all` now scans
+  dot-separated class requirements directly instead of allocating a `split(".")`
+  array for every selector match.
