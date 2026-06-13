@@ -251,6 +251,21 @@ the emitted C. That exposed — and this session FIXED — the real root blocker
 - **Honesty:** the backend primitive is sound by construction but DORMANT (no sound producer wired);
   it does not move seed-run benchmarks and is not exercised by `bin/simple test` (off the seed path).
 
+#### SG-1.3 UPDATE 3 — producer drafted, higher-level review caught 2 miscompiles, NOT landed 2026-06-13
+On the user's "go until all phases done, parallel agents + higher-level model review" instruction, a
+sound elision producer (`elide_bulk_copy`: strict consecutive-unit matcher + firing/non-firing specs,
+all green at unit level) was drafted in a worktree and put through an **adversarial Opus review BEFORE
+landing**. The review found the structural matcher necessary but NOT sufficient — two HIGH miscompile
+holes the non-firing specs didn't cover: (H1) the deleted run's temporaries weren't verified dead
+outside the run → dangling-local if the loaded value/pointer is reused; (H2) the backend hardcodes a
+`count*8` memmove but element Stores write `sizeof(ty)` → unsound for sub-8-byte elements. Decision:
+the draft was **NOT landed** (shipping known-unsound codegen, even default-OFF, is disallowed). Fixes
+shipped instead: bug `sg13_bulk_copy_recognizer_index_blind` updated with H1/H2 + the exact guards and
+the helpers to use (`get_inst_uses`, `find_local_type`); `emit_bulk_copy` precondition extended to
+conditions 5 (8-byte) + 6 (temp dead-out). The review WORKING AS INTENDED — it prevented two
+miscompiles — is the outcome, not a failure. A sound producer needs H1+H2 guards + their own non-firing
+specs + re-review; that is the remaining follow-up.
+
 ### Honest completion boundary (advisor-guided, corrected)
 **Fully DONE/verified this session:** AC-1 (plan+design first), AC-2 (checklists), AC-7 (SMF
 idle-compile + cache reuse, startup-regression-checked), AC-8 (API/arch guard GREEN, scoped to

@@ -136,11 +136,20 @@ impl MirToC:
           3. the matched GEP/Load/Store form a CONSECUTIVE, uninterrupted run with nothing
              reading the dst region between steps (else element-wise observes half-copied
              state that memmove does not — different semantics);
-          4. count is a compile-time constant.
+          4. count is a compile-time constant;
+          5. every copied element is EXACTLY 8 bytes — this lowering hardcodes a `count*8`
+             byte span (stride 8 = the GEP lowering). For a sub-8-byte element type the
+             element-wise Store writes only `sizeof(ty)` bytes per 8-byte slot, so memmove
+             would clobber the untouched gap bytes (copying src padding). NOT sound for
+             i32/i16/bool/f32 elements;
+          6. the per-unit temporaries (the element pointers and the loaded value) are DEAD
+             outside the matched run — the producer deletes their defining GEP/Load, so any
+             use elsewhere is a dangling-local miscompile.
         WARNING: as of this commit NO sound producer emits `bulk_copy`. The only bulk-op
         recognizer (optimize_bulk_copy) is index-blind and emits the NO-OP `bulk_copy_hint`,
-        which must NOT be renamed/lowered to `bulk_copy` without first adding the guard
-        above. See bug doc sg13_bulk_copy_recognizer_index_blind."""
+        which must NOT be renamed/lowered to `bulk_copy` without first adding ALL of the
+        guards above. Conditions 5 and 6 were surfaced by an adversarial review of a draft
+        elision pass. See bug doc sg13_bulk_copy_recognizer_index_blind."""
         var bc_args: [text] = []
         for arg in args:
             bc_args = bc_args.push(self.translate_operand(arg))
