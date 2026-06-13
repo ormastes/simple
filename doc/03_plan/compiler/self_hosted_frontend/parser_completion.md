@@ -534,9 +534,14 @@ Resolves the M11d WATCH item. Two halves, landed together:
 
 #### G42 — `if cond then X else Y` ternary expression — PARSER DONE 2026-06-13
 - `parser_stmts.spl parse_if_expr` (:894): after the cond, if the next token
-  is Ident(6) text "then", consume it, parse then-expr, optionally consume
-  `else` (kw 41) + parse else-expr, return `expr_if_expr(cond, then, else, 0)`
-  with all three branches faithfully populated. Block form (`:`) unchanged.
+  is Ident(6), consume it (it can only be `then` — block form always has `:`
+  there), parse then-expr, optionally consume `else` (kw 41) + parse else-expr,
+  return `expr_if_expr(cond, then, else, 0)` with all three branches
+  faithfully populated. Block form (`:`) unchanged.
+- PITFALL (cost a debug cycle): detect `then` on KIND alone, not text.
+  `par_text_get()` returns "" for this token under the interpreter (offset-
+  based retrieval per interp_parse_superlinear bug), so a `== "then"` check
+  silently never fires in probes — even though compiled stage4 shows the text.
 - Round-2 (orchestrator, tmp/site12/g42_probe.spl): ifthen_val / ifthen_arg /
   ifthen_calls → false; dict cases stay false; control must-fail true.
 - **NOTE — bridge else/elif fidelity is NOT done** (see M12 item 5). Both
