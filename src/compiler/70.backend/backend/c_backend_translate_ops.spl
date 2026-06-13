@@ -96,6 +96,47 @@ impl MirToC:
 
         false
 
+    # === Intrinsics ===
+
+    me translate_intrinsic(dest: LocalId?, name: text, args: [MirOperand]):
+        """Translate an intrinsic call to C++ (incl. SG-1.3 bulk-op lowerings)."""
+        # SG-1.3: advisory bulk-op markers are a NO-OP. The additive recognizer keeps every
+        # original Load/Store/GEP, so dropping the hint emits identical C to flag-off.
+        if name == "bulk_copy_hint" or name == "bulk_fill_hint" or name == "bulk_cmp_hint":
+            return
+        # SG-1.3 perf-bearing form: the active `bulk_copy` intrinsic, emitted only by the
+        # C-backend MIR elision pass (which removes the element-wise ops it subsumes).
+        if name == "bulk_copy":
+            self.emit_bulk_copy(args)
+            return
+        # Generic intrinsic -> call into the runtime shim.
+        var arg_vals: [text] = []
+        for arg in args:
+            arg_vals = arg_vals.push(self.translate_operand(arg))
+        val args_str = arg_vals.join(", ")
+        if dest.?:
+            val dest_name = self.get_local(dest.unwrap().id)
+            val ret_ty = self.get_local_type(dest.unwrap().id)
+            self.builder.emit_assign(dest_name, r"__simple_intrinsic_" + name + r"(" + args_str + r")")
+        else:
+            self.builder.emit(r"__simple_intrinsic_" + name + r"(" + args_str + r");")
+
+    me emit_bulk_copy(args: [MirOperand]):
+        """SG-1.3 perf lowering: a contiguous, index-ordered element-wise array copy
+        collapsed to a single memmove. args = [src_base, dst_base, count]; the element
+        stride is 8 bytes, matching the GEP lowering (`(char*)base + idx*8`), so `count`
+        elements span `count*8` bytes. memmove (not memcpy) keeps overlapping src/dst
+        well-defined; <cstring> is already included by the impl preamble. The redundant
+        GEP/Load/Store are removed at MIR level before this point, so this memmove is the
+        whole copy, not a duplicate of it."""
+        var bc_args: [text] = []
+        for arg in args:
+            bc_args = bc_args.push(self.translate_operand(arg))
+        if bc_args.len() == 3:
+            self.builder.emit(r"memmove((void*)" + bc_args[1] + r", (void*)" + bc_args[0] + r", (" + bc_args[2] + r") * 8);")
+        else:
+            self.builder.emit_comment(r"bulk_copy: expected 3 args, got " + bc_args.len())
+
     # === Binary Operations ===
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
@@ -281,11 +322,11 @@ impl MirToC:
 
     me translate_const_value(value: MirConstValue) -> text:
         match value:
-            case Int(val): r"" + val
-            case Float(val): r"" + val
-            case Bool(val): if val: "1" else: "0"
-            case Str(val):
-                val var_name = self.builder.add_string_literal(val)
+            case Int(v): r"" + v
+            case Float(v): r"" + v
+            case Bool(v): if v: "1" else: "0"
+            case Str(v):
+                val var_name = self.builder.add_string_literal(v)
                 r"(const char*)" + var_name
             case Zero: "0"
             case Array(elements):
@@ -315,12 +356,12 @@ impl MirToC:
 
     me const_to_i64_expr(value: MirConstValue) -> text:
         match value:
-            case Int(val):
-                r"" + val
-            case Float(val):
-                r"(int64_t)(" + val + r")"
-            case Bool(val):
-                if val: "1" else: "0"
+            case Int(v):
+                r"" + v
+            case Float(v):
+                r"(int64_t)(" + v + r")"
+            case Bool(v):
+                if v: "1" else: "0"
             case Str(_):
                 val str_expr = self.translate_const_value(value)
                 r"(int64_t)(intptr_t)(" + str_expr + r")"
