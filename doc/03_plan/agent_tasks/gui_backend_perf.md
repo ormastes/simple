@@ -683,3 +683,7 @@ Updated: 2026-06-11
   and selector bucket kind/value resolution now use `char_at` for leading
   class/id checks, avoiding one-character substring allocation in startup rule
   bucketing and matching.
+- Simple Web selector token fill allocation removal: `selector_group_parts`
+  now records token start offsets and slices each token once instead of
+  rebuilding tokens with per-character string concatenation during selector
+  parsing.
