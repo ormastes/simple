@@ -676,3 +676,6 @@ Updated: 2026-06-11
 - Simple Web color parser substring removal: direct `#rgb`, `#rrggbb`, and
   `rgb(...)` prefix parsing now uses `char_at`/`text_matches_at` instead of
   allocating tiny substrings during CSS color resolution.
+- Simple Web selector specificity substring removal: class/id specificity
+  prefix checks and multi-class dot counting now use `char_at`, avoiding
+  per-character substring allocation during cascade rule ordering.
