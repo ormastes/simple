@@ -2600,6 +2600,406 @@ RuntimeValue rt_arm_fat32_fats(void) { return ENCODE_INT(g_arm_fat32_fats); }
 RuntimeValue rt_arm_fat32_fat_size(void) { return ENCODE_INT(g_arm_fat32_fat_size); }
 RuntimeValue rt_arm_fat32_root_cluster(void) { return ENCODE_INT(g_arm_fat32_root_cluster); }
 
+/* ==========================================================================
+ * Slice 4 — native block-storage + FAT32 bridge for the arm64 fs-exec stub.
+ *
+ * The arm64 kernel imports c_nvme_adapter.spl / vfs_init.spl which declare the
+ * `simpleos_nvme_*` and `simpleos_fat32_*` externs as a C-only block-device
+ * bridge.  On arm64 QEMU `virt` the backing store is virtio-blk over
+ * virtio-MMIO (NOT NVMe/PCI), so these bridges are wired to the virtio-blk
+ * primitives already present in this file (rt_arm_virtio_blk_read_sector_direct,
+ * g_arm_virtio_blk_dma_storage, configure_queue, the BPB globals).
+ *
+ * ABI (matches the x86_64 reference baremetal_stubs.c exactly):
+ *   - simpleos_nvme_*        : raw uint64_t args, raw int64_t return.
+ *   - simpleos_fat32_read_path / _size : `text` lowers to (const char*, int64_t)
+ *                              under the cranelift baremetal backend; raw int64_t
+ *                              return.
+ *   - simpleos_fat32_read_path_array  : returns a tagged RuntimeValue HEAP_ARRAY
+ *                              whose items are ENCODE_INT bytes.
+ *   - simpleos_fat32_path_read_buffer_addr : raw uint64_t.
+ *
+ * Device init (simpleos_nvme_init) performs the FULL virtio-blk bringup in C —
+ * the rt_arm_virtio_blk_read_sector_direct primitive assumes the queue is
+ * already configured, and on the Simple-orchestrated path that bringup lives in
+ * virtio_blk_arm_init().  This bridge path is C-only, so the handshake is
+ * replicated here verbatim from src/os/drivers/virtio/virtio_blk_part1.spl.
+ *
+ * FAT32 geometry mirrors the Simple side (arm_fs_exec_vfs.spl): the ARM fs-exec
+ * media emitted by scripts/os/make_os_disk.shs uses bps=512, spc=1,
+ * reserved=32, fats=1, fat_size=64, root_cluster=2, data_start=96.  Cluster N
+ * therefore maps to LBA 96 + (N-2); the FAT lives at LBA 32 + fat_offset/512.
+ * ========================================================================== */
+
+/* arm64 virt: virtio-mmio transports at 0x0a000000, 0x200 stride. The block
+ * device QEMU exposes (-device virtio-blk-device,drive=armdisk) lands at slot
+ * 31 -> 0x0a000000 + 31*0x200 = 0x0A003E00. Confirmed three ways: the existing
+ * SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE_DEFAULT in this file, the Simple-side probe
+ * in arm_fs_exec_vfs.spl ("magic={mmio_read32(0x0A003E00)} ..."), and the
+ * qemu args in src/os/qemu_systest_contract.spl (virtio-blk-device on virt). */
+#define SIMPLEOS_ARM_FAT32_BPS        512U
+#define SIMPLEOS_ARM_FAT32_SPC        1U
+#define SIMPLEOS_ARM_FAT32_RESERVED   32U
+#define SIMPLEOS_ARM_FAT32_DATA_START 96U
+
+static int g_simpleos_blk_ready = 0;
+
+/* Path-read buffer exposed to Simple via simpleos_fat32_path_read_buffer_addr().
+ * 4 MiB matches the x86_64 reference; arm64 RAM is 254M with a 64M heap and 8M
+ * stack (fs_exec_linker.ld), so a 4 MiB BSS reservation is well within budget. */
+static uint8_t simpleos_fat32_path_read_buf[4194304] __attribute__((aligned(16)));
+static const uint32_t simpleos_fat32_path_read_buf_size = 4194304;
+
+uint64_t simpleos_fat32_path_read_buffer_addr(void)
+{
+    return (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf;
+}
+
+/* MMIO register access against the configured virtio-blk transport. Offsets are
+ * byte offsets per the virtio-mmio spec (0x000 magic, 0x004 version, 0x008
+ * device id, 0x070 status, etc.). */
+static inline uint32_t _simpleos_blk_reg_rd32(uint32_t off)
+{
+    return *(volatile uint32_t *)(uintptr_t)(g_arm_virtio_blk_mmio_base + (uint64_t)off);
+}
+static inline void _simpleos_blk_reg_wr32(uint32_t off, uint32_t val)
+{
+    *(volatile uint32_t *)(uintptr_t)(g_arm_virtio_blk_mmio_base + (uint64_t)off) = val;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* Full virtio-blk device + queue bringup. Mirrors virtio_blk_arm_init() in
+ * src/os/drivers/virtio/virtio_blk_part1.spl step for step. Returns 1 on
+ * success, 0 on failure. */
+static int _simpleos_blk_bringup(void)
+{
+    if (g_simpleos_blk_ready) return 1;
+
+    g_arm_virtio_blk_mmio_base = SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE_DEFAULT;
+
+    uint32_t magic = _simpleos_blk_reg_rd32(0x000U);
+    if (magic == 0U) {
+        serial_puts("[nvme-c] virtio fail stage=magic_zero\r\n");
+        return 0;
+    }
+    uint32_t version = _simpleos_blk_reg_rd32(0x004U);
+    if (version == 0U) {
+        serial_puts("[nvme-c] virtio fail stage=version_zero\r\n");
+        return 0;
+    }
+    uint32_t device_id = _simpleos_blk_reg_rd32(0x008U);
+    if (device_id != 2U) {
+        serial_puts("[nvme-c] virtio fail stage=device_id\r\n");
+        return 0;
+    }
+
+    /* status: reset -> ACKNOWLEDGE(1) -> DRIVER(2) => 3 */
+    _simpleos_blk_reg_wr32(0x070U, 0U);
+    _simpleos_blk_reg_wr32(0x070U, 1U);
+    _simpleos_blk_reg_wr32(0x070U, 3U);
+
+    /* feature negotiation: accept no features (matches Simple side) */
+    _simpleos_blk_reg_wr32(0x014U, 0U);          /* DeviceFeaturesSel = 0 */
+    (void)_simpleos_blk_reg_rd32(0x010U);        /* DeviceFeatures */
+    _simpleos_blk_reg_wr32(0x024U, 0U);          /* DriverFeaturesSel = 0 */
+    _simpleos_blk_reg_wr32(0x020U, 0U);          /* DriverFeatures = 0 */
+    if (version != 1U) {
+        _simpleos_blk_reg_wr32(0x014U, 1U);
+        (void)_simpleos_blk_reg_rd32(0x010U);
+        _simpleos_blk_reg_wr32(0x024U, 1U);
+        _simpleos_blk_reg_wr32(0x020U, 1U);
+    }
+
+    /* FEATURES_OK(8) -> status becomes 11 (1|2|8) */
+    _simpleos_blk_reg_wr32(0x070U, 11U);
+    uint32_t status = _simpleos_blk_reg_rd32(0x070U);
+    if ((status & 8U) == 0U) {
+        _simpleos_blk_reg_wr32(0x070U, 128U);    /* FAILED */
+        serial_puts("[nvme-c] virtio fail stage=features_ok\r\n");
+        return 0;
+    }
+
+    /* queue 0 setup */
+    _simpleos_blk_reg_wr32(0x030U, 0U);          /* QueueSel = 0 */
+    uint32_t max_queue = _simpleos_blk_reg_rd32(0x034U); /* QueueNumMax */
+    if (max_queue == 0U) {
+        serial_puts("[nvme-c] virtio fail stage=max_queue\r\n");
+        return 0;
+    }
+    _simpleos_blk_reg_wr32(0x038U, 128U);        /* QueueNum = 128 */
+
+    /* zero the shared virtqueue storage, then program queue addresses via the
+     * existing configure_queue helper (handles legacy vs modern layout). */
+    (void)rt_arm_virtq_reset();
+    (void)rt_arm_virtio_blk_configure_queue((RuntimeValue)(uint64_t)version);
+
+    /* DRIVER_OK(4) -> status 15 (1|2|8|4) */
+    _simpleos_blk_reg_wr32(0x070U, 15U);
+
+    g_simpleos_blk_ready = 1;
+    serial_puts("[nvme-c] virtio-blk bringup ok base=");
+    serial_put_hex(g_arm_virtio_blk_mmio_base);
+    serial_puts("\r\n");
+    return 1;
+}
+
+/* Read a 512-byte sector into out[0..512). Returns 1 on success, 0 on failure. */
+static int _simpleos_blk_read_sector(uint64_t lba, uint8_t *out)
+{
+    if (!g_simpleos_blk_ready && !_simpleos_blk_bringup()) return 0;
+    RuntimeValue status = rt_arm_virtio_blk_read_sector_direct((RuntimeValue)lba);
+    if (status == (RuntimeValue)0xffffffffULL || status != (RuntimeValue)0) return 0;
+    uint8_t *src = g_arm_virtio_blk_dma_storage + 16;
+    arm64_invalidate_dcache_range((uint64_t)(uintptr_t)src, 512ULL);
+    for (uint32_t i = 0; i < 512U; i++) out[i] = src[i];
+    return 1;
+}
+
+/* ---- simpleos_nvme_* bridge (backed by virtio-blk) ---- */
+
+int64_t simpleos_nvme_init(void)
+{
+    if (!_simpleos_blk_bringup()) return -19; /* ENODEV */
+    /* Probe sector 0 (FAT32 BPB) so the BPB-derived geometry globals are set,
+     * matching the x86_64 init-and-read-sector0 behaviour. */
+    (void)rt_arm_fat32_probe_bpb_from_virtio();
+    return 0;
+}
+
+int64_t simpleos_nvme_read_sector(uint64_t device_idx, uint64_t lba, uint64_t buf_addr)
+{
+    (void)device_idx;
+    if (buf_addr == 0ULL) return -14; /* EFAULT */
+    uint8_t *dst = (uint8_t *)(uintptr_t)buf_addr;
+    if (!_simpleos_blk_read_sector(lba, dst)) return -5; /* EIO */
+    return 0;
+}
+
+/* LOW-CONFIDENCE / STUBBED: write is not required for read-only fs-exec.
+ * virtio-blk write would need a TYPE_OUT descriptor path that does not exist in
+ * the current arm64 primitives; returns failure so any accidental write attempt
+ * is caught loudly rather than silently corrupting the disk image. FLAGGED. */
+int64_t simpleos_nvme_write_sector(uint64_t device_idx, uint64_t lba, uint64_t buf_addr)
+{
+    (void)device_idx;
+    (void)lba;
+    (void)buf_addr;
+    serial_puts("[nvme-c] write_sector unsupported on arm64 virtio bridge\r\n");
+    return -38; /* ENOSYS */
+}
+
+/* ---- FAT32 read path (over virtio-blk) ---- */
+
+/* Hardcoded geometry helpers, matching arm_fs_exec_vfs.spl. */
+static uint32_t _simpleos_fat_cluster_lba(uint32_t cluster)
+{
+    return SIMPLEOS_ARM_FAT32_DATA_START + ((cluster - 2U) * SIMPLEOS_ARM_FAT32_SPC);
+}
+
+static uint32_t _simpleos_rd16(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+}
+static uint32_t _simpleos_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Follow the FAT chain one link. Returns next cluster or >=0x0ffffff8 at EOC. */
+static uint32_t _simpleos_fat_next(uint32_t cluster)
+{
+    uint8_t sec[512];
+    uint32_t fat_offset = cluster * 4U;
+    uint32_t lba = SIMPLEOS_ARM_FAT32_RESERVED + (fat_offset / 512U);
+    uint32_t off = fat_offset % 512U;
+    if (!_simpleos_blk_read_sector(lba, sec)) return 0x0fffffffU;
+    return _simpleos_rd32(sec + off) & 0x0fffffffU;
+}
+
+/* Build an uppercase 8.3 (11-byte, space-padded) name key from one path
+ * component. Returns 1 on success, 0 if the component is empty/too long. */
+static int _simpleos_make_8_3(const char *comp, uint32_t len, char out11[11])
+{
+    for (uint32_t i = 0; i < 11U; i++) out11[i] = ' ';
+    if (len == 0U || len > 12U) return 0;
+    uint32_t i = 0, o = 0;
+    /* base name (up to 8 chars before '.') */
+    while (i < len && comp[i] != '.' && o < 8U) {
+        char c = comp[i++];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        out11[o++] = c;
+    }
+    while (i < len && comp[i] != '.') i++;
+    if (i < len && comp[i] == '.') {
+        i++;
+        o = 8;
+        while (i < len && o < 11U) {
+            char c = comp[i++];
+            if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+            out11[o++] = c;
+        }
+    }
+    return 1;
+}
+
+static int _simpleos_name_eq(const uint8_t *e, const char name11[11])
+{
+    for (uint32_t i = 0; i < 11U; i++) {
+        if ((char)e[i] != name11[i]) return 0;
+    }
+    return 1;
+}
+
+/* Scan a directory cluster chain for an 8.3 entry. want_dir selects file vs
+ * directory. On a match, sets *size_out (file size) and returns the first
+ * cluster (>=2). Returns 0 if not found. */
+static uint32_t _simpleos_find_entry(uint32_t dir_cluster, const char name11[11],
+                                     int want_dir, uint32_t *size_out)
+{
+    uint8_t sec[512];
+    uint32_t cluster = dir_cluster;
+    while (cluster >= 2U && cluster < 0x0ffffff8U) {
+        uint32_t first_lba = _simpleos_fat_cluster_lba(cluster);
+        for (uint32_t s = 0; s < SIMPLEOS_ARM_FAT32_SPC; s++) {
+            if (!_simpleos_blk_read_sector(first_lba + s, sec)) return 0;
+            for (uint32_t off = 0; off < 512U; off += 32U) {
+                const uint8_t *e = sec + off;
+                if (e[0] == 0x00U) return 0;          /* end of directory */
+                if (e[0] == 0xe5U || e[11] == 0x0fU) continue; /* free / LFN */
+                if (!_simpleos_name_eq(e, name11)) continue;
+                int is_dir = (e[11] & 0x10U) != 0;
+                if (is_dir != want_dir) continue;
+                if (size_out) *size_out = _simpleos_rd32(e + 28U);
+                return ((uint32_t)_simpleos_rd16(e + 20U) << 16) |
+                       _simpleos_rd16(e + 26U);
+            }
+        }
+        cluster = _simpleos_fat_next(cluster);
+    }
+    return 0;
+}
+
+/* Resolve an absolute path like /sys/apps/hello_world.smf to its first cluster
+ * and size by walking each directory component from the root. Returns first
+ * cluster (>=2) and sets *size_out, or 0 if not found. */
+static uint32_t _simpleos_resolve_path(const char *path, int64_t path_len, uint32_t *size_out)
+{
+    if (size_out) *size_out = 0;
+    if (!path || path_len <= 0) return 0;
+
+    /* probe BPB so geometry is valid (also confirms sector 0 magic) */
+    if (rt_arm_fat32_probe_bpb_from_virtio() == (RuntimeValue)0ULL) return 0;
+
+    uint32_t cluster = 2U;      /* root cluster */
+    int64_t i = 0;
+    uint32_t found_size = 0;
+    int matched_any = 0;
+
+    while (i < path_len) {
+        while (i < path_len && path[i] == '/') i++;
+        int64_t start = i;
+        while (i < path_len && path[i] != '/') i++;
+        uint32_t comp_len = (uint32_t)(i - start);
+        if (comp_len == 0U) break;
+
+        int is_last = 1;
+        for (int64_t j = i; j < path_len; j++) {
+            if (path[j] != '/') { is_last = 0; break; }
+        }
+
+        char name11[11];
+        if (!_simpleos_make_8_3(path + start, comp_len, name11)) return 0;
+
+        uint32_t sz = 0;
+        uint32_t next = _simpleos_find_entry(cluster, name11, is_last ? 0 : 1, &sz);
+        if (next < 2U) return 0;
+        cluster = next;
+        found_size = sz;
+        matched_any = 1;
+        if (is_last) break;
+    }
+
+    if (!matched_any) return 0;
+    if (size_out) *size_out = found_size;
+    return cluster;
+}
+
+/* Read a file's full contents (size bytes) into out (capacity cap). Returns
+ * bytes copied. */
+static uint32_t _simpleos_read_chain(uint32_t first_cluster, uint32_t size,
+                                     uint8_t *out, uint32_t cap)
+{
+    uint8_t sec[512];
+    if (first_cluster < 2U || size == 0U || size > cap) return 0;
+    uint32_t copied = 0;
+    uint32_t cur = first_cluster;
+    while (cur >= 2U && cur < 0x0ffffff8U && copied < size) {
+        uint32_t first_lba = _simpleos_fat_cluster_lba(cur);
+        for (uint32_t s = 0; s < SIMPLEOS_ARM_FAT32_SPC && copied < size; s++) {
+            if (!_simpleos_blk_read_sector(first_lba + s, sec)) return 0;
+            for (uint32_t k = 0; k < 512U && copied < size; k++) {
+                out[copied++] = sec[k];
+            }
+        }
+        if (copied >= size) break;
+        cur = _simpleos_fat_next(cur);
+    }
+    return copied;
+}
+
+/* ---- simpleos_fat32_* bridges (text -> (const char*, int64_t)) ---- */
+
+int64_t simpleos_fat32_read_path_size(const char *path, int64_t path_len)
+{
+    if (!_simpleos_blk_bringup()) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size);
+    if (cluster < 2U) return 0;
+    return (int64_t)file_size;
+}
+
+int64_t simpleos_fat32_read_path(const char *path, int64_t path_len)
+{
+    if (!_simpleos_blk_bringup()) return -1;
+    uint32_t file_size = 0;
+    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size);
+    if (cluster < 2U || file_size == 0U) return -1;
+    if (file_size > simpleos_fat32_path_read_buf_size) return -2;
+    __builtin_memset(simpleos_fat32_path_read_buf, 0, file_size);
+    uint32_t read = _simpleos_read_chain(cluster, file_size,
+                                         simpleos_fat32_path_read_buf,
+                                         simpleos_fat32_path_read_buf_size);
+    if (read != file_size) return -3;
+    return 0;
+}
+
+RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
+{
+    if (!_simpleos_blk_bringup()) return rt_array_new((RuntimeValue)0);
+    uint32_t file_size = 0;
+    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size);
+    if (cluster < 2U || file_size == 0U ||
+        file_size > simpleos_fat32_path_read_buf_size)
+        return rt_array_new((RuntimeValue)0);
+    __builtin_memset(simpleos_fat32_path_read_buf, 0, file_size);
+    uint32_t read = _simpleos_read_chain(cluster, file_size,
+                                         simpleos_fat32_path_read_buf,
+                                         simpleos_fat32_path_read_buf_size);
+    if (read != file_size) return rt_array_new((RuntimeValue)0);
+
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)file_size * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return rt_array_new((RuntimeValue)0);
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = file_size;
+    a->cap = file_size;
+    for (uint32_t i = 0; i < file_size; i++)
+        a->items[i] = ENCODE_INT((int64_t)simpleos_fat32_path_read_buf[i]);
+    return ENCODE_PTR(a);
+}
+
 int64_t rt_bytes_u8_at(RuntimeValue arr, int64_t idx)
 {
     if (idx < 0) return 0;
