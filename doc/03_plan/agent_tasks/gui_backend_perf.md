@@ -603,3 +603,6 @@ Updated: 2026-06-11
 - UI Web CSS startup allocation tightening: `generate_css` now uses the shared
   StringBuilder path for its large static fragment stream instead of rebuilding
   the fragment array on each append.
+- Simple Web layout current-node hoisting: `layout` now reuses the current node
+  while resolving width, nowrap text, text wrapping, and replaced element
+  branches, avoiding repeated node indexing in startup layout recursion.
