@@ -649,3 +649,7 @@ Updated: 2026-06-11
 - Simple Web Engine2D resolver alias convergence: the final Simple Web
   Engine2D resolver now also uses the shared Engine2D canonicalizer, keeping
   DirectX, HIP/ROCm, and CPU SIMD aliases aligned across every GUI entrypoint.
+- Simple Web CSS declaration scan allocation removal: `decl_get` and
+  `decl_last_pos` now scan declaration blocks by original-string positions
+  instead of allocating tail/raw substrings for every property lookup during
+  startup style resolution.
