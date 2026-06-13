@@ -552,6 +552,33 @@ Resolves the M11d WATCH item. Two halves, landed together:
   so the lean bridge's if-path isn't exercised in production. Tracked, not
   worked around: G42 is "parser accepts if-then-else", not "if-then-else DONE".
 
+#### G43 — open-ended slice `arr[N..]` — PARSER DONE 2026-06-13
+`parse_range` (parser_expr.spl:276) always called `parse_addition()` for the
+upper bound, so `arr[1..]` choked on `]` (`parts[1..].join(...)` in
+query_engine/query_visibility). Fix: after consuming `..` (165), if the next
+token cannot start an expression (`]`145 `)`141 `,`160 `}`143 Newline180
+Dedent182 EOF190), emit `expr_range(left, expr_int_lit(-1), 0, 0)` — reusing
+the parser's established "-1 = to end" sentinel (same one the colon-slice
+`[start:]` path uses). `..=` still requires a bound (inclusive-open is
+malformed). Round-2 (tmp/site12/g43_slice_seed.spl): open_slice_join /
+open_slice_bare → false; bounded_slice (`a[1..3]`) and normal_range (`0..n`)
+unregressed; control true. Target AST `Range(Expr?, Expr?, bool, Expr?)` has
+optional bounds — a future refinement could carry None instead of -1.
+
+#### G44 — postfix `!` force-unwrap `expr!` / `expr!.field` — PARSER DONE 2026-06-13
+Pervasive (57 files: `loc!.` ×112, `func!.` ×43, `best!.` etc.;
+dwarf_parser.spl:44 `best!.address`). `!` lexes to kind 57 (TOK_NOT); in
+postfix position (after a primary) a `!` is always force-unwrap — prefix-not
+is consumed before the primary. Added kind-57 case to BOTH postfix loops
+(parse_postfix + parse_postfix_on, parser_expr.spl) → `expr_exists_check`.
+Round-2 (tmp/site12/g44_bang_seed.spl): bang_field / bang_method / bang_bare /
+bang_field_cmp → false; prefix_not (`if not done:`) unregressed; control true.
+- **NOTE — semantic fidelity:** `!` is parsed as the unwrap-family
+  `EXPR_EXISTS_CHECK` (the only unwrap node; target AST has no ForceUnwrap).
+  So `expr!` and `expr.?`/`expr?` currently produce identical AST; the
+  force(panic)-vs-exists(nil) distinction needs a dedicated ForceUnwrap
+  ExprKind — tracked M12 item 7. G44 is "parser accepts `!`", not full fidelity.
+
 #### M12 remaining
 1. Interpreted `flat_ast_to_module` entry OOB (see above) — diagnose/fix.
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
@@ -572,6 +599,10 @@ Resolves the M11d WATCH item. Two halves, landed together:
    Wrap bare-expr then/else as single-stmt blocks and convert both branches +
    elif recursion. Touches a hot compiled path — verify no STMT_IF regression
    across the full sweep before landing.
+7. **ForceUnwrap fidelity** (surfaced by G44): postfix `!` parses as
+   `EXPR_EXISTS_CHECK`, conflating force-unwrap with `?`/`.?`. Add a dedicated
+   ForceUnwrap ExprKind + flat node + bridge mapping so panic-on-None vs
+   nil-on-None is distinguishable. Parser-only acceptance already landed.
 
 ---
 

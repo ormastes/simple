@@ -277,6 +277,15 @@ fn parse_range() -> i64:
     val left = parse_addition()
     if par_kind_get() == 165:
         parser_advance()
+        # G43: open-ended range `start..` (e.g. `arr[1..]`). If `..` is followed
+        # by a token that cannot start an expression, there is no upper bound;
+        # emit end = -1, the parser's established "to end" sentinel (same one the
+        # colon-slice `[start:]` path uses at expr_slice neg1).
+        val rk = par_kind_get()
+        val no_upper: bool = (rk == 145 or rk == 141 or rk == 160 or
+            rk == 143 or rk == 180 or rk == 182 or rk == 190)
+        if no_upper:
+            return expr_range(left, expr_int_lit(-1, 0), 0, 0)
         val right = parse_addition()
         return expr_range(left, right, 0, 0)
     if par_kind_get() == 166:
@@ -822,6 +831,14 @@ fn parse_postfix_on(base_expr: i64) -> i64:
             # Standalone existence check: expr.?
             parser_advance()
             base = expr_exists_check(base, 0)
+        elif par_kind_get() == 57:
+            # G44: postfix `!` force-unwrap (expr!, expr!.field). Pervasive
+            # (loc!./func!. etc.). In postfix position a `!` after a primary is
+            # always force-unwrap (prefix-not is handled before the primary).
+            # Parses as the unwrap-family exists-check node; the force(panic)
+            # vs exists(nil) distinction needs a ForceUnwrap ExprKind — M12.
+            parser_advance()
+            base = expr_exists_check(base, 0)
         else:
             break
     # Continue with assignment operators
@@ -972,6 +989,10 @@ fn parse_postfix() -> i64:
             base = expr_field_access(base, field_name, 0)
         elif par_kind_get() == 130:
             # Try/unwrap operator: expr? — propagate Err / None
+            parser_advance()
+            base = expr_exists_check(base, 0)
+        elif par_kind_get() == 57:
+            # G44: postfix `!` force-unwrap (expr!, expr!.field) — see parse_postfix.
             parser_advance()
             base = expr_exists_check(base, 0)
         elif par_kind_get() == 133:
