@@ -71,7 +71,9 @@ Runtime externs needed (Rust seed additions → require `scripts/bootstrap/boots
 - [x] G3 (library layer) — `GpuAccessGraph` implicit RAW/WAW/WAR DAG from declared buffer access sets
 - [x] G4 (device kind) — `usm_malloc_device` CUDA-backed via `rt_cuda_mem_alloc`/`rt_cuda_mem_free`; shared/managed still needs seed externs
 - [x] W4.2 (host path) — `GpuEvent.elapsed_nanos`/`elapsed_ms` + `GpuQueue.enable_profiling`; device timers pending native stream binding
-- [ ] W2.1/W2.3/W2.5/W2.6 — pending (compiler-side)
+- [x] W2.3 Group algorithms — gpu_warp_reduce_add/broadcast/scan_add; OpenCL `sub_group_reduce_add`/`broadcast`/`scan_inclusive_add` + PTX butterfly/idx/up shuffle sequences with predicated adds; contract spec 21/21 (`group_algorithms_contract_spec.spl`); G7 closed at kernel level
+- [x] W4.1 Generic CPU executor — `cpu_kernel_run_1d` + state-backed gpu_* index intrinsics in `gpu_ops.spl`; any kernel-shaped body runs a real 1D ndrange on host (serial; shared-mem/syncthreads exchange unsupported, documented); G10 closed for 1D
+- [ ] W2.1/W2.5/W2.6 — W2.5 in flight (agent), W2.1/W2.6 pending
 - Found during W1: `grid` named-arg parser bug (P2) — `doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md`; API uses grid_dim/block_dim until fixed
 - [ ] W3.x — pending (headline)
 - [ ] W4.x — pending

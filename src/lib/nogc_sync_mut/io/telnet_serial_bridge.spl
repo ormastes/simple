@@ -1,0 +1,261 @@
+# Telnet-over-Serial Bridge (ser2net-style)
+#
+# Exposes a serial console (e.g. FPGA PL UART, SimpleOS/RISC-V boot console)
+# as a telnet server so system tests can drive it with the existing telnet
+# client (std.net.telnet) or any standard telnet tool.
+#
+#   serial device <—— raw bytes ——> bridge <—— RFC 854 telnet ——> TCP client
+#
+# Server negotiation policy: advertises WILL ECHO + WILL SGA (character-at-a-
+# time console mode), refuses every option requested of it (DO -> WONT,
+# WILL -> DONT), unescapes IAC IAC, and strips subnegotiation blocks.
+#
+# Byte-cliff note: the serial SFFI surface is text-typed, so non-UTF-8 bytes
+# from the wire are lossy-converted. Fine for ASCII boot consoles; do not use
+# this bridge for binary file transfer (xmodem etc.).
+#
+# Depends on: io/serial_sffi.spl, net/sffi.spl
+
+use std.error.{SimpleError, error}
+use std.nogc_sync_mut.io.serial_sffi.{SerialPort, serial_open, serial_close, serial_read, serial_write, serial_set_timeout, serial_flush}
+use std.net.sffi.{TcpListener, TcpStream, tcp_listener_bind, tcp_listener_accept_timeout, tcp_listener_close, tcp_stream_read, tcp_stream_set_read_timeout, tcp_stream_set_nodelay, tcp_stream_close, bytes_to_string}
+
+# ============================================================================
+# Telnet protocol constants (RFC 854) — BRIDGE_ prefix avoids colliding with
+# the client-side constants in net/telnet.spl when both are imported.
+# ============================================================================
+
+val BRIDGE_IAC = 255
+val BRIDGE_DONT = 254
+val BRIDGE_DO = 253
+val BRIDGE_WONT = 252
+val BRIDGE_WILL = 251
+val BRIDGE_SB = 250
+val BRIDGE_SE = 240
+val BRIDGE_OPT_ECHO = 1
+val BRIDGE_OPT_SGA = 3
+
+# Poll interval for the relay loop (both TCP and serial read timeouts).
+val BRIDGE_POLL_MS = 20
+
+fn bridge_byte(value: i64) -> u8:
+    """Convert integer constant to a wire byte."""
+    value.to_u8()
+
+# ============================================================================
+# Pure protocol helpers (spec-tested)
+# ============================================================================
+
+struct TelnetFilterResult:
+    """Result of filtering client bytes: console-clean data + protocol replies."""
+    clean: [u8]
+    replies: [u8]
+
+fn bridge_initial_negotiation() -> [u8]:
+    """Server greeting: WILL ECHO + WILL SGA puts clients in character mode."""
+    var out: [u8] = []
+    out.push(bridge_byte(BRIDGE_IAC))
+    out.push(bridge_byte(BRIDGE_WILL))
+    out.push(bridge_byte(BRIDGE_OPT_ECHO))
+    out.push(bridge_byte(BRIDGE_IAC))
+    out.push(bridge_byte(BRIDGE_WILL))
+    out.push(bridge_byte(BRIDGE_OPT_SGA))
+    out
+
+fn bridge_filter_client_bytes(data: [u8]) -> TelnetFilterResult:
+    """Strip IAC sequences from client bytes; build refusal replies.
+
+    Policy:
+    - IAC IAC        -> literal 0xFF data byte
+    - IAC DO opt     -> reply IAC WONT opt (refuse), strip
+    - IAC WILL opt   -> reply IAC DONT opt (refuse), strip
+    - IAC DONT/WONT  -> strip silently (we never insisted)
+    - IAC SB .. IAC SE -> strip whole subnegotiation
+    - other IAC cmd  -> strip (NOP, AYT, BREAK, ...)
+    """
+    var clean: [u8] = []
+    var replies: [u8] = []
+    val len = data.length()
+    var i = 0
+
+    while i < len:
+        val byte = data[i].to_i64()
+        if byte != BRIDGE_IAC:
+            clean.push(data[i])
+            i = i + 1
+        else:
+            if i + 1 >= len:
+                # Lone IAC at buffer end — drop
+                i = i + 1
+            else:
+                val cmd = data[i + 1].to_i64()
+                if cmd == BRIDGE_IAC:
+                    clean.push(bridge_byte(BRIDGE_IAC))
+                    i = i + 2
+                else:
+                    if cmd == BRIDGE_SB:
+                        # Skip until IAC SE
+                        i = i + 2
+                        var sb_done = false
+                        while (i < len and
+                               not sb_done):
+                            val sb_byte = data[i].to_i64()
+                            if sb_byte == BRIDGE_IAC and i + 1 < len:
+                                val next = data[i + 1].to_i64()
+                                if next == BRIDGE_SE:
+                                    i = i + 2
+                                    sb_done = true
+                                else:
+                                    i = i + 1
+                            else:
+                                i = i + 1
+                    else:
+                        if (cmd == BRIDGE_DO or cmd == BRIDGE_DONT or
+                            cmd == BRIDGE_WILL or cmd == BRIDGE_WONT):
+                            if i + 2 < len:
+                                val option = data[i + 2]
+                                if cmd == BRIDGE_DO:
+                                    replies.push(bridge_byte(BRIDGE_IAC))
+                                    replies.push(bridge_byte(BRIDGE_WONT))
+                                    replies.push(option)
+                                if cmd == BRIDGE_WILL:
+                                    replies.push(bridge_byte(BRIDGE_IAC))
+                                    replies.push(bridge_byte(BRIDGE_DONT))
+                                    replies.push(option)
+                                i = i + 3
+                            else:
+                                # Truncated negotiation — drop remainder
+                                i = i + 2
+                        else:
+                            # NOP / AYT / BREAK / other 2-byte command
+                            i = i + 2
+
+    TelnetFilterResult(clean: clean, replies: replies)
+
+# ============================================================================
+# Bridge runtime
+# ============================================================================
+
+struct BridgeConfig:
+    """Bridge runtime configuration.
+
+    max_sessions:  stop after serving N sessions (0 = serve forever)
+    idle_limit_ms: close a session after this long with no traffic (0 = never)
+    max_wait_ms:   give up if no client connects within this window (0 = wait forever)
+    """
+    device: text
+    baud: i64
+    bind_addr: text
+    max_sessions: i64
+    idle_limit_ms: i64
+    max_wait_ms: i64
+
+fn bridge_relay_session(stream: TcpStream, port: SerialPort, idle_limit_ms: i64) -> i64:
+    """Relay bytes between one telnet client and the serial port.
+
+    Returns total payload bytes relayed (both directions).
+    """
+    var relayed = 0
+    var idle_ms = 0
+    var done = false
+
+    while not done:
+        var traffic = 0
+
+        # Client -> serial
+        val r = tcp_stream_read(stream, 4096)
+        match r:
+            Ok(data):
+                if data.length() == 0:
+                    # Orderly client disconnect
+                    done = true
+                else:
+                    val filtered = bridge_filter_client_bytes(data)
+                    if filtered.replies.length() > 0:
+                        stream.write_all(filtered.replies)
+                    if filtered.clean.length() > 0:
+                        serial_write(port, bytes_to_string(filtered.clean))
+                        serial_flush(port)
+                        traffic = traffic + filtered.clean.length()
+            Err(e):
+                # Read timeout — no client bytes this tick
+                pass_do_nothing
+
+        # Serial -> client
+        if not done:
+            val from_serial = serial_read(port, 4096)
+            if from_serial.len() > 0:
+                val out = from_serial.as_bytes()
+                stream.write_all(out)
+                traffic = traffic + out.length()
+
+        if traffic == 0:
+            idle_ms = idle_ms + BRIDGE_POLL_MS
+            if idle_limit_ms > 0 and idle_ms >= idle_limit_ms:
+                done = true
+        else:
+            relayed = relayed + traffic
+            idle_ms = 0
+
+    relayed
+
+fn bridge_serve(cfg: BridgeConfig) -> i64:
+    """Open serial + TCP listener and serve telnet sessions per config.
+
+    Returns 0 if at least one session was served, 1 on setup failure or
+    when no client connected within max_wait_ms.
+    """
+    val device = cfg.device
+    val bind_addr = cfg.bind_addr
+    val baud = cfg.baud
+
+    val port = serial_open(device, baud)
+    if not port.is_valid:
+        print("BRIDGE_ERROR=serial_open_failed device={device}")
+        return 1
+    serial_set_timeout(port, BRIDGE_POLL_MS)
+
+    val bind_result = tcp_listener_bind(bind_addr)
+    match bind_result:
+        Err(e):
+            serial_close(port)
+            print("BRIDGE_ERROR=bind_failed addr={bind_addr}")
+            return 1
+        Ok(listener):
+            print("BRIDGE_LISTENING addr={bind_addr} device={device} baud={baud}")
+            var sessions = 0
+            var waited_ms = 0
+            var serving = true
+
+            while serving:
+                val accepted = tcp_listener_accept_timeout(listener, 200)
+                match accepted:
+                    Ok(stream):
+                        tcp_stream_set_nodelay(stream, true)
+                        tcp_stream_set_read_timeout(stream, BRIDGE_POLL_MS)
+                        stream.write_all(bridge_initial_negotiation())
+                        val relayed = bridge_relay_session(stream, port, cfg.idle_limit_ms)
+                        tcp_stream_close(stream)
+                        sessions = sessions + 1
+                        print("BRIDGE_SESSION_DONE bytes={relayed} sessions={sessions}")
+                        waited_ms = 0
+                        if cfg.max_sessions > 0 and sessions >= cfg.max_sessions:
+                            serving = false
+                    Err(e):
+                        waited_ms = waited_ms + 200
+                        if cfg.max_wait_ms > 0 and waited_ms >= cfg.max_wait_ms:
+                            print("BRIDGE_TIMEOUT no_client_within_ms={waited_ms}")
+                            serving = false
+
+            tcp_listener_close(listener)
+            serial_close(port)
+            if sessions > 0:
+                print("BRIDGE_DONE sessions={sessions}")
+                return 0
+            return 1
+
+export TelnetFilterResult, BridgeConfig
+export BRIDGE_IAC, BRIDGE_DONT, BRIDGE_DO, BRIDGE_WONT, BRIDGE_WILL, BRIDGE_SB, BRIDGE_SE
+export BRIDGE_OPT_ECHO, BRIDGE_OPT_SGA
+export bridge_initial_negotiation, bridge_filter_client_bytes
+export bridge_relay_session, bridge_serve

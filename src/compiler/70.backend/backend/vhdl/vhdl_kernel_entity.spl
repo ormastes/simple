@@ -23,7 +23,6 @@ use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind}
 use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
 use compiler.backend.backend.gpu_backend_metadata.{GpuBackendKernelPlan, gpu_backend_accepts_kernel, gpu_backend_plan_module_kernels}
 use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
-use compiler.backend.backend.vhdl_backend.{VhdlEntity}
 
 # ============================================================================
 # Acceptance helpers
@@ -138,16 +137,15 @@ fn vhdl_kernel_validate_return(func: MirFunction) -> text:
 
 fn vhdl_kernel_param_name(func: MirFunction, idx: i64) -> text:
     """Return VHDL port name for the idx-th parameter."""
+    var result = "arg{idx}"
     for local in func.locals:
         match local.kind:
             case Arg(i):
-                if i == idx:
-                    if local.name.?:
-                        return local.name.unwrap()
-                    return "arg{idx}"
+                if i == idx and local.name.?:
+                    result = local.name.unwrap()
             case _:
                 ()
-    "arg{idx}"
+    result
 
 # ============================================================================
 # Main emission: emit_vhdl_kernel_entity
@@ -258,23 +256,23 @@ fn emit_vhdl_kernel_entity(func: MirFunction) -> Result<text, CompileError>:
 fn emit_vhdl_kernel_entities_for_module(module: MirModule) -> Result<text, CompileError>:
     """
     Emit VHDL kernel entities for all @gpu_kernel functions in module
-    that have gpu_target=vhdl.  Returns concatenated VHDL source, or
-    the first diagnostic for any rejected kernel.
+    that have gpu_target=vhdl.  Kernels for other backends (opencl, cuda, etc.)
+    are silently skipped.  Returns concatenated VHDL source, or the first
+    diagnostic for a vhdl-accepted kernel that fails validation.
     """
-    val plan = vhdl_kernel_plan_module(module)
-    if not plan.ready:
-        return Err(compileerror_backend_error(BackendKind.Vhdl, plan.diagnostic))
-
-    var parts: [text] = []
+    var output = ""
     for symbol in module.functions.keys():
         val func: MirFunction = module.functions[symbol]
         if vhdl_kernel_accepts(func):
             val result = emit_vhdl_kernel_entity(func)
             if result.is_err():
                 return Err(result.unwrap_err())
-            parts = parts.push(result.unwrap())
+            if output.len() > 0:
+                output = output + "\n\n" + result.unwrap()
+            else:
+                output = result.unwrap()
 
-    Ok(parts.join("\n\n"))
+    Ok(output)
 
 export vhdl_kernel_accepts
 export vhdl_kernel_plan_module

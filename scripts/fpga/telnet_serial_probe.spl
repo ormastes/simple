@@ -1,0 +1,52 @@
+# Telnet probe client for serial-bridge system tests
+#
+# Connects to a telnet server (the telnet_serial_bridge), captures output for
+# up to CAPTURE_MS, and reports whether EXPECT appeared in the stream.
+#
+#   bin/simple run scripts/fpga/telnet_serial_probe.spl HOST PORT CAPTURE_MS EXPECT
+#
+# Markers on stdout: TELNET_PROBE_CONNECTED / TELNET_PROBE_RX_BEGIN/END /
+# TELNET_PROBE_STATUS=marker_seen|no_marker|connect_failed
+
+use std.net.telnet.{telnet_connect, telnet_receive, telnet_close}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn main():
+    val args = rt_cli_get_args()
+    if args.len() < 4:
+        print("usage: telnet_serial_probe.spl HOST PORT CAPTURE_MS EXPECT")
+        return
+
+    val host = args[0]
+    val port = args[1].to_int()
+    val capture_ms = args[2].to_int()
+    val expect_text = args[3]
+
+    val conn_result = telnet_connect(host, port, 5000)
+    match conn_result:
+        Err(e):
+            print("TELNET_PROBE_STATUS=connect_failed host={host} port={port}")
+        Ok(conn):
+            print("TELNET_PROBE_CONNECTED host={host} port={port}")
+            var received = ""
+            var waited = 0
+            var found = false
+            while (waited < capture_ms and
+                   not found):
+                val chunk = telnet_receive(conn, 200)
+                if chunk.len() > 0:
+                    received = received + chunk
+                    if received.contains(expect_text):
+                        found = true
+                waited = waited + 200
+            telnet_close(conn)
+            print("TELNET_PROBE_RX_BEGIN")
+            print(received)
+            print("TELNET_PROBE_RX_END")
+            if found:
+                print("TELNET_PROBE_STATUS=marker_seen")
+            else:
+                print("TELNET_PROBE_STATUS=no_marker waited_ms={waited}")
+
+main()
