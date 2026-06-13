@@ -879,7 +879,7 @@ expect(backend_priority("rocm")).to_equal(2)
 
 </details>
 
-#### backend_priority: cpu is lowest priority (10)
+#### backend_priority: cpu is lowest priority (12)
 
 <details>
 <summary>Executable SSpec</summary>
@@ -888,7 +888,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_priority("cpu")).to_equal(10)
+expect(backend_priority("cpu")).to_equal(12)
 ```
 
 </details>
@@ -916,7 +916,7 @@ expect(s).to_be_less_than(c)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -925,6 +925,8 @@ expect(order[0]).to_equal("metal")
 expect(order[1]).to_equal("cuda")
 expect(order[2]).to_equal("rocm")
 expect(order[4]).to_equal("vulkan")
+expect(order[5]).to_equal("directx")
+expect(order[6]).to_equal("opencl")
 expect(order[order.len() - 1]).to_equal("cpu")
 ```
 

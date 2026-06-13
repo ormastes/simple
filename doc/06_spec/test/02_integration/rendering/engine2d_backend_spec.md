@@ -271,7 +271,7 @@ e3.shutdown()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -280,10 +280,11 @@ expect(order[0]).to_equal("metal")
 expect(order[1]).to_equal("cuda")
 expect(order[2]).to_equal("rocm")
 expect(order[4]).to_equal("vulkan")
-expect(order[5]).to_equal("opencl")
+expect(order[5]).to_equal("directx")
+expect(order[6]).to_equal("opencl")
 expect(order[order.len() - 1]).to_equal("cpu")
 expect(backend_preference_summary()).to_contain("metal > cuda > rocm/hip")
-expect(backend_preference_summary()).to_contain("vulkan > opencl")
+expect(backend_preference_summary()).to_contain("vulkan > directx > opencl")
 ```
 
 </details>
