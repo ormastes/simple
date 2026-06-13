@@ -12,11 +12,48 @@
 Note: `simpleos_platform_targets()[0].name` works while `get_all_scenarios()[0].name` does not, despite both being `-> [class]` — the seed's element-type resolution differs by call site. Root cause remains a Rust-seed interpreter bug (document-don't-patch); not chased further this session.
 
 ## Build-feasibility blocker for arm64/arm32/riscv32/x86_64 fs-exec kernels (2026-06-13)
-With the scenario Option crash fixed, `os build` now reaches the real walls — TWO independent, environmental, NOT code-fixable this session:
-1. **LLVM backend absent** — arm64/arm32/riscv32 fs-exec lanes use `backend=llvm`; this host's Rust driver was built without the `llvm` feature. Build fails in ~20ms at the backend-availability check: `native backend 'llvm' is not available in this build; rebuild the Rust driver with --features llvm or use --backend cranelift`. (riscv64 builds because it uses `backend=cranelift`.)
-2. **Entry sources absent** — `examples/09_embedded/simple_os/arch/{arm64,arm32,riscv32}/` directories do not exist; only `riscv64/` and `x86_64/` are present (and x86_64 lacks `fs_exec_entry.spl`).
+With the scenario Option crash fixed, `os build` now reaches the real walls. The
+binding constraint is **missing entry sources**, NOT the backend (verified below).
 
-Consequence: the four `sys_qemu_<arch>_fs_exec_spec.spl` system tests for arm64/arm32/riscv32/x86_64 correctly classify as `missing-media` (diagnosed RED, fail-closed) and are NOT flippable to live-pass on this host. riscv64 + x86_32 live-pass. This is the honest live-vs-contract split.
+### Backend verification — cranelift is NOT the blocker (2026-06-13)
+The default backend table (`_os_build_backend_for_target`) routes arm/riscv/x86 OS
+lanes to `llvm`, and this host's driver lacks the `llvm` feature, so the *default*
+path fails at the LLVM-availability check (~20ms): `native backend 'llvm' is not
+available in this build; ... use --backend cranelift`. But forcing
+`SIMPLE_OS_BUILD_BACKEND=cranelift` was tested for all four arches:
+
+| Arch  | target triple              | cranelift accepts triple? | fails at |
+|-------|----------------------------|---------------------------|----------|
+| arm64  | aarch64-unknown-none      | YES (past backend stage)  | read entry .spl → ENOENT (~32ms) |
+| arm32  | armv7-unknown-none-eabihf | YES                       | read entry .spl → ENOENT (~37ms) |
+| riscv32| riscv32-unknown-none      | YES                       | read entry .spl → ENOENT (~42ms) |
+| x86_64 | x86_64-unknown-none       | YES                       | read entry .spl → ENOENT (~32ms) |
+
+So cranelift accepts every triple at invocation (no "target not supported"
+rejection) and all four then fail identically at `Build failed: failed to read
+.../<arch>/<entry>.spl: No such file or directory`. Cranelift codegen for these
+freestanding targets could NOT be confirmed because the build never reaches
+codegen — there is no source to compile. (The code's own comment warns cranelift
+"does not provide i686 or RISC-V freestanding object targets", so riscv32/x86 would
+likely still fail at codegen even if sources existed; arm64/arm32 are not in that
+exclusion and are unverified.)
+
+### Binding wall — entry sources were deleted in a bulk reorg
+The four entry `.spl` files (`arch/arm64/fs_exec_entry.spl`,
+`arch/arm32/fs_exec_entry.spl`, `arch/riscv32/smoke_entry.spl`,
+`arch/x86_64/fs_test_entry.spl`) plus their linker scripts and boot stubs were
+**deleted in commit `de204598bfa`** (2026-06-08, a 238,935-file bulk reorg, blank
+message). They are not tracked anywhere in the current tree under any name (only
+`riscv64/ssh_live_entry.spl` and `x86_64/green_carrier_probe_entry.spl` survive;
+the `arm64/arm32/riscv32` arch dirs no longer exist). The riscv64 fs-exec kernel
+already on disk was itself built from a now-deleted `smoke_entry.spl`. Restoring
+them means reviving a deleted subsystem across a major reorg (dependencies/module
+paths changed) — a separate task, out of scope here.
+
+Consequence: the four `sys_qemu_<arch>_fs_exec_spec.spl` system tests for
+arm64/arm32/riscv32/x86_64 correctly classify as `missing-media` (diagnosed RED,
+fail-closed) and are NOT flippable to live-pass on this host. riscv64 + x86_32
+live-pass. This is the honest live-vs-contract split.
 
 ## Symptom
 Calling `simpleos_platform_qemu_smoke_lane("riscv64")` (src/os/port/simpleos_multiplatform_build_part3.spl:174) in interpreter mode kills the process with exit code 248 and no diagnostic. When reached through spec files (e.g. `test/01_unit/os/qemu_runner_protection_acceptance_spec.spl`), it instead surfaces as:
