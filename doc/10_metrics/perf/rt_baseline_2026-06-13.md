@@ -30,5 +30,29 @@ sites, not the raw prefix.
    `rt_gui_set_text_buf`) behind stdlib public APIs so example/app code calls the stdlib, not `rt_*`.
 3. Re-measure; record before/after in this table.
 
+## Reduction sweep — DONE (measured) 2026-06-13
+A real migration of app-facing example code off raw `rt_*` externs to `std.io_runtime`
+wrappers (`read_file`/`write_file`/`file_exists`/`env_get`/`process_run`), run via 5 parallel
+agents over disjoint directory subtrees, each changed file verified `bin/simple check` OK.
+
+| Metric | Before | After | Δ |
+|--------|------:|------:|---:|
+| Example files declaring migratable file/env `rt_*` externs | 82 | **39** | **−43** |
+| `rt_process_run` extern decls in examples | 38 | **23** | **−15** |
+| Raw `extern fn rt_*` decls removed (file/env/process) | — | — | **~84** |
+
+Migrated dirs: `examples/06_io/{ui,smux,tls_hosted_client,simple_web_server}` +
+`examples/10_tooling/{obsidian-search,trace32_tools,mcpgdb,llm_cli_tools}`. Commit `rrp 0d9`.
+
+**Honestly NOT migrated** (no false-green): externs with no 1:1 stdlib wrapper (`rt_dir_list`,
+`rt_file_size`, `rt_file_delete`, `rt_dir_create` variants) or signature mismatch (`text?`
+returns vs `read_file -> text`); hardware/MMIO/GUI externs (`rt_port_*`, `rt_mmio_*`, `rt_gui_*`)
+are intentional low-level access and correctly stay raw.
+
+## Remaining (smaller, follow-up)
+The 39 residual files are mostly: non-1:1 externs (need new stdlib wrappers first), GUI examples
+with pre-existing unrelated `check` failures, and hardware examples that legitimately keep raw
+externs. Closing them requires adding the missing stdlib wrappers — a bounded follow-up.
+
 ## Status
-OPEN — baseline captured; reduction sweep staged.
+SWEEP DONE — measured reduction landed (82→39 files); residual needs new wrappers (follow-up).
