@@ -621,3 +621,6 @@ Updated: 2026-06-11
 - Simple Web Draw IR first-visible scan removal: Draw IR command collection now
   records the first visible node during the count pass instead of scanning the
   node list a second time before filling the exact-size command array.
+- Simple Web final paint visibility hoisting: the final image/icon/text paint
+  pass now reuses per-node visibility and widget-mode booleans instead of
+  repeating the same display/visibility checks for each branch.
