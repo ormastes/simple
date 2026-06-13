@@ -197,6 +197,20 @@ Repository guards:
 - `find doc/06_spec -name '*_spec.spl' | wc -l`
 - `sh scripts/setup/install-spipe-dev-command.shs --check`
 
+## Hosted Fairness Decision
+
+The supported hosted fairness contract for CPU-heavy multicore-green work is
+the explicit sliced API. `multicore_green_spawn_sliced` lets user code expose
+scalar progress state, execute one bounded slice, and requeue itself so other
+runtime-pool work can run even when hosted parallelism is `1`.
+
+This is a deliberate API decision rather than an implicit preemption claim:
+ordinary `multicore_green_spawn` closures still run until they return, and the
+profile `Hosted Fairness Evidence` section must keep describing sliced fairness
+as explicit scalar-state requeueing. Future compiler/runtime preemption can
+extend the model, but it must add separate executable evidence before docs call
+plain closures Go-like tight-loop preemptive work.
+
 ## Open Design Decisions
 
 - Scheduler-owned parallelism handoff: the hosted runtime-pool facade now has
@@ -206,8 +220,8 @@ Repository guards:
   limits. The AP ring/user context-switch proof itself is now closed by the
   opt-in live gate tracked in
   `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
-- Preemption strategy: compiler-inserted yields, runtime safepoints, or an
-  explicit resumable task-slice model. Current hosted runtime-pool workers run
+- Future ordinary-closure preemption strategy: compiler-inserted yields or
+  runtime safepoints. Current hosted runtime-pool workers run
   each popped closure to return before selecting another queued task, so raw
   `thread_yield()` inside that closure is not enough to provide Go-like
   fairness on the host lane.

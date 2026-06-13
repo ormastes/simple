@@ -241,8 +241,11 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
 
 Future roadmap work remains explicit: expanding blocking coverage beyond the
 current green-channel wake pass, and wiring final IDT/APIC-owned queue state
-plus actual compiler insertion/poll-placement or another resumable task-slice
-mechanism before claiming tight-loop fairness comparable to Go. The final AP
+plus actual compiler insertion/poll-placement before claiming ordinary-closure
+tight-loop preemption comparable to Go. The supported hosted fairness contract
+for CPU-heavy Simple work is the explicit resumable task-slice model exposed by
+`multicore_green_spawn_sliced`; profile and API evidence must keep that
+separate from plain `multicore_green_spawn` closure semantics. The final AP
 ring/user handoff proof itself is now closed by the opt-in live gate.
 
 ## Known Gaps

@@ -135,7 +135,9 @@ Failed: 0
   report so the release-visible evidence points at the same report enforced by
   the active profile gate.
 - The tracking row must carry the dedicated hosted fairness/preemption gap
-  tracker until host-side Go-parity evidence is actually closed.
+  tracker and record that the explicit sliced API is the supported hosted
+  CPU-heavy fairness contract while ordinary closure preemption remains future
+  work.
 - The tracking row must carry the hosted fairness-preemption executable proofs,
   including the one-worker monopolization gap and the raw `thread_yield()`
   insufficiency proof, so the remaining host boundary cannot drift back to
@@ -574,7 +576,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -594,6 +596,9 @@ expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_swit
 expect(row).to_contain("SimpleOS final ring/user handoff is closed")
 expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
 step("Verify hosted fairness executable proofs are linked")
+expect(row).to_contain("Hosted fairness contract tracking is now explicit")
+expect(row).to_contain("multicore_green_spawn_sliced is the supported hosted CPU-heavy fairness contract")
+expect(row).to_contain("ordinary multicore_green_spawn closure preemption remains future work")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl")

@@ -10,8 +10,8 @@
 This perf stress spec keeps the Simple concurrency rows comparable: OS threads,
 cooperative green, and multicore green all run the same deterministic fanout
 workload and must produce the same checksum. The multicore-green row separately
-reports runtime-pool and work-stealing evidence, so inline fallback or a single
-FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
+classifies runtime-pool and work-stealing evidence, so inline fallback or a
+single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 ## Requirements
 
@@ -193,7 +193,7 @@ describe "multicore green fanout stress":
         expect(stdout.trim()).to_equal("")
         expect(code).to_equal(0)
 
-    slow_it "matches multicore-green fanout checksum and reports M:N evidence":
+    slow_it "matches multicore-green fanout checksum and classifies M:N evidence":
         step("Prepare deterministic multicore-green fanout inputs")
         val iterations = 512
         val expected = fanout_expected(8, iterations)
@@ -230,13 +230,22 @@ describe "multicore green fanout stress":
 
         step("Join multicore-green workers and classify evidence")
         val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
-        val has_mn_evidence = pool_used == 8
-        val evidence_count = if has_mn_evidence: pool_used else: inline_fallback
+
+        val queue_model = multicore_queue_model()
+        val has_mn_evidence = pool_used == 8 and inline_fallback == 0 and queue_model == "work_stealing"
+        val has_inline_fallback_only = pool_used == 0 and inline_fallback == 8 and queue_model == "inline_or_unavailable"
+        val evidence_class = if has_mn_evidence: 2 elif has_inline_fallback_only: 1 else: 0
 
         step("Verify checksum and runtime evidence accounting")
         expect(got).to_equal(expected)
         expect(pool_used + inline_fallback).to_equal(8)
-        expect(evidence_count).to_equal(8)
+        step("Verify the row is either full M:N evidence or explicit inline fallback, never partial evidence")
+        expect(evidence_class).to_be_greater_than(0)
         if has_mn_evidence:
             step("Verify runtime-pool fanout uses work stealing")
-            expect(multicore_queue_model()).to_equal("work_stealing")
+            expect(queue_model).to_equal("work_stealing")
+        else:
+            step("Verify inline fallback is not counted as M:N evidence")
+            expect(pool_used).to_equal(0)
+            expect(inline_fallback).to_equal(8)
+            expect(queue_model).to_equal("inline_or_unavailable")

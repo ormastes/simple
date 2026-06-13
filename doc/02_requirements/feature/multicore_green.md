@@ -44,8 +44,12 @@ SimpleOS scheduler work distinct and verifiable.
   per-worker queues, hosted `multicore_green_set_parallelism` /
   `multicore_green_parallelism` evidence as the initial Go `GOMAXPROCS`-like
   control, scheduler-owned carrier limits beyond the hosted pool, and
-  preemption or compiler-inserted yield points before claiming tight-loop
-  fairness comparable to modern Go.
+  the supported hosted fairness contract. For CPU-heavy hosted work, that
+  contract is `multicore_green_spawn_sliced`: tasks expose scalar progress
+  state and requeue between bounded slices. Ordinary `multicore_green_spawn`
+  closures still run to return and must not be described as preempted tight-loop
+  work until compiler-inserted yield points or equivalent runtime preemption
+  have executable evidence.
 - REQ-MCG-009: C, Go, and Rust may be used as baselines, research references,
   seed implementations, or runtime/compiler implementation contexts; they must
   not replace Simple user-facing concurrency APIs.

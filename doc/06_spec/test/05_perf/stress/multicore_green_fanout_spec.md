@@ -1,6 +1,6 @@
 # Multicore Green Fanout Stress Specification
 
-> This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately reports runtime-pool and work-stealing evidence, so inline fallback or a single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
+> This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately classifies runtime-pool and work-stealing evidence, so inline fallback or a single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 <!-- sdn-diagram:id=multicore_green_fanout_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_fanout_spec -> std
 
 # Multicore Green Fanout Stress Specification
 
-This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately reports runtime-pool and work-stealing evidence, so inline fallback or a single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
+This perf stress spec keeps the Simple concurrency rows comparable: OS threads, cooperative green, and multicore green all run the same deterministic fanout workload and must produce the same checksum. The multicore-green row separately classifies runtime-pool and work-stealing evidence, so inline fallback or a single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 ## At a Glance
 
@@ -56,8 +56,8 @@ This perf stress spec keeps the Simple concurrency rows comparable: OS threads, 
 This perf stress spec keeps the Simple concurrency rows comparable: OS threads,
 cooperative green, and multicore green all run the same deterministic fanout
 workload and must produce the same checksum. The multicore-green row separately
-reports runtime-pool and work-stealing evidence, so inline fallback or a single
-FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
+classifies runtime-pool and work-stealing evidence, so inline fallback or a
+single FIFO queue cannot be mistaken for Go-like M:N CPU-parallel evidence.
 
 ## Requirements
 
@@ -142,9 +142,9 @@ expect(code).to_equal(0)
 </details>
 
 <details>
-<summary>Advanced: matches multicore-green fanout checksum and reports M:N evidence</summary>
+<summary>Advanced: matches multicore-green fanout checksum and classifies M:N evidence</summary>
 
-#### matches multicore-green fanout checksum and reports M:N evidence _(slow)_
+#### matches multicore-green fanout checksum and classifies M:N evidence _(slow)_
 
 - Prepare deterministic multicore-green fanout inputs
 - Spawn eight multicore-green workers
@@ -153,15 +153,19 @@ expect(code).to_equal(0)
 - Verify checksum and runtime evidence accounting
    - Expected: got equals `expected`
    - Expected: pool_used + inline_fallback equals `8`
-   - Expected: evidence_count equals `8`
+- Verify the row is either full M:N evidence or explicit inline fallback, never partial evidence
 - Verify runtime-pool fanout uses work stealing
-   - Expected: multicore_queue_model() equals `work_stealing`
+   - Expected: queue_model equals `work_stealing`
+- Verify inline fallback is not counted as M:N evidence
+   - Expected: pool_used equals `0`
+   - Expected: inline_fallback equals `8`
+   - Expected: queue_model equals `inline_or_unavailable`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -201,16 +205,25 @@ if h7.ran_inline_fallback(): inline_fallback = inline_fallback + 1
 
 step("Join multicore-green workers and classify evidence")
 val got = h0.join() + h1.join() + h2.join() + h3.join() + h4.join() + h5.join() + h6.join() + h7.join()
-val has_mn_evidence = pool_used == 8
-val evidence_count = if has_mn_evidence: pool_used else: inline_fallback
+
+val queue_model = multicore_queue_model()
+val has_mn_evidence = pool_used == 8 and inline_fallback == 0 and queue_model == "work_stealing"
+val has_inline_fallback_only = pool_used == 0 and inline_fallback == 8 and queue_model == "inline_or_unavailable"
+val evidence_class = if has_mn_evidence: 2 elif has_inline_fallback_only: 1 else: 0
 
 step("Verify checksum and runtime evidence accounting")
 expect(got).to_equal(expected)
 expect(pool_used + inline_fallback).to_equal(8)
-expect(evidence_count).to_equal(8)
+step("Verify the row is either full M:N evidence or explicit inline fallback, never partial evidence")
+expect(evidence_class).to_be_greater_than(0)
 if has_mn_evidence:
     step("Verify runtime-pool fanout uses work stealing")
-    expect(multicore_queue_model()).to_equal("work_stealing")
+    expect(queue_model).to_equal("work_stealing")
+else:
+    step("Verify inline fallback is not counted as M:N evidence")
+    expect(pool_used).to_equal(0)
+    expect(inline_fallback).to_equal(8)
+    expect(queue_model).to_equal("inline_or_unavailable")
 ```
 
 </details>

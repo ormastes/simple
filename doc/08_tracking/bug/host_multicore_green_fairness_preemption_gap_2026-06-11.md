@@ -1,7 +1,7 @@
 # Host Multicore Green Fairness and Preemption Gap
 
 Date: 2026-06-11
-Status: open
+Status: closed-as-designed for hosted fairness contract; future ordinary-closure preemption remains open roadmap work
 Owner: multicore-green lane
 
 ## Summary
@@ -12,13 +12,17 @@ The hosted `multicore_green_spawn` lane now has real runtime-pool evidence:
 - hosted reports require `queue_model=work_stealing`
 - Go-vs-C-vs-Simple stress evidence is current
 
-That is enough for bounded CPU-parallel M:N candidate claims, but it is still
-not enough for full Go-like scheduler parity on the host runtime.
+That is enough for bounded CPU-parallel M:N candidate claims. The hosted
+fairness decision is now explicit: CPU-heavy work that needs fairness must use
+`multicore_green_spawn_sliced`, which requeues bounded scalar-state slices and
+has source/native/profile evidence.
 
-The remaining host-side gap is the same one called out in the selected
-requirements, research, and architecture docs:
+Plain `multicore_green_spawn` closures still run until they return. They must
+not be described as automatic tight-loop-preempted work until compiler-inserted
+yield points or equivalent runtime preemption have executable evidence.
 
-- fairness/preemption is not yet proven end to end for hosted multicore green
+The previous open host-side gap is therefore closed for the supported hosted
+fairness contract, not by overclaiming ordinary-closure preemption.
 
 ## Why This Is Still Open
 
@@ -29,10 +33,11 @@ Current hosted multicore-green evidence proves:
 - work-stealing queue reporting
 - fanout/fanin checksum integrity
 
-Current hosted multicore-green evidence does not yet prove:
+Current hosted multicore-green evidence deliberately does not claim:
 
-- long-running CPU work is preempted or yield-forced with a host-side contract
-- host fairness semantics comparable to Go's scheduler under sustained loop load
+- ordinary long-running closures are preempted or yield-forced
+- plain-closure fairness semantics comparable to Go's async preemption under
+  sustained tight-loop load
 
 Current best explicit host-fairness experiment now has executable native
 regression coverage:
@@ -141,16 +146,22 @@ Current SimpleOS fairness/preemption evidence:
 - `test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl`
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`
 
-These do not yet close the hosted-runtime parity claim.
+These close the supported hosted fairness contract only for explicit sliced
+work. They do not close future ordinary-closure preemption.
 
-## Exit Criteria
+## Closure Criteria
 
-This gap can close only when the hosted multicore-green lane has executable
-evidence for:
+This tracker is closed for the supported hosted fairness contract because the
+lane now has executable evidence for:
 
-- fairness/preemption for ordinary long-running closures, or a decision that
-  the explicit sliced API is the supported hosted fairness contract and profile
-  evidence/docs are updated to use it
+- the selected requirement naming `multicore_green_spawn_sliced` as the hosted
+  CPU-heavy fairness contract
+- source-run and native `multicore_green_spawn_sliced` fairness regression
+  coverage
+- profile `Hosted Fairness Evidence` rows
+- public API and misuse coverage for the sliced API
 
-That evidence must be tied into the canonical multicore-green feature tracking
-and must not rely on SimpleOS-only scheduler proofs.
+Future ordinary-closure preemption must remain separate work. It can use
+compiler-inserted yields, runtime safepoints, or another resumable closure
+mechanism, but it must add new executable evidence before docs call plain
+closures Go-like tight-loop preemptive work.

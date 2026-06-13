@@ -1,6 +1,6 @@
 # Multicore Green Host Parity Gap Tracking Specification
 
-> This specification keeps the remaining hosted multicore-green Go-parity gap explicit. Hosted runtime-pool evidence is real, but the lane must stay `current` until the remaining fairness/preemption gap is tracked as unresolved host-runtime work rather than being implied closed by SimpleOS-only proofs.
+> This specification keeps the hosted multicore-green fairness boundary explicit. Hosted runtime-pool evidence is real, and CPU-heavy hosted fairness is supported through `multicore_green_spawn_sliced`. Ordinary `multicore_green_spawn` closures still run until return, so future tight-loop preemption must remain separate runtime/compiler work rather than being implied closed by SimpleOS-only proofs.
 
 <!-- sdn-diagram:id=multicore_green_host_parity_gap_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_host_parity_gap_spec -> std
 
 # Multicore Green Host Parity Gap Tracking Specification
 
-This specification keeps the remaining hosted multicore-green Go-parity gap explicit. Hosted runtime-pool evidence is real, but the lane must stay `current` until the remaining fairness/preemption gap is tracked as unresolved host-runtime work rather than being implied closed by SimpleOS-only proofs.
+This specification keeps the hosted multicore-green fairness boundary explicit. Hosted runtime-pool evidence is real, and CPU-heavy hosted fairness is supported through `multicore_green_spawn_sliced`. Ordinary `multicore_green_spawn` closures still run until return, so future tight-loop preemption must remain separate runtime/compiler work rather than being implied closed by SimpleOS-only proofs.
 
 ## At a Glance
 
@@ -53,10 +53,12 @@ This specification keeps the remaining hosted multicore-green Go-parity gap expl
 
 ## Overview
 
-This specification keeps the remaining hosted multicore-green Go-parity gap
-explicit. Hosted runtime-pool evidence is real, but the lane must stay `current`
-until the remaining fairness/preemption gap is tracked as unresolved
-host-runtime work rather than being implied closed by SimpleOS-only proofs.
+This specification keeps the hosted multicore-green fairness boundary explicit.
+Hosted runtime-pool evidence is real, and CPU-heavy hosted fairness is supported
+through `multicore_green_spawn_sliced`. Ordinary `multicore_green_spawn`
+closures still run until return, so future tight-loop preemption must remain
+separate runtime/compiler work rather than being implied closed by SimpleOS-only
+proofs.
 
 ## Requirements
 
@@ -82,8 +84,9 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ## Examples
 
-- Hosted multicore-green pool, work-stealing, and blocking-compensation
-  evidence are current, but that does not close host fairness/preemption.
+- Hosted multicore-green pool, work-stealing, blocking-compensation, and sliced
+  fairness evidence are current, but that does not close ordinary-closure
+  preemption.
 - SimpleOS scheduler preemption evidence is relevant context, but it must not
   be used by itself to claim hosted Go-like parity.
 - `multicore_green_spawn_sliced` is the explicit positive hosted fairness
@@ -94,10 +97,10 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ### multicore green host parity gap tracking
 
-#### keeps the host-side Go parity gap explicit in requirements research and tracking
+#### keeps the host-side fairness contract explicit in requirements research and tracking
 
 - Read the selected requirement document
-- Verify the requirement still preserves the broader roadmap before Go-like fairness claims
+- Verify the requirement names sliced fairness without overclaiming plain closure preemption
 - Read the Go-versus-Simple research note
 - Verify the research keeps the remaining host/runtime gap explicit
 - Read the canonical feature tracking row
@@ -107,22 +110,25 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Read the selected requirement document")
 val requirements = read_text("doc/02_requirements/feature/multicore_green.md")
-step("Verify the requirement still preserves the broader roadmap before Go-like fairness claims")
+step("Verify the requirement names sliced fairness without overclaiming plain closure preemption")
 expect(requirements).to_contain("blocking integration")
-expect(requirements).to_contain("preemption or compiler-inserted yield points")
-expect(requirements).to_contain("fairness comparable to modern Go")
+expect(requirements).to_contain("the supported hosted fairness contract")
+expect(requirements).to_contain("multicore_green_spawn_sliced")
+expect(requirements).to_contain("Ordinary `multicore_green_spawn`")
+expect(requirements).to_contain("compiler-inserted yield points")
 
 step("Read the Go-versus-Simple research note")
 val research = read_text("doc/01_research/lib/threading/go_vs_simple_threads.md")
 step("Verify the research keeps the remaining host/runtime gap explicit")
 expect(research).to_contain("blocking compensation")
-expect(research).to_contain("preemption/fairness claims are not complete")
+expect(research).to_contain("final preemption/fairness")
+expect(research).to_contain("claims are not complete")
 
 step("Read the canonical feature tracking row")
 val feature_db = read_text("doc/08_tracking/feature/feature_db.sdn")
@@ -130,8 +136,9 @@ expect(feature_db).to_contain("host_multicore_green_fairness_preemption_gap_2026
 
 step("Read the dedicated host gap tracker")
 val bug = read_text("doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md")
-expect(bug).to_contain("Status: open")
-expect(bug).to_contain("fairness/preemption")
+expect(bug).to_contain("Status: closed-as-designed for hosted fairness contract")
+expect(bug).to_contain("multicore_green_spawn_sliced")
+expect(bug).to_contain("ordinary-closure preemption remains open roadmap work")
 expect(bug).to_contain("SimpleOS has scheduler-facing")
 expect(bug).to_contain("multicore_green_blocking_compensation_gap_spec.spl")
 expect(bug).to_contain("blocking compensation now has executable hosted coverage")
@@ -145,14 +152,14 @@ expect(bug).to_contain("multicore_green_fairness_preemption_gap_spec.spl")
 #### keeps the host gap separate from SimpleOS-only proofs
 
 - Read the host gap tracker and the architecture note
-- Verify the host gap tracker requires hosted evidence rather than SimpleOS-only evidence
-- Verify the architecture still treats future fairness as open host work
+- Verify the host tracker keeps hosted evidence separate from SimpleOS-only evidence
+- Verify the architecture treats sliced fairness and future closure preemption separately
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -160,8 +167,8 @@ step("Read the host gap tracker and the architecture note")
 val bug = read_text("doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md")
 val architecture = read_text("doc/04_architecture/runtime/multicore_green.md")
 
-step("Verify the host gap tracker requires hosted evidence rather than SimpleOS-only evidence")
-expect(bug).to_contain("must not rely on SimpleOS-only scheduler proofs")
+step("Verify the host tracker keeps hosted evidence separate from SimpleOS-only evidence")
+expect(bug).to_contain("They do not close future ordinary-closure preemption")
 expect(bug).to_contain("Current SimpleOS fairness/preemption evidence")
 expect(bug).to_contain("two sleeping tasks still allow a third quick task")
 expect(bug).to_contain("bounded parallelism")
@@ -169,9 +176,11 @@ expect(bug).to_contain("parallelism pinned to `1`")
 expect(bug).to_contain("quick task")
 expect(bug).to_contain("thread_yield()")
 
-step("Verify the architecture still treats future fairness as open host work")
-expect(architecture).to_contain("before claiming tight-loop")
-expect(architecture).to_contain("fairness comparable to Go")
+step("Verify the architecture treats sliced fairness and future closure preemption separately")
+expect(architecture).to_contain("supported hosted fairness contract")
+expect(architecture).to_contain("multicore_green_spawn_sliced")
+expect(architecture).to_contain("ordinary-closure")
+expect(architecture).to_contain("tight-loop preemption comparable to Go")
 ```
 
 </details>

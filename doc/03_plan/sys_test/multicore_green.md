@@ -43,16 +43,16 @@
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl` parses the Docker contract profile report and gates numeric Simple OS-thread and multicore-green native rows against Go goroutine and C pthread baselines, proves Go beats C in the isolated large-fanout stress row, requires Go `GOMAXPROCS` fairness metadata, and keeps cooperative green classified as non-M:N.
 - `test/03_system/feature/usage/concurrency_api_misuse_spec.spl` checks the public concurrency API contract: approved meaningful public names remain usable through `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` with `positive_fixtures=6` and generated profile-script contract `misuse_fixtures=11`, including `task_spawn` and a run/join proof that `multicore_green_spawn_sliced` returns `public_multicore_green_sliced_result=19`; `thread_spawn_with_args_wrong_surface_import.spl`, `task_spawn_wrong_surface_import.spl`, `multicore_green_wrong_surface_import.spl`, and `multicore_green_sliced_wrong_surface_import.spl` reject the wrong public facade; wrong-surface imports, wrong arity, non-closure/non-function arguments, bad parallelism or sliced-state argument types, direct runtime aliases, and shared mutable captures in green-process closures fail closed at compile time; and `doc/06_spec/test/03_system/feature/usage/concurrency_api_misuse_spec.md` mirrors the executable manual. The current-source rerun on 2026-06-12 passes all six scenarios with `misuse_fixtures=11`; the release-visible checked-in misuse fixture inventory is tracked separately as `checked_in_misuse_fixtures=25`.
 - `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` checks that `doc/03_plan/agent_tasks/multicore_green.md` uses meaningful parallel-agent lane names instead of `Agent A`/`Agent B` labels, and keeps each lane tied to deliverables and acceptance evidence.
-- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the remaining hosted fairness/preemption gap explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths.
-- `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so the remaining host gap is deeper than a missing OS-thread yield primitive.
+- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the ordinary-closure boundary explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths. This is future ordinary-closure preemption work, not the supported hosted fairness contract.
+- `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so future plain-closure preemption needs compiler/runtime cooperation rather than a bare OS-thread yield primitive.
 - `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
-  proves the explicit Pure Simple sliced-task API can provide a hosted
-  fairness contract without changing plain closure semantics: with hosted
-  parallelism pinned to `1`, `multicore_green_spawn_sliced` requeues a long CPU
-  task between short slices, a later quick `multicore_green_spawn` completes
-  during the first observation window, and `multicore_green_parallelism()`
-  remains `1` on both source-run and standalone native paths. The 2026-06-12
-  native compile/run SSpec takes about 60 seconds and remains perf-sensitive.
+  proves the supported hosted fairness contract for CPU-heavy work without
+  changing plain closure semantics: with hosted parallelism pinned to `1`,
+  `multicore_green_spawn_sliced` requeues a long CPU task between short slices,
+  a later quick `multicore_green_spawn` completes during the first observation
+  window, and `multicore_green_parallelism()` remains `1` on both source-run
+  and standalone native paths. The 2026-06-12 native compile/run SSpec takes
+  about 60 seconds and remains perf-sensitive.
 - `test/03_system/feature/usage/native_struct_array_runtime_blocker_spec.spl`
   regression-covers the smaller hosted-native by-value struct-array path
   beneath the callback-id resumable-stepper lane on current-source seed/native.
@@ -100,9 +100,10 @@
   - closure-aligned SimpleOS final AP ring/user handoff wording across
     requirements, research, architecture, design, tracking, and reports;
   - refreshed multicore-green agent-plan current-state text;
-  - refreshed Go-vs-Simple research wording so the remaining parity gap is
-    explicitly hosted fairness/preemption, not final hardware handoff proof or
-    the already-covered blocking-compensation path.
+  - refreshed Go-vs-Simple research wording so ordinary-closure preemption
+    remains future host work while the supported hosted fairness contract is
+    the explicit sliced API, not final hardware handoff proof or the
+    already-covered blocking-compensation path.
 - The shared default checkout remains dirty outside the multicore-green lane
   because other sessions are active; this lane uses a separate jj workspace and
   must keep those files out of multicore-green commits unless the user

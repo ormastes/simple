@@ -10,6 +10,10 @@ Date: 2026-06-06
   both stay ahead of the C pthread-per-task baseline:
   Go `6.533 ms`, Simple multicore green native `9.638 ms`, C pthreads
   `63.791 ms`.
+- Hosted CPU-heavy fairness is now an explicit sliced contract:
+  `multicore_green_spawn_sliced` is the supported fairness path, while plain
+  `multicore_green_spawn` closures still run until they return and must not be
+  called tight-loop preemptive work.
 - Fresh isolated 2026-06-11 evidence now shows the earlier `thread_spawn`
   native zero-join blocker is closed end to end: host-native public
   `thread_spawn`, `thread_spawn_with_args`, and the Docker profile OS-thread
@@ -198,9 +202,9 @@ Acceptance evidence:
 
 ## Host Fairness And Blocking Agent
 
-Goal: keep the remaining host-side Go-parity gap explicit and move it toward
-real closure rather than letting SimpleOS-only scheduler evidence overclaim the
-host runtime lane.
+Goal: keep the host-side fairness boundary explicit: the supported CPU-heavy
+host fairness contract is `multicore_green_spawn_sliced`, while future
+ordinary-closure preemption remains separate runtime/compiler work.
 
 Primary paths:
 
@@ -212,9 +216,10 @@ Primary paths:
 
 Deliverables:
 
-- dedicated tracking for the remaining hosted multicore-green parity gap;
-- executable proof that hosted blocking compensation stays fixed while
-  fairness/preemption remains open until stronger evidence lands;
+- dedicated tracking for the hosted fairness decision and future
+  ordinary-closure preemption boundary;
+- executable proof that hosted blocking compensation stays fixed while sliced
+  fairness is the supported contract for CPU-heavy work;
 - executable blocker coverage for the explicit resumable host-fairness path,
   including the scalar-state `multicore_green_spawn_sliced` source/native
   regression and historical closure of the earlier callback-id prototype;
@@ -278,8 +283,8 @@ Acceptance evidence:
 3. Cooperative Green Semantics Agent and Multicore Green Runtime-Pool Agent can
    run in parallel because cooperative green and multicore green must stay
    semantically distinct.
-4. Host Fairness And Blocking Agent keeps the remaining host-side Go-parity
-   gap explicit while stronger runtime evidence is still missing.
+4. Host Fairness And Blocking Agent keeps the sliced fairness contract and the
+   future ordinary-closure preemption boundary explicit.
 5. SimpleOS Green Carrier Agent consumes stable host/library contracts into
    SimpleOS and QEMU proof.
 6. Generated manuals and `doc/09_report` are refreshed after executable specs
@@ -296,8 +301,9 @@ Acceptance evidence:
   must provide `used_runtime_pool()` evidence and Go Profile Evidence Agent must
   gate the row numerically.
 - If a change claims hosted fairness/preemption parity with Go, Host Fairness
-  And Blocking Agent must update the dedicated host-gap tracker and executable
-  parity-gap spec before the lane can be described as closed.
+  And Blocking Agent must distinguish explicit sliced fairness from future
+  ordinary-closure preemption and update the dedicated tracker plus executable
+  specs before the claim is accepted.
 - If a SimpleOS QEMU probe uses a fixed-slot helper, SimpleOS Green Carrier
   Agent must state exactly what is proven and what remains future hardware
   handoff work.
