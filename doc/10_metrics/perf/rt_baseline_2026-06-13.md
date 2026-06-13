@@ -67,17 +67,29 @@ after every wave (API/arch guard symbols+arch GREEN; perf+cache specs 6/0). All 
 EXISTING `std.io_runtime` wrappers (`read_file`/`write_file`/`file_exists`/`file_delete`/`file_size`/
 `file_append_text`/`dir_list`/`dir_create`/`dir_create_all`/`env_get`/`process_run`).
 
-### Honest floor — the 23 residual (need NEW wrappers or have mismatched signatures)
-No false-green: these were deliberately NOT force-migrated.
-- **No stdlib wrapper exists** (genuine follow-up = write the wrapper first): `rt_http_*`,
-  `rt_time_now_unix_micros`/`rt_time_now_monotonic_ms`/`rt_time_ms`, `rt_stdin_read_line`,
-  `rt_cli_get_args`, `rt_env_cwd`, `rt_getpid`, `rt_dir_remove_all`, `rt_file_write_bytes`,
-  `rt_process_run_timeout`, `rt_file_read_text_at` (3-arg).
+### Floor closure update — 2026-06-13 (commit `1406f27` / origin `e7fdff8`)
+Two of the "no wrapper exists" items are now closed with real wrappers over
+already-registered runtime externs (verified: `check` OK + runtime smoke —
+write/read 3 bytes, recursive dir remove confirmed file gone):
+- `std.io_runtime.file_write_bytes(path, bytes) -> bool` → wraps `rt_file_write_bytes`.
+- `std.io_runtime.dir_remove_all(path) -> bool` → wraps `rt_dir_remove_all`
+  (also fixed latent bug: `dir_remove(path, recursive=true)` had ignored the flag).
+Also corrected: `getpid()` (line 158) and `cwd()` (line 148) **already existed** —
+files using `rt_getpid`/`rt_env_cwd` can migrate to those today; no new wrapper needed.
+
+### Honest floor — the remaining residual (need NEW runtime externs or have mismatched signatures)
+No false-green: these are deliberately NOT force-migrated.
+- **No stdlib wrapper AND extern needs 6-site runtime registration first** (true rebuild
+  follow-up, out of scope here): `rt_http_*`, `rt_time_now_monotonic_ms`/`rt_time_ms`,
+  `rt_stdin_read_line`, `rt_process_run_timeout`, `rt_file_read_text_at` (3-arg).
+  (`rt_time_now_unix_micros` already has the `time_now_unix_micros()` wrapper.)
 - **Signature mismatch:** `rt_file_read_text -> text?` (nullable) in `simple_browser.spl` —
   wrapper returns `text`; migrating would change semantics.
 - Hardware/terminal/ctypes externs (`rt_port_*`, `rt_mmio_*`, `rt_gui_*`, `rt_term_*`,
   `rt_alloc`/`rt_free`/ctypes) correctly stay raw — not app-developer-convenience surface.
 
 ## Status
-DONE — decisive measured reduction (82→23, ~208 externs), no regression. Residual floor needs
-new stdlib wrappers (bounded follow-up), not further migration of existing ones.
+DONE — decisive measured reduction (82→23, ~208 externs), no regression. Floor advanced:
+`file_write_bytes`/`dir_remove_all` wrappers added + `getpid`/`cwd` confirmed pre-existing.
+The only true remaining follow-up is externs that need NEW 6-site runtime registration
+(rebuild territory), not further migration of existing wrappers.
