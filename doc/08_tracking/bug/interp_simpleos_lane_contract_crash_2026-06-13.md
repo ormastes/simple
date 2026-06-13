@@ -73,6 +73,54 @@ arm64/arm32/riscv32/x86_64 correctly classify as `missing-media`/`boot-fail` (di
 fail-closed) and are NOT flippable to live-pass on this host. riscv64 + x86_32 live-pass.
 This is the honest live-vs-contract split.
 
+### Update 2026-06-13 (boot-stub wiring attempt): root cause is an ARCHITECTURE DIVERGENCE, not a missing stub
+"Wire the arm64 boot stub and try again" led to a definitive diagnosis. Building arm64
+fs-exec honestly (proper `os build` path: `SIMPLE_BOOT_MINIMAL=1`, **no** freestanding
+no-op flag) fails the link with the compiler reporting **51 unexpected unresolved symbols**
+— the core Simple runtime ABI: `rt_for_iterable` (124+ refs), `rt_value_as_int`,
+`rt_typed_words_u64_push/set`, `f32_from_bits`, `f64_from_bits`, `bytes_to_string`,
+`rt_any_add`, `rt_bytes_to_text`, `rt_string_char_code_at`, plus the 11 MMIO/barrier
+(`rt_volatile_read/write_u8/16/32/64`, `rt_load/store_barrier`). Plus a hard assembler bug:
+`arm64/boot/baremetal_interrupt_control.S` `.include`s the stale path
+`examples/simple_os/arch/common/...` (missing `09_embedded/`) so the `AIC` macro is undefined.
+
+Note: the earlier 1.9 MB "successful" arm64 ELF only linked because
+`SIMPLE_ALLOW_FREESTANDING_STUBS=1` injects **weak no-op** defs for every missing symbol —
+so MMIO writes became no-ops and the kernel produced zero serial. `freestanding_weak_boot_defsyms`
+(linker.rs:1393) also injects weak defsyms unconditionally, so honest sufficiency must be
+judged by the weak-symbol/unresolved list, not by link success.
+
+**Why 51 symbols?** The two arches use opposite designs for the *same* lane:
+- **riscv64 (PASSES, 86 KB):** `riscv64/smoke_entry.spl` is thin — declares `extern fn
+  rt_riscv_nvfs_probe / rt_riscv_smf_cli_probe / rt_riscv_smf_cli_load / rt_riscv_smf_gui_probe
+  / rt_riscv_native_gui_process_render` and the real work (virtio-blk MMIO init + sector read
+  + FAT32 BPB/cluster parse + SMF discovery + ELF load) lives in **native C**
+  (`riscv64/boot/baremetal_stubs.c`, 1806 lines). No Simple-kernel imports → links small.
+- **arm64 (BROKEN, 1.9 MB):** `arm64/fs_exec_entry.spl` imports `os.services.vfs.arm_fs_exec_vfs`
+  + `os.kernel.loader.arm64_fs_exec_spawn` — **pure-Simple** VFS/spawn that transitively pull
+  the entire Simple kernel (fat32/nvme/dbfs/async/binary_io) → the 51 missing runtime-ABI symbols.
+  arm64's 39 native C functions are only low-level MMU/context primitives
+  (`rt_arm64_context_*`, `rt_arm64_user_as_*`, `rt_arm64_handle_user_svc`, …); there is **no**
+  arm64 equivalent of riscv64's high-level `rt_*_nvfs_probe/smf_cli_load` orchestration, and no
+  arm64 virtio-blk helper at all.
+
+`arm64/smoke_entry.spl` exists but is a 9-line stub that prints `TEST PASSED` without doing any
+fs-exec work — pointing the scenario at it would be a **false green** (rejected per no-cover-up).
+
+**Two legitimate paths to a genuinely-passing arm64 (both large, mutually exclusive):**
+- **A — mirror riscv64's native design:** implement arm64 virtio-mmio-blk (arm64 `virt` virtio
+  base differs from riscv64), port ~1000 lines of FAT32/SMF/ELF-load C from riscv64's
+  `baremetal_stubs.c`, add `rt_arm64_nvfs_probe/smf_cli_*` mirroring `rt_riscv_*`, rewrite a
+  thin honest `arm64/smoke_entry.spl`, repoint the fs-exec target, and update the specs that
+  assert `entry == fs_exec_entry.spl`.
+- **B — full arm64 freestanding runtime ABI:** port the ~51 missing runtime functions from
+  x86_64's `rt_extras.c` (3990 lines, mostly portable) to arm64 (deduped vs `baremetal_stubs.c`),
+  fix the `.S` include path — then debug first-ever arm64 execution of the nvme/dbfs/async/fat32
+  Simple kernel.
+
+Both are "bring up SimpleOS fs-exec on arm64," a multi-session effort — NOT a boot-stub wire-up.
+arm64 fs-exec stays diagnosed-RED pending an explicit decision on path A vs B.
+
 ## Symptom
 Calling `simpleos_platform_qemu_smoke_lane("riscv64")` (src/os/port/simpleos_multiplatform_build_part3.spl:174) in interpreter mode kills the process with exit code 248 and no diagnostic. When reached through spec files (e.g. `test/01_unit/os/qemu_runner_protection_acceptance_spec.spl`), it instead surfaces as:
 
