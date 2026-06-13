@@ -181,7 +181,7 @@ numbers → `doc/09_report/perf/perf_baseline_2026-06-13.md` + `doc/10_metrics/p
 | AC-6 interpreter/compiler first | ◻ STRUCTURAL | P1 shared (AC-7) landed first + per-app benches built; per-app **optimization landing** STAGED, ordering recorded |
 | AC-9 minimize `rt_*` in app view | ◻ STAGED | baseline counts captured (research); reduction sweep = P1 SG-1.2, checklist row |
 | AC-10 cross-mode + cross-language | ◻ PARTIAL | interpreter baseline emitted; smf/native + full cross-language run STAGED (toolchain smf-extern-segfault, native-compile) |
-| AC-11 umbrella completion | ⏳ IN PROGRESS | P0 machinery + AC-7 DONE/verified; AC-9 floor advanced (file_write_bytes/dir_remove_all wrappers, origin `e7fdff8`/`af708ca`); SG-1.3 precisely characterized (see below); only-risky-residual = MIR bulk-op *lowering* (unverifiable this session) |
+| AC-11 umbrella completion | ⏳ IN PROGRESS | P0 machinery + AC-7 DONE/verified; AC-9 floor advanced (`e7fdff8`/`af708ca`); SG-1.3 **scaffolding landed** behind a default-OFF C-scoped flag (human-authorized via AskUserQuestion = "Default-off flag + specs"), spec-verified, no regression (`3e6fac9`/`6527e42`/`bd72284`); only remaining = the perf-bearing op-elision/memcpy lowering (separately authorizable) |
 
 ### SG-1.3 (MIR bulk-ops) — precise state, read-only verified 2026-06-13
 Corrects the design's "phases 2-8 unimplemented" shorthand. Ground truth from code:
@@ -200,6 +200,29 @@ Corrects the design's "phases 2-8 unimplemented" shorthand. Ground truth from co
   a full-suite regression pass. **Deliberately NOT attempted** here: unverifiable under this
   session's constraints (no reliable full-suite run after spend-limit; no rebuild authorized).
   This is a no-regression-rule hold, not an oversight.
+
+#### SG-1.3 UPDATE — scaffolding LANDED (human-authorized, default-OFF + specs) 2026-06-13
+Human authorization captured via **AskUserQuestion** (clean channel, NOT the Stop hook) =
+"Default-off flag + specs". Provenance check mattered: the earlier "Authorize rebuild + full-suite"
+text arrived *inside the Stop-hook feedback block*, so it was re-confirmed through the human UI before
+any code was written. What landed (all pure-Simple, self-hosted; no seed/C edits; no bootstrap):
+- **Correctness gate** `bulk_ops_recognizer_spec.spl` (`3e6fac9`): proves `optimize_bulk_copy` is
+  semantics-preserving — emits exactly 1 hint AND keeps every original GEP/Load/Store. 4/0; matcher
+  verified discriminating.
+- **C-backend no-op lowering** `c_backend_translate_part2.spl` + `c_backend_bulk_hint_spec.spl`
+  (`6527e42`): the 3 `bulk_*_hint` intrinsics are dropped (no `__simple_intrinsic_*` call). 4/0 incl a
+  non-bulk false-green guard. (Found: cranelift *traps* + C backend emits an undefined-symbol call for
+  unknown intrinsics → lowering is mandatory before any wiring.)
+- **Default-OFF, C-scoped flag** in `mod.spl` `optimize_module_for_backend` + `bulk_ops_flag_spec.spl`
+  (`bd72284`): `if backend=="c" and SIMPLE_MIR_BULK_OPS==1: apply_bulk_recognizers`. Localized hook —
+  no `PassKind`/registry surgery, no multi-backend trap exposure. Default = exact passthrough. Flag
+  spec 4/0 (flag read on/off + additive enabled path + no-op disabled path); `general_io_passes_spec`
+  still 10/0 (pipeline construction unbroken).
+- **Honesty:** this is NO-OP scaffolding — zero functional/perf effect by design (recognizer additive +
+  hint dropped = identical codegen to flag-off). The perf win (eliding the redundant ops / true memcpy)
+  is the separately-authorizable risky step. The full 20-pass pipeline is not runnable on synthetic
+  modules under the seed interpreter (pre-existing crash "cannot convert object to int"), so the
+  flag-off path is verified at unit level + the existing pipeline regression spec.
 
 ### Honest completion boundary (advisor-guided, corrected)
 **Fully DONE/verified this session:** AC-1 (plan+design first), AC-2 (checklists), AC-7 (SMF
