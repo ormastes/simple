@@ -12,6 +12,9 @@ Updated: 2026-06-11
   Qualcomm, Vulkan, DirectX, OpenCL, OpenGL, Intel, WebGPU, CPU SIMD, software,
   then CPU. Evidence: `backend_lane_spec.spl` now covers alias handling and
   native GPU lanes before Vulkan.
+- this slice -- documented the separate font-offload CPU tail in
+  `engine2d_backend_order.md` and hardened `backend_lane_spec.spl` so
+  `cpu-simd` aliases win over `software` for font/vector preparation.
 - this commit -- preferred font offload evidence wrappers: added vector and
   bitmap evidence helpers that apply the Engine2D font offload order to probed
   backend candidates before building typed evidence. Evidence:

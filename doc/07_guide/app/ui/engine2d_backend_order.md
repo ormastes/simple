@@ -10,6 +10,12 @@ The current shared order is:
 
 `metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
 
+Font offload uses the same native-GPU-first processing lane, but after WebGPU it
+prefers `cpu_simd` before `software` so glyph/vector preparation uses SIMD CPU
+kernels before falling back to the generic software path:
+
+`metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu`
+
 ## Why This Order
 
 1. `metal`
@@ -55,6 +61,8 @@ The current shared order is:
   pretending a different backend was selected.
 - Baremetal and virtio-gpu remain explicit construction paths, not part of the
   generic auto-detect order.
+- Font offload planners must use `engine2d_font_offload_backend_order()` and
+  keep the CPU tail as `cpu_simd > software > cpu`.
 - `directx` on Linux requires the local prefix (build/dx/prefix) built via
   `scripts/setup/setup-directx-linux.shs`, or system libvulkan.so.1. When
   neither is present the backend falls back to `structured` leaf mode and
