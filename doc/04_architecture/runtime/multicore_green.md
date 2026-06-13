@@ -78,6 +78,7 @@ Primary paths:
 
 - `scripts/check/check-cross-language-perf.shs`
 - `test/05_perf/profile_scripts/profile_report_contract_test.shs`
+- `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`
 - `test/05_perf/stress/multicore_green_fanout_spec.spl`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 - `doc/09_report/cross_language_perf_parallel_smoke.md`
@@ -87,6 +88,8 @@ Responsibilities:
 - Generate and gate reproducible evidence for Simple OS thread, cooperative
   green, multicore green, C pthread, and Go goroutine rows.
 - Reject missing or misleading native M:N rows.
+- Fail closed when public concurrency APIs drift into numbered aliases, wrong
+  import surfaces, direct runtime-pool access, or mutable shared-state captures.
 - Keep Simple-vs-Go-vs-C large fanout stress explicit so one-pthread-per-task C
   is not mistaken for M:N scheduling and Simple multicore-green stress rows must
   carry runtime-pool evidence.

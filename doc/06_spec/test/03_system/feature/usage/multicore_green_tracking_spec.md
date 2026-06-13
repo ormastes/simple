@@ -300,12 +300,13 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 - Read the canonical multicore-green tracking row
 - Verify research links are present
 - Verify plan and design links are present
+- Verify architecture and design name the API misuse gate
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -319,6 +320,13 @@ expect(row).to_contain("doc/03_plan/agent_tasks/multicore_green.md")
 expect(row).to_contain("doc/03_plan/sys_test/multicore_green.md")
 expect(row).to_contain("doc/04_architecture/runtime/multicore_green.md")
 expect(row).to_contain("doc/05_design/multicore_green.md")
+val architecture = rt_file_read_text("doc/04_architecture/runtime/multicore_green.md") ?? ""
+val design = rt_file_read_text("doc/05_design/multicore_green.md") ?? ""
+step("Verify architecture and design name the API misuse gate")
+expect(architecture).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
+expect(architecture).to_contain("numbered aliases")
+expect(design).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
+expect(design).to_contain("numeric-suffix concurrency aliases")
 ```
 
 </details>

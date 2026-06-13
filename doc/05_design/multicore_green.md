@@ -188,6 +188,9 @@ SimpleOS coverage:
 Profile coverage:
 
 - `test/05_perf/profile_scripts/profile_report_contract_test.shs`
+- `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`
+  gates meaningful public API names, wrong-surface imports, direct `rt_pool_*`
+  access, shared mutable green captures, and numeric-suffix concurrency aliases.
 - `test/05_perf/stress/multicore_green_fanout_spec.spl`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 
