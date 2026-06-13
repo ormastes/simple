@@ -606,3 +606,6 @@ Updated: 2026-06-11
 - Simple Web layout current-node hoisting: `layout` now reuses the current node
   while resolving width, nowrap text, text wrapping, and replaced element
   branches, avoiding repeated node indexing in startup layout recursion.
+- Simple Web flex order allocation tightening: `flex_ordered_children` now
+  collects children into an exact-size array and stable-sorts in place instead
+  of rebuilding a replacement array for every ordered insertion.
