@@ -34,13 +34,13 @@ struct BenchCase:
     iters: i64
 
 fn make_bench_case(name: text, mode: text, plane: text, iters: i64) -> BenchCase:
-    BenchCase{
+    BenchCase(
         name: name,
         arch_tags: ["x86_64"],
         mode: mode,
         plane: plane,
         iters: iters,
-    }
+    )
 
 # ============================================================================
 # BenchResult — one measured row
@@ -63,7 +63,7 @@ struct BenchResult:
     arch: text
 
 fn make_bench_result(name: text, mode: text, plane: text, metric: text, value: i64, unit: text) -> BenchResult:
-    BenchResult{
+    BenchResult(
         name: name,
         mode: mode,
         plane: plane,
@@ -71,7 +71,7 @@ fn make_bench_result(name: text, mode: text, plane: text, metric: text, value: i
         value: value,
         unit: unit,
         arch: "x86_64",
-    }
+    )
 
 # ============================================================================
 # bench_run_warm — in-process closure timing
@@ -182,7 +182,8 @@ fn _parse_wall_ms(time_stderr: text) -> i64:
         if line.contains("Elapsed (wall clock)"):
             val colon_idx = _last_colon_idx(line)
             if colon_idx >= 0:
-                val time_str = line.slice(colon_idx + 1, line.len()).trim()
+                val raw_str = line.slice(colon_idx + 1, line.len())
+                val time_str = raw_str.trim()
                 return _parse_time_str_to_ms(time_str)
         i = i + 1
     0
@@ -195,7 +196,8 @@ fn _parse_rss_kb(time_stderr: text) -> i64:
         if line.contains("Maximum resident set size"):
             val colon_idx = _last_colon_idx(line)
             if colon_idx >= 0:
-                val num_str = line.slice(colon_idx + 1, line.len()).trim()
+                val raw_str = line.slice(colon_idx + 1, line.len())
+                val num_str = raw_str.trim()
                 return _parse_i64(num_str)
         i = i + 1
     0
@@ -211,19 +213,28 @@ fn _last_colon_idx(s: text) -> i64:
 
 fn _parse_time_str_to_ms(s: text) -> i64:
     # Handles "M:SS.ss" and "H:MM:SS.ss" formats. Returns whole milliseconds.
-    val parts = s.trim().split(":")
+    val trimmed = s.trim()
+    val parts = trimmed.split(":")
     val n = parts.len()
     if n == 2:
         # M:SS.ss
-        val minutes = _parse_i64(parts[0].trim())
-        val sec_frac = parts[1].trim()
+        val p0 = parts[0]
+        val p0t = p0.trim()
+        val minutes = _parse_i64(p0t)
+        val p1 = parts[1]
+        val sec_frac = p1.trim()
         val secs_ms = _parse_sec_frac_to_ms(sec_frac)
         (minutes * 60 * 1000) + secs_ms
     elif n == 3:
         # H:MM:SS.ss
-        val hours = _parse_i64(parts[0].trim())
-        val minutes = _parse_i64(parts[1].trim())
-        val sec_frac = parts[2].trim()
+        val p0 = parts[0]
+        val p0t = p0.trim()
+        val hours = _parse_i64(p0t)
+        val p1 = parts[1]
+        val p1t = p1.trim()
+        val minutes = _parse_i64(p1t)
+        val p2 = parts[2]
+        val sec_frac = p2.trim()
         val secs_ms = _parse_sec_frac_to_ms(sec_frac)
         (hours * 3600 * 1000) + (minutes * 60 * 1000) + secs_ms
     else:
@@ -233,24 +244,41 @@ fn _parse_sec_frac_to_ms(s: text) -> i64:
     # "SS.ss" -> whole milliseconds: SS*1000 + ss*10
     val dot_parts = s.split(".")
     if dot_parts.len() == 2:
-        val secs = _parse_i64(dot_parts[0].trim())
-        val frac_str = dot_parts[1].trim()
+        val dp0 = dot_parts[0]
+        val dp0t = dp0.trim()
+        val secs = _parse_i64(dp0t)
+        val dp1 = dot_parts[1]
+        val frac_str = dp1.trim()
         val frac: i64 = if frac_str.len() >= 2:
-            _parse_i64(frac_str.slice(0, 2)) * 10
+            val frac_sub = frac_str.slice(0, 2)
+            _parse_i64(frac_sub) * 10
         else:
             0
         secs * 1000 + frac
     else:
         _parse_i64(s) * 1000
 
+fn _char_digit(ch: text) -> i64:
+    # Returns 0-9 for digit chars, -1 for non-digits.
+    if ch == "0": 0
+    elif ch == "1": 1
+    elif ch == "2": 2
+    elif ch == "3": 3
+    elif ch == "4": 4
+    elif ch == "5": 5
+    elif ch == "6": 6
+    elif ch == "7": 7
+    elif ch == "8": 8
+    elif ch == "9": 9
+    else: -1
+
 fn _parse_i64(s: text) -> i64:
     var result: i64 = 0
     var idx: i64 = 0
     while idx < s.len():
-        val ch = s.char_at(idx)
-        val digit = ch - '0'
-        if digit >= 0 and digit <= 9:
-            result = result * 10 + digit
+        val d = _char_digit(s.char_at(idx))
+        if d >= 0:
+            result = result * 10 + d
         idx = idx + 1
     result
 
