@@ -584,7 +584,8 @@ pub fn board_lane_test_command(platform_name: text, output_path: text) -> [text]
 
 pub fn ensure_board_bundle(platform_name: text, kernel_path: text, output_path: text) -> bool:
     """Materialize the representative board bundle for a first-class platform."""
-    if simpleos_platform_board_lane(platform_name) == nil:
+    # Workaround: avoid Option<large-struct> nil-check (interpreter crash).
+    if not simpleos_platform_has_board_lane(platform_name):
         print "[ensure_board_bundle] no representative board lane declared for {platform_name}"
         return false
     if platform_name == "x86_64":
@@ -617,7 +618,8 @@ pub fn ensure_board_bundle(platform_name: text, kernel_path: text, output_path: 
 
 pub fn test_board_lane(platform_name: text, kernel_path: text, output_path: text) -> bool:
     """Run the representative board compile-smoke lane for a first-class platform."""
-    if simpleos_platform_board_lane(platform_name) == nil:
+    # Workaround: avoid Option<large-struct> nil-check (interpreter crash).
+    if not simpleos_platform_has_board_lane(platform_name):
         print "[test_board_lane] no representative board lane declared for {platform_name}"
         return false
     val cmd = board_lane_test_command(platform_name, output_path)
@@ -649,30 +651,32 @@ pub fn test_board_lane(platform_name: text, kernel_path: text, output_path: text
 
 pub fn test_board(platform_name: text) -> bool:
     """Build and run the representative board compile-smoke lane for a platform."""
-    if val lane = simpleos_platform_board_lane(platform_name):
-        val output_path = _board_bundle_output_path(platform_name)
-        if output_path == "":
-            print "[test_board] no bundle output path configured for {platform_name}"
-            return false
-        if board_lane_test_command(platform_name, output_path).len() == 0:
-            print "[test_board] board execution lane not implemented for {platform_name}"
-            return false
-        val scenario_name = _board_qemu_linked_scenario_name(platform_name)
-        if scenario_name != "":
-            val scenario = get_scenario(scenario_name)
-            if val resolved_scenario = scenario:
-                val target = scenario_target(resolved_scenario)
-                if not build_scenario(resolved_scenario):
-                    return false
-                return test_board_lane(platform_name, target.output, output_path)
-            print "[test_board] missing QEMU-linked board scenario: {scenario_name}"
-            return false
-        val target = _lane_to_target(platform_name, lane)
-        if not build_os(target):
-            return false
-        return test_board_lane(platform_name, target.output, output_path)
-    print "[test_board] no representative board lane declared for {platform_name}"
-    false
+    # Workaround: avoid if val Option<large-struct> (interpreter crash). Use has + direct.
+    if not simpleos_platform_has_board_lane(platform_name):
+        print "[test_board] no representative board lane declared for {platform_name}"
+        return false
+    val lane = simpleos_platform_board_lane_direct(platform_name)
+    val output_path = _board_bundle_output_path(platform_name)
+    if output_path == "":
+        print "[test_board] no bundle output path configured for {platform_name}"
+        return false
+    if board_lane_test_command(platform_name, output_path).len() == 0:
+        print "[test_board] board execution lane not implemented for {platform_name}"
+        return false
+    val scenario_name = _board_qemu_linked_scenario_name(platform_name)
+    if scenario_name != "":
+        val scenario = get_scenario(scenario_name)
+        if val resolved_scenario = scenario:
+            val target = scenario_target(resolved_scenario)
+            if not build_scenario(resolved_scenario):
+                return false
+            return test_board_lane(platform_name, target.output, output_path)
+        print "[test_board] missing QEMU-linked board scenario: {scenario_name}"
+        return false
+    val target = _lane_to_target(platform_name, lane)
+    if not build_os(target):
+        return false
+    test_board_lane(platform_name, target.output, output_path)
 
 fn ensure_fs_test_disk_image() -> bool:
     """Ensure the FAT32 fixture image used by x64-nvme-fat32 exists.
