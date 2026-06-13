@@ -48,6 +48,7 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 - `sh test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
 - `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
+- `sh test/05_perf/profile_scripts/concurrency_api_contract_test.shs`
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean`
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean`
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`

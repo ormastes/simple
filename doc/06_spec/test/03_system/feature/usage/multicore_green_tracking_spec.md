@@ -265,7 +265,7 @@ expect(absent_in_text(row, "\"done\"")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -285,6 +285,7 @@ expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_binary_auto
 expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(nfr_req).to_contain("src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean")
 expect(nfr_req).to_contain("ordinary large-fanout section")
 expect(nfr_req).to_contain("large-fanout stress section")
