@@ -42,7 +42,6 @@ telnet_serial_bridge_spec -> std
 
 - expect result clean length
 - expect result replies length
-- expect result clean[0] to i64
 
 
 <details>
@@ -52,11 +51,11 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val data = bytes_of([104, 101, 108, 112, 13, 10])
+val data: [i64] = [104, 101, 108, 112, 13, 10]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 6
 expect result.replies.length() == 0
-expect result.clean[0].to_i64() == 104
+expect result.clean[0] == 104
 ```
 
 </details>
@@ -65,9 +64,6 @@ expect result.clean[0].to_i64() == 104
 
 - expect result clean length
 - expect result replies length
-- expect result replies[0] to i64
-- expect result replies[1] to i64
-- expect result replies[2] to i64
 
 
 <details>
@@ -78,13 +74,13 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # client: IAC DO ECHO(1)
-val data = bytes_of([255, 253, 1])
+val data: [i64] = [255, 253, 1]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 0
 expect result.replies.length() == 3
-expect result.replies[0].to_i64() == 255
-expect result.replies[1].to_i64() == 252
-expect result.replies[2].to_i64() == 1
+expect result.replies[0] == 255
+expect result.replies[1] == 252
+expect result.replies[2] == 1
 ```
 
 </details>
@@ -93,9 +89,6 @@ expect result.replies[2].to_i64() == 1
 
 - expect result clean length
 - expect result replies length
-- expect result replies[0] to i64
-- expect result replies[1] to i64
-- expect result replies[2] to i64
 
 
 <details>
@@ -106,13 +99,13 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # client: IAC WILL SGA(3)
-val data = bytes_of([255, 251, 3])
+val data: [i64] = [255, 251, 3]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 0
 expect result.replies.length() == 3
-expect result.replies[0].to_i64() == 255
-expect result.replies[1].to_i64() == 254
-expect result.replies[2].to_i64() == 3
+expect result.replies[0] == 255
+expect result.replies[1] == 254
+expect result.replies[2] == 3
 ```
 
 </details>
@@ -120,7 +113,6 @@ expect result.replies[2].to_i64() == 3
 #### ignores IAC DONT and IAC WONT silently
 
 - expect result clean length
-- expect result clean[0] to i64
 - expect result replies length
 
 
@@ -131,10 +123,10 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val data = bytes_of([255, 254, 1, 255, 252, 3, 65])
+val data: [i64] = [255, 254, 1, 255, 252, 3, 65]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 1
-expect result.clean[0].to_i64() == 65
+expect result.clean[0] == 65
 expect result.replies.length() == 0
 ```
 
@@ -143,8 +135,6 @@ expect result.replies.length() == 0
 #### unescapes IAC IAC to a literal 255 byte
 
 - expect result clean length
-- expect result clean[0] to i64
-- expect result clean[1] to i64
 - expect result replies length
 
 
@@ -155,11 +145,11 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val data = bytes_of([255, 255, 66])
+val data: [i64] = [255, 255, 66]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 2
-expect result.clean[0].to_i64() == 255
-expect result.clean[1].to_i64() == 66
+expect result.clean[0] == 255
+expect result.clean[1] == 66
 expect result.replies.length() == 0
 ```
 
@@ -168,7 +158,6 @@ expect result.replies.length() == 0
 #### strips subnegotiation blocks entirely
 
 - expect result clean length
-- expect result clean[0] to i64
 - expect result replies length
 
 
@@ -180,10 +169,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # IAC SB NAWS(31) 0 80 0 24 IAC SE, then 'A'
-val data = bytes_of([255, 250, 31, 0, 80, 0, 24, 255, 240, 65])
+val data: [i64] = [255, 250, 31, 0, 80, 0, 24, 255, 240, 65]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 1
-expect result.clean[0].to_i64() == 65
+expect result.clean[0] == 65
 expect result.replies.length() == 0
 ```
 
@@ -192,7 +181,6 @@ expect result.replies.length() == 0
 #### drops two-byte IAC commands like NOP and AYT
 
 - expect result clean length
-- expect result clean[0] to i64
 - expect result replies length
 
 
@@ -204,10 +192,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # IAC NOP(241), IAC AYT(246), 'B'
-val data = bytes_of([255, 241, 255, 246, 66])
+val data: [i64] = [255, 241, 255, 246, 66]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 1
-expect result.clean[0].to_i64() == 66
+expect result.clean[0] == 66
 expect result.replies.length() == 0
 ```
 
@@ -216,7 +204,6 @@ expect result.replies.length() == 0
 #### drops a lone IAC at end of buffer
 
 - expect result clean length
-- expect result clean[0] to i64
 
 
 <details>
@@ -226,10 +213,10 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val data = bytes_of([67, 255])
+val data: [i64] = [67, 255]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 1
-expect result.clean[0].to_i64() == 67
+expect result.clean[0] == 67
 ```
 
 </details>
@@ -248,7 +235,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # 'o' 'k' IAC DO ECHO 'g' 'o'
-val data = bytes_of([111, 107, 255, 253, 1, 103, 111])
+val data: [i64] = [111, 107, 255, 253, 1, 103, 111]
 val result = bridge_filter_client_bytes(data)
 expect result.clean.length() == 4
 expect result.replies.length() == 3
@@ -261,12 +248,6 @@ expect result.replies.length() == 3
 #### advertises WILL ECHO and WILL SGA
 
 - expect greeting length
-- expect greeting[0] to i64
-- expect greeting[1] to i64
-- expect greeting[2] to i64
-- expect greeting[3] to i64
-- expect greeting[4] to i64
-- expect greeting[5] to i64
 
 
 <details>
@@ -278,12 +259,12 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val greeting = bridge_initial_negotiation()
 expect greeting.length() == 6
-expect greeting[0].to_i64() == 255
-expect greeting[1].to_i64() == 251
-expect greeting[2].to_i64() == 1
-expect greeting[3].to_i64() == 255
-expect greeting[4].to_i64() == 251
-expect greeting[5].to_i64() == 3
+expect greeting[0] == 255
+expect greeting[1] == 251
+expect greeting[2] == 1
+expect greeting[3] == 255
+expect greeting[4] == 251
+expect greeting[5] == 3
 ```
 
 </details>

@@ -4,8 +4,11 @@
 # Proves the full chain on physical hardware:
 #   telnet client -> telnet_serial_bridge -> KV260 merged-USB PS UART1 <- XSDB/JTAG marker
 #
-# The bridge owns the serial port; XSDB writes MARKER bytes into ZynqMP UART1
-# TXFIFO over JTAG; the telnet client must observe MARKER through the bridge.
+# The serial port is read by a detached `dd` appending to a capture file the
+# bridge relays from (the interpreter has no serial extern dispatch — see
+# doc/08_tracking/bug/interpreter_serial_net_sffi_dispatch_gap.md). XSDB
+# writes MARKER bytes into ZynqMP UART1 TXFIFO over JTAG; the telnet client
+# must observe MARKER through the bridge.
 #
 # All long-lived helpers run in their own detached process groups (setsid +
 # timeout) so a wedge or crash never takes down the invoking session.
@@ -21,7 +24,7 @@ HW_PORT="${HW_PORT:-3123}"
 OUT_DIR="${OUT_DIR:-build/kv260_telnet_serial_system_$(date +%Y%m%d_%H%M%S)}"
 BAUD="${BAUD:-115200}"
 BRIDGE_PORT="${BRIDGE_PORT:-2326}"
-CAPTURE_MS="${CAPTURE_MS:-20000}"
+CAPTURE_MS="${CAPTURE_MS:-30000}"
 MARKER="${MARKER:-KV260-TELNET-SERIAL-SYSTEM}"
 UART1_TXFIFO="${UART1_TXFIFO:-0xff010030}"
 UART1_STATUS="${UART1_STATUS:-0xff01002c}"
@@ -45,9 +48,10 @@ info() {
 # Guarded kill: never signal pid <= 1 or empty (session-crash hardening).
 safe_kill() {
     for pid in "$@"; do
-        if [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-        fi
+        case "$pid" in
+            ''|0|1|-*) continue ;;
+        esac
+        kill "$pid" 2>/dev/null || true
     done
 }
 
@@ -69,24 +73,34 @@ info "serial_port=$SERIAL_PORT baud=$BAUD"
 [ -x "$SIMPLE" ] || fail "simple_binary_missing path=$SIMPLE"
 pass "prerequisites"
 
+dd_pid=""
 bridge_pid=""
 hw_pid=""
 probe_pid=""
 cleanup() {
-    safe_kill "$probe_pid" "$bridge_pid" "$hw_pid"
+    safe_kill "$probe_pid" "$bridge_pid" "$dd_pid" "$hw_pid"
 }
 trap cleanup EXIT INT TERM
 
-# 1. Bridge: own the serial port, serve exactly one telnet session.
+# 1. Serial reader: raw mode, detached dd appending device bytes to rx file.
+rx_file="$OUT_DIR/serial_rx.bin"
+: >"$rx_file"
+stty -F "$SERIAL_PORT" "$BAUD" cs8 -cstopb -parenb -ixon -ixoff raw -echo
+setsid timeout 180 dd if="$SERIAL_PORT" of="$rx_file" oflag=append conv=notrunc bs=1 status=none &
+dd_pid=$!
+pass "serial_reader_started"
+
+# 2. Bridge: serve exactly one telnet session over the capture file/device.
 bridge_log="$OUT_DIR/bridge.log"
-setsid timeout 120 "$SIMPLE" run scripts/fpga/telnet_serial_bridge.spl \
-    "$SERIAL_PORT" "$BAUD" "127.0.0.1:$BRIDGE_PORT" 1 0 90000 \
+setsid timeout 170 env SIMPLE_EXECUTION_MODE=interpreter \
+    "$SIMPLE" run scripts/fpga/telnet_serial_bridge.spl \
+    "$rx_file" "$SERIAL_PORT" "127.0.0.1:$BRIDGE_PORT" 1 0 \
     >"$bridge_log" 2>&1 &
 bridge_pid=$!
 
 listening=1
 i=0
-while [ "$i" -lt 60 ]; do
+while [ "$i" -lt 90 ]; do
     if grep -q 'BRIDGE_LISTENING' "$bridge_log" 2>/dev/null; then
         listening=0
         break
@@ -103,21 +117,22 @@ if [ "$listening" -ne 0 ]; then
 fi
 pass "bridge_listening"
 
-# 2. hw_server for the JTAG marker injection.
+# 3. hw_server for the JTAG marker injection.
 setsid timeout 150 "$HW_SERVER" -s "tcp::$HW_PORT" >"$OUT_DIR/hw_server.log" 2>&1 &
 hw_pid=$!
 sleep 3
 
-# 3. Telnet probe client: connect through the bridge, watch for the marker.
+# 4. Telnet probe client: connect through the bridge, watch for the marker.
 probe_log="$OUT_DIR/probe.log"
-setsid timeout 90 "$SIMPLE" run scripts/fpga/telnet_serial_probe.spl \
+setsid timeout 160 env SIMPLE_EXECUTION_MODE=interpreter \
+    "$SIMPLE" run scripts/fpga/telnet_serial_probe.spl \
     127.0.0.1 "$BRIDGE_PORT" "$CAPTURE_MS" "$MARKER" \
     >"$probe_log" 2>&1 &
 probe_pid=$!
 
 connected=1
 i=0
-while [ "$i" -lt 30 ]; do
+while [ "$i" -lt 60 ]; do
     if grep -q 'TELNET_PROBE_CONNECTED' "$probe_log" 2>/dev/null; then
         connected=0
         break
@@ -134,7 +149,7 @@ if [ "$connected" -ne 0 ]; then
 fi
 pass "telnet_client_connected"
 
-# 4. Inject the marker into ZynqMP PS UART1 TXFIFO over JTAG.
+# 5. Inject the marker into ZynqMP PS UART1 TXFIFO over JTAG.
 tcl="$OUT_DIR/ps_uart_write.tcl"
 {
     printf 'connect -host localhost -port %s\n' "$HW_PORT"
@@ -162,18 +177,20 @@ else
     fail "jtag_marker_injected"
 fi
 
-# 5. The probe must have seen the marker through bridge + serial.
+# 6. The probe must have seen the marker through bridge + serial capture.
 wait "$probe_pid" 2>/dev/null || true
 probe_pid=""
 sed -n '1,60p' "$probe_log"
 if grep -q 'TELNET_PROBE_STATUS=marker_seen' "$probe_log"; then
     pass "telnet_serial_marker_seen"
 else
+    info "rx_file_bytes=$(wc -c <"$rx_file" | tr -d ' ')"
     fail "telnet_serial_marker_seen"
 fi
 
-wait "$bridge_pid" 2>/dev/null || true
+safe_kill "$bridge_pid" "$dd_pid"
 bridge_pid=""
+dd_pid=""
 sed -n '1,20p' "$bridge_log"
 
 info "out_dir=$OUT_DIR"

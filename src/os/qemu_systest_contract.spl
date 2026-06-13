@@ -1,0 +1,282 @@
+"""
+QEMU System Test Contract — Per-Architecture Descriptors and Classification.
+
+**Feature IDs:** #QEMU-SYSTEST-MULTIARCH-AC1
+**Category:** OS system test infrastructure
+
+Provides hardcoded per-arch QEMU boot descriptors and a pure classifier
+function for use by system specs. Does NOT call simpleos_platform_* or any
+catalog-lane accessor (those crash in interpreter mode). All argv is hardcoded
+from the lane reference data in src/os/port/simpleos_multiplatform_build_part2.spl.
+
+Serial logs are written to build/os/systest/<arch>.serial.log.
+"""
+
+use os.fs_exec_fallback_contract.{fs_exec_serial_has_fallback}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+
+# ---------------------------------------------------------------------------
+# Classification results (string constants)
+# ---------------------------------------------------------------------------
+
+pub val SYSTEST_PASS: text = "pass"
+pub val SYSTEST_PREFIX_MISSING_MEDIA: text = "missing-media:"
+pub val SYSTEST_PREFIX_BOOT_FAIL: text = "boot-fail:"
+pub val SYSTEST_BOOT_FAIL_FALLBACK: text = "boot-fail:fallback"
+
+# ---------------------------------------------------------------------------
+# Classifier — pure text-in, no I/O (testable without QEMU)
+# ---------------------------------------------------------------------------
+
+pub fn classify_serial(serial: text, markers: [text]) -> text:
+    """Classify a completed QEMU serial log against required markers.
+
+    Returns:
+      'pass'                     — all markers present, no fallback pattern
+      'boot-fail:fallback'       — fallback pattern detected in serial
+      'boot-fail:<marker>'       — first missing marker
+    """
+    if fs_exec_serial_has_fallback(serial):
+        return SYSTEST_BOOT_FAIL_FALLBACK
+    val n = markers.len()
+    val i = 0
+    while i < n:
+        val m = markers[i]
+        if not serial.contains(m):
+            return "boot-fail:" + m
+        val i = i + 1
+    SYSTEST_PASS
+
+# ---------------------------------------------------------------------------
+# riscv64 descriptor
+# ---------------------------------------------------------------------------
+
+pub fn riscv64_kernel_path() -> text:
+    "build/os/simpleos_riscv64_smf_fs.elf"
+
+pub fn riscv64_image_path() -> text:
+    "build/os/fat32-riscv64.img"
+
+pub fn riscv64_qemu_bin() -> text:
+    "qemu-system-riscv64"
+
+pub fn riscv64_qemu_args() -> [text]:
+    ["-machine", "virt",
+     "-cpu", "rv64",
+     "-m", "512M",
+     "-nographic",
+     "-bios", "default",
+     "-global", "virtio-mmio.force-legacy=false",
+     "-drive", "file=build/os/fat32-riscv64.img,if=none,id=rvdisk,format=raw",
+     "-device", "virtio-blk-device,drive=rvdisk",
+     "-kernel", "build/os/simpleos_riscv64_smf_fs.elf"]
+
+pub fn riscv64_markers() -> [text]:
+    ["ELF_LOAD_OK",
+     "SMF_CLI_LAUNCH_OK",
+     "SMF_WM_GUI_LAUNCH_OK",
+     "NATIVE_GUI_PROCESS_RENDER_OK",
+     "TEST PASSED"]
+
+pub fn riscv64_timeout_ms() -> i64:
+    60000
+
+# ---------------------------------------------------------------------------
+# riscv32 descriptor
+# ---------------------------------------------------------------------------
+
+pub fn riscv32_kernel_path() -> text:
+    "build/os/simpleos_riscv32_smf_fs.elf"
+
+pub fn riscv32_image_path() -> text:
+    "build/os/fat32-riscv32.img"
+
+pub fn riscv32_qemu_bin() -> text:
+    "qemu-system-riscv32"
+
+pub fn riscv32_qemu_args() -> [text]:
+    ["-machine", "virt",
+     "-cpu", "rv32",
+     "-m", "256M",
+     "-nographic",
+     "-bios", "none",
+     "-global", "virtio-mmio.force-legacy=false",
+     "-drive", "file=build/os/fat32-riscv32.img,if=none,id=rvdisk,format=raw",
+     "-device", "virtio-blk-device,drive=rvdisk",
+     "-kernel", "build/os/simpleos_riscv32_smf_fs.elf"]
+
+pub fn riscv32_markers() -> [text]:
+    ["ELF_LOAD_OK",
+     "SMF_CLI_LAUNCH_OK",
+     "SMF_WM_GUI_LAUNCH_OK",
+     "NATIVE_GUI_PROCESS_RENDER_OK",
+     "TEST PASSED"]
+
+pub fn riscv32_timeout_ms() -> i64:
+    60000
+
+# ---------------------------------------------------------------------------
+# arm64 descriptor (loader device boot, force-raw=on)
+# ---------------------------------------------------------------------------
+
+pub fn arm64_kernel_path() -> text:
+    "build/os/simpleos_arm64_fs_exec.elf"
+
+pub fn arm64_image_path() -> text:
+    "build/os/fat32-arm64.img"
+
+pub fn arm64_qemu_bin() -> text:
+    "qemu-system-aarch64"
+
+pub fn arm64_qemu_args() -> [text]:
+    ["-machine", "virt",
+     "-cpu", "cortex-a72",
+     "-m", "384M",
+     "-nographic",
+     "-global", "virtio-mmio.force-legacy=false",
+     "-drive", "file=build/os/fat32-arm64.img,if=none,id=armdisk,format=raw",
+     "-device", "virtio-blk-device,drive=armdisk",
+     "-semihosting-config", "enable=on,target=native",
+     "-device", "loader,file=build/os/simpleos_arm64_fs_exec.elf,addr=0x40200000,force-raw=on",
+     "-device", "loader,addr=0x40200000,cpu-num=0"]
+
+pub fn arm64_markers() -> [text]:
+    ["ELF_LOAD_OK",
+     "SMF_CLI_LAUNCH_OK",
+     "SMF_WM_GUI_LAUNCH_OK",
+     "NATIVE_GUI_PROCESS_RENDER_OK",
+     "TEST PASSED"]
+
+pub fn arm64_timeout_ms() -> i64:
+    60000
+
+# ---------------------------------------------------------------------------
+# arm32 descriptor (loader device boot, no force-raw)
+# ---------------------------------------------------------------------------
+
+pub fn arm32_kernel_path() -> text:
+    "build/os/simpleos_arm32_fs_exec.elf"
+
+pub fn arm32_image_path() -> text:
+    "build/os/fat32-arm32.img"
+
+pub fn arm32_qemu_bin() -> text:
+    "qemu-system-arm"
+
+pub fn arm32_qemu_args() -> [text]:
+    ["-machine", "virt",
+     "-cpu", "cortex-a15",
+     "-m", "384M",
+     "-nographic",
+     "-global", "virtio-mmio.force-legacy=false",
+     "-drive", "file=build/os/fat32-arm32.img,if=none,id=armdisk,format=raw",
+     "-device", "virtio-blk-device,drive=armdisk",
+     "-semihosting-config", "enable=on,target=native",
+     "-device", "loader,file=build/os/simpleos_arm32_fs_exec.elf,addr=0x40200000",
+     "-device", "loader,addr=0x40200000,cpu-num=0"]
+
+pub fn arm32_markers() -> [text]:
+    ["ELF_LOAD_OK",
+     "SMF_CLI_LAUNCH_OK",
+     "SMF_WM_GUI_LAUNCH_OK",
+     "NATIVE_GUI_PROCESS_RENDER_OK",
+     "TEST PASSED"]
+
+pub fn arm32_timeout_ms() -> i64:
+    60000
+
+# ---------------------------------------------------------------------------
+# x86_64 descriptor
+# ---------------------------------------------------------------------------
+
+pub fn x86_64_kernel_path() -> text:
+    "build/os/simpleos_x86_64_fs_exec.elf"
+
+pub fn x86_64_image_path() -> text:
+    "build/os/fat32-x86_64.img"
+
+pub fn x86_64_qemu_bin() -> text:
+    "qemu-system-x86_64"
+
+pub fn x86_64_qemu_args() -> [text]:
+    ["-machine", "q35",
+     "-cpu", "qemu64",
+     "-m", "512M",
+     "-nographic",
+     "-kernel", "build/os/simpleos_x86_64_fs_exec.elf"]
+
+pub fn x86_64_markers() -> [text]:
+    ["ELF_LOAD_OK",
+     "SMF_CLI_LAUNCH_OK",
+     "SMF_WM_GUI_LAUNCH_OK",
+     "NATIVE_GUI_PROCESS_RENDER_OK",
+     "TEST PASSED"]
+
+pub fn x86_64_timeout_ms() -> i64:
+    60000
+
+# ---------------------------------------------------------------------------
+# x86_32 descriptor (uses qemu-system-x86_64 — i386 rejects PVH)
+# ---------------------------------------------------------------------------
+
+pub fn x86_32_kernel_path() -> text:
+    "build/os/simpleos_x86_32_initrd_fs_exec_probe.elf"
+
+pub fn x86_32_image_path() -> text:
+    "build/os/fat32-x86_32.img"
+
+pub fn x86_32_qemu_bin() -> text:
+    "qemu-system-x86_64"
+
+pub fn x86_32_qemu_args() -> [text]:
+    ["-machine", "pc",
+     "-cpu", "qemu32",
+     "-m", "128M",
+     "-nographic",
+     "-initrd", "build/os/fat32-x86_32.img",
+     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+     "-kernel", "build/os/simpleos_x86_32_initrd_fs_exec_probe.elf"]
+
+pub fn x86_32_markers() -> [text]:
+    ["[x86_32 fs] initrd fat32 ok",
+     "[x86_32 fs] hello_world smf ok",
+     "[x86_32 fs] browser smf ok",
+     "[x86_32 fs] x86_32 payload ok",
+     "[x86_32 fs] app execution ok"]
+
+pub fn x86_32_timeout_ms() -> i64:
+    60000
+
+# ---------------------------------------------------------------------------
+# Run helper — spawn QEMU, write serial log, return classification
+# ---------------------------------------------------------------------------
+
+pub fn run_qemu_systest(
+    arch: text,
+    kernel_path: text,
+    image_path: text,
+    qemu_bin: text,
+    qemu_args: [text],
+    markers: [text],
+    timeout_ms: i64
+) -> text:
+    """Spawn QEMU for one arch, write serial log, return classification string.
+
+    Returns 'missing-media:<path>' immediately if kernel or image is absent.
+    Otherwise runs QEMU and calls classify_serial on the combined output.
+    Serial log is written to build/os/systest/<arch>.serial.log.
+    """
+    if not rt_file_exists(kernel_path):
+        return SYSTEST_PREFIX_MISSING_MEDIA + kernel_path
+    if not rt_file_exists(image_path):
+        return SYSTEST_PREFIX_MISSING_MEDIA + image_path
+    rt_dir_create_all("build/os/systest")
+    val log_path = "build/os/systest/" + arch + ".serial.log"
+    val result = rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms)
+    val serial = result[0] + result[1]
+    rt_file_write_text(log_path, serial)
+    classify_serial(serial, markers)
