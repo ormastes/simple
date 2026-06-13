@@ -317,7 +317,7 @@ expect(row).to_contain("doc/05_design/multicore_green.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 70 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -384,11 +384,13 @@ expect(row).to_contain("simple_multicore_parallelism_missing")
 expect(row).to_contain("hosted_sliced_fairness_section_missing")
 expect(row).to_contain("hosted_sliced_fairness_marker_corrupt")
 expect(row).to_contain("hosted_sliced_fairness_explanation_corrupt")
+expect(row).to_contain("cooperative_green_explanation_corrupt")
 expect(row).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(row).to_contain("go_scheduler_width_mismatch")
 expect(row).to_contain("forbidden_number_suffix_api_name")
 step("Verify the system-test plan describes the cooperative-green negative profile case")
 val system_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
+expect(system_plan).to_contain("cooperative-green explanation")
 expect(system_plan).to_contain("cooperative_green_mn_runtime_pool_label")
 expect(system_plan).to_contain("cooperative-label")
 ```
@@ -538,12 +540,13 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 - Verify cooperative green remains documented as single-carrier work
 - Verify hosted M:N claims require runtime-pool and scheduler-width evidence
 - Verify stale release-wrapper guidance stays visible
+- Verify forbidden numbered API-name scans cover the public concurrency family
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -551,6 +554,8 @@ step("Read the public guide and profile guide")
 val stdlib = rt_file_read_text("doc/07_guide/lib/misc/stdlib.md") ?? ""
 val perf = rt_file_read_text("doc/07_guide/compiler/check_perf.md") ?? ""
 val coding = rt_file_read_text(".codex/skills/coding/SKILL.md") ?? ""
+val profile_contract = rt_file_read_text("test/05_perf/profile_scripts/profile_report_contract_test.shs") ?? ""
+val api_contract = rt_file_read_text("test/05_perf/profile_scripts/concurrency_api_contract_test.shs") ?? ""
 
 step("Verify cooperative green remains documented as single-carrier work")
 expect(stdlib).to_contain("no preemption or CPU parallelism")
@@ -566,12 +571,23 @@ expect(stdlib).to_contain("GOMAXPROCS")
 expect(perf).to_contain("used_runtime_pool()")
 expect(perf).to_contain("queue_model=work_stealing")
 expect(perf).to_contain("GOMAXPROCS=$CPU_WORKERS")
+expect(perf).to_contain("contract-gated reports must keep")
 expect(coding).to_contain("assert `used_runtime_pool()`")
 expect(coding).to_contain("Cross-language profile")
 
 step("Verify stale release-wrapper guidance stays visible")
 expect(perf).to_contain("skips a stale release wrapper")
 expect(perf).to_contain("PROFILE_DOCKER_SIMPLE_BINARY=src/compiler_rust/target/debug/simple")
+
+step("Verify forbidden numbered API-name scans cover the public concurrency family")
+expect(profile_contract).to_contain("thread_spawn_with_args")
+expect(profile_contract).to_contain("task_spawn")
+expect(profile_contract).to_contain("cooperative_green_spawn")
+expect(profile_contract).to_contain("multicore_green_spawn_sliced")
+expect(api_contract).to_contain("thread_spawn_with_args")
+expect(api_contract).to_contain("task_spawn")
+expect(api_contract).to_contain("cooperative_green_spawn")
+expect(api_contract).to_contain("multicore_green_spawn_sliced")
 ```
 
 </details>

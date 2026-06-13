@@ -98,7 +98,7 @@ sh scripts/check/check-cross-language-perf.shs
 | `FANOUT_STRESS_WORKERS` | 512 | Simple-vs-Go-vs-C tiny-task stress count for multicore green, goroutines, and pthreads |
 | `FANOUT_STRESS_ITERS` | 1 | Tiny per-task LCG iterations for the stress benchmark |
 | `RUN_TIMEOUT` | 30 | Per-command timeout in seconds for measured commands and RSS probes |
-| `GOMAXPROCS` | `CPU_WORKERS` | Go scheduler width for goroutine rows; defaults to the same limit used by Simple multicore-green parallelism |
+| `GOMAXPROCS` | `CPU_WORKERS` | Go scheduler width for goroutine rows; contract-gated reports must keep this equal to `CPU_WORKERS` |
 | `SIMPLE_BINARY` | `bin/simple` | Path to Simple compiler |
 | `BUILD_DIR` | `build/cross_lang_perf` | Workload compile output |
 | `REPORT_PATH` | `doc/09_report/cross_language_perf_<date>.md` | Output report |
@@ -135,9 +135,11 @@ you are explicitly retesting the debug-binary linker regression tracked in
 The report records the Go toolchain and the generated Go probe's
 `runtime.GOMAXPROCS(0)` / `runtime.NumCPU()` values so Go-like M:N comparisons
 name the scheduler limit used by the goroutine rows. The harness exports
-`GOMAXPROCS=$CPU_WORKERS` unless the caller explicitly overrides it, so the Go
-goroutine rows and Simple `multicore_green_set_parallelism(CPU_WORKERS)` rows
-use the same scheduler-width limit in current contract reports.
+`GOMAXPROCS=$CPU_WORKERS` by default, and contract-gated reports must keep the
+recorded Go scheduler width equal to `CPU_WORKERS` so Go goroutine rows and
+Simple `multicore_green_set_parallelism(CPU_WORKERS)` rows use the same limit.
+Explicit `GOMAXPROCS` overrides are exploratory unless they preserve that
+equality.
 Generated Simple concurrency workloads compute an expected checksum and exit
 nonzero on mismatch, so runtime-pool closure lookup failures, lambda capture
 bugs, or wrong joins are classified as failed rows instead of performance wins.
