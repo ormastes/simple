@@ -61,3 +61,11 @@ Until the source/runtime/compiler state is made consistent again:
 - current-source debug probes are authoritative in this workspace
 - checked-in `bin/release/simple` should be treated as stale lane evidence
   rather than a closure signal for multicore-green hosted parity
+
+## Mitigation
+
+2026-06-13: user-facing wrappers that choose among release/runtime candidates
+now require the candidate to pass `--version`, matching the cross-language
+profile harness. `bin/sj` and `bin/simple-interp` therefore skip an executable
+but stale `bin/release/simple` wrapper whose platform target is missing.
+Regression: `test/02_integration/simple_wrapper_runtime_probe_test.shs`.
