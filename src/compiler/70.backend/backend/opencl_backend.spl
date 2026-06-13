@@ -826,6 +826,37 @@ class OpenClBackend:
             return "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {resolved};"
         "{resolved};"
 
+    static fn emit_vec_load(func: MirFunction, dest, width: i64, name: text, args: [MirOperand]) -> text:
+        """Emit gpu_vecN_load_f32 as vloadN(index, ptr) — OpenCL vectorized load."""
+        if not dest.?:
+            return "// {name} missing destination"
+        if args.len() < 2:
+            return "// {name} missing arguments (expected ptr, index)"
+        val dest_id = dest.unwrap()
+        val ptr_op = OpenClBackend.emit_operand(func, args[0])
+        val idx_op = OpenClBackend.emit_operand(func, args[1])
+        val vec_ty = "float{width}"
+        val local_name = OpenClBackend.local_id_name_for_func(func, dest_id)
+        "{vec_ty} {local_name} = vload{width}({idx_op}, (const __global float*){ptr_op});"
+
+    static fn emit_vec_store(func: MirFunction, width: i64, name: text, args: [MirOperand]) -> text:
+        """Emit gpu_vecN_store_f32 as vstoreN(vec, index, ptr) — OpenCL vectorized store."""
+        val min_args = width + 2
+        if args.len() < min_args:
+            return "// {name} missing arguments (expected ptr, index, v0..v{width-1})"
+        val ptr_op = OpenClBackend.emit_operand(func, args[0])
+        val idx_op = OpenClBackend.emit_operand(func, args[1])
+        val vec_ty = "float{width}"
+        if width == 4:
+            val v0 = OpenClBackend.emit_operand(func, args[2])
+            val v1 = OpenClBackend.emit_operand(func, args[3])
+            val v2 = OpenClBackend.emit_operand(func, args[4])
+            val v3 = OpenClBackend.emit_operand(func, args[5])
+            return "vstore4(({vec_ty})({v0}, {v1}, {v2}, {v3}), {idx_op}, (__global float*){ptr_op});"
+        val v0 = OpenClBackend.emit_operand(func, args[2])
+        val v1 = OpenClBackend.emit_operand(func, args[3])
+        "vstore2(({vec_ty})({v0}, {v1}), {idx_op}, (__global float*){ptr_op});"
+
     static fn emit_barrier(scope: GpuBarrierScope) -> text:
         match scope:
             case Workgroup:
