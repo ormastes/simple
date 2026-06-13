@@ -173,20 +173,23 @@ fn _mcp_get_tool_set() -> text:
     _MCP_TOOL_SET
 
 # Read tool-set selection from environment and argv.
-# Env var SIMPLE_MCP_TOOL_SET ("core" | "all") is checked first;
-# --tool-set=<set> argv flag overrides it.  Unknown values are silently ignored
-# so "all" is always the safe fallback.
+# Env var SIMPLE_MCP_TOOL_SET ("auto" | "core" | "all") is checked first;
+# --tool-set=<set> argv flag overrides it.  Unknown values fall back to "auto".
 fn _mcp_init_tool_set(args: [text]):
     val env_set = env_get("SIMPLE_MCP_TOOL_SET") ?? ""
-    if env_set == "core" or env_set == "all":
+    if env_set == "auto" or env_set == "core" or env_set == "all":
         _MCP_TOOL_SET = env_set
+    elif env_set != "":
+        _MCP_TOOL_SET = "auto"
     var i = 0
     while i < args.len():
         val arg = args[i]
         if arg.starts_with("--tool-set="):
             val v = arg.replace("--tool-set=", "")
-            if v == "core" or v == "all":
+            if v == "auto" or v == "core" or v == "all":
                 _MCP_TOOL_SET = v
+            else:
+                _MCP_TOOL_SET = "auto"
         i = i + 1
 
 # Strip --tool-set=... flags from the arg list so the unknown-arg check in
@@ -207,21 +210,40 @@ fn mcp_strip_tool_set_args(args: [text]) -> [text]:
 fn _mcp_input_schema(props: text, req: text) -> text:
     "{\"type\":\"object\",\"properties\":" + props + ",\"required\":" + req + "}"
 
-# Lazily build and cache the tools/list result JSON for the active tool set.
-# "all" path is byte-identical to the original — default behavior unchanged.
-# "core" delegates to the T1 contract function _mcp_tools_list_json_for_set.
-fn _mcp_tools_list_result() -> text:
-    if _MCP_TOOLS_LIST_CACHE != "":
-        return _MCP_TOOLS_LIST_CACHE
+# Build and return the tools/list result JSON for the active tool set.
+# "auto": first call returns core JSON and arms the list_changed notification;
+#         subsequent calls return the full cached list.
+# "all":  always returns the full cached list (no notification).
+# "core": always returns core JSON (no notification, no upgrade).
+fn _mcp_tools_list_payload() -> text:
+    if _MCP_TOOL_SET == "auto":
+        if not _MCP_LIST_UPGRADED:
+            _MCP_LIST_UPGRADED = true
+            _MCP_EMIT_LIST_CHANGED = true
+            return _mcp_tools_list_json_for_set("core")
+        return _mcp_static_tools_result_cached()
     if _MCP_TOOL_SET == "core":
-        _MCP_TOOLS_LIST_CACHE = _mcp_tools_list_json_for_set("core")
-    else:
-        _MCP_TOOLS_LIST_CACHE = _mcp_static_tools_result()
-    _MCP_TOOLS_LIST_CACHE
+        return _mcp_tools_list_json_for_set("core")
+    # "all" (and any unexpected value)
+    _mcp_static_tools_result_cached()
+
+# Returns true once the auto-mode upgrade has been served (first tools/list done).
+fn _mcp_list_upgraded() -> bool:
+    _MCP_LIST_UPGRADED
+
+# One-shot read: returns the current emit flag and clears it.
+# After returning true once, subsequent calls return false until the flag is set again.
+fn _mcp_take_emit_list_changed() -> bool:
+    val v = _MCP_EMIT_LIST_CHANGED
+    _MCP_EMIT_LIST_CHANGED = false
+    v
 
 fn _mcp_initialize_result() -> text:
     var caps = LB()
-    caps = caps + jp("tools", LB() + RB())
+    if _MCP_TOOL_SET == "auto":
+        caps = caps + jp("tools", jo1(jp("listChanged", "true")))
+    else:
+        caps = caps + jp("tools", LB() + RB())
     caps = caps + "," + jp("resources", jo1(jp("listChanged", "false")))
     caps = caps + "," + jp("prompts", jo1(jp("listChanged", "false")))
     caps = caps + "," + jp("logging", LB() + RB())
@@ -415,7 +437,7 @@ fn main() -> i64:
             response = dispatch_tool(id, tool_name, args_raw)
         elif has_method(msg, "tools/list"):
             val id = _mcp_extract_id(msg, "tools/list")
-            response = make_json_result(id, _mcp_tools_list_result())
+            response = make_json_result(id, _mcp_tools_list_payload())
         elif has_method(msg, "notifications/initialized") or (
             has_method(msg, "notifications/cancelled")) or (
             has_method(msg, "notifications/roots/list_changed")) or (
@@ -467,6 +489,9 @@ fn main() -> i64:
                 response = make_error(id, -32601, "Method not found")
         if response != "":
             _mcp_write_message(response)
+            if _mcp_take_emit_list_changed():
+                val notif = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}"
+                _mcp_write_message(notif)
     0
 
 export _mcp_get_tool_set
