@@ -101,7 +101,7 @@ sh scripts/check/check-cross-language-perf.shs
 | `GOMAXPROCS` | `CPU_WORKERS` | Go scheduler width for goroutine rows; contract-gated reports must keep this equal to `CPU_WORKERS` |
 | `SIMPLE_BINARY` | `bin/simple` | Path to Simple compiler |
 | `BUILD_DIR` | `build/cross_lang_perf` | Workload compile output |
-| `REPORT_PATH` | `doc/09_report/cross_language_perf_<date>.md` | Output report |
+| `REPORT_PATH` | `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md` | Canonical checked-in output report; set explicitly for ad-hoc/date-stamped runs |
 | `PROFILE_DOCKER_ISOLATION` | 0 | Re-exec the existing profile script inside Docker when set to `1` |
 | `PROFILE_DOCKER_IMAGE` | `simple-cross-language-perf:latest` | Docker image for isolated crash-prone profile/test runs with the C/Go toolchains installed |
 | `PROFILE_DOCKER_MEMORY` | `2g` | Container memory limit for isolated profile runs |

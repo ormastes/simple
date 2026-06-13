@@ -642,7 +642,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 93 lines folded for reproduction.
+Runnable source: 97 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -675,6 +675,7 @@ expect(perf).to_contain("checked stress report")
 expect(perf).to_contain("runtime-seed `rt_pool_*` support")
 expect(perf).to_contain("not describe this as a combined Pure Simple")
 expect(perf).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(perf).to_contain("set explicitly for ad-hoc/date-stamped runs")
 expect(coding).to_contain("assert `used_runtime_pool()`")
 expect(coding).to_contain("Cross-language profile")
 expect(coding).to_contain("Pure Simple user API")
@@ -698,6 +699,9 @@ expect(profile_contract).to_contain("\"total = total + handle.join()\"")
 expect(profile_contract).to_contain("canonical_checked_report=1")
 expect(profile_contract).to_contain("report_index=\"doc/09_report/README.md\"")
 expect(profile_contract).to_contain("report_index_checked=doc/09_report/README.md")
+val profile_script = rt_file_read_text("scripts/check/check-cross-language-perf.shs") ?? ""
+expect(profile_script).to_contain("CANONICAL_CROSS_LANGUAGE_REPORT")
+expect(profile_script).to_contain("REPORT_PATH=\"${REPORT_PATH:-$CANONICAL_CROSS_LANGUAGE_REPORT}\"")
 expect(sys_test_plan).to_contain("Generated multicore-green profile code must store `MulticoreGreenHandle` values")
 expect(sys_test_plan).to_contain("must not import `rt_pool_join` directly")
 expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn`/`rt_pool_*` candidate row")
