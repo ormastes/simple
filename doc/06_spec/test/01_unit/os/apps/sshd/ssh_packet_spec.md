@@ -1,6 +1,6 @@
 # Ssh Packet Specification
 
-> 1. ed25519 seed:  ed25519 seed
+> <details>
 
 <!-- sdn-diagram:id=ssh_packet_spec.arch -->
 <details class="sdn-source">
@@ -41,7 +41,7 @@ ssh_packet_spec -> os
 
 #### preserves a host-key aware KEXINIT payload byte-for-byte inside the packet
 
-1. ed25519 seed:  ed25519 seed
+- ed25519 seed:  ed25519 seed
    - Expected: ssh_get_u32(packet, 0).to_u64() equals `packet.len() - 4`
    - Expected: _u8_at(packet, 4) equals `5`
    - Expected: _u8_at(packet, 5) equals `20`
@@ -49,7 +49,7 @@ ssh_packet_spec -> os
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -77,11 +77,11 @@ while i < payload.len():
 
 #### keeps the expected KEXINIT wire prefix after packet wrapping
 
-1. ed25519 seed:  ed25519 seed
+- ed25519 seed:  ed25519 seed
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -104,7 +104,7 @@ _expect_prefix(
 
 #### round-trips a host-key aware KEXINIT packet through ssh_packet_read
 
-1. ed25519 seed:  ed25519 seed
+- ed25519 seed:  ed25519 seed
    - Expected: parsed.is_ok() is true
    - Expected: pair.consumed equals `packet.len()`
    - Expected: pair.packet.payload.len() equals `payload.len()`
@@ -112,7 +112,7 @@ _expect_prefix(
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -141,7 +141,7 @@ while i < payload.len():
 
 #### does not zero out payload bytes after the first length field
 
-1. ed25519 seed:  ed25519 seed
+- ed25519 seed:  ed25519 seed
    - Expected: _u8_at(packet, 22) equals `0`
    - Expected: _u8_at(packet, 23) equals `0`
    - Expected: _u8_at(packet, 24) equals `0`
@@ -153,7 +153,7 @@ while i < payload.len():
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -184,7 +184,7 @@ expect(_u8_at(packet, 29)).to_equal(0x76)
 #### returns Err when fewer than 5 bytes are available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -201,7 +201,7 @@ expect(parsed.err().unwrap()).to_equal("ssh_packet_read: need at least 5 bytes")
 #### returns Err when packet_length is smaller than 2
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -218,7 +218,7 @@ expect(parsed.err().unwrap()).to_equal("ssh_packet_read: packet_length too small
 #### returns Err when packet bytes are incomplete
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -235,7 +235,7 @@ expect(parsed.err().unwrap()).to_equal("ssh_packet_read: incomplete packet")
 #### returns Err when padding exceeds packet_length
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -253,13 +253,12 @@ expect(parsed.err().unwrap()).to_equal("ssh_packet_read: padding exceeds packet"
 
 #### preserves the raw X25519 byte string order for SSH mpint encoding
 
-1. encoded = ssh put mpint
-
-2.  expect prefix
+- encoded = ssh put mpint
+-  expect prefix
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -274,13 +273,12 @@ _expect_prefix(encoded, "0000000401020304")
 
 #### prepends a sign pad without reversing the byte string
 
-1. encoded = ssh put mpint
-
-2.  expect prefix
+- encoded = ssh put mpint
+-  expect prefix
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

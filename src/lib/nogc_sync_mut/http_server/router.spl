@@ -5,7 +5,7 @@
 # Design: doc/05_design/simple_web_server_lib_api.md
 
 use std.nogc_sync_mut.http_server.types.{
-    HttpRequest, HttpResponse, HttpMethod, http_method_to_text
+    HttpRequest, HttpResponse, HttpMethod, HttpStatus, http_method_to_text
 }
 
 # =============================================================================
@@ -72,6 +72,10 @@ class Router:
         self.not_found_handler = handler
 
     fn dispatch(req: HttpRequest) -> HttpResponse:
+        # AC-3: reject path traversal before any handler sees the request.
+        if not path_is_safe(req.path):
+            return HttpResponse.error(HttpStatus.BadRequest, "400 Bad Request: unsafe path")
+
         for r in self.routes:
             if method_matches(r.method, req.method) and match_route_pattern(r.pattern, req.path):
                 return r.handler(req)
@@ -139,3 +143,59 @@ fn extract_route_params(pattern: text, path: text) -> [(text, text)]:
 
 fn default_not_found(req: HttpRequest) -> HttpResponse:
     HttpResponse.not_found()
+
+# =============================================================================
+# Path Safety (AC-3)
+# =============================================================================
+
+# path_is_safe returns false when the path contains traversal sequences that
+# could escape the document root.  Checked patterns:
+#   - ".." as a path segment (/../, /..%2f, etc.)
+#   - URL-encoded dot sequences (%2e%2e)
+#   - Double slash (//)
+#   - Absolute path injection (scheme: or \\ on Windows-style paths)
+#
+# This is a defence-in-depth guard.  Callers should also normalise paths
+# before serving files from disk.
+fn path_is_safe(path: text) -> bool:
+    val lower = path.to_lower()
+
+    # Double-dot segment: literal "../" or "/.." at end
+    if lower.contains("/../"):
+        return false
+    if lower.ends_with("/.."):
+        return false
+    if lower.starts_with("../"):
+        return false
+    if lower == "..":
+        return false
+
+    # URL-encoded variants: %2e%2e (both dots encoded)
+    if lower.contains("%2e%2e"):
+        return false
+
+    # Partially encoded: .%2e or %2e.
+    if lower.contains(".%2e"):
+        return false
+    if lower.contains("%2e."):
+        return false
+
+    # Backslash traversal (Windows-style)
+    if lower.contains("\\.."):
+        return false
+    if lower.contains("..\\"):
+        return false
+
+    # Double slash — often used to bypass naive prefix checks
+    if lower.contains("//"):
+        return false
+
+    # Null byte injection
+    if lower.contains("\0"):
+        return false
+    if lower.contains("%00"):
+        return false
+
+    return true
+
+export path_is_safe

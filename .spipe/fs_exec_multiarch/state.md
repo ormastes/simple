@@ -19,7 +19,21 @@ FS-loaded execution proof contracts are fail-closed and arch-uniform (x86_64, ri
 No changes to src/os/apps/** or src/lib/**. No new QEMU scenarios; contract/loader level only. desktop_qemu_contract.spl marker strings must not diverge.
 
 ## Phase
-dev-done
+implement-done
+
+## Gap Map (AC-1)
+Derived from qemu_runner_part5.spl and x86_64_fs_loaded_launch_proof.spl:
+
+| Arch   | Required-marker source                     | Fallback rejection before this change |
+|--------|--------------------------------------------|---------------------------------------|
+| x86_64 | x86_64_fs_loaded_marker_contract / has_resident_manifest_fallback | YES — inline in launch_proof.spl |
+| riscv64 | _catalog_lane_for_scenario → required_serial_markers | NO — _scenario_serial_accepts_completion only checks markers |
+| riscv32 | reuses arm fn / catalog lane               | NO — same gap                         |
+| arm64  | arm64_wm_ramfb_required_marker_fragments / catalog lane | NO — same gap              |
+| arm32  | arm_fs_exec_required_marker_fragments / catalog lane | NO — same gap              |
+
+Gap: _scenario_serial_accepts_completion (line 649) only loops over required markers; no arch lane calls has_resident_manifest_fallback. The shared contract introduced in this change provides the fix; arm/riscv lanes must wire fs_exec_serial_rejects_fallback into their serial-acceptance path (out of Track C scope — noted for follow-up).
 
 ## Log
 - dev: Created state file with 4 acceptance criteria (type: code-quality)
+- implement-done (Track C): Gap map recorded (AC-1). Shared arch-neutral fallback contract created (src/os/fs_exec_fallback_contract.spl). x86_64_fs_loaded_launch_proof.spl delegated to shared contract (no drift, AC-2). _smf_copy_range in smf.spl now guards with in_range before loop; byte_utils.spl in_range promoted to pub (AC-3). New specs: smf_bounds_spec.spl (13 pass), fs_exec_fallback_contract_spec.spl (24 pass, covers all 5 arch lanes). Existing x86_64_fs_loaded_launch_proof_spec.spl: 2 pass. All touched files check-clean. Pre-existing smf_spec.spl failures (2) are unrelated to this change (confirmed via baseline run). AC-4 satisfied — no QEMU lanes required.

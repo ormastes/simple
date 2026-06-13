@@ -1,0 +1,108 @@
+# Path Safety Specification
+#
+# **Feature IDs:** #SEC-021
+# **Category:** HTTP Server Security
+# **Difficulty:** 2/5
+# **Status:** Implemented
+#
+# ## Overview
+# Boundary specs for the path_is_safe() guard in the HTTP router.
+# Validates rejection of ".." traversal, encoded variants, double-slash,
+# null bytes, and acceptance of normal paths.
+
+use std.spec.*
+use std.nogc_sync_mut.http_server.router.{path_is_safe}
+
+# ============================================================================
+# Test Group 1: Dot-dot traversal rejection
+# ============================================================================
+
+describe "path_is_safe — dot-dot traversal rejection":
+    it "rejects /../ in middle of path":
+        expect(path_is_safe("/../etc/passwd")).to_equal(false)
+
+    it "rejects /.. at end of path":
+        expect(path_is_safe("/api/..")).to_equal(false)
+
+    it "rejects ../ at start":
+        expect(path_is_safe("../secret")).to_equal(false)
+
+    it "rejects bare ..":
+        expect(path_is_safe("..")).to_equal(false)
+
+    it "rejects nested traversal":
+        expect(path_is_safe("/a/b/../../etc/shadow")).to_equal(false)
+
+# ============================================================================
+# Test Group 2: URL-encoded traversal rejection
+# ============================================================================
+
+describe "path_is_safe — encoded traversal rejection":
+    it "rejects %2e%2e (both dots encoded)":
+        expect(path_is_safe("/%2e%2e/etc/passwd")).to_equal(false)
+
+    it "rejects .%2e (second dot encoded)":
+        expect(path_is_safe("/.%2e/secret")).to_equal(false)
+
+    it "rejects %2e. (first dot encoded)":
+        expect(path_is_safe("/%2e./secret")).to_equal(false)
+
+    it "rejects uppercase %2E%2E":
+        expect(path_is_safe("/%2E%2E/private")).to_equal(false)
+
+# ============================================================================
+# Test Group 3: Backslash traversal rejection
+# ============================================================================
+
+describe "path_is_safe — backslash traversal rejection":
+    it "rejects backslash-dot-dot prefix":
+        expect(path_is_safe("\\..\\windows")).to_equal(false)
+
+    it "rejects dot-dot-backslash":
+        expect(path_is_safe("..\\etc")).to_equal(false)
+
+# ============================================================================
+# Test Group 4: Double-slash rejection
+# ============================================================================
+
+describe "path_is_safe — double-slash rejection":
+    it "rejects // at start":
+        expect(path_is_safe("//etc/passwd")).to_equal(false)
+
+    it "rejects // in middle":
+        expect(path_is_safe("/api//secret")).to_equal(false)
+
+# ============================================================================
+# Test Group 5: Null byte rejection
+# ============================================================================
+
+describe "path_is_safe — null byte rejection":
+    it "rejects literal null byte":
+        val p = "/file\0.txt"
+        expect(path_is_safe(p)).to_equal(false)
+
+    it "rejects %00 encoded null":
+        expect(path_is_safe("/file%00.txt")).to_equal(false)
+
+# ============================================================================
+# Test Group 6: Valid path acceptance
+# ============================================================================
+
+describe "path_is_safe — valid paths accepted":
+    it "accepts root":
+        expect(path_is_safe("/")).to_equal(true)
+
+    it "accepts normal file path":
+        expect(path_is_safe("/static/style.css")).to_equal(true)
+
+    it "accepts path with dots in filename":
+        expect(path_is_safe("/js/app.min.js")).to_equal(true)
+
+    it "accepts path with numbers":
+        expect(path_is_safe("/api/v2/users/42")).to_equal(true)
+
+    it "accepts path with query-like segment":
+        expect(path_is_safe("/search?q=hello")).to_equal(true)
+
+    it "accepts single dot segment (current directory reference)":
+        expect(path_is_safe("/./safe")).to_equal(true)
