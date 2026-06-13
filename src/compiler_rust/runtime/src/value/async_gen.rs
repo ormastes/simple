@@ -453,6 +453,25 @@ pub extern "C" fn rt_future_reject(error: RuntimeValue) -> RuntimeValue {
     rt_future_resolve(error)
 }
 
+/// Canonical constructor: wrap any value into a resolved RuntimeFuture.
+///
+/// This is the single, intent-named entry point for "I already have a value;
+/// make it awaitable via the RuntimeFuture path."  It is semantically identical
+/// to `rt_future_resolve` but makes the call-site intent explicit.
+///
+/// Background (B5 reconcile):
+/// The runtime has two representations in flight — interpreter-layer
+/// `Value::Future`/`Value::Object{Promise}` and runtime-layer `RuntimeFuture`.
+/// Under eager-async semantics `rt_future_await` is already the single extract
+/// path for all three (identity for non-RuntimeFuture, state-extract for
+/// RuntimeFuture).  `rt_future_wrap` completes the picture on the construction
+/// side: new MIR/JIT lowering that needs to box a resolved value should call
+/// this rather than choosing between `rt_future_new`/`rt_future_resolve`.
+#[no_mangle]
+pub extern "C" fn rt_future_wrap(value: RuntimeValue) -> RuntimeValue {
+    rt_future_resolve(value)
+}
+
 #[cfg(test)]
 #[path = "async_gen_tests.rs"]
 mod tests;
