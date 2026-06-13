@@ -12,7 +12,6 @@
 
 wm_input_qemu_smoke_spec -> std
 wm_input_qemu_smoke_spec -> os
-wm_input_qemu_smoke_spec -> test
 ```
 
 </details>
@@ -61,7 +60,7 @@ expect(file_exists(target.output)).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -81,17 +80,27 @@ else:
         val serial = result[0] + result[1]
         val saw_init = serial.contains("[wm-input-test] Init synthetic input path")
         val saw_focus = serial.contains("[wm-input-test] focus click OK")
+        val saw_focus_command = serial.contains("[wm-input-test] focus command_kind=focus_window window_id=1")
+        val saw_titlebar_button = serial.contains("[wm-input-test] titlebar_button_click action=close window_id=1")
+        val saw_text_input = serial.contains("[wm-input-test] text_input_edit window_id=1 field=search before='' after='abc'")
+        val saw_css_pixels = serial.contains("[wm-input-test] css_pixels viewport=1024x768 browser=320x202 scale=1")
         val saw_drag = serial.contains("[wm-input-test] drag OK -> 444,252")
+        val saw_drag_command = serial.contains("[wm-input-test] drag command_kind=move_window window_id=1 from=320,180 to=444,252")
         val saw_pass = serial.contains("[PASS] wm_input_test_entry")
         val saw_test_passed = serial.contains("TEST PASSED")
 
-        if not saw_init or not saw_focus or not saw_drag or not saw_pass or not saw_test_passed:
-            print "[wm_input_qemu_smoke_spec] missing marker init={saw_init} focus={saw_focus} drag={saw_drag} pass={saw_pass} test_passed={saw_test_passed} exit={result[2]}"
+        if not saw_init or not saw_focus or not saw_focus_command or not saw_titlebar_button or not saw_text_input or not saw_css_pixels or not saw_drag or not saw_drag_command or not saw_pass or not saw_test_passed:
+            print "[wm_input_qemu_smoke_spec] missing marker init={saw_init} focus={saw_focus} focus_command={saw_focus_command} titlebar_button={saw_titlebar_button} text_input={saw_text_input} css_pixels={saw_css_pixels} drag={saw_drag} drag_command={saw_drag_command} pass={saw_pass} test_passed={saw_test_passed} exit={result[2]}"
             print "[wm_input_qemu_smoke_spec] serial follows:\n{serial}"
 
         expect(saw_init).to_equal(true)
         expect(saw_focus).to_equal(true)
+        expect(saw_focus_command).to_equal(true)
+        expect(saw_titlebar_button).to_equal(true)
+        expect(saw_text_input).to_equal(true)
+        expect(saw_css_pixels).to_equal(true)
         expect(saw_drag).to_equal(true)
+        expect(saw_drag_command).to_equal(true)
         expect(saw_pass).to_equal(true)
         expect(saw_test_passed).to_equal(true)
 ```
@@ -100,17 +109,17 @@ else:
 
 #### captures framebuffer markers for focus and drag state
 
-1. Ok
-2.  print guest diagnostics
-3. stop guest
+- Ok
+-  print guest diagnostics
+- stop guest
    - Expected: saw_fb is true
-4.  print guest diagnostics
-5. stop guest
+-  print guest diagnostics
+- stop guest
    - Expected: captured is true
-6. stop guest
+- stop guest
    - Expected: file_exists(capture_ppm) is true
-7. Err
-8. fail
+- Err
+- fail
 
 
 <details>

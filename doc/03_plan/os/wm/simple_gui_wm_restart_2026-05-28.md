@@ -108,11 +108,13 @@ SIMPLE_LIB=src bin/simple check test/03_system/gui/wm_input_qemu_smoke_spec.spl
 SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_input_qemu_smoke_spec.spl --mode=interpreter --clean --format json
 ```
 
-The new system spec is a bounded live WM input smoke for
+The system spec is a bounded live WM input smoke for
 `examples/09_embedded/simple_os/arch/x86_64/wm_input_test_entry.spl`. It builds the
 standalone input-test kernel, boots it under `qemu-system-x86_64` when the
-kernel exists, and asserts the serial input markers for init, focus click,
-drag to `444,252`, `[PASS] wm_input_test_entry`, and `TEST PASSED`.
+kernel exists, and asserts serial markers for init, focus click, structured
+focus command routing, titlebar button click, titlebar text input edit, CSS
+pixel scale, structured drag command routing to `444,252`,
+`[PASS] wm_input_test_entry`, and `TEST PASSED`.
 
 Current result on this Linux host:
 
@@ -125,10 +127,18 @@ Current result on this Linux host:
 - `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_input_qemu_smoke_spec.spl --mode=interpreter --clean --format json`
   now passes `3/3` in 14962 ms and boots the live QEMU input smoke through the
   init/focus/drag/pass serial-marker path plus QMP framebuffer capture.
-- 2026-05-28 follow-up: the entry now initializes PCI before painting the BGA
-  framebuffer, emits `[wm-input-test] framebuffer marker OK`, and the spec
-  decodes the QMP PPM to assert the expected background, title-bar, and dragged
-  window marker pixels.
+- 2026-06-13 follow-up: the entry emits structured markers for
+  `[wm-input-test] focus command_kind=focus_window window_id=1`,
+  `[wm-input-test] titlebar_button_click action=close window_id=1`,
+  `[wm-input-test] text_input_edit window_id=1 field=search before='' after='abc'`,
+  `[wm-input-test] css_pixels viewport=1024x768 browser=320x202 scale=1`, and
+  `[wm-input-test] drag command_kind=move_window window_id=1 from=320,180 to=444,252`.
+  The x86_64 Multiboot header is serial-safe for this smoke lane, the entry uses
+  `spl_start` to avoid a boot-entry symbol conflict, and the freestanding entry
+  no longer imports PCI just to paint its deterministic framebuffer marker.
+- 2026-06-13 verification: `SIMPLE_LIB=src bin/simple test test/03_system/gui/wm_input_qemu_smoke_spec.spl --no-cache`
+  passed `3/3` in 8427 ms with the structured markers and QMP framebuffer
+  capture.
 - 2026-05-28 harness fix: QEMU stale cleanup now scopes `pkill -f` to
   `qemu-system.*<identity>` patterns so cleanup no longer kills the shell/test
   command that mentions the same log path.

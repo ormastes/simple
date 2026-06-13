@@ -41,6 +41,7 @@ SECTIONS
      * makes QEMU reject the kernel image. Recreate the symbol at link time so
      * ENTRY(_entry32) always resolves to the actual boot code. */
     _entry32 = ADDR(.text) + 28;
+    _start = _entry32;
 
     /* Read-only data */
     .rodata ALIGN(4K) :

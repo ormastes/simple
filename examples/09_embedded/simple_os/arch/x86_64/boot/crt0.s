@@ -2,7 +2,7 @@
  * crt0.s -- x86_64 Multiboot1 header + 32→64 bit mode switch
  *
  * Provides:
- *   1. Multiboot1 header (with framebuffer request) in .text.entry
+ *   1. Multiboot1 header (serial-safe, no loader framebuffer request) in .text.entry
  *   2. _start entry: sets up identity-mapped page tables, enables
  *      long mode (64-bit), loads a 64-bit GDT, jumps to spl_start
  *
@@ -22,13 +22,13 @@
 .align 4
 
 .set MB_MAGIC, 0x1BADB002
-.set MB_FLAGS, 0x00000007
+.set MB_FLAGS, 0x00000003
 
 .global _multiboot_header
 _multiboot_header:
     .long MB_MAGIC
     .long MB_FLAGS
-    .long 0xE4524FF7          /* checksum: -(magic + flags) & 0xFFFFFFFF */
+    .long 0xE4524FFB          /* checksum: -(magic + flags) & 0xFFFFFFFF */
     .long 0                   /* video mode: linear graphics */
     .long 1024                /* framebuffer width */
     .long 768                 /* framebuffer height */
@@ -317,7 +317,7 @@ long_mode_entry:
     /* Call Simple compiler entry point */
     movq $boot64_start_msg, %rsi
     call boot64_serial_puts
-    call _start
+    call spl_start
 
     /* Halt if it returns */
 .halt64:
