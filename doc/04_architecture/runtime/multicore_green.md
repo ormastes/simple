@@ -13,6 +13,8 @@ This architecture covers the current and planned Simple concurrency split:
   current-carrier cooperative queue APIs.
 - `multicore_green_spawn` is the hosted Pure Simple M:N candidate only when
   its handle proves runtime-pool acceptance with `used_runtime_pool()`.
+  The user-facing API is Pure Simple; `rt_pool_*` remains runtime-seed support
+  behind the facade, not a combined user API.
 - SimpleOS green-carrier support is a scheduler-facing lane for logical green
   tasks, channel wake, AP dispatch evidence, and future hardware handoff.
 
@@ -47,7 +49,7 @@ Responsibilities:
 
 - Provide stable user-facing names.
 - Preserve the semantic difference between OS thread, cooperative queue, and
-  runtime-pool M:N candidate.
+  Pure Simple multicore-green facade backed by runtime-seed pool support.
 - Expose join and evidence methods without leaking runtime ABI names into user
   code.
 
@@ -117,7 +119,8 @@ Responsibilities:
 Hosted runtime-pool path:
 
 - User code calls `multicore_green_spawn`.
-- The facade calls `rt_pool_submit`.
+- The Pure Simple facade enters runtime-seed `rt_pool_submit` support; user
+  code does not call `rt_pool_*` directly.
 - Positive native handle means runtime-pool ownership; zero means inline
   fallback.
 - Join and done checks go through `rt_pool_join` and `rt_pool_is_done` only for
