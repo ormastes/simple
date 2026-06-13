@@ -46,7 +46,7 @@ html_compat_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 88 lines folded for reproduction.
+Runnable source: 89 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,6 +138,7 @@ expect(_catalog_has("84_flex_column_auto_margin_align_center")).to_equal(true)
 expect(_catalog_has("85_flex_cross_auto_margin_top")).to_equal(true)
 expect(_catalog_has("86_flex_row_cross_auto_margin_align_center")).to_equal(true)
 expect(_catalog_has("87_flex_row_cross_auto_margin_both_override_end")).to_equal(true)
+expect(_catalog_has("88_flex_order_basic")).to_equal(true)
 ```
 
 </details>
@@ -531,7 +532,7 @@ expect(report).to_contain("| `24_flex_wrap_reverse_basic` | pass | 0 |")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 97 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -601,12 +602,13 @@ expect(wrapper).to_contain("84_flex_column_auto_margin_align_center")
 expect(wrapper).to_contain("85_flex_cross_auto_margin_top")
 expect(wrapper).to_contain("86_flex_row_cross_auto_margin_align_center")
 expect(wrapper).to_contain("87_flex_row_cross_auto_margin_both_override_end")
+expect(wrapper).to_contain("88_flex_order_basic")
 expect(wrapper).to_contain("CHROME_CAPTURE_GEOMETRY_OUTPUT")
 expect(wrapper).to_contain("HTML_COMPAT_GEOMETRY_JSON=\"$geometry_json\"")
 expect(wrapper).to_contain("src/app/wm_compare/html_compat_geometry_probe_cli.spl")
 expect(wrapper).to_contain("\"$fixture\" \"$geometry_json\" \"$structural_sdn\" \"$WIDTH\" \"$HEIGHT\"")
 expect(wrapper).to_contain("blur_or_tolerance_used=false")
-expect(report).to_contain("- fixtures: 84")
+expect(report).to_contain("- fixtures: 85")
 expect(report).to_contain("- pass count: 84")
 expect(report).to_contain("- fail count: 0")
 expect(report).to_contain("- blur/tolerance used: false")

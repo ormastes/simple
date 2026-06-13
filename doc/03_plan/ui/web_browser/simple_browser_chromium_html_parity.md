@@ -774,7 +774,7 @@ Open gaps tied to the active browser objective:
      `mismatch_count=0`
   - live Chrome headless geometry manifest evidence now includes fixture 25:
     `chrome_html_compat_geometry_manifest_evidence_2026-06-11.md` reports
-    `22` fixtures, `22` passes, `0` failures, and
+    `85` fixtures, `85` passes, `0` failures, and
     `blur_or_tolerance_used=false`
   - `html_compat_spec.spl` now includes a source-level no-cheat guard for the
     Chrome geometry manifest wrapper and capture tool, requiring geometry JSON
@@ -803,3 +803,18 @@ Open gaps tied to the active browser objective:
   - this proves the focused native geometry smoke executes; it does not prove
     full Chromium layout parity, macOS live-window evidence, or Windows host
     evidence for the broader objective
+- Flex order and auto-margin geometry evidence now extends the live Chrome
+  manifest through fixture 88:
+   - added `88_flex_order_basic` to the HTML compatibility catalog and
+     structural geometry probe
+   - `simple_web_html_layout_renderer.spl` parses CSS `order` and uses stable
+     order-sorted traversal for row flex no-wrap layout while preserving the
+     original node IDs/labels for structural comparison
+   - the same renderer now carries `margin-top:auto` and `margin-bottom:auto`
+     state through style helpers, applies row cross-axis auto margins before
+     `align-items`, and distributes column main-axis free space to vertical auto
+     margins
+   - live Chrome headless geometry manifest evidence reports `85` fixtures,
+     `85` passes, `0` failures, and `blur_or_tolerance_used=false`; no blur,
+     tolerance, downscaling, copied Chromium pixels, or resolution adjustment
+     was used
