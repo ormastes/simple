@@ -289,3 +289,16 @@ Gate failures are recorded in the state file under the phase output section.
 | 8-ship | 15% | VCS operations only |
 
 Each phase runs in a **fresh agent context** (GSD principle). The state file is the sole communication channel between phases.
+
+## System tests over QEMU
+
+System-level SSpec specs live in `test/03_system/os/qemu/` and boot real
+`qemu-system-<arch>` binaries using per-arch descriptors from
+`src/os/qemu_systest_contract.spl` (argv mirrors the catalog lane contracts).
+Each run captures serial to `build/os/systest/<arch>.serial.log` and is
+classified `pass`, `missing-media:<path>`, or `boot-fail:<reason>`:
+- `pass` requires ALL required markers AND no resident-fallback marker
+  (fail-closed via `src/os/fs_exec_fallback_contract.spl`).
+- Missing kernel/image is a diagnosed RED failure — never `skip()`.
+- Storage hygiene: run `scripts/check/qemu-storage-audit.shs [--clean]`.
+Guide: `doc/07_guide/platform/simpleos/qemu_system_tests.md`.

@@ -23,3 +23,12 @@ dev-done
 
 ## Log
 - dev: Created state file with 4 acceptance criteria (type: code-quality)
+
+## Phase
+implement-done
+
+## Log (appended by orchestrator — haiku agent exited mid-task)
+- TASK 1 done (haiku): scripts/check/qemu-storage-audit.shs works. Real audit on this host: FAT32 imgs 40M (keep), kernel ELFs 124M (keep), QMP logs 532K (debris), serial/probe logs 11M (debris), PPM screendumps 13M (debris), FreeBSD VM overlay 3.6G (the real hog — documented, not auto-deleted; recreated by check-freebsd-bootstrap-qemu wrapper on demand).
+- TASK 2 done (haiku): doc/07_guide/platform/simpleos/qemu_system_tests.md (63 lines, run instructions + direct-boot fallback + markers + storage policy).
+- TASK 3 done (orchestrator): "System tests over QEMU" section appended to .claude/skills/lib/spipe_phases.md.
+- AC-4 note: --clean not executed (QMP/ppm debris < 7 days old retains nothing yet); dry-run evidence above.
