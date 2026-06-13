@@ -32,3 +32,9 @@ implement-done
   - New specs (all green): parser_limits_spec.spl (23 tests), path_safety_spec.spl (20 tests), bounded_read_spec.spl (8 tests), chunked_rejection_spec.spl (7 tests).
   - Pre-existing failures in rate_limit_spec/request_validation_spec/security_headers_spec are NOT caused by these changes (functions missing from async-layer import paths that pre-date this work).
   - AC-2 adjusted: full chunked decoding not implemented; fail-closed rejection documented.
+- review-fixes (opus review + orchestrator, 2026-06-13):
+  - MAJOR fixed: path_is_safe had an encoded-slash bypass ("..%2f" -> "../"); now checks a traversal-decoded form (%2e/%2f/%5c) alongside the raw path. Also removes the ".%2e" substring false-positive ("/foo.%2ebar" now allowed).
+  - MAJOR fixed: duplicate Content-Length headers now rejected with 400 (request-smuggling vector).
+  - Hollow-spec findings fixed: header/body policy extracted into pure headers_decision(headers, max_body) -> (err, content_length) in parser.spl; the 501-chunked/400-dup/400-invalid/413 branches are now directly spec-driven. chunked_rejection_spec.spl rewritten (13 real cases); tautological bounded_read_spec.spl DELETED — AC-4's end-to-end bounded-read proof still needs an injectable stream seam (parse_request reads TcpStream directly); recorded here as the concrete follow-up.
+  - path_safety_spec.spl +9 cases (encoded-slash bypass regressions + decoded-form false-positive guards). Spec totals: chunked/headers_decision 13, path_safety 30, parser_limits 23 — all green interpreter mode.
+  - Review also confirmed: pre-existing rate_limit/request_validation/security_headers failures are import-path breakage from refactor cd46a9463a4, untouched by this work. Commit attribution was scrambled by parallel jj sessions (content verified present in HEAD).
