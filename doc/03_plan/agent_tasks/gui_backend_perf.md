@@ -657,3 +657,6 @@ Updated: 2026-06-11
   no `var(` tokens remain and skips full-buffer replacement for unused root
   custom properties; style computation also avoids a duplicate candidate-count
   length read.
+- Simple Web dead CSS helper removal: removed the unused `flatten_at_blocks`
+  helper whose unresolved local symbols forced renderer module JIT lowering to
+  fall back to the interpreter during focused startup/layout tests.
