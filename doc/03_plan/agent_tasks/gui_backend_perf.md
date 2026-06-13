@@ -670,3 +670,6 @@ Updated: 2026-06-11
 - Simple Web numeric parser substring removal: CSS integer, nth-integer, and
   opacity fraction scans now use `char_at` instead of allocating a substring for
   every scanned digit during style application.
+- Simple Web selector scanner substring removal: pseudo-list, `:has`, selector
+  group splitting, child-combinator normalization, and selector tokenization
+  loops now use `char_at` instead of allocating one-character substrings.
