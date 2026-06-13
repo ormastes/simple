@@ -724,3 +724,7 @@ Updated: 2026-06-11
 - Simple Web compound-class match allocation removal: `class_has_all` now scans
   dot-separated class requirements directly instead of allocating a `split(".")`
   array for every selector match.
+- Simple Web RGB color split allocation removal: `parse_color` now parses
+  comma-delimited `rgb(...)` components from the original string ranges instead
+  of allocating an inner substring and `split(",")` array during style
+  resolution.
