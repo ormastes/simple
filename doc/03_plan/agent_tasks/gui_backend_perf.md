@@ -732,3 +732,7 @@ Updated: 2026-06-11
   bucket key extraction, and specificity scoring now use absolute offsets for
   `tag#id.class` and class-tail scans instead of allocating intermediate tail
   strings during cascade setup and matching.
+- Engine2D font operation lane routing: `engine2d_operation_lane` now classifies
+  vector-font, bitmap-font, glyph raster/blit, and generic font offload
+  operations as processing-lane work so preferred font offload backends are not
+  hidden behind the combined fallback lane.

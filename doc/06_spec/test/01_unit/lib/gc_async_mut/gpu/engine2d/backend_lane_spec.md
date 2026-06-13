@@ -64,7 +64,7 @@ expect(engine2d_backend_lane_summary(lane)).to_contain("framebuffer=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -77,6 +77,9 @@ expect(lane.owns_kernel_dispatch).to_equal(true)
 expect(lane.requires_readback).to_equal(false)
 expect(engine2d_operation_lane("generated_kernel")).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
 expect(engine2d_operation_lane("filter")).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
+expect(engine2d_operation_lane("font_offload")).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
+expect(engine2d_operation_lane("vector_font")).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
+expect(engine2d_operation_lane("bitmap_glyph_raster")).to_equal(ENGINE2D_BACKEND_LANE_PROCESSING)
 ```
 
 </details>
