@@ -150,8 +150,53 @@ Docs: `doc/03_plan/infra/perf_umbrella/perf_opt_plan.md` (+tldr),
 flow { harness->docs; snapshot->guard; opt->guard; guard->{pass:land, fail:block}; dynsmf->cachespec }
 -->
 
+## Implement + Verify (Phases 4–7 — parallel Sonnet lanes, Opus review)
+Spec+implement merged per-lane (TDD). Three waves, each committed before the next (advisor
+anti-clobber); Lane B sole-owned the dynsmf pair.
+
+**Wave 1** (commit `rzo ff8`): bench harness (warm+process planes) + lang script-vs-compiler
+spec (9/9, fib oracle); AC-7 dynSMF dispatch + `.srchash` content-hash + 7-case invalidation
+spec (7/7, 15 existing dynsmf specs still green); API/arch guard + `baseline.sdn` (303 syms,
+GREEN) + quarantine of 3 pre-existing broken specs.
+**Wave 2** (commit `pst ddc`): db ram/persistent/wal bench (11 live, negative-control verified);
+web bench (7/7, parse→route→serialize oracle); os fs/sched bench (10 live, host-proxy, 4 KB
+round-trip oracle, falsification-checked); 6-domain perf checklists (58 items).
+**Wave 3** (commit `pst ddc`): `bench_emit_rows` primitive-array API (dodges the staged
+cross-module struct bug); `bench_baseline_driver.spl` ran and emitted REAL interpreter baseline
+numbers → `doc/09_report/perf/perf_baseline_2026-06-13.md` + `doc/10_metrics/perf/`.
+
+**Bugs filed** (CLAUDE.md: never silently normalize): `interp_cross_module_struct_return_unit`
+(P1, staged — "improve interpreter first" target), `smf_header_source_hash_offset_mismatch` (P2).
+
+### AC verification matrix
+| AC | Status | Evidence |
+|----|--------|----------|
+| AC-1 plan+design first | ✅ DONE | plan + design + tldrs landed before any opt code |
+| AC-2 checklists | ✅ DONE | `perf_checklists.md`, 6 domains, 58 pass/fail items |
+| AC-3 arch-tagged bench sspec → docs | ✅ DONE | 4 specs tagged via `std.spec.decorators`; baseline docs emitted with real numbers |
+| AC-4 lang script vs compiler separate | ✅ DONE | lang spec + baseline doc separate script/smf/native rows |
+| AC-5 db RAM vs persistent separate | ✅ DONE | db spec proves 3 distinct modes ram/persistent/wal |
+| AC-7 SMF idle compile + cache reuse | ✅ DONE | investigated (verdict table) + built dispatch+content-hash+invalidation spec (7/7); user-script path confirmed pre-existing |
+| AC-8 no API/arch break guard | ✅ DONE | `check-api-arch-guard.shs` symbols=GREEN, arch baseline captured |
+| AC-6 interpreter/compiler first | ◻ STRUCTURAL | P1 shared (AC-7) landed first + per-app benches built; per-app **optimization landing** STAGED, ordering recorded |
+| AC-9 minimize `rt_*` in app view | ◻ STAGED | baseline counts captured (research); reduction sweep = P1 SG-1.2, checklist row |
+| AC-10 cross-mode + cross-language | ◻ PARTIAL | interpreter baseline emitted; smf/native + full cross-language run STAGED (toolchain smf-extern-segfault, native-compile) |
+| AC-11 umbrella completion | ⏳ IN PROGRESS | P0 machinery + AC-7 DONE/verified; P1 opt-landing + P2 + final no-regression diff = tracked staged sub-goals |
+
+### Honest completion boundary (advisor-guided)
+P0 machinery (AC-1,2,3,4,5,8) + AC-7 are **DONE and verified** this session. The
+optimization-landing portions (AC-6 per-app opts, AC-9 rt_* sweep, AC-10 cross-language,
+AC-11 close) are genuinely multi-session: landing + re-measuring perf wins across 4 domains and
+proving no-regression cannot be honestly closed in one session, so they are filed as **staged,
+not verified** tracked sub-goals in the plan + checklists. No false-green closure.
+
 ## Phase
-arch-done
+verify-done (P0 + AC-7); optimization sub-goals staged
+
+## Log (continued)
+- arch: Opus authored plan + design docs (+tldrs) + state arch section with SDN diagram + module list.
+- implement+verify: 3 parallel Sonnet waves (7 lanes) + Wave-3 finish by orchestrator (println→print,
+  baseline driver run). Guard GREEN. AC matrix above. P0+AC-7 done/verified; opts staged.
 
 ## Log
 - dev: Created state file with 11 acceptance criteria (type: code-quality; perf-optimization
