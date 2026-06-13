@@ -19,8 +19,11 @@ Benchmarks are used to:
 | `run_duplicate_check.spl` | Duplicate detection performance benchmark | `bin/simple test/perf/run_duplicate_check.spl [path] [options]` |
 | `native_layout_performance_spec.spl` | Native code layout performance tests | Run with test runner |
 | `profile_scripts/profile_report_contract_test.shs` | Common contract test for profile scripts that generate Markdown under `doc/09_report` | Called by profile scripts; can run directly with kind, script path, and report path |
+| `profile_scripts/profile_report_contract_negative_test.shs` | Negative mutation coverage for the cross-language report contract | Mutates temporary report copies and expects failures for slow Go fanout, slow Simple multicore-green fanout/stress, bad runtime-pool evidence, bad OS-thread labels, cooperative-green M:N mislabels, and forbidden numbered API names |
 | `profile_scripts/profile_binary_autoselect_test.shs` | Cross-language profile Simple-binary auto-selection regression | Runs a reduced profile and verifies stale wrappers are skipped |
 | `profile_scripts/profile_docker_isolation_contract_test.shs` | Cross-language profile Docker isolation contract | Stubs Docker and verifies the profile re-execs with network disabled, memory/CPU limits, UID/GID mapping, workspace mount, and env handoff |
+| `profile_scripts/concurrency_api_contract_test.shs` | Public concurrency API misuse and naming contract | Verifies approved OS-thread, task-pool, cooperative-green, and multicore-green imports while rejecting wrong surfaces, direct `rt_pool_*` access, shared mutable green captures, and numeric-suffix concurrency aliases |
+| `stress/multicore_green_large_profile_gate_spec.spl` | Simple SSpec companion gate for the checked-in large cross-language report | Parses `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md` and checks Go fanout, Simple multicore-green runtime-pool evidence, work-stealing queue evidence, and C pthread baselines |
 
 ## Quick Start
 
@@ -102,8 +105,11 @@ val results = runner.run_all()
 - **Cross-language profile:** `scripts/check/check-cross-language-perf.shs`
 - **GUI profile:** `tools/gui_perf_bench/run_all_benchmarks.shs`
 - **Common report contract:** `test/05_perf/profile_scripts/profile_report_contract_test.shs` (no args checks the canonical checked-in cross-language report; profile wrappers pass kind, script path, and report path explicitly)
+- **Negative report mutations:** `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs` keeps Go-vs-C, Simple-vs-C, OS-thread, cooperative-green, runtime-pool, and forbidden-numbered-name failures release-visible
+- **Large profile SSpec gate:** `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl` checks the current checked-in report's large Go fanout, Simple multicore-green fanout/stress, `pool_used=`, `parallelism=`, and `queue_model=work_stealing` evidence
 - **Profile binary auto-selection:** `test/05_perf/profile_scripts/profile_binary_autoselect_test.shs` checks that auto mode probes candidates and skips stale release wrappers
 - **Profile Docker isolation:** `test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs` checks the crash-containment re-exec command without requiring a Docker daemon
+- **Concurrency API contract:** `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` checks meaningful public API names and rejects numeric-suffix concurrency aliases
 - **Report location:** `doc/09_report/*.md`
 
 ## Benchmark Configuration

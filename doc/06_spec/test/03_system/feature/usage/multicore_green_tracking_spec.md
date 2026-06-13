@@ -615,6 +615,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 - Verify cooperative green remains documented as single-carrier work
 - Verify hosted M:N claims require runtime-pool and scheduler-width evidence
 - Verify Pure Simple facade wording stays separate from runtime seed support
+- Verify the performance README maps all profile-script gates
 - Verify stale release-wrapper guidance stays visible
 - Verify forbidden numbered API-name scans cover the public concurrency family
 
@@ -622,7 +623,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 77 lines folded for reproduction.
+Runnable source: 89 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -633,6 +634,7 @@ val coding = rt_file_read_text(".codex/skills/coding/SKILL.md") ?? ""
 val profile_contract = rt_file_read_text("test/05_perf/profile_scripts/profile_report_contract_test.shs") ?? ""
 val api_contract = rt_file_read_text("test/05_perf/profile_scripts/concurrency_api_contract_test.shs") ?? ""
 val sys_test_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
+val perf_readme = rt_file_read_text("test/05_perf/README.md") ?? ""
 
 step("Verify cooperative green remains documented as single-carrier work")
 expect(stdlib).to_contain("no preemption or CPU parallelism")
@@ -680,6 +682,17 @@ expect(profile_contract).to_contain("require_large_go_fanout_beats_c")
 expect(profile_contract).to_contain("large Go fanout row must be faster than C pthread fanout row")
 expect(profile_contract).to_contain("require_go_stress_beats_c")
 expect(profile_contract).to_contain("Go stress fanout row must be faster than C pthread stress row")
+
+step("Verify the performance README maps all profile-script gates")
+expect(perf_readme).to_contain("profile_scripts/profile_report_contract_test.shs")
+expect(perf_readme).to_contain("profile_scripts/profile_report_contract_negative_test.shs")
+expect(perf_readme).to_contain("profile_scripts/profile_binary_autoselect_test.shs")
+expect(perf_readme).to_contain("profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(perf_readme).to_contain("profile_scripts/concurrency_api_contract_test.shs")
+expect(perf_readme).to_contain("stress/multicore_green_large_profile_gate_spec.spl")
+expect(perf_readme).to_contain("large Go fanout")
+expect(perf_readme).to_contain("queue_model=work_stealing")
+expect(perf_readme).to_contain("numeric-suffix concurrency aliases")
 
 step("Verify stale release-wrapper guidance stays visible")
 expect(perf).to_contain("skips a stale release wrapper")
