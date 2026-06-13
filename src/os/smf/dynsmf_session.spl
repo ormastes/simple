@@ -2,6 +2,8 @@ use os.smf.smf_dynlib.{DynLoadRequest, smf_dlopen, smf_dlopen_checked, smf_dlsym
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_hash_text(s: text) -> i64
 
 class DynSmfManifestEntry:
     id: text
@@ -160,13 +162,44 @@ fn dynsmf_artifact_status_from_bytes(entry: DynSmfManifestEntry, file_present: b
         return DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: false, reason: "invalid_magic", byte_count: data.len(), magic_hex: dynsmf_artifact_magic_hex(data))
     DynSmfArtifactStatus(library_id: entry.id, path: entry.path, ready: true, reason: "smf_artifact_ready", byte_count: data.len(), magic_hex: dynsmf_artifact_magic_hex(data))
 
+fn dynsmf_srchash_path(artifact_path: text) -> text:
+    artifact_path + ".srchash"
+
+fn dynsmf_source_hash_current(source_path: text) -> i64:
+    val content = rt_file_read_text(source_path) ?? ""
+    rt_hash_text(content)
+
+fn dynsmf_source_hash_stored(artifact_path: text) -> i64:
+    val sidecar = dynsmf_srchash_path(artifact_path)
+    if not rt_file_exists(sidecar):
+        return -1
+    val raw = rt_file_read_text(sidecar) ?? ""
+    if raw == "":
+        return -1
+    raw.trim().to_i64() ?? -1
+
+fn dynsmf_artifact_status_with_hash(entry: DynSmfManifestEntry, file_present: bool, data: [u8], source_path: text) -> DynSmfArtifactStatus:
+    val base = dynsmf_artifact_status_from_bytes(entry, file_present, data)
+    if not base.ready:
+        return base
+    if source_path == "":
+        return base
+    val stored = dynsmf_source_hash_stored(entry.path)
+    if stored == -1:
+        return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_source", byte_count: base.byte_count, magic_hex: base.magic_hex)
+    val current = dynsmf_source_hash_current(source_path)
+    if current != stored:
+        return DynSmfArtifactStatus(library_id: base.library_id, path: base.path, ready: false, reason: "stale_source", byte_count: base.byte_count, magic_hex: base.magic_hex)
+    base
+
 fn dynsmf_artifact_status(entry: DynSmfManifestEntry) -> DynSmfArtifactStatus:
     if entry.path == "":
         return dynsmf_artifact_status_from_bytes(entry, false, [])
     if not rt_file_exists(entry.path):
         return dynsmf_artifact_status_from_bytes(entry, false, [])
     val data = rt_file_read_bytes(entry.path) ?? []
-    dynsmf_artifact_status_from_bytes(entry, true, data)
+    val source_path = dynsmf_manifest_source_path(entry)
+    dynsmf_artifact_status_with_hash(entry, true, data, source_path)
 
 fn dynsmf_artifacts_ready(manifest: [DynSmfManifestEntry]) -> bool:
     var idx = 0
@@ -411,6 +444,7 @@ export DynSmfManifestEntry, DynSmfPolicy, DynSmfLoadedLibrary, DynSmfEvidenceRow
 export dynsmf_default_manifest, dynsmf_manifest_all_precompiled, dynsmf_manifest_source_path
 export dynsmf_build_plan, dynsmf_build_plans, dynsmf_build_plans_ready
 export dynsmf_artifact_status_from_bytes, dynsmf_artifact_status, dynsmf_artifacts_ready
+export dynsmf_srchash_path, dynsmf_source_hash_current, dynsmf_source_hash_stored, dynsmf_artifact_status_with_hash
 export dynsmf_session_request_background_compiles, dynsmf_session_request_background_compiles_from_statuses, dynsmf_session_queue_missing_background_compiles
 export dynsmf_policy_default, dynsmf_policy_from_args_env
 export dynsmf_session_new, dynsmf_session_autoload, dynsmf_session_autoload_checked, dynsmf_session_load, dynsmf_session_load_checked
