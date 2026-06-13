@@ -231,6 +231,9 @@ Updated: 2026-06-11
 - this commit -- Simple Web text/icon paint index hoisting: the final text,
   widget-image, and icon paint pass now reuses the current node, style, and
   layout box values per iteration before text wrapping and glyph drawing.
+- this commit -- Simple Web debug/Draw IR command hoisting:
+  layout debug lookup and Draw IR command construction now reuse matched node
+  and layout values instead of repeatedly indexing the node and box arrays.
 - this commit -- global widget-store copy removal:
   process-global `upsert_widget_record`, `set_internal_prop`, child
   registration, and widget traversal helpers now avoid per-item array
