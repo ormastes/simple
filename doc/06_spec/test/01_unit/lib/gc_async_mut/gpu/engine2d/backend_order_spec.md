@@ -60,8 +60,8 @@ expect(order[6]).to_equal("opencl")
 expect(order[7]).to_equal("opengl")
 expect(order[8]).to_equal("intel")
 expect(order[9]).to_equal("webgpu")
-expect(order[10]).to_equal("software")
-expect(order[11]).to_equal("cpu_simd")
+expect(order[10]).to_equal("cpu_simd")
+expect(order[11]).to_equal("software")
 expect(order[12]).to_equal("cpu")
 ```
 
@@ -76,7 +76,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_preference_summary()).to_equal("explicit native (baremetal/virtio_gpu) > metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > software > cpu_simd > cpu")
+expect(backend_preference_summary()).to_equal("explicit native (baremetal/virtio_gpu) > metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu")
 ```
 
 </details>
@@ -126,9 +126,9 @@ expect(backend_priority("opencl")).to_be_less_than(backend_priority("opengl"))
 expect(backend_priority("opengl")).to_be_less_than(backend_priority("intel"))
 expect(backend_priority("intel")).to_be_less_than(backend_priority("webgpu"))
 expect(backend_priority("vulkan")).to_be_less_than(backend_priority("software"))
-expect(backend_priority("webgpu")).to_be_less_than(backend_priority("software"))
-expect(backend_priority("software")).to_be_less_than(backend_priority("cpu_simd"))
-expect(backend_priority("cpu_simd")).to_be_less_than(backend_priority("cpu"))
+expect(backend_priority("webgpu")).to_be_less_than(backend_priority("cpu_simd"))
+expect(backend_priority("cpu_simd")).to_be_less_than(backend_priority("software"))
+expect(backend_priority("software")).to_be_less_than(backend_priority("cpu"))
 ```
 
 </details>

@@ -208,7 +208,7 @@ and `dbus-run-session`.
 
 For pure-Simple Engine2D GUI rendering, `auto` follows the shared graphics order:
 
-`metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
+`metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu`
 
 The dedicated order note is in
 `doc/07_guide/app/ui/engine2d_backend_order.md`.

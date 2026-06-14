@@ -309,7 +309,7 @@ of bypassing into direct GPU calls or app-specific renderer paths.
 Engine2D exposes two backend-order helpers. `backend_full_preference_order()`
 is the documented preference order: explicit platform-native surfaces
 (`baremetal`, `virtio_gpu`) first, then Metal, CUDA, ROCm/HIP, Qualcomm,
-Vulkan, DirectX, OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU.
+Vulkan, DirectX, OpenCL, OpenGL, Intel, WebGPU, CPU SIMD, software, and CPU.
 `backend_default_priority_order()` is the automatic probe order and starts at
 Metal because baremetal and VirtIO GPU paths require a preinitialized host or
 platform framebuffer.

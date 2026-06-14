@@ -8,12 +8,12 @@ adapter, and the Simple Web renderer backend resolver.
 
 The current shared order is:
 
-`metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
+`metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu`
 
 `backend_full_preference_order()` also includes explicit native surfaces before
 the automatic list:
 
-`baremetal > virtio_gpu > metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
+`baremetal > virtio_gpu > metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu`
 
 `baremetal` and `virtio_gpu` require a caller-owned framebuffer/device and are
 not part of generic `auto` probing. GUI/lib callers that do not request a
@@ -51,10 +51,10 @@ kernels before falling back to the generic software path:
    Intel-specific runtime lane.
 10. `webgpu`
     Browser/runtime WebGPU lane.
-11. `software`
-    Optimized software renderer with the shared framebuffer path.
-12. `cpu_simd`
+11. `cpu_simd`
     Explicit CPU SIMD lane.
+12. `software`
+    Optimized software renderer with the shared framebuffer path.
 13. `cpu`
     Final fallback. Always available.
 

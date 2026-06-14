@@ -75,7 +75,7 @@ expect(full[0]).to_equal("baremetal")
 expect(full[1]).to_equal("virtio_gpu")
 expect(full[2]).to_equal("metal")
 expect(auto_order[0]).to_equal("metal")
-expect(auto_order).to_equal(["metal", "cuda", "rocm", "qualcomm", "vulkan", "directx", "opencl", "opengl", "intel", "webgpu", "software", "cpu_simd", "cpu"])
+expect(auto_order).to_equal(["metal", "cuda", "rocm", "qualcomm", "vulkan", "directx", "opencl", "opengl", "intel", "webgpu", "cpu_simd", "software", "cpu"])
 ```
 
 </details>
