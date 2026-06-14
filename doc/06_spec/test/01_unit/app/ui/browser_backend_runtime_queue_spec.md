@@ -77,8 +77,9 @@ runtime queue request was made instead of leaving stale queue receipts visible.
 
 The scenario renders a static BrowserBackend frame with the Vulkan backend,
 asserts that the first frame reports one submitted and drained runtime queue
-packet, then renders the same frame again and asserts that the cache hit reports
-`not_requested` queue status instead of stale receipt data.
+packet plus a same-frame backend readback receipt and nonblank/nonuniform pixel
+oracle, then renders the same frame again and asserts that the cache hit
+reports `not_requested` queue/readback status instead of stale receipt data.
 
 ## Scenarios
 
@@ -88,13 +89,13 @@ packet, then renders the same frame again and asserts that the cache hit reports
 
 - First GPU-selected render emits and drains one runtime queue packet
    - Expected: code equals `0`
-- Second unchanged frame is served from cache and reports no queue request
+- Second unchanged frame is served from cache and reports no queue or readback request
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -104,14 +105,22 @@ val output = stdout + stderr
 step("First GPU-selected render emits and drains one runtime queue packet")
 expect(code).to_equal(0)
 expect(output).to_contain("backend=vulkan")
+expect(output).to_contain("first_pixel_count=3072")
+expect(output).to_contain("first_checksum=772887022")
+expect(output).to_contain("first_nonuniform_count=2884")
 expect(output).to_contain("first_submit=submitted")
 expect(output).to_contain("first_drain=drained")
 expect(output).to_contain("first_packet=1")
 expect(output).to_contain("first_drained=1")
 expect(output).to_contain("first_backend_handle=7")
 expect(output).to_contain("first_reason=drained runtime queue")
+expect(output).to_contain("first_readback_status=readback")
+expect(output).to_contain("first_readback_backend=vulkan")
+expect(output).to_contain("first_readback_pixel_count=3072")
+expect(output).to_contain("first_readback_checksum=782290402")
+expect(output).to_contain("first_readback_reason=same-frame Engine2D read_pixels")
 
-step("Second unchanged frame is served from cache and reports no queue request")
+step("Second unchanged frame is served from cache and reports no queue or readback request")
 expect(output).to_contain("second_fast_hits=1")
 expect(output).to_contain("second_submit=not_requested")
 expect(output).to_contain("second_drain=not_requested")
@@ -119,6 +128,9 @@ expect(output).to_contain("second_packet=0")
 expect(output).to_contain("second_drained=0")
 expect(output).to_contain("second_backend_handle=0")
 expect(output).to_contain("second_reason=runtime queue not requested")
+expect(output).to_contain("second_readback_status=not_requested")
+expect(output).to_contain("second_readback_pixel_count=0")
+expect(output).to_contain("second_readback_checksum=0")
 ```
 
 </details>

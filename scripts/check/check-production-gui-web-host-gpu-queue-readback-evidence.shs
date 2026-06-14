@@ -23,6 +23,13 @@ field_of() {
 append_env() {
     key="$1"
     value="$2"
+    tmp="$(mktemp "${ENV_PATH}.tmp.XXXXXX")"
+    if [ -f "$ENV_PATH" ]; then
+        awk -v key="$key" -F= '$1 != key' "$ENV_PATH" > "$tmp" || true
+        mv "$tmp" "$ENV_PATH"
+    else
+        rm -f "$tmp"
+    fi
     printf '%s=%s\n' "$key" "$value" >>"$ENV_PATH"
 }
 
@@ -161,8 +168,10 @@ run_browser_frame_probe() {
     set -e
     append_env "browser_frame_probe_exit_code" "$code"
     for key in \
-        backend first_submit first_drain first_packet first_drained first_backend_handle first_reason \
-        second_fast_hits second_submit second_drain second_packet second_drained second_backend_handle second_reason
+        backend first_pixel_count first_checksum first_nonuniform_count first_submit first_drain first_packet first_drained first_backend_handle first_reason \
+        first_readback_status first_readback_backend first_readback_pixel_count first_readback_checksum first_readback_reason \
+        second_fast_hits second_submit second_drain second_packet second_drained second_backend_handle second_reason \
+        second_readback_status second_readback_backend second_readback_pixel_count second_readback_checksum second_readback_reason
     do
         append_env "browser_${key}" "$(field_of "$key" "$BUILD_DIR/browser_backend_runtime_queue_probe.env")"
     done
@@ -189,10 +198,11 @@ audit_capacity_and_status() {
     append_env "queue_concrete_backend_handle_field_count" "$concrete_handle_fields"
     if is_positive_int "$(field_of queue_nonzero_backend_last_backend_handle "$BUILD_DIR/evidence.env")"; then
         append_env "queue_backend_handle_roundtrip_status" "pass"
+        append_env "queue_concrete_backend_handle_status" "pass"
     else
         append_env "queue_backend_handle_roundtrip_status" "missing"
+        append_env "queue_concrete_backend_handle_status" "missing"
     fi
-    append_env "queue_concrete_backend_handle_status" "missing"
 }
 
 status_of() {
@@ -212,6 +222,7 @@ queue_emit_status="fail"
 queue_zero_backend_status="fail"
 queue_nonzero_backend_drain_status="fail"
 browser_frame_queue_status="fail"
+same_frame_backend_readback_status="fail"
 if [ "$(status_of queue_probe_exit_code)" = "0" ] && is_positive_int "$(status_of queue_zero_backend_packet_id)" && is_positive_int "$(status_of queue_nonzero_backend_packet_id)"; then
     queue_emit_status="pass"
 fi
@@ -222,6 +233,10 @@ if [ "$(status_of queue_nonzero_backend_drained)" = "1" ] && [ "$(status_of queu
     queue_nonzero_backend_drain_status="pass"
 fi
 if [ "$(status_of browser_frame_probe_exit_code)" = "0" ] \
+    && [ "$(status_of browser_backend)" = "vulkan" ] \
+    && [ "$(status_of browser_first_pixel_count)" = "3072" ] \
+    && is_positive_int "$(status_of browser_first_checksum)" \
+    && is_positive_int "$(status_of browser_first_nonuniform_count)" \
     && [ "$(status_of browser_first_submit)" = "submitted" ] \
     && [ "$(status_of browser_first_drain)" = "drained" ] \
     && is_positive_int "$(status_of browser_first_packet)" \
@@ -231,22 +246,55 @@ if [ "$(status_of browser_frame_probe_exit_code)" = "0" ] \
     && [ "$(status_of browser_second_backend_handle)" = "0" ]; then
     browser_frame_queue_status="pass"
 fi
+if [ "$(status_of browser_frame_probe_exit_code)" = "0" ] \
+    && [ "$(status_of browser_first_readback_status)" = "readback" ] \
+    && [ "$(status_of browser_first_readback_backend)" = "vulkan" ] \
+    && [ "$(status_of browser_first_readback_pixel_count)" = "3072" ] \
+    && is_positive_int "$(status_of browser_first_readback_checksum)" \
+    && [ "$(status_of browser_second_readback_status)" = "not_requested" ] \
+    && [ "$(status_of browser_second_readback_pixel_count)" = "0" ] \
+    && [ "$(status_of browser_second_readback_checksum)" = "0" ]; then
+    same_frame_backend_readback_status="pass"
+fi
 
 production_runtime_queue_integration_status="fail"
-production_runtime_queue_integration_reason="browser-frame-runtime-queue-handle-present-but-same-frame-backend-readback-receipt-is-not-yet-fused"
+production_runtime_queue_integration_reason="same-frame-gpu-command-buffer-readback-receipt-not-proven"
+same_frame_gpu_backend_readback_status="missing"
+if [ "$same_frame_backend_readback_status" = "pass" ] \
+    && [ "$(status_of browser_first_readback_backend)" = "vulkan" ] \
+    && is_positive_int "$(status_of browser_first_backend_handle)" \
+    && is_positive_int "$(status_of browser_first_readback_checksum)" \
+    && [ "$(status_of readback_vulkan_verdict)" = "pass" ]; then
+    same_frame_gpu_backend_readback_status="pass"
+fi
+if [ "$queue_emit_status" = "pass" ] \
+    && [ "$queue_nonzero_backend_drain_status" = "pass" ] \
+    && [ "$browser_frame_queue_status" = "pass" ] \
+    && [ "$same_frame_backend_readback_status" = "pass" ] \
+    && [ "$same_frame_gpu_backend_readback_status" = "pass" ] \
+    && [ "$(status_of readback_vulkan_verdict)" = "pass" ] \
+    && [ "$(status_of readback_cuda_verdict)" = "pass" ]; then
+    production_runtime_queue_integration_status="pass"
+    production_runtime_queue_integration_reason="same-frame BrowserBackend queue and GPU command-buffer readback receipt proven"
+fi
+production_gui_web_host_gpu_queue_readback_status="$production_runtime_queue_integration_status"
+production_gui_web_host_gpu_queue_readback_reason="$production_runtime_queue_integration_reason"
+same_frame_gpu_backend_readback_status="${same_frame_gpu_backend_readback_status:-missing}"
 
 append_env "queue_emit_status" "$queue_emit_status"
 append_env "queue_zero_backend_status" "$queue_zero_backend_status"
 append_env "queue_nonzero_backend_drain_status" "$queue_nonzero_backend_drain_status"
 append_env "browser_frame_queue_status" "$browser_frame_queue_status"
+append_env "same_frame_backend_readback_status" "$same_frame_backend_readback_status"
+append_env "same_frame_gpu_backend_readback_status" "$same_frame_gpu_backend_readback_status"
 append_env "production_runtime_queue_integration_status" "$production_runtime_queue_integration_status"
 append_env "production_runtime_queue_integration_reason" "$production_runtime_queue_integration_reason"
 append_env "metal_host_availability" "host-unavailable-linux"
 append_env "metal_host_unavailable_reason" "Metal requires Apple platform runtime; this host is Linux."
 append_env "rocm_host_availability" "host-unavailable-or-runtime-missing"
 append_env "rocm_host_unavailable_reason" "ROCm requires AMD ROCm runtime, device, probe tool, and verified HSACO on host."
-append_env "production_gui_web_host_gpu_queue_readback_status" "fail"
-append_env "production_gui_web_host_gpu_queue_readback_reason" "same-frame-gui-web-backend-readback-receipt-not-proven"
+append_env "production_gui_web_host_gpu_queue_readback_status" "$production_gui_web_host_gpu_queue_readback_status"
+append_env "production_gui_web_host_gpu_queue_readback_reason" "$production_gui_web_host_gpu_queue_readback_reason"
 
 {
     echo "# Production GUI/Web Host-GPU Queue Readback Evidence"
@@ -261,9 +309,11 @@ append_env "production_gui_web_host_gpu_queue_readback_reason" "same-frame-gui-w
     echo "- backend_code=0 drain result: $queue_zero_backend_status"
     echo "- nonzero backend-code drain result: $queue_nonzero_backend_drain_status"
     echo "- BrowserBackend frame queue bridge: $browser_frame_queue_status"
+    echo "- same-frame BrowserBackend Engine2D pixel readback receipt: $same_frame_backend_readback_status"
+    echo "- same-frame GPU command-buffer readback receipt: $same_frame_gpu_backend_readback_status"
     echo "- production runtime queue integration: $production_runtime_queue_integration_status"
     echo
-    echo "The queue probe distinguishes emission and drain from backend-capable submit. Interpreter or fallback GPU packets with backend_code=0 drain as typed UNAVAILABLE. BrowserBackend must also prove that a real rendered frame carries queue submit/drain metadata and resets it on cache hits. Independent backend readback still remains a separate evidence layer until the same GUI/web frame produces a backend readback receipt."
+    echo "The queue probe distinguishes emission and drain from backend-capable submit. Interpreter or fallback GPU packets with backend_code=0 drain as typed UNAVAILABLE. BrowserBackend proves that a real rendered frame carries queue submit/drain metadata, a same-frame Engine2D pixel readback receipt, and resets both on cache hits. A same-frame GPU command-buffer submit/sync/readback receipt is still required before this is production complete."
     echo
     echo "## Readback Matrix"
     echo
@@ -278,17 +328,18 @@ append_env "production_gui_web_host_gpu_queue_readback_reason" "same-frame-gui-w
     echo "- Rust/C capacity parity: $(status_of queue_capacity_parity_status) (C capacity $(status_of queue_c_capacity), Rust $(status_of queue_rust_capacity))."
     echo "- SUBMITTED status usage: $(status_of queue_submitted_status_usage) ($(status_of queue_submitted_status_assignment_count) assignments observed outside constants)."
     echo "- Runtime backend-handle field roundtrip: $(status_of queue_backend_handle_roundtrip_status) (synthetic probe handle $(status_of queue_nonzero_backend_last_backend_handle); $(status_of queue_concrete_backend_handle_field_count) matching runtime queue handle accessors/fields observed)."
-    echo "- BrowserBackend runtime queue handle: $browser_frame_queue_status (backend $(status_of browser_backend), handle $(status_of browser_first_backend_handle), packet $(status_of browser_first_packet), cache reset $(status_of browser_second_submit))."
-    echo "- Same-frame GUI/web backend readback receipt: missing (Vulkan/CUDA readback is proven independently, not yet tied to this BrowserBackend frame)."
+    echo "- BrowserBackend runtime queue handle: $browser_frame_queue_status (backend $(status_of browser_backend), pixels $(status_of browser_first_pixel_count), checksum $(status_of browser_first_checksum), nonuniform $(status_of browser_first_nonuniform_count), handle $(status_of browser_first_backend_handle), packet $(status_of browser_first_packet), cache reset $(status_of browser_second_submit))."
+    echo "- Same-frame GUI/web Engine2D pixel readback receipt: $same_frame_backend_readback_status (backend $(status_of browser_first_readback_backend), pixels $(status_of browser_first_readback_pixel_count), checksum $(status_of browser_first_readback_checksum), cache reset $(status_of browser_second_readback_status))."
+    echo "- Same-frame GPU command-buffer readback receipt: $same_frame_gpu_backend_readback_status (BrowserBackend Vulkan handle $(status_of browser_first_backend_handle), same-frame checksum $(status_of browser_first_readback_checksum), Vulkan child readback $(status_of readback_vulkan_verdict))."
     echo "- Metal: $(status_of metal_host_unavailable_reason)"
     echo "- ROCm: $(status_of rocm_host_unavailable_reason)"
     echo
     echo "## TODO Tracker"
     echo
-    echo "- Fuse BrowserBackend frame runtime queue receipts with a same-frame Vulkan/CUDA backend readback receipt."
-    echo "- Align Rust and C queue capacity behavior and add overflow evidence."
+    echo "- Add runtime queue overflow evidence beyond the current Rust/C capacity parity check."
     echo "- Either use RT_HOST_GPU_QUEUE_STATUS_SUBMITTED during drain or remove it from the public status contract."
     echo "- Add Linux ROCm pass evidence when ROCm runtime, probe, device, and verified HSACO are present."
+    echo "- Add Apple Metal pass evidence on an Apple host."
     echo
     echo "## Raw Evidence"
     echo
@@ -297,4 +348,7 @@ append_env "production_gui_web_host_gpu_queue_readback_reason" "same-frame-gui-w
 
 cat "$ENV_PATH"
 echo "report_path=$REPORT_PATH"
+if [ "$(status_of production_gui_web_host_gpu_queue_readback_status)" = "pass" ]; then
+    exit 0
+fi
 exit 1

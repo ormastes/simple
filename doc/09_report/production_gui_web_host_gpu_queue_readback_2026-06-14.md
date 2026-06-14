@@ -5,14 +5,16 @@ Date: 2026-06-14
 ## Summary
 
 - status: fail
-- reason: same-frame-gui-web-backend-readback-receipt-not-proven
+- reason: same-frame-gpu-command-buffer-readback-receipt-not-proven
 - queue emission via rt_host_gpu_queue_emit: pass
 - backend_code=0 drain result: unavailable
 - nonzero backend-code drain result: pass
-- BrowserBackend frame queue bridge: pass
+- BrowserBackend frame queue bridge: fail
+- same-frame BrowserBackend Engine2D pixel readback receipt: pass
+- same-frame GPU command-buffer readback receipt: missing
 - production runtime queue integration: fail
 
-The queue probe distinguishes emission and drain from backend-capable submit. Interpreter or fallback GPU packets with backend_code=0 drain as typed UNAVAILABLE. BrowserBackend must also prove that a real rendered frame carries queue submit/drain metadata and resets it on cache hits. Independent backend readback still remains a separate evidence layer until the same GUI/web frame produces a backend readback receipt.
+The queue probe distinguishes emission and drain from backend-capable submit. Interpreter or fallback GPU packets with backend_code=0 drain as typed UNAVAILABLE. BrowserBackend proves that a real rendered frame carries queue submit/drain metadata, a same-frame Engine2D pixel readback receipt, and resets both on cache hits. A same-frame GPU command-buffer submit/sync/readback receipt is still required before this is production complete.
 
 ## Readback Matrix
 
@@ -28,17 +30,18 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 - Rust/C capacity parity: pass (C capacity 1024, Rust 1024).
 - SUBMITTED status usage: used (5 assignments observed outside constants).
 - Runtime backend-handle field roundtrip: pass (synthetic probe handle 7; 38 matching runtime queue handle accessors/fields observed).
-- BrowserBackend runtime queue handle: pass (backend vulkan, handle 7, packet 1, cache reset not_requested).
-- Same-frame GUI/web backend readback receipt: missing (Vulkan/CUDA readback is proven independently, not yet tied to this BrowserBackend frame).
+- BrowserBackend runtime queue handle: fail (backend vulkan, pixels 3072, checksum 772887022, nonuniform 2884, handle 0, packet 1, cache reset not_requested).
+- Same-frame GUI/web Engine2D pixel readback receipt: pass (backend vulkan, pixels 3072, checksum 782290402, cache reset not_requested).
+- Same-frame GPU command-buffer readback receipt: missing (BrowserBackend Vulkan handle 0, same-frame checksum 782290402, Vulkan child readback pass).
 - Metal: Metal requires Apple platform runtime; this host is Linux.
 - ROCm: ROCm requires AMD ROCm runtime, device, probe tool, and verified HSACO on host.
 
 ## TODO Tracker
 
-- Fuse BrowserBackend frame runtime queue receipts with a same-frame Vulkan/CUDA backend readback receipt.
-- Align Rust and C queue capacity behavior and add overflow evidence.
+- Add runtime queue overflow evidence beyond the current Rust/C capacity parity check.
 - Either use RT_HOST_GPU_QUEUE_STATUS_SUBMITTED during drain or remove it from the public status contract.
 - Add Linux ROCm pass evidence when ROCm runtime, probe, device, and verified HSACO are present.
+- Add Apple Metal pass evidence on an Apple host.
 
 ## Raw Evidence
 
@@ -59,12 +62,20 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 - draw_ir_runtime_queue_spec_exit_code=0
 - browser_frame_probe_exit_code=0
 - browser_backend=vulkan
+- browser_first_pixel_count=3072
+- browser_first_checksum=772887022
+- browser_first_nonuniform_count=2884
 - browser_first_submit=submitted
 - browser_first_drain=drained
 - browser_first_packet=1
 - browser_first_drained=1
-- browser_first_backend_handle=7
+- browser_first_backend_handle=0
 - browser_first_reason=drained runtime queue
+- browser_first_readback_status=readback
+- browser_first_readback_backend=vulkan
+- browser_first_readback_pixel_count=3072
+- browser_first_readback_checksum=782290402
+- browser_first_readback_reason=same-frame Engine2D read_pixels
 - browser_second_fast_hits=1
 - browser_second_submit=not_requested
 - browser_second_drain=not_requested
@@ -72,6 +83,11 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 - browser_second_drained=0
 - browser_second_backend_handle=0
 - browser_second_reason=runtime queue not requested
+- browser_second_readback_status=not_requested
+- browser_second_readback_backend=
+- browser_second_readback_pixel_count=0
+- browser_second_readback_checksum=0
+- browser_second_readback_reason=backend readback not requested
 - readback_vulkan_exit_code=0
 - readback_vulkan_status=pass
 - readback_vulkan_reason=pass
@@ -99,16 +115,18 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 - queue_submitted_status_usage=used
 - queue_concrete_backend_handle_field_count=38
 - queue_backend_handle_roundtrip_status=pass
-- queue_concrete_backend_handle_status=missing
+- queue_concrete_backend_handle_status=pass
 - queue_emit_status=pass
 - queue_zero_backend_status=unavailable
 - queue_nonzero_backend_drain_status=pass
-- browser_frame_queue_status=pass
+- browser_frame_queue_status=fail
+- same_frame_backend_readback_status=pass
+- same_frame_gpu_backend_readback_status=missing
 - production_runtime_queue_integration_status=fail
-- production_runtime_queue_integration_reason=browser-frame-runtime-queue-handle-present-but-same-frame-backend-readback-receipt-is-not-yet-fused
+- production_runtime_queue_integration_reason=same-frame-gpu-command-buffer-readback-receipt-not-proven
 - metal_host_availability=host-unavailable-linux
 - metal_host_unavailable_reason=Metal requires Apple platform runtime; this host is Linux.
 - rocm_host_availability=host-unavailable-or-runtime-missing
 - rocm_host_unavailable_reason=ROCm requires AMD ROCm runtime, device, probe tool, and verified HSACO on host.
 - production_gui_web_host_gpu_queue_readback_status=fail
-- production_gui_web_host_gpu_queue_readback_reason=same-frame-gui-web-backend-readback-receipt-not-proven
+- production_gui_web_host_gpu_queue_readback_reason=same-frame-gpu-command-buffer-readback-receipt-not-proven

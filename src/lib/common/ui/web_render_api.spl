@@ -107,7 +107,13 @@ class WebRenderArtifact:
     queue_drain_status: text
     queue_packet_id: i64
     queue_drained: i64
+    queue_backend_handle: i64
     queue_reason: text
+    readback_status: text
+    readback_backend: text
+    readback_pixel_count: i64
+    readback_checksum: i64
+    readback_reason: text
 
     static fn empty(target: text, viewport_w: i32, viewport_h: i32) -> WebRenderArtifact:
         WebRenderArtifact(
@@ -131,7 +137,13 @@ class WebRenderArtifact:
             queue_drain_status: WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED,
             queue_packet_id: 0,
             queue_drained: 0,
-            queue_reason: "runtime queue not requested"
+            queue_backend_handle: 0,
+            queue_reason: "runtime queue not requested",
+            readback_status: "not_requested",
+            readback_backend: "",
+            readback_pixel_count: 0,
+            readback_checksum: 0,
+            readback_reason: "backend readback not requested"
         )
 
 class WebRenderBinaryArtifactMetadata:
@@ -192,7 +204,13 @@ fn web_render_artifact_with_binary_metadata(artifact: WebRenderArtifact, meta: W
         queue_drain_status: artifact.queue_drain_status,
         queue_packet_id: artifact.queue_packet_id,
         queue_drained: artifact.queue_drained,
-        queue_reason: artifact.queue_reason
+        queue_backend_handle: artifact.queue_backend_handle,
+        queue_reason: artifact.queue_reason,
+        readback_status: artifact.readback_status,
+        readback_backend: artifact.readback_backend,
+        readback_pixel_count: artifact.readback_pixel_count,
+        readback_checksum: artifact.readback_checksum,
+        readback_reason: artifact.readback_reason
         )
 
 fn web_render_artifact_with_engine2d_provenance(artifact: WebRenderArtifact, status: text, backend: text, reason: text) -> WebRenderArtifact:
@@ -217,13 +235,22 @@ fn web_render_artifact_with_engine2d_provenance(artifact: WebRenderArtifact, sta
         queue_drain_status: artifact.queue_drain_status,
         queue_packet_id: artifact.queue_packet_id,
         queue_drained: artifact.queue_drained,
-        queue_reason: artifact.queue_reason
+        queue_backend_handle: artifact.queue_backend_handle,
+        queue_reason: artifact.queue_reason,
+        readback_status: artifact.readback_status,
+        readback_backend: artifact.readback_backend,
+        readback_pixel_count: artifact.readback_pixel_count,
+        readback_checksum: artifact.readback_checksum,
+        readback_reason: artifact.readback_reason
     )
 
 fn web_render_engine2d_rendered_artifact(artifact: WebRenderArtifact, backend: text) -> WebRenderArtifact:
     web_render_artifact_with_engine2d_provenance(artifact, WEB_RENDER_ENGINE2D_STATUS_RENDERED, backend, "rendered through Engine2D")
 
 fn web_render_artifact_with_runtime_queue(artifact: WebRenderArtifact, submit_status: text, drain_status: text, packet_id: i64, drained: i64, reason: text) -> WebRenderArtifact:
+    web_render_artifact_with_runtime_queue_handle(artifact, submit_status, drain_status, packet_id, drained, 0, reason)
+
+fn web_render_artifact_with_runtime_queue_handle(artifact: WebRenderArtifact, submit_status: text, drain_status: text, packet_id: i64, drained: i64, backend_handle: i64, reason: text) -> WebRenderArtifact:
     WebRenderArtifact(
         target: artifact.target,
         html: artifact.html,
@@ -245,11 +272,48 @@ fn web_render_artifact_with_runtime_queue(artifact: WebRenderArtifact, submit_st
         queue_drain_status: drain_status,
         queue_packet_id: packet_id,
         queue_drained: drained,
-        queue_reason: reason
+        queue_backend_handle: backend_handle,
+        queue_reason: reason,
+        readback_status: artifact.readback_status,
+        readback_backend: artifact.readback_backend,
+        readback_pixel_count: artifact.readback_pixel_count,
+        readback_checksum: artifact.readback_checksum,
+        readback_reason: artifact.readback_reason
     )
 
 fn web_render_engine2d_compatibility_artifact(artifact: WebRenderArtifact, backend: text, reason: text) -> WebRenderArtifact:
     web_render_artifact_with_engine2d_provenance(artifact, WEB_RENDER_ENGINE2D_STATUS_COMPATIBILITY, backend, reason)
+
+fn web_render_artifact_with_backend_readback(artifact: WebRenderArtifact, status: text, backend: text, pixel_count: i64, checksum: i64, reason: text) -> WebRenderArtifact:
+    WebRenderArtifact(
+        target: artifact.target,
+        html: artifact.html,
+        ipc_json: artifact.ipc_json,
+        pixels: artifact.pixels,
+        viewport_w: artifact.viewport_w,
+        viewport_h: artifact.viewport_h,
+        capability_summary: artifact.capability_summary,
+        binary_schema: artifact.binary_schema,
+        binary_cache_key: artifact.binary_cache_key,
+        binary_cache_path: artifact.binary_cache_path,
+        binary_bytes: artifact.binary_bytes,
+        binary_layout_bytes: artifact.binary_layout_bytes,
+        binary_command_count: artifact.binary_command_count,
+        engine2d_status: artifact.engine2d_status,
+        engine2d_backend: artifact.engine2d_backend,
+        engine2d_reason: artifact.engine2d_reason,
+        queue_submit_status: artifact.queue_submit_status,
+        queue_drain_status: artifact.queue_drain_status,
+        queue_packet_id: artifact.queue_packet_id,
+        queue_drained: artifact.queue_drained,
+        queue_backend_handle: artifact.queue_backend_handle,
+        queue_reason: artifact.queue_reason,
+        readback_status: status,
+        readback_backend: backend,
+        readback_pixel_count: pixel_count,
+        readback_checksum: checksum,
+        readback_reason: reason
+    )
 
 fn web_render_engine2d_unavailable_artifact(artifact: WebRenderArtifact, backend: text, reason: text) -> WebRenderArtifact:
     web_render_artifact_with_engine2d_provenance(artifact, WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE, backend, reason)
@@ -831,7 +895,13 @@ fn web_render_to_artifact(req: WebRenderRequest) -> WebRenderArtifact:
         queue_drain_status: WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED,
         queue_packet_id: 0,
         queue_drained: 0,
-        queue_reason: "runtime queue not requested"
+        queue_backend_handle: 0,
+        queue_reason: "runtime queue not requested",
+        readback_status: "not_requested",
+        readback_backend: "",
+        readback_pixel_count: 0,
+        readback_checksum: 0,
+        readback_reason: "backend readback not requested"
     )
 
 fn web_render_pixel_artifact(req: WebRenderRequest, pixels: [u32]) -> WebRenderArtifact:
@@ -857,8 +927,16 @@ fn web_render_pixel_artifact(req: WebRenderRequest, pixels: [u32]) -> WebRenderA
         queue_drain_status: base.queue_drain_status,
         queue_packet_id: base.queue_packet_id,
         queue_drained: base.queue_drained,
-        queue_reason: base.queue_reason
+        queue_backend_handle: base.queue_backend_handle,
+        queue_reason: base.queue_reason,
+        readback_status: base.readback_status,
+        readback_backend: base.readback_backend,
+        readback_pixel_count: base.readback_pixel_count,
+        readback_checksum: base.readback_checksum,
+        readback_reason: base.readback_reason
     )
 
 export WEB_RENDER_CACHE_SCHEMA_VERSION, WEB_RENDER_ENGINE2D_STATUS_COMPATIBILITY, WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED, WEB_RENDER_ENGINE2D_STATUS_RENDERED, WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE, WEB_RENDER_QUEUE_STATUS_DRAINED, WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED, WEB_RENDER_QUEUE_STATUS_SUBMITTED, WEB_RENDER_QUEUE_STATUS_UNAVAILABLE, WEB_RENDER_TARGET_ANDROID_WASM, WEB_RENDER_TARGET_CHROME, WEB_RENDER_TARGET_CHROMIUM, WEB_RENDER_TARGET_ELECTRON, WEB_RENDER_TARGET_HEADLESS, WEB_RENDER_TARGET_HOST_WM_WASM, WEB_RENDER_TARGET_IOS_WASM, WEB_RENDER_TARGET_PURE_SIMPLE, WEB_RENDER_TARGET_SIMPLEOS_WM_WASM, WEB_RENDER_TARGET_SIMPLE_WEB, WEB_RENDER_TARGET_TAURI, WEB_RENDER_TARGET_TUI_WEB, WEB_RENDER_WASM_SCHEMA_VERSION
 export web_render_artifact_with_runtime_queue
+export web_render_artifact_with_runtime_queue_handle
+export web_render_artifact_with_backend_readback
