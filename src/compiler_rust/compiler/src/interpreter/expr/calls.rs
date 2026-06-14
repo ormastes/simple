@@ -751,12 +751,30 @@ pub(super) fn eval_call_expr(
                 Value::Enum {
                     ref enum_name,
                     ref variant,
-                    ..
+                    ref payload,
                 } => {
                     if enum_name == "Option" {
                         match field.as_str() {
                             "is_some" => Ok(Value::Bool(variant == "Some")),
                             "is_none" => Ok(Value::Bool(variant == "None")),
+                            _ if variant == "Some"
+                                && matches!(
+                                    payload.as_deref(),
+                                    Some(Value::Object { fields, .. }) if fields.contains_key(field)
+                                ) =>
+                            {
+                                // Some(x) field-access forwarding — mirrors the
+                                // method-call Some-forwarding in interpreter_method.
+                                // A `-> T?` value (Some-wrapped since 60fd804c)
+                                // funneled into a non-Optional context still reads
+                                // struct fields off the inner value. `None` falls
+                                // through to the error below, so nil stays caught.
+                                if let Some(Value::Object { fields, .. }) = payload.as_deref() {
+                                    Ok(fields.get(field).cloned().unwrap_or(Value::Nil))
+                                } else {
+                                    Ok(Value::Nil)
+                                }
+                            }
                             _ => {
                                 // Try calling as a no-arg method
                                 let empty_args: Vec<Argument> = vec![];

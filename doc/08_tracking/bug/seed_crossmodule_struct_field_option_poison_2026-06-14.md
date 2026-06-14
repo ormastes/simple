@@ -83,7 +83,7 @@ There is no app-level escape: `backend_cpu` (render), `builder` (build tree) and
    collision in the `raw_to_mangled` / `build_import_map` merge (see MEMORY.md cross-module notes).
 3. Add the 3-import repro as a regression fixture once fixed.
 
-## FIXED (2026-06-15, commit e9ee640c)
+## GUI path FIXED; Option representation split partially healed (2026-06-15, commits e9ee640c + field-forward follow-up)
 The "import-map / type-inference" framing above was a red herring — it is a **runtime value
 marshalling** bug. Culprit: `60fd804c` ("auto-wrap plain returns into Option for `-> T?`",
 2026-06-12) made `-> T?` functions return explicit `Option::Some(x)`, but the rest of the
@@ -92,17 +92,30 @@ a non-Optional sink stayed wrapped, and member access on it failed with "… on 
 responsive-showcase path hit it via `require_widget_record() -> WidgetRecord` (returns `found` from
 a `-> WidgetRecord?` call) and the `[WidgetNode]` children pipeline.
 
-Fix — three symmetric, conservative `Some`-coercions (each gated on `Value::Enum{Option,Some}` and
-a *concrete* non-Optional declared type; `any`/`Option`/`Result`/bare-generics excluded):
-- `interpreter_call/core/function_exec.rs` — unwrap `Some(x)→x` on a concrete non-Optional **return**.
-- `interpreter_call/core/arg_binding.rs` — same unwrap when binding into a concrete non-Optional **param**.
-- `interpreter_method/mod.rs` — forward a user **method call** on `Some(x)` to the inner value, but
-  only after every real Option/Result/enum method has missed.
-`None` is never unwrapped, so nil-dereferences still error.
+Fix — conservative `Some`-coercions at four sinks (each gated on `Value::Enum{Option,Some}`; the
+return/param/field cases additionally require a *concrete* non-Optional type — `any`/`Option`/
+`Result`/bare-generics excluded). `None` is never unwrapped, so nil-dereferences still error:
+- `interpreter_call/core/function_exec.rs` — unwrap `Some(x)→x` on a concrete non-Optional **return** (e9ee640c).
+- `interpreter_call/core/arg_binding.rs` — same unwrap binding into a concrete non-Optional **param** (e9ee640c).
+- `interpreter_method/mod.rs` — forward a user **method call** on `Some(x)` to the inner value, only
+  after every real Option/Result/enum method has missed (e9ee640c).
+- `interpreter/expr/calls.rs` — **field access** on `Some(Object)` reads the field off the inner
+  struct (field-forward follow-up). Without this, `Some(struct).field` still hit "… on Option" on
+  any path the upstream coercions didn't pre-unwrap.
+
+**This is a PARTIAL heal, not a full fix of 60fd804c's representation split.** Other sinks remain
+unpatched — `match` expressions, `==`, and direct use of a bound Optional (e.g.
+`val a = find(); print "{a}"` prints `Option::Some(10)`, not `10`). Recurrence is possible if new
+code routes a `Some` into one of those. The proper long-term fix is to make the whole interpreter
+agree on ONE Option representation. Known caveat: the method-call Some-forwarding re-dispatches via a
+temp receiver, which re-evaluates the call's args; for a method that misses every Option/Result/enum
+handler AND has effectful args, those args evaluate twice (the GUI path has no such call).
 
 Verification: responsive-showcase gate GREEN on the freshly-built dev seed (CPU nav bottom/rail/
-sidebar, PPMs pairwise-different, Metal `gpu_frame_complete=true × 4`); 51 Option/Result interpreter
-unit tests pass; nil-safety preserved (`None.member` still errors). The 2 unrelated CLI test
-failures (`check::…gc_boundary`, `…safe_mode_child_args`) are pre-existing and do not touch the
-interpreter. NOTE: a full 3-stage bootstrap was NOT run (interpreter-only change; disk-constrained
-environment) — run `bin/simple build bootstrap` when convenient to fully certify.
+sidebar, PPMs pairwise-different, Metal `gpu_frame_complete=true × 4`); `Some(struct).field` and
+`Some(struct).method()` both work, `None.field`/`None.method()` still error (nil-safety). All
+function-exec / arg-binding / method-dispatch unit tests in `simple-compiler` pass (364 interpreter
+tests; the 190 crate-wide failures are pre-existing, in `value::matches_type`, runtime-archive
+selection and module path-resolution — subsystems this change never touches). NOTE: a full 3-stage
+bootstrap was NOT run (interpreter-only change; disk-constrained env) — run `bin/simple build
+bootstrap` to fully certify.
