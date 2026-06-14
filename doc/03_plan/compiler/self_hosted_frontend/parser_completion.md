@@ -650,12 +650,17 @@ Remaining known gap classes (long tail, deferred):
 1. Interpreted `flat_ast_to_module` entry OOB (see above) — diagnose/fix.
 2. Verify `SIMPLE_BOOTSTRAP_DECL_*` env-var transport covers all new AST node types from M1–M11.
 3. Remove `simple_seed` delegation guards from `src/app/cli/check.spl` and lint entry.
-3b. **DEPLOY-BLOCKER — default-param call-site application.** Default param VALUES
-    now parse + capture into the IR (G50), but omitted-arg calls silently pass 0
-    because the self-hosted path has no call-resolution/arity-fill. Implement
-    call-site default-fill (clone `HirParam.default` for missing trailing args;
-    error if a missing param has no default) and confirm `g51_defparam` omit-call
-    returns 6 BEFORE removing delegation. Else deployed omit-calls miscompile.
+3b. **default-param call-site application — DONE on the active (Rust) frontend
+    (2026-06-14, commit 4e151c2649b).** Default param VALUES parse + capture into
+    the IR (G50); the deployed `run`/`jit`/`aot` path (Rust HIR frontend) now fills
+    omitted trailing CONSTANT defaults at the call site
+    (`Lowerer.fn_param_defaults` + `collect_fn_param_defaults` → fill in `lower_call`).
+    Verified: `greet("hi")`→103, `multi(1)`→31, no-default `add(2,3)`→5; regression
+    spec `test/01_unit/compiler/default_param_call_fill_spec.spl`. REMAINING for the
+    self-hosted frontend deploy: the `.spl` `35.semantics` fill
+    (`MethodResolver.fill_call_defaults`) must reach parity (currently inert; blocked
+    by LIM-010) before delegation is removed, else self-hosted omit-calls miscompile.
+    Follow-ups: method/`Path`-callee and cross-module imported-callee defaults.
     Bug: `doc/08_tracking/bug/lean_parser_default_param_call_fill_2026-06-13.md`.
 4. **Gate:** `docker run --rm simple-stage4 bin/simple check src/lib/common/text.spl` exits 0; full 1855-file sweep reports 0 errors.
    **PREREQUISITE (perf) — ROOT CAUSE FOUND & FIXED 2026-06-13:** the superlinear
