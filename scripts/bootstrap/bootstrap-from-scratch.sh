@@ -193,29 +193,33 @@ run_logged() {
 seed_bin="src/compiler_rust/target/bootstrap/simple"
 native_all_lib="src/compiler_rust/target/bootstrap/libsimple_native_all.a"
 
-# Detect stale seed OR stale runtime library: rebuild if any Rust source is
-# newer than EITHER artifact.  The runtime library (libsimple_native_all.a) is
-# linked into stage2/3/4 binaries and must include the latest stub filters,
-# constructor stripping, and linker config.  Checking only the seed binary
-# misses library staleness (hardlinks can mask mtime).
+# Detect stale seed OR stale runtime library by CONTENT, not mtime.
+#
+# The previous check used `find -newer` (mtime). jj/git operations (reconcile,
+# checkout, working-copy snapshots) routinely bump .rs mtimes WITHOUT changing
+# content, which made every bootstrap spuriously recompile ~11 Rust crates
+# (~5 min of pure waste; measured 2026-06-14: 286s, 0 content changes).
+#
+# seed_inputs_hash fingerprints everything that determines the seed binary +
+# runtime library: all Rust sources, every Cargo.toml, Cargo.lock, the build
+# profile/backend/features, and the rustc version. A stamp file beside the seed
+# records the fingerprint of the inputs the current seed was built from; we
+# rebuild only when the fingerprint differs (or is missing) — never on mtime
+# churn. Any doubt (missing stamp, hash failure → empty mismatch) rebuilds: a
+# stale seed would silently miscompile, which is worse than a slow build.
+seed_stamp="${seed_bin}.inputs.sha256"
+seed_inputs_hash() {
+  {
+    find src/compiler_rust \( -name '*.rs' -o -name 'Cargo.toml' \) \
+      -not -path '*/target/*' -print0 2>/dev/null | LC_ALL=C sort -z \
+      | xargs -0 sha256sum 2>/dev/null
+    sha256sum src/compiler_rust/Cargo.lock 2>/dev/null
+    printf 'profile=bootstrap backend=%s features=%s\n' "${backend}" "${llvm_features}"
+    rustc -V 2>/dev/null
+  } | sha256sum | awk '{print $1}'
+}
 seed_stale=0
-if [ -x "${seed_bin}" ]; then
-  # Check against both seed binary AND runtime library
-  check_against="${seed_bin}"
-  if [ -f "${native_all_lib}" ]; then
-    # Use whichever is OLDER as the reference — if either is stale, rebuild
-    seed_mtime=$(stat -c '%Y' "${seed_bin}" 2>/dev/null || stat -f '%m' "${seed_bin}" 2>/dev/null || echo 0)
-    lib_mtime=$(stat -c '%Y' "${native_all_lib}" 2>/dev/null || stat -f '%m' "${native_all_lib}" 2>/dev/null || echo 0)
-    if [ "${lib_mtime}" -lt "${seed_mtime}" ] 2>/dev/null; then
-      check_against="${native_all_lib}"
-    fi
-  fi
-  stale_files=$(find src/compiler_rust -name '*.rs' -newer "${check_against}" -not -path '*/target/*' 2>/dev/null | head -1)
-  if [ -n "${stale_files}" ]; then
-    seed_stale=1
-    echo "Seed/runtime stale (Rust sources changed since last build). Rebuilding..."
-  fi
-fi
+# (content-hash staleness gate runs below, after backend/llvm_features settle)
 
 # Detect LLVM 18 availability for llvm-lib backend
 llvm_features=""
@@ -233,6 +237,18 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   else
     echo "LLVM 18 not found (checked ${llvm18_prefix}); falling back to cranelift backend"
     backend="cranelift"
+  fi
+fi
+
+# Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
+# backend/features are final before they enter the fingerprint. If the seed or
+# runtime library is missing, the cargo branch below rebuilds regardless.
+if [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
+  if [ ! -f "${seed_stamp}" ] || [ "$(cat "${seed_stamp}" 2>/dev/null)" != "$(seed_inputs_hash)" ]; then
+    seed_stale=1
+    echo "Seed/runtime stale (Rust source content changed since last build). Rebuilding..."
+  else
+    echo "Seed/runtime current (input content hash matches); skipping Rust rebuild."
   fi
 fi
 
@@ -265,6 +281,10 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
   # not link). Separate invocations keep simple-runtime's feature set per-bin.
   run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver ${llvm_features}
   run_logged rust-native-all-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-native-all ${llvm_features}
+  # Record the fingerprint of the inputs we just built from, so the next run
+  # can skip cargo when nothing actually changed (only written after a real
+  # rebuild — never in pure-Simple or hash-match-skip paths).
+  seed_inputs_hash > "${seed_stamp}"
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
