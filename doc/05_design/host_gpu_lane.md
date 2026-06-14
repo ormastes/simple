@@ -124,8 +124,17 @@ HIR lowering now carries that node as `HirStmtKind.TargetLater`, and MIR lowerin
 emits explicit `MirInstKind.HostGpuLaneBegin` / `HostGpuLaneEnd` markers around
 the lowered body with lane text, optional max-packet operand, and statement span.
 These markers give later codegen/runtime transport a concrete boundary to turn
-into queue packet emission. The remaining gap is consuming those markers in the
-runtime/codegen path instead of treating them as metadata-only MIR instructions.
+into queue packet emission.
+
+`src/compiler/50.mir/host_gpu_lane_queue.spl` consumes those markers for the
+Pure Simple evidence path. It scans `MirFunction` instruction streams, turns each
+closed lane-marker region into an `Engine2dHostGpuQueuePacket`, validates ordered
+transport, and runs the queue submission/readback evidence gate. The adapter uses
+the explicit MIR `max_packet` operand when it is a constant integer and derives a
+deterministic payload estimate from the lowered body instruction count. This
+proves MIR markers can drive the same queue evidence ABI used by Engine2D tests.
+The remaining gap is native hardware/backend codegen emitting and draining those
+packets against a real device queue.
 
 ## Performance Model
 

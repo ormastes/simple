@@ -83,7 +83,9 @@ For host/GPU lane event-flow and less-ms evidence around
 `doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md`.
 That lane records `Engine2dHostGpuEventFlowEvidence`, Draw IR rendered-command
 counts, pixel/readback hashes, fallback state, and p50/p95 baseline-vs-candidate
-timings. Do not count fallback-only or smoke-size software runs as a real GPU
-speedup.
+timings. The compiler MIR adapter `compiler.mir.host_gpu_lane_queue` turns
+lowered lane markers into queue packet, transport, and submission/readback
+evidence for SSpec coverage. Do not count fallback-only or smoke-size software
+runs as a real GPU speedup.
 
 See also: [`web_render_backend_tldr.md`](web_render_backend_tldr.md).

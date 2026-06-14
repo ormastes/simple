@@ -30,6 +30,7 @@ changing pixel hashes, event order, or fallback reporting.
 | Host/GPU queue submission evidence | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Validates the final submission/readback gate: invalid transport, fallback packets, missing strict GPU backends, and invalid timings are rejected before device submission; submitted GPU batches require matching readback pixel hashes. |
 | Host/GPU frontend structural lane metadata | `src/compiler/10.frontend/core/parser_stmts.spl`; `src/compiler/10.frontend/flat_ast_bridge_part1.spl` | Preserves `target.later(max_packet: N) gpu|host \:` as `StmtKind.TargetLater(TargetLaterConfig, Block)` with lane, packet bound, and body metadata before HIR/MIR lowering. |
 | Host/GPU HIR/MIR lane markers | `src/compiler/20.hir/hir_lowering/statements.spl`; `src/compiler/50.mir/mir_lowering_stmts.spl` | Carries `target.later(...) gpu|host` through HIR as `HirStmtKind.TargetLater` and emits MIR `HostGpuLaneBegin` / `HostGpuLaneEnd` markers with lane, max-packet operand, and source span around the lowered body. |
+| Host/GPU MIR queue evidence adapter | `src/compiler/50.mir/host_gpu_lane_queue.spl` | Converts closed MIR lane-marker regions into deterministic Engine2D queue packets, validates ordered transport, and runs strict submission/readback evidence without claiming real hardware queue emission. |
 | Draw IR executor event-flow bridge | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | Feeds real `engine2d_draw_ir_adv_composition` rendered-command counts and pixel readback into host/GPU event-flow evidence. |
 | Native `simple check` lane lint | `src/compiler_rust/driver/src/cli/check.rs` | Emits `HGL-SEMANTIC` for GPU semantic mutation, `HGL-BATCH` for per-widget GPU dispatch, and `HGL-MAX-PACKET` for GPU `later()` without explicit packet bounds in the production Rust check path. |
 | Full render offload plan | `doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md` | Defines CPU host tree/events/layout -> Draw IR/Graph IR -> GPU render graph/raster/composite/present. |
@@ -62,6 +63,7 @@ bin/simple run test/05_perf/graphics_2d/simple_runner.spl
 bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.spl --mode=interpreter --clean
 bin/simple test test/03_system/feature/language/host_gpu_lane_spec.spl --mode=interpreter --clean
 bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl --mode=interpreter --clean
+bin/simple test test/01_unit/compiler/mir/host_gpu_lane_queue_evidence_spec.spl --mode=interpreter --clean
 cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --lib test_check_rejects_host_semantic_mutation_in_gpu_lane -- --nocapture
 cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --lib test_check_warns_for_loop_local_gpu_later_dispatch -- --nocapture
 src/compiler_rust/target/debug/simple check /tmp/hgl_check_*.spl
@@ -78,6 +80,7 @@ Results:
 | Host/GPU queue submission evidence | PASS: backend lane unit spec now covers 23 tests, including strict submission/readback success, fallback rejection before submission, and readback hash mismatch rejection. |
 | Host/GPU frontend structural lane metadata | PASS: frontend unit spec covers `StmtKind.TargetLater` preservation for GPU lane, `max_packet`, and body metadata. |
 | Host/GPU HIR/MIR lane markers | PASS: HIR and MIR unit specs cover `HirStmtKind.TargetLater` preservation and MIR `HostGpuLaneBegin` / `HostGpuLaneEnd` markers around the lowered GPU lane body. |
+| Host/GPU MIR queue evidence adapter | PASS: MIR queue evidence unit spec covers strict submission/readback evidence from lowered lane markers and fallback rejection before device submission. |
 | Host/GPU lane system SSpec | PASS: 6 scenarios, including canonical grammar, semantic ownership, per-widget dispatch diagnostics, and strict-GPU event-flow evidence. |
 | Draw IR executor event-flow bridge | PASS: 4 tests; `feeds rendered Draw IR command counts into host GPU event-flow evidence` records `draw_ir_delta_count=2`, `packet_bytes=256`, `pixel_hash=0xff00ff00`, and `speedup_x1000=2000` from a real Engine2D Draw IR composition result. |
 | Native driver `HGL-SEMANTIC` unit | PASS: `test_check_rejects_host_semantic_mutation_in_gpu_lane`, 1 passed. |

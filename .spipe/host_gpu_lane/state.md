@@ -47,3 +47,5 @@ implementing
 - spec: Added `test/01_unit/compiler/frontend/host_gpu_lane_structural_bridge_spec.spl` to prove rich AST preserves GPU lane, max_packet, and body metadata; generated its manual stub under `doc/06_spec`.
 - impl: Added `HirStmtKind.TargetLater` and MIR `HostGpuLaneBegin` / `HostGpuLaneEnd` marker instructions so `target.later(max_packet: N) gpu|host \:` survives HIR/MIR lowering with lane, packet bound, body boundary, and span metadata.
 - spec: Added HIR and MIR unit specs proving target-later metadata reaches HIR and emits ordered MIR lane markers; generated their manual stubs under `doc/06_spec`.
+- impl: Added `compiler.mir.host_gpu_lane_queue` to convert closed MIR host/GPU lane marker regions into deterministic Engine2D queue packets, transport evidence, and submission/readback evidence.
+- spec: Added MIR queue evidence SSpec coverage for strict marker-driven queue submission and fallback rejection before device submission; generated its manual stub under `doc/06_spec`.
