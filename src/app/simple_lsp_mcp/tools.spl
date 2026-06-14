@@ -162,6 +162,57 @@ fn arg_field(args: text, key: text) -> text:
         end = end + 1
     args.substring(start, end)
 
+fn _digit_val(ch: text) -> i64:
+    # Explicit `==` match only. `text.to_int()` and text ordering (`>=`/`<=`)
+    # both miscompile on the native-build path (see bug
+    # lsp_mcp_integer_position_args_corrupted_2026-06-14), so integer args must
+    # be parsed with `==` digit comparison exclusively. -1 = non-digit.
+    if ch == "0":
+        return 0
+    if ch == "1":
+        return 1
+    if ch == "2":
+        return 2
+    if ch == "3":
+        return 3
+    if ch == "4":
+        return 4
+    if ch == "5":
+        return 5
+    if ch == "6":
+        return 6
+    if ch == "7":
+        return 7
+    if ch == "8":
+        return 8
+    if ch == "9":
+        return 9
+    -1
+
+fn arg_int_field(args: text, key: text) -> i64:
+    # Extract + parse an integer field in one pass using only primitives proven
+    # to compile correctly here (_find_json_value_start, _char_at, `==`). Avoids
+    # the codegen-broken `.to_int()` round-trip that produced garbage line/char
+    # values. Returns -1 when the field is absent or non-numeric.
+    val start = _find_json_value_start(json: args, key: key)
+    if start < 0 or start >= args.len():
+        return -1
+    var i = start
+    if _char_at(args, i) == Q():
+        i = i + 1
+    var result = 0
+    var seen = false
+    while i < args.len():
+        val d = _digit_val(_char_at(args, i))
+        if d < 0:
+            break
+        result = result * 10 + d
+        seen = true
+        i = i + 1
+    if not seen:
+        return -1
+    result
+
 fn detect_tool_name(body: text) -> text:
     val requested = arg_field(args: body, key: "name")
     if requested == "lsp_definition":
@@ -222,12 +273,10 @@ fn handle_tool_call(id: text, body: text) -> text:
     # Position-based tools (file + line + character)
     if tool_name == "lsp_definition" or tool_name == "lsp_references" or tool_name == "lsp_hover" or tool_name == "lsp_completion" or tool_name == "lsp_type_at" or tool_name == "lsp_signature_help" or tool_name == "lsp_implementation" or tool_name == "lsp_document_highlight" or tool_name == "lsp_type_definition":
         val file = arg_field(args: body, key: "file")
-        val line_raw = arg_field(args: body, key: "line")
-        val char_raw = arg_field(args: body, key: "character")
-        if file == "" or line_raw == "" or char_raw == "":
+        val line0 = arg_int_field(args: body, key: "line")
+        val char0 = arg_int_field(args: body, key: "character")
+        if file == "" or line0 < 0 or char0 < 0:
             return make_tool_error(id, "Missing required argument: file/line/character")
-        val line0 = line_raw.to_int()
-        val char0 = char_raw.to_int()
 
         if tool_name == "lsp_definition":
             return make_tool_result(id, run_lsp_query(subcmd: "definition", file: file, line0: line0, char0: char0))

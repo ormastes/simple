@@ -1,11 +1,85 @@
 # LSP MCP: integer position args (line/character) corrupted in deployed server
 
-- **Status:** Open
-- **Severity:** P1 (7 of 11 LSP MCP tools unusable)
+- **Status:** Open — root cause is a **`native-build` codegen/runtime bug**, not a `tools.spl` logic bug
+- **Severity:** P1 (server currently fully unusable — see 2026-06-14 PM update)
 - **Date:** 2026-06-14
-- **Component:** `src/app/simple_lsp_mcp/` (compiled `simple_lsp_mcp_server`)
+- **Component:** `bin/simple native-build` codegen+runtime (`text.to_int()`, text `>=`, `str(negative i64)`); surfaces in `src/app/simple_lsp_mcp/`
 
-## Symptom
+---
+
+## UPDATE 2026-06-14 (PM) — corrected root cause: native-build codegen, not tools.spl
+
+The original write-up (below) blamed `tools.spl` UFCS resolution of `.to_int()`. That was
+the right *suspicion* but the wrong *layer*. Diagnosis with minimal reproducers (built via
+`bin/simple native-build`, compared native-vs-interpreter) shows the real causes are
+**codegen/runtime bugs in primitive operations on the `native-build` path**, reproduced in
+3-line programs with **no LSP code involved**.
+
+### Confirmed minimal codegen bugs (native-build only; interpreter is correct)
+
+1. **`text.to_int()` returns tagged garbage.** `"1".to_int()` → `<value:0x1>`,
+   `"136".to_int()` → `17`. This *is* the originally-reported "integer position args
+   corrupted": `line_raw.to_int()` produced garbage line numbers.
+2. **Text `>=` comparison miscompiles.** `"5" >= "0"` → `false` (should be true);
+   `"5" <= "9"` → `true` (correct). So `>=` specifically is broken; any digit test of the
+   form `ch >= "0" and ch <= "9"` silently fails.
+   Repro for (1)+(2): `doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl`.
+3. **`str(negative i64)` corrupts the value (display-only).** `str(-1)` →
+   `2305843009213693951` = `0x1FFFFFFFFFFFFFFF` (`-1` with the top 3 bits masked — a NaN-box
+   tag-extraction artifact). `-5`→`…FFB`, `-7`→`…FF9`. **Comparisons still work**
+   (`if x < 0` branches correctly), so this is display-only and does **not** explain the
+   empty-extraction symptom; it is a *separate* bug.
+   Repro: `doc/08_tracking/bug/repro/native_str_negative_i64_repro.spl`.
+
+Verify each: `bin/simple native-build --runtime-bundle core-c-bootstrap --entry <repro> --output /tmp/r && /tmp/r`,
+then `bin/simple run <repro>` for the interpreter baseline. Reproduces identically under the
+default bundle too, so it is the **codegen path**, not the runtime bundle.
+
+### Scope: `native-build` path only, NOT native execution in general
+
+`bin/simple` is itself a native binary — it calls `stack_text.to_int()` in its lexer to parse
+every numeric literal and prints integers constantly, all correctly. So these ops are **not**
+universally broken in native code; they are broken specifically in programs produced by
+`bin/simple native-build` (the path that builds the MCP servers). `bin/simple` is built by the
+**bootstrap** pipeline, which evidently emits a different i64 representation/runtime ABI than
+`native-build`. The signature (`"1".to_int()`→`<value:0x1>`, `str(-1)`→`0x1FFF…FFF`) is a
+**NaN-box-tagged value meeting code that expects a raw i64** — codegen and the linked runtime
+disagreeing on i64 boxing in the `native-build` path. Fix should compare the failing
+`native-build` i64 path against the working **bootstrap** one.
+
+### Two distinct failures — only the total one is clearly a recent regression
+
+- **Integer-arg corruption** (`.to_int()` etc.): the original matrix below already showed the
+  integer tools broken on the Jun-13 binary while string tools worked → this was **likely
+  already present** in `native-build`, not necessarily new.
+- **Total failure** (all tools → `"Missing tool name"` / `tools/call` segfault): via the live
+  `simple-lsp-mcp` client, **every** tool — including `lsp_symbols` — now returns
+  `"Missing tool name"`; fresh control builds *segfault* on `tools/call`. The Jun-13 binary's
+  `lsp_symbols` worked (per the prior session's matrix; that binary is gone, not re-tested), so
+  *this* is the recent regression. **Not minimally reproduced.** Ruled out as its cause:
+  cross-module returns (work), persistent init→loop heap state (works), the `--entry-closure`
+  build closure (minimal closure builds work), and stubbed symbols on the arg path (only
+  type/enum descriptors like `Option`, `JsonKind` are stubbed — the string *functions* are
+  real). A faithful single-file replica of the server's read→parse→extract path **works**; only
+  the full module graph fails. Bisect suspects (post-Jun-12 backend/resolve commits):
+  `61b74d9132f` (M12-3b call-site default-arg fill), c-backend `val`-binding fixes,
+  `b2e2889e052` — but confirm against a server rebuilt from that SHA.
+
+### Fix status
+
+- `tools.spl` parses line/character with a self-contained `arg_int_field` using **only `==`
+  digit matching** (avoids both broken `.to_int()` and `>=`). Correct fix for the
+  *integer-arg corruption*, unit-safe (its primitives are proven to compile correctly).
+  **Cannot be end-to-end verified or deployed until the separate total-failure regression is
+  fixed** — fresh server builds are broken regardless of this change (proven by a control
+  build of unedited source that also segfaults).
+- Real resolution: fix the `native-build` codegen/runtime i64-boxing bugs (#1/#2) and the
+  total-failure regression. Until then, run the LSP MCP via the interpreted `.spl` path or
+  revert the deployed binary to a pre-regression build.
+
+---
+
+## Symptom (original report)
 
 Live MCP calls against the deployed `bin/release/.../simple_lsp_mcp_server`:
 
@@ -23,71 +97,25 @@ Live MCP calls against the deployed `bin/release/.../simple_lsp_mcp_server`:
 | `lsp_implementation` | ❌ `…:741163762` |
 | `lsp_signature_help` | ❌ `…:741865010` |
 
-Split is exact: **every tool that passes an integer `line`/`character` is broken; every
-string-only tool works.** The **file path arrives intact** (`<file>:` part is correct); only
-the integer `line_num` is garbage. The garbage value is **monotonically increasing across
-calls** (740116738 → 740323010 → …, ~200K/call) — a parse bug would be deterministic per
-input; a growing pointer-/offset-like value indicates the integer is being read from
-uninitialized/heap memory in the running process.
+Split is exact: every tool that passes an integer `line`/`character` was broken; every
+string-only tool worked. The garbage value was monotonically increasing across calls — a
+growing pointer-/tag-like value, consistent with the `.to_int()` tagging bug confirmed above.
 
-`lsp_completion` only appears to work because `query_visibility_completions` returns the full
-identifier+keyword list regardless of position; it does not prove `line0` is correct.
-`lsp_hover` → `null` is consistent with a garbage line (out-of-range → no symbol).
+NOTE (2026-06-14 PM): the current deployed binary is worse — all tools (even `lsp_symbols`)
+return `"Missing tool name"`. See the update section above.
 
-## What is NOT the cause (ruled out)
+## Where it surfaces
 
-- **Stale binary** — `simple_lsp_mcp_server` (Jun 13 00:12) is newer than the last
-  `simple_lsp_mcp/` source commit (`b0f2319cba4`, Jun 12 03:50). Built from current source.
-- **Backend bug** — `lsp_query.spl` / `query_visibility.spl` produce correct results when run
-  directly with literal integer args, e.g.
-  `bin/simple src/lib/nogc_sync_mut/lsp/lsp_query.spl definition src/lib/common/base_encoding.spl 17 4`
-  returns the correct definition list. The corruption happens before the backend is spawned.
-- **`protocol.spl::to_int`** — that `to_int(self) -> Int` is a method on the `Severity` enum,
-  not on `text`; it cannot match a `text` receiver via UFCS.
-
-## Where it is
-
-In `src/app/simple_lsp_mcp/tools.spl::handle_tool_call` (and `main.spl`), the numeric path:
-
-```
-val line0 = line_raw.to_int()          # tools.spl:229
-val char0 = char_raw.to_int()          # tools.spl:230
-... run_lsp_query(subcmd, file, line0, char0)
-# run_lsp_query: [..., str(line0 + 1), str(char0 + 1)]   # tools.spl:15
-```
-
-The spawned backend receives a garbage line string. Suspect is the `text → i64` conversion
-(`.to_int()`, which resolves via global UFCS to `fn to_int(s: text) -> i64` in
-`process_monitor.spl`/`resource_tracker.spl` — NOT imported by `tools.spl`) and/or the numeric
-branch of `arg_field` (`tools.spl:157-163`), under native/AOT codegen.
-
-## Why it could not be isolated under interpret
-
-The source path cannot be faithfully reproduced with `bin/simple run`:
-`arg_field` / `_find_json_value_start` **diverge between interpret and compiled**. Calling the
-exported `handle_tool_call` under interpret returns `"Missing tool name"` because `arg_field`
-returns `""` for every field (even `name`) — yet the **compiled** server extracts `name` and
-`file` correctly (symbols/completion work). `arg_field` already carries a comment that it was
-rewritten to "avoid the Cranelift `match Some(i)` codegen bug", so this module is known to be
-codegen-sensitive. Net: the bug is codegen-specific and the interpret path fails earlier at a
-different point, so interpret is not a usable repro harness here.
-
-## Proposed next steps
-
-1. Add explicit `to_int(text)->i64` import to `tools.spl`/`main.spl` so UFCS cannot mis-resolve,
-   then **rebuild + redeploy** the server and re-run the live tool matrix above.
-2. If still broken, instrument `run_lsp_query` to log the exact spawned argv and confirm whether
-   `str(line0+1)` or `line_raw.to_int()` is the corruption point.
-3. Consider routing position tools through the same backend path as the working string tools, or
-   passing the raw `line`/`character` strings through untouched and incrementing inside the
-   interpreted backend (no `text↔i64` round-trip in the compiled server).
+`src/app/simple_lsp_mcp/tools.spl::handle_tool_call` numeric path used `line_raw.to_int()` /
+`char_raw.to_int()`, then `run_lsp_query` built `[..., str(line0 + 1), str(char0 + 1)]`. The
+`.to_int()` calls return tagged garbage under `native-build` (see bug #1).
 
 ## Verification harness
 
 ```
-# string tools (work):
-mcp lsp_symbols src/lib/common/base_encoding.spl
-# integer tools (broken): lsp_definition @ line 16, char 3 → garbage line_num
-# backend sanity (works):
+# backend sanity (works directly):
 bin/simple src/lib/nogc_sync_mut/lsp/lsp_query.spl definition src/lib/common/base_encoding.spl 17 4
+# minimal codegen repros (native broken / interpret correct):
+bin/simple native-build --runtime-bundle core-c-bootstrap --entry doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl --output /tmp/r && /tmp/r
+bin/simple run doc/08_tracking/bug/repro/native_text_ordering_to_int_repro.spl
 ```
