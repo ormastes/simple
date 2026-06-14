@@ -173,6 +173,10 @@ Run `sh test/05_perf/profile_scripts/profile_report_contract_test.shs` with no
 arguments to check the canonical cross-language profile script/report pair.
 Use the explicit `kind script report` form only for non-canonical profile
 outputs.
+When the multicore-green native row or profile-contract fixture changes, also
+run `cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols`.
+That smoke proves the rebuilt native resolver still exports the `rt_pool_*`
+counter symbols behind the public `multicore_green_*_count` evidence helpers.
 The profile-report contract and `simple check` reject forbidden number-suffix
 API names; use semantic API names in reports, generated workloads, runtime extern
 declarations, and profile-script comments. The public concurrency API contract

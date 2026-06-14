@@ -707,7 +707,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 138 lines folded for reproduction.
+Runnable source: 142 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -752,6 +752,8 @@ expect(perf).to_contain("runtime-seed `rt_pool_*` support")
 expect(perf).to_contain("not describe this as a combined Pure Simple")
 expect(perf).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
 expect(perf).to_contain("set explicitly for ad-hoc/date-stamped runs")
+expect(perf).to_contain("cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols")
+expect(perf).to_contain("native resolver still exports the `rt_pool_*`")
 expect(coding).to_contain("assert `used_runtime_pool()`")
 expect(coding).to_contain("Cross-language profile")
 expect(coding).to_contain("Pure Simple user API")
@@ -821,6 +823,8 @@ expect(perf_readme).to_contain("profile_scripts/profile_help_contract_test.shs")
 expect(perf_readme).to_contain("profile_scripts/profile_binary_autoselect_test.shs")
 expect(perf_readme).to_contain("profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(perf_readme).to_contain("profile_scripts/concurrency_api_contract_test.shs")
+expect(perf_readme).to_contain("native resolver coverage for `rt_pool_*` counter symbols")
+expect(perf_readme).to_contain("cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols")
 expect(perf_readme).to_contain("stress/multicore_green_large_profile_gate_spec.spl")
 expect(perf_readme).to_contain("large Go fanout")
 expect(perf_readme).to_contain("queue_model=work_stealing")

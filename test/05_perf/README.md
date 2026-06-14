@@ -23,7 +23,7 @@ Benchmarks are used to:
 | `profile_scripts/profile_help_contract_test.shs` | Cross-language profile help contract | Verifies `--help` prints usage and exits before expensive workload compilation starts |
 | `profile_scripts/profile_binary_autoselect_test.shs` | Cross-language profile Simple-binary auto-selection regression | Runs a reduced profile and verifies stale wrappers are skipped |
 | `profile_scripts/profile_docker_isolation_contract_test.shs` | Cross-language profile Docker isolation contract | Stubs Docker and verifies the profile re-execs with network disabled, memory/CPU limits, UID/GID mapping, workspace mount, and env handoff |
-| `profile_scripts/concurrency_api_contract_test.shs` | Public concurrency API misuse and naming contract | Verifies approved OS-thread, task-pool, cooperative-green, and multicore-green imports while rejecting wrong surfaces, direct `rt_pool_*` access, shared mutable green captures, and numeric-suffix concurrency aliases |
+| `profile_scripts/concurrency_api_contract_test.shs` | Public concurrency API misuse and naming contract | Verifies approved OS-thread, task-pool, cooperative-green, and multicore-green imports while rejecting wrong surfaces, direct `rt_pool_*` access, shared mutable green captures, numeric-suffix concurrency aliases, and native resolver coverage for `rt_pool_*` counter symbols |
 | `stress/multicore_green_large_profile_gate_spec.spl` | Simple SSpec companion gate for the checked-in large cross-language report | Parses `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md` and checks Go fanout, Simple multicore-green runtime-pool evidence, work-stealing queue evidence, and C pthread baselines |
 
 ## Quick Start
@@ -111,7 +111,7 @@ val results = runner.run_all()
 - **Large profile SSpec gate:** `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl` checks the current checked-in report's large Go fanout, Simple multicore-green fanout/stress, `pool_used=`, `parallelism=`, `counter_delta=`, and `queue_model=work_stealing` evidence
 - **Profile binary auto-selection:** `test/05_perf/profile_scripts/profile_binary_autoselect_test.shs` checks that auto mode probes candidates and skips stale release wrappers
 - **Profile Docker isolation:** `test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs` checks the crash-containment re-exec command without requiring a Docker daemon
-- **Concurrency API contract:** `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` checks meaningful public API names and rejects numeric-suffix concurrency aliases
+- **Concurrency API contract:** `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` checks meaningful public API names, rejects numeric-suffix concurrency aliases, and stays paired with `cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols` so native `rt_pool_*` counter symbols cannot disappear while profile rows still claim counter-qualified M:N evidence
 - **Report location:** `doc/09_report/*.md`
 
 ## Benchmark Configuration
