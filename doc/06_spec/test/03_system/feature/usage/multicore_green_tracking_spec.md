@@ -737,7 +737,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 149 lines folded for reproduction.
+Runnable source: 151 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -836,10 +836,12 @@ expect(sys_test_plan).to_contain("report_index_checked=doc/09_report/README.md")
 expect(sys_test_plan).to_contain("agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md")
 expect(sys_test_plan).to_contain("report index and agent handoff cannot silently point future agents at stale evidence")
 expect(sys_test_plan).to_contain("## Current Sync Status (2026-06-14)")
-expect(sys_test_plan).to_contain("e949435419d5 docs: require multicore green resolver smoke visibility")
-expect(sys_test_plan).to_contain("Docker-isolated interpreter")
+expect(sys_test_plan).to_contain("e375cd6cb2d4 docs: refresh simpleos multicore green evidence")
+expect(sys_test_plan).to_contain("2026-06-14 evidence-refresh slice")
+expect(sys_test_plan).to_contain("four interpreter-run SimpleOS feature specs")
 expect(agent_plan).to_contain("## Current Sync Status (2026-06-14)")
-expect(agent_plan).to_contain("d7115ef664c7 perf(gui): prune selector has subtree scans")
+expect(agent_plan).to_contain("e375cd6cb2d4 docs: refresh simpleos multicore green evidence")
+expect(agent_plan).to_contain("2026-06-14 refresh visible")
 expect(agent_plan).to_contain("broader Go-like runtime roadmap remains `current`, not `done`")
 expect(fanout_runner_bug).to_contain("historical resolved-bug evidence only")
 expect(fanout_runner_bug).to_contain("current reruns use")

@@ -438,21 +438,21 @@ Each agent reports:
   unrelated GUI renderer syncs through
   `d7115ef664c7 perf(gui): prune selector has subtree scans`; those remote
   changes did not touch the multicore-green owned paths.
-- The latest multicore-green doc/spec slice is
-  `e949435419d5 docs: require multicore green resolver smoke visibility`.
-  It made `doc/07_guide/compiler/check_perf.md` and `test/05_perf/README.md`
-  require the native resolver smoke
-  `cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols`
-  whenever multicore-green native/profile counter evidence changes.
-- The tracking SSpec and generated manual now assert that the perf guide and
-  perf README keep that resolver-smoke visibility, so public
-  `multicore_green_*_count` profile evidence cannot drift away from native
-  `rt_pool_*` counter-symbol resolver coverage.
-- Focused checks from the 2026-06-14 resolver-smoke visibility slice passed:
-  local tracking SSpec with 13 scenarios, Docker-isolated tracking SSpec with
-  13 scenarios, `cargo test -p simple-compiler
-  elf_utils::tests::resolves_runtime_pool_symbols`, and
-  `find doc/06_spec -name '*_spec.spl' | wc -l` returning `0`.
+- The latest pushed multicore-green doc/spec slice is
+  `e375cd6cb2d4 docs: refresh simpleos multicore green evidence`.
+  It refreshed the SimpleOS evidence report, feature-tracking row, tracking
+  SSpec, and generated manual after rerunning the interpreter SimpleOS
+  cooperative, multicore scheduler, green-channel wake, and final handoff
+  blocker specs.
+- The tracking SSpec and generated manual now assert that the SimpleOS report
+  and feature-tracking row keep the 2026-06-14 refresh visible, so future
+  agents do not treat older 2026-06-13 hosted evidence as the latest state.
+- Focused checks from the 2026-06-14 evidence-refresh slice passed: profile
+  report contract, negative profile contract, profile help, profile binary
+  autoselect, profile Docker isolation, concurrency API contract, four
+  interpreter-run SimpleOS feature specs, SDN lint, local tracking SSpec with
+  13 scenarios, and `find doc/06_spec -name '*_spec.spl' | wc -l` returning
+  `0`.
 - The broader Go-like runtime roadmap remains `current`, not `done`: ordinary
   closure preemption, full scheduler-aware host M:N behavior, and ongoing
   profile parity work remain explicit follow-up gates.

@@ -119,12 +119,12 @@
   still pass, and the profile report contract plus numeric cross-language gate
   pass against
   `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`.
-- The 2026-06-13 interpreter-run SimpleOS refresh in
+- The 2026-06-14 interpreter-run SimpleOS refresh in
   `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` reran the
-  cooperative, multicore-green scheduler, and green-channel wake specs in
-  Docker process isolation from `/tmp/simple-mgreen-next-jj-4101862`; it keeps
-  hosted SimpleOS support current without changing the already closed
-  opt-in live-QEMU final-handoff claim.
+  cooperative, multicore-green scheduler, green-channel wake, and final
+  handoff blocker specs from `/tmp/simple-pherallel-continue-jj` after
+  shared-main sync; it keeps hosted SimpleOS support current without changing
+  the already closed opt-in live-QEMU final-handoff claim.
 - This 2026-06-13 slice used Docker-isolated focused checks with `SIMPLE_BIN`
   pinned to a current-source compiler, passed
   `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` with
@@ -153,17 +153,16 @@
 
 ## Current Sync Status (2026-06-14)
 
-- The current jj workspace is rebased on `main@origin` after unrelated GUI
-  renderer changes through `d7115ef664c7`; no multicore-green files were
-  folded in from that remote lane.
-- The 2026-06-14 resolver-smoke visibility slice
-  `e949435419d5 docs: require multicore green resolver smoke visibility`
-  updates the perf guide, perf README, tracking SSpec, and generated tracking
-  manual so future multicore-green profile edits keep
-  `cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols`
-  paired with `rt_pool_*` counter evidence.
-- Focused verification for that slice passed: `simple check
-  test/03_system/feature/usage/multicore_green_tracking_spec.spl`, local
-  interpreter tracking SSpec with 13 scenarios, Docker-isolated interpreter
-  tracking SSpec with 13 scenarios, the native resolver smoke above, and the
-  generated-spec layout guard returning `0`.
+- The current jj workspace is rebased on `main@origin` after the pushed
+  `e375cd6cb2d4 docs: refresh simpleos multicore green evidence` slice.
+- The 2026-06-14 evidence-refresh slice updates the SimpleOS report,
+  feature-tracking row, tracking SSpec, and generated tracking manual so future
+  multicore-green status reads see the latest interpreter-run SimpleOS
+  cooperative, multicore scheduler, green-channel wake, and final handoff
+  blocker evidence.
+- Focused verification for that slice passed: profile report contract,
+  negative profile contract, profile help, profile binary autoselect, profile
+  Docker isolation, concurrency API contract, four interpreter-run SimpleOS
+  feature specs, SDN lint for `doc/08_tracking/feature/feature_db.sdn`, local
+  interpreter tracking SSpec with 13 scenarios, and the generated-spec layout
+  guard returning `0`.
