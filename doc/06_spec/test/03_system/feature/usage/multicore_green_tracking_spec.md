@@ -318,7 +318,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 77 lines folded for reproduction.
+Runnable source: 78 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -366,6 +366,7 @@ expect(report_index).to_contain("multicore_green_spawn_sliced")
 expect(report_index).to_contain("sliced-handle")
 expect(report_index).to_contain("used_runtime_pool=true")
 expect(report_index).to_contain("explicit scalar-state fairness contract")
+expect(report_index).to_contain("raw `thread_yield()` inside ordinary `multicore_green_spawn` closures classified as non-preemptive gap evidence")
 expect(absent_in_text(report_index, "ordinary closure preemption; and proves")).to_equal(1)
 expect(report_index).to_contain("used_runtime_pool()")
 expect(report_index).to_contain("pool_used=N/N")
@@ -455,7 +456,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 161 lines folded for reproduction.
+Runnable source: 163 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -579,6 +580,7 @@ expect(negative_contract).to_contain("case=go_scheduler_width_mismatch")
 expect(negative_contract).to_contain("case=hosted_sliced_fairness_section_missing")
 expect(negative_contract).to_contain("case=hosted_sliced_fairness_marker_corrupt")
 expect(negative_contract).to_contain("case=hosted_sliced_fairness_explanation_corrupt")
+expect(negative_contract).to_contain("case=thread_yield_preemption_gap_wording_missing")
 expect(negative_contract).to_contain("case=pure_simple_runtime_seed_boundary_corrupt")
 expect(negative_contract).to_contain("case=cooperative_green_explanation_corrupt")
 expect(negative_contract).to_contain("case=cooperative_green_mn_runtime_pool_label")
@@ -611,6 +613,7 @@ expect(system_plan).to_contain("os_thread_profile_timing_fail")
 expect(system_plan).to_contain("workload_variety_methodology_missing")
 expect(system_plan).to_contain("optional_language_inventory_missing")
 expect(system_plan).to_contain("docker_cpu_quota_scheduler_width_missing")
+expect(system_plan).to_contain("thread_yield_preemption_gap_wording_missing")
 expect(system_plan).to_contain("simpleos_report_index_row_missing")
 expect(system_plan).to_contain("hosted_sliced_fairness_report_index_marker_missing")
 expect(system_plan).to_contain("docker_simple_binary_probe_wording_corrupt")
@@ -787,7 +790,7 @@ expect(coding).to_contain("MulticoreGreenSlicedHandle.ran_inline_fallback()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 168 lines folded for reproduction.
+Runnable source: 171 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -830,6 +833,8 @@ expect(perf).to_contain("queue_model=work_stealing")
 expect(perf).to_contain("GOMAXPROCS=$CPU_WORKERS")
 expect(perf).to_contain("Docker CPU quota is containment metadata")
 expect(perf).to_contain("CPU_WORKERS == GOMAXPROCS")
+expect(perf).to_contain("Raw `thread_yield()` inside an ordinary `multicore_green_spawn` closure")
+expect(perf).to_contain("not counted as Go-like preemption evidence")
 expect(perf).to_contain("contract-gated reports must keep")
 expect(perf).to_contain("checked large-fanout row")
 expect(perf).to_contain("checked stress report")
@@ -948,6 +953,7 @@ expect(profile_contract).to_contain("Docker CPU quota is containment metadata")
 expect(profile_contract).to_contain("C and Go remain the required native baselines")
 expect(profile_negative).to_contain("optional_language_inventory_missing")
 expect(profile_negative).to_contain("docker_cpu_quota_scheduler_width_missing")
+expect(profile_negative).to_contain("thread_yield_preemption_gap_wording_missing")
 
 step("Verify forbidden numbered API-name scans cover the public concurrency family")
 expect(profile_contract).to_contain("thread_spawn_with_args")

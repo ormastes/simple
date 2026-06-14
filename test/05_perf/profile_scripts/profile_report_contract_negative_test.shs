@@ -407,6 +407,34 @@ printf '%s\n' "$output" | grep -Fq "missing 'explicit scalar-state fairness cont
 cp "$source_report" "$tmp_report"
 
 awk '
+    /Raw `thread_yield\(\)` inside an ordinary `multicore_green_spawn` closure is/ {
+        next
+    }
+    /also not counted as Go-like preemption evidence/ {
+        next
+    }
+    /remains the release-visible guard until compiler\/runtime safepoints land/ {
+        next
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "removed thread-yield preemption gap wording unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq 'Raw `thread_yield()` inside an ordinary `multicore_green_spawn` closure is' ||
+    fail "missing expected thread-yield preemption gap wording failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
     /Pure Simple `multicore_green_spawn` facade over runtime-seed/ {
         sub(/Pure Simple `multicore_green_spawn` facade over runtime-seed/, "Pure Simple `multicore_green_spawn`\\/`rt_pool_*` candidate row")
     }
@@ -766,6 +794,7 @@ echo "case=go_scheduler_width_mismatch"
 echo "case=hosted_sliced_fairness_section_missing"
 echo "case=hosted_sliced_fairness_marker_corrupt"
 echo "case=hosted_sliced_fairness_explanation_corrupt"
+echo "case=thread_yield_preemption_gap_wording_missing"
 echo "case=pure_simple_runtime_seed_boundary_corrupt"
 echo "case=cooperative_green_explanation_corrupt"
 echo "case=cooperative_green_mn_runtime_pool_label"
