@@ -28,7 +28,7 @@ webgpu_js_wasm_simple_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 126 | 126 | 0 | 0 |
+| 127 | 127 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -48,7 +48,7 @@ This executable system manual covers the active GUI hardening JS/WebEngine/WASM 
 | Design | doc/05_design/browser_wasm_webgpu_infra.md |
 | Research | doc/01_research/local/browser_wasm_webgpu_infra.md |
 | Source | `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
-| Updated | 2026-06-14 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -81,8 +81,9 @@ examples call declared `webgpu.requestAdapter`, `webgpu.dispatch`, and
 `webgpu.writeBuffer` callbacks from WASM exports, including WebGPU-like void
 dispatch calls, Simple2D rectangle payload bytes, and `Uint8Array` reads from
 `i.exports.memory.buffer`. Browser-shaped queue evidence resolves
-`adapter.requestDevice`, creates a bounded buffer, and records a queue upload
-from typed-array backing storage into observable buffer bytes.
+`adapter.requestDevice`, creates a bounded buffer, records a queue upload from
+typed-array backing storage into observable buffer bytes, and forwards
+WASM-originated Simple2D fill payload bytes into a WebGPU compute pass.
 
 **Requirements:** .spipe/browser-wasm-webgpu-infra/state.md
 **Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
@@ -1515,6 +1516,53 @@ match result:
         expect(_display_js(value)).to_equal("instantiated:1:1:2x3x4:1:24:1:1:24:1:1:1:1:24")
     Err(err):
         expect("unexpected WASM compute dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
+#### should drive a Simple2D fill compute pass from WASM payload bytes
+
+- var session = BrowserSession new
+- session open html
+- Ok
+   - Expected: _display_js(value) equals `adapter-queued`
+- Err
+   - Expected: "unexpected Simple2D fill adapter queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `device-queued`
+- Err
+   - Expected: "unexpected Simple2D fill device queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `instantiated:1242:1:webgpu:writeBuffer:8,0,0,0,210,4,0,0:8:1234:222:true:simp... (full value in folded executable source)`
+- Err
+   - Expected: "unexpected WASM Simple2D fill compute js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm-simple2d-fill.html", "<html><body>WebGPU WASM Simple2D Fill</body></html>")
+match session.eval_script("var adapter = null; var device = null; navigator.gpu.requestAdapter().then(function(a) { adapter = a; }); 'adapter-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("adapter-queued")
+    Err(err):
+        expect("unexpected Simple2D fill adapter queue error: {err}").to_equal("")
+match session.eval_script("adapter.requestDevice().then(function(d) { device = d; }); 'device-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("device-queued")
+    Err(err):
+        expect("unexpected Simple2D fill device queue error: {err}").to_equal("")
+val result = session.eval_script("var calls = 0; var payload = ''; var payloadChecksum = 0; var count = 0; var fillValue = 0; var shaderValid = false; var entry = ''; var m; var i; var imports = { webgpu: { writeBuffer: function(ptr, len) { calls = calls + 1; var source = new Uint8Array(i.exports.memory.buffer); payload = source[0] + ',' + source[1] + ',' + source[2] + ',' + source[3] + ',' + source[4] + ',' + source[5] + ',' + source[6] + ',' + source[7]; payloadChecksum = source[0] + source[1] + source[2] + source[3] + source[4] + source[5] + source[6] + source[7]; count = source[0] + source[1] * 256 + source[2] * 65536 + source[3] * 16777216; fillValue = source[4] + source[5] * 256 + source[6] * 65536 + source[7] * 16777216; var shader = device.createShaderModule({code: '@group(0) @binding(1) var<storage, read_write> dst: array<u32>; struct Simple2DParams { value: u32, count: u32, alpha: u32, width: u32, height: u32 }; @group(0) @binding(3) var<uniform> params: Simple2DParams; @compute @workgroup_size(64) fn simple_2d_fill_u32(@builtin(global_invocation_id) global_id: vec3<u32>) { }'}); shaderValid = shader.valid; var pipeline = device.createComputePipeline({module: shader, entryPoint: 'simple_2d_fill_u32'}); entry = pipeline.entryPoint; var encoder = device.createCommandEncoder(); var pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.dispatchWorkgroups(count / 8, 1, 1); pass.end(); var commands = encoder.finish(); device.queue.submit([commands]); return count + fillValue; } } }; m = new WebAssembly.Module('0061736d01000000010b0260027f7f017f6000017f021601067765626770750b77726974654275666665720000030201010503010001071002066d656d6f727902000372756e00010a43014100410041083a0000410141003a0000410241003a0000410341003a0000410441d2013a0000410541043a0000410641003a0000410741003a00004100410810000b'); i = new WebAssembly.Instance(m, imports); var runResult = i.exports.run(); i.status + ':' + runResult + ':' + calls + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + payload + ':' + count + ':' + fillValue + ':' + payloadChecksum + ':' + shaderValid + ':' + entry + ':' + device.queue.submitCount + ':' + device.queue.lastSubmitCommandBufferCount + ':' + device.queue.lastSubmitComputePassCount + ':' + device.queue.lastSubmitDispatchCallCount + ':' + device.queue.lastSubmitDispatchedWorkgroups")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:1242:1:webgpu:writeBuffer:8,0,0,0,210,4,0,0:8:1234:222:true:simple_2d_fill_u32:1:1:1:1:1")
+    Err(err):
+        expect("unexpected WASM Simple2D fill compute js error: {err}").to_equal("")
 ```
 
 </details>
@@ -4052,8 +4100,8 @@ match result:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 126 |
-| Active scenarios | 126 |
+| Total scenarios | 127 |
+| Active scenarios | 127 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
