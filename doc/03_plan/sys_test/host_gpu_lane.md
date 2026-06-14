@@ -61,6 +61,7 @@ Generated/manual mirror:
 | HGL-009 | Runtime queue transport drains packets in sequence and records payload, fallback, host-commit, and checksum accounting | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.spl` | records ordered queue transport accounting; rejects queue transport drained out of sequence order | Full for deterministic transport accounting; hardware queue submission pending |
 | HGL-010 | GPU `later()` source requires explicit `max_packet` before compiler lowering can emit bounded queue packets | `src/compiler_rust/driver/src/cli/check.rs` | `test_check_requires_max_packet_for_gpu_later_lane` | Full for native Rust check source; deployed binary refresh pending |
 | HGL-011 | Queue submission/readback evidence rejects fallback or invalid transport before device submission and verifies strict GPU pixel hash after submission | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.spl` | records strict queue submission and readback evidence; rejects fallback queue packets before device submission; rejects GPU submission when readback hash mismatches | Full for deterministic submission/readback gate; real hardware submit path pending |
+| HGL-012 | Frontend parser and flat-AST bridge preserve `target.later(max_packet: N) gpu \:` as structured lane metadata | `test/01_unit/compiler/frontend/host_gpu_lane_structural_bridge_spec.spl` | preserves target.later gpu lane metadata in rich AST | Full for frontend structural preservation; HIR/MIR propagation pending |
 
 ## Evidence Policy
 

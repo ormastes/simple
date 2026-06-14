@@ -43,3 +43,5 @@ implementing
 - spec: Added Rust driver unit coverage `test_check_requires_max_packet_for_gpu_later_lane`; kept system SSpec positive canonical grammar on explicit `max_packet` because deployed `bin/simple` may lag the edited Rust driver source.
 - impl: Added `Engine2dHostGpuQueueSubmissionEvidence` to validate the deterministic queue submission/readback gate above transport drain.
 - spec: Extended backend lane SSpec coverage to 23 tests for strict submission/readback success, fallback rejection before submission, and readback hash mismatch rejection; regenerated `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.md`.
+- impl: Added flat AST `STMT_HOST_GPU_LANE` and rich AST `StmtKind.TargetLater(TargetLaterConfig, Block)` so `target.later(max_packet: N) gpu|host \:` survives frontend parsing as structured lane metadata.
+- spec: Added `test/01_unit/compiler/frontend/host_gpu_lane_structural_bridge_spec.spl` to prove rich AST preserves GPU lane, max_packet, and body metadata; generated its manual stub under `doc/06_spec`.

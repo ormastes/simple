@@ -113,6 +113,13 @@ does happen, it requires the GPU readback pixel hash to match the expected
 oracle before reporting success. This keeps fallback evidence from claiming
 less-ms device execution.
 
+The frontend parser now preserves `target.later(max_packet: N) gpu|host \:` as a
+dedicated flat statement and bridges it into rich AST as
+`StmtKind.TargetLater(TargetLaterConfig, Block)`. This is the first structural
+compiler carrier for lane, packet bound, and body metadata; HIR and MIR
+propagation still need to consume that rich AST node before codegen can emit
+runtime queue packets directly.
+
 ## Performance Model
 
 For this slice, GPU batch performance is a deterministic evidence estimate:
