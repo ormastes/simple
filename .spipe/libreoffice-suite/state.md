@@ -107,13 +107,15 @@ possible so they are runner-verifiable.
      INTEGER coords to sidestep the f64 bug (the existing Skia SkPoint/SkRect are
      f64). Draw flipped to implemented in the LibreOffice branding (4 live apps).
      Spec 6/6; coords verified via direct run.
-   - BASE (db): attempted an in-memory relational table; BLOCKED — comparing an
-     array-extracted text element with a string (`row.get(i) == value`) returns
-     false in this code path (even `built.get(1) == "q"` after push), so query/
-     filtering can't work. Did NOT ship a db whose filter is broken. Trigger
-     unclear (formula.spl compares `tokens.get(pos) == ")"` fine).
-   - MATH: not yet scoped (LibreOffice Math = equation editor, distinct from
-     Calc's formula evaluator).
+   - BASE (db): DONE (landed origin a8e19d0). `office/base_db.spl` — text table
+     with insert, `select_where`, `project_column`. Root-caused the blocker: the
+     interpreter corrupts `arr.get(n)` for n>=1 (`.get(0)`==ok, `.get(1)` fails
+     `==`); fixed by reading cells via for-in iteration (see
+     [[feedback_array_get_index_ge1_corruption]]). Spec 6/6 runner-green.
+   - MATH: DONE (landed origin a838abeb). `office/math_editor.spl` — renders math
+     expressions to MathML (mi/mn/mo) + msup/msqrt helpers. Spec 6/6.
+   ALL SIX LibreOffice apps (Writer/Calc/Impress/Draw/Base/Math) now implemented
+   and verified (libreoffice spec 6/6, all implemented:true).
 8. DONE (landed origin effc1b1) — **Game-tool connect** (`office/game_bridge.spl`):
    declares game↔{calc,draw,db} connection targets; implements Calc-as-game-data
    (`calc_cells_to_game_values`/`calc_row_to_game_tokens` — a game reads level/
