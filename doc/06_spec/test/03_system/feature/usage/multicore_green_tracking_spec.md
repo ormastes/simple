@@ -681,6 +681,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 - Read the public guide and profile guide
 - Verify cooperative green remains documented as single-carrier work
 - Verify hosted M:N claims require runtime-pool and scheduler-width evidence
+- Verify live fanout evidence distinguishes counter-qualified M:N from runtime-pool-only evidence
 - Verify Pure Simple facade wording stays separate from runtime seed support
 - Verify the performance README maps all profile-script gates
 - Verify stale release-wrapper guidance stays visible
@@ -690,7 +691,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 121 lines folded for reproduction.
+Runnable source: 132 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -705,6 +706,8 @@ val api_contract = rt_file_read_text("test/05_perf/profile_scripts/concurrency_a
 val sys_test_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
 val perf_readme = rt_file_read_text("test/05_perf/README.md") ?? ""
 val fanout_runner_bug = rt_file_read_text("doc/08_tracking/bug/multicore_green_fanout_spec_runner_mismatch_2026-06-11.md") ?? ""
+val fanout_spec = rt_file_read_text("test/05_perf/stress/multicore_green_fanout_spec.spl") ?? ""
+val fanout_manual = rt_file_read_text("doc/06_spec/test/05_perf/stress/multicore_green_fanout_spec.md") ?? ""
 
 step("Verify cooperative green remains documented as single-carrier work")
 expect(stdlib).to_contain("no preemption or CPU parallelism")
@@ -746,6 +749,15 @@ expect(coding).to_contain("test/05_perf/profile_scripts/profile_docker_isolation
 expect(coding).to_contain("PROFILE_DOCKER_ISOLATION=1")
 expect(stdlib).to_contain("runtime-seed `rt_pool_submit`")
 expect(stdlib).to_contain("not a combined Pure Simple user-facing API")
+
+step("Verify live fanout evidence distinguishes counter-qualified M:N from runtime-pool-only evidence")
+expect(fanout_spec).to_contain("SIMPLE_MULTICORE_GREEN_COUNTER_EVIDENCE")
+expect(fanout_spec).to_contain("counter-qualified M:N evidence")
+expect(fanout_spec).to_contain("runtime-pool-only evidence")
+expect(fanout_spec).to_contain("not profile-grade counter evidence")
+expect(fanout_manual).to_contain("counter-qualified M:N evidence")
+expect(fanout_manual).to_contain("runtime-pool-only evidence")
+expect(fanout_manual).to_contain("not profile-grade counter evidence")
 
 step("Verify Pure Simple facade wording stays separate from runtime seed support")
 expect(profile_contract).to_contain("Pure Simple `multicore_green_spawn` facade over runtime-seed")
