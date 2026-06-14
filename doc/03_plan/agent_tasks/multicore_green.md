@@ -128,8 +128,10 @@ Acceptance evidence:
 - report rows proving Go fanout and Go stress fanout both beat C pthreads with
   Go `GOMAXPROCS` pinned to `CPU_WORKERS`.
 - no-arg profile contract output includes
-  `report_index_checked=doc/09_report/README.md`, proving the current report
-  index points at the same canonical freshbin evidence as the profile gate.
+  `report_index_checked=doc/09_report/README.md` and
+  `agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md`,
+  proving the current report index and agent handoff point at the same
+  canonical freshbin evidence as the profile gate.
 - report row showing Simple multicore green native still beats the C pthread
   large fanout stress baseline while remaining slower than Go until further
   scheduler/runtime work lands.

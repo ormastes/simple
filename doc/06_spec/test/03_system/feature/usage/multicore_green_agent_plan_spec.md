@@ -225,7 +225,7 @@ expect(absent_in_text(plan, "## Agent E:")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -240,6 +240,7 @@ expect(plan).to_contain("Go stress")
 expect(plan).to_contain("sh test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(absent_in_text(plan, "profile_report_contract_test.shs cross_language scripts/check/check-cross-language-perf.shs")).to_equal(1)
 expect(plan).to_contain("report_index_checked=doc/09_report/README.md")
+expect(plan).to_contain("agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md")
 expect(plan).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
 expect(plan).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(plan).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")

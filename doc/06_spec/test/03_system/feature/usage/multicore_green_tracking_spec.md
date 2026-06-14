@@ -690,7 +690,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 109 lines folded for reproduction.
+Runnable source: 113 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -749,7 +749,9 @@ expect(profile_contract).to_contain("\"val handle = handles[index]\"")
 expect(profile_contract).to_contain("\"total = total + handle.join()\"")
 expect(profile_contract).to_contain("canonical_checked_report=1")
 expect(profile_contract).to_contain("report_index=\"doc/09_report/README.md\"")
+expect(profile_contract).to_contain("agent_task_plan=\"doc/03_plan/agent_tasks/multicore_green.md\"")
 expect(profile_contract).to_contain("report_index_checked=doc/09_report/README.md")
+expect(profile_contract).to_contain("agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md")
 val profile_script = rt_file_read_text("scripts/check/check-cross-language-perf.shs") ?? ""
 expect(profile_script).to_contain("CANONICAL_CROSS_LANGUAGE_REPORT")
 expect(profile_script).to_contain("REPORT_PATH=\"${REPORT_PATH:-$CANONICAL_CROSS_LANGUAGE_REPORT}\"")
@@ -758,7 +760,8 @@ expect(profile_script).to_contain("cooperative queue fanout on current OS thread
 expect(sys_test_plan).to_contain("Generated multicore-green profile code must store `MulticoreGreenHandle` values")
 expect(sys_test_plan).to_contain("must not import `rt_pool_join` directly")
 expect(sys_test_plan).to_contain("report_index_checked=doc/09_report/README.md")
-expect(sys_test_plan).to_contain("report index cannot silently point future agents at stale evidence")
+expect(sys_test_plan).to_contain("agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md")
+expect(sys_test_plan).to_contain("report index and agent handoff cannot silently point future agents at stale evidence")
 expect(fanout_runner_bug).to_contain("historical resolved-bug evidence only")
 expect(fanout_runner_bug).to_contain("current reruns use")
 expect(fanout_runner_bug).to_contain("report_index_checked")
@@ -772,6 +775,7 @@ step("Verify the performance README maps all profile-script gates")
 expect(perf_readme).to_contain("profile_scripts/profile_report_contract_test.shs")
 expect(perf_readme).to_contain("doc/09_report/README.md")
 expect(perf_readme).to_contain("report_index_checked=doc/09_report/README.md")
+expect(perf_readme).to_contain("agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md")
 expect(perf_readme).to_contain("profile_scripts/profile_report_contract_negative_test.shs")
 expect(perf_readme).to_contain("profile_scripts/profile_binary_autoselect_test.shs")
 expect(perf_readme).to_contain("profile_scripts/profile_docker_isolation_contract_test.shs")

@@ -237,9 +237,10 @@ Use the canonical profile gates when changing these surfaces:
 `test/05_perf/profile_scripts/profile_report_contract_test.shs` checks OS
 thread, cooperative green, multicore green, C pthread, Go goroutine, RSS,
 GOMAXPROCS, `used_runtime_pool()` report evidence, public runtime-pool counter
-evidence where the native smoke covers it, and in no-arg canonical mode
-the `doc/09_report/README.md` report index via
-`report_index_checked=doc/09_report/README.md`;
+delta evidence, and in no-arg canonical mode the `doc/09_report/README.md`
+report index plus `doc/03_plan/agent_tasks/multicore_green.md` handoff via
+`report_index_checked=doc/09_report/README.md` and
+`agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md`;
 `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
 checks the stale/misleading failure cases; and
 `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` checks

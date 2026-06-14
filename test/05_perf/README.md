@@ -105,7 +105,7 @@ val results = runner.run_all()
 ### Profile Script Reports
 - **Cross-language profile:** `scripts/check/check-cross-language-perf.shs`
 - **GUI profile:** `tools/gui_perf_bench/run_all_benchmarks.shs`
-- **Common report contract:** `test/05_perf/profile_scripts/profile_report_contract_test.shs` (no args checks the canonical checked-in cross-language report and `doc/09_report/README.md`, printing `report_index_checked=doc/09_report/README.md`; profile wrappers pass kind, script path, and report path explicitly)
+- **Common report contract:** `test/05_perf/profile_scripts/profile_report_contract_test.shs` (no args checks the canonical checked-in cross-language report, `doc/09_report/README.md`, and `doc/03_plan/agent_tasks/multicore_green.md`, printing `report_index_checked=doc/09_report/README.md` and `agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md`; profile wrappers pass kind, script path, and report path explicitly)
 - **Negative report mutations:** `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs` keeps Go-vs-C, Simple-vs-C, OS-thread, cooperative-green, runtime-pool, and forbidden-numbered-name failures release-visible
 - **Profile help guard:** `test/05_perf/profile_scripts/profile_help_contract_test.shs` checks that `scripts/check/check-cross-language-perf.shs --help` prints usage without starting compilation
 - **Large profile SSpec gate:** `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl` checks the current checked-in report's large Go fanout, Simple multicore-green fanout/stress, `pool_used=`, `parallelism=`, `counter_delta=`, and `queue_model=work_stealing` evidence
