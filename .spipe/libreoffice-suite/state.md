@@ -73,8 +73,15 @@ possible so they are runner-verifiable.
 3. TODO — **Markdown WYSIWYG view in IDE**: styled preview beside line edit,
    using slices 2/2b. Reuse `std.editor.render.md_renderer` (AC-4 of
    ide-office-plugin-suite) — do not write a new renderer.
-4. TODO — **PPT renders like MS PPT**: apply slice-2 CSS to `slides/render` +
-   `slides/design` per-slide design and outline styling.
+4. DONE (landed origin d0ca1b9) — **PPT renders like MS PPT**:
+   `app.office.slides.html_render.render_slide_html` maps each element's role
+   (title/subtitle/body, inferred from layout + position) to the resolver's
+   slide theme and emits styled HTML. Decoupled into its own file to avoid the
+   `common.ui.widget`→`common.ui.style` load chain, which has a pre-existing
+   parser bug (`doc/08_tracking/bug/parser_array_index_misread_as_generics_2026-06-14.md`).
+   Spec `test/01_unit/app/office/slides/html_render_spec.spl` 4/4. Follow-up:
+   wire `slides/render.spl` WidgetNode path + `slides/design.spl` once the
+   ui/style parser bug is fixed.
 5. TODO — **Excel deeper**: dependency-graph recalc, cell-ref numeric path
    (gated on the f64 blocker), more functions (COUNTA/VLOOKUP/text fns).
 6. TODO — **Plugin split**: word/ppt/excel as separate plugins on the md module
@@ -94,5 +101,9 @@ possible so they are runner-verifiable.
   the f64-nested-struct toolchain blocker.
 - 2026-06-14 dev: Landed slice 2 (office_style_resolver CSS substrate, 3ce12f3,
   spec 8/8) and slice 2b (markdown styled render via the resolver, 1b0da57, spec
-  3/3). The CSS-for-md/TUI spine is now end-to-end and verified. Next: slice 3
-  (IDE WYSIWYG view) and slice 4 (PPT render via resolver).
+  3/3). The CSS-for-md/TUI spine is now end-to-end and verified.
+- 2026-06-14 dev: Landed slice 2c (slide theme tags, 0f79db9) and slice 4 (PPT
+  styled HTML render via resolver, d0ca1b9, spec 4/4). Refactored ResolvedStyle
+  accessors to free functions (style_value/style_has) to avoid a bare-method
+  collision with ThemeRegistry.get. Filed pre-existing ui/style.spl parser bug.
+  Next: slice 3 (IDE WYSIWYG view), slice 6 (plugin split via app.plugin.registry).
