@@ -49,14 +49,16 @@ Current production gaps to keep visible in WebGPU/Engine2D reports:
 - Interpreter GPU queue emission uses `backend_code=0` and drains as
   `UNAVAILABLE`; it is not a real WebGPU/Vulkan/CUDA/Metal/ROCm backend handle.
 - Real backend handles are not plumbed into runtime packets yet.
-- Rust and C runtime queues share a `1024` pending-packet capacity, but
-  backpressure/overflow tests are still required for the production contract.
+- Rust and C runtime queues share a `1024` pending-packet capacity, with Rust
+  runtime coverage for overflow rejection and post-drain reuse. A typed
+  overflow/backpressure status remains a follow-up if callers need to
+  distinguish capacity rejection from invalid arguments.
 - `SUBMITTED` is modeled, but the current drain path reports terminal
   `COMPLETED` or `UNAVAILABLE` directly.
-- Interpreter lane `END` accounting is not exception-safe if the lane body
-  raises before normal completion.
-- Backpressure, error-path, and real-backend-handle tests remain required
-  before claiming production GUI/web queue-drain integration.
+- Interpreter lane `END` accounting is exception-safe for lane body errors.
+- Full browser-frame, observable in-flight `SUBMITTED`, and real-backend-handle
+  tests remain required before claiming production GUI/web queue-drain
+  integration.
 
 ---
 

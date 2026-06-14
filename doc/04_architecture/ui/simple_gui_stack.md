@@ -360,20 +360,22 @@ Known runtime/production gaps:
 
 - Interpreter GPU queue packets currently emit `backend_code=0` and drain as
   `UNAVAILABLE`, not as a real backend handle submission.
-- Rust and C runtime queues now share a `1024` pending-packet capacity, but
-  production still needs explicit backpressure/overflow tests for the final
-  contract.
+- Rust and C runtime queues now share a `1024` pending-packet capacity, with
+  Rust runtime coverage for overflow rejection and post-drain reuse. A typed
+  overflow/backpressure status remains a follow-up if callers need to
+  distinguish capacity rejection from invalid arguments.
 - A `SUBMITTED` status exists, but drain currently reports terminal
   `COMPLETED` or `UNAVAILABLE` directly instead of exposing an observable
   submitted-in-flight phase.
-- Interpreter lane `END` accounting is not exception-safe if the lane body
-  errors before normal completion.
+- Interpreter lane `END` accounting is exception-safe for lane body errors, with
+  Rust interpreter regression coverage.
 - Real backend handles are not plumbed into runtime packets yet, so queue drain
   cannot prove backend submission from GUI/web frames.
 - `BrowserBackend.render_frame` currently needs a focused fix for the
   shared-pixel-artifact stall before its `last_artifact_queue_*` propagation can
   be release evidence.
-- Backpressure, error-path, and real-backend-handle tests are still missing.
+- Full browser-frame, observable in-flight `SUBMITTED`, and real-backend-handle
+  tests are still missing.
 
 Until the GUI/web queue-drain bridge exists, documentation and test reports must
 say "adapter evidence", "runtime queue emission", or "backend readback" instead

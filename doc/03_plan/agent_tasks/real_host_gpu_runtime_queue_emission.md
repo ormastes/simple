@@ -58,6 +58,8 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
 - Rust and C runtime queue capacity now match at 1024 pending packets. Rust
   runtime coverage rejects the overflow packet and accepts a new packet after a
   full drain.
+- Interpreter lane `END` accounting is exception-safe for body errors. Coverage:
+  `src/compiler_rust/compiler/tests/host_gpu_lane_error_test.rs`.
 - Backend readback evidence exists for generated 2D paths where available, for
   example `doc/03_plan/sys_test/gpu_backend_readback_evidence_2026-06-14.md`.
   The concrete generated/native reports are
@@ -82,8 +84,6 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
   backend handle.
 - `SUBMITTED` exists in the status model, but drain currently reports terminal
   `COMPLETED` or `UNAVAILABLE` directly.
-- Interpreter lane `END` accounting is not exception-safe when the lane body
-  raises before normal completion.
 - Runtime packets currently carry numeric metadata only; full Draw IR payload
   serialization still needs to flow through `draw_ir_to_sdn` or an equivalent
   runtime payload buffer.
@@ -130,11 +130,11 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
    already have typed availability/readback evidence. Unavailable GPU hardware
    must produce a typed unavailable drain result, not a silent host pass.
 8. Done: Define matching queue capacity semantics across Rust and C at 1024
-   pending packets. Follow-up: add required backpressure/overflow tests and a
-   typed overflow/backpressure status if callers need to distinguish capacity
-   rejection from invalid arguments.
-9. Make lane scope accounting exception-safe so a body error still records lane
-   end/failure evidence and does not leave counters or active-lane state stale.
+   pending packets. Rust runtime coverage now rejects overflow and accepts a new
+   packet after drain. Follow-up: add a typed overflow/backpressure status if
+   callers need to distinguish capacity rejection from invalid arguments.
+9. Done: Make lane scope accounting exception-safe so a body error still records
+   lane end/failure evidence and does not leave counters stale.
 10. Preserve observable `SUBMITTED` state when backend work is in flight, then
    transition through drain to `COMPLETED`, `UNAVAILABLE`, `submit_failed`, or
    `readback_mismatch`.
