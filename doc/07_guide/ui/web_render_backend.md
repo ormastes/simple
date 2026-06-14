@@ -28,6 +28,10 @@ is what the honest bit-level gate uses (pure-Simple ≡ Chromium OSR, `mismatch=
 Pure-Simple pixel artifacts stamp their `engine2d_backend` from the same
 Engine2D `auto` resolution path used for rendering; do not hard-code default
 artifact provenance as `software`.
+The browser backend keeps a retained one-entry pixel artifact cache for
+unchanged static full HTML at the same viewport and resolved backend. Requests
+with `data-simple-dynamic`, `data-live`, `data-ui-patch`, or WebSocket JS bypass
+that retained cache and render directly.
 `show_live_window` opens each backend's native window (chromium = live DOM;
 pure_simple has no live shell and returns false so the caller presents pixels).
 

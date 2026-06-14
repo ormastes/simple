@@ -17,7 +17,7 @@ use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.tui_web.backend.{TuiWebBackend}
 use app.ui.ipc.async_handler.{ipc_writer_message}
-use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_default_page_html as web_render_pixel_default_page_html, web_render_html_request_to_pixel_artifact, web_render_resolved_engine2d_backend_name, web_render_request_to_pixel_artifact, web_render_url_to_request}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_default_page_html as web_render_pixel_default_page_html, web_render_html_request_to_pixel_artifact, web_render_pixel_artifact_cache, web_render_resolved_engine2d_backend_name, web_render_request_to_pixel_artifact, web_render_url_to_request}
 
 fn sample_state():
     val root = panel("web_render_root", "Web Render", [
@@ -129,6 +129,30 @@ describe "web render backends use the shared common API":
         expect(request_artifact.engine2d_backend).to_equal(expected_backend)
         expect(html_artifact.engine2d_backend).to_equal(expected_backend)
         expect(request_artifact.pixels.len()).to_equal(16 * 12)
+
+    it "reuses retained pure simple pixel artifacts for identical full html":
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "main", "", "<main class=\"simple-web-success\">ok</main>", "", "", 16, 12)
+        val full_html = "<html><body style='background-color: #123456'><main class=\"simple-web-success\">ok</main></body></html>"
+        var cache = web_render_pixel_artifact_cache(16, 12, "software")
+        val first = cache.html_request_to_pixel_artifact(req, full_html)
+        val second = cache.html_request_to_pixel_artifact(req, full_html)
+
+        expect(first.engine2d_backend).to_equal("software")
+        expect(second.pixels).to_equal(first.pixels)
+        expect(cache.stores()).to_equal(1)
+        expect(cache.hits()).to_equal(1)
+
+    it "bypasses retained pixel artifacts for dynamic regions":
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "main", "", "<main data-live=\"clock\">tick</main>", "", "", 16, 12)
+        val full_html = "<html><body><main data-live=\"clock\">tick</main></body></html>"
+        var cache = web_render_pixel_artifact_cache(16, 12, "software")
+        val first = cache.html_request_to_pixel_artifact(req, full_html)
+        val second = cache.html_request_to_pixel_artifact(req, full_html)
+
+        expect(first.engine2d_backend).to_equal("software")
+        expect(second.pixels).to_equal(first.pixels)
+        expect(cache.stores()).to_equal(0)
+        expect(cache.hits()).to_equal(0)
 
     it "records shared render request provenance across GUI web and headless targets":
         val state = sample_state()

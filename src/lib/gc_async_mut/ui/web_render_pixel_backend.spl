@@ -8,6 +8,7 @@ use std.common.ui.web_render_api.{
     WEB_RENDER_TARGET_PURE_SIMPLE,
     WebRenderArtifact,
     WebRenderRequest,
+    web_render_dynamic_region_count,
     web_render_engine2d_rendered_artifact,
     web_render_full_html,
     web_render_pixel_artifact,
@@ -19,6 +20,42 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_url_to_pixels,
     simple_web_resolved_engine2d_backend_name
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{SimpleWebEngine2DStaticPixelCache}
+
+class WebRenderPixelArtifactCache:
+    width: i32
+    height: i32
+    backend_name: text
+    resolved_backend_name: text
+    pixel_cache: SimpleWebEngine2DStaticPixelCache
+
+impl WebRenderPixelArtifactCache:
+    static fn create(width: i32, height: i32, backend_name: text) -> WebRenderPixelArtifactCache:
+        val resolved = web_render_resolved_engine2d_backend_name(width, height, backend_name)
+        WebRenderPixelArtifactCache(
+            width: width,
+            height: height,
+            backend_name: backend_name,
+            resolved_backend_name: resolved,
+            pixel_cache: SimpleWebEngine2DStaticPixelCache.create(width, height, resolved)
+        )
+
+    me html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
+        if req.viewport_w != self.width or req.viewport_h != self.height:
+            return web_render_html_request_to_pixel_artifact_with_backend(req, full_html, self.backend_name)
+        if web_render_dynamic_region_count(req) > 0:
+            return web_render_html_request_to_pixel_artifact_with_backend(req, full_html, self.backend_name)
+        val pixels = self.pixel_cache.pixels_for_html(full_html)
+        web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), pixels), self.resolved_backend_name)
+
+    me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
+        self.html_request_to_pixel_artifact(req, web_render_full_html(req))
+
+    fn hits() -> i32:
+        self.pixel_cache.hits
+
+    fn stores() -> i32:
+        self.pixel_cache.stores
 
 pub fn web_render_request_to_pixels(req: WebRenderRequest) -> [u32]:
     simple_web_render_html_to_pixels(web_render_full_html(req), req.viewport_w, req.viewport_h)
@@ -43,6 +80,9 @@ pub fn web_render_html_request_to_pixel_artifact(req: WebRenderRequest, full_htm
 pub fn web_render_html_request_to_pixel_artifact_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> WebRenderArtifact:
     val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, backend_name)
     web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), web_render_html_request_to_pixels_with_backend(req, full_html, backend_name)), backend)
+
+pub fn web_render_pixel_artifact_cache(width: i32, height: i32, backend_name: text) -> WebRenderPixelArtifactCache:
+    WebRenderPixelArtifactCache.create(width, height, backend_name)
 
 pub fn web_render_url_request_to_pixels(req: WebRenderRequest) -> [u32]:
     web_render_request_to_pixels(req.with_pixel_output())

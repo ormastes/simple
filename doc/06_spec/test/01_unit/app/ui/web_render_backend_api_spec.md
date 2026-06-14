@@ -29,7 +29,7 @@ web_render_backend_api_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -213,6 +213,52 @@ expect(request_artifact.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_REN
 expect(request_artifact.engine2d_backend).to_equal(expected_backend)
 expect(html_artifact.engine2d_backend).to_equal(expected_backend)
 expect(request_artifact.pixels.len()).to_equal(16 * 12)
+```
+
+</details>
+
+#### reuses retained pure simple pixel artifacts for identical full html
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "main", "", "<main class=\"simple-web-success\">ok</main>", "", "", 16, 12)
+val full_html = "<html><body style='background-color: #123456'><main class=\"simple-web-success\">ok</main></body></html>"
+var cache = web_render_pixel_artifact_cache(16, 12, "software")
+val first = cache.html_request_to_pixel_artifact(req, full_html)
+val second = cache.html_request_to_pixel_artifact(req, full_html)
+
+expect(first.engine2d_backend).to_equal("software")
+expect(second.pixels).to_equal(first.pixels)
+expect(cache.stores()).to_equal(1)
+expect(cache.hits()).to_equal(1)
+```
+
+</details>
+
+#### bypasses retained pixel artifacts for dynamic regions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "main", "", "<main data-live=\"clock\">tick</main>", "", "", 16, 12)
+val full_html = "<html><body><main data-live=\"clock\">tick</main></body></html>"
+var cache = web_render_pixel_artifact_cache(16, 12, "software")
+val first = cache.html_request_to_pixel_artifact(req, full_html)
+val second = cache.html_request_to_pixel_artifact(req, full_html)
+
+expect(first.engine2d_backend).to_equal("software")
+expect(second.pixels).to_equal(first.pixels)
+expect(cache.stores()).to_equal(0)
+expect(cache.hits()).to_equal(0)
 ```
 
 </details>
@@ -507,8 +553,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
