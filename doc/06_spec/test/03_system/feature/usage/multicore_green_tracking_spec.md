@@ -399,7 +399,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 135 lines folded for reproduction.
+Runnable source: 136 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -426,6 +426,7 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_s
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(row).to_contain("canonical no-arg profile contract")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_help_contract_test.shs")
+expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs; test/05_perf/profile_scripts/profile_help_contract_test.shs; test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(row).to_contain("test/02_integration/simple_wrapper_runtime_probe_test.shs")
