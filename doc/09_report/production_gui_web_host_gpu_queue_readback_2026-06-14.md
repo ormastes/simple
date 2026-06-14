@@ -24,7 +24,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 
 ## Production Gaps
 
-- Rust/C capacity parity: gap (C capacity 1024, Rust missing).
+- Rust/C capacity parity: pass (C capacity 1024, Rust 1024).
 - SUBMITTED status usage: unused (0 assignments observed outside constants).
 - Concrete runtime backend handle carried through queue packet: missing (0 matching runtime queue fields observed).
 - Metal: Metal requires Apple platform runtime; this host is Linux.
@@ -73,8 +73,8 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 - readback_rocm_verdict=host-unavailable
 - readback_rocm_report=build/production_gui_web_host_gpu_queue_readback/rocm/report.md
 - queue_c_capacity=1024
-- queue_rust_capacity=missing
-- queue_capacity_parity_status=gap
+- queue_rust_capacity=1024
+- queue_capacity_parity_status=pass
 - queue_submitted_status_assignment_count=0
 - queue_submitted_status_usage=unused
 - queue_concrete_backend_handle_field_count=0
