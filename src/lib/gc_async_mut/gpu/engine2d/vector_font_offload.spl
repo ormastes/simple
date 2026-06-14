@@ -65,26 +65,8 @@ class VectorFontGlyphReadbackEvidence:
     reason: text
 
     static fn create(backend: text, width: i64, height: i64, args_ptr: i64, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64, runtime_available: bool, backend_submit_ok: bool, readback_available: bool, accelerator: VectorFontAcceleratorStats, glyph_pixels: [u8], actual_checksum: i64) -> VectorFontGlyphReadbackEvidence:
-        val request = generated_2d_execution_request(backend, GENERATED_2D_COPY, width, height, module_or_queue_handle, kernel_or_pipeline_handle, args_ptr)
-        val submit = generated_2d_submit_result(request, runtime_available, backend_submit_ok)
         val expected_checksum = vector_font_glyph_pixels_checksum(glyph_pixels)
-        val execution = generated_2d_execution_evidence(submit, readback_available, expected_checksum, actual_checksum)
-        val gpu_glyph_returned = accelerator.gpu_returned_glyphs > 0 and accelerator.gpu_returned_glyph_pixels > 0
-        val matched = gpu_glyph_returned and execution.device_executed
-        VectorFontGlyphReadbackEvidence(
-            backend_name: backend,
-            width: width,
-            height: height,
-            args_ptr: args_ptr,
-            accelerator: accelerator,
-            submit: submit,
-            execution: execution,
-            gpu_glyph_returned: gpu_glyph_returned,
-            gpu_glyph_readback_matched: matched,
-            production_ready: matched,
-            status_code: _vector_font_glyph_readback_status(execution, gpu_glyph_returned),
-            reason: _vector_font_glyph_readback_reason(execution, gpu_glyph_returned)
-        )
+        _vector_font_glyph_readback_with_checksum(backend, width, height, args_ptr, module_or_queue_handle, kernel_or_pipeline_handle, runtime_available, backend_submit_ok, readback_available, accelerator, expected_checksum, actual_checksum)
 
     fn diagnostic_text() -> text:
         "VectorFontGlyphReadbackEvidence[backend={self.backend_name} size={self.width}x{self.height} args={self.args_ptr} gpu_glyph_returned={self.gpu_glyph_returned.to_text()} gpu_glyph_readback_matched={self.gpu_glyph_readback_matched.to_text()} production_ready={self.production_ready.to_text()} status={self.status_code} reason={self.reason} execution={self.execution.summary()}]"
@@ -125,6 +107,27 @@ fn _vector_font_glyph_readback_reason(execution: Generated2DKernelExecutionEvide
         return "vector-font-gpu-readback-matched"
     execution.reason
 
+fn _vector_font_glyph_readback_with_checksum(backend: text, width: i64, height: i64, args_ptr: i64, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64, runtime_available: bool, backend_submit_ok: bool, readback_available: bool, accelerator: VectorFontAcceleratorStats, expected_checksum: i64, actual_checksum: i64) -> VectorFontGlyphReadbackEvidence:
+    val request = generated_2d_execution_request(backend, GENERATED_2D_COPY, width, height, module_or_queue_handle, kernel_or_pipeline_handle, args_ptr)
+    val submit = generated_2d_submit_result(request, runtime_available, backend_submit_ok)
+    val execution = generated_2d_execution_evidence(submit, readback_available, expected_checksum, actual_checksum)
+    val gpu_glyph_returned = accelerator.gpu_returned_glyphs > 0 and accelerator.gpu_returned_glyph_pixels > 0
+    val matched = gpu_glyph_returned and execution.device_executed
+    VectorFontGlyphReadbackEvidence(
+        backend_name: backend,
+        width: width,
+        height: height,
+        args_ptr: args_ptr,
+        accelerator: accelerator,
+        submit: submit,
+        execution: execution,
+        gpu_glyph_returned: gpu_glyph_returned,
+        gpu_glyph_readback_matched: matched,
+        production_ready: matched,
+        status_code: _vector_font_glyph_readback_status(execution, gpu_glyph_returned),
+        reason: _vector_font_glyph_readback_reason(execution, gpu_glyph_returned)
+    )
+
 fn vector_font_glyph_pixels_checksum(glyph_pixels: [u8]) -> i64:
     val pixel_len = glyph_pixels.len()
     if pixel_len == 0:
@@ -158,7 +161,7 @@ fn vector_font_glyph_readback_evidence(backend: text, width: i64, height: i64, a
 fn vector_font_preferred_glyph_readback_evidence(candidates: [text], width: i64, height: i64, args_ptr: i64, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64, runtime_available: bool, backend_submit_ok: bool, readback_available: bool, accelerator: VectorFontAcceleratorStats, glyph_pixels: [u8], actual_checksum: i64) -> VectorFontGlyphReadbackEvidence:
     val backend = engine2d_backend_lane_preferred_font_offload_candidate(candidates)
     if backend == "":
-        var evidence = vector_font_glyph_readback_evidence("cpu", width, height, 0, 0, 0, false, false, false, accelerator, glyph_pixels, actual_checksum)
+        var evidence = _vector_font_glyph_readback_with_checksum("cpu", width, height, 0, 0, 0, false, false, false, accelerator, 0, actual_checksum)
         evidence.status_code = "vector-font-glyph-no-preferred-font-backend"
         evidence.reason = "no-preferred-font-backend-candidate"
         return evidence

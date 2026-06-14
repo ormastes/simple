@@ -257,6 +257,7 @@ expect(evidence.diagnostic_text()).to_contain("gpu_glyph_readback_matched=true")
    - Expected: evidence.status_code equals `vector-font-glyph-readback-matched`
    - Expected: fallback.backend_name equals `cpu`
    - Expected: fallback.execution.device_executed is false
+   - Expected: fallback.execution.expected_checksum equals `0`
    - Expected: fallback.production_ready is false
    - Expected: fallback.status_code equals `vector-font-glyph-no-preferred-font-backend`
    - Expected: fallback.reason equals `no-preferred-font-backend-candidate`
@@ -265,7 +266,7 @@ expect(evidence.diagnostic_text()).to_contain("gpu_glyph_readback_matched=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -291,6 +292,7 @@ expect(evidence.production_ready).to_equal(true)
 expect(evidence.status_code).to_equal("vector-font-glyph-readback-matched")
 expect(fallback.backend_name).to_equal("cpu")
 expect(fallback.execution.device_executed).to_equal(false)
+expect(fallback.execution.expected_checksum).to_equal(0)
 expect(fallback.production_ready).to_equal(false)
 expect(fallback.status_code).to_equal("vector-font-glyph-no-preferred-font-backend")
 expect(fallback.reason).to_equal("no-preferred-font-backend-candidate")
