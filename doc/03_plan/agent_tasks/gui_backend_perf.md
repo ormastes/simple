@@ -1,7 +1,18 @@
 # GUI/Backend Performance Agent Task Plan
 
 Lane: ongoing Simple GUI/backend performance convergence
-Updated: 2026-06-11
+Updated: 2026-06-14
+
+## Brief lane snapshot (latest pushed updates)
+
+- `7d4b6884e6f` (`perf(gui): collect browser layout entries linearly`) changed browser layout entry collection to a single linear pass.
+- `4a452065683` (`fix(gui): stamp auto engine2d pixel backend`) applied automatic Engine2D pixel backend stamping in the startup path.
+- `6ab0eb4cd5b` (`perf(gui): retain pure simple pixel artifacts`) preserves existing Pure Simple pixel artifacts instead of forcing rematerialization.
+- `2dc841a399` (`perf(gui): expose font offload backend order`), `33214f81fa1` (`feat(gui): accept rocm vector font payloads`), `56030ade5a2` (`perf(gui): promote font offload evidence`), and `ec38eb1901e` (`perf(gui): prefer font readback backend order`) aligned ROCm/ROCm-HIP vector and bitmap font offload/readback with the preferred Engine2D lane before fallback behavior.
+- `989f54eeca0` (`test(gui): cover engine2d backend aliases`) and `f911d561d1b` (`feat(gui): default pure simple web to auto backend`) expanded alias coverage in backend selection paths.
+- `8623bc39f8f` (`perf(gui): fast path canonical backend names`) added a canonical-name fast path before deeper backend checks.
+- `3d8cd2a636a` (`perf(gui): avoid duplicate backend canonicalization`) prevented redundant canonicalization on duplicate backend names.
+- `102a3853d49` (`perf(gui): share font backend priority ranking`) moved font offload priority lookup onto the shared canonical Engine2D backend priority helper.
 
 ## Completed (already pushed)
 
