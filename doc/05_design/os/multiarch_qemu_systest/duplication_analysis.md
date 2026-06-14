@@ -170,12 +170,32 @@ Shared layers already in place:
 | 3a | Create `arch/common/linker_riscv_common.ld` with INCLUDE for shared sections; riscv32/riscv64 thin overlays | riscv32 + riscv64 linker.ld | ~100 L | Low — identical structure |
 | 3b | Create `arch/common/linker_arm_common.ld` for arm32/arm64 shared sections; arm64 adds `.text.vectors` block | arm32 + arm64 linker.ld | ~100 L | Medium — test arm64 `.text.vectors` alignment carefully |
 
-### Tier 4 — Full contract table (BLOCKED pending interpreter fix)
+### Tier 4 — Full contract table — CLOSED 2026-06-14 (NOT WORTH DOING; savings illusory)
 
-| Rank | Action | Files | Estimated Savings | Risk |
-|------|--------|-------|-------------------|------|
-| 4a | Fix interpreter struct-array/named-constructor timeout bug | interpreter core | — | High — compiler change |
-| 4b | Replace `qemu_systest_contract.spl` with table-driven delegate to `simpleos_platform_targets()` | `qemu_systest_contract.spl` + `simpleos_multiplatform_build_part2.spl` | ~270 L | Medium after fix |
+Investigated and dropped. Two findings settle it:
+
+1. **The interpreter blocker (4a) is NOT actually needed and should NOT be fixed.**
+   Probe (2026-06-14): in interpreter mode `simpleos_platform_targets()[i].field`
+   and `for t in simpleos_platform_targets()` both work cleanly (7 lanes, all
+   fields, exit 0). The earlier "struct-array hang" was *inline literal
+   construction* / `get_all_scenarios()` Option-poison — neither is what 4b needs.
+   So no "document-don't-patch" seed change is justified for this.
+2. **But the dedup itself is illusory.** The contract emits per-lane-UNIQUE qemu
+   arg lists that are NOT stored in (nor reconstructable from) the build-target
+   struct: riscv64 = virtio-blk + `-kernel`; arm32 = dual `-device loader,…,addr=0x40200000`
+   + `-semihosting-config` (no `-kernel`); x86_64 = `isa-debug-exit,iobase=0xf4` +
+   nvme + nvme-ns. The struct only carries machine/cpu/serial_kind/image_layout,
+   and `qemu_smoke_lane.required_serial_markers` is `[]` for every lane (markers
+   live only in the contract). Delegating would either store the arg lists verbatim
+   in the table (move 270 L, remove nothing) or re-create per-lane assembly with
+   NVMe/virtio/loader special-casing (relocate the logic) — no real savings, while
+   churning `qemu_systest_contract.spl`, the highest-fanout file every systest spec
+   consumes. **Decision: leave the contract as explicit per-lane functions.**
+
+| Rank | Action | Files | Estimated Savings | Status |
+|------|--------|-------|-------------------|--------|
+| 4a | Fix interpreter struct-array/named-constructor timeout bug | interpreter core | — | NOT NEEDED (interpreter reads the table fine) |
+| 4b | Replace `qemu_systest_contract.spl` with table-driven delegate | `qemu_systest_contract.spl` | ~0 L (was est. ~270 L) | CLOSED — savings illusory (per-lane-unique args not in struct) |
 
 ### Do NOT touch (out of scope / high risk)
 

@@ -65,8 +65,13 @@ source-reproducible (fixed 2026-06-14).
    `scripts/check-simpleos-native-surface.shs`, and wired it into the pre-commit hook
    (runs when boot/runtime/manifest files change). Verified: planted symlink AND
    planted stray `.c` both FAIL; clean tree PASSes. Origin tip `e81a1794602`.
-5. Dedup tier 4 (contract→platform_targets table, ~270 L) — BLOCKED by the
-   interpreter struct-array-literal hang; revisit when that's fixed.
+5. ~~Dedup tier 4 (contract→platform_targets table)~~ ✅ CLOSED 2026-06-14 — NOT
+   WORTH DOING. Probe showed the interpreter reads `simpleos_platform_targets()`
+   fine (no seed fix needed), but the ~270 L "savings" is illusory: the contract's
+   qemu-arg lists are per-lane-unique (NVMe / virtio / dual-loader / semihosting)
+   and not stored in the struct, and lane markers are `[]` in the table. Delegating
+   would just relocate the logic. Decision: keep explicit per-lane contract
+   functions. See `duplication_analysis.md` Tier 4.
 
 ## Key References
 - Plan: `doc/03_plan/os/multiarch_qemu_systest/remaining_lanes_plan.md`
