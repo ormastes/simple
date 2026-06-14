@@ -183,6 +183,25 @@ numbers → `doc/09_report/perf/perf_baseline_2026-06-13.md` + `doc/10_metrics/p
 | AC-10 cross-mode + cross-language | ◻ PARTIAL | interpreter baseline emitted; smf/native + full cross-language run STAGED (toolchain smf-extern-segfault, native-compile) |
 | AC-11 umbrella completion | ⏳ IN PROGRESS | P0 machinery + AC-7 DONE/verified; AC-9 floor advanced (`e7fdff8`/`af708ca`); SG-1.3 **scaffolding landed** behind a default-OFF C-scoped flag (human-authorized via AskUserQuestion = "Default-off flag + specs"), spec-verified, no regression (`3e6fac9`/`6527e42`/`bd72284`); only remaining = the perf-bearing op-elision/memcpy lowering (separately authorizable) |
 
+#### AC-3/4/10 UPDATE — smf-extern-segfault is STALE; bench driver now emits smf rows 2026-06-14
+The "smf-extern-segfault" toolchain blocker cited for AC-4/AC-10 was investigated and **does NOT
+reproduce**. Evidence: the externs the benchmarks use — `rt_time_now_unix_micros`, `rt_file_exists`,
+and the tuple/text-returning `rt_process_run(... ) -> (text,text,i64)` — all execute correctly in
+`--mode smf` (rc=0); a real spec with an extern + arithmetic passes identically in interpreter and smf
+mode; and the underlying `jit_text_extern_return_segfault` was Resolved 2026-05-29. The real reason
+smf rows were absent: `bench_baseline_driver` hardcoded `mode="script"` and never drove smf.
+RESOLUTION (human-authorized via AskUserQuestion = "Wire the driver to emit smf rows"): added
+`bench_smf_workload.spl` (standalone, self-timed, prints `RESULT|name|us|iters`) and wired the driver
+to compile+run it via `rt_process_run` and emit REAL `mode="smf"` rows alongside script (graceful
+skip, never faked, if the toolchain is unavailable). Verified end-to-end: driver rc=0, "smf rows
+added", 7 smf rows in the table (e.g. string_concat_loop ~4.3x faster in smf than interpreter). So
+**AC-4's smf/compiler-mode lang rows are now EMITTABLE** (was blocked on a stale premise); AC-3/AC-10
+lang-domain smf coverage likewise unblocked (db/web/os domains + native mode still separate work).
+Side-finding filed: `unit_return_fn_pointer_sigill` — a `fn() -> ()` unit-return function pointer hard-
+crashes (SIGILL) in BOTH interpreter and smf (distinct from smf-extern-segfault; `bench_run_warm` uses
+this type, but the baseline driver sidesteps it with inline timing). NOTE: regenerated perf docs are
+machine-specific + auto-generated and were NOT committed; the driver/workload SOURCE is the deliverable.
+
 ### SG-1.3 (MIR bulk-ops) — precise state, read-only verified 2026-06-13
 Corrects the design's "phases 2-8 unimplemented" shorthand. Ground truth from code:
 - **Recognizers EXIST and are implemented:** `optimize_bulk_copy` (L448), `optimize_bulk_fill`

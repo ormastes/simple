@@ -16,6 +16,8 @@ use app.test.bench.bench_report.{bench_emit_rows}
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
 
 # ============================================================================
 # Workload functions — top-level (no closures to avoid capture limitations)
@@ -137,6 +139,55 @@ fn _i64_to_text_local(n: i64) -> text:
     result
 
 # ============================================================================
+# SMF-mode helpers — parse the workload program's self-timed output
+# ============================================================================
+
+fn _parse_i64(s: text) -> i64:
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+    var result: i64 = 0
+    var idx: i64 = 0
+    while idx < trimmed.len():
+        val ch = trimmed[idx:idx + 1]
+        var digit: i64 = -1
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return result
+        result = result * 10 + digit
+        idx = idx + 1
+    result
+
+# Find the `RESULT|<name>|<elapsed_us>|<iters>` line and return elapsed_us, or -1.
+fn _extract_us(output: text, name: text) -> i64:
+    val needle = "RESULT|" + name + "|"
+    for line in output.split("\n"):
+        if line.contains(needle):
+            val parts = line.split("|")
+            if parts.len() >= 3:
+                return _parse_i64(parts[2])
+    -1
+
+# ============================================================================
 # main
 # ============================================================================
 
@@ -253,6 +304,71 @@ fn main():
     metrics.push("ns/op")
     values.push(str_ns)
     units.push("ns/op")
+
+    # --- SMF-mode rows: compile the workload to SMF, run it, parse its self-timed
+    #     output. REAL numbers only — if compile/run/parse fails, smf rows are skipped
+    #     (never faked). Internal timing makes these directly comparable to script rows.
+    val simple_bin = "bin/simple"
+    var smf_emitted = false
+    if rt_file_exists(simple_bin):
+        val workload = "src/app/test/bench/bench_smf_workload.spl"
+        val smf_path = "/tmp/bench_smf_workload.smf"
+        print("Compiling + running SMF workload ...")
+        val (co, ce, ccode) = rt_process_run(simple_bin, ["compile", workload, "-o", smf_path])
+        if ccode == 0:
+            val (ro, re, rcode) = rt_process_run(simple_bin, ["run", smf_path])
+            if rcode == 0:
+                val s_fib30 = _extract_us(ro, "fib_recursive(30)")
+                val s_fibiter = _extract_us(ro, "fib_iterative(35)")
+                val s_sum = _extract_us(ro, "sum_loop(10000)")
+                val s_str = _extract_us(ro, "string_concat_loop(100)")
+                if s_fib30 > 0 and s_fibiter > 0 and s_sum > 0 and s_str > 0:
+                    names.push("fib_recursive(30)")
+                    modes.push("smf")
+                    metrics.push("ns/op")
+                    values.push((s_fib30 * 1000) / fib30_iters)
+                    units.push("ns/op")
+
+                    names.push("fib_iterative(35)")
+                    modes.push("smf")
+                    metrics.push("ops/sec")
+                    values.push((fib_iter_iters * 1000000) / s_fibiter)
+                    units.push("ops/sec")
+
+                    names.push("fib_iterative(35)")
+                    modes.push("smf")
+                    metrics.push("ns/op")
+                    values.push((s_fibiter * 1000) / fib_iter_iters)
+                    units.push("ns/op")
+
+                    names.push("sum_loop(10000)")
+                    modes.push("smf")
+                    metrics.push("ops/sec")
+                    values.push((sum_iters * 1000000) / s_sum)
+                    units.push("ops/sec")
+
+                    names.push("sum_loop(10000)")
+                    modes.push("smf")
+                    metrics.push("ns/op")
+                    values.push((s_sum * 1000) / sum_iters)
+                    units.push("ns/op")
+
+                    names.push("string_concat_loop(100)")
+                    modes.push("smf")
+                    metrics.push("ops/sec")
+                    values.push((str_iters * 1000000) / s_str)
+                    units.push("ops/sec")
+
+                    names.push("string_concat_loop(100)")
+                    modes.push("smf")
+                    metrics.push("ns/op")
+                    values.push((s_str * 1000) / str_iters)
+                    units.push("ns/op")
+                    smf_emitted = true
+    if smf_emitted:
+        print("  smf rows added.")
+    else:
+        print("  WARN: smf rows skipped (compile/run/parse unavailable) — script rows only.")
 
     print("Writing benchmark docs ...")
     val ok = bench_emit_rows(names, modes, metrics, values, units, arch, date_str, report_path, table_path)
