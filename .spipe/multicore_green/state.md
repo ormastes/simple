@@ -223,6 +223,18 @@ go-runtime-hardening
   `cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols`.
 - verification: 2026-06-14 focused checks passed for the tracking spec in local
   and Docker-isolated interpreter runs, and the native resolver smoke passed.
+- implementation: 2026-06-14 final SimpleOS QEMU refresh added the freestanding
+  no-op `rt_pool_safepoint` ABI for compiler-inserted loop safepoints and
+  changed the probe-only final handoff to clear IF while keeping IOPL=3.
+- docs: 2026-06-14 refreshed
+  `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`,
+  `doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md`,
+  `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`,
+  `doc/09_report/README.md`, and the generated SimpleOS handoff manual under
+  `doc/06_spec/test/03_system/os/simpleos/feature/`.
+- verification: 2026-06-14 opt-in final QEMU SSpec passed 3 scenarios in
+  74244ms and direct serial output included `HW_HANDOFF_PASS=true`,
+  `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`.
 
 ## Completion Audit - refreshed 2026-06-14
 
@@ -253,8 +265,10 @@ go-runtime-hardening
 - AC-6: `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`,
   `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`,
   their generated manuals under `doc/06_spec/test/03_system/os/simpleos/feature/`,
-  and `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` provide
-  current SimpleOS evidence.
+  `test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl`, and
+  `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md` provide
+  current SimpleOS scheduler, QEMU readiness, and final AP ring/user marker
+  evidence.
 - AC-7: `test/03_system/feature/usage/multicore_green_tracking_spec.spl`,
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`,
   `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`, and the
