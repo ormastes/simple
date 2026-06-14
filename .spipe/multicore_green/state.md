@@ -224,7 +224,7 @@ go-runtime-hardening
 - verification: 2026-06-14 focused checks passed for the tracking spec in local
   and Docker-isolated interpreter runs, and the native resolver smoke passed.
 
-## Completion Audit - 2026-06-07
+## Completion Audit - refreshed 2026-06-14
 
 ### Proven Or Strong Evidence
 
@@ -237,13 +237,19 @@ go-runtime-hardening
   work, runtime-pool multicore green work, Go goroutines, C pthreads, and
   `task_spawn`.
 - AC-3 / AC-4 / AC-5: `scripts/check/check-cross-language-perf.shs`,
-  `doc/09_report/cross_language_perf_parallel_smoke.md`,
-  `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md`,
-  `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`, and
-  `test/05_perf/profile_scripts/profile_report_contract_test.shs` use the
-  canonical profile harness, compact handle-array generated workloads, Go/C
-  comparison rows, large fanout evidence, and `pool_used=` evidence while
-  rejecting numbered aliases.
+  `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`,
+  `doc/09_report/README.md`,
+  `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`,
+  `test/05_perf/profile_scripts/profile_report_contract_test.shs`, and
+  `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
+  use the canonical profile harness, compact handle-array generated workloads,
+  pinned Go `GOMAXPROCS=CPU_WORKERS`, Go/C comparison rows, large fanout and
+  stress evidence, `used_runtime_pool()` / `pool_used=N/N`, public
+  `counter_delta=submitted/completed,pending=0,busy=0,blocked=0` evidence, and
+  numeric-suffix rejection. Earlier reports
+  `doc/09_report/cross_language_perf_parallel_smoke.md` and
+  `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md` are
+  historical chronology only, not current release evidence.
 - AC-6: `test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl`,
   `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`,
   their generated manuals under `doc/06_spec/test/03_system/os/simpleos/feature/`,
@@ -257,8 +263,11 @@ go-runtime-hardening
   and runtime-pool fallback rows.
 - AC-9: Recent guards include `sh scripts/setup/install-spipe-dev-command.shs
   --check`, `find doc/06_spec -name '*_spec.spl' | wc -l` returning `0`,
-  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, and the
-  cross-language profile report contract. GitHub is synced through this lane.
+  `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`, the
+  cross-language profile report contract, Docker-isolated tracking SSpec runs,
+  and `cargo test -p simple-compiler
+  elf_utils::tests::resolves_runtime_pool_symbols`. GitHub is synced through
+  this lane.
 
 ### Requirement Selection Complete
 
