@@ -9,6 +9,12 @@
 
 Simple supports GPU compute programming through CUDA and Vulkan backends. Write compute kernels in Simple syntax, compile to GPU code, and run on NVIDIA or cross-platform GPUs.
 
+For portable compute, draw, tensor, RV64 vector, and FPGA accelerator planning,
+use the processing backend lane instead of adding vendor-specific concepts to
+the public API. The processing lane is documented in
+`doc/07_guide/compiler/backends/processing_backend.md` and architected in
+`doc/04_architecture/compiler/backend/processing_backend.md`.
+
 **Two APIs available:**
 - **Runtime API** (`std.gpu_runtime`) -- Works today with the interpreter, no compiler needed
 - **Full API** (`std.gpu`) -- Requires the compiler, type-safe generics, RAII

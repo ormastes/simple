@@ -130,6 +130,16 @@ After adding or moving UI-facing app feature specs, run
 the critical UI SSPEC lane mirrored into generated manuals with visible
 evidence markers.
 
+For portable processing, GPU compute, ML matops, draw-kernel, RV64GCV, VHDL/RTL
+accelerator, or `simplegpu64` work, keep the processing lane current in
+`doc/04_architecture/compiler/backend/processing_backend.md`,
+`doc/04_architecture/compiler/backend/processing_backend_tldr.md`, and
+`doc/07_guide/compiler/backends/processing_backend.md`. Treat CUDA, Vulkan,
+RV64GCV, VHDL/RTL, and CPU fallback as backends below ProcessingIR, not separate
+public API forks. Do not claim Simple has a real RISC-V64 Adreno/Mali-like GPGPU
+until CPU oracle, software backend, and RTL/simulation evidence agree for the
+same processing scenarios.
+
 For compiler cache, loader, JIT, formal verification, or accessor-forwarding
 work, include SPipe evidence for semantic invalidation. A change to public ABI,
 field-wrapper shape, forwarded getter/setter behavior, or generated accessor

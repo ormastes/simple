@@ -100,6 +100,7 @@ User-facing guides for the Simple programming language. For specifications see `
 |-------|-------------|
 | [compiler/backends/backends.md](compiler/backends/backends.md) | Backend selection, capabilities, shared components |
 | [compiler/backends/gpu_programming.md](compiler/backends/gpu_programming.md) | GPU (CUDA + Vulkan), SIMD, config |
+| [compiler/backends/processing_backend.md](compiler/backends/processing_backend.md) | Portable ProcessingIR path for CPU, Vulkan, CUDA, RV64GCV, VHDL/RTL, and simplegpu64 |
 | [compiler/backends/baremetal.md](compiler/backends/baremetal.md) | Baremetal, QEMU, semihosting, embedded |
 | [compiler/llvm/llvm_backend_policy.md](compiler/llvm/llvm_backend_policy.md) | LLVM backend policy |
 | [compiler/llvm/llvm_optimization_workflow.md](compiler/llvm/llvm_optimization_workflow.md) | LLVM optimization workflow, IR quality, verification, benchmark gate |
