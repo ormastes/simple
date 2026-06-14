@@ -10,10 +10,11 @@ Date: 2026-06-14
   both stay ahead of the C pthread-per-task baseline:
   Go `6.533 ms`, Simple multicore green native `9.638 ms`, C pthreads
   `63.791 ms`.
-- Hosted CPU-heavy fairness is now an explicit sliced contract:
-  `multicore_green_spawn_sliced` is the supported fairness path, while plain
-  `multicore_green_spawn` closures still run until they return and must not be
-  called tight-loop preemptive work.
+- Hosted CPU-heavy fairness now has two explicit evidence paths:
+  `multicore_green_spawn_sliced` for scalar-state requeueing and ordinary
+  `multicore_green_spawn` loop-body safepoints for compiler-inserted
+  runtime-pool polling. Broader non-loop/native-call preemption remains outside
+  the current claim.
 - Fresh isolated 2026-06-11 evidence now shows the earlier `thread_spawn`
   native zero-join blocker is closed end to end: host-native public
   `thread_spawn`, `thread_spawn_with_args`, and the Docker profile OS-thread
@@ -267,14 +268,14 @@ Deliverables:
 - dedicated tracking for the hosted fairness decision and the remaining
   non-loop/native-call preemption boundary;
 - executable proof that hosted blocking compensation stays fixed while sliced
-  fairness is the supported contract for CPU-heavy work;
+  fairness and ordinary loop-body safepoints are the supported CPU-heavy fairness
+  contracts;
 - executable blocker coverage for the explicit resumable host-fairness path,
   including the scalar-state `multicore_green_spawn_sliced` source/native
   regression and historical closure of the earlier callback-id prototype;
-- profile/report visibility for the generated hosted sliced-fairness evidence
-  section, kept separate from compiler-inserted ordinary loop-body safepoint
-  evidence, including sliced-handle `used_runtime_pool()` proof so inline
-  fallback cannot pass as hosted fairness;
+- profile/report visibility for generated hosted sliced-fairness and
+  loop-safepoint evidence, with source rows labeled as interpreter-inline
+  semantic checks and native rows requiring `used_runtime_pool=true`;
 - public API contract visibility for the scalar-state sliced API through
   `public_multicore_green_sliced_result=19 used_runtime_pool=true`;
 - updated research and architecture text when that boundary changes.
