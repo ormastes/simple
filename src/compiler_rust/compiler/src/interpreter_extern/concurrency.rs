@@ -152,6 +152,31 @@ pub fn rt_pool_get_parallelism(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(1))
 }
 
+/// Interpreter mode has no native runtime-pool task counters.
+pub fn rt_pool_submitted_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// Interpreter mode has no native runtime-pool task counters.
+pub fn rt_pool_completed_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// Interpreter mode has no native runtime-pool task counters.
+pub fn rt_pool_pending_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// Interpreter mode has no native runtime-pool task counters.
+pub fn rt_pool_busy_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// Interpreter mode has no native runtime-pool task counters.
+pub fn rt_pool_blocked_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
 /// Interpreter mode has no native global-FIFO runtime pool.
 pub fn rt_pool_uses_global_fifo_queue(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))

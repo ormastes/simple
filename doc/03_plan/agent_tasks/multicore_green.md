@@ -210,7 +210,9 @@ Acceptance evidence:
 
 - `src/compiler_rust/target/debug/simple check test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
 - native build/run of `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
-  exits `0`, proving every handle reported `used_runtime_pool()`;
+  exits `0`, proving every handle reported `used_runtime_pool()` and public
+  submitted/completed/pending/busy/blocked counter evidence is consistent
+  after join;
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
 - cross-language report contains `used_runtime_pool()` evidence text.
 
@@ -390,7 +392,7 @@ Each agent reports:
   SimpleOS evidence docs, final SimpleOS AP ring/user handoff wording,
   handle-array native lowering, thread-spawn native regression coverage, and
   the concurrency API misuse inventory (`positive_fixtures=6`,
-  `checked_in_misuse_fixtures=26`, `total_misuse_fixtures=37`).
+  `checked_in_misuse_fixtures=27`, `total_misuse_fixtures=38`).
 - The shared default checkout remains dirty outside this lane because other
   sessions are active in WebGPU/UI/loader work. Multicore-green syncs continue
   in the separate jj workspace and must keep unrelated files out of lane

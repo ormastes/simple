@@ -69,10 +69,16 @@ Behavior:
   the inline result.
 - `multicore_green_uses_work_stealing()` is true only when the hosted native
   pool reports per-worker queues with stealing rather than a single global FIFO.
+- `multicore_green_submitted_count()` and `multicore_green_completed_count()`
+  expose monotonic hosted pool progress evidence.
+- `multicore_green_pending_count()`, `multicore_green_busy_count()`, and
+  `multicore_green_blocked_count()` expose queue/worker state for profile and
+  starvation diagnostics.
 
 Design rule: only positive-handle work with work-stealing evidence can support
 hosted M:N claims. Inline fallback is correct behavior but not M:N evidence.
-Plain closures do not claim automatic preemption.
+Plain closures do not claim automatic preemption; counters prove pool progress,
+not preemptive green-thread scheduling.
 
 ### Explicit Sliced Fairness API
 

@@ -170,7 +170,7 @@ Failed: 0
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `26`
+   - Expected: fixture_count() equals `27`
 
 
 <details>
@@ -181,7 +181,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(26)
+expect(fixture_count()).to_equal(27)
 ```
 
 </details>
@@ -235,8 +235,8 @@ expect(output).to_contain("public_multicore_green_sliced_result=19")
 expect(output).to_contain("positive_fixtures=6")
 expect(output).to_contain("fixtures=11")
 expect(output).to_contain("misuse_fixtures=11")
-expect(output).to_contain("checked_in_misuse_fixtures=26")
-expect(output).to_contain("total_misuse_fixtures=37")
+expect(output).to_contain("checked_in_misuse_fixtures=27")
+expect(output).to_contain("total_misuse_fixtures=38")
 ```
 
 </details>
@@ -331,6 +331,8 @@ expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 - expect compile error
 - Reject direct access to internal runtime-pool symbols
 - expect compile error
+- Reject direct access to internal runtime-pool counter symbols
+- expect compile error
 - Reject multicore_green_spawn_sliced imported from the OS-thread surface
 - expect compile error
 - Reject multicore_green_spawn_sliced called with too few arguments
@@ -344,7 +346,7 @@ expect_compile_error("green_spawn_bad_arg.spl", "E-PAR-004", "pass a closure")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -358,6 +360,8 @@ step("Reject multicore_green_set_parallelism called with text")
 expect_compile_error("multicore_green_parallelism_bad_arg.spl", "E-PAR-004", "integer worker count")
 step("Reject direct access to internal runtime-pool symbols")
 expect_compile_error("multicore_green_direct_rt_pool_access.spl", "E-PAR-005", "internal runtime-pool symbol")
+step("Reject direct access to internal runtime-pool counter symbols")
+expect_compile_error("multicore_green_direct_rt_pool_counter_access.spl", "E-PAR-005", "internal runtime-pool symbol")
 step("Reject multicore_green_spawn_sliced imported from the OS-thread surface")
 expect_compile_error("multicore_green_sliced_wrong_surface_import.spl", "E-PAR-003", "multicore_green_spawn_sliced belongs to std.concurrent.multicore_green")
 step("Reject multicore_green_spawn_sliced called with too few arguments")

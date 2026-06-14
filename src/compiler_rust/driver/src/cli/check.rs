@@ -290,6 +290,11 @@ fn validate_numbered_concurrency_source(file_path: &Path, source: &str, errors: 
                 "rt_pool_is_done",
                 "rt_pool_set_parallelism",
                 "rt_pool_get_parallelism",
+                "rt_pool_submitted_count",
+                "rt_pool_completed_count",
+                "rt_pool_pending_count",
+                "rt_pool_busy_count",
+                "rt_pool_blocked_count",
             ] {
                 if let Some(offset) = line.find(name) {
                     errors.push(internal_concurrency_runtime_error(

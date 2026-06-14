@@ -54,6 +54,8 @@ static int g_pool_next_worker = 0;
 static int g_pool_busy_workers = 0;
 static int g_pool_pending_tasks = 0;
 static int g_pool_blocked_workers = 0;
+static int64_t g_pool_submitted_tasks = 0;
+static int64_t g_pool_completed_tasks = 0;
 
 #ifdef RT_POOL_WINDOWS
 __declspec(thread) static int g_pool_worker_tls = 0;
@@ -179,6 +181,7 @@ static void rt_pool_complete_task(RtPoolTask* task, int64_t result) {
 #ifdef RT_POOL_PTHREAD
     pthread_mutex_lock(&g_pool_lock);
     if (g_pool_busy_workers > 0) g_pool_busy_workers--;
+    g_pool_completed_tasks++;
     pthread_mutex_unlock(&g_pool_lock);
     pthread_mutex_lock(&task->lock);
     task->result = result;
@@ -188,6 +191,7 @@ static void rt_pool_complete_task(RtPoolTask* task, int64_t result) {
 #else
     EnterCriticalSection(&g_pool_lock);
     if (g_pool_busy_workers > 0) g_pool_busy_workers--;
+    g_pool_completed_tasks++;
     LeaveCriticalSection(&g_pool_lock);
     EnterCriticalSection(&task->lock);
     task->result = result;
@@ -448,6 +452,7 @@ static void rt_pool_push_task(RtPoolTask* task) {
     int target = g_pool_next_worker % count;
     g_pool_next_worker = (g_pool_next_worker + 1) % count;
     rt_pool_queue_push_tail(&g_pool_queues[target], task);
+    g_pool_submitted_tasks++;
     g_pool_pending_tasks++;
     pthread_cond_signal(&g_pool_not_empty);
     pthread_mutex_unlock(&g_pool_lock);
@@ -458,6 +463,7 @@ static void rt_pool_push_task(RtPoolTask* task) {
     int target = g_pool_next_worker % count;
     g_pool_next_worker = (g_pool_next_worker + 1) % count;
     rt_pool_queue_push_tail(&g_pool_queues[target], task);
+    g_pool_submitted_tasks++;
     g_pool_pending_tasks++;
     WakeConditionVariable(&g_pool_not_empty);
     LeaveCriticalSection(&g_pool_lock);
@@ -493,6 +499,16 @@ int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {
 #endif
 
     if (rt_pool_start() <= 0) {
+#ifdef RT_POOL_PTHREAD
+        pthread_mutex_lock(&g_pool_lock);
+        g_pool_submitted_tasks++;
+        pthread_mutex_unlock(&g_pool_lock);
+#else
+        InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+        EnterCriticalSection(&g_pool_lock);
+        g_pool_submitted_tasks++;
+        LeaveCriticalSection(&g_pool_lock);
+#endif
         rt_pool_complete_task(task, task->entry(task->closure_ptr));
         return (int64_t)(intptr_t)task;
     }
@@ -539,4 +555,79 @@ int64_t rt_pool_join(int64_t handle) {
 #endif
     free(task);
     return result;
+}
+
+int64_t rt_pool_submitted_count(void) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    int64_t count = g_pool_submitted_tasks;
+    pthread_mutex_unlock(&g_pool_lock);
+    return count;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    int64_t count = g_pool_submitted_tasks;
+    LeaveCriticalSection(&g_pool_lock);
+    return count;
+#endif
+}
+
+int64_t rt_pool_completed_count(void) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    int64_t count = g_pool_completed_tasks;
+    pthread_mutex_unlock(&g_pool_lock);
+    return count;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    int64_t count = g_pool_completed_tasks;
+    LeaveCriticalSection(&g_pool_lock);
+    return count;
+#endif
+}
+
+int64_t rt_pool_pending_count(void) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    int64_t count = g_pool_pending_tasks;
+    pthread_mutex_unlock(&g_pool_lock);
+    return count;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    int64_t count = g_pool_pending_tasks;
+    LeaveCriticalSection(&g_pool_lock);
+    return count;
+#endif
+}
+
+int64_t rt_pool_busy_count(void) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    int64_t count = g_pool_busy_workers;
+    pthread_mutex_unlock(&g_pool_lock);
+    return count;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    int64_t count = g_pool_busy_workers;
+    LeaveCriticalSection(&g_pool_lock);
+    return count;
+#endif
+}
+
+int64_t rt_pool_blocked_count(void) {
+#ifdef RT_POOL_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    int64_t count = g_pool_blocked_workers;
+    pthread_mutex_unlock(&g_pool_lock);
+    return count;
+#else
+    InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+    EnterCriticalSection(&g_pool_lock);
+    int64_t count = g_pool_blocked_workers;
+    LeaveCriticalSection(&g_pool_lock);
+    return count;
+#endif
 }

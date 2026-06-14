@@ -60,6 +60,11 @@ Primary surfaces:
 - `rt_pool_is_done`
 - `rt_pool_uses_global_fifo_queue`
 - `rt_pool_uses_work_stealing`
+- `rt_pool_submitted_count`
+- `rt_pool_completed_count`
+- `rt_pool_pending_count`
+- `rt_pool_busy_count`
+- `rt_pool_blocked_count`
 
 Responsibilities:
 
@@ -71,6 +76,10 @@ Responsibilities:
   `multicore_green_uses_global_fifo_queue()` and
   `multicore_green_uses_work_stealing()`. Profile evidence treats shared FIFO
   as invalid for M:N claims and requires work-stealing evidence.
+- Report submitted/completed task progress and queue/worker state through
+  public `multicore_green_*_count()` helpers. These counters are diagnostic
+  evidence for runtime-pool progress and starvation checks, not a claim that
+  ordinary closures are automatically preempted.
 
 ### Profile And Evidence Layer
 
