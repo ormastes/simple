@@ -120,6 +120,10 @@ impl Codegen {
         self.backend.set_enum_defs(defs);
     }
 
+    pub fn set_tag_runtime_pool_join_result(&mut self, value: bool) {
+        self.backend.set_tag_runtime_pool_join_result(value);
+    }
+
     /// Get a reference to the inner backend for accessing mangling and resolution state.
     pub fn backend(&self) -> &CodegenBackend<ObjectModule> {
         &self.backend

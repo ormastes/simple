@@ -2232,14 +2232,13 @@ fn compile_known_enum_constructor_call<M: Module>(
 /// These are runtime functions whose C ABI returns an unboxed integer, while the
 /// native Simple value path expects tagged integer values in vregs.
 ///
-/// NOTE: rt_array_get, rt_tuple_get, rt_index_get, rt_dict_get are NOT included here
-/// because they return RuntimeValue that could be any type (string, object, etc.),
-/// not just integers. Untagging should be done based on the expected result type,
-/// not the function name. The caller should handle type-specific untagging.
-fn needs_runtime_value_result_tagging(func_name: &str) -> bool {
-    // The C runtime-pool join returns the worker's raw i64 result; tag it for
-    // native Simple arithmetic/formatting before storing it in a vreg.
-    matches!(func_name, "rt_pool_join")
+/// NOTE: rt_array_get, rt_tuple_get, rt_index_get, rt_dict_get, and rt_pool_join
+/// are NOT included here because they return RuntimeValue that could be any type
+/// (or a closure result already encoded as a RuntimeValue), not just integers.
+/// Untagging should be done based on the expected result type, not the function
+/// name. The caller should handle type-specific untagging.
+fn needs_runtime_value_result_tagging<M: Module>(ctx: &InstrContext<'_, M>, func_name: &str) -> bool {
+    ctx.tag_runtime_pool_join_result && func_name == "rt_pool_join"
 }
 
 /// Returns which Simple-level argument indices are text parameters for a given
@@ -2871,7 +2870,7 @@ pub fn compile_call<M: Module>(
         // Check if this function needs RuntimeValue tagging for certain arguments
         let tagging_indices = needs_runtime_value_tagging(sffi_name);
         // Check if this function returns a raw value that needs Simple tagging.
-        let needs_tagging = needs_runtime_value_result_tagging(sffi_name);
+        let needs_tagging = needs_runtime_value_result_tagging(ctx, sffi_name);
 
         // First collect VReg values with defaults
         let mut arg_vals = Vec::with_capacity(args.len());

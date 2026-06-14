@@ -236,6 +236,9 @@ pub struct CodegenBackend<M: Module> {
     pub fn_arities: std::sync::Arc<std::collections::HashMap<String, usize>>,
     /// Global enum definitions harvested during native-project discovery.
     pub enum_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    /// Native-project compatibility: tag rt_pool_join results after raw
+    /// closure-return lowering. Kept false for interpreter and `compile --native`.
+    pub tag_runtime_pool_join_result: bool,
     /// Vtable data object IDs: struct_name -> DataId for each trait-impl struct.
     /// Used by compile_struct_init to write vtable_ptr at offset 0.
     pub vtable_data_ids: BTreeMap<String, cranelift_module::DataId>,
@@ -747,6 +750,7 @@ impl<M: Module> CodegenBackend<M> {
             data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
             fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
             enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+            tag_runtime_pool_join_result: false,
             vtable_data_ids: BTreeMap::new(),
             vtable_type_ids: BTreeMap::new(),
         })
@@ -802,6 +806,10 @@ impl<M: Module> CodegenBackend<M> {
         defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
     ) {
         self.enum_defs = defs;
+    }
+
+    pub fn set_tag_runtime_pool_join_result(&mut self, value: bool) {
+        self.tag_runtime_pool_join_result = value;
     }
 
     /// Mangle a function name with the module prefix (if set).
@@ -1249,6 +1257,7 @@ impl<M: Module> CodegenBackend<M> {
                 &self.vtable_type_ids,
                 &self.fn_arities,
                 &self.enum_defs,
+                self.tag_runtime_pool_join_result,
             )
         }));
         match body_result {

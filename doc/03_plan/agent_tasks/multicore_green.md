@@ -47,10 +47,15 @@ Date: 2026-06-13
   delegates unless they pass `--version`.
   These native compile/run SSpecs remain perf-sensitive at roughly one minute.
 - 2026-06-14 fresh compiler evidence fixed the hosted native `rt_pool_join`
-  value boundary: LLVM native-build now tags raw runtime-pool join integers
-  before storing them in Simple vregs, and the Cranelift SFFI path has the same
-  result-tagging rule. `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
-  now clean-builds and exits `0` with runtime-pool counter drain evidence.
+  value boundary without corrupting regular public `handle.join()` values:
+  LLVM native-build tags raw runtime-pool join integers before storing them in
+  Simple vregs, and Cranelift tags that result only for the native-project
+  build lane where escaped closure returns are raw. Regular interpreter and
+  `compile --native` paths leave `rt_pool_join` unchanged because the pool
+  result is already a Simple value there. The public concurrency API contract
+  and `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl` both pass,
+  so the regular public facade and native-project runtime-pool smoke now agree
+  on visible `handle.join()` semantics.
 
 ## Coordination Contract
 

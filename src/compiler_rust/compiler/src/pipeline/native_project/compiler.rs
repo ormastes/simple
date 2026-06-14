@@ -551,6 +551,7 @@ pub(crate) fn compile_file_to_object(
     codegen.set_data_exports(imports.data_exports.clone());
     codegen.set_fn_arities(imports.fn_arities.clone());
     codegen.set_enum_defs(imports.enum_defs.clone());
+    codegen.set_tag_runtime_pool_join_result(true);
     if !no_mangle {
         let prefix = module_prefix_from_path(file_path, source_root);
         codegen.set_module_prefix(prefix);

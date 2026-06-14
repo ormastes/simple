@@ -386,6 +386,7 @@ pub fn compile_function_body<M: Module>(
     vtable_type_ids: &std::collections::BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
     fn_arities: &std::sync::Arc<std::collections::HashMap<String, usize>>,
     enum_defs: &std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    tag_runtime_pool_join_result: bool,
 ) -> InstrResult<()> {
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
@@ -790,6 +791,7 @@ pub fn compile_function_body<M: Module>(
                     vreg_types: &mut vreg_types,
                     fn_arities,
                     enum_defs,
+                    tag_runtime_pool_join_result,
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 // Sync vreg_values → Variables after yield
@@ -822,6 +824,7 @@ pub fn compile_function_body<M: Module>(
                     vreg_types: &mut vreg_types,
                     fn_arities,
                     enum_defs,
+                    tag_runtime_pool_join_result,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
                 // Ensure all vreg values are i64 (extend smaller int types)

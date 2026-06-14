@@ -149,6 +149,10 @@ pub struct InstrContext<'a, M: Module> {
     pub fn_arities: &'a std::sync::Arc<std::collections::HashMap<String, usize>>,
     /// Global enum definitions: enum name -> [(variant name, payload arity)].
     pub enum_defs: &'a std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    /// Native-project builds currently lower escaped runtime-pool closure
+    /// returns as raw typed integers. Regular interpreter/native paths already
+    /// pass a Simple RuntimeValue through rt_pool_join.
+    pub tag_runtime_pool_join_result: bool,
 }
 
 impl<'a, M: Module> InstrContext<'a, M> {
@@ -251,6 +255,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             vreg_types,
             fn_arities,
             enum_defs,
+            tag_runtime_pool_join_result: false,
         }
     }
 }
