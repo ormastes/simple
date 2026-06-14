@@ -399,7 +399,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 136 lines folded for reproduction.
+Runnable source: 137 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -448,8 +448,8 @@ expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green
 step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=11")
-expect(row).to_contain("checked_in_misuse_fixtures=26")
-expect(row).to_contain("total_misuse_fixtures=37")
+expect(row).to_contain("checked_in_misuse_fixtures=27")
+expect(row).to_contain("total_misuse_fixtures=38")
 expect(row).to_contain("thread_spawn_number_suffix_alias.spl rejects numbered API aliases")
 expect(absent_in_text(row, "misuse_fixtures=611")).to_equal(1)
 expect(row).to_contain("task_spawn approved")
@@ -467,6 +467,7 @@ expect(row).to_contain("multicore_green_sliced_bad_state_arg.spl rejects non-int
 expect(row).to_contain("multicore_green_sliced_bad_step_arg.spl rejects non-function step")
 expect(row).to_contain("multicore_green_sliced_shared_var_capture.spl rejects shared mutable step state")
 expect(row).to_contain("multicore_green_direct_rt_pool_access.spl rejects internal runtime-pool symbol")
+expect(row).to_contain("multicore_green_direct_rt_pool_counter_access.spl rejects internal runtime-pool counter symbol")
 step("Verify negative profile contract cases stay release-visible")
 expect(row).to_contain("large_simple_multicore_fanout_slower_than_c")
 expect(row).to_contain("large_go_fanout_slower_than_c")
@@ -566,9 +567,9 @@ expect(plan).to_contain("generated misuse contract")
 expect(plan).to_contain("misuse_fixtures=11")
 step("Verify the checked-in misuse fixture inventory is named separately")
 expect(plan).to_contain("checked-in fixture contract")
-expect(plan).to_contain("checked_in_misuse_fixtures=26")
+expect(plan).to_contain("checked_in_misuse_fixtures=27")
 step("Verify the shell-enforced total cannot silently omit checked-in fixtures")
-expect(plan).to_contain("total shell-enforced `total_misuse_fixtures=37`")
+expect(plan).to_contain("total shell-enforced `total_misuse_fixtures=38`")
 expect(absent_in_text(plan, "misuse_fixtures=611")).to_equal(1)
 ```
 
