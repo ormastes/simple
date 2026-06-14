@@ -11,8 +11,8 @@
 - `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl`
 - `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.md`
 - `test/01_unit/app/ui/web_render_backend_api_spec.spl` covers the shared
-  artifact queue metadata helper. The full browser-frame propagation regression
-  is still blocked by the `BrowserBackend.render_frame` pixel-artifact stall.
+  artifact queue metadata helper and BrowserBackend frame propagation through
+  generated widget HTML.
 - `test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl`
   proves GPU-selected web pixel artifacts carry submitted/drained runtime queue
   metadata while software artifacts stay queue-neutral.
@@ -25,6 +25,9 @@
   matching `last_artifact_queue_*` diagnostics, but GUI/web production evidence
   still needs a completed frame run with one runtime packet and one drain
   receipt.
+- Generated widget HTML now routes through a deterministic widget raster path
+  before the full CSS/layout renderer, so `BrowserBackend.render_frame` no
+  longer stalls on the shared pixel artifact path.
 - Vulkan readback passed locally through
   `scripts/check/check-vulkan-engine2d-readback.shs`.
 - CUDA generated 2D readback passed locally through

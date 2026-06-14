@@ -7,14 +7,14 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 7
-- **Warnings:** 7
+- **Total Lines:** 31
+- **Warnings:** 1
 
 ---
 
-## Standard Library (1 features)
+## Application (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Web Render Pixel Backend Runtime Queue Spec](test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.md) | Minimal | N/A | 2 | 20% | 7 lines |
+| [Browser Backend Runtime Queue Spec](test/01_unit/app/ui/browser_backend_runtime_queue_spec.md) | Minimal | N/A | 1 | 20% | 31 lines |
 

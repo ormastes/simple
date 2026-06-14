@@ -26,3 +26,6 @@ dev-done
 
 ## Log
 - dev: Created state file with 7 acceptance criteria (type: feature).
+- impl: Added focused BrowserBackend runtime queue diagnostics coverage for
+  GPU-selected frames and cache-hit reset. Remaining production blockers are
+  real backend-handle propagation and observable in-flight `SUBMITTED` status.

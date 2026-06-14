@@ -26,7 +26,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 
 - Rust/C capacity parity: pass (C capacity 1024, Rust 1024).
 - SUBMITTED status usage: unused (0 assignments observed outside constants).
-- Concrete runtime backend handle carried through queue packet: missing (0 matching runtime queue fields observed).
+- Concrete runtime backend handle carried through queue packet: missing (last observed handle 0; 3 matching runtime queue handle accessors/fields observed).
 - Metal: Metal requires Apple platform runtime; this host is Linux.
 - ROCm: ROCm requires AMD ROCm runtime, device, probe tool, and verified HSACO on host.
 
@@ -44,6 +44,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 - queue_zero_backend_queued_status=1
 - queue_zero_backend_drained=1
 - queue_zero_backend_last_status=4
+- queue_zero_backend_last_backend_handle=0
 - queue_nonzero_backend_packet_id=1
 - queue_nonzero_backend_queued_status=1
 - queue_nonzero_backend_drained=1
@@ -51,6 +52,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 - queue_nonzero_backend_submitted_count=1
 - queue_nonzero_backend_completed_count=1
 - queue_nonzero_backend_last_status=3
+- queue_nonzero_backend_last_backend_handle=0
 - draw_ir_runtime_queue_spec_exit_code=0
 - readback_vulkan_exit_code=0
 - readback_vulkan_status=pass
@@ -77,7 +79,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. In
 - queue_capacity_parity_status=pass
 - queue_submitted_status_assignment_count=0
 - queue_submitted_status_usage=unused
-- queue_concrete_backend_handle_field_count=0
+- queue_concrete_backend_handle_field_count=3
 - queue_concrete_backend_handle_status=missing
 - queue_emit_status=pass
 - queue_zero_backend_status=unavailable

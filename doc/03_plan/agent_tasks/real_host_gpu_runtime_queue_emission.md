@@ -3,11 +3,11 @@
 Date: 2026-06-14
 Status: Partial implementation; runtime queue externs, interpreter/native
 GPU-lane queue evidence, Engine2D runtime-submit/drain evidence, a Draw IR
-runtime queue bridge, and WebRender/BrowserBackend queue metadata fields are in
-place. Full browser-frame runtime queue execution and real backend
-submit/readback receipts remain pending. The production GUI/web path is
-fail-closed until it proves one ordered adapter -> runtime queue -> backend
-submit -> drain/readback run.
+runtime queue bridge, WebRender queue metadata, and focused BrowserBackend
+render-frame queue diagnostics are in place. Real backend submit/readback
+receipts remain pending. The production GUI/web path is fail-closed until it
+proves one ordered adapter -> runtime queue -> backend submit ->
+drain/readback run.
 
 ## Scope
 
@@ -54,7 +54,13 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
   attaches runtime queue evidence for GPU-selected web-render artifacts, and
   `src/app/ui.browser/backend.spl` mirrors those values as
   `last_artifact_queue_*` frame diagnostics. Focused coverage:
-  `test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl`.
+  `test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl`
+  and `test/01_unit/app/ui/browser_backend_runtime_queue_spec.spl`.
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`
+  routes Simple-generated widget HTML through the deterministic widget raster
+  path before expensive CSS scans. This unblocks `BrowserBackend.render_frame`
+  for generated widget frames while keeping generic non-widget HTML on the full
+  layout renderer.
 - Rust and C runtime queue capacity now match at 1024 pending packets. Rust
   runtime coverage rejects the overflow packet and accepts a new packet after a
   full drain.
@@ -73,22 +79,24 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
 ## Not Proven Yet
 
 - No backend submit call is driven from the host/GPU lane queue.
-- Browser-frame metadata propagation exists, but a full
-  `BrowserBackend.render_frame` regression currently stalls in the shared pixel
-  artifact path after the previous widget-store optional-access crash is fixed.
-  The GUI/web queue-drain integration must not be called production until that
-  frame run completes with one packet, one drain receipt, and a typed backend
-  terminal status.
+- Browser-frame queue diagnostics are proven for a GPU-selected
+  `BrowserBackend.render_frame` run, including cache-hit reset to
+  `not_requested`. This is still diagnostic runtime-queue evidence, not a real
+  backend-handle submit/readback proof.
 - Interpreter and statement-lowered native GPU queue packets currently emit
   `backend_code=0` and drain as `UNAVAILABLE`; they do not yet carry a real
   backend handle.
+- The runtime now exposes `rt_host_gpu_queue_last_backend_handle()` through the
+  Rust/C/interpreter/SFFI symbol path, but it intentionally returns `0` until a
+  concrete backend submit/readback handle is attached to queue packets.
 - `SUBMITTED` exists in the status model, but drain currently reports terminal
   `COMPLETED` or `UNAVAILABLE` directly.
 - Runtime packets currently carry numeric metadata only; full Draw IR payload
   serialization still needs to flow through `draw_ir_to_sdn` or an equivalent
   runtime payload buffer.
-- Runtime packets also lack real backend handles, so a queue drain cannot yet
-  prove Vulkan/CUDA/WebGPU/Metal/ROCm submission for a GUI/web frame.
+- Runtime packets still lack real backend handles, so a queue drain cannot yet
+  prove Vulkan/CUDA/WebGPU/Metal/ROCm submission for a GUI/web frame even
+  though the missing handle is now runtime-observable.
 - Dedicated HostGpuLaneBegin/End MIR instructions do not exist in the current
   compiler. The current syntax parses as ordinary calls/trailing lambdas;
   statement lowering handles the marker form, but expression-position forms
@@ -141,14 +149,14 @@ compatibility fixtures that must be replaced or cross-checked by runtime data.
 11. Add real-backend-handle plumbing so packets no longer drain as
    `UNAVAILABLE` solely because `backend_code=0`.
 12. Partly done: Add the browser-frame bridge. `WebRenderArtifact` and
-   `BrowserBackend` now expose queue status fields, and the pixel artifact
-   backend can attach host/GPU runtime queue evidence for GPU-selected render
-   artifacts. Remaining work: make `BrowserBackend.render_frame` complete
-   reliably under the shared pixel artifact path, enqueue GPU-selected Draw IR
-   through `engine2d_draw_ir_adv_batch_runtime_queue`, drain it once per frame
-   or explicit flush, attach backend submit/readback receipt metadata, and fall
-   back to the existing Engine2D pixel artifact path with a typed reason when
-   unavailable.
+   `BrowserBackend` now expose queue status fields, the pixel artifact backend
+   can attach host/GPU runtime queue evidence for GPU-selected render artifacts,
+   and generated widget frames complete reliably through the shared pixel
+   artifact path with focused queue diagnostic coverage. Remaining work:
+   enqueue GPU-selected Draw IR through `engine2d_draw_ir_adv_batch_runtime_queue`,
+   drain it once per frame or explicit flush, attach real backend
+   submit/readback receipt metadata, and fall back to the existing Engine2D
+   pixel artifact path with a typed reason when unavailable.
 13. Keep reports and docs layer-specific. Adapter summaries, runtime queue
    counters, and backend readback fixtures are useful evidence, but only a
    single ordered GUI/web run through adapter -> runtime queue -> backend drain

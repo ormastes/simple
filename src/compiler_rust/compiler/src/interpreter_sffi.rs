@@ -667,6 +667,9 @@ unsafe extern "C" fn interp_call_handler(
                 "rt_host_gpu_queue_last_status" => {
                     crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_last_status(&args)
                 }
+                "rt_host_gpu_queue_last_backend_handle" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_last_backend_handle(&args)
+                }
                 _ => crate::interpreter::interpreter_extern::call_extern_function_with_values(
                     name,
                     &args,

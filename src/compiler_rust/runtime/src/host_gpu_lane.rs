@@ -230,6 +230,11 @@ pub extern "C" fn rt_host_gpu_queue_last_status() -> i64 {
         .unwrap_or(RT_HOST_GPU_QUEUE_STATUS_EMPTY)
 }
 
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_last_backend_handle() -> i64 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +266,7 @@ mod tests {
         assert_eq!(rt_host_gpu_queue_submitted_count(), 1);
         assert_eq!(rt_host_gpu_queue_completed_count(), 1);
         assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE);
+        assert_eq!(rt_host_gpu_queue_last_backend_handle(), 0);
     }
 
     #[test]

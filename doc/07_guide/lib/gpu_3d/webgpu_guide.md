@@ -56,9 +56,9 @@ Current production gaps to keep visible in WebGPU/Engine2D reports:
 - `SUBMITTED` is modeled, but the current drain path reports terminal
   `COMPLETED` or `UNAVAILABLE` directly.
 - Interpreter lane `END` accounting is exception-safe for lane body errors.
-- Full browser-frame, observable in-flight `SUBMITTED`, and real-backend-handle
-  tests remain required before claiming production GUI/web queue-drain
-  integration.
+- Focused BrowserBackend queue diagnostics are covered, but observable
+  in-flight `SUBMITTED` and real-backend-handle tests remain required before
+  claiming production GUI/web queue-drain integration.
 
 ---
 

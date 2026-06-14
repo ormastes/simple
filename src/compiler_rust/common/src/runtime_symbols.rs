@@ -1448,6 +1448,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_host_gpu_queue_submitted_count",
     "rt_host_gpu_queue_completed_count",
     "rt_host_gpu_queue_last_status",
+    "rt_host_gpu_queue_last_backend_handle",
     "rt_handle_free",
     "rt_handle_get",
     "rt_handle_is_valid",

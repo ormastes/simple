@@ -346,9 +346,9 @@ Production status is deliberately split by proof type:
 |---|---|---|
 | Evidence adapter | `src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` and `host_gpu_draw_ir_event_flow.spl` produce deterministic decision, submit, receipt, and Draw IR routing summaries. | Proves host-vs-GPU routing policy and packet-size/fallback classification. It is not by itself proof that a GUI/web frame was drained through a backend. |
 | Runtime queue emission | `target.later(...) gpu` interpreter handling and `engine2d_host_gpu_event_submit_to_runtime` can emit queue packets and expose queue counters/drain status through runtime externs. | Proves packets can enter the host/GPU runtime queue. Native lowering and full Draw IR payload serialization are still required for production parity. |
-| Web artifact diagnostics | `src/lib/common/ui/web_render_api.spl` stores `WebRenderArtifact.queue_*` metadata, `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl` can attach runtime queue evidence for GPU-selected artifacts, and `src/app/ui.browser/backend.spl` mirrors it as `last_artifact_queue_*`. | Proves queue evidence can be carried through the web-render artifact contract. It is still diagnostic propagation unless a full frame completes with one packet and one drain receipt. |
+| Web artifact diagnostics | `src/lib/common/ui/web_render_api.spl` stores `WebRenderArtifact.queue_*` metadata, `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl` can attach runtime queue evidence for GPU-selected artifacts, and `src/app/ui.browser/backend.spl` mirrors it as `last_artifact_queue_*`. | Proves queue evidence can be carried through the web-render artifact contract and a focused `BrowserBackend.render_frame` GPU frame. It is still diagnostic propagation until packets carry real backend submit/readback handles. |
 | Backend readback | Generated/native reports under `doc/09_report/` prove backend-specific readback when the backend is available: Vulkan Engine2D readback is `pass`, CUDA generated 2D readback is `pass`, and Linux Metal/ROCm generated readback is typed `unavailable`. | Proves backend submit/sync/readback only for the reported backend fixtures. It does not prove the GUI/web queue-drain path uses those backends. |
-| GUI/web integration | `src/app/ui.browser/backend.spl` owns a local UI event queue, an Engine2D pixel artifact path, and queue diagnostic fields, but the focused `BrowserBackend.render_frame` regression currently stalls in the shared pixel artifact path after widget-store optional-access fixes. | This is the remaining production gap: GUI/web redraw must complete, connect Draw IR/runtime queue packets to backend drain receipts, and expose typed backend terminal status before accelerated GUI/web rendering can be claimed. |
+| GUI/web integration | `src/app/ui.browser/backend.spl` owns a local UI event queue, an Engine2D pixel artifact path, and queue diagnostic fields. Generated widget HTML now uses the deterministic widget raster path before expensive CSS scans, so focused `BrowserBackend.render_frame` specs complete and expose queue diagnostics. | The remaining production gap is backend proof: GUI/web redraw must connect Draw IR/runtime queue packets to real backend drain/readback receipts and expose typed real-backend terminal status before accelerated GUI/web rendering can be claimed. |
 
 The current production posture is fail-closed. Adapter summaries, runtime
 queue emit/drain receipts, and Vulkan/CUDA readback reports are valid evidence
@@ -369,13 +369,12 @@ Known runtime/production gaps:
   submitted-in-flight phase.
 - Interpreter lane `END` accounting is exception-safe for lane body errors, with
   Rust interpreter regression coverage.
-- Real backend handles are not plumbed into runtime packets yet, so queue drain
-  cannot prove backend submission from GUI/web frames.
-- `BrowserBackend.render_frame` currently needs a focused fix for the
-  shared-pixel-artifact stall before its `last_artifact_queue_*` propagation can
-  be release evidence.
-- Full browser-frame, observable in-flight `SUBMITTED`, and real-backend-handle
-  tests are still missing.
+- Real backend handles are not plumbed into runtime packets yet; the runtime
+  exposes `rt_host_gpu_queue_last_backend_handle()` and currently reports `0`,
+  so queue drain cannot prove backend submission from GUI/web frames.
+- `BrowserBackend.render_frame` now completes for generated widget frames and
+  has focused queue-diagnostic coverage, but observable in-flight `SUBMITTED`
+  and real-backend-handle tests are still missing.
 
 Until the GUI/web queue-drain bridge exists, documentation and test reports must
 say "adapter evidence", "runtime queue emission", or "backend readback" instead

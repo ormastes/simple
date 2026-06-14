@@ -200,7 +200,7 @@ match backend_result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -219,10 +219,17 @@ expect(request_artifact.pixels.len()).to_equal(16 * 12)
 
 #### reuses retained pure simple pixel artifacts for identical full html
 
+- var cache = web render pixel artifact cache
+   - Expected: first.engine2d_backend equals `software`
+   - Expected: second.pixels equals `first.pixels`
+   - Expected: cache.stores() equals `1`
+   - Expected: cache.hits() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -242,10 +249,17 @@ expect(cache.hits()).to_equal(1)
 
 #### bypasses retained pixel artifacts for dynamic regions
 
+- var cache = web render pixel artifact cache
+   - Expected: first.engine2d_backend equals `software`
+   - Expected: second.pixels equals `first.pixels`
+   - Expected: cache.stores() equals `0`
+   - Expected: cache.hits() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -507,7 +521,7 @@ expect(web_render_pixel_default_page_html("about:blank")).to_contain("<div id=\"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -515,6 +529,8 @@ val req = web_render_url_request(WEB_RENDER_TARGET_PURE_SIMPLE, "about:blank", 3
 val base = web_render_to_artifact(req)
 expect(base.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED)
 expect(base.engine2d_reason).to_equal("pixel output not requested")
+expect(base.queue_submit_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
+expect(base.queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
 
 val pixel = web_render_pixel_artifact(req, [1u32, 2u32, 3u32])
 expect(pixel.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_COMPATIBILITY)
@@ -530,6 +546,12 @@ val unavailable = web_render_engine2d_unavailable_artifact(base, "opencl", "open
 expect(unavailable.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE)
 expect(unavailable.engine2d_backend).to_equal("opencl")
 expect(unavailable.engine2d_reason).to_equal("opencl ICD unavailable")
+
+val queued = web_render_artifact_with_runtime_queue(rendered, "submitted", "completed", 9, 1, "drained runtime queue")
+expect(queued.queue_submit_status).to_equal("submitted")
+expect(queued.queue_drain_status).to_equal("completed")
+expect(queued.queue_packet_id).to_equal(9)
+expect(queued.queue_drained).to_equal(1)
 ```
 
 </details>

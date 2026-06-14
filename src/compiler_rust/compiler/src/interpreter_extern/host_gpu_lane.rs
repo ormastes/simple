@@ -88,6 +88,10 @@ pub fn rt_host_gpu_queue_last_status(_args: &[Value]) -> Result<Value, CompileEr
     Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_last_status()))
 }
 
+pub fn rt_host_gpu_queue_last_backend_handle(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_last_backend_handle()))
+}
+
 fn expect_int(value: Option<&Value>, message: &str) -> Result<i64, CompileError> {
     match value {
         Some(Value::Int(v)) => Ok(*v),

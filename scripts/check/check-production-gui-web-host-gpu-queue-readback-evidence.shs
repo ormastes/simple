@@ -96,6 +96,7 @@ extern fn rt_host_gpu_queue_packet_count() -> i64
 extern fn rt_host_gpu_queue_submitted_count() -> i64
 extern fn rt_host_gpu_queue_completed_count() -> i64
 extern fn rt_host_gpu_queue_last_status() -> i64
+extern fn rt_host_gpu_queue_last_backend_handle() -> i64
 
 fn main() -> i32:
     rt_host_gpu_queue_reset()
@@ -103,16 +104,19 @@ fn main() -> i32:
     val unavailable_queued_status = rt_host_gpu_queue_last_status()
     val unavailable_drained = rt_host_gpu_queue_drain(4)
     val unavailable_status = rt_host_gpu_queue_last_status()
+    val unavailable_backend_handle = rt_host_gpu_queue_last_backend_handle()
     print("queue_zero_backend_packet_id=" + unavailable_packet.to_text())
     print("queue_zero_backend_queued_status=" + unavailable_queued_status.to_text())
     print("queue_zero_backend_drained=" + unavailable_drained.to_text())
     print("queue_zero_backend_last_status=" + unavailable_status.to_text())
+    print("queue_zero_backend_last_backend_handle=" + unavailable_backend_handle.to_text())
 
     rt_host_gpu_queue_reset()
     val backend_packet = rt_host_gpu_queue_emit(2, 1, 512, 7)
     val backend_queued_status = rt_host_gpu_queue_last_status()
     val backend_drained = rt_host_gpu_queue_drain(4)
     val backend_status = rt_host_gpu_queue_last_status()
+    val backend_handle = rt_host_gpu_queue_last_backend_handle()
     print("queue_nonzero_backend_packet_id=" + backend_packet.to_text())
     print("queue_nonzero_backend_queued_status=" + backend_queued_status.to_text())
     print("queue_nonzero_backend_drained=" + backend_drained.to_text())
@@ -120,6 +124,7 @@ fn main() -> i32:
     print("queue_nonzero_backend_submitted_count=" + rt_host_gpu_queue_submitted_count().to_text())
     print("queue_nonzero_backend_completed_count=" + rt_host_gpu_queue_completed_count().to_text())
     print("queue_nonzero_backend_last_status=" + backend_status.to_text())
+    print("queue_nonzero_backend_last_backend_handle=" + backend_handle.to_text())
     return 0
 SPL
 }
@@ -132,10 +137,10 @@ run_queue_probe() {
     set -e
     append_env "queue_probe_exit_code" "$code"
     for key in \
-        queue_zero_backend_packet_id queue_zero_backend_queued_status queue_zero_backend_drained queue_zero_backend_last_status \
+        queue_zero_backend_packet_id queue_zero_backend_queued_status queue_zero_backend_drained queue_zero_backend_last_status queue_zero_backend_last_backend_handle \
         queue_nonzero_backend_packet_id queue_nonzero_backend_queued_status queue_nonzero_backend_drained \
         queue_nonzero_backend_packet_count queue_nonzero_backend_submitted_count queue_nonzero_backend_completed_count \
-        queue_nonzero_backend_last_status
+        queue_nonzero_backend_last_status queue_nonzero_backend_last_backend_handle
     do
         append_env "$key" "$(field_of "$key" "$BUILD_DIR/queue_probe.env")"
     done
@@ -168,10 +173,10 @@ audit_capacity_and_status() {
         append_env "queue_submitted_status_usage" "used"
     fi
     append_env "queue_concrete_backend_handle_field_count" "$concrete_handle_fields"
-    if [ "$concrete_handle_fields" = "0" ]; then
-        append_env "queue_concrete_backend_handle_status" "missing"
-    else
+    if is_positive_int "$(field_of queue_nonzero_backend_last_backend_handle "$BUILD_DIR/evidence.env")"; then
         append_env "queue_concrete_backend_handle_status" "present"
+    else
+        append_env "queue_concrete_backend_handle_status" "missing"
     fi
 }
 
@@ -243,7 +248,7 @@ append_env "production_gui_web_host_gpu_queue_readback_reason" "backend-runtime-
     echo
     echo "- Rust/C capacity parity: $(status_of queue_capacity_parity_status) (C capacity $(status_of queue_c_capacity), Rust $(status_of queue_rust_capacity))."
     echo "- SUBMITTED status usage: $(status_of queue_submitted_status_usage) ($(status_of queue_submitted_status_assignment_count) assignments observed outside constants)."
-    echo "- Concrete runtime backend handle carried through queue packet: $(status_of queue_concrete_backend_handle_status) ($(status_of queue_concrete_backend_handle_field_count) matching runtime queue fields observed)."
+    echo "- Concrete runtime backend handle carried through queue packet: $(status_of queue_concrete_backend_handle_status) (last observed handle $(status_of queue_nonzero_backend_last_backend_handle); $(status_of queue_concrete_backend_handle_field_count) matching runtime queue handle accessors/fields observed)."
     echo "- Metal: $(status_of metal_host_unavailable_reason)"
     echo "- ROCm: $(status_of rocm_host_unavailable_reason)"
     echo

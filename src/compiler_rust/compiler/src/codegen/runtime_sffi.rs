@@ -834,6 +834,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_host_gpu_queue_submitted_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_completed_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_status", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_last_backend_handle", &[], &[I64]),
     // =========================================================================
     // GPU kernel launch
     // =========================================================================

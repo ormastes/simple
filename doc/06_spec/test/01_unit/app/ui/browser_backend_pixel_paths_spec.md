@@ -11,6 +11,7 @@
 @direction LR
 
 browser_backend_pixel_paths_spec -> std
+browser_backend_pixel_paths_spec -> common
 browser_backend_pixel_paths_spec -> app
 ```
 
@@ -100,10 +101,21 @@ expect(BrowserBackend.create(8, 8, "vulkan").unwrap().gpu_backend()).to_equal("v
 
 #### collects wide render layout entries without dropping hit-test boxes
 
+- text widget
+- text widget
+- text widget
+- text widget
+- text widget
+- text widget
+- text widget
+- text widget
+- backend render frame
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

@@ -515,6 +515,9 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
             host_gpu_lane::rt_host_gpu_queue_completed_count as *const () as usize
         },
         "rt_host_gpu_queue_last_status" => host_gpu_lane::rt_host_gpu_queue_last_status as *const () as usize,
+        "rt_host_gpu_queue_last_backend_handle" => {
+            host_gpu_lane::rt_host_gpu_queue_last_backend_handle as *const () as usize
+        },
 
         // Process operations
         "rt_process_run" => value::rt_process_run as *const () as usize,

@@ -206,6 +206,7 @@ int64_t rt_host_gpu_queue_packet_count(void) { return rt_host_gpu_queue_packet_t
 int64_t rt_host_gpu_queue_submitted_count(void) { return rt_host_gpu_queue_submitted_total; }
 int64_t rt_host_gpu_queue_completed_count(void) { return rt_host_gpu_queue_completed_total; }
 int64_t rt_host_gpu_queue_last_status(void) { return rt_host_gpu_queue_last_status_code; }
+int64_t rt_host_gpu_queue_last_backend_handle(void) { return 0; }
 
 typedef struct RtCoreString {
     uint32_t kind;
