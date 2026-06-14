@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 55 | 55 | 0 | 0 |
+| 57 | 57 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -421,6 +421,25 @@ expect(pixels[20 + 4 * 32]).to_equal(0xFF1D4ED8u32)
 
 </details>
 
+#### keeps equal flex order in document order
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:16px;overflow:hidden;background-color:#f8fafc}.shell{display:flex;width:32px;height:16px}.first{order:1;background-color:#ef4444;width:8px;height:8px}.second{order:1;background-color:#22c55e;width:8px;height:8px}.third{order:1;background-color:#1d4ed8;width:8px;height:8px}</style></head><body><section class='shell'><div class='first'></div><div class='second'></div><div class='third'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 32, 16)
+expect(pixels.len()).to_equal(32 * 16)
+expect(pixels[4 + 4 * 32]).to_equal(0xFFEF4444u32)
+expect(pixels[12 + 4 * 32]).to_equal(0xFF22C55Eu32)
+expect(pixels[20 + 4 * 32]).to_equal(0xFF1D4ED8u32)
+```
+
+</details>
+
 <details>
 <summary>Advanced: matches Chrome solid-border and nested-selector geometry for a text-free CSS matrix</summary>
 
@@ -690,6 +709,25 @@ expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
 > expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
 
 </details>
+
+</details>
+
+#### keeps equal positive z-index paint order stable
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:32px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;width:32px;height:32px}.first{position:absolute;left:4px;top:4px;z-index:1;background-color:#ef4444;width:12px;height:12px}.second{position:absolute;left:4px;top:4px;z-index:1;background-color:#22c55e;width:12px;height:12px}.third{position:absolute;left:4px;top:4px;z-index:1;background-color:#1d4ed8;width:12px;height:12px}</style></head><body><section class='shell'><div class='first'></div><div class='second'></div><div class='third'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 32, 32)
+expect(pixels.len()).to_equal(32 * 32)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(144)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+```
 
 </details>
 
@@ -1216,8 +1254,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 55 |
-| Active scenarios | 55 |
+| Total scenarios | 57 |
+| Active scenarios | 57 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
