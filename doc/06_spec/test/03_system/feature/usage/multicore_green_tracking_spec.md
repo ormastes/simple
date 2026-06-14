@@ -318,7 +318,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -363,6 +363,8 @@ expect(report_index).to_contain("hosted sliced fairness")
 expect(report_index).to_contain("parallel artifact footprint, and peak RSS")
 expect(report_index).to_contain("Hosted Fairness Evidence")
 expect(report_index).to_contain("multicore_green_spawn_sliced")
+expect(report_index).to_contain("sliced-handle")
+expect(report_index).to_contain("used_runtime_pool=true")
 expect(report_index).to_contain("explicit scalar-state fairness contract")
 expect(absent_in_text(report_index, "ordinary closure preemption; and proves")).to_equal(1)
 expect(report_index).to_contain("used_runtime_pool()")
@@ -446,7 +448,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 147 lines folded for reproduction.
+Runnable source: 150 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -544,6 +546,7 @@ expect(row).to_contain("os_thread_profile_row_missing")
 expect(row).to_contain("os_thread_profile_timing_fail")
 expect(row).to_contain("workload_variety_methodology_missing")
 expect(row).to_contain("simpleos_report_index_row_missing")
+expect(row).to_contain("hosted_sliced_fairness_report_index_marker_missing")
 expect(row).to_contain("docker_simple_binary_probe_wording_corrupt")
 expect(row).to_contain("forbidden_number_suffix_api_name")
 step("Verify the negative profile script emits the same release-visible cases")
@@ -572,6 +575,7 @@ expect(negative_contract).to_contain("case=os_thread_profile_row_missing")
 expect(negative_contract).to_contain("case=os_thread_profile_timing_fail")
 expect(negative_contract).to_contain("case=workload_variety_methodology_missing")
 expect(negative_contract).to_contain("case=simpleos_report_index_row_missing")
+expect(negative_contract).to_contain("case=hosted_sliced_fairness_report_index_marker_missing")
 expect(negative_contract).to_contain("case=docker_simple_binary_probe_wording_corrupt")
 expect(negative_contract).to_contain("case=forbidden_number_suffix_api_name")
 step("Verify the system-test plan describes cooperative-green and OS-thread negative profile cases")
@@ -590,6 +594,7 @@ expect(system_plan).to_contain("os_thread_profile_row_missing")
 expect(system_plan).to_contain("os_thread_profile_timing_fail")
 expect(system_plan).to_contain("workload_variety_methodology_missing")
 expect(system_plan).to_contain("simpleos_report_index_row_missing")
+expect(system_plan).to_contain("hosted_sliced_fairness_report_index_marker_missing")
 expect(system_plan).to_contain("docker_simple_binary_probe_wording_corrupt")
 expect(system_plan).to_contain("OS-thread-label")
 expect(system_plan).to_contain("OS-thread-presence")
