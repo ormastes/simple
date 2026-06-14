@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 53 | 53 | 0 | 0 |
+| 54 | 54 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -643,6 +643,37 @@ expect(_count_color(pixels, 0xFF334155u32)).to_equal(56)
 
 </details>
 
+#### keeps positive z-index paint order independent of document order
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:32px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;width:32px;height:32px}.top{position:absolute;left:4px;top:4px;z-index:3;background-color:#f59e0b;width:12px;height:12px}.bottom{position:absolute;left:4px;top:4px;z-index:1;background-color:#1d4ed8;width:12px;height:12px}.middle{position:absolute;left:4px;top:4px;z-index:2;background-color:#22c55e;width:12px;height:12px}</style></head><body><section class='shell'><div class='top'></div><div class='bottom'></div><div class='middle'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 32, 32)
+expect(pixels.len()).to_equal(32 * 32)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(144)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:32px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;width:32px;height:32px}.top{position:absolute;left:4px;top:4px;z-index:3;background-color:#f59e0b;width:12px;height:12px}.botto$position$.middle{position:absolute;left:4px;top:4px;z-index:2;background-color:#22c55e;width:12px;height:12px}</style></head><body><section class='shell'><div class='top'></div><div class='bottom'></div><div class='middle'></div></section></body></html>"<br>
+> val pixels = simple_web_render_html_to_pixels(html, 32, 32)<br>
+> expect(pixels.len()).to_equal(32 * 32)<br>
+> expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(144)<br>
+> expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)<br>
+> expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+
+</details>
+
+</details>
+
 #### matches Chrome leaf background opacity blending
 
 <details>
@@ -1166,8 +1197,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 53 |
-| Active scenarios | 53 |
+| Total scenarios | 54 |
+| Active scenarios | 54 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
