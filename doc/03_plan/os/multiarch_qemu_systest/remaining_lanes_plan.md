@@ -200,7 +200,7 @@ git-plumbing.
 
 | Lane | State | Build/boot notes |
 |------|-------|------------------|
-| riscv64 | GREEN (boot) | ⚠ rebuild blocked — pre-existing cranelift regression (bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14`); green from stale Jun-8 ELF |
+| riscv64 | **RED (fresh sweep 2026-06-14)** | both LLVM+cranelift rebuilds boot OpenSBI then die silent; good Jun-8 ELF lost (overwritten by dedup verify). Was never source-reproducible this session. Bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14` |
 | arm64 | GREEN (genuine EL0) | rebuild blocked by pre-existing env (x86 modules in arm64 scope); green from Jun-13 ELF; linker dedup statically verified |
 | x86_32 | GREEN | unchanged |
 | arm32 | GREEN ✅ | rebuilt; virtio-blk init fix (`fc1c73a`) |

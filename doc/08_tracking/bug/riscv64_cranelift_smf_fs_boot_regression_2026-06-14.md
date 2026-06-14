@@ -8,12 +8,21 @@
 
 ## Symptom
 
-Rebuilding `build/os/simpleos_riscv64_smf_fs.elf` from current source with the
-**cranelift** backend produces a ~171 KB ELF that boots in `qemu-system-riscv64`
-but emits **no kernel markers** (no `ELF_LOAD_OK`, no `TEST PASSED` — silent/early
-death). The last known-good artifact is the **Jun 8 86 KB** ELF, which boots green
-with all 6 markers (`ELF_LOAD_OK`, `SMF_CLI_LAUNCH_OK`, `SMF_WM_GUI_LAUNCH_OK`,
+Rebuilding `build/os/simpleos_riscv64_smf_fs.elf` from current source produces a
+~164–171 KB ELF that boots far enough for **OpenSBI** to load (banner appears) but
+the kernel then emits **no markers** (silent death right after the OpenSBI handoff).
+The last known-good artifact was the **Jun 8 86 KB** ELF (booted green, all 6
+markers: `ELF_LOAD_OK`, `SMF_CLI_LAUNCH_OK`, `SMF_WM_GUI_LAUNCH_OK`,
 `NATIVE_GUI_PROCESS_RENDER_OK`, `SIMPLEOS_RISCV_SMF_FS_PASS`, `TEST PASSED`).
+
+**UPDATE 2026-06-14 (full-sweep verification):** NOT cranelift-specific — the
+**LLVM** backend fails identically (164 KB ELF, OpenSBI banner then silence). And
+the good 86 KB artifact was **overwritten** during dedup verification, so the lane
+is now RED in a fresh sweep (it was previously green only because the stale Jun 8
+artifact was still on disk; riscv64 was never source-reproducible this session).
+The ~2× size jump (86 KB → 164–171 KB) on both backends points at a riscv64 kernel
+build/codegen change, not a backend bug. riscv32 (same shared `riscv_common.h`,
+LLVM backend) builds and boots GREEN — so the fault is riscv64-specific.
 
 ## Scope / proof it is PRE-EXISTING (not caused by the dedup)
 
