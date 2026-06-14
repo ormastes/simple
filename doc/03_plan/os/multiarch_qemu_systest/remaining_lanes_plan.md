@@ -237,6 +237,25 @@ manifests completed (15 sources), verifier `find` catches symlinks, gate script
 symlink + stray `.c` both fail. Dedup tier 4 still BLOCKED by the interpreter
 struct-array-literal hang.
 
+**Full-sweep clean-rebuild re-verification — 2026-06-14 (per-lane worktree rebuilds):**
+Re-ran the plan's "rebuild + boot all 6 lanes" step via isolated git worktrees
+(clean `build/os/`), to prove source-reproducibility rather than trust on-disk ELFs.
+This surfaced a real regression the stale-ELF boots had masked.
+
+| Lane | Clean-rebuild result | Notes |
+|------|----------------------|-------|
+| riscv64 | **GREEN (reproducible)** | 80 KB ELF, 0 unresolved, OpenSBI boot, 6/6 markers |
+| x86_64 | **GREEN (reproducible)** | 269 KB ELF, 0 unresolved, NVMe→FAT32→SMF, 5/5 + SMF_FS_PASS |
+| arm64 | **was RED → FIXED → GREEN (reproducible)** | clean build hit `undefined symbol: rt_pool_safepoint` (regression from the multicore-green loop-safepoint work — only x86_64's stub defined it). Fixed by adding the freestanding no-op stub to all baremetal arches (origin `8c8128fa815`); rebuilt 1880 KB ELF, 0 unresolved, **boots 7/7 markers incl genuine EL0 `user-svc-exit:ok`**. Bug `freestanding_rt_pool_safepoint_undefined_2026-06-14`. |
+| arm32 | **BLOCKED (env)** | requires `--backend llvm` (cranelift refuses armv7); no LLVM-enabled driver in this checkout. Fix stub applied (trivial no-op); boot unverified here. |
+| riscv32 | **BLOCKED (env)** | requires `--backend llvm` (cranelift refuses rv32); no LLVM-enabled driver in this checkout. build_stamp shows the env's llvm driver was replaced by a non-llvm build. Fix stub applied; unverified here. |
+| x86_32 | (re-verification in progress) | cranelift-capable; standard 5-marker set |
+
+The two `BLOCKED (env)` lanes are an **environment** limitation (missing LLVM driver),
+not a source-reproducibility failure; the recipe was validated against `build_stamp`.
+To unblock: rebuild an LLVM-enabled driver (`scripts/bootstrap/bootstrap-from-scratch.sh`,
+`--features llvm`; system LLVM present) and re-run those two lanes.
+
 **riscv64 independent re-verification — 2026-06-14:** rebuilt clean in a fresh git
 worktree off committed `origin/main` (zero pre-existing `build/os/*.elf`): seed-built
 ELF 80,144 B (clean ~78 KB, not the 100 KB+ networking-runtime blob), 0 unresolved
