@@ -41,6 +41,7 @@ class TuiWebBackend:
     initialized: bool
     current_html: text
     event_queue: [UIEvent]
+    event_head: i32
 
     static fn new() -> TuiWebBackend:
         """Create a TUI web backend with a fixed 120x40 virtual terminal."""
@@ -49,7 +50,8 @@ class TuiWebBackend:
             height: 40,
             initialized: false,
             current_html: "",
-            event_queue: []
+            event_queue: [],
+            event_head: 0
         )
 
     # --- Lifecycle ---
@@ -89,20 +91,28 @@ class TuiWebBackend:
 
     me push_event(event: UIEvent):
         """Add an event to the internal queue."""
-        self.event_queue = self.event_queue + [event]
+        self.event_queue.push(event)
 
     me poll_event(timeout_ms: i32) -> UIEvent?:
         """Pop the next event from the queue, or return nil if empty."""
-        if self.event_queue.len() == 0:
+        val queue_len = self.event_queue.len()
+        if self.event_head >= queue_len:
+            self.event_queue = []
+            self.event_head = 0
             return nil
-        val event = self.event_queue[0]
-        # Remove first element by rebuilding the list
-        var new_queue: [UIEvent] = []
-        var i = 1
-        while i < self.event_queue.len():
-            new_queue = new_queue + [self.event_queue[i]]
-            i = i + 1
-        self.event_queue = new_queue
+        val event = self.event_queue[self.event_head]
+        self.event_head = self.event_head + 1
+        if self.event_head >= queue_len:
+            self.event_queue = []
+            self.event_head = 0
+        elif self.event_head > 64 and self.event_head * 2 >= queue_len:
+            var compacted: [UIEvent] = []
+            var i = self.event_head
+            while i < queue_len:
+                compacted.push(self.event_queue[i])
+                i = i + 1
+            self.event_queue = compacted
+            self.event_head = 0
         return event
 
     fn input_envelope_json(surface_id: text, event: UIEvent) -> text:

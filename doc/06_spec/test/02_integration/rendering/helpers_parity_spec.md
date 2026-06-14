@@ -27,7 +27,7 @@ helpers_parity_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 66 | 66 | 0 | 0 |
+| 67 | 67 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -932,6 +932,25 @@ expect(order[order.len() - 1]).to_equal("cpu")
 
 </details>
 
+#### backend_full_preference_order keeps native surfaces before auto GPU order
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val order = backend_full_preference_order()
+expect(order[0]).to_equal("baremetal")
+expect(order[1]).to_equal("virtio_gpu")
+expect(order[2]).to_equal("metal")
+expect(order[3]).to_equal("cuda")
+expect(order[4]).to_equal("rocm")
+```
+
+</details>
+
 #### backend_is_hardware: cuda is hardware
 
 <details>
@@ -1122,8 +1141,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 66 |
-| Active scenarios | 66 |
+| Total scenarios | 67 |
+| Active scenarios | 67 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
