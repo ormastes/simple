@@ -162,6 +162,10 @@ gate is added.
 They also fail closed before measuring work if the runtime reports
 `queue_model=global_fifo` or `queue_model=scheduler_owned`; only a single
 `queue_model=work_stealing` marker may support M:N profile evidence.
+Generated multicore-green profile rows also print public runtime-pool counter
+evidence as `counter_delta=submitted/completed,pending=0,busy=0,blocked=0`.
+The report contract rejects rows that omit those counters because handle
+acceptance alone does not prove the pool drained cleanly after join.
 Reports include a `Profile contract:` header. Current evidence must say the
 contract was enforced; reports generated with `SKIP_PROFILE_REPORT_CONTRACT=1`
 are explicitly labeled as skipped and must not be cited as gated M:N evidence.
@@ -229,7 +233,7 @@ row.
 
 **Warm throughput (fib35):** C ≈ Simple-native < Go < Java (after JIT) < Bun < Simple-SMF < Erlang < Simple-interp < Python
 
-**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses Pure Simple `thread_spawn` fork-join. `thread_spawn_with_args` is tracked by the focused native smoke `scripts/check/check-thread-spawn-with-args-native.shs`, but it is not the profile baseline because the report is measuring scheduler and fanout behavior. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses the Pure Simple `multicore_green_spawn` facade over runtime-seed `rt_pool_*` support as the current M:N candidate until a scheduler-aware green runtime lands; do not describe this as a combined Pure Simple `multicore_green_spawn`/`rt_pool_*` user API. Use `multicore_green_spawn_sliced` only when the benchmark is explicitly measuring scalar-state sliced fairness rather than ordinary closure scheduling. The generated multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`, print `multicore_green_parallelism=requested/actual` and `queue_model=work_stealing`, check every handle with `used_runtime_pool()`, and fail the row if the runtime pool or work-stealing evidence is unavailable. Focused native smoke may also assert public counter deltas so the profile contract has scheduler progress evidence without exposing direct `rt_pool_*` symbols to user code.
+**Parallel (100 workers):** Go and C are the current native baselines; the OS-thread Simple row uses Pure Simple `thread_spawn` fork-join. `thread_spawn_with_args` is tracked by the focused native smoke `scripts/check/check-thread-spawn-with-args-native.shs`, but it is not the profile baseline because the report is measuring scheduler and fanout behavior. The implemented `std.concurrent.cooperative_green` API is cooperative and single-OS-thread, so it is not a drop-in Go-goroutine benchmark row. The `std.concurrent.multicore_green` row uses the Pure Simple `multicore_green_spawn` facade over runtime-seed `rt_pool_*` support as the current M:N candidate until a scheduler-aware green runtime lands; do not describe this as a combined Pure Simple `multicore_green_spawn`/`rt_pool_*` user API. Use `multicore_green_spawn_sliced` only when the benchmark is explicitly measuring scalar-state sliced fairness rather than ordinary closure scheduling. The generated multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`, print `multicore_green_parallelism=requested/actual`, `counter_delta=submitted/completed,pending=0,busy=0,blocked=0`, and `queue_model=work_stealing`, check every handle with `used_runtime_pool()`, and fail the row if the runtime pool, counter, or work-stealing evidence is unavailable.
 
 ### What matters per use case
 

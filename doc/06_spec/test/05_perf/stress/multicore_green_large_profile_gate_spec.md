@@ -113,6 +113,9 @@ The native multicore-green rows must include runtime-pool evidence:
 pool_used=100/100
 pool_used=1000/1000
 pool_used=512/512
+counter_delta=100/100,pending=0,busy=0,blocked=0
+counter_delta=1000/1000,pending=0,busy=0,blocked=0
+counter_delta=512/512,pending=0,busy=0,blocked=0
 queue_model=work_stealing
 ```
 
@@ -144,6 +147,9 @@ queue_model=work_stealing
   expected Go-vs-pthread scheduling-shape difference.
 - Every Simple multicore-green row used by this gate must carry `pool_used=`
   evidence so inline fallback cannot pass as M:N work.
+- Every Simple multicore-green row used by this gate must carry public
+  submitted/completed counter deltas and zero pending/busy/blocked state
+  evidence after join.
 - Every Simple multicore-green fanout row used by this gate must carry
   `queue_model=work_stealing` evidence.
 - Parallelism evidence must stay visible because the Simple runtime-pool width
@@ -176,7 +182,7 @@ queue_model=work_stealing
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -194,9 +200,12 @@ expect(report).to_contain("Report path:** `doc/09_report/cross_language_perf_202
 step("Check every multicore-green native row reports runtime-pool usage")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("pool_used=100/100")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("parallelism=64/64")
+expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("counter_delta=100/100,pending=0,busy=0,blocked=0")
 expect(model_text(row_for_label(parallel, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("pool_used=1000/1000")
+expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("counter_delta=1000/1000,pending=0,busy=0,blocked=0")
 expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("pool_used=512/512")
+expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("counter_delta=512/512,pending=0,busy=0,blocked=0")
 ```
 
 </details>
@@ -234,7 +243,7 @@ expect(model_text(row_for_label(stress, "Go"))).to_contain("goroutine per stress
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -246,8 +255,10 @@ step("Compare Simple multicore-green native rows against C pthread rows")
 expect(row_ms_scaled(fanout, "Simple multicore green (native)")).to_be_less_than(row_ms_scaled(fanout, "C (pthreads)"))
 expect(row_ms_scaled(stress, "Simple multicore green (native)")).to_be_less_than(row_ms_scaled(stress, "C (pthreads)"))
 expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("parallelism=")
+expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("counter_delta=")
 expect(model_text(row_for_label(fanout, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("parallelism=")
+expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("counter_delta=")
 expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_contain("queue_model=work_stealing")
 ```
 

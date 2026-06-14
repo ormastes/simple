@@ -81,8 +81,8 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Simple cooperative green (interp) |      138.303 | cooperative_green_spawn cooperative queue on current OS thread |
 | Simple cooperative green (SMF) |       51.207 | cooperative_green_spawn cooperative queue on current OS thread |
 | Simple cooperative green (native) |       22.210 | cooperative_green_spawn cooperative queue on current OS thread |
-| Simple multicore green (SMF) |      150.593 | multicore_green runtime pool candidate (pool_used=100/100, parallelism=64/64, queue_model=work_stealing) |
-| Simple multicore green (native) |      115.270 | multicore_green runtime pool candidate (pool_used=100/100, parallelism=64/64, queue_model=work_stealing) |
+| Simple multicore green (SMF) |      150.593 | multicore_green runtime pool candidate (pool_used=100/100, parallelism=64/64, counter_delta=100/100,pending=0,busy=0,blocked=0, queue_model=work_stealing) |
+| Simple multicore green (native) |      115.270 | multicore_green runtime pool candidate (pool_used=100/100, parallelism=64/64, counter_delta=100/100,pending=0,busy=0,blocked=0, queue_model=work_stealing) |
 | C (pthreads)           |       15.214 |                               OS threads |
 | Go                     |       18.345 |           goroutines + chan result (M:N) |
 | Python                 |     3007.684 |                          threading (GIL) |
@@ -97,8 +97,8 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Simple cooperative green (interp) |      113.477 |                 cooperative queue fanout on current OS thread |
 | Simple cooperative green (SMF) |       38.594 |                 cooperative queue fanout on current OS thread |
 | Simple cooperative green (native) |        5.836 |                 cooperative queue fanout on current OS thread |
-| Simple multicore green (SMF) |       42.633 | multicore_green runtime pool fanout (pool_used=1000/1000, parallelism=64/64, queue_model=work_stealing) |
-| Simple multicore green (native) |       19.621 | multicore_green runtime pool fanout (pool_used=1000/1000, parallelism=64/64, queue_model=work_stealing) |
+| Simple multicore green (SMF) |       42.633 | multicore_green runtime pool fanout (pool_used=1000/1000, parallelism=64/64, counter_delta=1000/1000,pending=0,busy=0,blocked=0, queue_model=work_stealing) |
+| Simple multicore green (native) |       19.621 | multicore_green runtime pool fanout (pool_used=1000/1000, parallelism=64/64, counter_delta=1000/1000,pending=0,busy=0,blocked=0, queue_model=work_stealing) |
 | C (pthreads)           |       53.742 |              one OS thread per tiny task |
 | Go                     |        9.307 |        goroutine per tiny task + channel |
 | Python                 |      120.250 |            threading per tiny task (GIL) |
@@ -108,7 +108,7 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 | Language               |     Avg (ms) |                        Concurrency model |
 |------------------------|--------------|------------------------------------------|
 | C (pthreads)           |       28.948 |                  pthread per stress task |
-| Simple multicore green (native) |       14.237 | multicore_green stress fanout (pool_used=512/512, parallelism=64/64, queue_model=work_stealing) |
+| Simple multicore green (native) |       14.237 | multicore_green stress fanout (pool_used=512/512, parallelism=64/64, counter_delta=512/512,pending=0,busy=0,blocked=0, queue_model=work_stealing) |
 | Go                     |        7.359 |          goroutine per stress task (M:N) |
 
 ## Hosted Fairness Evidence
@@ -153,11 +153,13 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 > pool-backed `multicore_green_spawn` fanout separately. Generated
 > multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`
 > before spawning tasks and print `multicore_green_parallelism=requested/actual`
-> evidence so the hosted pool limit is explicit.
+> plus `counter_delta=submitted/completed,pending=0,busy=0,blocked=0`
+> evidence so the hosted pool limit and clean pool drain are explicit.
 > The Simple-vs-Go-vs-C large fanout stress section repeats the stress shape at
 > `FANOUT_STRESS_WORKERS` workers and includes a Simple multicore-green native
-> row with `pool_used=N/N` evidence. It exists so the pthread-per-task baseline
-> cannot be mistaken for Go-style M:N scheduling when fanout grows.
+> row with `pool_used=N/N` and public counter evidence. It exists so the
+> pthread-per-task baseline cannot be mistaken for Go-style M:N scheduling when
+> fanout grows.
 > The hosted fairness section separately checks `multicore_green_spawn_sliced`.
 > It is an explicit scalar-state fairness contract for long Pure Simple work
 > and is not counted as automatic preemption evidence for ordinary

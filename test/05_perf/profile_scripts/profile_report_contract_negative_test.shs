@@ -284,6 +284,31 @@ printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row"
 cp "$source_report" "$tmp_report"
 
 awk '
+    /^## / {
+        in_fanout = ($0 ~ /^## Large Fanout Scheduling/)
+    }
+    in_fanout && /\| Simple multicore green \(native\)/ {
+        sub(/, counter_delta=[0-9]+\/[0-9]+,pending=0,busy=0,blocked=0/, "")
+    }
+    { print }
+' "$tmp_report" >"$tmp_edit"
+mv "$tmp_edit" "$tmp_report"
+
+set +e
+output="$(sh "$contract" cross_language "$script_path" "$tmp_report" 2>&1)"
+code=$?
+set -e
+
+if [ "$code" -eq 0 ]; then
+    fail "mutated Simple multicore-green counter evidence unexpectedly passed"
+fi
+
+printf '%s\n' "$output" | grep -Fq "invalid Simple multicore green evidence row" ||
+    fail "missing expected counter evidence failure message"
+
+cp "$source_report" "$tmp_report"
+
+awk '
     /Go scheduler: `GOMAXPROCS=/ {
         sub(/GOMAXPROCS=[0-9]+/, "GOMAXPROCS=32")
     }
@@ -612,6 +637,7 @@ echo "case=simple_multicore_queue_model_global_fifo"
 echo "case=simple_multicore_pool_used_partial"
 echo "case=simple_multicore_pool_used_zero"
 echo "case=simple_multicore_parallelism_missing"
+echo "case=simple_multicore_counter_evidence_missing"
 echo "case=go_scheduler_width_mismatch"
 echo "case=hosted_sliced_fairness_section_missing"
 echo "case=hosted_sliced_fairness_marker_corrupt"

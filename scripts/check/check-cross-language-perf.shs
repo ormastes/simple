@@ -257,6 +257,7 @@ pool_evidence() {
     _out=$(run_bounded "$_cmd" 2>&1) || { echo "pool_used=fail/$_expected"; return; }
     _used=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_pool_used = \([0-9][0-9]*\)\/[0-9][0-9]*.*/\1/p' | tail -1)
     _parallelism=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_parallelism = \([0-9][0-9]*\/[0-9][0-9]*\).*/\1/p' | tail -1)
+    _counters=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_counters = \(counter_delta=[0-9][0-9]*\/[0-9][0-9]*,pending=[0-9][0-9]*,busy=[0-9][0-9]*,blocked=[0-9][0-9]*\).*/\1/p' | tail -1)
     _queue_models=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_queue_model = \([A-Za-z_][A-Za-z0-9_]*\).*/\1/p')
     _queue_count=$(printf '%s\n' "$_queue_models" | sed '/^$/d' | wc -l | tr -d ' ')
     if [ -z "$_used" ]; then
@@ -271,6 +272,9 @@ pool_evidence() {
         _evidence="pool_used=$_used/$_expected"
         if [ -n "$_parallelism" ]; then
             _evidence="$_evidence, parallelism=$_parallelism"
+        fi
+        if [ -n "$_counters" ]; then
+            _evidence="$_evidence, $_counters"
         fi
         _evidence="$_evidence, queue_model=work_stealing"
         echo "$_evidence"
@@ -424,7 +428,7 @@ write_simple_parallel_multicore_green() {
     # Generated profile code must use MulticoreGreenHandle.join() rather than
     # importing rt_pool_* directly.
     {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, MulticoreGreenHandle}'
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, multicore_green_submitted_count, multicore_green_completed_count, multicore_green_pending_count, multicore_green_busy_count, multicore_green_blocked_count, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo ''
@@ -455,6 +459,8 @@ write_simple_parallel_multicore_green() {
         echo '        rt_exit(76)'
         echo '        return'
         echo '    println("multicore_green_queue_model = work_stealing")'
+        echo '    val submitted_before = multicore_green_submitted_count()'
+        echo '    val completed_before = multicore_green_completed_count()'
         echo '    var handles: [MulticoreGreenHandle] = []'
         echo "    for task in 0..${MULTICORE_GREEN_WORKERS}:"
         echo '        var handle = spawn_worker()'
@@ -466,9 +472,21 @@ write_simple_parallel_multicore_green() {
         echo '        val handle = handles[index]'
         echo '        pool_used = pool_used + 1'
         echo '        total = total + handle.join()'
+        echo '    val submitted_delta = multicore_green_submitted_count() - submitted_before'
+        echo '    val completed_delta = multicore_green_completed_count() - completed_before'
+        echo '    val pending_count = multicore_green_pending_count()'
+        echo '    val busy_count = multicore_green_busy_count()'
+        echo '    val blocked_count = multicore_green_blocked_count()'
+        echo '    println("multicore_green_counters = counter_delta={submitted_delta}/{completed_delta},pending={pending_count},busy={busy_count},blocked={blocked_count}")'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${MULTICORE_GREEN_WORKERS}:"
         echo '        rt_exit(73)'
+        echo '    if submitted_delta != pool_used:'
+        echo '        rt_exit(77)'
+        echo '    if completed_delta != pool_used:'
+        echo '        rt_exit(78)'
+        echo '    if pending_count != 0 or busy_count != 0 or blocked_count != 0:'
+        echo '        rt_exit(79)'
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'
@@ -555,7 +573,7 @@ write_simple_fanout_cooperative_green() {
 
 write_simple_fanout_multicore_green() {
     {
-        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, MulticoreGreenHandle}'
+        echo 'use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, multicore_green_submitted_count, multicore_green_completed_count, multicore_green_pending_count, multicore_green_busy_count, multicore_green_blocked_count, MulticoreGreenHandle}'
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo ''
@@ -586,6 +604,8 @@ write_simple_fanout_multicore_green() {
         echo '        rt_exit(76)'
         echo '        return'
         echo '    println("multicore_green_queue_model = work_stealing")'
+        echo '    val submitted_before = multicore_green_submitted_count()'
+        echo '    val completed_before = multicore_green_completed_count()'
         echo '    var handles: [MulticoreGreenHandle] = []'
         echo "    for task in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
         echo '        var handle = spawn_work()'
@@ -597,9 +617,21 @@ write_simple_fanout_multicore_green() {
         echo '        val handle = handles[index]'
         echo '        pool_used = pool_used + 1'
         echo '        total = total + handle.join()'
+        echo '    val submitted_delta = multicore_green_submitted_count() - submitted_before'
+        echo '    val completed_delta = multicore_green_completed_count() - completed_before'
+        echo '    val pending_count = multicore_green_pending_count()'
+        echo '    val busy_count = multicore_green_busy_count()'
+        echo '    val blocked_count = multicore_green_blocked_count()'
+        echo '    println("multicore_green_counters = counter_delta={submitted_delta}/{completed_delta},pending={pending_count},busy={busy_count},blocked={blocked_count}")'
         echo "    println(\"multicore_green_pool_used = {pool_used}/${FANOUT_MULTICORE_GREEN_WORKERS}\")"
         echo "    if pool_used != ${FANOUT_MULTICORE_GREEN_WORKERS}:"
         echo '        rt_exit(73)'
+        echo '    if submitted_delta != pool_used:'
+        echo '        rt_exit(77)'
+        echo '    if completed_delta != pool_used:'
+        echo '        rt_exit(78)'
+        echo '    if pending_count != 0 or busy_count != 0 or blocked_count != 0:'
+        echo '        rt_exit(79)'
         echo '    val expected = expected_total()'
         echo '    if total != expected:'
         echo '        println("checksum_mismatch total={total} expected={expected}")'
@@ -610,7 +642,7 @@ write_simple_fanout_multicore_green() {
 
 write_simple_fanout_stress_multicore_green() {
     cat >"$BUILD_DIR/fanout_stress_multicore_green.spl" <<EOF
-use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, MulticoreGreenHandle}
+use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, multicore_green_submitted_count, multicore_green_completed_count, multicore_green_pending_count, multicore_green_busy_count, multicore_green_blocked_count, MulticoreGreenHandle}
 extern fn rt_exit(code: i32)
 
 fn work() -> i64:
@@ -640,6 +672,8 @@ fn main():
         rt_exit(76)
         return
     println("multicore_green_queue_model = work_stealing")
+    val submitted_before = multicore_green_submitted_count()
+    val completed_before = multicore_green_completed_count()
     var handles: [MulticoreGreenHandle] = []
     for task in 0..${FANOUT_STRESS_WORKERS}:
         var handle = spawn_work()
@@ -651,9 +685,21 @@ fn main():
         val handle = handles[index]
         pool_used = pool_used + 1
         total = total + handle.join()
+    val submitted_delta = multicore_green_submitted_count() - submitted_before
+    val completed_delta = multicore_green_completed_count() - completed_before
+    val pending_count = multicore_green_pending_count()
+    val busy_count = multicore_green_busy_count()
+    val blocked_count = multicore_green_blocked_count()
+    println("multicore_green_counters = counter_delta={submitted_delta}/{completed_delta},pending={pending_count},busy={busy_count},blocked={blocked_count}")
     println("multicore_green_pool_used = {pool_used}/${FANOUT_STRESS_WORKERS}")
     if pool_used != ${FANOUT_STRESS_WORKERS}:
         rt_exit(73)
+    if submitted_delta != pool_used:
+        rt_exit(77)
+    if completed_delta != pool_used:
+        rt_exit(78)
+    if pending_count != 0 or busy_count != 0 or blocked_count != 0:
+        rt_exit(79)
     val expected = expected_total()
     if total != expected:
         println("checksum_mismatch total={total} expected={expected}")
@@ -1981,11 +2027,13 @@ cat >>"$REPORT_PATH" <<'EOF'
 > pool-backed `multicore_green_spawn` fanout separately. Generated
 > multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`
 > before spawning tasks and print `multicore_green_parallelism=requested/actual`
-> evidence so the hosted pool limit is explicit.
+> plus `counter_delta=submitted/completed,pending=0,busy=0,blocked=0`
+> evidence so the hosted pool limit and clean pool drain are explicit.
 > The Simple-vs-Go-vs-C large fanout stress section repeats the stress shape at
 > `FANOUT_STRESS_WORKERS` workers and includes a Simple multicore-green native
-> row with `pool_used=N/N` evidence. It exists so the pthread-per-task baseline
-> cannot be mistaken for Go-style M:N scheduling when fanout grows.
+> row with `pool_used=N/N` and public counter evidence. It exists so the
+> pthread-per-task baseline cannot be mistaken for Go-style M:N scheduling when
+> fanout grows.
 > The hosted fairness section separately checks `multicore_green_spawn_sliced`.
 > It is an explicit scalar-state fairness contract for long Pure Simple work
 > and is not counted as automatic preemption evidence for ordinary
