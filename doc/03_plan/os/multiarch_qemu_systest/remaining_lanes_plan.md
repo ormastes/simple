@@ -187,3 +187,35 @@ The x86_32 sibling passes via `initrd_fs_exec_probe_entry.spl` + `-initrd`.
   `MARKERS-PARTIAL`) is the deliverable for this session, with the blocker named — not
   a forced or faked green.
 - No `skip()`, no weakened asserts, no unconditional marker prints, no TODO→NOTE.
+
+---
+
+## FINAL STATE — 2026-06-14 (all lanes settled)
+
+All 3 target lanes reached **GREEN**, plus the 7th (darwin) lane added and the
+duplication removed. Every lane independently re-verified by Opus (binary-safe
+`grep -a` on the committed serial log) and every green-making source confirmed on
+origin — each agent's commits were lost to parallel reconcile and re-pushed via
+git-plumbing.
+
+| Lane | State | Build/boot notes |
+|------|-------|------------------|
+| riscv64 | GREEN (boot) | ⚠ rebuild blocked — pre-existing cranelift regression (bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14`); green from stale Jun-8 ELF |
+| arm64 | GREEN (genuine EL0) | rebuild blocked by pre-existing env (x86 modules in arm64 scope); green from Jun-13 ELF; linker dedup statically verified |
+| x86_32 | GREEN | unchanged |
+| arm32 | GREEN ✅ | rebuilt; virtio-blk init fix (`fc1c73a`) |
+| riscv32 | GREEN ✅ | **needs LLVM-backed driver** (cranelift blocks rv32); rebuilt green |
+| x86_64 | GREEN ✅ | NVMe + FAT32 (O1 ratified, `0c4561b`); rebuilt green |
+| aarch64-darwin | hosted — RED on Linux (honest `missing-media`), GREEN on Apple Silicon | 7th platform; merged into contract + build matrix; both files check OK |
+
+**Duplication removed (−~830 L owned code, verify-or-revert):**
+- riscv: `arch/common/riscv_common.h` (−360 L ×2) + `linker_riscv_common.ld`
+  (−50 L ×2). riscv32 build-verified; riscv64 static-equivalence verified.
+- arm: `arch/common/linker_arm_common.ld` (fs_exec linker pair). arm32 build-verified;
+  arm64 static-equivalence verified. Tier 2b already shared; Tier 2c skipped
+  (EL0-adjacent, ~15 L). Contract-table tier 4 BLOCKED by interpreter struct-array
+  hang (see `duplication_analysis.md`).
+
+**Reproducibility caveats to fix later:** riscv64 cranelift regression (bug filed);
+arm64 rebuild env (x86 modules pulled into arm64 source scope); riscv32 LLVM-driver
+requirement (document in build tooling).
