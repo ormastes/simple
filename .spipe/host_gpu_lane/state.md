@@ -37,3 +37,5 @@ implementing
 - doc: Refreshed SPipe and UI/WebGPU guide references for the canonical host GPU event-flow wrapper and remaining full-GPU evidence gap.
 - impl: Added `Engine2dHostGpuQueuePacket` as the deterministic queue-packet descriptor future `later(...)` lowering/runtime transport must emit.
 - spec: Extended backend lane SSpec coverage to 18 tests for cross-lane packet sequence, payload checksum, fallback state, and invalid sequence rejection; regenerated `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.md`.
+- impl: Added `Engine2dHostGpuQueueTransportEvidence` to validate deterministic runtime queue drain accounting over lowered packet descriptors.
+- spec: Extended backend lane SSpec coverage to 20 tests for ordered transport payload/fallback/checksum accounting and out-of-sequence rejection; regenerated `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.md`.

@@ -27,7 +27,7 @@ backend_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -437,6 +437,97 @@ expect(packet.diagnostic).to_contain("sequence")
 
 </details>
 
+#### records ordered queue transport accounting
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val draw_packet = engine2d_host_gpu_queue_packet(
+    1,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    128,
+    4096,
+    false,
+    false,
+    true,
+    20
+)
+val glyph_packet = engine2d_host_gpu_queue_packet(
+    2,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "glyph_batch",
+    256,
+    4096,
+    false,
+    false,
+    false,
+    20
+)
+val evidence = engine2d_host_gpu_queue_transport_evidence([draw_packet, glyph_packet])
+
+expect(evidence.ok).to_equal(true)
+expect(evidence.packet_count).to_equal(2)
+expect(evidence.total_payload_bytes).to_equal(384)
+expect(evidence.first_sequence).to_equal(1)
+expect(evidence.last_sequence).to_equal(2)
+expect(evidence.drained_in_order).to_equal(true)
+expect(evidence.fallback_count).to_equal(1)
+expect(evidence.host_commit_count).to_equal(0)
+expect(evidence.checksum).to_equal(6945)
+expect(engine2d_host_gpu_queue_transport_summary(evidence)).to_contain("packets=2")
+```
+
+</details>
+
+#### rejects queue transport drained out of sequence order
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val first = engine2d_host_gpu_queue_packet(
+    2,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    128,
+    4096,
+    false,
+    false,
+    true,
+    20
+)
+val second = engine2d_host_gpu_queue_packet(
+    1,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "glyph_batch",
+    256,
+    4096,
+    false,
+    false,
+    true,
+    20
+)
+val evidence = engine2d_host_gpu_queue_transport_evidence([first, second])
+
+expect(evidence.ok).to_equal(false)
+expect(evidence.drained_in_order).to_equal(false)
+expect(evidence.diagnostic).to_contain("sequence")
+```
+
+</details>
+
 #### records event flow timings and speedup for strict GPU batches
 
 <details>
@@ -574,8 +665,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

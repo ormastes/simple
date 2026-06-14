@@ -97,6 +97,12 @@ payload checksum, fallback state, and host-commit ownership. The descriptor does
 not submit to a device; it makes the queue packet ABI testable before the
 hardware backend lands.
 
+`Engine2dHostGpuQueueTransportEvidence` validates deterministic queue drain
+accounting over those descriptors. It records packet count, total payload bytes,
+maximum packet bound, first/last sequence, order preservation, fallback count,
+host-commit count, and aggregate checksum. This is the runtime-transport
+contract above packet construction and below real hardware submission.
+
 ## Performance Model
 
 For this slice, GPU batch performance is a deterministic evidence estimate:

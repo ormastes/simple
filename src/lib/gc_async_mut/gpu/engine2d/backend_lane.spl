@@ -77,6 +77,19 @@ struct Engine2dHostGpuQueuePacket:
     fallback_explicit: bool
     committed_on_host: bool
 
+struct Engine2dHostGpuQueueTransportEvidence:
+    ok: bool
+    diagnostic: text
+    packet_count: i64
+    total_payload_bytes: i64
+    max_packet_bytes: i64
+    first_sequence: i64
+    last_sequence: i64
+    drained_in_order: bool
+    fallback_count: i64
+    host_commit_count: i64
+    checksum: i64
+
 fn engine2d_drawing_backend_lane(backend_name: text) -> Engine2dBackendLane:
     Engine2dBackendLane(
         lane: ENGINE2D_BACKEND_LANE_DRAWING,
@@ -297,6 +310,66 @@ fn engine2d_host_gpu_queue_packet(sequence: i64, source_lane: text, target_lane:
 fn engine2d_host_gpu_queue_packet_summary(packet: Engine2dHostGpuQueuePacket) -> text:
     "ok={packet.ok};seq={packet.sequence};source={packet.source_lane};target={packet.target_lane};exec={packet.execution_kind};operation={packet.operation};payload={packet.payload_bytes}/{packet.max_packet_bytes};checksum={packet.payload_checksum};fallback={packet.fallback_explicit};host_commit={packet.committed_on_host};diagnostic={packet.diagnostic}"
 
+fn engine2d_host_gpu_queue_transport_evidence(packets: [Engine2dHostGpuQueuePacket]) -> Engine2dHostGpuQueueTransportEvidence:
+    """Validate deterministic queue drain accounting for lowered later(...) packets."""
+    var ok = true
+    var diagnostic = ""
+    var packet_count: i64 = 0
+    var total_payload_bytes: i64 = 0
+    var max_packet_bytes: i64 = 0
+    var first_sequence: i64 = 0
+    var last_sequence: i64 = 0
+    var previous_sequence: i64 = 0
+    var drained_in_order = true
+    var fallback_count: i64 = 0
+    var host_commit_count: i64 = 0
+    var checksum: i64 = 0
+
+    for packet in packets:
+        packet_count = packet_count + 1
+        if first_sequence == 0:
+            first_sequence = packet.sequence
+        if packet.sequence <= previous_sequence:
+            drained_in_order = false
+        previous_sequence = packet.sequence
+        last_sequence = packet.sequence
+        total_payload_bytes = total_payload_bytes + packet.payload_bytes
+        if packet.max_packet_bytes > max_packet_bytes:
+            max_packet_bytes = packet.max_packet_bytes
+        checksum = checksum + packet.payload_checksum
+        if packet.fallback_explicit:
+            fallback_count = fallback_count + 1
+        if packet.committed_on_host:
+            host_commit_count = host_commit_count + 1
+        if not packet.ok:
+            ok = false
+            if diagnostic == "":
+                diagnostic = packet.diagnostic
+
+    if packet_count == 0:
+        ok = false
+        diagnostic = "queue transport requires at least one packet"
+    elif not drained_in_order:
+        ok = false
+        diagnostic = "queue packets drained out of sequence order"
+
+    Engine2dHostGpuQueueTransportEvidence(
+        ok: ok,
+        diagnostic: diagnostic,
+        packet_count: packet_count,
+        total_payload_bytes: total_payload_bytes,
+        max_packet_bytes: max_packet_bytes,
+        first_sequence: first_sequence,
+        last_sequence: last_sequence,
+        drained_in_order: drained_in_order,
+        fallback_count: fallback_count,
+        host_commit_count: host_commit_count,
+        checksum: checksum
+    )
+
+fn engine2d_host_gpu_queue_transport_summary(evidence: Engine2dHostGpuQueueTransportEvidence) -> text:
+    "ok={evidence.ok};packets={evidence.packet_count};payload_bytes={evidence.total_payload_bytes};max_packet={evidence.max_packet_bytes};seq={evidence.first_sequence}->{evidence.last_sequence};ordered={evidence.drained_in_order};fallback_count={evidence.fallback_count};host_commit_count={evidence.host_commit_count};checksum={evidence.checksum};diagnostic={evidence.diagnostic}"
+
 fn engine2d_host_gpu_event_flow_evidence(source_lane: text, target_lane: text, operation: text, event_count: i64, draw_ir_delta_count: i64, packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, per_widget_dispatch: bool, strict_backend_available: bool, event_to_draw_ir_ms: i64, draw_ir_to_submit_baseline_ms: i64, submit_to_present_baseline_ms: i64, baseline_frame_p50_ms: i64, baseline_frame_p95_ms: i64, pixel_hash: i64, event_order_preserved: bool) -> Engine2dHostGpuEventFlowEvidence:
     """Build deterministic host/GPU lane event-flow evidence for SSpec and perf reports."""
     val schedule = engine2d_host_gpu_lane_schedule(source_lane, target_lane, operation, packet_bytes, max_packet_bytes, mutates_host_semantics, per_widget_dispatch, strict_backend_available, baseline_frame_p50_ms)
@@ -344,7 +417,7 @@ export ENGINE2D_BACKEND_LANE_DRAWING, ENGINE2D_BACKEND_LANE_PROCESSING, ENGINE2D
 export ENGINE2D_HOST_GPU_LANE_HOST, ENGINE2D_HOST_GPU_LANE_GPU
 export ENGINE2D_HOST_GPU_EXEC_DIRECT, ENGINE2D_HOST_GPU_EXEC_PACKET
 export Engine2dBackendLane, Engine2dBackendLanePlan
-export Engine2dHostGpuLaneResult, Engine2dHostGpuEventFlowEvidence, Engine2dHostGpuQueuePacket
+export Engine2dHostGpuLaneResult, Engine2dHostGpuEventFlowEvidence, Engine2dHostGpuQueuePacket, Engine2dHostGpuQueueTransportEvidence
 export engine2d_drawing_backend_lane, engine2d_processing_backend_lane, engine2d_combined_backend_lane
 export engine2d_backend_lane_summary, engine2d_backend_lane_plan, engine2d_operation_lane
 export engine2d_backend_lane_drawing_preference_order, engine2d_backend_lane_full_preference_order
@@ -352,4 +425,5 @@ export engine2d_backend_lane_preference_summary, engine2d_backend_lane_preferred
 export engine2d_font_offload_backend_order, engine2d_backend_lane_preferred_font_offload_candidate
 export engine2d_host_gpu_lane_schedule, engine2d_host_gpu_lane_summary
 export engine2d_host_gpu_queue_packet, engine2d_host_gpu_queue_packet_summary
+export engine2d_host_gpu_queue_transport_evidence, engine2d_host_gpu_queue_transport_summary
 export engine2d_host_gpu_event_flow_evidence, engine2d_host_gpu_event_flow_summary
