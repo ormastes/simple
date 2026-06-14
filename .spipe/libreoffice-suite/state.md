@@ -76,9 +76,12 @@ possible so they are runner-verifiable.
    `attributed_text` DocBlock model (the existing `word/render.spl` targets a
    stale DocBlock API + the broken UI tree). Spec 4/4. All three office surfaces
    — markdown, slides, word — now share ONE CSS substrate.
-3. TODO — **Markdown WYSIWYG view in IDE**: styled preview beside line edit,
-   using slices 2/2b. Reuse `std.editor.render.md_renderer` (AC-4 of
-   ide-office-plugin-suite) — do not write a new renderer.
+3. DONE (landed origin 493118d) — **Markdown WYSIWYG view** (`office/md_wysiwyg.spl`):
+   `build_wysiwyg_view` pairs each editable source line with its styled-HTML
+   preview; `wysiwyg_source_pane`/`wysiwyg_preview_pane` + per-line
+   `wysiwyg_update_line` (edit-and-re-render). Pure model→view, no GUI dep — IDE
+   TUI+GUI both consume it. Spec `test/01_unit/app/office/md_wysiwyg_spec.spl`
+   5/5. Follow-up: wire into the IDE's actual editor surface.
 4. DONE (landed origin d0ca1b9) — **PPT renders like MS PPT**:
    `app.office.slides.html_render.render_slide_html` maps each element's role
    (title/subtitle/body, inferred from layout + position) to the resolver's
@@ -105,8 +108,12 @@ possible so they are runner-verifiable.
    draw→SVG renderer needs (a) a shape model and (b) the f64 toolchain fix
    (coords are f64 — same nested-payload bug). Do not fabricate an unverifiable
    renderer. `simple_db` and a Math formula-editor remain to scope.
-8. TODO — **Game-tool migrate + connect**: `examples/11_advanced/game2d`
-   connect to draw/calc/db.
+8. DONE (landed origin effc1b1) — **Game-tool connect** (`office/game_bridge.spl`):
+   declares game↔{calc,draw,db} connection targets; implements Calc-as-game-data
+   (`calc_cells_to_game_values`/`calc_row_to_game_tokens` — a game reads level/
+   tuning tokens from a spreadsheet by cell ref, verified via direct run:
+   "wall floor door"). Draw/Base honestly flagged not-yet-implemented (blocked by
+   the same drawing-model/f64 issues as slice 7). Connection-surface spec 2/2.
 9. DONE (landed origin 626f970) — **Rename to "LibreOffice"** (minimal/honest):
    `app.office.libreoffice` brands the suite "LibreOffice" and maps components to
    Writer/Calc/Impress/Draw/Base/Math, with an `implemented` flag reporting only
