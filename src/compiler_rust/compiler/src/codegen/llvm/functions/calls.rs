@@ -2371,7 +2371,17 @@ impl LlvmBackend {
         // Store result if there's a destination
         if let Some(d) = dest {
             if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                vreg_map.insert(d, ret_val);
+                let final_ret = if sffi_name == "rt_pool_join" {
+                    let raw = self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?.into_int_value();
+                    let shift = i64_type.const_int(3, false);
+                    builder
+                        .build_left_shift(raw, shift, "rt_pool_join_tagged")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_pool_join tag", &e))?
+                        .into()
+                } else {
+                    ret_val
+                };
+                vreg_map.insert(d, final_ret);
             } else {
                 let default_val = i64_type.const_int(0, false);
                 vreg_map.insert(d, default_val.into());

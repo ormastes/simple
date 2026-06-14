@@ -46,6 +46,11 @@ Date: 2026-06-13
   ignored platform delegate, and profile/user wrappers must skip stale
   delegates unless they pass `--version`.
   These native compile/run SSpecs remain perf-sensitive at roughly one minute.
+- 2026-06-14 fresh compiler evidence fixed the hosted native `rt_pool_join`
+  value boundary: LLVM native-build now tags raw runtime-pool join integers
+  before storing them in Simple vregs, and the Cranelift SFFI path has the same
+  result-tagging rule. `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
+  now clean-builds and exits `0` with runtime-pool counter drain evidence.
 
 ## Coordination Contract
 
@@ -395,6 +400,9 @@ Each agent reports:
   numeric-suffix API-alias rejection and active source/profile scans are part
   of the selected non-functional gate rather than only tracking commentary.
 - Focused checks from the latest pushed slice passed:
+  - `src/compiler_rust/target/debug/simple native-build --clean --source src/lib --entry test/01_unit/lib/nogc_async_mut/multicore_green_native.spl --output build/test/multicore_green_native && ./build/test/multicore_green_native`
+  - `sh scripts/check/check-thread-spawn-with-args-native.shs`
+  - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
   - `test/03_system/feature/usage/multicore_green_tracking_spec.spl`
   - `test/05_perf/stress/multicore_green_large_profile_gate_spec.spl`
   - `test/05_perf/profile_scripts/profile_report_contract_test.shs`

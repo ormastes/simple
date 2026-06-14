@@ -2228,29 +2228,18 @@ fn compile_known_enum_constructor_call<M: Module>(
     true
 }
 
-/// Check if a runtime function returns a RuntimeValue that should be untagged to raw i64.
-/// These are functions that return RuntimeValue containing integers that need to be extracted.
+/// Check if a runtime function returns a raw integer that should be tagged as a RuntimeValue.
+/// These are runtime functions whose C ABI returns an unboxed integer, while the
+/// native Simple value path expects tagged integer values in vregs.
 ///
 /// NOTE: rt_array_get, rt_tuple_get, rt_index_get, rt_dict_get are NOT included here
 /// because they return RuntimeValue that could be any type (string, object, etc.),
 /// not just integers. Untagging should be done based on the expected result type,
 /// not the function name. The caller should handle type-specific untagging.
-fn needs_runtime_value_untagging(func_name: &str) -> bool {
-    // Currently no functions need automatic untagging.
-    // Type-specific untagging is handled by the MIR Unbox instruction.
-    matches!(func_name, "")
-}
-
-/// Untag a RuntimeValue to raw i64 by right-shifting 3 bits.
-/// RuntimeValue integers are encoded as (value << 3) | TAG_INT where TAG_INT = 0.
-/// So untagging is simply value >> 3 (arithmetic shift).
-#[allow(dead_code)] // reason: reachable via SFFI or future entry point; not yet wired
-fn untag_runtime_value_to_int(
-    builder: &mut FunctionBuilder,
-    value: cranelift_codegen::ir::Value,
-) -> cranelift_codegen::ir::Value {
-    let three = builder.ins().iconst(types::I64, 3);
-    builder.ins().sshr(value, three)
+fn needs_runtime_value_result_tagging(func_name: &str) -> bool {
+    // The C runtime-pool join returns the worker's raw i64 result; tag it for
+    // native Simple arithmetic/formatting before storing it in a vreg.
+    matches!(func_name, "rt_pool_join")
 }
 
 /// Returns which Simple-level argument indices are text parameters for a given
@@ -2881,8 +2870,8 @@ pub fn compile_call<M: Module>(
 
         // Check if this function needs RuntimeValue tagging for certain arguments
         let tagging_indices = needs_runtime_value_tagging(sffi_name);
-        // Check if this function returns RuntimeValue that needs untagging
-        let needs_untagging = needs_runtime_value_untagging(sffi_name);
+        // Check if this function returns a raw value that needs Simple tagging.
+        let needs_tagging = needs_runtime_value_result_tagging(sffi_name);
 
         // First collect VReg values with defaults
         let mut arg_vals = Vec::with_capacity(args.len());
@@ -2942,9 +2931,9 @@ pub fn compile_call<M: Module>(
                     }
                 }
 
-                // Untag the result if needed
-                let final_result = if needs_untagging {
-                    untag_runtime_value_to_int(builder, result)
+                // Tag the result if needed.
+                let final_result = if needs_tagging {
+                    tag_int_as_runtime_value(builder, result)
                 } else {
                     result
                 };
