@@ -65,6 +65,9 @@ mirror the Engine2D lane contract:
   a host-owned semantic field such as `.checked`.
 - `HGL-BATCH` is a warning when `target.later(...) gpu \:` appears as a
   per-widget loop dispatch instead of a frame-level render/effect batch.
+- `HGL-MAX-PACKET` is a hard error when a `target.later(...) gpu \:` block omits
+  explicit `max_packet`, because compiler lowering must produce bounded queue
+  packets before runtime transport or device submission.
 
 These diagnostics are covered by Rust driver unit tests. A local deployed
 `bin/simple` may still require a binary refresh before it reflects the edited

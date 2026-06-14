@@ -164,7 +164,7 @@ test, not a visual UI test.
 #### should accept canonical gpu and host lane markers after later
 
 - Check the canonical target.later(...) gpu and host grammar
-- "target later
+- "packet target later
 - "target later
    - Expected: code equals `0`
 
@@ -178,7 +178,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Check the canonical target.later(...) gpu and host grammar")
 val source = host_gpu_fixture(
-    "target.later() gpu \\:\n" +
+    "packet_target.later(max_packet: 512) gpu \\:\n" +
     "    val draw_ir_batch = \"DisplayGraphIR batch\"\n" +
     "target.later() host \\:\n" +
     "    val semantic_owner = \"host\"\n"

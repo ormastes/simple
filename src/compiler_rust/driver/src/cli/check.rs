@@ -349,6 +349,20 @@ fn validate_host_gpu_lane_source(file_path: &Path, source: &str, errors: &mut Ve
         }
         if trimmed.contains(" gpu \\:") {
             in_gpu_lane = true;
+            if trimmed.contains("later") && !trimmed.contains("max_packet") {
+                errors.push(CheckError {
+                    file: file_path.display().to_string(),
+                    line: line_number,
+                    column: line.find("gpu \\:").map(|idx| idx + 1).unwrap_or(1),
+                    severity: ErrorSeverity::Error,
+                    code: Some("HGL-MAX-PACKET".to_string()),
+                    message: "GPU later() lane requires explicit max_packet".to_string(),
+                    expected: Some("target.later(max_packet: <bytes>) gpu \\:".to_string()),
+                    found: Some("GPU later() without max_packet".to_string()),
+                    notes: vec!["Host/GPU lane lowering must emit bounded queue packets so runtime transport can reject oversized batches before device submission.".to_string()],
+                    help: vec!["Use target.later(max_packet: 4096) gpu \\: or another explicit packet bound sized for the Draw IR/resource batch.".to_string()],
+                });
+            }
             if in_loop && trimmed.contains("later") {
                 errors.push(CheckError {
                     file: file_path.display().to_string(),
@@ -2563,7 +2577,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "fn main():\n    button.later() gpu \\:\n        button.checked = true"
+            "fn main():\n    button.later(max_packet: 512) gpu \\:\n        button.checked = true"
         )
         .unwrap();
 
@@ -2580,7 +2594,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
             file,
-            "fn main():\n    for widget in widgets:\n        widget.later() gpu \\:\n            draw(widget)"
+            "fn main():\n    for widget in widgets:\n        widget.later(max_packet: 512) gpu \\:\n            draw(widget)"
         )
         .unwrap();
 
@@ -2588,6 +2602,18 @@ mod tests {
         assert_eq!(result.status, CheckStatus::Warning);
         assert!(result.errors.iter().any(|error| {
             error.code.as_deref() == Some("HGL-BATCH") && error.message.contains("per-widget GPU later() call")
+        }));
+    }
+
+    #[test]
+    fn test_check_requires_max_packet_for_gpu_later_lane() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "fn main():\n    button.later() gpu \\:\n        draw(button)").unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result.errors.iter().any(|error| {
+            error.code.as_deref() == Some("HGL-MAX-PACKET") && error.message.contains("requires explicit max_packet")
         }));
     }
 

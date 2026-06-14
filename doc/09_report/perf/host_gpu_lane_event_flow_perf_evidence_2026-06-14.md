@@ -28,7 +28,7 @@ changing pixel hashes, event order, or fallback reporting.
 | Host/GPU queue packet descriptor | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Records deterministic `later(...)` queue-packet sequence, source/target lanes, operation, execution kind, payload bytes, max packet bytes, payload checksum, fallback state, and host-commit ownership for future lowering/runtime transport. |
 | Host/GPU queue transport evidence | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Validates deterministic queue drain accounting: packet count, total payload bytes, max packet bound, first/last sequence, order preservation, fallback count, host-commit count, and aggregate checksum. |
 | Draw IR executor event-flow bridge | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | Feeds real `engine2d_draw_ir_adv_composition` rendered-command counts and pixel readback into host/GPU event-flow evidence. |
-| Native `simple check` lane lint | `src/compiler_rust/driver/src/cli/check.rs` | Emits `HGL-SEMANTIC` for GPU semantic mutation and `HGL-BATCH` for per-widget GPU dispatch in the production Rust check path. |
+| Native `simple check` lane lint | `src/compiler_rust/driver/src/cli/check.rs` | Emits `HGL-SEMANTIC` for GPU semantic mutation, `HGL-BATCH` for per-widget GPU dispatch, and `HGL-MAX-PACKET` for GPU `later()` without explicit packet bounds in the production Rust check path. |
 | Full render offload plan | `doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md` | Defines CPU host tree/events/layout -> Draw IR/Graph IR -> GPU render graph/raster/composite/present. |
 | Host/GPU grammar system spec | `test/03_system/feature/language/host_gpu_lane_spec.spl` | Guards canonical `target.later(...) gpu \:` and `target.later(...) host \:` grammar. Do not edit for this lane. |
 | GUI retained-frame baseline | `scripts/check/check-gtk-gui-size-speed-baseline.shs` | Emits cached BrowserBackend frame, no-op frame, present cache, retained Engine2D pixels, vector text render, GTK comparison, RSS, and ratio fields. |
@@ -76,6 +76,7 @@ Results:
 | Draw IR executor event-flow bridge | PASS: 4 tests; `feeds rendered Draw IR command counts into host GPU event-flow evidence` records `draw_ir_delta_count=2`, `packet_bytes=256`, `pixel_hash=0xff00ff00`, and `speedup_x1000=2000` from a real Engine2D Draw IR composition result. |
 | Native driver `HGL-SEMANTIC` unit | PASS: `test_check_rejects_host_semantic_mutation_in_gpu_lane`, 1 passed. |
 | Native driver `HGL-BATCH` unit | PASS: `test_check_warns_for_loop_local_gpu_later_dispatch`, 1 passed. |
+| Native driver `HGL-MAX-PACKET` unit | PASS: `test_check_requires_max_packet_for_gpu_later_lane`, 1 passed. |
 | Debug native `simple check` smoke | PASS/expected failure: `src/compiler_rust/target/debug/simple check` returns nonzero and prints `error[HGL-SEMANTIC]` for a GPU lane `.checked = true` mutation. |
 | Deterministic strict-GPU event-flow contract | PASS: sample evidence records `events=3`, `draw_ir_deltas=2`, `packet=384/4096`, `event_to_present_ms=12`, `baseline_p50_ms=20`, `candidate_p50_ms=10`, `candidate_p95_ms=15`, `speedup_x1000=2000`, `pixel_hash=1113616374`, `fallback=false`. |
 | `fill_1080p` smoke | `backend=simple_cpu_scalar`, 16x16 smoke, 3 frames, `p50_ns=186000`, `pixels_per_sec=1376344`, `draws_per_sec=543010`, `pixel_hash=1113616374`. |

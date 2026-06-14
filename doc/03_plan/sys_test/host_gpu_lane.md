@@ -59,6 +59,7 @@ Generated/manual mirror:
 | HGL-007 | Draw IR execution feeds rendered command counts and pixel readback into host/GPU event-flow evidence | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | feeds rendered Draw IR command counts into host GPU event-flow evidence | Full for CPU-fallback Draw IR executor evidence; real GPU device submission pending |
 | HGL-008 | Runtime/lowering queue packets have deterministic sequence, payload bounds, checksum, fallback, and host-commit fields | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.spl` | builds deterministic queue packets for cross-lane lowering; rejects queue packets without a positive sequence | Full for deterministic packet descriptor; compiler lowering/runtime transport pending |
 | HGL-009 | Runtime queue transport drains packets in sequence and records payload, fallback, host-commit, and checksum accounting | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.spl` | records ordered queue transport accounting; rejects queue transport drained out of sequence order | Full for deterministic transport accounting; hardware queue submission pending |
+| HGL-010 | GPU `later()` source requires explicit `max_packet` before compiler lowering can emit bounded queue packets | `src/compiler_rust/driver/src/cli/check.rs` | `test_check_requires_max_packet_for_gpu_later_lane` | Full for native Rust check source; deployed binary refresh pending |
 
 ## Evidence Policy
 
