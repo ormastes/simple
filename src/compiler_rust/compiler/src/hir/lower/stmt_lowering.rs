@@ -419,7 +419,31 @@ impl Lowerer {
                     .module
                     .types
                     .get_iterable_element(iterable.ty)
-                    .unwrap_or(crate::hir::TypeId::ANY);
+                    .unwrap_or_else(|| {
+                        // For range BuiltinCalls (rt_range / rt_range_inclusive),
+                        // the element type is the integer type of the start/end args.
+                        // Without this, loop vars get TypeId::ANY, which skips BoxInt
+                        // in rt_value_to_string lowering, producing <value:0xN> in native.
+                        if let crate::hir::HirExprKind::BuiltinCall { ref name, ref args } = iterable.kind {
+                            if name == "rt_range" || name == "rt_range_inclusive" {
+                                if let Some(start) = args.first() {
+                                    match start.ty {
+                                        crate::hir::TypeId::I8
+                                        | crate::hir::TypeId::I16
+                                        | crate::hir::TypeId::I32
+                                        | crate::hir::TypeId::I64
+                                        | crate::hir::TypeId::U8
+                                        | crate::hir::TypeId::U16
+                                        | crate::hir::TypeId::U32
+                                        | crate::hir::TypeId::U64 => return start.ty,
+                                        _ => {}
+                                    }
+                                }
+                                return crate::hir::TypeId::I64;
+                            }
+                        }
+                        crate::hir::TypeId::ANY
+                    });
 
                 // Check if this is a tuple pattern for destructuring
                 if let Pattern::Tuple(patterns) = &for_stmt.pattern {

@@ -1,11 +1,24 @@
 # Bug: Native List Indexing with Loop Variables
 
-Status: Open
+Status: resolved (2026-06-14)
 
 **Date:** 2026-06-05
 **Severity:** High
 **Component:** compiler/codegen (Cranelift native)
-**Status:** Open
+**Status:** resolved (2026-06-14)
+
+## Resolution (2026-06-14)
+
+Root cause: in `for i in 0..N`, HIR `Node::For` lowering
+(`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs`) gave the loop var
+`TypeId::ANY` because the `rt_range` builtin iterable reports element type `ANY`.
+An untagged i64 loop var then skipped `rt_value_to_string` boxing → formatted as
+`<value:0x1>` and corrupted list indexing. Fix: infer the concrete integer
+element type from the `rt_range`/`rt_range_inclusive` start argument (default
+`TypeId::I64`). Verified: native build of the loop-index repro now matches the
+interpreter exactly. Requires seed rebuild to deploy. (Same i64-boxing family as
+the `native-build` codegen notes in
+`lsp_mcp_integer_position_args_corrupted_2026-06-14`.)
 
 ## Description
 

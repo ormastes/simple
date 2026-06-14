@@ -4,7 +4,18 @@
 - **Severity:** P1 (silent logic divergence between interpreted and compiled code)
 - **Date:** 2026-06-12
 - **Component:** stage4 native pipeline (cranelift lane) — imported `const` resolution in compiled comparisons
-- **Status:** OPEN (one call site mitigated with numeric literals)
+- **Status:** resolved (2026-06-14)
+
+## Resolution (2026-06-14)
+
+`const X = 3` without a type annotation was lowered with `TypeId::ANY` in both
+the defining-module pass (`hir/lower/module_lowering/module_pass.rs`) and the
+import-loader pass (`hir/lower/import_loader.rs`). On an `ANY`-typed operand the
+equality lowering routed through `rt_native_eq` and applied `BoxInt` (shift-left
+by 3) to only the non-ANY side, comparing `rt_native_eq(24, 3)` instead of
+`(3, 3)`. Fix: infer the literal type for unannotated consts (`Integer`→`I64`,
+`String`/`FString`→`STRING`) in both passes. Verified: cross-module and local
+`check_tag(3)`→1, `check_tag(2)`→2, `check_tag(99)`→0. Requires seed rebuild.
 
 ## Symptom
 

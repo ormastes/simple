@@ -503,6 +503,12 @@ impl Lowerer {
                 // Register constant
                 let ty = if let Some(ref t) = c.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else if try_const_eval(&c.value).is_some() {
+                    // Unannotated integer literal const → infer i64 so comparisons
+                    // against it don't fall into the ANY boxing path (bug: stage4_imported_const_compare)
+                    TypeId::I64
+                } else if matches!(&c.value, Expr::String(_) | Expr::FString { .. }) {
+                    TypeId::STRING
                 } else {
                     TypeId::ANY
                 };

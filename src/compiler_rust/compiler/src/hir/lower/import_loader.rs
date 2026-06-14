@@ -3,7 +3,7 @@
 //! This module handles loading type definitions from imported modules during HIR lowering,
 //! enabling compile-time type checking for imports like `import a.{ShapeError}`.
 
-use simple_parser::ast::{ImportTarget, ModulePath, Node};
+use simple_parser::ast::{Expr, ImportTarget, ModulePath, Node};
 use std::path::{Path, PathBuf};
 
 use super::super::types::{HirType, TypeId};
@@ -418,6 +418,13 @@ impl Lowerer {
                     if self.should_import_symbol(&const_stmt.name, target) {
                         let ty = if let Some(ref t) = const_stmt.ty {
                             self.resolve_type(t).unwrap_or(TypeId::ANY)
+                        } else if matches!(&const_stmt.value, Expr::Integer(_)) {
+                            // Unannotated integer literal const → infer i64 so comparisons
+                            // against imported consts don't fall into the ANY boxing path
+                            // (bug: stage4_imported_const_compare)
+                            TypeId::I64
+                        } else if matches!(&const_stmt.value, Expr::String(_) | Expr::FString { .. }) {
+                            TypeId::STRING
                         } else {
                             TypeId::ANY
                         };
