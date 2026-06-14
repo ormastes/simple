@@ -1,7 +1,7 @@
 # Bug: freestanding `rt_pool_safepoint` undefined on non-x86_64 baremetal arches
 
 **ID:** freestanding_rt_pool_safepoint_undefined_2026-06-14
-**Status:** FIXED (origin `8c8128fa815`)
+**Status:** FIXED (origin `f47ddc609bd` — scoped to arm64 only; supersedes the intermediate all-arches `8c8128fa815`)
 **Severity:** P1 — breaks the arm64 QEMU systest lane from a clean source build (cranelift-emitted symbol; other lanes verified unaffected)
 **Found by:** multiarch QEMU systest full-sweep verification (clean-worktree rebuild of every lane)
 
