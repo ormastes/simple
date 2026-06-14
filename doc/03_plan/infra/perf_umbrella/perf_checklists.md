@@ -49,7 +49,11 @@ Spec: `test/01_unit/app/interpreter/perf_spec.spl`, `test/05_perf/lang/lang_scri
 
 ## 2. Language — Compiler (SMF + Native)
 
-Harness: `sh scripts/check/check-cross-language-perf.shs` in SMF mode (`simple .smf`) and native mode (`./binary`).
+Harness: `bin/simple run src/app/test/bench/bench_baseline_driver.spl` emits
+script and SMF-mode language baseline rows by compiling
+`src/app/test/bench/bench_smf_workload.spl` to SMF and parsing its self-timed
+output. Keep `sh scripts/check/check-cross-language-perf.shs` for the separate
+C/Go/pherallel comparison harness.
 Specs: `test/05_perf/lang/lang_script_vs_compiler_bench_spec.spl` (AC-4); `test/02_integration/app/simple/smf_cache_reuse_spec.spl` (AC-7).
 
 ### Baseline & Measurement
@@ -64,7 +68,8 @@ Specs: `test/05_perf/lang/lang_script_vs_compiler_bench_spec.spl` (AC-4); `test/
 - [ ] **[OPEN]** Binary size audited via `check-startup-size-performance-audit.shs` after each native build change; size table updated in `doc/10_metrics/perf/compiler_baseline.md`.
 
 ### Warm Throughput
-- [ ] **[OPEN]** SMF warm throughput (fib35 in-process, `check-cross-language-perf.shs` SMF mode) re-measured post-P1 and recorded.
+- [ ] **[OPEN]** SMF warm throughput (`bench_baseline_driver.spl` SMF-mode rows
+  from `bench_smf_workload.spl`) re-measured post-P1 and recorded.
 - [ ] **[OPEN]** Native Cranelift AOT throughput (`check-cross-language-perf.shs` native mode) re-measured; `pure_simple_ctype_perf_gap` (Cranelift no inlining) either resolved or filed as explicit open bug with measurement.
 - [ ] **[CLOSED]** Parallel workers (rayon/green-thread) benchmarked via `check-cross-language-perf.shs` `WORKERS`/`FANOUT_WORKERS` dimensions (DONE per research).
 
