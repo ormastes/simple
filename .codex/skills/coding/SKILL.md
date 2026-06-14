@@ -242,7 +242,15 @@ report index plus `doc/03_plan/agent_tasks/multicore_green.md` handoff via
 `report_index_checked=doc/09_report/README.md` and
 `agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md`;
 `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
-checks the stale/misleading failure cases; and
+checks the stale/misleading failure cases, including exact public counter
+evidence such as
+`counter_delta=submitted/completed,pending=0,busy=0,blocked=0`;
+`test/05_perf/profile_scripts/profile_help_contract_test.shs` keeps `--help`
+inspection from starting expensive profile compilation;
+`test/05_perf/profile_scripts/profile_binary_autoselect_test.shs` keeps stale
+release wrappers from being selected over the current Simple binary;
+`test/05_perf/stress/multicore_green_large_profile_gate_spec.spl` gates the
+checked large-fanout/stress profile evidence; and
 `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` checks
 approved public concurrency names, wrong-surface imports, direct runtime-pool
 access, shared mutable green captures, and numeric-suffix aliases across active

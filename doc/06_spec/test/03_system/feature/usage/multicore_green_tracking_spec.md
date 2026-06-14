@@ -705,7 +705,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 134 lines folded for reproduction.
+Runnable source: 138 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -755,6 +755,10 @@ expect(coding).to_contain("Cross-language profile")
 expect(coding).to_contain("Pure Simple user API")
 expect(coding).to_contain("runtime-seed support")
 expect(coding).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
+expect(coding).to_contain("test/05_perf/profile_scripts/profile_help_contract_test.shs")
+expect(coding).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
+expect(coding).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_spec.spl")
+expect(coding).to_contain("counter_delta=submitted/completed,pending=0,busy=0,blocked=0")
 expect(coding).to_contain("doc/09_report/README.md")
 expect(coding).to_contain("report_index_checked=doc/09_report/README.md")
 expect(coding).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
