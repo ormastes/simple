@@ -1,9 +1,10 @@
 # Multiarch QEMU Systest — Remaining Lanes Plan (riscv32 / arm32 / x86_64)
 
-**Status:** 3/6 lanes green (riscv64, arm64, x86_32). 3 lanes report `missing-media`
-because their kernel ELFs are not built. This plan drives the 3 remaining lanes to
-green — or to an honest, documented blocker — via parallel per-arch agents reviewed
-by Opus.
+**Status:** COMPLETE as of 2026-06-14. The original 6 QEMU lanes are green
+(riscv64, arm64, x86_32, arm32, riscv32, x86_64). The added aarch64-darwin hosted
+lane is honestly platform-scoped: green on Apple Silicon and `missing-media` on
+Linux. This file is now the completion record for the remaining-lanes push, not an
+open work queue.
 
 **Goal framing (Stop-hook):** "remake plan for remains with tests and parallel agents
 (Sonnet impl, Haiku where mechanical, Opus review). Full detail plan and impl."
@@ -24,23 +25,24 @@ with binary-safe matching (`grep -a` — `ugrep` skips NUL-containing logs):
 | `BLOCKED:<X>` | cannot build; specific blocker named |
 
 The session goal is satisfied by **plan committed + each lane driven to its honest
-state with the blocker named** — not only by 3/3 GREEN. We do not promise 3/3; we
-promise honest, verified progress with no cover-ups.
+state with the blocker named** — not only by 3/3 GREEN. The final state exceeded
+that floor: the 3 remaining QEMU lanes are GREEN, and the hosted Darwin lane records
+its Linux `missing-media` result honestly.
 
 ## Shared facts (all 3 lanes)
 
 - **Contract:** `src/os/qemu_systest_contract.spl` (kernel path, image path, qemu bin,
-  qemu args, markers, timeout per arch). Already correct — **do not edit** unless a
-  marker set is genuinely wrong; coordinate first (shared file).
+  qemu args, markers, timeout per arch). The contract now includes the settled x86_64
+  NVMe/FAT32 model and the aarch64-darwin hosted lane.
 - **Build target reference data:** `src/os/port/simpleos_multiplatform_build_part2.spl`
-  (`qemu_acceptance_lane` per platform). riscv32 + arm32 targets already declared;
-  x86_64 fs_exec target is **absent** and must be added.
-- **Specs (already exist, currently RED):**
+  (`qemu_acceptance_lane` per platform). riscv32, arm32, x86_64, and aarch64-darwin
+  targets are declared.
+- **Specs:**
   - `test/03_system/os/qemu/sys_qemu_riscv32_fs_exec_spec.spl`
   - `test/03_system/os/qemu/sys_qemu_arm32_fs_exec_spec.spl`
   - `test/03_system/os/qemu/sys_qemu_x86_64_fs_exec_spec.spl`
   Each asserts `classification == SYSTEST_PASS`; missing kernel → `missing-media:<path>`
-  → spec fails (correct RED). No spec edits needed — the work is making them pass.
+  → spec fails (correct RED). These specs now pass against committed-source evidence.
 - **Build recipe (proven on arm64):**
   ```
   env SIMPLE_BOOT_MINIMAL=1 \
@@ -55,8 +57,8 @@ promise honest, verified progress with no cover-ups.
   Builds get killed under heavy parallel-Codex load → run **nice'd, in background,
   with retries**, not inline.
 - **Disk images:** `build/os/fat32-<arch>.img` already exist for all 6 arches
-  (verified present). riscv32/arm32 lanes consume them via virtio-blk. x86_64 lane
-  qemu args currently carry **no disk** — see x86_64 task O1.
+  (verified present). riscv32/arm32 lanes consume them via virtio-blk. x86_64 uses
+  the resolved NVMe/FAT32 model.
 - **Known 32-bit ABI bug class (from arm64 Path B):** the freestanding runtime passes
   Simple arrays as RAW untagged pointers, so `.len()` / `arr[i]` / module-level `val`
   (tagged-only reads) mis-read. Fix with `rt_arm_array_len_u32` /
@@ -86,12 +88,9 @@ promise honest, verified progress with no cover-ups.
 **Markers:** `ELF_LOAD_OK`, `SMF_CLI_LAUNCH_OK`, `SMF_WM_GUI_LAUNCH_OK`,
 `NATIVE_GUI_PROCESS_RENDER_OK`, `TEST PASSED`.
 
-**Current state:** entry (`arch/arm32/fs_exec_entry.spl`), linker
-(`fs_exec_linker.ld`), boot (`baremetal_stubs.c`, `crt0.s`, `baremetal_interrupt_control.S`)
-and build target all present. Prior build artifact
-`simpleos_arm32_fs_exec_nostubs_probe.elf` (May 13) exists → build path was exercised.
-**Gap:** the entry emits `[arm-fs-exec]…`/`process-backed:ok` markers, NOT the 4
-contract markers (`ELF_LOAD_OK` etc.). Mirror the arm64 marker reconciliation.
+**Final state:** GREEN. Entry, linker, boot sources, build target, virtio-blk init,
+and contract markers are present. Evidence: `build/os/systest/arm32.serial.log` and
+`test/03_system/os/qemu/sys_qemu_arm32_fs_exec_spec.spl`.
 
 **Steps:**
 1. Build `simpleos_arm32_fs_exec.elf` with the recipe (triple `arm-unknown-none-eabi`
@@ -111,11 +110,10 @@ contract markers (`ELF_LOAD_OK` etc.). Mirror the arm64 marker reconciliation.
 **Markers:** `ELF_LOAD_OK`, `SMF_CLI_LAUNCH_OK`, `SMF_WM_GUI_LAUNCH_OK`,
 `NATIVE_GUI_PROCESS_RENDER_OK`, `TEST PASSED`.
 
-**Current state:** entry = `arch/riscv32/smoke_entry.spl`, linker =
-`arch/riscv32/linker.ld`, boot = `arch/riscv32/boot/baremetal_stubs.c` — all present.
-The **passing** riscv64 lane uses the identical structure
-(`arch/riscv64/smoke_entry.spl` → `simpleos_riscv64_smf_fs.elf`). So the work is a
-32-bit port of the working riscv64 smf_fs kernel.
+**Final state:** GREEN. The rv32 lane uses the shared smf_fs path, auto-selects the
+LLVM backend, emits the full marker set, and boots under QEMU. Evidence:
+`build/os/systest/riscv32.serial.log` and
+`test/03_system/os/qemu/sys_qemu_riscv32_fs_exec_spec.spl`.
 
 **Steps:**
 1. Diff `arch/riscv64/smoke_entry.spl` vs `arch/riscv32/smoke_entry.spl`; align the
@@ -131,23 +129,17 @@ The **passing** riscv64 lane uses the identical structure
 ## Lane C — x86_64 (highest effort; author entry + target + resolve disk)
 
 **Output:** `build/os/simpleos_x86_64_fs_exec.elf` · **qemu:** `qemu-system-x86_64`
--cpu qemu64 -m 512M -nographic **-kernel only (no disk/initrd in current args)**.
+-cpu qemu64 -m 512M -nographic with the resolved NVMe/FAT32 disk model.
 **Markers:** `ELF_LOAD_OK`, `SMF_CLI_LAUNCH_OK`, `SMF_WM_GUI_LAUNCH_OK`,
 `NATIVE_GUI_PROCESS_RENDER_OK`, `TEST PASSED`.
 
-**Current state:** NO fs_exec entry, NO fs_exec build target. x86_64 has a mature boot
-(`boot_stage1..4_entry.spl`, SMP, paging, `boot/` with crt0/context_switch/syscall).
-The x86_32 sibling passes via `initrd_fs_exec_probe_entry.spl` + `-initrd`.
+**Final state:** GREEN. The fs_exec entry, build target, and NVMe/FAT32 disk model
+are in place. Evidence: `build/os/systest/x86_64.serial.log` and
+`test/03_system/os/qemu/sys_qemu_x86_64_fs_exec_spec.spl`.
 
-**Open questions (resolve before coding):**
-- **O1 — disk model:** x86_64 qemu args have no `-initrd`/`-drive`. Either (a) add
-  `-initrd build/os/fat32-x86_64.img` to the contract args (shared-file edit — Opus
-  coordinates) mirroring x86_32, or (b) make the kernel self-contained (embedded
-  payload, load-proof only like riscv64/x86_64's documented bar). Decide via what the
-  markers can honestly assert.
-- **O2 — build target:** add an `x86_64` `qemu_acceptance_lane` to
-  `simpleos_multiplatform_build_part2.spl` (entry + `linker.ld` + output
-  `simpleos_x86_64_fs_exec.elf` + boot sources already listed for x86_64).
+**Resolved questions:**
+- **O1 — disk model:** resolved as NVMe + FAT32.
+- **O2 — build target:** resolved by adding the x86_64 `qemu_acceptance_lane`.
 
 **Steps:**
 1. Author `arch/x86_64/fs_exec_entry.spl` mirroring x86_32's
@@ -198,6 +190,15 @@ duplication removed. Every lane independently re-verified by Opus (binary-safe
 origin — each agent's commits were lost to parallel reconcile and re-pushed via
 git-plumbing.
 
+**Codex verification refresh — 2026-06-14:** confirmed this completion record
+against the current workspace. `bin/simple test --mode=interpreter` passes for all
+six QEMU lane specs:
+`sys_qemu_riscv64_fs_exec_spec.spl`, `sys_qemu_arm64_fs_exec_spec.spl`,
+`sys_qemu_x86_32_fs_exec_spec.spl`, `sys_qemu_arm32_fs_exec_spec.spl`,
+`sys_qemu_riscv32_fs_exec_spec.spl`, and `sys_qemu_x86_64_fs_exec_spec.spl`.
+`scripts/check-simpleos-native-surface.shs` reports `STATUS: PASS`, and
+`find doc/06_spec -name '*_spec.spl' | wc -l` reports `0`.
+
 | Lane | State | Build/boot notes |
 |------|-------|------------------|
 | riscv64 | **GREEN ✅ (source-reproducible 2026-06-14)** | root cause: accidental `arch/riscv64/boot/freestanding_runtime.c` `#include`-ing the 100 KB networking runtime, compiled in via the linker boot-dir glob + minimal allowlist (78→175 KB, displaced reset vector). Renamed → `full_networking_runtime.c` (`ab37912`). x86 `glass_render.c` symlink also removed. Verified: fresh 78 KB build, real OpenSBI boot, 6/6 markers. Bug closed |
@@ -215,6 +216,13 @@ git-plumbing.
   arm64 static-equivalence verified. Tier 2b already shared; Tier 2c skipped
   (EL0-adjacent, ~15 L). Contract-table tier 4 BLOCKED by interpreter struct-array
   hang (see `duplication_analysis.md`).
+- contract spl (Tier 1, landed 2026-06-14, origin tip `fd51c63`): shared
+  `default_qemu_timeout_ms()` (1a — 6 QEMU lanes delegate, darwin keeps 15000) +
+  `standard_smf_markers()` (1b — riscv32/arm32/x86_64 delegate the identical 5-marker
+  set; riscv64/arm64/x86_32/darwin keep their distinct sets). Interpreter
+  `[text]`-helper-delegation probed safe; marker literals byte-identical (git diff);
+  `simple check` OK. Tier 1 now fully complete; safe dedup plan exhausted (only the
+  documented-BLOCKED tier 4 remains).
 
 **Reproducibility caveats — RESOLVED 2026-06-14:** riscv64 regression fixed
 (accidental boot-dir wrapper renamed); arm64 rebuild env fixed (x86 `glass_render.c`
@@ -228,3 +236,12 @@ manifests completed (15 sources), verifier `find` catches symlinks, gate script
 `scripts/check-simpleos-native-surface.shs` wired into pre-commit. Verified planted
 symlink + stray `.c` both fail. Dedup tier 4 still BLOCKED by the interpreter
 struct-array-literal hang.
+
+**riscv64 independent re-verification — 2026-06-14:** rebuilt clean in a fresh git
+worktree off committed `origin/main` (zero pre-existing `build/os/*.elf`): seed-built
+ELF 80,144 B (clean ~78 KB, not the 100 KB+ networking-runtime blob), 0 unresolved
+symbols (`nm`), real OpenSBI v1.3 boot → `FS_MOUNT_OK` → `SMF_DISCOVERY_OK` → ELF load
+→ CLI/GUI launch → render → all 5 markers + `SIMPLEOS_RISCV_SMF_FS_PASS`. Confirms the
+lane is reproducible-from-source (not an orphaned artifact); origin tree carries
+`full_networking_runtime.c` (96 B) with no `freestanding_runtime.c` in the boot-glob
+dir. Reproduction log: `build/os/systest/riscv64_source_reproduction_2026-06-14.serial.log`.
