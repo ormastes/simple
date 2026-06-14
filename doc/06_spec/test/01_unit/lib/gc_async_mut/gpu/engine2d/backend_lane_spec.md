@@ -27,7 +27,7 @@ backend_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -528,6 +528,139 @@ expect(evidence.diagnostic).to_contain("sequence")
 
 </details>
 
+#### records strict queue submission and readback evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val draw_packet = engine2d_host_gpu_queue_packet(
+    1,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    128,
+    4096,
+    false,
+    false,
+    true,
+    20
+)
+val glyph_packet = engine2d_host_gpu_queue_packet(
+    2,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "glyph_batch",
+    256,
+    4096,
+    false,
+    false,
+    true,
+    20
+)
+val transport = engine2d_host_gpu_queue_transport_evidence([draw_packet, glyph_packet])
+val evidence = engine2d_host_gpu_queue_submission_evidence(
+    transport,
+    true,
+    4,
+    3,
+    1113616374,
+    1113616374
+)
+
+expect(evidence.ok).to_equal(true)
+expect(evidence.submitted_to_device).to_equal(true)
+expect(evidence.rejected_before_submission).to_equal(false)
+expect(evidence.readback_verified).to_equal(true)
+expect(evidence.submitted_packet_count).to_equal(2)
+expect(evidence.submitted_payload_bytes).to_equal(384)
+expect(engine2d_host_gpu_queue_submission_summary(evidence)).to_contain("readback_verified=true")
+```
+
+</details>
+
+#### rejects fallback queue packets before device submission
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val fallback_packet = engine2d_host_gpu_queue_packet(
+    1,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    128,
+    4096,
+    false,
+    false,
+    false,
+    20
+)
+val transport = engine2d_host_gpu_queue_transport_evidence([fallback_packet])
+val evidence = engine2d_host_gpu_queue_submission_evidence(
+    transport,
+    true,
+    4,
+    3,
+    1113616374,
+    1113616374
+)
+
+expect(evidence.ok).to_equal(false)
+expect(evidence.submitted_to_device).to_equal(false)
+expect(evidence.rejected_before_submission).to_equal(true)
+expect(evidence.diagnostic).to_contain("fallback")
+```
+
+</details>
+
+#### rejects GPU submission when readback hash mismatches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val packet = engine2d_host_gpu_queue_packet(
+    1,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    128,
+    4096,
+    false,
+    false,
+    true,
+    20
+)
+val transport = engine2d_host_gpu_queue_transport_evidence([packet])
+val evidence = engine2d_host_gpu_queue_submission_evidence(
+    transport,
+    true,
+    4,
+    3,
+    1113616374,
+    42
+)
+
+expect(evidence.ok).to_equal(false)
+expect(evidence.submitted_to_device).to_equal(true)
+expect(evidence.rejected_before_submission).to_equal(false)
+expect(evidence.readback_verified).to_equal(false)
+expect(evidence.diagnostic).to_contain("hash mismatch")
+```
+
+</details>
+
 #### records event flow timings and speedup for strict GPU batches
 
 <details>
@@ -665,8 +798,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

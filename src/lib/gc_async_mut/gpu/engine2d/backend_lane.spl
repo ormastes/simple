@@ -90,6 +90,20 @@ struct Engine2dHostGpuQueueTransportEvidence:
     host_commit_count: i64
     checksum: i64
 
+struct Engine2dHostGpuQueueSubmissionEvidence:
+    ok: bool
+    diagnostic: text
+    transport: Engine2dHostGpuQueueTransportEvidence
+    submitted_to_device: bool
+    rejected_before_submission: bool
+    readback_verified: bool
+    submitted_packet_count: i64
+    submitted_payload_bytes: i64
+    device_submit_ms: i64
+    readback_ms: i64
+    readback_pixel_hash: i64
+    expected_pixel_hash: i64
+
 fn engine2d_drawing_backend_lane(backend_name: text) -> Engine2dBackendLane:
     Engine2dBackendLane(
         lane: ENGINE2D_BACKEND_LANE_DRAWING,
@@ -370,6 +384,63 @@ fn engine2d_host_gpu_queue_transport_evidence(packets: [Engine2dHostGpuQueuePack
 fn engine2d_host_gpu_queue_transport_summary(evidence: Engine2dHostGpuQueueTransportEvidence) -> text:
     "ok={evidence.ok};packets={evidence.packet_count};payload_bytes={evidence.total_payload_bytes};max_packet={evidence.max_packet_bytes};seq={evidence.first_sequence}->{evidence.last_sequence};ordered={evidence.drained_in_order};fallback_count={evidence.fallback_count};host_commit_count={evidence.host_commit_count};checksum={evidence.checksum};diagnostic={evidence.diagnostic}"
 
+fn engine2d_host_gpu_queue_submission_evidence(transport: Engine2dHostGpuQueueTransportEvidence, strict_backend_available: bool, device_submit_ms: i64, readback_ms: i64, readback_pixel_hash: i64, expected_pixel_hash: i64) -> Engine2dHostGpuQueueSubmissionEvidence:
+    """Validate the final queue submission/readback gate above runtime packet drain."""
+    var ok = transport.ok
+    var diagnostic = transport.diagnostic
+    var submitted_to_device = false
+    var rejected_before_submission = false
+    var readback_verified = false
+    var submitted_packet_count: i64 = 0
+    var submitted_payload_bytes: i64 = 0
+
+    if not transport.ok:
+        ok = false
+        rejected_before_submission = true
+        if diagnostic == "":
+            diagnostic = "queue transport failed before device submission"
+    elif transport.fallback_count > 0:
+        ok = false
+        rejected_before_submission = true
+        diagnostic = "queue transport contains fallback packets; device submission skipped"
+    elif not strict_backend_available:
+        ok = false
+        rejected_before_submission = true
+        diagnostic = "strict GPU backend unavailable; device submission skipped"
+    elif device_submit_ms <= 0 or readback_ms <= 0:
+        ok = false
+        rejected_before_submission = true
+        diagnostic = "device submission and readback timings must be positive"
+    elif readback_pixel_hash != expected_pixel_hash:
+        ok = false
+        submitted_to_device = true
+        submitted_packet_count = transport.packet_count
+        submitted_payload_bytes = transport.total_payload_bytes
+        diagnostic = "GPU readback pixel hash mismatch"
+    else:
+        submitted_to_device = true
+        readback_verified = true
+        submitted_packet_count = transport.packet_count
+        submitted_payload_bytes = transport.total_payload_bytes
+
+    Engine2dHostGpuQueueSubmissionEvidence(
+        ok: ok,
+        diagnostic: diagnostic,
+        transport: transport,
+        submitted_to_device: submitted_to_device,
+        rejected_before_submission: rejected_before_submission,
+        readback_verified: readback_verified,
+        submitted_packet_count: submitted_packet_count,
+        submitted_payload_bytes: submitted_payload_bytes,
+        device_submit_ms: device_submit_ms,
+        readback_ms: readback_ms,
+        readback_pixel_hash: readback_pixel_hash,
+        expected_pixel_hash: expected_pixel_hash
+    )
+
+fn engine2d_host_gpu_queue_submission_summary(evidence: Engine2dHostGpuQueueSubmissionEvidence) -> text:
+    "ok={evidence.ok};submitted={evidence.submitted_to_device};rejected_before_submission={evidence.rejected_before_submission};readback_verified={evidence.readback_verified};packets={evidence.submitted_packet_count};payload_bytes={evidence.submitted_payload_bytes};submit_ms={evidence.device_submit_ms};readback_ms={evidence.readback_ms};hash={evidence.readback_pixel_hash}/{evidence.expected_pixel_hash};diagnostic={evidence.diagnostic}"
+
 fn engine2d_host_gpu_event_flow_evidence(source_lane: text, target_lane: text, operation: text, event_count: i64, draw_ir_delta_count: i64, packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, per_widget_dispatch: bool, strict_backend_available: bool, event_to_draw_ir_ms: i64, draw_ir_to_submit_baseline_ms: i64, submit_to_present_baseline_ms: i64, baseline_frame_p50_ms: i64, baseline_frame_p95_ms: i64, pixel_hash: i64, event_order_preserved: bool) -> Engine2dHostGpuEventFlowEvidence:
     """Build deterministic host/GPU lane event-flow evidence for SSpec and perf reports."""
     val schedule = engine2d_host_gpu_lane_schedule(source_lane, target_lane, operation, packet_bytes, max_packet_bytes, mutates_host_semantics, per_widget_dispatch, strict_backend_available, baseline_frame_p50_ms)
@@ -417,7 +488,7 @@ export ENGINE2D_BACKEND_LANE_DRAWING, ENGINE2D_BACKEND_LANE_PROCESSING, ENGINE2D
 export ENGINE2D_HOST_GPU_LANE_HOST, ENGINE2D_HOST_GPU_LANE_GPU
 export ENGINE2D_HOST_GPU_EXEC_DIRECT, ENGINE2D_HOST_GPU_EXEC_PACKET
 export Engine2dBackendLane, Engine2dBackendLanePlan
-export Engine2dHostGpuLaneResult, Engine2dHostGpuEventFlowEvidence, Engine2dHostGpuQueuePacket, Engine2dHostGpuQueueTransportEvidence
+export Engine2dHostGpuLaneResult, Engine2dHostGpuEventFlowEvidence, Engine2dHostGpuQueuePacket, Engine2dHostGpuQueueTransportEvidence, Engine2dHostGpuQueueSubmissionEvidence
 export engine2d_drawing_backend_lane, engine2d_processing_backend_lane, engine2d_combined_backend_lane
 export engine2d_backend_lane_summary, engine2d_backend_lane_plan, engine2d_operation_lane
 export engine2d_backend_lane_drawing_preference_order, engine2d_backend_lane_full_preference_order
@@ -426,4 +497,5 @@ export engine2d_font_offload_backend_order, engine2d_backend_lane_preferred_font
 export engine2d_host_gpu_lane_schedule, engine2d_host_gpu_lane_summary
 export engine2d_host_gpu_queue_packet, engine2d_host_gpu_queue_packet_summary
 export engine2d_host_gpu_queue_transport_evidence, engine2d_host_gpu_queue_transport_summary
+export engine2d_host_gpu_queue_submission_evidence, engine2d_host_gpu_queue_submission_summary
 export engine2d_host_gpu_event_flow_evidence, engine2d_host_gpu_event_flow_summary

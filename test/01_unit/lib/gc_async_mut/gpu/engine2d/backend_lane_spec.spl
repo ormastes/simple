@@ -26,6 +26,8 @@ use std.gpu.engine2d.backend_lane.{
     engine2d_host_gpu_lane_summary,
     engine2d_host_gpu_queue_packet,
     engine2d_host_gpu_queue_packet_summary,
+    engine2d_host_gpu_queue_submission_evidence,
+    engine2d_host_gpu_queue_submission_summary,
     engine2d_host_gpu_queue_transport_evidence,
     engine2d_host_gpu_queue_transport_summary,
     engine2d_operation_lane,
@@ -336,6 +338,106 @@ describe "Engine2D backend lane split":
         expect(evidence.ok).to_equal(false)
         expect(evidence.drained_in_order).to_equal(false)
         expect(evidence.diagnostic).to_contain("sequence")
+
+    it "records strict queue submission and readback evidence":
+        val draw_packet = engine2d_host_gpu_queue_packet(
+            1,
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            128,
+            4096,
+            false,
+            false,
+            true,
+            20
+        )
+        val glyph_packet = engine2d_host_gpu_queue_packet(
+            2,
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "glyph_batch",
+            256,
+            4096,
+            false,
+            false,
+            true,
+            20
+        )
+        val transport = engine2d_host_gpu_queue_transport_evidence([draw_packet, glyph_packet])
+        val evidence = engine2d_host_gpu_queue_submission_evidence(
+            transport,
+            true,
+            4,
+            3,
+            1113616374,
+            1113616374
+        )
+
+        expect(evidence.ok).to_equal(true)
+        expect(evidence.submitted_to_device).to_equal(true)
+        expect(evidence.rejected_before_submission).to_equal(false)
+        expect(evidence.readback_verified).to_equal(true)
+        expect(evidence.submitted_packet_count).to_equal(2)
+        expect(evidence.submitted_payload_bytes).to_equal(384)
+        expect(engine2d_host_gpu_queue_submission_summary(evidence)).to_contain("readback_verified=true")
+
+    it "rejects fallback queue packets before device submission":
+        val fallback_packet = engine2d_host_gpu_queue_packet(
+            1,
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            128,
+            4096,
+            false,
+            false,
+            false,
+            20
+        )
+        val transport = engine2d_host_gpu_queue_transport_evidence([fallback_packet])
+        val evidence = engine2d_host_gpu_queue_submission_evidence(
+            transport,
+            true,
+            4,
+            3,
+            1113616374,
+            1113616374
+        )
+
+        expect(evidence.ok).to_equal(false)
+        expect(evidence.submitted_to_device).to_equal(false)
+        expect(evidence.rejected_before_submission).to_equal(true)
+        expect(evidence.diagnostic).to_contain("fallback")
+
+    it "rejects GPU submission when readback hash mismatches":
+        val packet = engine2d_host_gpu_queue_packet(
+            1,
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            128,
+            4096,
+            false,
+            false,
+            true,
+            20
+        )
+        val transport = engine2d_host_gpu_queue_transport_evidence([packet])
+        val evidence = engine2d_host_gpu_queue_submission_evidence(
+            transport,
+            true,
+            4,
+            3,
+            1113616374,
+            42
+        )
+
+        expect(evidence.ok).to_equal(false)
+        expect(evidence.submitted_to_device).to_equal(true)
+        expect(evidence.rejected_before_submission).to_equal(false)
+        expect(evidence.readback_verified).to_equal(false)
+        expect(evidence.diagnostic).to_contain("hash mismatch")
 
     it "records event flow timings and speedup for strict GPU batches":
         val evidence = engine2d_host_gpu_event_flow_evidence(

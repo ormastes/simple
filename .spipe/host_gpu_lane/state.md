@@ -41,3 +41,5 @@ implementing
 - spec: Extended backend lane SSpec coverage to 20 tests for ordered transport payload/fallback/checksum accounting and out-of-sequence rejection; regenerated `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.md`.
 - impl: Added native Rust `simple check` diagnostic `HGL-MAX-PACKET` so GPU `later()` source must declare `max_packet` before compiler lowering can emit bounded host/GPU queue packets.
 - spec: Added Rust driver unit coverage `test_check_requires_max_packet_for_gpu_later_lane`; kept system SSpec positive canonical grammar on explicit `max_packet` because deployed `bin/simple` may lag the edited Rust driver source.
+- impl: Added `Engine2dHostGpuQueueSubmissionEvidence` to validate the deterministic queue submission/readback gate above transport drain.
+- spec: Extended backend lane SSpec coverage to 23 tests for strict submission/readback success, fallback rejection before submission, and readback hash mismatch rejection; regenerated `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.md`.

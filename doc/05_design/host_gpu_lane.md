@@ -106,6 +106,13 @@ maximum packet bound, first/last sequence, order preservation, fallback count,
 host-commit count, and aggregate checksum. This is the runtime-transport
 contract above packet construction and below real hardware submission.
 
+`Engine2dHostGpuQueueSubmissionEvidence` validates the final submission/readback
+gate above queue drain. It rejects invalid transport, fallback packets, missing
+strict GPU backends, and invalid timing before device submission; if submission
+does happen, it requires the GPU readback pixel hash to match the expected
+oracle before reporting success. This keeps fallback evidence from claiming
+less-ms device execution.
+
 ## Performance Model
 
 For this slice, GPU batch performance is a deterministic evidence estimate:
