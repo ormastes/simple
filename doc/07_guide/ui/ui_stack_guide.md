@@ -301,10 +301,15 @@ Rust-seed change**:
 After any GUI / engine2d / web-render change, sanity-check these three on-screen
 apps (on macOS the pure-Simple drawing lane = Engine2D CPU/NEON + Metal):
 
+Pure Simple GUI/default Simple2D rendering must enter through the shared
+Engine2D backend lane planner. GUI code should request a typed drawing or
+processing lane and let the planner select the best available backend instead
+of bypassing into direct GPU calls or app-specific renderer paths.
+
 Engine2D exposes two backend-order helpers. `backend_full_preference_order()`
 is the documented preference order: explicit platform-native surfaces
 (`baremetal`, `virtio_gpu`) first, then Metal, CUDA, ROCm/HIP, Qualcomm,
-Vulkan, OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU.
+Vulkan, DirectX, OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU.
 `backend_default_priority_order()` is the automatic probe order and starts at
 Metal because baremetal and VirtIO GPU paths require a preinitialized host or
 platform framebuffer.
@@ -313,7 +318,9 @@ Font offload uses the processing-lane helper
 `engine2d_backend_lane_preferred_font_offload_candidate(...)`: Metal first,
 then CUDA, ROCm/HIP, Qualcomm, Vulkan, DirectX, OpenCL, OpenGL, Intel, WebGPU,
 CPU SIMD, software, and CPU. Use this helper for vector and bitmap glyph
-offload selection instead of per-frame or per-glyph ad hoc probing.
+offload selection instead of per-frame or per-glyph ad hoc probing. Treat an
+accelerated font path as valid only when readback/checksum evidence matches the
+CPU reference for the covered fixture.
 
 | Lane | App | Renders |
 |------|-----|---------|

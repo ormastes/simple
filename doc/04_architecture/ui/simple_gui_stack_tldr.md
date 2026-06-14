@@ -85,11 +85,17 @@ Host input
 - Simple2D hook: `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` accepts
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
 - Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+- Pure Simple GUI/default Simple2D rendering enters through the shared Engine2D
+  backend lane planner. GUI code should not bypass the lane planner with direct
+  GPU calls.
 - Engine2D backend preference: `backend_full_preference_order()` puts explicit
   native surfaces (`baremetal`, `virtio_gpu`) before Metal/CUDA/ROCm,
   Qualcomm, Vulkan, DirectX, and portable fallback lanes; the automatic probe
   order starts at Metal because native surfaces need a preinitialized
   framebuffer.
+- Font offload uses `engine2d_font_offload_backend_order()` for vector and
+  bitmap glyph preparation, with readback/checksum parity against the CPU
+  reference path before a backend is treated as valid.
 - Text fallback hot path: AA glyph loops touch only glyph coverage pixels; the
   prefilled buffer owns advance gaps and font-size padding rows as background.
 - WM dispatch adapter: `src/lib/common/ui/wm_runtime_dispatch.spl` converts
