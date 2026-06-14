@@ -29,6 +29,8 @@ use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
 use nogc_sync_mut.db.dbfs_engine.mvcc.{
     MvccTable, MvccTxnManager, MvccSnapshot
 }
+use nogc_sync_mut.db.dbfs_engine.meta_store.{MetaStore, MetaOp}
+use nogc_sync_mut.db.dbfs_engine.schema.{InodeRow, DentryRow}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_exists(path: text) -> bool
@@ -197,6 +199,52 @@ fn run_wal_timing_us() -> i64:
         return -1
     t1 - t0
 
+# WAL disk-replay round-trip: write rows to the on-disk MetaStore journal,
+# reopen a fresh handle (forces disk replay), and reconstruct the row from the
+# replayed journal. Returns a "ino|size|name" string so the test can assert
+# exact field data survives the disk round-trip (wal-disk-replay-blank-row-p0).
+fn run_wal_disk_replay_field() -> text:
+    val path = "/tmp/bench_db/wal_replay.db"
+    rt_dir_create_all("/tmp/bench_db")
+    rt_file_delete(path + ".meta.wal")
+    rt_file_delete(path + ".meta.ckpt")
+    var ms = MetaStore.create(path)
+    val row = InodeRow(
+        ino_id:     BENCH_POINT_ID,
+        gen:        1,
+        mode:       33188 as u32,
+        uid:        1000 as u32,
+        gid:        1000 as u32,
+        link_count: 1,
+        size:       420,
+        mtime:      111,
+        ctime:      222,
+        flags:      7 as u32
+    )
+    ms.write_inode(row)
+    ms.write_dentry(DentryRow(parent_ino: 1, name: "bench.txt", child_ino: BENCH_POINT_ID, gen: 1))
+    val msr = MetaStore.open(path)
+    match msr:
+        case Ok(store):
+            val entries = store.replay_journal()
+            var ino_str:  text = ""
+            var size_str: text = ""
+            var name_str: text = ""
+            var i = 0
+            while i < entries.len():
+                match entries[i].op:
+                    case MetaOp.InodeWrite(r):
+                        ino_str  = r.ino_id.to_text()
+                        size_str = r.size.to_text()
+                    case MetaOp.DentryWrite(d):
+                        name_str = d.name
+                    case _:
+                        i = i
+                i = i + 1
+            ino_str + "|" + size_str + "|" + name_str
+        case Err(msg):
+            "ERR:" + msg
+
 # ============================================================================
 # Spec
 # ============================================================================
@@ -297,8 +345,10 @@ describe "db ram vs persistent bench (AC-5)":
         # (bug: interp_cross_module_struct_unit).
         pending("interp-cross-module-struct-unit")
 
-    it "wal disk-replay path":
-        # WAL disk replay (dbfs_engine/wal.spl + checkpoint_ring) has a P0 blank-row
-        # bug found in simple-db-hardening research: WAL replay drops all field data.
-        # This test is pending until that bug is fixed and the disk path is benchmarkable.
-        pending("wal-disk-replay-blank-row-p0")
+    it "wal disk-replay path: field data survives disk round-trip (wal-disk-replay-blank-row-p0)":
+        # FIXED: dbfs_engine MetaStore journal serialization collapsed every op to
+        # an empty CHECKPOINT (broken `op is MetaOp.Variant` discrimination), so WAL
+        # disk replay reconstructed blank rows. Now round-trips exact field data.
+        val result = run_wal_disk_replay_field()
+        # "ino|size|name" reconstructed from the on-disk journal after a fresh reopen.
+        expect(result).to_equal("42|420|bench.txt")

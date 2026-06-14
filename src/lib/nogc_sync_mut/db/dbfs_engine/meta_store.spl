@@ -111,29 +111,37 @@ fn _parse_dentry(line: text) -> DentryRow?:
     )
 
 fn _serialize_journal_entry(entry: MetaJournalEntry) -> text:
+    # NOTE: `entry.op is MetaOp.Variant` evaluates false even for a freshly
+    # constructed payload-carrying variant under the interpreter (bug:
+    # interp_qualified_enum_is_payload_variant). The old `is`-chain collapsed
+    # every op to the `else` branch — tag "CHECKPOINT", payload "" — silently
+    # dropping all field data. That was the wal-disk-replay-blank-row-p0 root
+    # cause. `match` discriminates payload-carrying variants correctly.
     val op_tag: text =
-        if entry.op is MetaOp.InodeWrite:   "INODE_WRITE"
-        else if entry.op is MetaOp.InodeDelete: "INODE_DELETE"
-        else if entry.op is MetaOp.DentryWrite: "DENTRY_WRITE"
-        else if entry.op is MetaOp.DentryDelete: "DENTRY_DELETE"
-        else if entry.op is MetaOp.InlineWrite: "INLINE_WRITE"
-        else if entry.op is MetaOp.InlineDelete: "INLINE_DELETE"
-        else: "CHECKPOINT"
+        match entry.op:
+            case MetaOp.InodeWrite(row):                "INODE_WRITE"
+            case MetaOp.InodeDelete(ino_id):           "INODE_DELETE"
+            case MetaOp.DentryWrite(row):              "DENTRY_WRITE"
+            case MetaOp.DentryDelete(parent_ino, name): "DENTRY_DELETE"
+            case MetaOp.InlineWrite(ino_id, data_hex): "INLINE_WRITE"
+            case MetaOp.InlineDelete(ino_id):          "INLINE_DELETE"
+            case MetaOp.Checkpoint:                    "CHECKPOINT"
     val payload: text =
-        if entry.op is MetaOp.InodeWrite:
-            _serialize_inode(entry.op.row)
-        else if entry.op is MetaOp.InodeDelete:
-            entry.op.ino_id.to_text()
-        else if entry.op is MetaOp.DentryWrite:
-            _serialize_dentry(entry.op.row)
-        else if entry.op is MetaOp.DentryDelete:
-            entry.op.parent_ino.to_text() + "|" + entry.op.name
-        else if entry.op is MetaOp.InlineWrite:
-            entry.op.ino_id.to_text() + "|" + entry.op.data_hex
-        else if entry.op is MetaOp.InlineDelete:
-            entry.op.ino_id.to_text()
-        else:
-            ""
+        match entry.op:
+            case MetaOp.InodeWrite(row):
+                _serialize_inode(row)
+            case MetaOp.InodeDelete(ino_id):
+                ino_id.to_text()
+            case MetaOp.DentryWrite(row):
+                _serialize_dentry(row)
+            case MetaOp.DentryDelete(parent_ino, name):
+                parent_ino.to_text() + "|" + name
+            case MetaOp.InlineWrite(ino_id, data_hex):
+                ino_id.to_text() + "|" + data_hex
+            case MetaOp.InlineDelete(ino_id):
+                ino_id.to_text()
+            case MetaOp.Checkpoint:
+                ""
     entry.sequence.to_text() + "~" +
     op_tag + "~" +
     entry.timestamp.to_text() + "~" +
@@ -147,36 +155,35 @@ fn _parse_journal_entry(line: text) -> MetaJournalEntry?:
     val op_tag    = parts[1]
     val ts        = parts[2].to_int() ?? 0
     val payload   = parts[3]
-    val op: MetaOp? =
-        if op_tag == "INODE_WRITE":
-            val row = _parse_inode(payload)
-            if row: MetaOp.InodeWrite(row: row) else: nil
-        else if op_tag == "INODE_DELETE":
-            val id = payload.to_int() ?? 0
-            MetaOp.InodeDelete(ino_id: id)
-        else if op_tag == "DENTRY_WRITE":
-            val row = _parse_dentry(payload)
-            if row: MetaOp.DentryWrite(row: row) else: nil
-        else if op_tag == "DENTRY_DELETE":
-            val dp = payload.split("|")
-            if dp.len() >= 2:
-                MetaOp.DentryDelete(parent_ino: dp[0].to_int() ?? 0, name: dp[1])
-            else: nil
-        else if op_tag == "INLINE_WRITE":
-            val ip = payload.split("|")
-            if ip.len() >= 2:
-                MetaOp.InlineWrite(ino_id: ip[0].to_int() ?? 0, data_hex: ip[1])
-            else: nil
-        else if op_tag == "INLINE_DELETE":
-            val id = payload.to_int() ?? 0
-            MetaOp.InlineDelete(ino_id: id)
-        else if op_tag == "CHECKPOINT":
-            MetaOp.Checkpoint
-        else:
-            nil
-    if not op:
-        return nil
-    MetaJournalEntry(sequence: seq, op: op, timestamp: ts)
+    if op_tag == "INODE_WRITE":
+        val row_opt = _parse_inode(payload)
+        if not row_opt.?:
+            return nil
+        return MetaJournalEntry(sequence: seq, op: MetaOp.InodeWrite(row: row_opt.unwrap()), timestamp: ts)
+    else if op_tag == "INODE_DELETE":
+        val id = payload.to_int() ?? 0
+        return MetaJournalEntry(sequence: seq, op: MetaOp.InodeDelete(ino_id: id), timestamp: ts)
+    else if op_tag == "DENTRY_WRITE":
+        val row_opt = _parse_dentry(payload)
+        if not row_opt.?:
+            return nil
+        return MetaJournalEntry(sequence: seq, op: MetaOp.DentryWrite(row: row_opt.unwrap()), timestamp: ts)
+    else if op_tag == "DENTRY_DELETE":
+        val dp = payload.split("|")
+        if dp.len() < 2:
+            return nil
+        return MetaJournalEntry(sequence: seq, op: MetaOp.DentryDelete(parent_ino: dp[0].to_int() ?? 0, name: dp[1]), timestamp: ts)
+    else if op_tag == "INLINE_WRITE":
+        val ip = payload.split("|")
+        if ip.len() < 2:
+            return nil
+        return MetaJournalEntry(sequence: seq, op: MetaOp.InlineWrite(ino_id: ip[0].to_int() ?? 0, data_hex: ip[1]), timestamp: ts)
+    else if op_tag == "INLINE_DELETE":
+        val id = payload.to_int() ?? 0
+        return MetaJournalEntry(sequence: seq, op: MetaOp.InlineDelete(ino_id: id), timestamp: ts)
+    else if op_tag == "CHECKPOINT":
+        return MetaJournalEntry(sequence: seq, op: MetaOp.Checkpoint, timestamp: ts)
+    nil
 
 # ============================================================
 # MetaStore
@@ -399,7 +406,7 @@ impl MetaStore:
             val line = lines[i].trim()
             if line.len() > 0:
                 val entry = _parse_journal_entry(line)
-                if entry:
-                    result.push(entry)
+                if entry.?:
+                    result.push(entry.unwrap())
             i = i + 1
         result
