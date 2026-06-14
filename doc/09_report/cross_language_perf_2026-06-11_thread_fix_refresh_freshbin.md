@@ -117,8 +117,10 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 
 | Runtime                |         Result |                                                     Evidence |
 |------------------------|----------------|------------------------------------------------------------|
-| Simple sliced (source) |           pass | multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9 |
+| Simple sliced (source) |           pass | multicore_green_spawn_sliced interpreter_inline=true, quick_done=true, parallelism=1, total=9 |
 | Simple sliced (native) |           pass | multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9 |
+| Simple loop safepoint (source) |           pass | multicore_green_spawn loop_safepoint interpreter_inline=true, quick_done=true, parallelism=1, total=9 |
+| Simple loop safepoint (native) |           pass | multicore_green_spawn loop_safepoint used_runtime_pool=true, quick_done=true, parallelism=4, total=9 |
 
 ## Parallel Artifact Footprint
 
@@ -162,13 +164,12 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 > row with `pool_used=N/N` and public counter evidence. It exists so the
 > pthread-per-task baseline cannot be mistaken for Go-style M:N scheduling when
 > fanout grows.
-> The hosted fairness section separately checks `multicore_green_spawn_sliced`.
-> It is an explicit scalar-state fairness contract for long Pure Simple work
-> and is not counted as automatic preemption evidence for ordinary
-> `multicore_green_spawn` closures.
-> Raw `thread_yield()` inside an ordinary `multicore_green_spawn` closure is
-> also not counted as Go-like preemption evidence; the thread-yield gap spec
-> remains the release-visible guard until compiler/runtime safepoints land.
+> The hosted fairness section separately checks `multicore_green_spawn_sliced`
+> and ordinary `multicore_green_spawn` loop-safepoint fairness. Sliced fairness
+> remains the explicit scalar-state fairness contract for long Pure Simple work,
+> while loop-safepoint rows prove compiler-inserted runtime-pool polls let a
+> queued quick task finish during a spinning ordinary closure.
+> Raw `thread_yield()` alone is still not counted as Go-like preemption evidence.
 >
 > **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
 > the OS-thread API. `thread_spawn_with_args` remains tracked separately by
