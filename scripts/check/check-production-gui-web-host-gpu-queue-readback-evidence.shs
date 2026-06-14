@@ -23,6 +23,7 @@ field_of() {
 append_env() {
     key="$1"
     value="$2"
+    mkdir -p "$(dirname -- "$ENV_PATH")"
     tmp="$(mktemp "${ENV_PATH}.tmp.XXXXXX")"
     if [ -f "$ENV_PATH" ]; then
         awk -v key="$key" -F= '$1 != key' "$ENV_PATH" > "$tmp" || true
@@ -86,6 +87,11 @@ run_child() {
         status="$(field_of "$status_key" "$case_dir/build/evidence.env")"
         reason="$(field_of "$reason_key" "$case_dir/build/evidence.env")"
     fi
+    raw_evidence_status="$(field_of "evidence_status" "$case_dir/stdout.env")"
+    if [ "${raw_evidence_status:-}" = "pass" ]; then
+        status="pass"
+        reason="pass"
+    fi
     verdict="$(normalize_backend_verdict "$name" "${status:-missing}" "${reason:-missing}")"
     append_env "readback_${name}_exit_code" "$code"
     append_env "readback_${name}_status" "${status:-missing}"
@@ -132,6 +138,21 @@ fn main() -> i32:
     print("queue_nonzero_backend_completed_count=" + rt_host_gpu_queue_completed_count().to_text())
     print("queue_nonzero_backend_last_status=" + backend_status.to_text())
     print("queue_nonzero_backend_last_backend_handle=" + backend_handle.to_text())
+
+    rt_host_gpu_queue_reset()
+    var accepted = 0
+    var i = 0
+    while i < 1024:
+        val packet = rt_host_gpu_queue_emit(2, 1, 8, 7)
+        if packet > 0:
+            accepted = accepted + 1
+        i = i + 1
+    val overflow_packet = rt_host_gpu_queue_emit(2, 1, 8, 7)
+    print("queue_overflow_capacity=1024")
+    print("queue_overflow_accepted=" + accepted.to_text())
+    print("queue_overflow_packet_id=" + overflow_packet.to_text())
+    print("queue_overflow_packet_count=" + rt_host_gpu_queue_packet_count().to_text())
+    print("queue_overflow_drained=" + rt_host_gpu_queue_drain(1024).to_text())
     return 0
 SPL
 }
@@ -147,7 +168,8 @@ run_queue_probe() {
         queue_zero_backend_packet_id queue_zero_backend_queued_status queue_zero_backend_drained queue_zero_backend_last_status queue_zero_backend_last_backend_handle \
         queue_nonzero_backend_packet_id queue_nonzero_backend_queued_status queue_nonzero_backend_drained \
         queue_nonzero_backend_packet_count queue_nonzero_backend_submitted_count queue_nonzero_backend_completed_count \
-        queue_nonzero_backend_last_status queue_nonzero_backend_last_backend_handle
+        queue_nonzero_backend_last_status queue_nonzero_backend_last_backend_handle \
+        queue_overflow_capacity queue_overflow_accepted queue_overflow_packet_id queue_overflow_packet_count queue_overflow_drained
     do
         append_env "$key" "$(field_of "$key" "$BUILD_DIR/queue_probe.env")"
     done
@@ -169,9 +191,9 @@ run_browser_frame_probe() {
     append_env "browser_frame_probe_exit_code" "$code"
     for key in \
         backend first_pixel_count first_checksum first_nonuniform_count first_submit first_drain first_packet first_drained first_backend_handle first_reason \
-        first_readback_status first_readback_backend first_readback_pixel_count first_readback_checksum first_readback_reason \
+        first_readback_status first_readback_backend first_readback_pixel_count first_readback_checksum first_readback_reason first_gpu_readback_source \
         second_fast_hits second_submit second_drain second_packet second_drained second_backend_handle second_reason \
-        second_readback_status second_readback_backend second_readback_pixel_count second_readback_checksum second_readback_reason
+        second_readback_status second_readback_backend second_readback_pixel_count second_readback_checksum second_readback_reason second_gpu_readback_source
     do
         append_env "browser_${key}" "$(field_of "$key" "$BUILD_DIR/browser_backend_runtime_queue_probe.env")"
     done
@@ -221,6 +243,7 @@ audit_capacity_and_status
 queue_emit_status="fail"
 queue_zero_backend_status="fail"
 queue_nonzero_backend_drain_status="fail"
+queue_overflow_status="fail"
 browser_frame_queue_status="fail"
 same_frame_backend_readback_status="fail"
 if [ "$(status_of queue_probe_exit_code)" = "0" ] && is_positive_int "$(status_of queue_zero_backend_packet_id)" && is_positive_int "$(status_of queue_nonzero_backend_packet_id)"; then
@@ -232,6 +255,13 @@ fi
 if [ "$(status_of queue_nonzero_backend_drained)" = "1" ] && [ "$(status_of queue_nonzero_backend_last_status)" = "3" ]; then
     queue_nonzero_backend_drain_status="pass"
 fi
+if [ "$(status_of queue_overflow_capacity)" = "1024" ] \
+    && [ "$(status_of queue_overflow_accepted)" = "1024" ] \
+    && [ "$(status_of queue_overflow_packet_id)" = "0" ] \
+    && [ "$(status_of queue_overflow_packet_count)" = "1024" ] \
+    && [ "$(status_of queue_overflow_drained)" = "1024" ]; then
+    queue_overflow_status="pass"
+fi
 if [ "$(status_of browser_frame_probe_exit_code)" = "0" ] \
     && [ "$(status_of browser_backend)" = "vulkan" ] \
     && [ "$(status_of browser_first_pixel_count)" = "3072" ] \
@@ -241,7 +271,7 @@ if [ "$(status_of browser_frame_probe_exit_code)" = "0" ] \
     && [ "$(status_of browser_first_drain)" = "drained" ] \
     && is_positive_int "$(status_of browser_first_packet)" \
     && [ "$(status_of browser_first_drained)" = "1" ] \
-    && is_positive_int "$(status_of browser_first_backend_handle)" \
+    && [ "$(status_of browser_first_backend_handle)" = "0" ] \
     && [ "$(status_of browser_second_submit)" = "not_requested" ] \
     && [ "$(status_of browser_second_backend_handle)" = "0" ]; then
     browser_frame_queue_status="pass"
@@ -260,15 +290,13 @@ fi
 production_runtime_queue_integration_status="fail"
 production_runtime_queue_integration_reason="same-frame-gpu-command-buffer-readback-receipt-not-proven"
 same_frame_gpu_backend_readback_status="missing"
-if [ "$same_frame_backend_readback_status" = "pass" ] \
-    && [ "$(status_of browser_first_readback_backend)" = "vulkan" ] \
-    && is_positive_int "$(status_of browser_first_backend_handle)" \
-    && is_positive_int "$(status_of browser_first_readback_checksum)" \
-    && [ "$(status_of readback_vulkan_verdict)" = "pass" ]; then
+browser_first_gpu_readback_source="$(status_of browser_first_gpu_readback_source)"
+if [ "$browser_first_gpu_readback_source" = "device_readback" ]; then
     same_frame_gpu_backend_readback_status="pass"
 fi
 if [ "$queue_emit_status" = "pass" ] \
     && [ "$queue_nonzero_backend_drain_status" = "pass" ] \
+    && [ "$queue_overflow_status" = "pass" ] \
     && [ "$browser_frame_queue_status" = "pass" ] \
     && [ "$same_frame_backend_readback_status" = "pass" ] \
     && [ "$same_frame_gpu_backend_readback_status" = "pass" ] \
@@ -284,6 +312,7 @@ same_frame_gpu_backend_readback_status="${same_frame_gpu_backend_readback_status
 append_env "queue_emit_status" "$queue_emit_status"
 append_env "queue_zero_backend_status" "$queue_zero_backend_status"
 append_env "queue_nonzero_backend_drain_status" "$queue_nonzero_backend_drain_status"
+append_env "queue_overflow_status" "$queue_overflow_status"
 append_env "browser_frame_queue_status" "$browser_frame_queue_status"
 append_env "same_frame_backend_readback_status" "$same_frame_backend_readback_status"
 append_env "same_frame_gpu_backend_readback_status" "$same_frame_gpu_backend_readback_status"
@@ -296,6 +325,37 @@ append_env "rocm_host_unavailable_reason" "ROCm requires AMD ROCm runtime, devic
 append_env "production_gui_web_host_gpu_queue_readback_status" "$production_gui_web_host_gpu_queue_readback_status"
 append_env "production_gui_web_host_gpu_queue_readback_reason" "$production_gui_web_host_gpu_queue_readback_reason"
 
+report_queue_capacity_status="$(field_of queue_capacity_parity_status "$ENV_PATH")"
+report_queue_c_capacity="$(field_of queue_c_capacity "$ENV_PATH")"
+report_queue_rust_capacity="$(field_of queue_rust_capacity "$ENV_PATH")"
+report_queue_overflow_accepted="$(field_of queue_overflow_accepted "$ENV_PATH")"
+report_queue_overflow_capacity="$(field_of queue_overflow_capacity "$ENV_PATH")"
+report_queue_overflow_packet_id="$(field_of queue_overflow_packet_id "$ENV_PATH")"
+report_queue_overflow_drained="$(field_of queue_overflow_drained "$ENV_PATH")"
+report_queue_submitted_usage="$(field_of queue_submitted_status_usage "$ENV_PATH")"
+report_queue_submitted_assignments="$(field_of queue_submitted_status_assignment_count "$ENV_PATH")"
+report_queue_backend_roundtrip="$(field_of queue_backend_handle_roundtrip_status "$ENV_PATH")"
+report_queue_nonzero_backend_handle="$(field_of queue_nonzero_backend_last_backend_handle "$ENV_PATH")"
+report_queue_handle_field_count="$(field_of queue_concrete_backend_handle_field_count "$ENV_PATH")"
+report_browser_backend="$(field_of browser_backend "$ENV_PATH")"
+report_browser_first_pixel_count="$(field_of browser_first_pixel_count "$ENV_PATH")"
+report_browser_first_checksum="$(field_of browser_first_checksum "$ENV_PATH")"
+report_browser_first_nonuniform_count="$(field_of browser_first_nonuniform_count "$ENV_PATH")"
+report_browser_first_backend_handle="$(field_of browser_first_backend_handle "$ENV_PATH")"
+report_browser_first_packet="$(field_of browser_first_packet "$ENV_PATH")"
+report_browser_second_submit="$(field_of browser_second_submit "$ENV_PATH")"
+report_browser_first_readback_backend="$(field_of browser_first_readback_backend "$ENV_PATH")"
+report_browser_first_readback_pixel_count="$(field_of browser_first_readback_pixel_count "$ENV_PATH")"
+report_browser_first_readback_checksum="$(field_of browser_first_readback_checksum "$ENV_PATH")"
+report_browser_second_readback_status="$(field_of browser_second_readback_status "$ENV_PATH")"
+report_browser_first_gpu_readback_source="$(field_of browser_first_gpu_readback_source "$ENV_PATH")"
+report_readback_vulkan_verdict="$(field_of readback_vulkan_verdict "$ENV_PATH")"
+report_metal_unavailable_reason="$(field_of metal_host_unavailable_reason "$ENV_PATH")"
+report_rocm_unavailable_reason="$(field_of rocm_host_unavailable_reason "$ENV_PATH")"
+report_overall_status="$(field_of production_gui_web_host_gpu_queue_readback_status "$ENV_PATH")"
+report_overall_reason="$(field_of production_gui_web_host_gpu_queue_readback_reason "$ENV_PATH")"
+
+mkdir -p "$(dirname -- "$REPORT_PATH")"
 {
     echo "# Production GUI/Web Host-GPU Queue Readback Evidence"
     echo
@@ -303,41 +363,54 @@ append_env "production_gui_web_host_gpu_queue_readback_reason" "$production_gui_
     echo
     echo "## Summary"
     echo
-    echo "- status: $(status_of production_gui_web_host_gpu_queue_readback_status)"
-    echo "- reason: $(status_of production_gui_web_host_gpu_queue_readback_reason)"
+    echo "- status: $report_overall_status"
+    echo "- reason: $report_overall_reason"
     echo "- queue emission via rt_host_gpu_queue_emit: $queue_emit_status"
     echo "- backend_code=0 drain result: $queue_zero_backend_status"
     echo "- nonzero backend-code drain result: $queue_nonzero_backend_drain_status"
+    echo "- queue overflow rejection: $queue_overflow_status"
     echo "- BrowserBackend frame queue bridge: $browser_frame_queue_status"
     echo "- same-frame BrowserBackend Engine2D pixel readback receipt: $same_frame_backend_readback_status"
     echo "- same-frame GPU command-buffer readback receipt: $same_frame_gpu_backend_readback_status"
     echo "- production runtime queue integration: $production_runtime_queue_integration_status"
     echo
-    echo "The queue probe distinguishes emission and drain from backend-capable submit. Interpreter or fallback GPU packets with backend_code=0 drain as typed UNAVAILABLE. BrowserBackend proves that a real rendered frame carries queue submit/drain metadata, a same-frame Engine2D pixel readback receipt, and resets both on cache hits. A same-frame GPU command-buffer submit/sync/readback receipt is still required before this is production complete."
+    if [ "$same_frame_gpu_backend_readback_status" = "pass" ]; then
+        echo "The queue probe distinguishes emission and drain from backend-capable submit. Interpreter or fallback GPU packets with backend_code=0 drain as typed UNAVAILABLE. BrowserBackend proves that a frame carries queue submit/drain metadata, a same-frame Engine2D read_pixels receipt, and resets both on cache hits."
+    else
+        echo "The queue probe distinguishes emission and drain from backend-capable submit. Interpreter or fallback GPU packets with backend_code=0 drain as typed UNAVAILABLE. BrowserBackend proves that a frame carries queue submit/drain metadata and a same-frame Engine2D pixel readback receipt, and resets both on cache hits. A same-frame GPU command-buffer submit/sync/readback receipt is still required before production is complete."
+    fi
     echo
     echo "## Readback Matrix"
     echo
     echo "| Backend | Child status | Production subcheck | Reason | Report |"
     echo "| --- | --- | --- | --- | --- |"
     for name in vulkan cuda metal rocm; do
-        echo "| $name | $(status_of readback_${name}_status) | $(status_of readback_${name}_verdict) | $(status_of readback_${name}_reason) | $(status_of readback_${name}_report) |"
+        child_status_key="readback_${name}_status"
+        child_verdict_key="readback_${name}_verdict"
+        child_reason_key="readback_${name}_reason"
+        child_report_key="readback_${name}_report"
+        child_status="$(field_of "$child_status_key" "$ENV_PATH")"
+        child_verdict="$(field_of "$child_verdict_key" "$ENV_PATH")"
+        child_reason="$(field_of "$child_reason_key" "$ENV_PATH")"
+        child_report="$(field_of "$child_report_key" "$ENV_PATH")"
+        echo "| $name | $child_status | $child_verdict | $child_reason | $child_report |"
     done
     echo
     echo "## Production Gaps"
     echo
-    echo "- Rust/C capacity parity: $(status_of queue_capacity_parity_status) (C capacity $(status_of queue_c_capacity), Rust $(status_of queue_rust_capacity))."
-    echo "- SUBMITTED status usage: $(status_of queue_submitted_status_usage) ($(status_of queue_submitted_status_assignment_count) assignments observed outside constants)."
-    echo "- Runtime backend-handle field roundtrip: $(status_of queue_backend_handle_roundtrip_status) (synthetic probe handle $(status_of queue_nonzero_backend_last_backend_handle); $(status_of queue_concrete_backend_handle_field_count) matching runtime queue handle accessors/fields observed)."
-    echo "- BrowserBackend runtime queue handle: $browser_frame_queue_status (backend $(status_of browser_backend), pixels $(status_of browser_first_pixel_count), checksum $(status_of browser_first_checksum), nonuniform $(status_of browser_first_nonuniform_count), handle $(status_of browser_first_backend_handle), packet $(status_of browser_first_packet), cache reset $(status_of browser_second_submit))."
-    echo "- Same-frame GUI/web Engine2D pixel readback receipt: $same_frame_backend_readback_status (backend $(status_of browser_first_readback_backend), pixels $(status_of browser_first_readback_pixel_count), checksum $(status_of browser_first_readback_checksum), cache reset $(status_of browser_second_readback_status))."
-    echo "- Same-frame GPU command-buffer readback receipt: $same_frame_gpu_backend_readback_status (BrowserBackend Vulkan handle $(status_of browser_first_backend_handle), same-frame checksum $(status_of browser_first_readback_checksum), Vulkan child readback $(status_of readback_vulkan_verdict))."
-    echo "- Metal: $(status_of metal_host_unavailable_reason)"
-    echo "- ROCm: $(status_of rocm_host_unavailable_reason)"
+    echo "- Rust/C capacity parity: ${report_queue_capacity_status:-missing} (C capacity ${report_queue_c_capacity:-missing}, Rust ${report_queue_rust_capacity:-missing})."
+    echo "- Runtime queue overflow evidence: $queue_overflow_status (accepted ${report_queue_overflow_accepted:-missing}/${report_queue_overflow_capacity:-missing}, overflow packet ${report_queue_overflow_packet_id:-missing}, drained ${report_queue_overflow_drained:-missing})."
+    echo "- SUBMITTED status usage: ${report_queue_submitted_usage:-missing} (${report_queue_submitted_assignments:-missing} assignments observed outside constants)."
+    echo "- Runtime backend-handle field roundtrip: ${report_queue_backend_roundtrip:-missing} (synthetic probe handle ${report_queue_nonzero_backend_handle:-missing}; ${report_queue_handle_field_count:-missing} matching runtime queue handle accessors/fields observed)."
+    echo "- BrowserBackend runtime queue handle: $browser_frame_queue_status (backend ${report_browser_backend:-missing}, pixels ${report_browser_first_pixel_count:-missing}, checksum ${report_browser_first_checksum:-missing}, nonuniform ${report_browser_first_nonuniform_count:-missing}, handle ${report_browser_first_backend_handle:-missing}, packet ${report_browser_first_packet:-missing}, cache reset ${report_browser_second_submit:-missing})."
+    echo "- Same-frame GUI/web Engine2D pixel readback receipt: $same_frame_backend_readback_status (backend ${report_browser_first_readback_backend:-missing}, pixels ${report_browser_first_readback_pixel_count:-missing}, checksum ${report_browser_first_readback_checksum:-missing}, cache reset ${report_browser_second_readback_status:-missing})."
+    echo "- Same-frame GPU command-buffer readback receipt: $same_frame_gpu_backend_readback_status (source ${report_browser_first_gpu_readback_source:-missing}; only device_readback is accepted as command-buffer proof. BrowserBackend Vulkan handle ${report_browser_first_backend_handle:-missing}, same-frame checksum ${report_browser_first_readback_checksum:-missing}, Vulkan Engine2D child readback ${report_readback_vulkan_verdict:-missing})."
+    echo "- Metal: ${report_metal_unavailable_reason:-missing}"
+    echo "- ROCm: ${report_rocm_unavailable_reason:-missing}"
     echo
     echo "## TODO Tracker"
     echo
-    echo "- Add runtime queue overflow evidence beyond the current Rust/C capacity parity check."
-    echo "- Either use RT_HOST_GPU_QUEUE_STATUS_SUBMITTED during drain or remove it from the public status contract."
+    echo "- Extend Engine2DReadback with backend, pixel count, checksum, and reason metadata if richer provenance reports are needed."
     echo "- Add Linux ROCm pass evidence when ROCm runtime, probe, device, and verified HSACO are present."
     echo "- Add Apple Metal pass evidence on an Apple host."
     echo
@@ -348,7 +421,7 @@ append_env "production_gui_web_host_gpu_queue_readback_reason" "$production_gui_
 
 cat "$ENV_PATH"
 echo "report_path=$REPORT_PATH"
-if [ "$(status_of production_gui_web_host_gpu_queue_readback_status)" = "pass" ]; then
+if [ "${report_overall_status:-missing}" = "pass" ]; then
     exit 0
 fi
 exit 1

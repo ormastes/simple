@@ -2,28 +2,33 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_software_pixels,
     simple_web_layout_render_html_software_pixels_at_scroll
 }
+use std.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gpu.engine2d.engine.{Engine2D}
 
-fn present_layout_pixels_with_engine2d(pixels: [u32], width: i32, height: i32, backend_name: text, base: u32) -> [u32]:
+fn present_layout_pixels_with_engine2d_readback(pixels: [u32], width: i32, height: i32, backend_name: text, base: u32) -> Engine2DReadback:
     if width <= 0 or height <= 0:
-        return []
+        return engine2d_readback([], "not_requested")
     val normalized_backend = backend_name.trim().lower()
     if normalized_backend == "software" or normalized_backend == "cpu":
-        return pixels
-    var engine = Engine2D.create_with_backend(width, height, backend_name)
+        return engine2d_readback(pixels, "cpu_mirror")
+    val requested_engine = Engine2D.create_requested_backend(width, height, backend_name)
+    if requested_engine.is_err():
+        return engine2d_readback(pixels, "cpu_mirror")
+    var engine = requested_engine.unwrap()
     engine.clear(base)
-    # draw_image is mirror-only (poisons gpu_frame_complete on Metal/Vulkan).
-    # Use draw_layout_pixel_runs (clear + draw_rect_filled = GPU-dispatched) for
-    # Metal and Vulkan so gpu_frame_complete stays true.
-    # Other backends (opencl, cuda, etc.) use draw_image for pixel-exact passthrough.
+    # draw_image is mirror-only for some GPU backends. Use run-length rect
+    # dispatch for Vulkan/Metal so the frame stays on the GPU path.
     if normalized_backend == "vulkan" or normalized_backend == "metal":
         draw_layout_pixel_runs(engine, pixels, width, height)
     else:
         engine.draw_image(0, 0, width, height, pixels)
+    val rendered = engine.read_pixels_with_source()
     engine.present()
-    val rendered = engine.read_pixels()
     engine.shutdown()
     rendered
+
+fn present_layout_pixels_with_engine2d(pixels: [u32], width: i32, height: i32, backend_name: text, base: u32) -> [u32]:
+    present_layout_pixels_with_engine2d_readback(pixels, width, height, backend_name, base).pixels
 
 fn draw_layout_pixel_runs(engine: Engine2D, pixels: [u32], width: i32, height: i32):
     var y = 0
@@ -47,3 +52,8 @@ pub fn simple_web_layout_render_html_pixels_at_scroll(html: text, width: i32, he
     val pixels = simple_web_layout_render_html_software_pixels_at_scroll(html, width, height, scroll_y)
     val base = if html.contains("widget-panel"): 0xFFF5F5F5u32 else: 0xFFFFFFFFu32
     present_layout_pixels_with_engine2d(pixels, width, height, backend_name, base)
+
+pub fn simple_web_layout_render_html_readback(html: text, width: i32, height: i32, backend_name: text) -> Engine2DReadback:
+    val pixels = simple_web_layout_render_html_software_pixels(html, width, height)
+    val base = if html.contains("widget-panel"): 0xFFF5F5F5u32 else: 0xFFFFFFFFu32
+    present_layout_pixels_with_engine2d_readback(pixels, width, height, backend_name, base)

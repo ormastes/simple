@@ -140,20 +140,54 @@ fn _sc_sub_L8(a: [u32]) -> [u32]:
         i = i + 1
     result
 
-fn sc_reduce(s: [u8]) -> [u8]:
-    """Reduce a 64-byte scalar modulo L to 32 bytes.
-
-    Input: 64 bytes (512 bits), output: 32 bytes (< L).
-    Uses schoolbook reduction by repeatedly subtracting L * 2^k.
-    """
-    serial_println("[ed25519-sc] reduce start")
+fn _sc_reduce_bits(s: [u8], max_bit_idx: i64) -> [u32]:
     var rem: [u32] = [0,0,0,0,0,0,0,0]
-    var bit_idx: i64 = 511
+    var bit_idx = max_bit_idx
     while bit_idx >= 0:
         rem = _sc_shift_left1_add_bit(rem, _sc_get_bit_bytes(s, bit_idx as u64))
         if _sc_ge_L(rem):
             rem = _sc_sub_L8(rem)
         bit_idx = bit_idx - 1
+    rem
+
+fn _sc_add_mod(a: [u32], b: [u32]) -> [u32]:
+    var result: [u32] = []
+    var carry: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val sum = a[i].to_u64() + b[i].to_u64() + carry
+        result.push((sum & 0xFFFFFFFF).to_u32())
+        carry = sum >> 32
+        i = i + 1
+    if carry > 0 or _sc_ge_L(result):
+        result = _sc_sub_L8(result)
+    if _sc_ge_L(result):
+        result = _sc_sub_L8(result)
+    result
+
+fn _sc_mul_mod(a: [u32], b: [u32]) -> [u32]:
+    var result: [u32] = [0,0,0,0,0,0,0,0]
+    var addend = a
+    var bit_idx: u64 = 0
+    while bit_idx < 256:
+        val limb_idx = bit_idx / 32
+        val bit_in_limb = bit_idx - limb_idx * 32
+        val bit = (b[limb_idx].to_u64() >> bit_in_limb) & 1
+        if bit == 1:
+            result = _sc_add_mod(result, addend)
+        addend = _sc_add_mod(addend, addend)
+        bit_idx = bit_idx + 1
+    result
+
+fn sc_reduce(s: [u8]) -> [u8]:
+    """Reduce a 64-byte scalar modulo L to 32 bytes.
+
+    Input: 64 bytes (512 bits), output: 32 bytes (< L).
+    Uses bit-serial modular reduction so checked runtimes never rely on
+    overflowing wide integer behavior.
+    """
+    serial_println("[ed25519-sc] reduce start")
+    val rem = _sc_reduce_bits(s, 511)
     serial_println("[ed25519-sc] reduce done")
     _limbs32_to_bytes(rem, 32)
 
@@ -164,58 +198,8 @@ fn sc_muladd(a_bytes: [u8], b_bytes: [u8], c_bytes: [u8]) -> [u8]:
     Uses schoolbook multiplication to produce a 64-byte product, adds c,
     then reduces modulo L.
     """
-    # Load a, b, c as 8 u32 limbs each
-    val a = _bytes_to_limbs32(a_bytes, 8)
-    val b = _bytes_to_limbs32(b_bytes, 8)
-    val c = _bytes_to_limbs32(c_bytes, 8)
-
-    # Schoolbook multiply a * b into 16 u64 accumulators
-    var product: [u64] = []
-    var i: u64 = 0
-    while i < 16:
-        product.push(0)
-        i = i + 1
-
-    i = 0
-    while i < 8:
-        var carry: u64 = 0
-        var j: u64 = 0
-        while j < 8:
-            val idx = i + j
-            val mul_val: u64 = a[i].to_u64() * b[j].to_u64()
-            val sum: u64 = product[idx] + mul_val + carry
-            product = _sc_u64_vec_set(product, idx, sum & 0xFFFFFFFF)
-            carry = sum >> 32
-            j = j + 1
-        product = _sc_u64_vec_set(product, i + 8, product[i + 8] + carry)
-        i = i + 1
-
-    # Add c to the product
-    var add_carry: u64 = 0
-    i = 0
-    while i < 8:
-        val sum: u64 = product[i] + c[i].to_u64() + add_carry
-        product = _sc_u64_vec_set(product, i, sum & 0xFFFFFFFF)
-        add_carry = sum >> 32
-        i = i + 1
-    # Propagate carry through upper limbs
-    while add_carry > 0:
-        if i >= 16:
-            break
-        val sum: u64 = product[i] + add_carry
-        product = _sc_u64_vec_set(product, i, sum & 0xFFFFFFFF)
-        add_carry = sum >> 32
-        i = i + 1
-
-    # Convert product to 64 bytes and reduce mod L
-    var prod_bytes: [u8] = []
-    i = 0
-    while i < 16:
-        val limb = product[i]
-        prod_bytes.push((limb & 0xFF).to_u8())
-        prod_bytes.push(((limb >> 8) & 0xFF).to_u8())
-        prod_bytes.push(((limb >> 16) & 0xFF).to_u8())
-        prod_bytes.push(((limb >> 24) & 0xFF).to_u8())
-        i = i + 1
-
-    sc_reduce(prod_bytes)
+    val a = _sc_reduce_bits(a_bytes, 255)
+    val b = _sc_reduce_bits(b_bytes, 255)
+    val c = _sc_reduce_bits(c_bytes, 255)
+    val product = _sc_mul_mod(a, b)
+    _limbs32_to_bytes(_sc_add_mod(product, c), 32)

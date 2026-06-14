@@ -45,12 +45,13 @@ val COMPRESS_ALGORITHM: text = "none"
 fn _u8_at(data: [u8], idx: u64) -> u8:
     data[idx]
 
-fn _push_raw_string(buf: [u8], data: [u8]):
+fn _push_raw_string(buf: [u8], data: [u8]) -> [u8]:
     buf = ssh_put_u32(buf, data.len().to_u32())
     var i: u64 = 0
     while i < data.len():
         buf.push(_u8_at(data, i))
         i = i + 1
+    buf
 
 fn _service_name_bytes(service: text) -> [u8]:
     if service == "ssh-userauth":
@@ -60,6 +61,11 @@ fn _service_name_bytes(service: text) -> [u8]:
     []
 
 fn _server_sig_algs_bytes(server_sig_algs: text) -> [u8]:
+    if server_sig_algs == "ssh-ed25519":
+        return [
+            0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35,
+            0x35, 0x31, 0x39
+        ]
     if server_sig_algs == "ssh-ed25519,rsa-sha2-256,rsa-sha2-512":
         return [
             0x73, 0x73, 0x68, 0x2D, 0x65, 0x64, 0x32, 0x35,
@@ -587,7 +593,7 @@ fn ssh_build_service_accept(service: text) -> [u8]:
     """Build SSH_MSG_SERVICE_ACCEPT payload."""
     var buf: [u8] = []
     buf.push(SSH_MSG_SERVICE_ACCEPT)
-    _push_raw_string(buf, _service_name_bytes(service))
+    buf = _push_raw_string(buf, _service_name_bytes(service))
     buf
 
 fn ssh_build_ext_info_server_sig_algs(server_sig_algs: text) -> [u8]:
@@ -595,11 +601,37 @@ fn ssh_build_ext_info_server_sig_algs(server_sig_algs: text) -> [u8]:
     var buf: [u8] = []
     buf.push(SSH_MSG_EXT_INFO)
     buf = ssh_put_u32(buf, 1)
-    _push_raw_string(buf, [
-        0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x2D, 0x73,
-        0x69, 0x67, 0x2D, 0x61, 0x6C, 0x67, 0x73
-    ])
-    _push_raw_string(buf, _server_sig_algs_bytes(server_sig_algs))
+    buf = ssh_put_u32(buf, 15)
+    buf.push(0x73)
+    buf.push(0x65)
+    buf.push(0x72)
+    buf.push(0x76)
+    buf.push(0x65)
+    buf.push(0x72)
+    buf.push(0x2D)
+    buf.push(0x73)
+    buf.push(0x69)
+    buf.push(0x67)
+    buf.push(0x2D)
+    buf.push(0x61)
+    buf.push(0x6C)
+    buf.push(0x67)
+    buf.push(0x73)
+    if server_sig_algs == "ssh-ed25519":
+        buf = ssh_put_u32(buf, 11)
+        buf.push(0x73)
+        buf.push(0x73)
+        buf.push(0x68)
+        buf.push(0x2D)
+        buf.push(0x65)
+        buf.push(0x64)
+        buf.push(0x32)
+        buf.push(0x35)
+        buf.push(0x35)
+        buf.push(0x31)
+        buf.push(0x39)
+    else:
+        buf = _push_raw_string(buf, _server_sig_algs_bytes(server_sig_algs))
     buf
 
 fn ssh_parse_service_request(data: [u8]) -> Result<text, text>:
@@ -624,7 +656,7 @@ fn ssh_build_disconnect(reason: u32, description: text) -> [u8]:
     var buf: [u8] = []
     buf.push(SSH_MSG_DISCONNECT)
     buf = ssh_put_u32(buf, reason)
-    _push_raw_string(buf, _disconnect_description_bytes(description))
+    buf = _push_raw_string(buf, _disconnect_description_bytes(description))
     buf = ssh_put_u32(buf, 0)     # language tag
     buf
 

@@ -17,9 +17,76 @@ extern fn rt_env_get(key: text) -> text
 # ============================================================================
 
 impl HirLowering:
+    me lower_host_gpu_lane_payload(marker: Expr) -> i64:
+        match marker.kind:
+            case MethodCall(_receiver, method, args):
+                if method != "later":
+                    return 0
+                for arg in args:
+                    if arg.has_name and arg.name == "max_packet":
+                        match arg.value.kind:
+                            case IntLit(value):
+                                if value > 0:
+                                    return value
+                                return 0
+                            case _:
+                                pass
+                if args.len() == 1:
+                    match args[0].value.kind:
+                        case IntLit(value):
+                            if value > 0:
+                                return value
+                            return 0
+                        case _:
+                            pass
+                0
+            case _:
+                0
+
+    me lower_host_gpu_lane_body(body_expr: Expr) -> HirBlock:
+        match body_expr.kind:
+            case Block(block):
+                self.lower_hir_block(block)
+            case _:
+                HirBlock(stmts: [], value: Some(self.lower_hir_expr(body_expr)), span: body_expr.span)
+
+    me try_lower_host_gpu_lane_expr(e: Expr) -> HirExpr?:
+        match e.kind:
+            case Call(callee, args):
+                var lane_code: i64 = 0
+                match callee.kind:
+                    case Ident(name):
+                        if name == "host":
+                            lane_code = 1
+                        elif name == "gpu":
+                            lane_code = 2
+                    case _:
+                        pass
+                if lane_code == 0:
+                    return nil
+                if args.len() != 2:
+                    return nil
+                match args[1].value.kind:
+                    case Lambda(_params, lambda_body):
+                        val marker = self.lower_hir_expr(args[0].value)
+                        val payload_size = self.lower_host_gpu_lane_payload(args[0].value)
+                        val body = self.lower_host_gpu_lane_body(lambda_body)
+                        Some(HirExpr(
+                            kind: HirExprKind.HostGpuLane(lane_code, payload_size, marker, body),
+                            type_: nil,
+                            span: e.span
+                        ))
+                    case _:
+                        nil
+            case _:
+                nil
+
     me lower_hir_expr(e: Expr) -> HirExpr:
         val expr_kind_value = match e:
             case Expr(k, _): k
+        val host_gpu_lane = self.try_lower_host_gpu_lane_expr(e)
+        if host_gpu_lane.?:
+            return host_gpu_lane.unwrap()
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_expr:kind")
         val kind = match expr_kind_value:

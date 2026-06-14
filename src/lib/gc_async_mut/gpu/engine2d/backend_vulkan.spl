@@ -17,7 +17,7 @@
 # Usage:
 #   use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
 
-use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.helpers_text.{text_blit_buffer}
@@ -610,19 +610,22 @@ impl RenderBackend for VulkanBackend:
             self.dirty = false
 
     fn read_pixels() -> [u32]:
+        self.read_pixels_with_source().pixels
+
+    fn read_pixels_with_source() -> Engine2DReadback:
         # fn contract forbids self mutation: dirty reads fetch straight from the
         # device; present() owns the host_buf cache refresh.
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
             vulkan_sffi_wait_idle()
-            return _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            return engine2d_readback(_bytes_to_pixel_array(fb_bytes, self.w * self.h), "device_readback")
         var copy: [u32] = [0u32; self.w * self.h]
         var i = 0
         while i < self.w * self.h:
             copy[i] = self.host_buf[i]
             i = i + 1
-        copy
+        engine2d_readback(copy, "host_cache_after_device_present")
 
     fn width() -> i32:
         self.w

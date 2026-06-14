@@ -29,13 +29,14 @@ use compiler.core.tokens.{TOK_KW_DEFER, TOK_KW_ERRDEFER}
 use compiler.core.tokens.{TOK_LABEL}
 use compiler.core.tokens.{TOK_KW_STATIC_FOR, TOK_KW_COMPTIME}
 use compiler.core.tokens.{TOK_KW_BIND, TOK_KW_RECEIVE, TOK_KW_AFTER}
+use compiler.core.tokens.{TOK_BACKSLASH}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
 use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
-use compiler.core.ast.{expr_unit, expr_block}
+use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_lazy_val_decl, stmt_var_decl}
 use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
@@ -425,6 +426,23 @@ fn parse_statement() -> i64:
     # G31: tuple assignment (a, b) = expr is handled naturally:
     #   G29 makes (a, b) a tuple expr; parse_assignment sees = and builds expr_assign.
     val expression = parse_expr()
+    if par_kind_get() == TOK_IDENT:
+        val lane_name = par_text_get()
+        if lane_name == "gpu" or lane_name == "host":
+            parser_advance()
+            if par_kind_get() == TOK_BACKSLASH:
+                parser_advance()
+            parser_expect(TOK_COLON)
+            val lane_body = parse_block()
+            val lane_block_expr = expr_block(lane_body, -1, 0)
+            var lane_lambda_body: [i64] = []
+            lane_lambda_body.push(lane_block_expr)
+            var lane_params: [i64] = []
+            val lane_lambda = expr_lambda(lane_params, lane_lambda_body, 0)
+            var lane_args: [i64] = []
+            lane_args.push(expression)
+            lane_args.push(lane_lambda)
+            return stmt_expr_stmt(expr_call(expr_ident(lane_name, 0), lane_args, 0), 0)
     stmt_expr_stmt(expression, 0)
 
 # ===== Val/Var Declaration Statements =====

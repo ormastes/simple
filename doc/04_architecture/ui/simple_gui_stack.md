@@ -346,15 +346,17 @@ Production status is deliberately split by proof type:
 |---|---|---|
 | Evidence adapter | `src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` and `host_gpu_draw_ir_event_flow.spl` produce deterministic decision, submit, receipt, and Draw IR routing summaries. | Proves host-vs-GPU routing policy and packet-size/fallback classification. It is not by itself proof that a GUI/web frame was drained through a backend. |
 | Runtime queue emission | `target.later(...) gpu` interpreter handling and `engine2d_host_gpu_event_submit_to_runtime` can emit queue packets and expose queue counters/drain status through runtime externs. | Proves packets can enter the host/GPU runtime queue. Native lowering and full Draw IR payload serialization are still required for production parity. |
-| Web artifact diagnostics | `src/lib/common/ui/web_render_api.spl` stores `WebRenderArtifact.queue_*` metadata, `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl` can attach runtime queue evidence for GPU-selected artifacts, and `src/app/ui.browser/backend.spl` mirrors it as `last_artifact_queue_*`. | Proves queue evidence can be carried through the web-render artifact contract and a focused `BrowserBackend.render_frame` GPU frame. It is still diagnostic propagation until packets carry real backend submit/readback handles. |
-| Backend readback | Generated/native reports under `doc/09_report/` prove backend-specific readback when the backend is available: Vulkan Engine2D readback is `pass`, CUDA generated 2D readback is `pass`, and Linux Metal/ROCm generated readback is typed `unavailable`. | Proves backend submit/sync/readback only for the reported backend fixtures. It does not prove the GUI/web queue-drain path uses those backends. |
-| GUI/web integration | `src/app/ui.browser/backend.spl` owns a local UI event queue, an Engine2D pixel artifact path, and queue diagnostic fields. Generated widget HTML now uses the deterministic widget raster path before expensive CSS scans, so focused `BrowserBackend.render_frame` specs complete and expose queue diagnostics. | The remaining production gap is backend proof: GUI/web redraw must connect Draw IR/runtime queue packets to real backend drain/readback receipts and expose typed real-backend terminal status before accelerated GUI/web rendering can be claimed. |
+| Web artifact diagnostics | `src/lib/common/ui/web_render_api.spl` stores `WebRenderArtifact.queue_*`, backend handle, and readback-source metadata; `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl` attaches runtime queue evidence for GPU-selected artifacts; `src/app/ui.browser/backend.spl` mirrors it as `last_artifact_queue_*` and `last_artifact_gpu_readback_source`. | Proves queue evidence and backend readback provenance can be carried through the web-render artifact contract and a focused `BrowserBackend.render_frame` GPU frame. |
+| Backend readback | Generated/native reports under `doc/09_report/` prove backend-specific readback when the backend is available: Vulkan Engine2D readback is `pass`, CUDA generated 2D readback is `pass`, and Linux Metal/ROCm generated readback is typed `unavailable`. | Proves backend submit/sync/readback for the reported backend fixtures and is consumed by the production GUI/web queue-readback wrapper. |
+| GUI/web integration | `src/app/ui.browser/backend.spl` owns a local UI event queue, an Engine2D pixel artifact path, and queue diagnostic fields. Generated widget HTML uses the deterministic widget raster path, then presents through Engine2D for bounded backend readback. Focused `BrowserBackend.render_frame` specs expose queue diagnostics, backend handle `7` on Vulkan, Engine2D readback source, and cache-hit reset. | `scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs` is the canonical production gate for GUI/web event queue -> runtime packet -> backend handle -> drain/readback receipt on this lane. |
 
-The current production posture is fail-closed. Adapter summaries, runtime
-queue emit/drain receipts, and Vulkan/CUDA readback reports are valid evidence
-for their own layers, but the GUI/web path must keep reporting unavailable or
-CPU fallback until one ordered run proves GUI/web event queue -> runtime packet
--> backend submit -> drain/readback receipt.
+The current production posture is evidence-gated and fail-closed. Adapter
+summaries, runtime queue emit/drain receipts, BrowserBackend frame receipts,
+and Vulkan/CUDA readback reports remain separate layers. The canonical wrapper
+must be the source of truth for whether the joined GUI/web run currently proves
+event queue -> runtime packet -> backend handle -> drain/readback receipt.
+Linux Metal and ROCm/HIP remain typed host-unavailable unless those runtimes are
+present.
 
 Known runtime/production gaps:
 
@@ -370,11 +372,11 @@ Known runtime/production gaps:
   Rust interpreter regression coverage.
 - Runtime packets can now expose a submitted backend-handle value through
   `rt_host_gpu_queue_last_backend_handle()`, and BrowserBackend frames mirror
-  that value from the WebRenderArtifact. Queue drain still cannot prove backend
-  submission until a same-frame backend readback receipt is tied to the frame.
+  that value from the WebRenderArtifact. The production wrapper ties that
+  frame-local handle to same-frame Engine2D readback provenance.
 - `BrowserBackend.render_frame` now completes for generated widget frames and
-  has focused queue-diagnostic coverage, but real-backend-handle tests are still
-  missing.
+  has focused queue/readback coverage, including real Vulkan backend-handle
+  propagation and cache-hit reset.
 
 Until the GUI/web queue-drain bridge exists, documentation and test reports must
 say "adapter evidence", "runtime queue emission", or "backend readback" instead

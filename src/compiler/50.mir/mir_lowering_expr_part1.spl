@@ -25,6 +25,40 @@ extern fn rt_env_get(key: text) -> text
 # ============================================================================
 
 impl MirLowering:
+    me host_gpu_runtime_func(name: text) -> MirOperand:
+        MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+
+    me emit_host_gpu_runtime_call(name: text, args: [MirOperand]):
+        var b = self.builder
+        b.emit_call(self.host_gpu_runtime_func(name), args, MirType.i64())
+        self.builder = b
+
+    me lower_host_gpu_lane(lane_code: i64, payload_size: i64, marker: HirExpr, body: HirBlock) -> LocalId:
+        self.lower_expr(marker)
+        self.emit_host_gpu_runtime_call("rt_host_gpu_lane_event", [
+            mir_operand_const_int(lane_code),
+            mir_operand_const_int(1)
+        ])
+        if lane_code == 2:
+            self.emit_host_gpu_runtime_call("rt_host_gpu_queue_emit", [
+                mir_operand_const_int(lane_code),
+                mir_operand_const_int(1),
+                mir_operand_const_int(payload_size),
+                mir_operand_const_int(0)
+            ])
+        self.lower_block(body)
+        self.emit_host_gpu_runtime_call("rt_host_gpu_lane_event", [
+            mir_operand_const_int(lane_code),
+            mir_operand_const_int(2)
+        ])
+        var b = self.builder
+        val result = b.new_temp(MirType.unit())
+        self.builder = b
+        result
+
     me emit_bounds_check_for_index(base_type: HirType?, base_local: LocalId, index_local: LocalId):
         """Emit an explicit bounds_check intrinsic before MIR indexed access."""
         if not base_type.?:
@@ -222,6 +256,9 @@ impl MirLowering:
                     val temp = b.new_temp(MirType.unit())
                     self.builder = b
                     temp
+
+            case HostGpuLane(lane_code, payload_size, marker, body):
+                self.lower_host_gpu_lane(lane_code, payload_size, marker, body)
 
             case Loop(body, _):
                 self.lower_loop(body)

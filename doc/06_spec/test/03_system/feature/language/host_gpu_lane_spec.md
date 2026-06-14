@@ -27,7 +27,7 @@ host_gpu_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -131,11 +131,10 @@ requires a batch.
 
 ## Out Of Scope
 
-This spec proves parser acceptance plus statement-position runtime marker
-lowering for interpreter and native execution. It does not prove expression
-position lane markers, backend device submission, or GPU readback. Those are
-tracked by the implementation plan and perf report. Queue packets currently use
-backend code 0 and drain as typed unavailable evidence.
+This spec proves parser acceptance, statement-position runtime marker lowering,
+backend_code=0 unavailable drain evidence, and nonzero backend-code
+submit/complete queue state. It still does not prove expression-position lane
+markers, real backend device submission, or GPU readback.
 
 ## Generated Manual Policy
 
@@ -338,6 +337,92 @@ expect(output).to_contain("end=1")
 expect(output).to_contain("queue=1")
 expect(output).to_contain("drain=1")
 expect(output).to_contain("drain_status=4")
+```
+
+</details>
+
+#### should expose native submit-only queue state before completion
+
+- Submit a native runtime queue packet, inspect SUBMITTED, then complete it
+- "extern fn rt host gpu queue reset
+- "extern fn rt host gpu queue emit
+- "extern fn rt host gpu queue submit
+- "extern fn rt host gpu queue complete
+- "extern fn rt host gpu queue submitted count
+- "extern fn rt host gpu queue completed count
+- "extern fn rt host gpu queue in flight count
+- "extern fn rt host gpu queue last status
+- "rt host gpu queue reset
+- "val packet id = rt host gpu queue emit
+- "val submit count = rt host gpu queue submit
+- "val submit status = rt host gpu queue last status
+- "val submit in flight = rt host gpu queue in flight count
+- "val submit total = rt host gpu queue submitted count
+- "val complete before = rt host gpu queue completed count
+- "val complete count = rt host gpu queue complete
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 43 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Submit a native runtime queue packet, inspect SUBMITTED, then complete it")
+val source =
+    "extern fn rt_host_gpu_queue_reset()\n" +
+    "extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_code: i64) -> i64\n" +
+    "extern fn rt_host_gpu_queue_submit(max_packets: i64) -> i64\n" +
+    "extern fn rt_host_gpu_queue_complete(max_packets: i64) -> i64\n" +
+    "extern fn rt_host_gpu_queue_submitted_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_completed_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_in_flight_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_last_status() -> i64\n\n" +
+    "rt_host_gpu_queue_reset()\n" +
+    "val packet_id = rt_host_gpu_queue_emit(2, 1, 8, 7)\n" +
+    "val submit_count = rt_host_gpu_queue_submit(1)\n" +
+    "val submit_status = rt_host_gpu_queue_last_status()\n" +
+    "val submit_in_flight = rt_host_gpu_queue_in_flight_count()\n" +
+    "val submit_total = rt_host_gpu_queue_submitted_count()\n" +
+    "val complete_before = rt_host_gpu_queue_completed_count()\n" +
+    "val complete_count = rt_host_gpu_queue_complete(1)\n" +
+    "print(\"packet_id=\" + str(packet_id))\n" +
+    "print(\"submit_count=\" + str(submit_count))\n" +
+    "print(\"submit_status=\" + str(submit_status))\n" +
+    "print(\"submit_in_flight=\" + str(submit_in_flight))\n" +
+    "print(\"submit_total=\" + str(submit_total))\n" +
+    "print(\"complete_before=\" + str(complete_before))\n" +
+    "print(\"complete_count=\" + str(complete_count))\n" +
+    "print(\"complete_status=\" + str(rt_host_gpu_queue_last_status()))\n" +
+    "print(\"complete_in_flight=\" + str(rt_host_gpu_queue_in_flight_count()))\n" +
+    "print(\"complete_total=\" + str(rt_host_gpu_queue_completed_count()))\n"
+
+val (stdout, stderr, code) = run_source_native("gpu_lane_native_queue_two_phase", source)
+val output = combined_output(stdout, stderr)
+
+expect(code).to_equal(0)
+expect(output).to_contain("packet_id=1")
+expect(output).to_contain("submit_count=1")
+expect(output).to_contain("submit_status=2")
+expect(output).to_contain("submit_in_flight=1")
+expect(output).to_contain("submit_total=1")
+expect(output).to_contain("complete_before=0")
+expect(output).to_contain("complete_count=1")
+expect(output).to_contain("complete_status=3")
+expect(output).to_contain("complete_in_flight=0")
+expect(output).to_contain("complete_total=1")
 ```
 
 </details>
@@ -627,8 +712,8 @@ expect(result.diagnostic).to_contain("per-widget GPU dispatch")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

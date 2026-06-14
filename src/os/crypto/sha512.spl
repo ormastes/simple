@@ -19,6 +19,22 @@ extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 fn _sha512_u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
 
+fn _sha512_add2(a: u64, b: u64) -> u64:
+    val a_lo = a & 0xFFFFFFFF
+    val a_hi = a >> 32
+    val b_lo = b & 0xFFFFFFFF
+    val b_hi = b >> 32
+    val lo_sum = a_lo + b_lo
+    val lo = lo_sum & 0xFFFFFFFF
+    val hi = (a_hi + b_hi + (lo_sum >> 32)) & 0xFFFFFFFF
+    (hi << 32) | lo
+
+fn _sha512_add4(a: u64, b: u64, c: u64, d: u64) -> u64:
+    _sha512_add2(_sha512_add2(a, b), _sha512_add2(c, d))
+
+fn _sha512_add5(a: u64, b: u64, c: u64, d: u64, e: u64) -> u64:
+    _sha512_add2(_sha512_add4(a, b, c, d), e)
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -242,7 +258,7 @@ fn sha512_process_block(block: [u8], offset: u64, h: [u64]) -> [u64]:
     while t < 80:
         val s0 = small_sigma0_512(w[t - 15])
         val s1 = small_sigma1_512(w[t - 2])
-        val w_t: u64 = w[t - 16] + s0 + w[t - 7] + s1
+        val w_t: u64 = _sha512_add4(w[t - 16], s0, w[t - 7], s1)
         w.push(w_t)
         t = t + 1
 
@@ -261,32 +277,32 @@ fn sha512_process_block(block: [u8], offset: u64, h: [u64]) -> [u64]:
     while round < 80:
         val s1 = big_sigma1_512(e)
         val ch_val = ch64(e, f, g)
-        val temp1: u64 = hh + s1 + ch_val + _sha512_k(round) + w[round]
+        val temp1: u64 = _sha512_add5(hh, s1, ch_val, _sha512_k(round), w[round])
         val s0 = big_sigma0_512(a)
         val maj_val = maj64(a, b, c)
-        val temp2: u64 = s0 + maj_val
+        val temp2: u64 = _sha512_add2(s0, maj_val)
 
         hh = g
         g = f
         f = e
-        e = d + temp1
+        e = _sha512_add2(d, temp1)
         d = c
         c = b
         b = a
-        a = temp1 + temp2
+        a = _sha512_add2(temp1, temp2)
 
         round = round + 1
 
     # 4. Compute new hash values
     var result: [u64] = []
-    result.push(h[0] + a)
-    result.push(h[1] + b)
-    result.push(h[2] + c)
-    result.push(h[3] + d)
-    result.push(h[4] + e)
-    result.push(h[5] + f)
-    result.push(h[6] + g)
-    result.push(h[7] + hh)
+    result.push(_sha512_add2(h[0], a))
+    result.push(_sha512_add2(h[1], b))
+    result.push(_sha512_add2(h[2], c))
+    result.push(_sha512_add2(h[3], d))
+    result.push(_sha512_add2(h[4], e))
+    result.push(_sha512_add2(h[5], f))
+    result.push(_sha512_add2(h[6], g))
+    result.push(_sha512_add2(h[7], hh))
     result
 
 # ============================================================================
@@ -419,32 +435,32 @@ fn _sha512_compress_one_block_scalar(block: [u8], offset: u64, h: Sha512State) -
         else:
             val s0 = small_sigma0_512(_sha512_w16_get(w, (round - 15) % 16))
             val s1 = small_sigma1_512(_sha512_w16_get(w, (round - 2) % 16))
-            w_round = _sha512_w16_get(w, (round - 16) % 16) + s0 + _sha512_w16_get(w, (round - 7) % 16) + s1
+            w_round = _sha512_add4(_sha512_w16_get(w, (round - 16) % 16), s0, _sha512_w16_get(w, (round - 7) % 16), s1)
             w = _sha512_w16_set(w, round % 16, w_round)
 
         val s1_big = big_sigma1_512(e)
-        val temp1: u64 = hh + s1_big + ch64(e, f, g) + _sha512_k(round) + w_round
-        val temp2: u64 = big_sigma0_512(a) + maj64(a, b, c)
+        val temp1: u64 = _sha512_add5(hh, s1_big, ch64(e, f, g), _sha512_k(round), w_round)
+        val temp2: u64 = _sha512_add2(big_sigma0_512(a), maj64(a, b, c))
 
         hh = g
         g = f
         f = e
-        e = d + temp1
+        e = _sha512_add2(d, temp1)
         d = c
         c = b
         b = a
-        a = temp1 + temp2
+        a = _sha512_add2(temp1, temp2)
         round = round + 1
 
     Sha512State(
-        h0: h.h0 + a,
-        h1: h.h1 + b,
-        h2: h.h2 + c,
-        h3: h.h3 + d,
-        h4: h.h4 + e,
-        h5: h.h5 + f,
-        h6: h.h6 + g,
-        h7: h.h7 + hh
+        h0: _sha512_add2(h.h0, a),
+        h1: _sha512_add2(h.h1, b),
+        h2: _sha512_add2(h.h2, c),
+        h3: _sha512_add2(h.h3, d),
+        h4: _sha512_add2(h.h4, e),
+        h5: _sha512_add2(h.h5, f),
+        h6: _sha512_add2(h.h6, g),
+        h7: _sha512_add2(h.h7, hh)
     )
 
 fn _sha512_digest_state(h: Sha512State) -> [u8]:

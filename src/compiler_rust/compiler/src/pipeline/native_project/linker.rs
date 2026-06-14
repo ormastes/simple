@@ -1238,6 +1238,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                                 && stem != "curve25519_ring_helper"
                                 && stem != "ed25519_scalar_helper"
                                 && stem != "ed25519_sha512_helper"
+                                && stem != "tls13_aes256_gcm_helper"
                                 && stem != "tls13_sha256_helper"
                                 && stem != "ed25519_verify_helper"
                             {

@@ -8,7 +8,7 @@ use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_negotiate_algorithms, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, host_key_set_advertised_algorithms}
 use os.apps.sshd.ssh_kex_core.{ssh_kex_compute_exchange_hash, ssh_derive_keys}
-use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _push_mpint_bytes, curve25519_shared_secret_mpint_bytes}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _append_byte, _push_bytes, _push_mpint_bytes, curve25519_shared_secret_mpint_bytes}
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey}
 use os.kernel.log.klog_api.{log_info}
@@ -78,6 +78,8 @@ fn _live_exchange_hash_fast(
     serial_println("[sshd-session] exchash sha qc={_bytes_to_hex(rt_tls13_sha256(client_public))}")
     serial_println("[sshd-session] exchash sha qs={_bytes_to_hex(rt_tls13_sha256(server_public))}")
     serial_println("[sshd-session] exchash sha k={_bytes_to_hex(rt_tls13_sha256(shared_secret))}")
+    val shared_secret_mpint = curve25519_shared_secret_mpint_bytes(shared_secret)
+    serial_println("[sshd-session] exchash sha k-mpint={_bytes_to_hex(rt_tls13_sha256(shared_secret_mpint))}")
     var hash_input: [u8] = []
     hash_input = _push_string_live(hash_input, client_version)
     hash_input = _push_string_live(hash_input, server_version)
@@ -86,7 +88,7 @@ fn _live_exchange_hash_fast(
     hash_input = _push_string_live(hash_input, host_key_blob)
     hash_input = _push_string_live(hash_input, client_public)
     hash_input = _push_string_live(hash_input, server_public)
-    hash_input = _push_mpint_bytes(hash_input, curve25519_shared_secret_mpint_bytes(shared_secret))
+    hash_input = _push_mpint_bytes(hash_input, shared_secret_mpint)
     rt_tls13_sha256(hash_input)
 
 fn _live_bootstrap_x25519_private_key() -> [u8]:
@@ -371,6 +373,29 @@ fn _build_live_ed25519_sig_blob() -> [u8]:
         0xe7, 0xf5, 0x1e, 0x01, 0x00, 0x19, 0xcb, 0x78,
         0x69, 0x62, 0x09
     ]
+
+fn _derive_key_live_runtime_sha256(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id: [u8], needed: u64) -> [u8]:
+    var input: [u8] = []
+    val shared_secret_mpint = curve25519_shared_secret_mpint_bytes(shared_secret)
+    input = _push_mpint_bytes(input, shared_secret_mpint)
+    input = _push_bytes(input, exchange_hash)
+    input = _append_byte(input, letter)
+    input = _push_bytes(input, session_id)
+    val k1 = rt_tls13_sha256(input)
+    var key_material: [u8] = _push_bytes([], k1)
+    while key_material.len() < needed:
+        var ext_input: [u8] = []
+        ext_input = _push_mpint_bytes(ext_input, shared_secret_mpint)
+        ext_input = _push_bytes(ext_input, exchange_hash)
+        ext_input = _push_bytes(ext_input, key_material)
+        val next = rt_tls13_sha256(ext_input)
+        key_material = _push_bytes(key_material, next)
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < needed:
+        result = _append_byte(result, _u8_at(key_material, i))
+        i = i + 1
+    result
 
 impl SshSession:
 
@@ -706,6 +731,16 @@ impl SshSession:
         val keys = ssh_derive_keys(shared_secret, exchange_hash, self.session_id)
         if using_live_openssh_profile:
             serial_println("[sshd-session] derived iv_s2c len={keys.iv_s2c.len()} key_s2c len={keys.enc_key_s2c.len()}")
+            serial_println("[sshd-session] derived iv_s2c={_bytes_to_hex(keys.iv_s2c)}")
+            serial_println("[sshd-session] derived key_s2c={_bytes_to_hex(keys.enc_key_s2c)}")
+            val runtime_iv_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x42, self.session_id, 12)
+            val runtime_key_s2c = _derive_key_live_runtime_sha256(shared_secret, exchange_hash, 0x44, self.session_id, 32)
+            serial_println("[sshd-session] runtime iv_s2c={_bytes_to_hex(runtime_iv_s2c)}")
+            serial_println("[sshd-session] runtime key_s2c={_bytes_to_hex(runtime_key_s2c)}")
+            if not dual_backend_bytes_equal(keys.iv_s2c, runtime_iv_s2c) or not dual_backend_bytes_equal(keys.enc_key_s2c, runtime_key_s2c):
+                serial_println("[sshd-session] kdf sha256 alpha mismatch: refusing session keys")
+                self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "kdf alpha mismatch")
+                return false
         else:
             serial_println("[sshd-session] derived iv_s2c={_bytes_to_hex(keys.iv_s2c)}")
             serial_println("[sshd-session] derived key_s2c={_bytes_to_hex(keys.enc_key_s2c)}")
@@ -733,13 +768,36 @@ impl SshSession:
         self.ctr_counter_s2c = _copy_bytes_stable(self.iv_s2c)
         if using_live_openssh_profile:
             serial_println("[sshd-session] stored key lengths iv_c2s={self.iv_c2s.len()} iv_s2c={self.iv_s2c.len()} key_c2s={self.enc_key_c2s.len()} key_s2c={self.enc_key_s2c.len()}")
+            serial_println("[sshd-session] live iv_s2c={_bytes_to_hex(self.iv_s2c)}")
+            serial_println("[sshd-session] live key_s2c={_bytes_to_hex(self.enc_key_s2c)}")
+            serial_println("[sshd-session] live iv_c2s={_bytes_to_hex(self.iv_c2s)}")
+            serial_println("[sshd-session] live key_c2s={_bytes_to_hex(self.enc_key_c2s)}")
         else:
             serial_println("[sshd-session] stored iv_c2s={_bytes_to_hex(self.iv_c2s)}")
             serial_println("[sshd-session] stored iv_s2c={_bytes_to_hex(self.iv_s2c)}")
             serial_println("[sshd-session] stored key_c2s={_bytes_to_hex(self.enc_key_c2s)}")
             serial_println("[sshd-session] stored key_s2c={_bytes_to_hex(self.enc_key_s2c)}")
+
+        # OpenSSH enables outbound keys immediately after sending its NEWKEYS
+        # and may send server EXT_INFO before receiving the peer NEWKEYS. Keep
+        # inbound plaintext until the client NEWKEYS is consumed.
+        var sent_server_ext_info_early = false
+        if using_live_openssh_profile:
+            self.cipher.seq_s2c = 0u32
+            self.cipher.active = true
+            val ext_info_early = ssh_build_ext_info_server_sig_algs(_live_host_key_sig_algs())
+            self.send_packet(ext_info_early)
+            sent_server_ext_info_early = true
+            self.cipher.active = false
+
         # Receive client NEWKEYS under the pre-NEWKEYS plaintext framing.
-        val client_newkeys = self.recv_packet_payload()
+        var client_newkeys: [u8] = []
+        var client_newkeys_attempts: u64 = 0
+        while client_newkeys.len() == 0 and client_newkeys_attempts < 1000:
+            client_newkeys = self.recv_packet_payload()
+            if client_newkeys.len() == 0:
+                rt_thread_sleep(1)
+            client_newkeys_attempts = client_newkeys_attempts + 1
         var client_newkeys_len: u64 = client_newkeys.len()
         var client_newkeys_type: u8 = 0
         if client_newkeys_len > 0:
@@ -750,16 +808,19 @@ impl SshSession:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid NEWKEYS")
             return false
 
-        # Subsequent encrypted packets start a fresh packet sequence space.
-        self.cipher.seq_c2s = 0
-        self.cipher.seq_s2c = 0
+        # Strict KEX resets encrypted sequence numbers after NEWKEYS. OpenSSH
+        # logs the pre-reset value, then sets the packet sequence to zero.
+        self.cipher.seq_c2s = 0u32
+        if not sent_server_ext_info_early:
+            self.cipher.seq_s2c = 0u32
         self.cipher.active = true
         self.state = SessionState.Authentication
-        serial_println("[sshd-session] cipher activated c2s_seq=0 s2c_seq=0")
-        log_info("[app.sshd] " + "[sshd-session] cipher activated: c2s_seq=0 s2c_seq=0")
+        serial_println("[sshd-session] cipher activated c2s_seq={self.cipher.seq_c2s} s2c_seq={self.cipher.seq_s2c} recv_seq={self.recv_seq} send_seq={self.send_seq}")
+        log_info("[app.sshd] " + "[sshd-session] cipher activated")
 
-        val ext_info = ssh_build_ext_info_server_sig_algs(if using_live_openssh_profile: _live_host_key_sig_algs() else: host_key_set_advertised_algorithms(self.host_keys))
-        self.send_packet(ext_info)
+        if not sent_server_ext_info_early:
+            val ext_info = ssh_build_ext_info_server_sig_algs(if using_live_openssh_profile: _live_host_key_sig_algs() else: host_key_set_advertised_algorithms(self.host_keys))
+            self.send_packet(ext_info)
         log_info("[app.sshd] " + "[sshd-session] kex ok")
 
         true

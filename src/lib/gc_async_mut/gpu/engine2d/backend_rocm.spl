@@ -10,7 +10,7 @@
 # Usage:
 #   use std.gpu.engine2d.backend_rocm.{RocmBackend}
 
-use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
@@ -454,21 +454,26 @@ impl RenderBackend for RocmBackend:
             self.dirty = false
 
     fn read_pixels() -> [u32]:
+        self.read_pixels_with_source().pixels
+
+    fn read_pixels_with_source() -> Engine2DReadback:
         # Guard: if not initialized or framebuffer pointer is null, return empty
         # to avoid a null-pointer device-memory read.
         if not self.initialized or self.d_framebuffer == 0:
-            return []
+            return engine2d_readback([], "not_requested")
         # Ensure host buffer is up to date
+        var source = "host_cache_after_device_present"
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             _download_framebuffer(self.d_framebuffer, self.host_buf, fb_size)
             rt_rocm_synchronize()
+            source = "device_readback"
         var copy: [u32] = [0u32; self.w * self.h]
         var i = 0
         while i < self.w * self.h:
             copy[i] = self.host_buf[i]
             i = i + 1
-        copy
+        engine2d_readback(copy, source)
 
     fn width() -> i32:
         self.w

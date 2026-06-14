@@ -94,27 +94,26 @@ Host input
 - Web-render artifact diagnostics now carry queue submit/drain status, packet
   id, drained count, and reason through `WebRenderArtifact.queue_*`; browser
   frames mirror those fields as `BrowserBackend.last_artifact_queue_*`.
-- Production status is split: adapter evidence proves routing decisions,
-  runtime queue emission proves packets/counters/drain status, backend readback
-  proves backend-specific submit/sync/readback, and full GUI/web production
-  requires a completed frame bridge from GUI/web event queues to runtime queue
-  drain plus backend receipt. Focused `BrowserBackend.render_frame` specs now
-  prove queue metadata propagation and cache-hit reset, but this remains
-  diagnostic evidence until packets carry real backend submit/readback handles.
+- Production status is evidence-gated: adapter evidence proves routing
+  decisions, runtime queue emission proves packets/counters/drain status,
+  backend readback proves backend-specific submit/sync/readback, and
+  `scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
+  proves the joined GUI/web frame path. Focused `BrowserBackend.render_frame`
+  specs now prove queue metadata propagation, Vulkan backend-handle receipt,
+  Engine2D readback provenance, and cache-hit reset.
 - Current backend readback reports: Vulkan Engine2D and CUDA generated 2D pass;
   Linux Metal and ROCm/HIP generated 2D are typed unavailable. These are backend
   fixtures, not proof that `src/app/ui.browser/backend.spl` drains GUI/web
   frames through the host/GPU runtime queue.
-- Production GUI/web GPU rendering is fail-closed: adapter summaries, runtime
-  queue emit/drain, and backend readback are separate evidence layers until a
-  single GUI/web run proves event queue -> runtime packet -> backend submit ->
-  drain/readback receipt.
+- Production GUI/web GPU rendering remains fail-closed: the canonical wrapper
+  is the source of truth for whether the joined event queue -> runtime packet ->
+  backend handle -> drain/readback receipt currently passes. Linux Metal and
+  ROCm/HIP remain typed unavailable without matching host runtimes.
 - Current runtime gaps: interpreter GPU packets emit `backend_code=0` and drain
-  as `UNAVAILABLE`; runtime packets and BrowserBackend frames can round-trip a
-  backend-handle value, but same-frame backend readback is not fused yet;
-  `SUBMITTED` is observable through the runtime submit/complete path;
-  interpreter lane `END` is exception-safe; Rust/C capacity is `1024` with
-  overflow coverage, but same-frame backend-readback tests are still required.
+  as `UNAVAILABLE`; `SUBMITTED` is observable through the runtime
+  submit/complete path; interpreter lane `END` is exception-safe; Rust/C
+  capacity is `1024` with overflow coverage; broader native lowering and Draw IR
+  payload serialization remain follow-up production work.
 - Pure Simple GUI/default Simple2D rendering enters through the shared Engine2D
   backend lane planner. GUI code should not bypass the lane planner with direct
   GPU calls.

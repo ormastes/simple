@@ -5,16 +5,16 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
-- **Stubs Remaining:** 0
-- **Total Lines:** 31
+- **Complete Documentation:** 0 (0%)
+- **Stubs Remaining:** 1
+- **Total Lines:** 0
 - **Warnings:** 1
 
 ---
 
-## Application (1 features)
+## Hardware & OS (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Browser Backend Runtime Queue Spec](test/01_unit/app/ui/browser_backend_runtime_queue_spec.md) | Minimal | N/A | 1 | 20% | 31 lines |
+| [Ed25519 Scalar Muladd Specification](test/01_unit/os/crypto/ed25519_scalar_muladd_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
 

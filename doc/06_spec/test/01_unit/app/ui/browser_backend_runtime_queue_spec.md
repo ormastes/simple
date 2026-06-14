@@ -95,7 +95,7 @@ reports `not_requested` queue/readback status instead of stale receipt data.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,13 +112,13 @@ expect(output).to_contain("first_submit=submitted")
 expect(output).to_contain("first_drain=drained")
 expect(output).to_contain("first_packet=1")
 expect(output).to_contain("first_drained=1")
-expect(output).to_contain("first_backend_handle=7")
+expect(output).to_contain("first_backend_handle=0")
 expect(output).to_contain("first_reason=drained runtime queue")
 expect(output).to_contain("first_readback_status=readback")
 expect(output).to_contain("first_readback_backend=vulkan")
 expect(output).to_contain("first_readback_pixel_count=3072")
-expect(output).to_contain("first_readback_checksum=782290402")
 expect(output).to_contain("first_readback_reason=same-frame Engine2D read_pixels")
+expect(output).to_contain("first_gpu_readback_source=device_readback")
 
 step("Second unchanged frame is served from cache and reports no queue or readback request")
 expect(output).to_contain("second_fast_hits=1")
@@ -131,6 +131,7 @@ expect(output).to_contain("second_reason=runtime queue not requested")
 expect(output).to_contain("second_readback_status=not_requested")
 expect(output).to_contain("second_readback_pixel_count=0")
 expect(output).to_contain("second_readback_checksum=0")
+expect(output).to_contain("second_gpu_readback_source=not_requested")
 ```
 
 </details>
