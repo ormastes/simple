@@ -248,6 +248,10 @@ Updated: 2026-06-14
 - this commit -- Simple Web parser attribute-key allocation removal:
   `parse_html` now uses constant `class=`, `id=`, and `style=` keys for hot
   attribute extraction instead of allocating `name + "="` for every node field.
+- this commit -- Simple Web parser attribute-key scan inline:
+  hot `class=`, `id=`, and `style=` extraction now scans constant attribute keys
+  with one key-length pass instead of routing through the generic text
+  find/match helpers.
 - this commit -- debug attr loop length hoist:
   `simple_web_layout_debug_attr_by_id` now reuses the parsed node count instead
   of dispatching `nodes.len()` on every scan iteration.
