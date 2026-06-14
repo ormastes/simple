@@ -135,6 +135,20 @@ pub fn compile_store<M: Module>(
                     } else {
                         v
                     }
+                } else if expected_cl_ty == types::F64 && actual_ty == types::I64 {
+                    // A cross-block f64 value is carried through an i64-typed
+                    // Cranelift Variable (cross-block VRegs are declared i64 and
+                    // `def_var_coerced_typed` bitcasts f64->i64 to fit). Storing
+                    // it into an f64 local arrives here as I64 vs expected F64.
+                    // Reinterpret the bits back to f64 — the inverse of the
+                    // F64->I64 bitcast in `coerce_to_i64_typed`. Without this the
+                    // value was silently replaced by 0.0 (f64 fn-call result
+                    // bound to a local). Gated on Cranelift types (not
+                    // `vreg_types`) so it also covers non-inlined `MirInst::Call`
+                    // results, whose dest VReg carries no `vreg_types` entry.
+                    builder
+                        .ins()
+                        .bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), v)
                 } else {
                     create_default(builder)
                 }

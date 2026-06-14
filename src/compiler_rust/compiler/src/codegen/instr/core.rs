@@ -184,6 +184,28 @@ pub(crate) fn compile_binop<M: Module>(
     // non-negative shift count and always widens uextend.
     let lhs_signed = vreg_is_signed(ctx, left_vreg);
 
+    // A cross-block f64 operand is carried through an i64-typed Cranelift
+    // Variable (cross-block VRegs are declared i64; `def_var` bitcasts f64->i64
+    // to fit). When such a value reaches a binop it arrives as a Cranelift I64
+    // value, so `coerce_binop_operands` — which infers float-ness from the
+    // Cranelift value type — would misclassify it as an integer and emit
+    // integer `iadd`/`imul`/… on the raw f64 bits (garbage; e.g. `a + b` on two
+    // f64 params returned 0). `vreg_types` (built from MIR) still records the
+    // true F64 type, so reinterpret the bits back to f64 here before coercion.
+    let reinterpret_f64 = |builder: &mut FunctionBuilder, v: cranelift_codegen::ir::Value, vreg: VReg| {
+        if ctx.vreg_types.get(&vreg).copied() == Some(TypeId::F64)
+            && builder.func.dfg.value_type(v) == types::I64
+        {
+            builder
+                .ins()
+                .bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), v)
+        } else {
+            v
+        }
+    };
+    let lhs = reinterpret_f64(builder, lhs, left_vreg);
+    let rhs = reinterpret_f64(builder, rhs, right_vreg);
+
     // FR-DRIVER-0002b: preserve the pre-coerce Values so the ShiftRight arm
     // can re-widen with the right extension. `coerce_binop_operands` calls
     // `ensure_i64` which unconditionally `uextend`s narrow ints; for a signed
