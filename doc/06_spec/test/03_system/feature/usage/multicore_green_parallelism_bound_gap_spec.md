@@ -99,7 +99,7 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -115,6 +115,8 @@ expect(native_compile_code).to_equal(0)
 
 step("Run the fixture through the hosted source path")
 val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
+expect(interp_out).to_contain("parallelism_zero_clamped=1")
+expect(interp_out).to_contain("parallelism_negative_clamped=1")
 expect(interp_out).to_contain("parallelism_before=2")
 expect(interp_out).to_contain("parallelism_after_submit=2")
 expect(interp_out).to_contain("parallelism_after_join=2")
@@ -123,6 +125,8 @@ expect(interp_code).to_equal(0)
 
 step("Run the fixture through the hosted standalone native path")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
+expect(native_out).to_contain("parallelism_zero_clamped=1")
+expect(native_out).to_contain("parallelism_negative_clamped=1")
 expect(native_out).to_contain("parallelism_before=2")
 expect(native_out).to_contain("parallelism_after_submit=2")
 expect(native_out).to_contain("parallelism_after_join=2")

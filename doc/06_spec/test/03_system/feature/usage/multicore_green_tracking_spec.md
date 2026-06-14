@@ -308,6 +308,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 - Verify architecture and design name the API misuse gate
    - Expected: absent_in_text(architecture, "cross_language_perf_parallel_smoke.md") equals `1`
 - Verify the report index promotes the current freshbin profile evidence
+   - Expected: absent_in_text(report_index, "ordinary closure preemption; and proves") equals `1`
 - Verify the SPipe state audit points at current profile evidence
 - Verify old profile reports point at current freshbin evidence
    - Expected: absent_in_text(older_smoke_report, "for current\n> Go-like") equals `1`
@@ -317,7 +318,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 63 lines folded for reproduction.
+Runnable source: 68 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -358,7 +359,12 @@ expect(report_index).to_contain("cross_language_perf_2026-06-11_thread_fix_refre
 expect(report_index).to_contain("Current contract-passing Docker-isolated cross-language profile")
 expect(report_index).to_contain("preserves the broad workload inventory")
 expect(report_index).to_contain("artifact footprint, cold startup, warm throughput")
+expect(report_index).to_contain("hosted sliced fairness")
 expect(report_index).to_contain("parallel artifact footprint, and peak RSS")
+expect(report_index).to_contain("Hosted Fairness Evidence")
+expect(report_index).to_contain("multicore_green_spawn_sliced")
+expect(report_index).to_contain("explicit scalar-state fairness contract")
+expect(absent_in_text(report_index, "ordinary closure preemption; and proves")).to_equal(1)
 expect(report_index).to_contain("used_runtime_pool()")
 expect(report_index).to_contain("pool_used=N/N")
 expect(report_index).to_contain("counter_delta=submitted/completed,pending=0,busy=0,blocked=0")
@@ -705,7 +711,7 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -721,6 +727,8 @@ expect(stdlib).to_contain("E-PAR-006")
 expect(stdlib).to_contain("integer initial state")
 expect(stdlib).to_contain("step function")
 expect(stdlib).to_contain("MulticoreGreenSliceResult")
+expect(stdlib).to_contain("MulticoreGreenSlicedHandle.used_runtime_pool()")
+expect(stdlib).to_contain("MulticoreGreenSlicedHandle.ran_inline_fallback()")
 expect(perf).to_contain("multicore_green_spawn_sliced")
 expect(perf).to_contain("E-PAR-003")
 expect(perf).to_contain("E-PAR-004")
@@ -735,6 +743,8 @@ expect(coding).to_contain("E-PAR-006")
 expect(coding).to_contain("integer initial state")
 expect(coding).to_contain("step function")
 expect(coding).to_contain("MulticoreGreenSliceResult")
+expect(coding).to_contain("MulticoreGreenSlicedHandle.used_runtime_pool()")
+expect(coding).to_contain("MulticoreGreenSlicedHandle.ran_inline_fallback()")
 ```
 
 </details>

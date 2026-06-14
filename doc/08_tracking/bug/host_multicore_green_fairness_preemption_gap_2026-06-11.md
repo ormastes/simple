@@ -94,12 +94,12 @@ Current hosted fairness-gap evidence also includes:
 - `scripts/check/check-cross-language-perf.shs` now emits a separate
   `Hosted Fairness Evidence` section with `Simple sliced (source)` and
   `Simple sliced (native)` rows. The profile-report contract requires
-  `multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9`, so
+  `multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9`, so
   this positive path remains visible without treating it as ordinary closure
   preemption.
 - `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` also keeps
   the public sliced API executable by requiring the run/join marker
-  `public_multicore_green_sliced_result=19`.
+  `public_multicore_green_sliced_result=19 used_runtime_pool=true`.
 
 SimpleOS has scheduler-facing timer/runtime/compiler safepoint coverage for its
 green-carrier lane, but that is not the same as proving the hosted runtime-pool

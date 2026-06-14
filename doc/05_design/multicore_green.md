@@ -7,7 +7,9 @@ and `doc/02_requirements/nfr/multicore_green.md`.
 ## Design Goals
 
 - Keep the Simple API split stable and meaningful.
-- Make hosted M:N evidence depend on `MulticoreGreenHandle.used_runtime_pool()`.
+- Make hosted M:N and sliced-fairness evidence depend on
+  `MulticoreGreenHandle.used_runtime_pool()` and
+  `MulticoreGreenSlicedHandle.used_runtime_pool()`.
 - Keep cooperative green deterministic and current-carrier.
 - Keep SimpleOS green work scheduler-owned and separate from normal OS tasks.
 - Keep profile scripts reproducible and explicit about model differences.
@@ -74,6 +76,8 @@ Behavior:
 - `multicore_green_pending_count()`, `multicore_green_busy_count()`, and
   `multicore_green_blocked_count()` expose queue/worker state for profile and
   starvation diagnostics.
+- `multicore_green_set_parallelism(workers)` clamps non-positive requests to
+  `1` at the Pure Simple API boundary before delegating to runtime support.
 
 Design rule: only positive-handle work with work-stealing evidence can support
 hosted M:N claims. Inline fallback is correct behavior but not M:N evidence.
@@ -92,6 +96,8 @@ Data structures:
 - `MulticoreGreenSliceResult.state`
 - `MulticoreGreenSliceResult.value`
 - `MulticoreGreenSlicedHandle.result_channel_id`
+- `MulticoreGreenSlicedHandle.first_slice_used_pool`
+- `MulticoreGreenSlicedHandle.first_slice_ran_inline`
 
 Behavior:
 
@@ -100,6 +106,8 @@ Behavior:
   state to the work channel and requeues one more pool task.
 - `MulticoreGreenSliceResult.completed(value)` sends the final value to the
   result channel.
+- `MulticoreGreenSlicedHandle.used_runtime_pool()` is true only when the first
+  slice was accepted by the hosted runtime pool.
 - `MulticoreGreenSlicedHandle.join()` receives the completed value.
 
 Design rule: sliced work is an explicit user-facing fairness contract. It does
@@ -225,7 +233,8 @@ can run even when hosted parallelism is `1`.
 This is a deliberate API decision rather than an implicit preemption claim:
 ordinary `multicore_green_spawn` closures still run until they return, and the
 profile `Hosted Fairness Evidence` section must keep describing sliced fairness
-as explicit scalar-state requeueing. Future compiler/runtime preemption can
+as explicit scalar-state requeueing and must require sliced-handle
+`used_runtime_pool()` evidence. Future compiler/runtime preemption can
 extend the model, but it must add separate executable evidence before docs call
 plain closures Go-like tight-loop preemptive work.
 

@@ -138,6 +138,9 @@ name the scheduler limit used by the goroutine rows. The harness exports
 `GOMAXPROCS=$CPU_WORKERS` by default, and contract-gated reports must keep the
 recorded Go scheduler width equal to `CPU_WORKERS` so Go goroutine rows and
 Simple `multicore_green_set_parallelism(CPU_WORKERS)` rows use the same limit.
+Non-positive `multicore_green_set_parallelism` requests clamp to `1`; profile
+scripts should still pass an explicit positive `CPU_WORKERS` value for evidence
+rows.
 Explicit `GOMAXPROCS` overrides are exploratory unless they preserve that
 equality.
 Current checked cross-language evidence is recorded in
@@ -196,7 +199,7 @@ than mutating captured `var`s.
 | **Warm throughput** | `fib(35)` recursive, in-process loop (10 warmup + 20 measured) | Steady-state single-thread perf (JIT reaches hotspot) |
 | **Parallel** | 100 workers × LCG 100K iters. Simple native uses Pure Simple `thread_spawn` fork-join for the OS-thread baseline. Simple multicore green sets `multicore_green_set_parallelism(CPU_WORKERS)`, uses `multicore_green_spawn`, and fails the row unless every handle reports `used_runtime_pool()` and the runtime reports work-stealing queues. Focused native smoke also checks public submitted/completed/pending/busy/blocked counter evidence after join. Go runs with `GOMAXPROCS=CPU_WORKERS` by default. | CPU-heavy worker throughput plus concurrency overhead |
 | **Large fanout** | 1000 tiny workers × LCG 32 iters, plus the Simple-vs-Go-vs-C stress row. Simple native uses loop-based `thread_spawn` fork-join; Simple cooperative green uses cooperative queue fanout; C uses one pthread per tiny task; Go uses one goroutine per tiny task with the pinned scheduler width; Erlang uses one BEAM process per tiny task. | Scheduling overhead where Go must beat C pthread creation in both the checked large-fanout row and the checked stress report; Simple native measures OS-thread fanout; Simple cooperative green measures queue fanout, not CPU parallelism |
-| **Hosted fairness evidence** | `multicore_green_spawn_sliced` source/native probe with hosted parallelism pinned to `1` | Explicit scalar-state sliced fairness: a later quick task completes while a long sliced task is still requeueing; not ordinary closure preemption |
+| **Hosted fairness evidence** | `multicore_green_spawn_sliced` source/native probe with hosted parallelism pinned to `1` and sliced-handle `used_runtime_pool()` evidence | Explicit scalar-state sliced fairness: a later quick task completes while a long sliced task is still requeueing; not ordinary closure preemption |
 | **Parallel binary size** | Binary/script sizes for parallel workloads across languages | Deployment footprint for concurrent programs |
 | **Parallel peak RSS** | `/usr/bin/time -v` peak RSS with 100 workers, baseline subtracted, per-worker delta | Memory cost per concurrent task (baseline = hello world RSS for each language) |
 
@@ -216,7 +219,7 @@ parallel/fanout/stress aggregates.
 | Simple (SMF loader) | Bytecode VM | Shows bytecode dispatch win |
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
 | Simple `cooperative_green_spawn` / `cooperative_green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
-| Simple `multicore_green_spawn` / `multicore_green_spawn_sliced` | Bounded runtime worker pool through runtime-seed `rt_pool_*` support | Current Pure Simple M:N candidate row for CPU-heavy comparisons uses `multicore_green_spawn`; `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work. Profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if `used_runtime_pool()` is false. Public `multicore_green_*_count` helpers are runtime-pool progress evidence, not ordinary-closure preemption evidence |
+| Simple `multicore_green_spawn` / `multicore_green_spawn_sliced` | Bounded runtime worker pool through runtime-seed `rt_pool_*` support | Current Pure Simple M:N candidate row for CPU-heavy comparisons uses `multicore_green_spawn`; `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work. Profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if value or sliced handles report `used_runtime_pool()` as false. Public `multicore_green_*_count` helpers are runtime-pool progress evidence, not ordinary-closure preemption evidence |
 | Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Lower-level pool-backed task API with focused API/native evidence; not the named cross-language M:N profile row |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |

@@ -70,8 +70,9 @@ Responsibilities:
 
 - Accept closure work into a bounded native worker pool when linked.
 - Return a positive handle only when the runtime pool owns the work.
-- Allow `MulticoreGreenHandle.used_runtime_pool()` to be the trust boundary for
-  profile and M:N evidence.
+- Allow `MulticoreGreenHandle.used_runtime_pool()` and
+  `MulticoreGreenSlicedHandle.used_runtime_pool()` to be the trust boundary for
+  profile, hosted sliced-fairness, and M:N evidence.
 - Report the hosted queue model in meaningful Simple-facing terms through
   `multicore_green_uses_global_fifo_queue()` and
   `multicore_green_uses_work_stealing()`. Profile evidence treats shared FIFO
@@ -243,8 +244,8 @@ SimpleOS path:
 The selected Full Go-Like Runtime Roadmap uses all layers:
 
 - Public Simple API Layer preserves meaningful user APIs and model separation.
-- Runtime Pool ABI Layer proves hosted M:N ownership through positive handles,
-  `used_runtime_pool()`, `multicore_green_parallelism()`, and `multicore_green_uses_work_stealing()` evidence after
+- Runtime Pool ABI Layer proves hosted M:N ownership through positive value and
+  sliced handles, `used_runtime_pool()`, `multicore_green_parallelism()`, and `multicore_green_uses_work_stealing()` evidence after
   `multicore_green_set_parallelism(CPU_WORKERS)`.
 - Profile And Evidence Layer keeps Go, C pthread, Simple OS-thread,
   cooperative green, and multicore-green rows separate.

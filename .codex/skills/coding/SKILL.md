@@ -204,7 +204,7 @@ execution model:
 | `thread_spawn` / `ThreadHandle` | `src/lib/nogc_async_mut/concurrent/thread.spl` and `thread_sffi.spl` | OS thread (`pthread_create` / `CreateThread`) |
 | `cooperative_green_spawn` / `cooperative_green_spawn_value` / `GreenThreadHandle` / `cooperative_green_run_one` / `cooperative_green_run_all` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Cooperative green-thread queue on the current OS thread; no preemption or CPU parallelism |
 | `green_channel_new` / `green_channel_recv` / `green_channel_send` | `src/lib/nogc_async_mut/concurrent/green_channel.spl` | Pure Simple nonblocking green-channel contract; recv parks a logical green task, send unparks a waiter or reports bounded backpressure |
-| `multicore_green_spawn` / `multicore_green_spawn_sliced` / `multicore_green_set_parallelism` / `multicore_green_parallelism` / `multicore_green_submitted_count` / `multicore_green_completed_count` / `multicore_green_pending_count` / `multicore_green_busy_count` / `multicore_green_blocked_count` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` / `MulticoreGreenSliceResult` / `MulticoreGreenSlicedHandle` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over runtime-seed `rt_pool_*` support; current M:N benchmark candidate with a hosted Go `GOMAXPROCS`-like pool limit. Public counter helpers expose runtime-pool progress evidence; they do not prove ordinary-closure preemption. `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work, not automatic preemption for ordinary closures |
+| `multicore_green_spawn` / `multicore_green_spawn_sliced` / `multicore_green_set_parallelism` / `multicore_green_parallelism` / `multicore_green_submitted_count` / `multicore_green_completed_count` / `multicore_green_pending_count` / `multicore_green_busy_count` / `multicore_green_blocked_count` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` / `MulticoreGreenSliceResult` / `MulticoreGreenSlicedHandle.used_runtime_pool()` / `MulticoreGreenSlicedHandle.ran_inline_fallback()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple bounded-worker facade over runtime-seed `rt_pool_*` support; current M:N benchmark candidate with a hosted Go `GOMAXPROCS`-like pool limit. Public counter helpers expose runtime-pool progress evidence; they do not prove ordinary-closure preemption. `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work, not automatic preemption for ordinary closures |
 | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Lower-level pool-backed native task path when `rt_pool_*` is available; interpreter fallback otherwise; not the named cross-language M:N profile row |
 | `channel_new` / `channel_from_id` | `src/lib/nogc_sync_mut/concurrent/channel.spl` re-exported through `std.concurrent.channel` | Runtime MPMC channel |
 
@@ -229,8 +229,9 @@ check submitted/completed deltas and pending/busy/blocked counters through the
 public `multicore_green_*_count` helpers; do not import direct `rt_pool_*`
 symbols from user code.
 Call `multicore_green_set_parallelism(workers)` before the first
-`multicore_green_spawn` when a profile needs an explicit hosted pool limit, and
-record `multicore_green_parallelism()` in evidence. Cross-language profile
+`multicore_green_spawn` when a profile needs an explicit hosted pool limit.
+Non-positive requests clamp to `1` at the Pure Simple boundary. Record
+`multicore_green_parallelism()` in evidence. Cross-language profile
 evidence must also show Go `GOMAXPROCS` pinned to the same `CPU_WORKERS` value.
 Live pools can grow but do not claim shrink/preemption behavior yet.
 Use the canonical profile gates when changing these surfaces:

@@ -115,8 +115,8 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 
 | Runtime                |         Result |                                                     Evidence |
 |------------------------|----------------|------------------------------------------------------------|
-| Simple sliced (source) |           pass | multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9 |
-| Simple sliced (native) |           pass | multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9 |
+| Simple sliced (source) |           pass | multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9 |
+| Simple sliced (native) |           pass | multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9 |
 
 ## Parallel Artifact Footprint
 

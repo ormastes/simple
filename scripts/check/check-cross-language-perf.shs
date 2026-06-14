@@ -728,14 +728,18 @@ fn slice_step(state: i64) -> MulticoreGreenSliceResult:
 fn main() -> i64:
     multicore_green_set_parallelism(1)
     val sliced = multicore_green_spawn_sliced(0, slice_step)
+    val sliced_used_pool = sliced.used_runtime_pool()
     rt_thread_sleep(2)
     val quick = multicore_green_spawn(\: 7)
     rt_thread_sleep(20)
     val quick_done_during_slices = quick.is_done()
     val total = sliced.join() + quick.join()
+    println("sliced_fairness_used_runtime_pool = {sliced_used_pool}")
     println("sliced_fairness_quick_done = {quick_done_during_slices}")
     println("sliced_fairness_parallelism = {multicore_green_parallelism()}")
     println("sliced_fairness_total = {total}")
+    if !sliced_used_pool:
+        rt_exit(71)
     if !quick_done_during_slices:
         rt_exit(72)
     if multicore_green_parallelism() != 1:
@@ -1817,11 +1821,12 @@ fairness_row() {
 sliced_fairness_evidence() {
     _cmd="$1"
     _out=$(run_bounded "$_cmd" 2>&1) || { echo "failed"; return; }
+    _used_pool=$(printf '%s\n' "$_out" | sed -n 's/.*sliced_fairness_used_runtime_pool = \(true\|false\).*/\1/p' | tail -1)
     _quick=$(printf '%s\n' "$_out" | sed -n 's/.*sliced_fairness_quick_done = \(true\|false\).*/\1/p' | tail -1)
     _parallelism=$(printf '%s\n' "$_out" | sed -n 's/.*sliced_fairness_parallelism = \([0-9][0-9]*\).*/\1/p' | tail -1)
     _total=$(printf '%s\n' "$_out" | sed -n 's/.*sliced_fairness_total = \([0-9][0-9]*\).*/\1/p' | tail -1)
-    if [ "$_quick" = "true" ] && [ "$_parallelism" = "1" ] && [ "$_total" = "9" ]; then
-        echo "multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9"
+    if [ "$_used_pool" = "true" ] && [ "$_quick" = "true" ] && [ "$_parallelism" = "1" ] && [ "$_total" = "9" ]; then
+        echo "multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9"
     else
         echo "invalid sliced fairness evidence"
     fi
@@ -1829,7 +1834,7 @@ sliced_fairness_evidence() {
 
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hosted_sliced_fairness.spl" ]; then
     evidence=$(sliced_fairness_evidence "$SIMPLE_BINARY run $BUILD_DIR/hosted_sliced_fairness.spl --mode=interpreter")
-    if [ "$evidence" = "multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9" ]; then
+    if [ "$evidence" = "multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9" ]; then
         fairness_row "Simple sliced (source)" "pass" "$evidence"
     else
         fairness_row "Simple sliced (source)" "fail" "$evidence"
@@ -1837,7 +1842,7 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hosted_sliced_fairness.spl" ]; th
 fi
 if [ -x "$BUILD_DIR/hosted_sliced_fairness_simple_native" ]; then
     evidence=$(sliced_fairness_evidence "$BUILD_DIR/hosted_sliced_fairness_simple_native")
-    if [ "$evidence" = "multicore_green_spawn_sliced quick_done=true, parallelism=1, total=9" ]; then
+    if [ "$evidence" = "multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9" ]; then
         fairness_row "Simple sliced (native)" "pass" "$evidence"
     else
         fairness_row "Simple sliced (native)" "fail" "$evidence"

@@ -69,7 +69,7 @@ Date: 2026-06-13
   `multicore_green_spawn` is the current Pure Simple bounded-worker M:N
   candidate over `rt_pool_*`. `multicore_green_spawn_sliced` is the explicit
   scalar-state fairness API for long Pure Simple work; the public API contract
-  must keep the run/join marker `public_multicore_green_sliced_result=19`.
+  must keep the run/join marker `public_multicore_green_sliced_result=19 used_runtime_pool=true`.
 - Do not use numbered API names to distinguish behavior.
 - Do not rewrite Simple features in C/Rust for benchmark wins. C, Go, and Rust
   are evidence baselines or seed/runtime implementation contexts only.
@@ -150,7 +150,7 @@ Acceptance evidence:
   elf_utils::tests::resolves_runtime_pool_symbols` and
   `SIMPLE_BIN=src/compiler_rust/target/debug/simple sh
   test/05_perf/profile_scripts/concurrency_api_contract_test.shs` pass with
-  `public_multicore_green_sliced_result=19` and runtime-pool counter symbols
+  `public_multicore_green_sliced_result=19 used_runtime_pool=true` and runtime-pool counter symbols
   exported by the rebuilt driver.
 
 ## Simple OS-Thread Baseline Agent
@@ -267,9 +267,11 @@ Deliverables:
   including the scalar-state `multicore_green_spawn_sliced` source/native
   regression and historical closure of the earlier callback-id prototype;
 - profile/report visibility for the generated hosted sliced-fairness evidence
-  section without reclassifying ordinary closure scheduling as preemptive;
+  section without reclassifying ordinary closure scheduling as preemptive,
+  including sliced-handle `used_runtime_pool()` proof so inline fallback cannot
+  pass as hosted fairness;
 - public API contract visibility for the scalar-state sliced API through
-  `public_multicore_green_sliced_result=19`;
+  `public_multicore_green_sliced_result=19 used_runtime_pool=true`;
 - updated research and architecture text when that boundary changes.
 
 Acceptance evidence:

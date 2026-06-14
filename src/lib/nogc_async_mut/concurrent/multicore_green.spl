@@ -55,32 +55,47 @@ class MulticoreGreenSliceResult:
     static fn completed(value: i64) -> MulticoreGreenSliceResult:
         MulticoreGreenSliceResult(done: true, state: 0, value: value)
 
-class MulticoreGreenSliceTask:
-    state: i64
-
-class MulticoreGreenSliceDone:
-    value: i64
-
 class MulticoreGreenSlicedHandle:
     """Join handle for an explicitly sliced multicore-green task."""
     result_channel_id: i64
+    first_slice_used_pool: bool
+    first_slice_ran_inline: bool
+    inline_done: bool
+    inline_result: i64
+
+    fn used_runtime_pool() -> bool:
+        """Return true when the first slice was accepted by the runtime worker pool."""
+        self.first_slice_used_pool
+
+    fn ran_inline_fallback() -> bool:
+        """Return true when the first slice ran inline because no runtime pool was available."""
+        self.first_slice_ran_inline
 
     fn join() -> i64:
+        if self.inline_done:
+            return self.inline_result
         val results = channel_from_id(self.result_channel_id)
-        val done = results.recv() as MulticoreGreenSliceDone
-        done.value
+        results.recv() as i64
 
 fn multicore_green_slice_worker(work_id: i64, result_id: i64, step_fn: fn(i64) -> MulticoreGreenSliceResult) -> i64:
     val work = channel_from_id(work_id)
     val results = channel_from_id(result_id)
-    val task = work.recv() as MulticoreGreenSliceTask
-    val next = step_fn(task.state)
+    val state = work.recv() as i64
+    val next = step_fn(state)
     if next.done:
-        results.send(MulticoreGreenSliceDone(value: next.value))
+        results.send(next.value)
     else:
-        work.send(MulticoreGreenSliceTask(state: next.state))
+        work.send(next.state)
         multicore_green_spawn(\: multicore_green_slice_worker(work_id, result_id, step_fn))
     0
+
+fn multicore_green_run_slices_inline(initial_state: i64, step_fn: fn(i64) -> MulticoreGreenSliceResult) -> i64:
+    var state = initial_state
+    while true:
+        val next = step_fn(state)
+        if next.done:
+            return next.value
+        state = next.state
 
 fn multicore_green_spawn(task: fn() -> i64) -> MulticoreGreenHandle:
     """Spawn a value task on the bounded runtime worker pool when available."""
@@ -107,9 +122,23 @@ fn multicore_green_spawn_sliced(initial_state: i64, step_fn: fn(i64) -> Multicor
     """
     val work = channel_new()
     val results = channel_new()
-    work.send(MulticoreGreenSliceTask(state: initial_state))
-    multicore_green_spawn(\: multicore_green_slice_worker(work.id(), results.id(), step_fn))
-    MulticoreGreenSlicedHandle(result_channel_id: results.id())
+    work.send(initial_state)
+    val native_handle = rt_pool_submit(\: multicore_green_slice_worker(work.id(), results.id(), step_fn))
+    if native_handle == 0:
+        return MulticoreGreenSlicedHandle(
+            result_channel_id: results.id(),
+            first_slice_used_pool: false,
+            first_slice_ran_inline: true,
+            inline_done: true,
+            inline_result: multicore_green_run_slices_inline(initial_state, step_fn)
+        )
+    MulticoreGreenSlicedHandle(
+        result_channel_id: results.id(),
+        first_slice_used_pool: true,
+        first_slice_ran_inline: false,
+        inline_done: false,
+        inline_result: 0
+    )
 
 fn multicore_green_set_parallelism(workers: i64) -> i64:
     """Set hosted runtime-pool parallelism.
@@ -118,8 +147,11 @@ fn multicore_green_set_parallelism(workers: i64) -> i64:
     the current hosted M:N candidate. Call it before the first
     multicore_green_spawn to choose the initial worker count. If the pool is
     already running, the runtime can grow the pool but does not claim live
-    shrink/preemption behavior.
+    shrink/preemption behavior. Non-positive requests are clamped to `1` at
+    the Pure Simple boundary to match hosted runtime support.
     """
+    if workers <= 0:
+        return rt_pool_set_parallelism(1)
     rt_pool_set_parallelism(workers)
 
 fn multicore_green_parallelism() -> i64:
