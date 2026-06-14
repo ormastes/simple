@@ -648,13 +648,14 @@ expect(absent_in_text(combined, "misuse_fixtures=611")).to_equal(1)
 
 - Read the canonical multicore-green tracking row
 - Verify Pure Simple implementation surfaces are linked
+- Verify native runtime-pool value-boundary evidence is tracked
 - Verify profile and guide surfaces are linked
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -666,6 +667,10 @@ expect(row).to_contain("src/lib/nogc_async_mut/concurrent/multicore_green.spl")
 expect(row).to_contain("src/os/kernel/scheduler/green_carrier.spl")
 expect(row).to_contain("test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl")
 expect(row).to_contain("test/01_unit/os/kernel/arch/x86_64_user_entry_validation_spec.spl")
+step("Verify native runtime-pool value-boundary evidence is tracked")
+expect(row).to_contain("scoped `rt_pool_join` value-boundary coverage")
+expect(row).to_contain("native-project Cranelift tags raw join results")
+expect(row).to_contain("`compile --native` leave already-encoded Simple values unchanged")
 step("Verify profile and guide surfaces are linked")
 expect(row).to_contain("scripts/check/check-cross-language-perf.shs")
 expect(row).to_contain("doc/07_guide/compiler/check_perf.md")
