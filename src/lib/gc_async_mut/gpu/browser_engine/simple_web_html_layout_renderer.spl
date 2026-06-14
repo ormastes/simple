@@ -1390,9 +1390,10 @@ fn _css_collect_custom_props(css: text) -> text:
     # Collect --name: value pairs from :root { } blocks.
     # Returns a compact string of "--name:value\n" entries.
     val css_len = css.len()
+    var entries: [text] = [""; 200]
+    var entry_i = 0
     var pos: i64 = 0
     var guard = 0
-    var prop_count = 0
     while pos < css_len and guard < 200:
         guard = guard + 1
         val brace = find_from(css, "{", pos)
@@ -1422,51 +1423,14 @@ fn _css_collect_custom_props(css: text) -> text:
                 if val_end < 0:
                     val_end = body_len
                 val prop_val = body.substring(colon + 1, val_end).trim()
-                if name.len() > 2:
-                    prop_count = prop_count + 1
-                bp = if semi >= 0: semi + 1 else: body_len
-        pos = close + 1
-    if prop_count == 0:
-        return ""
-    var entries: [text] = [""; prop_count]
-    var entry_i = 0
-    pos = 0
-    guard = 0
-    while pos < css_len and guard < 200:
-        guard = guard + 1
-        val brace = find_from(css, "{", pos)
-        if brace < 0:
-            break
-        val sel_raw = css.substring(pos, brace)
-        val sel = sel_raw.trim()
-        val close = css_matching_close(css, brace)
-        if close < 0:
-            break
-        if sel == ":root":
-            val body = css.substring(brace + 1, close)
-            val body_len = body.len()
-            var bp: i64 = 0
-            var bg = 0
-            while bp < body_len and bg < 200:
-                bg = bg + 1
-                val dd = find_from(body, "--", bp)
-                if dd < 0:
-                    break
-                val colon = find_from(body, ":", dd)
-                if colon < 0:
-                    break
-                val semi = find_from(body, ";", colon)
-                val name = body.substring(dd, colon).trim()
-                var val_end = semi
-                if val_end < 0:
-                    val_end = body_len
-                val prop_val = body.substring(colon + 1, val_end).trim()
-                if name.len() > 2 and entry_i < prop_count:
+                if name.len() > 2 and entry_i < entries.len():
                     entries[entry_i] = name + ":" + prop_val + "\n"
                     entry_i = entry_i + 1
                 bp = if semi >= 0: semi + 1 else: body_len
         pos = close + 1
-    entries.join("")
+    if entry_i == 0:
+        return ""
+    text_list_prefix(entries, entry_i).join("")
 
 fn _css_resolve_vars(css: text, props: text) -> text:
     if props.len() == 0 or css.index_of("var(") < 0:
@@ -1525,7 +1489,8 @@ fn _css_resolve_vars(css: text, props: text) -> text:
 
 fn extract_css(html: text) -> Rules:
     # First pass: collect CSS custom properties from all :root blocks
-    var custom_props = ""
+    var custom_prop_parts: [text] = [""; 100]
+    var custom_prop_count = 0
     var pre_pos = 0
     var pre_guard = 0
     while pre_guard < 100:
@@ -1540,8 +1505,11 @@ fn extract_css(html: text) -> Rules:
         if pre_close < 0:
             break
         val pre_css = html.substring(pre_open + 1, pre_close)
-        custom_props = custom_props + _css_collect_custom_props(pre_css)
+        if custom_prop_count < custom_prop_parts.len():
+            custom_prop_parts[custom_prop_count] = _css_collect_custom_props(pre_css)
+            custom_prop_count = custom_prop_count + 1
         pre_pos = pre_close + 1
+    val custom_props = custom_prop_parts.join("")
     val rule_count = count_css_rules(html)
     var group_parts: [[[text]]] = [[[]]; rule_count]
     var decls: [text] = [""; rule_count]

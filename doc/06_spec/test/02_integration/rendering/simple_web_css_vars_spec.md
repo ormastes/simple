@@ -27,7 +27,7 @@ simple_web_css_vars_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -63,6 +63,31 @@ expect(height).to_equal("27")
 
 </details>
 
+#### resolves CSS variables collected across separate style blocks
+
+- Build a CSS fixture with root variables and use sites split across style tags
+- Resolve the computed target height through the joined custom property path
+- Assert split style blocks still share collected custom properties
+   - Expected: height equals `31`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Build a CSS fixture with root variables and use sites split across style tags")
+val html = _multi_style_css_var_fixture()
+step("Resolve the computed target height through the joined custom property path")
+val height = simple_web_layout_debug_style_by_id(html, "target", "height")
+step("Assert split style blocks still share collected custom properties")
+expect(height).to_equal("31")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -82,8 +107,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
