@@ -274,7 +274,8 @@ Deliverables:
 - hosted SimpleOS multicore evidence keeps the model/live boundary executable:
   the hosted spec has 7 scenarios and rejects stale wording that treats
   live AP or final ring/user proof as unavailable;
-- live QEMU proof for AP startup plus scheduler-visible CPU1 green dispatch;
+- live QEMU proof for AP startup plus scheduler-visible CPU1 green dispatch,
+  with the scheduler-only lane rejecting final hardware handoff markers;
 - final hardware context-switch handoff kept separate from scheduler-state
   proof and backed by the `HW_HANDOFF_PASS`, `USER_ENTRY_PASS`, and
   `USER_SYSCALL_PASS` marker triplet.
@@ -285,6 +286,8 @@ Acceptance evidence:
   `doc/08_tracking/bug/green_thread_spec_runner_mismatch_2026-06-11.md`
   blocker is closed and regression coverage is in place;
 - `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`
+  proves readiness markers and must not emit `HW_HANDOFF_PASS=true`,
+  `USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`;
 - `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean`
   proves the final AP ring/user handoff marker triplet.
 
