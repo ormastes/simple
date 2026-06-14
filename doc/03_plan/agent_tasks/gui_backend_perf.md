@@ -227,6 +227,10 @@ Updated: 2026-06-14
   layout renderer now searches from an offset directly in the original text
   buffer instead of allocating a tail substring before every parser `find_from`
   call.
+- this commit -- layout count-pass text trim allocation removal: the real Pure
+  Simple HTML layout renderer now checks text ranges in-place while sizing the
+  parse arena instead of allocating temporary text/tail substrings just to trim
+  and count visible text nodes.
 - this commit -- debug attr loop length hoist:
   `simple_web_layout_debug_attr_by_id` now reuses the parsed node count instead
   of dispatching `nodes.len()` on every scan iteration.
