@@ -152,7 +152,7 @@ Shared layers already in place:
 
 | Rank | Action | Files | Estimated Savings | Risk |
 |------|--------|-------|-------------------|------|
-| 1a | Add `fn default_qemu_timeout_ms() -> i64: 60000` and call from all 6 arch `_timeout_ms()` | `qemu_systest_contract.spl` | ~5 L | Very Low |
+| 1a | **DONE 2026-06-14** — added `default_qemu_timeout_ms() -> i64: 60000`; the 6 QEMU `_timeout_ms()` now delegate to it (darwin keeps its own 15000). `simple check` OK. | `qemu_systest_contract.spl` | ~5 L | Very Low |
 | 1b | Probe interpreter safety of `[text]` literal return; if safe, add `fn standard_smf_markers() -> [text]` | `qemu_systest_contract.spl` | ~20 L | Low (needs probe) |
 
 ### Tier 2 — C header extraction (no freestanding build logic change, additive only)
