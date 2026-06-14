@@ -27,7 +27,7 @@ backend_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -374,6 +374,124 @@ expect(result.diagnostic).to_contain("per-widget GPU dispatch")
 
 </details>
 
+#### records event flow timings and speedup for strict GPU batches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = engine2d_host_gpu_event_flow_evidence(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    3,
+    2,
+    384,
+    4096,
+    false,
+    false,
+    true,
+    4,
+    6,
+    10,
+    20,
+    30,
+    1113616374,
+    true
+)
+
+expect(evidence.ok).to_equal(true)
+expect(evidence.schedule.execution_kind).to_equal(ENGINE2D_HOST_GPU_EXEC_PACKET)
+expect(evidence.schedule.gpu_batched).to_equal(true)
+expect(evidence.schedule.fallback_explicit).to_equal(false)
+expect(evidence.draw_ir_to_submit_ms).to_equal(3)
+expect(evidence.submit_to_present_ms).to_equal(5)
+expect(evidence.event_to_present_ms).to_equal(12)
+expect(evidence.candidate_frame_p50_ms).to_equal(10)
+expect(evidence.candidate_frame_p95_ms).to_equal(15)
+expect(evidence.speedup_x1000).to_equal(2000)
+expect(engine2d_host_gpu_event_flow_summary(evidence)).to_contain("speedup_x1000=2000")
+```
+
+</details>
+
+#### keeps fallback event flow honest without claiming speedup
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = engine2d_host_gpu_event_flow_evidence(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    2,
+    1,
+    256,
+    4096,
+    false,
+    false,
+    false,
+    4,
+    6,
+    10,
+    20,
+    30,
+    970686405,
+    true
+)
+
+expect(evidence.ok).to_equal(true)
+expect(evidence.schedule.fallback_explicit).to_equal(true)
+expect(evidence.candidate_frame_p50_ms).to_equal(20)
+expect(evidence.candidate_frame_p95_ms).to_equal(30)
+expect(evidence.speedup_x1000).to_equal(1000)
+expect(engine2d_host_gpu_event_flow_summary(evidence)).to_contain("fallback=true")
+```
+
+</details>
+
+#### rejects event flow evidence when event order is not preserved
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = engine2d_host_gpu_event_flow_evidence(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    2,
+    1,
+    256,
+    4096,
+    false,
+    false,
+    true,
+    4,
+    6,
+    10,
+    20,
+    30,
+    970686405,
+    false
+)
+
+expect(evidence.ok).to_equal(false)
+expect(evidence.diagnostic).to_contain("event order")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -393,8 +511,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
