@@ -45,10 +45,11 @@ and `tools/web-render-backend/chromium-webgpu-draw/` when the requirement is
 Chrome/Electron WebGPU drawing. That wrapper reports either positive adapter,
 non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a
 deterministic `host-unavailable:*` status without falling back to Simple
-software replay. For WASM-originated Simple2D evidence, use
-`chrome_webgpu_draw_wasm_simple2d_payload_evidence`; it parses
-`rect:x,y,w,h:rgba:r,g,b,a`, converts RGB to `#rrggbb`, and records payload
-byte/checksum provenance even when the host reports unavailable WebGPU.
+software replay. For WASM-originated Simple3D evidence, use
+`chrome_webgpu_draw_wasm_simple3d_triangle_payload_evidence`; it parses
+`simple3d:canvas:w,h:triangle:x1,y1,z1,x2,y2,z2,x3,y3,z3:rgba:r,g,b,a`,
+converts RGB to `#rrggbb`, and records payload byte/checksum provenance even
+when the host reports unavailable WebGPU.
 
 For in-process browser Simple-script drawing evidence, use
 `canvas_get_context_simple2d` or `canvas_get_context_simple3d` from

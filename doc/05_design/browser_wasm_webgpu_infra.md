@@ -27,6 +27,14 @@ Canvas facade records:
 - Simple3D dimensions, clear/camera/mesh commands, scene JSON, scene byte count,
   scene checksum, and WebGPU scene submission counters.
 
+Chrome draw evidence records:
+
+- Host-adaptive adapter/device/pipeline/draw/pixel evidence for the rectangle
+  smoke probe and the WASM Simple3D triangle payload probe.
+- `source_origin=wasm-simple3d-payload`, payload byte count, payload checksum,
+  and triangle count when the Simple3D wrapper is used, even if the local host
+  reports `host-unavailable:*`.
+
 Chrome compute evidence records:
 
 - `backend_target=webgpu`, `source_format=wgsl`, `binary_format=none`.
@@ -52,8 +60,10 @@ Compiler planning records:
    title/body or append Simple2D/Simple3D evidence. Unsupported commands warn.
 5. Simple2D/Simple3D facade submission builds deterministic in-process WebGPU
    evidence: pass counts, draw counts, payload sizes, checksums, and status.
-6. Chrome evidence wrappers run only in explicit specs/tools. They parse JSON
-   from the helper app and preserve host-unavailable outcomes.
+6. Chrome evidence wrappers run only in explicit specs/tools. The draw wrapper
+   converts bounded Simple3D triangle payload strings into Electron helper
+   environment fields, and both draw/compute wrappers parse JSON from helper
+   apps while preserving host-unavailable outcomes.
 7. Portable compute WebGPU codegen emits WGSL/source-only plans with host-import
    diagnostics instead of claiming native binary output.
 

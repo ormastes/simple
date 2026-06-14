@@ -1,6 +1,6 @@
 # Browser Chrome WebGPU Draw Evidence
 
-> This host-adaptive scenario proves that the browser WebGPU drawing lane either draws through Chromium/Electron WebGPU and captures non-background pixels, or returns an explicit `host-unavailable:*` status without substituting Simple's software replay path.
+> These host-adaptive scenarios prove that the browser WebGPU drawing lane either draws through Chromium/Electron WebGPU and captures non-background pixels, or returns an explicit `host-unavailable:*` status without substituting Simple's software replay path. The Simple3D scenario carries bounded WASM payload provenance through the Chrome helper so the 3D path is not confused with the older rectangle-only probe.
 
 <!-- sdn-diagram:id=browser_webgpu_chrome_draw_evidence_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ browser_webgpu_chrome_draw_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Browser Chrome WebGPU Draw Evidence
 
-This host-adaptive scenario proves that the browser WebGPU drawing lane either draws through Chromium/Electron WebGPU and captures non-background pixels, or returns an explicit `host-unavailable:*` status without substituting Simple's software replay path.
+These host-adaptive scenarios prove that the browser WebGPU drawing lane either draws through Chromium/Electron WebGPU and captures non-background pixels, or returns an explicit `host-unavailable:*` status without substituting Simple's software replay path. The Simple3D scenario carries bounded WASM payload provenance through the Chrome helper so the 3D path is not confused with the older rectangle-only probe.
 
 ## At a Glance
 
@@ -46,16 +46,18 @@ This host-adaptive scenario proves that the browser WebGPU drawing lane either d
 | Plan | doc/03_plan/platform/webgpu_js_wasm_simple.md |
 | Design | doc/05_design/browser_wasm_webgpu_infra.md |
 | Research | doc/01_research/local/browser_wasm_webgpu_infra.md |
-| Source | `test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl` |
+| Source | `/tmp/simple-browser-payload/test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-This host-adaptive scenario proves that the browser WebGPU drawing lane either
+These host-adaptive scenarios prove that the browser WebGPU drawing lane either
 draws through Chromium/Electron WebGPU and captures non-background pixels, or
 returns an explicit `host-unavailable:*` status without substituting Simple's
-software replay path.
+software replay path. The Simple3D scenario carries bounded WASM payload
+provenance through the Chrome helper so the 3D path is not confused with the
+older rectangle-only probe.
 
 ## Examples
 
@@ -109,12 +111,49 @@ else:
 
 </details>
 
+#### returns Chrome WebGPU Simple3D triangle pixels or explicit host unavailable status with WASM provenance
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = chrome_webgpu_draw_wasm_simple3d_triangle_payload_evidence("simple3d:canvas:96,64:triangle:0,1,0,-1,-1,0,1,-1,0:rgba:32,204,255,255")
+
+expect(evidence.source_origin).to_equal("wasm-simple3d-payload")
+expect(evidence.payload_byte_count).to_equal(71)
+expect(evidence.payload_checksum).to_equal(1207)
+expect(evidence.triangle_count).to_equal(1)
+if evidence.ok():
+    expect(evidence.status).to_equal("ok")
+    expect(evidence.adapter).to_be(true)
+    expect(evidence.fallback_adapter).to_be(false)
+    expect(evidence.device_configured).to_be(true)
+    expect(evidence.pipeline_valid).to_be(true)
+    expect(evidence.render_pass_count).to_equal(1)
+    expect(evidence.draw_call_count).to_equal(1)
+    expect(evidence.presented).to_be(true)
+    expect(evidence.pixel_checksum).to_be_greater_than(0)
+    expect(evidence.non_background_pixels).to_be_greater_than(0)
+    expect(evidence.capture_width).to_be_greater_than(0)
+    expect(evidence.capture_height).to_be_greater_than(0)
+else:
+    expect(evidence.host_unavailable()).to_be(true)
+    expect(evidence.status).to_start_with("host-unavailable:")
+    expect(evidence.pixel_checksum).to_equal(0)
+    expect(evidence.non_background_pixels).to_equal(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
