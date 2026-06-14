@@ -11,9 +11,9 @@
 > `cooperative_green_spawn` and `multicore_green_spawn`. Rows named
 > `Simple green` are cooperative queue evidence only and must not be cited as
 > Go-like M:N CPU-parallel evidence. Use
-> `doc/09_report/cross_language_perf_parallel_smoke.md` or
-> `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md` for current
-> gated multicore-green profile evidence.
+> `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+> for current contract-gated multicore-green profile evidence. The parallel
+> smoke and 2026-06-07 large reports are historical chronology only.
 
 ## Methodology
 

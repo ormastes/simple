@@ -309,12 +309,15 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
    - Expected: absent_in_text(architecture, "cross_language_perf_parallel_smoke.md") equals `1`
 - Verify the report index promotes the current freshbin profile evidence
 - Verify the SPipe state audit points at current profile evidence
+- Verify old profile reports point at current freshbin evidence
+   - Expected: absent_in_text(older_smoke_report, "for current\n> Go-like") equals `1`
+   - Expected: absent_in_text(oldest_smoke_report, "for current\n> gated") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -334,6 +337,8 @@ val architecture = rt_file_read_text("doc/04_architecture/runtime/multicore_gree
 val design = rt_file_read_text("doc/05_design/multicore_green.md") ?? ""
 val report_index = rt_file_read_text("doc/09_report/README.md") ?? ""
 val spipe_state = rt_file_read_text(".spipe/multicore_green/state.md") ?? ""
+val older_smoke_report = rt_file_read_text("doc/09_report/cross_language_perf_2026-06-07_smoke.md") ?? ""
+val oldest_smoke_report = rt_file_read_text("doc/09_report/cross_language_perf_2026-06-06.md") ?? ""
 step("Verify architecture and design name the API misuse gate")
 expect(architecture).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(architecture).to_contain("numbered aliases")
@@ -359,6 +364,13 @@ expect(spipe_state).to_contain("## Completion Audit - refreshed 2026-06-14")
 expect(spipe_state).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
 expect(spipe_state).to_contain("historical chronology only, not current release evidence")
 expect(spipe_state).to_contain("elf_utils::tests::resolves_runtime_pool_symbols")
+step("Verify old profile reports point at current freshbin evidence")
+expect(older_smoke_report).to_contain("cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(older_smoke_report).to_contain("historical chronology only")
+expect(absent_in_text(older_smoke_report, "for current\n> Go-like")).to_equal(1)
+expect(oldest_smoke_report).to_contain("cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(oldest_smoke_report).to_contain("historical chronology only")
+expect(absent_in_text(oldest_smoke_report, "for current\n> gated")).to_equal(1)
 ```
 
 </details>

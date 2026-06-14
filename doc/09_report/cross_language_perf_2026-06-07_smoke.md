@@ -9,9 +9,9 @@
 
 > **Historical report:** this smoke predates the fail-closed
 > `queue_model=work_stealing` multicore-green evidence contract. Use
-> `doc/09_report/cross_language_perf_parallel_smoke.md` or
-> `doc/09_report/cross_language_perf_parallel_large_2026-06-07.md` for current
-> Go-like M:N profile evidence.
+> `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
+> for current contract-gated Go-like M:N profile evidence. The parallel
+> smoke and 2026-06-07 large reports are historical chronology only.
 
 ## Methodology
 
