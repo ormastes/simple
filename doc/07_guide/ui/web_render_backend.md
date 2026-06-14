@@ -7,6 +7,7 @@ rendered (and compared) by Simple's own renderer or by real Chromium.
 - **Sample app:** `examples/06_io/ui/web_render_backend_gui.spl`
 - **Chromium helper:** `tools/web-render-backend/chromium_render.js`
 - **WebGPU draw evidence helper:** `tools/web-render-backend/chromium-webgpu-draw/`
+- **WebGPU compute evidence helper:** `tools/web-render-backend/chromium-webgpu-compute/`
 
 ## The interface
 
@@ -94,3 +95,16 @@ timings. Do not count fallback-only or smoke-size software runs as a real GPU
 speedup.
 
 See also: [`web_render_backend_tldr.md`](web_render_backend_tldr.md).
+
+## Chrome WebGPU Evidence Helpers
+
+`std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence` is the
+canonical host-adaptive draw probe for real Chromium WebGPU pixels.
+`std.gc_async_mut.gpu.browser_engine.chrome_webgpu_compute_evidence` is the
+matching processing probe for real Chromium WebGPU compute readback. The
+compute helper accepts compiler-emitted WGSL through `CWC_WGSL_SOURCE` and can
+run both `u32_add` and `simple2d_fill` operations. For WASM-backed Simple2D
+processing evidence, use
+`chrome_webgpu_compute_wasm_simple2d_fill_payload_bytes_evidence(...)` so the
+evidence carries the payload byte count and checksum beside the WGSL source
+metadata.

@@ -1,6 +1,6 @@
 # Browser Chrome WebGPU Compute Evidence
 
-> This host-adaptive scenario proves that the Chrome/Electron WebGPU processing lane either runs generated WGSL `u32` addition and Simple2D fill compute shaders with matching readback, or returns an explicit `host-unavailable:*` status without substituting Simple's software executor.
+> This host-adaptive scenario proves that the Chrome/Electron WebGPU processing lane either runs a generated WGSL `u32` addition compute shader and reads back matching output, or returns an explicit `host-unavailable:*` status without substituting Simple's software executor.
 
 <!-- sdn-diagram:id=browser_webgpu_chrome_compute_evidence_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ browser_webgpu_chrome_compute_evidence_spec -> compiler
 
 # Browser Chrome WebGPU Compute Evidence
 
-This host-adaptive scenario proves that the Chrome/Electron WebGPU processing lane either runs generated WGSL `u32` addition and Simple2D fill compute shaders with matching readback, or returns an explicit `host-unavailable:*` status without substituting Simple's software executor.
+This host-adaptive scenario proves that the Chrome/Electron WebGPU processing lane either runs a generated WGSL `u32` addition compute shader and reads back matching output, or returns an explicit `host-unavailable:*` status without substituting Simple's software executor.
 
 ## At a Glance
 
@@ -54,18 +54,17 @@ This host-adaptive scenario proves that the Chrome/Electron WebGPU processing la
 ## Overview
 
 This host-adaptive scenario proves that the Chrome/Electron WebGPU processing
-lane either runs generated WGSL `u32` addition and Simple2D fill compute shaders
-with matching readback, or returns an explicit `host-unavailable:*` status
-without substituting Simple's software executor.
+lane either runs a generated WGSL `u32` addition compute shader and reads back
+matching output, or returns an explicit `host-unavailable:*` status without
+substituting Simple's software executor.
 
 ## Examples
 
-The scenarios dispatch one compute pass for eight values for compiler-emitted
-`simple_webgpu_add_u32` and `simple_2d_fill_u32` WGSL. On a host with
+The scenario dispatches one compute pass for eight values. On a host with
 non-fallback WebGPU support, evidence must show a configured device, valid
-shader/pipeline/bind group, one dispatch, queue submission, valid readback, zero
-mismatches, and matching output and expected checksums. On a host without
-support, evidence must start with `host-unavailable:`.
+shader/pipeline/bind group, one dispatch, queue submission, valid readback, and
+matching output and expected checksums. On a host without support, evidence must
+start with `host-unavailable:` and keep output counters at zero.
 
 **Requirements:** .spipe/browser-wasm-webgpu-infra/state.md
 **Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
@@ -125,19 +124,19 @@ else:
 
 </details>
 
-#### returns Chrome WebGPU readback for compiler emitted Simple2D fill WGSL or explicit host unavailable status
+#### returns Chrome WebGPU readback for WASM Simple2D fill payload provenance or explicit host unavailable status
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val generated = emit_portable_2d_optimization_module(PortableComputeTarget.WebGpu)
 expect(generated.source).to_contain("@group(0) @binding(3) var<uniform> params: Simple2DParams")
 expect(generated.source).to_contain("fn simple_2d_fill_u32")
-val evidence = chrome_webgpu_compute_simple2d_fill_generated_source_evidence(8, 1234, generated.source, "simple_2d_fill_u32")
+val evidence = chrome_webgpu_compute_wasm_simple2d_fill_payload_bytes_evidence("8,0,0,0,210,4,0,0", generated.source, "simple_2d_fill_u32")
 
 if evidence.ok():
     expect(evidence.status).to_equal("ok")
@@ -148,9 +147,11 @@ if evidence.ok():
     expect(evidence.tool_hint).to_equal("browser-webgpu-host-import")
     expect(evidence.entry_name).to_equal("simple_2d_fill_u32")
     expect(evidence.operation).to_equal("simple2d_fill")
-    expect(evidence.source_origin).to_equal("compiler-portable-compute")
+    expect(evidence.source_origin).to_equal("wasm-simple2d-compute-payload")
     expect(evidence.source_byte_count).to_be_greater_than(0)
     expect(evidence.source_checksum).to_be_greater_than(0)
+    expect(evidence.payload_byte_count).to_equal(8)
+    expect(evidence.payload_checksum).to_equal(222)
     expect(evidence.fallback_adapter).to_be(false)
     expect(evidence.device_configured).to_be(true)
     expect(evidence.shader_module_valid).to_be(true)

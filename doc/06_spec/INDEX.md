@@ -4,18 +4,24 @@
 
 ## Quick Stats
 
-- **Total Features:** 2
-- **Complete Documentation:** 1 (50%)
+- **Total Features:** 3
+- **Complete Documentation:** 2 (66%)
 - **Stubs Remaining:** 1
 - **Total Lines:** 41
-- **Warnings:** 2
+- **Warnings:** 3
 
 ---
+
+## Other (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Chrome WebGPU Compute Evidence Parser](test/01_unit/browser_engine/chrome_webgpu_compute_evidence_spec.md) | Minimal | N/A | 13 | 20% | 19 lines |
 
 ## Application (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
-| [WebGPU JS WASM Simple System Evidence](test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Minimal | N/A | 127 | 20% | 41 lines |
+| [Browser Chrome WebGPU Compute Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.md) | Minimal | N/A | 2 | 20% | 22 lines |
 
