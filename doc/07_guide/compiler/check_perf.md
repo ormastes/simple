@@ -200,7 +200,9 @@ Profile scripts must emit separate checked rows for Simple OS thread
 (`thread_spawn`), Simple cooperative green, Simple multicore green
 (`multicore_green_spawn` with `used_runtime_pool()` and work-stealing
 evidence), C pthread, and Go goroutine; do not merge these into one aggregate
-row.
+row. Keep `Simple (SMF loader)` as a bytecode-loader baseline in the language
+comparison section; do not use it as M:N pherallel evidence or merge it into
+parallel/fanout/stress aggregates.
 
 ### Languages compared
 
