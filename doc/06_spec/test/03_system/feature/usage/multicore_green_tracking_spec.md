@@ -418,7 +418,7 @@ expect(parallel_large_report).to_contain("active report checked by the large-pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -426,17 +426,22 @@ step("Read the Go scheduler domain research notes")
 val domain = rt_file_read_text("doc/01_research/domain/multicore_green.md") ?? ""
 val comparison = rt_file_read_text("doc/01_research/lib/threading/go_vs_simple_threads.md") ?? ""
 step("Verify the current refresh date and official Go scheduler model are recorded")
-expect(domain).to_contain("Verified: 2026-06-13")
+expect(domain).to_contain("Verified: 2026-06-14")
 expect(domain).to_contain("G/M/P runtime")
 expect(domain).to_contain("per-processor queues")
-expect(comparison).to_contain("Verified: 2026-06-13")
+expect(comparison).to_contain("Verified: 2026-06-14")
 step("Verify current GOMAXPROCS default/update behavior is captured")
 expect(domain).to_contain("logical CPUs, CPU affinity, and Linux")
 expect(domain).to_contain("cgroup CPU quota")
 expect(domain).to_contain("update the default")
+expect(domain).to_contain("Go 1.25")
+expect(domain).to_contain("container-aware `GOMAXPROCS`")
+expect(domain).to_contain("containermaxprocs")
 expect(comparison).to_contain("may update automatically")
+expect(comparison).to_contain("Go 1.25 makes that container-aware")
 step("Verify profile fairness remains pinned and recorded")
 expect(domain).to_contain("GOMAXPROCS=$CPU_WORKERS")
+expect(domain).to_contain("container-aware defaults are domain context")
 expect(domain).to_contain("record the observed scheduler width")
 expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 ```

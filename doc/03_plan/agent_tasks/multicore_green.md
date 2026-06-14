@@ -1,6 +1,6 @@
 # Multicore Green Parallel Agent Plan
 
-Date: 2026-06-13
+Date: 2026-06-14
 
 ## Current State Snapshot
 
@@ -138,6 +138,10 @@ Acceptance evidence:
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_large_profile_gate_spec.spl --mode=interpreter --clean`
 - report rows proving Go fanout and Go stress fanout both beat C pthreads with
   Go `GOMAXPROCS` pinned to `CPU_WORKERS`.
+- domain research refreshed against official Go docs on 2026-06-14, including
+  Go 1.25 container-aware `GOMAXPROCS` and the Linux `containermaxprocs`
+  GODEBUG setting, while keeping release profile evidence pinned to
+  `GOMAXPROCS=$CPU_WORKERS`.
 - no-arg profile contract output includes
   `report_index_checked=doc/09_report/README.md` and
   `agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md`,
@@ -438,6 +442,9 @@ Each agent reports:
 
 - Current multicore-green lane state is rebased on `main@origin`; unrelated
   remote GUI syncs have not touched the multicore-green owned paths.
+- Go scheduler research is refreshed against official 2026-06-14 Go docs:
+  the plan records Go 1.25 container-aware `GOMAXPROCS` defaults as domain
+  context, but profile evidence remains pinned to `GOMAXPROCS=$CPU_WORKERS`.
 - The current multicore-green doc/spec handoff keeps the report index,
   agent-task plan, system-test plan, tracking SSpec, and generated manual
   aligned with the 2026-06-14 SimpleOS evidence refresh without depending on a

@@ -167,6 +167,11 @@
 
 - The current jj workspace is rebased on `main@origin` for the multicore-green
   lane.
+- Go scheduler research is refreshed against official 2026-06-14 Go docs and
+  records Go 1.25 container-aware `GOMAXPROCS` plus `containermaxprocs` as
+  domain context. The checked-in profile gates still require
+  `GOMAXPROCS=$CPU_WORKERS` so Simple-vs-Go comparisons do not depend on
+  volatile host or Docker defaults.
 - The 2026-06-14 status-alignment slice updates the report index, agent-task
   plan, system-test plan, tracking SSpec, and generated tracking manual so
   future multicore-green status reads see the latest interpreter-run SimpleOS

@@ -1,6 +1,6 @@
 # Go M:N Scheduler vs Simple Concurrency Surfaces
 
-Verified: 2026-06-13
+Verified: 2026-06-14
 
 ## Scope
 
@@ -27,6 +27,9 @@ OS threads. The important properties for this lane are:
 - bounded parallelism through `GOMAXPROCS`
 - current Go defaults may account for logical CPUs, CPU affinity, and Linux
   cgroup CPU quota, and may update automatically when those inputs change
+- Go 1.25 makes that container-aware `GOMAXPROCS` behavior a Linux default
+  when cgroup CPU limits are visible; the `containermaxprocs` GODEBUG setting
+  can disable that default for compatibility
 - worker ownership of runnable work rather than one-OS-thread-per-task
 - blocking compensation so one blocked task does not collapse the whole runtime
 - work stealing so runnable work can move between workers

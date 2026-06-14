@@ -27,7 +27,7 @@ simpleos_cooperative_green_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -117,6 +117,14 @@ carrier cooperative scheduling, not CPU-parallel M:N execution.
 - Run one cooperative carrier turn.
 - Join the value handle and assert the direct value is returned.
 
+### Evidence Boundary Classification
+
+- Read the SimpleOS evidence report and multicore-green design docs.
+- Assert cooperative-green evidence is classified as current-carrier logical
+  scheduling.
+- Assert cooperative-green evidence is not used as runtime-pool or Go-like
+  M:N CPU-parallel proof.
+
 ## Evidence Boundary
 
 - This spec proves hosted SimpleOS compatibility for the cooperative-green
@@ -149,7 +157,7 @@ Simple Test Runner v1.0.0-beta
 Running: test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl
 SimpleOS cooperative green contract PASSED
 Files: 1
-Passed: 3
+Passed: 4
 Failed: 0
 ```
 
@@ -264,12 +272,51 @@ expect(handle.join()).to_equal(21)
 
 </details>
 
+#### keeps cooperative green out of SimpleOS M:N runtime-pool evidence
+
+- Read the SimpleOS evidence report and multicore-green design
+- Verify cooperative green stays classified as current-carrier scheduling
+- Reject runtime-pool or Go-like M:N classification for cooperative evidence
+   - Expected: absent_in_text(report, "cooperative_green_spawn runtime pool") equals `1`
+   - Expected: absent_in_text(report, "cooperative_green_spawn M:N") equals `1`
+   - Expected: absent_in_text(profile_index, "cooperative-green runtime-pool") equals `1`
+   - Expected: absent_in_text(profile_index, "cooperative-green M:N") equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Read the SimpleOS evidence report and multicore-green design")
+val report = rt_file_read_text("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md") ?? ""
+val design = rt_file_read_text("doc/05_design/multicore_green.md") ?? ""
+val profile_index = rt_file_read_text("doc/09_report/README.md") ?? ""
+
+step("Verify cooperative green stays classified as current-carrier scheduling")
+expect(report).to_contain("cooperative current-carrier SimpleOS proof")
+expect(design).to_contain("current OS thread")
+expect(design).to_contain("not CPU-parallel")
+expect(profile_index).to_contain("cooperative-green")
+expect(profile_index).to_contain("current OS thread")
+
+step("Reject runtime-pool or Go-like M:N classification for cooperative evidence")
+expect(absent_in_text(report, "cooperative_green_spawn runtime pool")).to_equal(1)
+expect(absent_in_text(report, "cooperative_green_spawn M:N")).to_equal(1)
+expect(absent_in_text(profile_index, "cooperative-green runtime-pool")).to_equal(1)
+expect(absent_in_text(profile_index, "cooperative-green M:N")).to_equal(1)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
