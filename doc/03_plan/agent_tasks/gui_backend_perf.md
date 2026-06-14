@@ -231,6 +231,10 @@ Updated: 2026-06-14
   Simple HTML layout renderer now checks text ranges in-place while sizing the
   parse arena instead of allocating temporary text/tail substrings just to trim
   and count visible text nodes.
+- this commit -- Simple Web class flag scan consolidation: `parse_html` now
+  derives widget, icon-image, and focused class flags in one class-attribute
+  scan instead of running repeated substring searches for every classed node
+  during GUI startup parsing.
 - this commit -- debug attr loop length hoist:
   `simple_web_layout_debug_attr_by_id` now reuses the parsed node count instead
   of dispatching `nodes.len()` on every scan iteration.
