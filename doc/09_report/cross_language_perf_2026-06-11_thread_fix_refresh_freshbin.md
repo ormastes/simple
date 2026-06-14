@@ -176,8 +176,10 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 > green` is the Pure Simple `multicore_green_spawn` facade over runtime-seed
 > `rt_pool_*` support for bounded worker-pool scheduling with a hosted
 > parallelism limit; generated multicore-green workloads require every
-> handle to report `used_runtime_pool()` so inline fallback cannot masquerade as
-> M:N evidence. The large-fanout multicore-green generated source keeps compact
+> handle to report `used_runtime_pool()` and require public
+> submitted/completed/pending/busy/blocked counter deltas to prove accepted work
+> drained through the runtime pool, so inline fallback cannot masquerade as M:N
+> evidence. The large-fanout multicore-green generated source keeps compact
 > handle-array joins and a capture-free worker kernel so the profile measures
 > scheduler fanout rather than the separate native closure-capture blocker. It
 > is not yet the final scheduler-aware green API.

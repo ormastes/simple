@@ -203,7 +203,14 @@ Deliverables:
 
 - handle evidence methods remain stable:
   `used_runtime_pool()` and `ran_inline_fallback()`;
+- public pool counters remain stable:
+  `multicore_green_submitted_count()`, `multicore_green_completed_count()`,
+  `multicore_green_pending_count()`, `multicore_green_busy_count()`, and
+  `multicore_green_blocked_count()`;
 - profile workloads fail if a native M:N row would silently fall back inline;
+- profile workloads print counter deltas and fail unless submitted/completed
+  deltas match the runtime-pool handle count and pending/busy/blocked drain to
+  zero after join;
 - checksum parity with OS-thread and cooperative rows.
 
 Acceptance evidence:
@@ -214,7 +221,8 @@ Acceptance evidence:
   submitted/completed/pending/busy/blocked counter evidence is consistent
   after join;
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
-- cross-language report contains `used_runtime_pool()` evidence text.
+- cross-language report contains `used_runtime_pool()` evidence text plus
+  `counter_delta=<submitted>/<completed>,pending=0,busy=0,blocked=0` evidence.
 
 ## Host Fairness And Blocking Agent
 
@@ -322,8 +330,8 @@ refreshed after executable specs and profile scripts change.
   must update `scripts/check/check-thread-spawn-with-args-native.shs` and the
   matching tracking note.
 - If a change claims Go-like M:N behavior, Multicore Green Runtime-Pool Agent
-  must provide `used_runtime_pool()` evidence and Go Profile Evidence Agent must
-  gate the row numerically.
+  must provide `used_runtime_pool()` plus public counter-delta evidence, and Go
+  Profile Evidence Agent must gate the row numerically.
 - If a change claims hosted fairness/preemption parity with Go, Host Fairness
   And Blocking Agent must distinguish explicit sliced fairness from future
   ordinary-closure preemption and update the dedicated tracker plus executable

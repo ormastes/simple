@@ -68,6 +68,8 @@ This is a green-thread API, but it is not a Go-style CPU-parallel scheduler.
   `rt_pool_is_done`
 - exposes `used_runtime_pool()` so reports can fail closed when work stayed
   inline
+- exposes public submitted/completed/pending/busy/blocked counters so reports
+  can prove accepted work drained through the runtime pool after join
 - exposes `multicore_green_parallelism()` so hosted pool width is visible like
   a Go `GOMAXPROCS`-style limit
 - requires `queue_model=work_stealing` evidence before a profile row can be
