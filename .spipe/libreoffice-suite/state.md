@@ -70,6 +70,12 @@ possible so they are runner-verifiable.
    HTML via the resolver — the spine demonstrated end-to-end. Paragraph spec 3/3
    green; heading path verified via direct `bin/simple run` (runner compiled-mode
    i32 interpolation is unreliable — same toolchain fragility as the f64 bug).
+2d. DONE (landed origin 2ec0229) — **word wired to the substrate**
+   (`office/word/html_render.spl`): `render_block_html`/`render_document_html`
+   map each `BlockKind` to the resolver theme → styled HTML, against the real
+   `attributed_text` DocBlock model (the existing `word/render.spl` targets a
+   stale DocBlock API + the broken UI tree). Spec 4/4. All three office surfaces
+   — markdown, slides, word — now share ONE CSS substrate.
 3. TODO — **Markdown WYSIWYG view in IDE**: styled preview beside line edit,
    using slices 2/2b. Reuse `std.editor.render.md_renderer` (AC-4 of
    ide-office-plugin-suite) — do not write a new renderer.
