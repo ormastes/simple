@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 57 | 57 | 0 | 0 |
+| 58 | 58 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -949,6 +949,27 @@ expect(_pixels_equal(simple_pixels, browser_pixels)).to_equal(true)
 
 </details>
 
+#### web render backend pure_simple uses the Engine2D auto backend path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><div style='width: 64px; height: 24px; background-color: #2563eb'></div><span style='color:#ffffff'>Auto</span></body></html>"
+val simple = SimpleWebRenderer.create(96, 64)
+val web = WebRenderBackend.create("pure_simple", 96, 64)
+val simple_pixels = simple.render_html_to_pixels(html)
+val web_pixels = web.render_html_to_pixels(html)
+expect(simple.backend_name).to_equal(simple_web_resolved_engine2d_backend_name(96, 64, "auto"))
+expect(web.name()).to_equal("pure_simple")
+expect(_pixels_equal(simple_pixels, web_pixels)).to_equal(true)
+```
+
+</details>
+
 #### fallback facade parses rgb() background-color with the shared CSS parser
 
 <details>
@@ -1255,8 +1276,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 57 |
-| Active scenarios | 57 |
+| Total scenarios | 58 |
+| Active scenarios | 58 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
