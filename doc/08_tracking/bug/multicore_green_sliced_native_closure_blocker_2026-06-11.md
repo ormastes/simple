@@ -10,7 +10,7 @@ An early local additive prototype for explicit resumable host-side sliced tasks
 was attempted in `src/lib/nogc_async_mut/concurrent/multicore_green.spl` and
 then reverted because the hosted native path was not stable enough to ship.
 
-The shape that was tried:
+The historical task-object shape that was tried:
 
 - `MulticoreGreenSliceTask`
 - `MulticoreGreenSliceResult`
@@ -18,7 +18,8 @@ The shape that was tried:
 
 That captured-mutable-state prototype failed on the native hosted path. The
 current public API closes this blocker with a simpler scalar-state contract:
-`MulticoreGreenSliceResult`, `MulticoreGreenSlicedHandle`, and
+it does not expose `MulticoreGreenSliceTask` or `MulticoreGreenSliceResult`;
+it exposes `MulticoreGreenSlicedHandle` and
 `multicore_green_spawn_sliced(initial_state, step_fn)`.
 
 ## What Was Proven

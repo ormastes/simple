@@ -448,7 +448,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 150 lines folded for reproduction.
+Runnable source: 155 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -485,6 +485,11 @@ expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_neg
 expect(row).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(row).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
 expect(row).to_contain("doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md")
+val sliced_native_blocker = rt_file_read_text("doc/08_tracking/bug/multicore_green_sliced_native_closure_blocker_2026-06-11.md") ?? ""
+expect(sliced_native_blocker).to_contain("Status: closed")
+expect(sliced_native_blocker).to_contain("historical task-object shape")
+expect(sliced_native_blocker).to_contain("does not expose `MulticoreGreenSliceTask`")
+expect(sliced_native_blocker).to_contain("multicore_green_spawn_sliced(initial_state, step_fn)")
 expect(row).to_contain("scripts/check/check-thread-spawn-with-args-native.shs")
 expect(row).to_contain("test/01_unit/lib/nogc_async_mut/multicore_green_native.spl")
 expect(row).to_contain("Native/evidence trace: runtime-pool resolver exports `rt_pool_*` counter symbols")
