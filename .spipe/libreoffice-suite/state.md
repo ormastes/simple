@@ -98,13 +98,21 @@ possible so they are runner-verifiable.
    NOTE: the higher-level office *apps* (`word_app`/`sheets_app`/... exercised by
    `office_suite_spec.spl`) have 13 PRE-EXISTING failures unrelated to these
    slices (stale `word/render.spl` DocBlock API, etc.) — separate cleanup.
-7. TODO — **Harden db / SDD-draw / math**: `simple_db`, `common/drawing`,
-   math; connect draw to the CSS/render substrate.
+7. PARTIAL — **Harden db / SDD-draw / math**: Draw/Base/Math are named as
+   LibreOffice apps (slice 9) but not yet substrate-backed. BLOCKER found:
+   `common/drawing` is a RASTER model (`DrawingDocument` pixel layers + f64
+   `SkPoint`/`SkRect` primitives) with no vector-shape list, so a verifiable
+   draw→SVG renderer needs (a) a shape model and (b) the f64 toolchain fix
+   (coords are f64 — same nested-payload bug). Do not fabricate an unverifiable
+   renderer. `simple_db` and a Math formula-editor remain to scope.
 8. TODO — **Game-tool migrate + connect**: `examples/11_advanced/game2d`
    connect to draw/calc/db.
-9. TODO (LAST, MINIMAL) — **Rename to "LibreOffice"**: user-facing app/branding
-   names only; NOT a repo-wide symbol sweep (high-conflict, low-value churn in
-   this parallel-force-push repo).
+9. DONE (landed origin 626f970) — **Rename to "LibreOffice"** (minimal/honest):
+   `app.office.libreoffice` brands the suite "LibreOffice" and maps components to
+   Writer/Calc/Impress/Draw/Base/Math, with an `implemented` flag reporting only
+   the 3 substrate-backed apps as live. Emits a LibreOffice-branded plugin
+   manifest. Spec `test/01_unit/app/office/libreoffice_spec.spl` 6/6. (Branding
+   layer, not a repo-wide symbol sweep — the right minimal interpretation.)
 
 ## Log
 
