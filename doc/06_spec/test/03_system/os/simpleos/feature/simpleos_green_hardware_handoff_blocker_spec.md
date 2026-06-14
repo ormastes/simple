@@ -1,6 +1,6 @@
 # SimpleOS Green Hardware Handoff Closure Contract
 
-> This SSpec keeps the final SimpleOS green-thread hardware handoff closure executable. Earlier QEMU evidence proved AP startup, fixed-slot dispatch, preemption, scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, and prerequisite user-entry readiness markers. The closed final live lane now also requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP ring/user path so prerequisite markers cannot be mistaken for final hardware proof.
+> This SSpec keeps the final SimpleOS green-thread hardware handoff boundary executable. Earlier QEMU evidence proved AP startup, fixed-slot dispatch, preemption, scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, and prerequisite user-entry readiness markers. Current direct QEMU evidence now reaches `USER_CR3_READY=true`; the final live lane still requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP ring/user path so prerequisite markers cannot be mistaken for final hardware proof.
 
 <!-- sdn-diagram:id=simpleos_green_hardware_handoff_blocker_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ simpleos_green_hardware_handoff_blocker_spec -> std
 
 # SimpleOS Green Hardware Handoff Closure Contract
 
-This SSpec keeps the final SimpleOS green-thread hardware handoff closure executable. Earlier QEMU evidence proved AP startup, fixed-slot dispatch, preemption, scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, and prerequisite user-entry readiness markers. The closed final live lane now also requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP ring/user path so prerequisite markers cannot be mistaken for final hardware proof.
+This SSpec keeps the final SimpleOS green-thread hardware handoff boundary executable. Earlier QEMU evidence proved AP startup, fixed-slot dispatch, preemption, scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, and prerequisite user-entry readiness markers. Current direct QEMU evidence now reaches `USER_CR3_READY=true`; the final live lane still requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP ring/user path so prerequisite markers cannot be mistaken for final hardware proof.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec keeps the final SimpleOS green-thread hardware handoff closure execut
 |-------|-------|
 | Feature IDs | #green-simpleos-hardware-handoff |
 | Category | SimpleOS / Concurrency |
-| Status | Closed |
+| Status | Current |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,13 +53,14 @@ This SSpec keeps the final SimpleOS green-thread hardware handoff closure execut
 
 ## Overview
 
-This SSpec keeps the final SimpleOS green-thread hardware handoff closure
+This SSpec keeps the final SimpleOS green-thread hardware handoff boundary
 executable. Earlier QEMU evidence proved AP startup, fixed-slot dispatch,
 preemption, scheduler-owned handoff through `SCHED_HANDOFF_PASS=true`, and
-prerequisite user-entry readiness markers. The closed final live lane now also
-requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
-`USER_SYSCALL_PASS=true` from the real AP ring/user path so prerequisite
-markers cannot be mistaken for final hardware proof.
+prerequisite user-entry readiness markers. Current direct QEMU evidence now
+reaches `USER_CR3_READY=true`; the final live lane still requires
+`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
+from the real AP ring/user path so prerequisite markers cannot be mistaken for
+final hardware proof.
 
 ## Requirements
 
@@ -296,14 +297,14 @@ expect(probe).to_contain("USER_CR3_READY")
 - Read requirements, NFR, QEMU spec, and current evidence report
 - Verify requirement docs require the final marker triplet
 - Verify the QEMU spec owns the explicit final live gate
-- Verify the evidence report claims final ring/user handoff through live markers
+- Verify the evidence report keeps final ring/user handoff open without fresh final markers
    - Expected: absent_in_text(report, "SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl") equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -327,23 +328,28 @@ expect(qemu_spec).to_contain("GREEN_HW_HANDOFF_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_ENTRY_MARKER")
 expect(qemu_spec).to_contain("GREEN_USER_SYSCALL_MARKER")
 
-step("Verify the evidence report claims final ring/user handoff through live markers")
+step("Verify the evidence report keeps final ring/user handoff open without fresh final markers")
 expect(report).to_contain("| SimpleOS final hardware handoff blocker contract | PASS | 3 |")
 expect(report).to_contain("final hardware handoff blocker contract: 3 scenarios")
-expect(report).to_contain("Final Ring/User Handoff PASS")
-expect(report).to_contain("final live green-carrier QEMU lane now proves the real AP ring/user path")
+expect(report).to_contain("final hardware handoff open")
+expect(report).to_contain("| SimpleOS green-carrier QEMU final hardware handoff lane | BLOCKED | missing final marker triplet |")
 expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1")
 expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")
 expect(report).to_contain("2026-06-14 Live Final-Handoff Rerun Attempt")
 expect(report).to_contain("completed without the Simple")
 expect(report).to_contain("test runner's 120s timeout")
 expect(report).to_contain("x86_64 freestanding runtime ABI fix")
-expect(report).to_contain("current-source Cranelift build now links")
+expect(report).to_contain("freestanding linker also now preserves the boot `_entry32` ELF entry")
+expect(report).to_contain("current-source Cranelift build links")
+expect(report).to_contain("Entry point address: 0x10001c")
 expect(report).to_contain("rt_string_char_code_at")
 expect(report).to_contain("rt_for_iterable")
-expect(report).to_contain("Direct QEMU boot of that ELF")
-expect(report).to_contain("timed out after 30")
-expect(report).to_contain("without `[smp]` or `[green-carrier-qemu]` serial markers")
+expect(report).to_contain("direct QEMU boot reaches")
+expect(report).to_contain("[BOOT32]")
+expect(report).to_contain("[BOOT64]")
+expect(report).to_contain("[smp] AP reached 64-bit entry")
+expect(report).to_contain("[green-carrier-qemu] USER_CR3_READY=true")
+expect(report).to_contain("still does not produce fresh current PASS evidence")
 expect(report).to_contain("`--backend llvm` remains unavailable")
 expect(report).to_contain("uses the fast blocker contract below as the current release-visible guard")
 expect(report).to_contain("doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md")

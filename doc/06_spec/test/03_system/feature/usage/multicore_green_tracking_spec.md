@@ -318,7 +318,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 81 lines folded for reproduction.
+Runnable source: 83 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -379,9 +379,11 @@ expect(report_index).to_contain("release-visible gate is the fast")
 expect(report_index).to_contain("simpleos_green_hardware_handoff_blocker_spec.spl")
 expect(report_index).to_contain("live final-handoff rerun with `--timeout 240` completed without the runner timeout")
 expect(report_index).to_contain("x86_64 freestanding runtime ABI fix added `rt_string_char_code_at` / `rt_for_iterable`")
-expect(report_index).to_contain("current-source Cranelift build now links `build/os/simpleos_green_carrier_probe.elf`")
-expect(report_index).to_contain("direct QEMU boot of that ELF timed out after 30 seconds")
-expect(report_index).to_contain("without `[smp]` or `[green-carrier-qemu]` serial markers")
+expect(report_index).to_contain("linker now preserves the boot `_entry32` ELF entry")
+expect(report_index).to_contain("current-source Cranelift build links `build/os/simpleos_green_carrier_probe.elf`")
+expect(report_index).to_contain("direct QEMU boot reaches `[BOOT32]`, `[BOOT64]`, `[smp] AP reached 64-bit entry`")
+expect(report_index).to_contain("non-final live SSpec wrapper also passed 3 scenarios")
+expect(report_index).to_contain("final `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` marker triplet is still not refreshed")
 expect(report_index).to_contain("LLVM backend is unavailable in this driver build")
 expect(report_index).to_contain("doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md")
 expect(report_index).to_contain("prior live QEMU final-handoff claim is therefore not refreshed by this report")

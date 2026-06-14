@@ -6,6 +6,13 @@ Status: CLOSED on 2026-06-08. The live
 `USER_SYSCALL_PASS=true` from the real AP ring/user path. See
 `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`.
 
+Current refresh note, 2026-06-14: this closure record is historical evidence.
+The current `/tmp/simple-pherallel-continue-jj` refresh fixed the x86_64
+freestanding boot entry and reaches AP/scheduler/readiness markers through
+`USER_CR3_READY=true`, but it has not refreshed the final marker triplet. Track
+the current open refresh blocker in
+`doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md`.
+
 ## Summary
 
 The multicore-green SimpleOS lane has hosted scheduler evidence, live QEMU AP
@@ -67,10 +74,10 @@ final hardware/user markers from a real AP ring/user handoff path whose user
 payload reaches the syscall entry and returns through the kernel syscall
 dispatcher.
 
-## Final Ring/User Handoff PASS
+## Historical Final Ring/User Handoff PASS
 
-The final live green-carrier QEMU lane now proves the real AP ring/user path
-through the explicit marker triplet:
+The 2026-06-08 final live green-carrier QEMU lane proved the real AP ring/user
+path through the explicit marker triplet:
 
 ```text
 [green-carrier-qemu] HW_HANDOFF_PASS=true

@@ -19,17 +19,29 @@ completed without the 120s runner timeout but failed one scenario before fresh
 evidence was produced.
 
 Updated direct build classification after the x86_64 freestanding runtime ABI
-fix:
+and boot-entry fixes:
 
 - `--backend cranelift` now links
   `build/os/simpleos_green_carrier_probe.elf` from the current `/tmp/simple-pherallel-continue-jj`
   worktree. The fixed x86_64 boot runtime exports `rt_string_char_code_at` and
   `rt_for_iterable`.
-- Direct QEMU boot of that ELF with the spec's serial command timed out after
-  30 seconds without `[smp]` or `[green-carrier-qemu]` serial markers; the log
-  only contained the timeout termination line.
-- An opt-in live SSpec scheduler-lane rerun did not return usable marker output
-  in this session after starting the spec runner.
+- The freestanding linker now preserves the boot object's `_entry32` ELF entry
+  instead of overriding it with the Simple `spl_start` alias. `readelf` reports
+  `Entry point address: 0x10001c`, matching `_entry32`; `spl_start` remains a
+  separate alias to the Simple entry.
+- Direct QEMU boot of that ELF with the spec's serial command reaches
+  `[BOOT32]`, `[BOOT64]`, `[smp] AP reached 64-bit entry`,
+  `[green-carrier-qemu] PASS=true`, `[green-carrier-qemu] PREEMPT_PASS=true`,
+  `[green-carrier-qemu] SCHED_HANDOFF_PASS=true`, and
+  `[green-carrier-qemu] USER_CR3_READY=true`.
+- The non-final live SSpec wrapper also passes when pinned to the rebuilt
+  compiler with `SIMPLEOS_QEMU_SIMPLE_BIN=src/compiler_rust/target/debug/simple`
+  and `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1`; the latest run passed 3 scenarios
+  in 64532ms.
+- The direct boot still does not produce fresh
+  `[green-carrier-qemu] HW_HANDOFF_PASS=true`,
+  `[green-carrier-qemu] USER_ENTRY_PASS=true`, or
+  `[green-carrier-qemu] USER_SYSCALL_PASS=true` marker evidence.
 - `--backend llvm` is unavailable in the current `src/compiler_rust/target/debug/simple`
   driver build.
 

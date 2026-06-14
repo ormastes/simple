@@ -1459,27 +1459,30 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
             c
         };
 
-        if !boot_objects.is_empty() {
-            let has_entry32 = boot_objects.iter().any(|obj| {
+        let has_boot_entry32 = if !boot_objects.is_empty() {
+            boot_objects.iter().any(|obj| {
                 Self::cached_global_symbols(&mut symbol_cache, obj)
                     .map(|symbols| symbols.iter().any(|sym| sym == "_entry32"))
                     .unwrap_or(false)
-            });
-            if has_entry32 {
-                let entry_flag = if use_direct_lld.is_some() {
-                    "--entry=_entry32"
-                } else {
-                    "-Wl,--entry=_entry32"
-                };
-                cmd.arg(entry_flag);
-            }
+            })
+        } else {
+            false
+        };
+        if has_boot_entry32 {
+            let entry_flag = if use_direct_lld.is_some() {
+                "--entry=_entry32"
+            } else {
+                "-Wl,--entry=_entry32"
+            };
+            cmd.arg(entry_flag);
         }
 
-        let has_explicit_start = object_paths.iter().any(|obj| {
-            Self::cached_global_symbols(&mut symbol_cache, obj)
-                .map(|symbols| symbols.iter().any(|sym| sym == "_start" || sym.ends_with("___start")))
-                .unwrap_or(false)
-        });
+        let has_explicit_start = !has_boot_entry32
+            && object_paths.iter().any(|obj| {
+                Self::cached_global_symbols(&mut symbol_cache, obj)
+                    .map(|symbols| symbols.iter().any(|sym| sym == "_start" || sym.ends_with("___start")))
+                    .unwrap_or(false)
+            });
         if has_explicit_start {
             let entry_flag = if use_direct_lld.is_some() {
                 "--entry=_start"
@@ -1553,11 +1556,13 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
             let raw_start_alias = best_raw_start.clone().or(fallback_raw_start.clone());
             let spl_start_alias = best_spl_start.clone().or(fallback_spl_start.clone());
 
-            if let Some(sym) = raw_start_alias.clone() {
-                if use_direct_lld.is_some() {
-                    cmd.arg(format!("--defsym=_start={}", sym));
-                } else {
-                    cmd.arg(format!("-Wl,--defsym=_start={}", sym));
+            if !has_boot_entry32 {
+                if let Some(sym) = raw_start_alias.clone() {
+                    if use_direct_lld.is_some() {
+                        cmd.arg(format!("--defsym=_start={}", sym));
+                    } else {
+                        cmd.arg(format!("-Wl,--defsym=_start={}", sym));
+                    }
                 }
             }
             if let Some(sym) = raw_start_alias.clone().or(spl_start_alias.clone()) {
