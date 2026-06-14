@@ -4,14 +4,14 @@
 
 This report records the SimpleOS evidence for the multicore-green SPipe lane,
 including the opt-in live QEMU green-carrier proof and the current final
-ring/user context-switch handoff blocker. The live proof covers AP startup,
+ring/user context-switch handoff proof. The live proof covers AP startup,
 fixed-slot CPU1 green dispatch/IPI evidence, fixed timer-preemption yield
 evidence, scheduler-owned CPU1 green handoff through the real `Scheduler`,
 non-final scheduler/user handoff readiness through `USER_HANDOFF_READY=true`,
 non-final user-entry bridge readiness through
 `USER_ENTRY_BRIDGE_READY=true`, non-final user-syscall bridge readiness
 through `USER_SYSCALL_BRIDGE_READY=true`, non-final final-path CR3 readiness
-through `USER_CR3_READY=true`. Current evidence does not claim the final marker
+through `USER_CR3_READY=true`, and the opt-in final marker
 triplet `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 `USER_SYSCALL_PASS=true`.
 
@@ -31,6 +31,8 @@ must not be conflated with host runtime-pool profile evidence.
 Commands below are the canonical repo-root checks for this lane. The latest
 interpreter-run SimpleOS feature-spec refresh was rerun from
 `/tmp/simple-pherallel-continue-jj` on 2026-06-14 after syncing shared `main`.
+The final live QEMU refresh was rerun from `/tmp/simple-pherallel-loop-jj` on
+2026-06-14 after rebasing on `main@origin`.
 The release-visible final-handoff gate is the fast blocker contract; the live
 QEMU final-handoff command remains opt-in and is used only when intentionally
 refreshing AP ring/user hardware evidence.
@@ -59,34 +61,37 @@ final AP ring/user lane was attempted again:
 SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
-Result: FAIL. A follow-up run with `--timeout 240` completed without the Simple
-test runner's 120s timeout, but the final live lane still failed before fresh
-marker proof. A later x86_64 freestanding runtime ABI fix added
-`rt_string_char_code_at` and `rt_for_iterable` to the boot runtime. The
-freestanding linker also now preserves the boot `_entry32` ELF entry instead of
-overriding it with the Simple `spl_start` alias. A clean current-source
-Cranelift build links `build/os/simpleos_green_carrier_probe.elf`, `readelf`
-reports `Entry point address: 0x10001c`, and direct QEMU boot reaches
-`[BOOT32]`, `[BOOT64]`, `[smp] AP reached 64-bit entry`,
+Result: PASS after the 2026-06-14 refresh in `/tmp/simple-pherallel-loop-jj`.
+A follow-up fix added freestanding `rt_pool_safepoint` to the x86_64 boot
+runtime so compiler-inserted loop safepoints link for SimpleOS, then changed the
+probe-only `set_user_task_address_space_for_probe` handoff to clear IF while
+keeping IOPL=3. QEMU interrupt diagnostics showed the previous failure was an
+external interrupt immediately after `iretq` into the minimal final-probe CR3,
+before the user payload could emit serial markers. A clean current-source
+Cranelift build links `build/os/simpleos_green_carrier_probe.elf`; direct QEMU
+boot reaches `[BOOT32]`, `[BOOT64]`, `[smp] AP reached 64-bit entry`,
 `[green-carrier-qemu] PASS=true`, `[green-carrier-qemu] PREEMPT_PASS=true`,
-`[green-carrier-qemu] SCHED_HANDOFF_PASS=true`, and
-`[green-carrier-qemu] USER_CR3_READY=true`.
+`[green-carrier-qemu] SCHED_HANDOFF_PASS=true`,
+`[green-carrier-qemu] USER_CR3_READY=true`,
+`[green-carrier-qemu] HW_HANDOFF_PASS=true`,
+`[green-carrier-qemu] USER_ENTRY_PASS=true`, and
+`[green-carrier-qemu] USER_SYSCALL_PASS=true`.
 
 The non-final live SSpec wrapper was also rerun with
 `SIMPLEOS_QEMU_SIMPLE_BIN=src/compiler_rust/target/debug/simple` and
 `SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1`; it passed 3 scenarios in 64532ms.
 
-That direct boot still does not produce fresh current PASS evidence for
-`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
-`USER_SYSCALL_PASS=true`. `--backend llvm` remains unavailable in this driver
-build. Therefore this report keeps final hardware handoff open and uses the
-fast blocker contract below as the current release-visible guard:
+The opt-in final live SSpec wrapper was rerun with
+`SIMPLEOS_QEMU_SIMPLE_BIN=src/compiler_rust/target/debug/simple` and
+`SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1`; it passed 3 scenarios in
+74244ms. `--backend llvm` remains unavailable in this driver build. The fast
+contract below remains the release-visible guard for ordinary verification:
 
 ```sh
 src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean
 ```
 
-The current refresh blocker is tracked in
+The now-closed refresh blocker is tracked in
 `doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md`.
 
 ## Results
@@ -104,7 +109,7 @@ The current refresh blocker is tracked in
 | SimpleOS scheduler green/user handoff compatibility | PASS | 1 |
 | SimpleOS green-carrier QEMU spec default lane | PASS | 2 |
 | SimpleOS green-carrier QEMU live lane | PASS | 2 |
-| SimpleOS green-carrier QEMU final hardware handoff lane | BLOCKED | missing final marker triplet |
+| SimpleOS green-carrier QEMU final hardware handoff lane | PASS | 3 |
 
 ## 2026-06-11 Interpreter-Run Refresh
 
@@ -121,7 +126,8 @@ cross-language profile-script hardening update:
 This refresh does not rerun a live QEMU lane. It confirms that the interpreter-run
 SimpleOS cooperative lane, the interpreter-run multicore-green scheduler lane, and the
 interpreter-run green-channel wake bridge still pass after the host/profile-script
-changes, without refreshing the historical final live-handoff claim.
+changes. Current final QEMU handoff evidence is recorded in the 2026-06-14
+live final-handoff section above.
 
 ## 2026-06-12 Interpreter-Run Refresh
 
@@ -138,7 +144,7 @@ contract tracking refresh:
 This refresh does not rerun a live QEMU lane. It confirms that the interpreter-run
 SimpleOS cooperative, multicore-green scheduler, and green-channel wake
 contracts remain current after the profile/API contract documentation updates,
-without refreshing the historical final live-handoff claim.
+while leaving QEMU refresh evidence to the live final-handoff section above.
 
 ## 2026-06-13 Interpreter-Run Refresh
 

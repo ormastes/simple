@@ -452,6 +452,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 RuntimeValue rt_for_iterable(RuntimeValue collection);
 RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue idx);
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
+int64_t rt_pool_safepoint(void);
 RuntimeValue rt_value_to_string(RuntimeValue val);
 RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, RuntimeValue fmt_len);
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
@@ -741,6 +742,11 @@ RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
     int64_t i = (int64_t)idx;
     if (i < 0 || (uint64_t)i >= s->len) return 0;
     return (RuntimeValue)(uint8_t)s->data[i];
+}
+
+int64_t rt_pool_safepoint(void)
+{
+    return 0;
 }
 
 RuntimeValue char_code_at(RuntimeValue str, RuntimeValue idx)
