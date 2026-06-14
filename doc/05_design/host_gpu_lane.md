@@ -120,6 +120,13 @@ compiler carrier for lane, packet bound, and body metadata; HIR and MIR
 propagation still need to consume that rich AST node before codegen can emit
 runtime queue packets directly.
 
+HIR lowering now carries that node as `HirStmtKind.TargetLater`, and MIR lowering
+emits explicit `MirInstKind.HostGpuLaneBegin` / `HostGpuLaneEnd` markers around
+the lowered body with lane text, optional max-packet operand, and statement span.
+These markers give later codegen/runtime transport a concrete boundary to turn
+into queue packet emission. The remaining gap is consuming those markers in the
+runtime/codegen path instead of treating them as metadata-only MIR instructions.
+
 ## Performance Model
 
 For this slice, GPU batch performance is a deterministic evidence estimate:

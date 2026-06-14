@@ -45,3 +45,5 @@ implementing
 - spec: Extended backend lane SSpec coverage to 23 tests for strict submission/readback success, fallback rejection before submission, and readback hash mismatch rejection; regenerated `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.md`.
 - impl: Added flat AST `STMT_HOST_GPU_LANE` and rich AST `StmtKind.TargetLater(TargetLaterConfig, Block)` so `target.later(max_packet: N) gpu|host \:` survives frontend parsing as structured lane metadata.
 - spec: Added `test/01_unit/compiler/frontend/host_gpu_lane_structural_bridge_spec.spl` to prove rich AST preserves GPU lane, max_packet, and body metadata; generated its manual stub under `doc/06_spec`.
+- impl: Added `HirStmtKind.TargetLater` and MIR `HostGpuLaneBegin` / `HostGpuLaneEnd` marker instructions so `target.later(max_packet: N) gpu|host \:` survives HIR/MIR lowering with lane, packet bound, body boundary, and span metadata.
+- spec: Added HIR and MIR unit specs proving target-later metadata reaches HIR and emits ordered MIR lane markers; generated their manual stubs under `doc/06_spec`.

@@ -17,6 +17,11 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 # ============================================================================
 
 impl MirLowering:
+    fn lower_target_lane_text(lane: HirTargetLane) -> text:
+        match lane:
+            case HirTargetLane.Gpu: "gpu"
+            case HirTargetLane.Host: "host"
+
     me lower_stmt(stmt: HirStmt):
         """Lower HIR statement to MIR."""
         val stmt_kind: HirStmtKind
@@ -56,6 +61,27 @@ impl MirLowering:
             case AsmAssert(spec):
 
                 self.lower_asm_assert(spec, stmt_span)
+
+            case TargetLater(config, body):
+
+                val lane_text = self.lower_target_lane_text(config.lane)
+                val max_packet_operand = if config.has_max_packet:
+                    Some(mir_operand_copy(self.lower_expr(config.max_packet)))
+                else:
+                    nil
+                var begin_builder = self.builder
+                begin_builder.emit(MirInst(
+                    kind: MirInstKind.HostGpuLaneBegin(lane_text, max_packet_operand),
+                    span: Some(stmt_span)
+                ))
+                self.builder = begin_builder
+                self.lower_block(body)
+                var end_builder = self.builder
+                end_builder.emit(MirInst(
+                    kind: MirInstKind.HostGpuLaneEnd(lane_text),
+                    span: Some(stmt_span)
+                ))
+                self.builder = end_builder
 
             case _:
                 ()
