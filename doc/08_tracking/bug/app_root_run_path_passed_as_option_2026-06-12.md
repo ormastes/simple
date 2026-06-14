@@ -1,8 +1,24 @@
 # Bug: app root `run src/app/main.spl` receives its own script path as an option (stage4)
 
 Date: 2026-06-12
-Status: open
+Status: resolved (2026-06-14)
 Severity: medium (blocks `--dynsmf-status` evidence path; 2 integration its red)
+
+## Resolution (2026-06-14)
+
+`src/app/main.spl`: added `app_root_is_entry_script(arg)` predicate
+(`arg.ends_with("/app/main.spl") or arg == "src/app/main.spl"`) and made
+`app_root_clean_log_args` skip it — the same `arg_is_entry_script` treatment the
+B7 sweep gave the sibling app roots (check/pkg/context/cli_debug). The `run
+<abs-path>/src/app/main.spl --dynsmf-status` form now reaches
+`dynsmf_startup_session` instead of rejecting the script path.
+
+Verified: both `run_app_root_dynsmf` its in
+`test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl` now pass —
+`--dynsmf-status` emits `loaded=7` + `tui_renderer:load:default:loaded:smf_dlopen`,
+`--no-dynsmf --dynsmf-status` emits `policy=arg:--no-dynsmf`/`loaded=0`/`skipped=7`,
+relative-path + no-arg forms still behave. (A separate in-process it, "queues
+background compile evidence", fails independently — unrelated to arg parsing.)
 
 ## Symptom
 
