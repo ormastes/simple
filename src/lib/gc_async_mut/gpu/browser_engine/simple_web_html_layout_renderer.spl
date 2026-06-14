@@ -3698,6 +3698,15 @@ fn zero_i32_list(count: i32) -> [i32]:
 fn neg_one_i32_list(count: i32) -> [i32]:
     [-1; count]
 
+fn shifted_i32_list(values: [i32], delta: i32) -> [i32]:
+    val count = values.len()
+    var shifted: [i32] = [0; count]
+    var i = 0
+    while i < count:
+        shifted[i] = values[i] + delta
+        i = i + 1
+    shifted
+
 fn empty_i32_lists(count: i32) -> [[i32]]:
     [[]; count]
 
@@ -4985,8 +4994,8 @@ pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, hei
     val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
     painted
 
-# Render at a scroll offset: lay out into a virtual canvas of height (height + scroll_y),
-# paint, then crop the viewport window [scroll_y .. scroll_y+height].
+# Render at a scroll offset: lay out with the full scroll extent, then shift
+# paint coordinates into the viewport so allocation stays bounded by WxH.
 # This re-render approach keeps each call stateless.
 pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width: i32, height: i32, scroll_y: i32) -> [u32]:
     if width <= 0 or height <= 0:
@@ -5020,20 +5029,7 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
     val white = argb(255, 255, 255)
     val widget_mode = html.contains("widget-panel")
     val base = if widget_mode: argb(245, 245, 245) else: white
-    var fb: [u32] = [base; width * virtual_h]
+    var fb: [u32] = [base; width * height]
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
-    val painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, virtual_h, widget_mode)
-    # Crop the viewport row-by-row
-    var cropped: [u32] = [base; width * height]
-    var row = 0
-    var dst_base = 0
-    var src_base = clamp_scroll * width
-    while row < height:
-        var col = 0
-        while col < width:
-            cropped[dst_base + col] = painted[src_base + col]
-            col = col + 1
-        dst_base = dst_base + width
-        src_base = src_base + width
-        row = row + 1
-    cropped
+    val shifted_by = shifted_i32_list(boxes.by, 0 - clamp_scroll)
+    paint(nodes, styles, boxes.bx, shifted_by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
