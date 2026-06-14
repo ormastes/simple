@@ -359,6 +359,9 @@ fn resolve_native_build_policy(
         parse_native_backend_name(value)?
     } else if let Some(value) = project.backend.as_deref().or(user.backend.as_deref()) {
         parse_native_backend_name(value)?
+    } else if target.arch == TargetArch::Riscv32 {
+        // cranelift has no rv32 codegen backend; default rv32 targets to LLVM.
+        NativeCodegenBackend::Llvm
     } else {
         default_native_codegen_backend()
     };
@@ -677,6 +680,21 @@ backend = "llvm"
         if policy.target.arch == simple_common::target::TargetArch::X86_64 {
             assert_eq!(policy.cpu, TargetCpu::X86_64V3);
         }
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn test_resolve_native_build_policy_auto_selects_llvm_for_riscv32() {
+        let project = tempfile::tempdir().unwrap();
+        let src = project.path().join("main.spl");
+        fs::write(&src, "fn main() -> i32:\n    return 0\n").unwrap();
+
+        let rv32 = simple_common::target::Target::parse("riscv32-unknown-none-elf").unwrap();
+        let policy = resolve_native_build_policy(&src, Some(rv32), None, None).unwrap();
+
+        assert_eq!(policy.target.arch, simple_common::target::TargetArch::Riscv32);
+        // cranelift has no rv32 codegen; the driver must auto-select LLVM.
+        assert_eq!(policy.backend, NativeCodegenBackend::Llvm);
     }
 
     #[cfg(not(feature = "llvm"))]
