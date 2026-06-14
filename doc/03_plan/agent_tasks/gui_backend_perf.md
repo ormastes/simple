@@ -239,6 +239,9 @@ Updated: 2026-06-14
   matching now compares the raw tag-inner range in place, including uppercase
   close tags and trailing whitespace, instead of allocating and lowercasing a
   temporary close-tag name during startup parsing.
+- this commit -- Simple Web close-tag char lowercase allocation removal:
+  mixed-case close-tag matching now uses direct ASCII character comparisons
+  instead of allocating a one-character lowercase value for each tag character.
 - this commit -- debug attr loop length hoist:
   `simple_web_layout_debug_attr_by_id` now reuses the parsed node count instead
   of dispatching `nodes.len()` on every scan iteration.
