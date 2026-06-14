@@ -67,8 +67,9 @@ is now closed:
 - not just raw `thread_yield()` insufficiency
 - escaped captured closure values now survive source-run and standalone native
 
-Until this is closed, additive sliced/resumable task objects are not stable
-enough to claim on the hosted native path.
+Because this boundary is closed, additive sliced/resumable task objects no
+longer need to avoid callable fields for this specific native-source parity
+reason. The broader hosted fairness/preemption gap remains tracked separately.
 
 ## Next Step
 
