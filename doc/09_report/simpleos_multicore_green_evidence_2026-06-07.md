@@ -125,6 +125,28 @@ Go-style M:N CPU parallelism, and has no `pool_used` runtime-pool evidence. The
 host runtime-pool boundary remains the Pure Simple `multicore_green_spawn`
 facade over runtime-seed `rt_pool_*` with `used_runtime_pool()` evidence.
 
+## 2026-06-14 Interpreter-Run Refresh
+
+The interpreter-run SimpleOS feature lane was rerun from
+`/tmp/simple-pherallel-continue-jj` after syncing through
+`perf(gui): fast-path classless style candidates`. The run refreshed the
+cooperative, multicore scheduler, green-channel wake, and final handoff blocker
+contracts:
+
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean`
+  -> PASS, 3 scenarios in 4610ms
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl --mode=interpreter --clean`
+  -> PASS, 7 scenarios in 14357ms
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_channel_wake_spec.spl --mode=interpreter --clean`
+  -> PASS, 4 scenarios in 12025ms
+- `src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean`
+  -> PASS, 3 scenarios in 768ms
+
+This refresh does not rerun a live QEMU lane. It keeps the interpreter-run
+SimpleOS cooperative, multicore-green scheduler, green-channel wake, and final
+handoff blocker contracts current after the shared-main sync, without changing
+the already closed final live-handoff claim.
+
 ## Current Refresh
 
 After syncing `/tmp/simple-pherallel-sync` to `origin/main` at `9b5cb43402`,
