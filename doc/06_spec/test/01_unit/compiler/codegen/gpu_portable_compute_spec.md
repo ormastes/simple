@@ -434,7 +434,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val plan = portable_compute_2d_optimization_compile_plan(PortableComputeTarget.Cuda, "simple_2d_optimization")
-val valid = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32", 4486)
+val valid = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32 .entry simple_2d_scroll_u32 .entry simple_2d_bitmap_glyph_raster_u32", 4486)
 val missing_scroll = portable_compute_compiled_artifact_evidence(plan, ".version 8.0", ".entry simple_2d_fill_u32 .entry simple_2d_copy_u32 .entry simple_2d_alpha_u32", 4486)
 
 expect(valid.artifact_valid).to_equal(true)
@@ -446,24 +446,48 @@ expect(missing_scroll.reason).to_equal("missing-entry-symbol:simple_2d_scroll_u3
 </details>
 
 <details>
-<summary>Advanced: builds a smoke matrix for CUDA HIP OpenCL and Metal</summary>
+<summary>Advanced: builds a smoke matrix for CUDA HIP OpenCL Metal and WebGPU</summary>
 
-#### builds a smoke matrix for CUDA HIP OpenCL and Metal
+#### builds a smoke matrix for CUDA HIP OpenCL Metal and WebGPU
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val matrix = emit_portable_compute_smoke_matrix()
-expect(matrix.len()).to_equal(4)
+expect(matrix.len()).to_equal(5)
 expect(matrix[0].target_name()).to_equal("cuda")
 expect(matrix[1].target_name()).to_equal("hip")
 expect(matrix[2].target_name()).to_equal("opencl")
 expect(matrix[3].target_name()).to_equal("metal")
+expect(matrix[4].target_name()).to_equal("webgpu")
+expect(matrix[4].binary_format).to_equal("source")
 expect(matrix[0].source).to_contain("simple_2d_scroll_u32")
+val webgpu_plan = portable_compute_compile_plan(matrix[4], "simple_2d_optimization")
+val webgpu_required_plan = portable_compute_2d_optimization_compile_plan(PortableComputeTarget.WebGpu, "simple_2d_optimization")
+expect(webgpu_plan.artifact_path_suffix).to_end_with(".wgsl")
+expect(webgpu_required_plan.required_symbols).to_contain("simple_2d_clear_screen_u32")
+expect(webgpu_required_plan.required_symbols).to_contain("simple_2d_set_pixel_u32")
+expect(webgpu_required_plan.required_symbols).to_contain("simple_2d_draw_line_u32")
+expect(webgpu_required_plan.required_symbols).to_contain("simple_2d_fill_rect_u32")
+expect(webgpu_required_plan.required_symbols).to_contain("simple_2d_draw_rect_u32")
+expect(webgpu_required_plan.required_symbols).to_contain("simple_2d_blit_sprite_u32")
+expect(matrix[4].source).to_contain("@group(0) @binding(0) var<storage, read> src")
+expect(matrix[4].source).to_contain("@compute @workgroup_size(64)")
+expect(matrix[4].source).to_contain("fn simple_2d_fill_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_copy_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_alpha_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_scroll_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_bitmap_glyph_raster_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_clear_screen_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_set_pixel_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_draw_line_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_fill_rect_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_draw_rect_u32")
+expect(matrix[4].source).to_contain("fn simple_2d_blit_sprite_u32")
 ```
 
 </details>

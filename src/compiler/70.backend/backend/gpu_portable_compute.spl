@@ -516,7 +516,19 @@ fn portable_compute_required_symbols_reason(required_symbols: text, exported_sym
         return "missing-entry-symbol:simple_2d_scroll_u32"
     if required_symbols.contains("simple_2d_bitmap_glyph_raster_u32") and not exported_symbols.contains("simple_2d_bitmap_glyph_raster_u32"):
         return "missing-entry-symbol:simple_2d_bitmap_glyph_raster_u32"
-    if required_symbols.contains("simple_2d_fill_u32") or required_symbols.contains("simple_2d_copy_u32") or required_symbols.contains("simple_2d_alpha_u32") or required_symbols.contains("simple_2d_scroll_u32") or required_symbols.contains("simple_2d_bitmap_glyph_raster_u32"):
+    if required_symbols.contains("simple_2d_clear_screen_u32") and not exported_symbols.contains("simple_2d_clear_screen_u32"):
+        return "missing-entry-symbol:simple_2d_clear_screen_u32"
+    if required_symbols.contains("simple_2d_set_pixel_u32") and not exported_symbols.contains("simple_2d_set_pixel_u32"):
+        return "missing-entry-symbol:simple_2d_set_pixel_u32"
+    if required_symbols.contains("simple_2d_draw_line_u32") and not exported_symbols.contains("simple_2d_draw_line_u32"):
+        return "missing-entry-symbol:simple_2d_draw_line_u32"
+    if required_symbols.contains("simple_2d_fill_rect_u32") and not exported_symbols.contains("simple_2d_fill_rect_u32"):
+        return "missing-entry-symbol:simple_2d_fill_rect_u32"
+    if required_symbols.contains("simple_2d_draw_rect_u32") and not exported_symbols.contains("simple_2d_draw_rect_u32"):
+        return "missing-entry-symbol:simple_2d_draw_rect_u32"
+    if required_symbols.contains("simple_2d_blit_sprite_u32") and not exported_symbols.contains("simple_2d_blit_sprite_u32"):
+        return "missing-entry-symbol:simple_2d_blit_sprite_u32"
+    if required_symbols.contains("simple_2d_fill_u32") or required_symbols.contains("simple_2d_copy_u32") or required_symbols.contains("simple_2d_alpha_u32") or required_symbols.contains("simple_2d_scroll_u32") or required_symbols.contains("simple_2d_bitmap_glyph_raster_u32") or required_symbols.contains("simple_2d_clear_screen_u32") or required_symbols.contains("simple_2d_set_pixel_u32") or required_symbols.contains("simple_2d_draw_line_u32") or required_symbols.contains("simple_2d_fill_rect_u32") or required_symbols.contains("simple_2d_draw_rect_u32") or required_symbols.contains("simple_2d_blit_sprite_u32"):
         return "pass"
     if not exported_symbols.contains(required_symbols):
         return "missing-entry-symbol"
@@ -670,6 +682,14 @@ fn emit_portable_2d_optimization_kernels(target: PortableComputeTarget) -> [Port
 fn portable_compute_2d_required_symbols() -> text:
     "simple_2d_fill_u32 simple_2d_copy_u32 simple_2d_alpha_u32 simple_2d_scroll_u32 simple_2d_bitmap_glyph_raster_u32"
 
+fn portable_compute_2d_webgpu_required_symbols() -> text:
+    "{portable_compute_2d_required_symbols()} simple_2d_clear_screen_u32 simple_2d_set_pixel_u32 simple_2d_draw_line_u32 simple_2d_fill_rect_u32 simple_2d_draw_rect_u32 simple_2d_blit_sprite_u32"
+
+fn portable_compute_2d_required_symbols_for_target(target: PortableComputeTarget) -> text:
+    if target == PortableComputeTarget.WebGpu:
+        return portable_compute_2d_webgpu_required_symbols()
+    portable_compute_2d_required_symbols()
+
 fn portable_compute_operation_generated_name(operation_family: text) -> text:
     val clean = operation_family.trim().lower()
     if clean == "bitmap_glyph_raster" or clean == "bitmap_font_raster" or clean == "gpu_bitmap_glyph" or clean == "glyph_bitmap_raster":
@@ -690,7 +710,17 @@ fn portable_compute_operation_needs_cpu_preprocess(operation_family: text) -> bo
         return false
     clean == "font" or clean == "text" or clean == "text_blit"
 
+fn emit_webgpu_2d_optimization_module() -> PortableComputeArtifact:
+    PortableComputeArtifact(
+        target: PortableComputeTarget.WebGpu,
+        entry_name: "simple_2d_fill_u32",
+        source: "struct Simple2DParams {\n    value: u32,\n    count: u32,\n    alpha: u32,\n    width: u32,\n    height: u32,\n    glyph_count: u32,\n    font_size: u32,\n    color: u32,\n    delta_y: i32,\n    x: u32,\n    y: u32,\n    w: u32,\n    h: u32,\n    sprite_width: u32,\n}\n\n@group(0) @binding(0) var<storage, read> src: array<u32>;\n@group(0) @binding(1) var<storage, read_write> dst: array<u32>;\n@group(0) @binding(2) var<storage, read> glyph_bits: array<u32>;\n@group(0) @binding(3) var<uniform> params: Simple2DParams;\n\n@compute @workgroup_size(64)\nfn simple_2d_fill_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    if (i >= params.count || i >= arrayLength(&dst)) {\n        return;\n    }\n    dst[i] = params.value;\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_copy_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    if (i >= params.count || i >= arrayLength(&src) || i >= arrayLength(&dst)) {\n        return;\n    }\n    dst[i] = src[i];\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_alpha_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    if (i >= params.count || i >= arrayLength(&src) || i >= arrayLength(&dst)) {\n        return;\n    }\n    let s = src[i];\n    let d = dst[i];\n    let inv = 255u - params.alpha;\n    let rb = (((s & 0x00ff00ffu) * params.alpha) + ((d & 0x00ff00ffu) * inv)) >> 8u;\n    let g = (((s & 0x0000ff00u) * params.alpha) + ((d & 0x0000ff00u) * inv)) >> 8u;\n    dst[i] = 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_scroll_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    let count = params.width * params.height;\n    if (i >= count || i >= arrayLength(&dst)) {\n        return;\n    }\n    let x = i % params.width;\n    let y = i / params.width;\n    let sy = i32(y) - params.delta_y;\n    if (sy < 0 || sy >= i32(params.height)) {\n        dst[i] = 0u;\n        return;\n    }\n    let src_index = u32(sy) * params.width + x;\n    if (src_index >= arrayLength(&src)) {\n        dst[i] = 0u;\n        return;\n    }\n    dst[i] = src[src_index];\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_bitmap_glyph_raster_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    let count = params.width * params.height;\n    if (i >= count || i >= arrayLength(&glyph_bits) || i >= arrayLength(&dst)) {\n        return;\n    }\n    let mask = glyph_bits[i];\n    dst[i] = select(params.color, 0u, mask == 0u);\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_clear_screen_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    let count = params.width * params.height;\n    if (i < count && i < arrayLength(&dst)) {\n        dst[i] = params.color;\n    }\n}\n\n@compute @workgroup_size(1)\nfn simple_2d_set_pixel_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let idx = params.y * params.width + params.x;\n    if (global_id.x == 0u && idx < arrayLength(&dst)) {\n        dst[idx] = params.color;\n    }\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_draw_line_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    if (i >= params.w) {\n        return;\n    }\n    let idx = params.y * params.width + params.x + i;\n    if (idx < arrayLength(&dst)) {\n        dst[idx] = params.color;\n    }\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_fill_rect_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    let area = params.w * params.h;\n    if (i >= area) {\n        return;\n    }\n    let dx = i % params.w;\n    let dy = i / params.w;\n    let idx = (params.y + dy) * params.width + params.x + dx;\n    if (idx < arrayLength(&dst)) {\n        dst[idx] = params.color;\n    }\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_draw_rect_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    let area = params.w * params.h;\n    if (i >= area) {\n        return;\n    }\n    let dx = i % params.w;\n    let dy = i / params.w;\n    if (dx != 0u && dy != 0u && dx + 1u != params.w && dy + 1u != params.h) {\n        return;\n    }\n    let idx = (params.y + dy) * params.width + params.x + dx;\n    if (idx < arrayLength(&dst)) {\n        dst[idx] = params.color;\n    }\n}\n\n@compute @workgroup_size(64)\nfn simple_2d_blit_sprite_u32(@builtin(global_invocation_id) global_id: vec3<u32>) {\n    let i = global_id.x;\n    let area = params.w * params.h;\n    if (i >= area) {\n        return;\n    }\n    let dx = i % params.w;\n    let dy = i / params.w;\n    let src_idx = dy * params.sprite_width + dx;\n    let dst_idx = (params.y + dy) * params.width + params.x + dx;\n    if (src_idx < arrayLength(&src) && dst_idx < arrayLength(&dst)) {\n        dst[dst_idx] = src[src_idx];\n    }\n}\n",
+        binary_format: portable_compute_binary_format(PortableComputeTarget.WebGpu)
+    )
+
 fn emit_portable_2d_optimization_module(target: PortableComputeTarget) -> PortableComputeArtifact:
+    if target == PortableComputeTarget.WebGpu:
+        return emit_webgpu_2d_optimization_module()
     val fill = emit_portable_2d_fill_u32_kernel(target)
     val copy = emit_portable_2d_copy_u32_kernel(target)
     val alpha = emit_portable_2d_alpha_u32_kernel(target)
@@ -751,7 +781,7 @@ fn portable_compute_2d_optimization_compile_plan(target: PortableComputeTarget, 
     portable_compute_compile_plan_with_required_symbols(
         emit_portable_2d_optimization_module(target),
         output_stem,
-        portable_compute_2d_required_symbols()
+        portable_compute_2d_required_symbols_for_target(target)
     )
 
 fn portable_compute_2d_optimization_backend_plan(backend_order: text, output_stem: text) -> PortableComputeBackendArtifactPlan:
@@ -774,5 +804,6 @@ fn emit_portable_compute_smoke_matrix() -> [PortableComputeArtifact]:
         emit_portable_2d_optimization_module(PortableComputeTarget.Cuda),
         emit_portable_2d_optimization_module(PortableComputeTarget.Hip),
         emit_portable_2d_optimization_module(PortableComputeTarget.OpenCl),
-        emit_portable_2d_optimization_module(PortableComputeTarget.Metal)
+        emit_portable_2d_optimization_module(PortableComputeTarget.Metal),
+        emit_portable_2d_optimization_module(PortableComputeTarget.WebGpu)
     ]

@@ -27,7 +27,7 @@ browser_session_simple_script_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -112,6 +112,40 @@ match result:
 
 </details>
 
+#### records Simple 3D WebGPU upload evidence from text simple
+
+- var session = BrowserSession new
+- Ok
+   - Expected: session.warnings.len() equals `0`
+- Err
+   - Expected: "unexpected load error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+val html = "<html><body><script type='text/simple'>simple3d.clear_color 255\nsimple3d.camera_perspective 60 1 1000\nsimple3d.triangle 0 1 0 -1 -1 0 1 -1 0 65535\nsimple3d.submit_webgpu</script></body></html>"
+val result = session.open_html("https://example.com/simple-3d.html", html)
+match result:
+    Ok(_):
+        expect(session.current_body_html).to_contain("\"status\":\"submitted-webgpu-3d-scene-upload\"")
+        expect(session.current_body_html).to_contain("\"type\":\"simple3d\"")
+        expect(session.current_body_html).to_contain("\"op\":\"triangle\"")
+        expect(session.current_body_html).to_contain("\"triangles\":1")
+        expect(session.current_body_html).to_contain("\"scenePayloadBytes\":217")
+        expect(session.current_body_html).to_contain("\"scenePayloadChecksum\":7331173752178674817")
+        expect(session.warnings.len()).to_equal(0)
+    Err(err):
+        expect("unexpected load error: {err}").to_equal("")
+```
+
+</details>
+
 #### reports unsupported Simple script commands without running them as JavaScript
 
 - var session = BrowserSession new
@@ -189,8 +223,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
