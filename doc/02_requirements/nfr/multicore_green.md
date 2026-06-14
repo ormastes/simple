@@ -9,12 +9,16 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 
 - NFR-MCG-001: No report, guide, release note, or SPipe manual may claim
   Go-like M:N CPU parallelism unless the evidence row has `used_runtime_pool()`
-  / `pool_used=` evidence or SimpleOS scheduler evidence.
+  / `pool_used=` evidence plus public runtime-pool counter drain evidence
+  (`counter_delta=<submitted>/<completed>,pending=0,busy=0,blocked=0`), or
+  SimpleOS scheduler evidence.
 - NFR-MCG-002: Cooperative green rows must remain classified as current-carrier,
   non-CPU-parallel work.
 - NFR-MCG-003: Cross-language performance reports must include OS-thread,
   cooperative-green, multicore-green, C pthread, Go goroutine, large-fanout,
   Simple-vs-Go-vs-C stress, hosted `parallelism=requested/actual`,
+  public `counter_delta=submitted/completed,pending=0,busy=0,blocked=0`
+  evidence for hosted multicore-green rows,
   Go runtime/scheduler metadata, Go `GOMAXPROCS` pinned to `CPU_WORKERS` unless
   explicitly overridden, artifact-size, and RSS evidence. The report contract
   must also preserve Docker Simple binary auto-selection wording that probes

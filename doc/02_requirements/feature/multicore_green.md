@@ -20,7 +20,9 @@ SimpleOS scheduler work distinct and verifiable.
   parallelism.
 - REQ-MCG-003: `multicore_green_spawn` is the hosted Simple M:N candidate only
   when every handle proves runtime-pool ownership with
-  `MulticoreGreenHandle.used_runtime_pool()`.
+  `MulticoreGreenHandle.used_runtime_pool()` and the row proves public
+  runtime-pool counter drain evidence with
+  `counter_delta=<submitted>/<completed>,pending=0,busy=0,blocked=0`.
 - REQ-MCG-004: Profile scripts must keep Simple OS-thread, Simple cooperative
   green, Simple multicore green, C pthread, Go goroutine, artifact-size, RSS,
   and large-fanout stress rows separate. Reports must record the Go runtime and
@@ -51,10 +53,10 @@ SimpleOS scheduler work distinct and verifiable.
   that explicit helper is `multicore_green_spawn_sliced`: tasks expose scalar
   progress state and requeue between bounded slices. It is separate from the
   Go-like M:N evidence path through `multicore_green_spawn` with
-  `used_runtime_pool`. Ordinary `multicore_green_spawn` closures still run to
-  return and must not be described as preempted tight-loop work until
-  compiler-inserted yield points or equivalent runtime preemption have
-  executable evidence.
+  `used_runtime_pool()` plus public counter-delta evidence. Ordinary
+  `multicore_green_spawn` closures still run to return and must not be
+  described as preempted tight-loop work until compiler-inserted yield points
+  or equivalent runtime preemption have executable evidence.
 - REQ-MCG-009: C, Go, and Rust may be used as baselines, research references,
   seed implementations, or runtime/compiler implementation contexts; they must
   not replace Simple user-facing concurrency APIs.

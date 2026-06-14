@@ -43,7 +43,7 @@ This system spec connects the pure green-channel contract to the SimpleOS green-
 |-------|-------|
 | Feature IDs | #green-simpleos-channel-wake |
 | Category | SimpleOS / Concurrency |
-| Status | In Progress |
+| Status | Implemented |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/04_architecture/runtime/multicore_green.md |
