@@ -35,8 +35,12 @@ HTML through Electron offscreen and returns comparable pixels for web-renderer
 parity. Use `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence`
 and `tools/web-render-backend/chromium-webgpu-draw/` when the requirement is
 Chrome/Electron WebGPU drawing. That wrapper reports either positive adapter,
-non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a deterministic
-`host-unavailable:*` status without falling back to Simple software replay.
+non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a
+deterministic `host-unavailable:*` status without falling back to Simple
+software replay. For WASM-originated Simple2D evidence, use
+`chrome_webgpu_draw_wasm_simple2d_payload_evidence`; it parses
+`rect:x,y,w,h:rgba:r,g,b,a`, converts RGB to `#rrggbb`, and records payload
+byte/checksum provenance even when the host reports unavailable WebGPU.
 
 For in-process browser Simple-script drawing evidence, use
 `canvas_get_context_simple2d` or `canvas_get_context_simple3d` from
@@ -73,5 +77,13 @@ fixed (see `doc/08_tracking/bug/pure_simple_web_render_interpreter_bound_2026-06
 Use two **independently produced** artifacts + an absolute oracle, never hard-coded
 captured pixels. Gate: `scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs`
 (pure-Simple Engine2D vs real Chromium OSR → `mismatch_count=0`).
+
+For host/GPU lane event-flow and less-ms evidence around
+`target.later(...) gpu \:`, use
+`doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md`.
+That lane records `Engine2dHostGpuEventFlowEvidence`, Draw IR rendered-command
+counts, pixel/readback hashes, fallback state, and p50/p95 baseline-vs-candidate
+timings. Do not count fallback-only or smoke-size software runs as a real GPU
+speedup.
 
 See also: [`web_render_backend_tldr.md`](web_render_backend_tldr.md).

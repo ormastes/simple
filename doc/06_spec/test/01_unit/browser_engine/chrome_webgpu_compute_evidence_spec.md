@@ -27,7 +27,7 @@ chrome_webgpu_compute_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,9 +59,11 @@ submission, readback, and matching output checksums.
 
 ## Examples
 
-The positive example parses generated WGSL compute output for a small `u32`
-addition kernel. Negative examples keep host-unavailable evidence deterministic
-and reject empty readback or fallback-adapter reports.
+The positive examples parse generated WGSL compute output for a small `u32`
+addition kernel and compiler-emitted Simple2D fill kernel, including legitimate
+zero-checksum fills. Negative examples keep host-unavailable evidence
+deterministic, preserve mismatch detail, and reject empty readback,
+fallback-adapter, and post-adapter launch-failure reports.
 
 **Requirements:** N/A
 **Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
@@ -149,6 +151,89 @@ expect(evidence.tool_hint).to_equal("browser-webgpu-host-import")
 
 </details>
 
+#### parses compiler emitted Simple2D fill WGSL compute metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"ok\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_2d_fill_u32\",\"operation\":\"simple2d_fill\",\"source_origin\":\"compiler-portable-compute\",\"source_byte_count\":4096,\"source_checksum\":345678,\"element_count\":8,\"adapter\":true,\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":true,\"compute_pass_count\":1,\"dispatch_call_count\":1,\"dispatched_workgroups\":1,\"queue_submit_count\":1,\"readback_byte_count\":32,\"readback_valid\":true,\"result_checksum\":9872,\"expected_checksum\":9872,\"mismatch_count\":0,\"hardware_acceleration_verified\":false}", "", "/electron", "/helper", 0)
+
+expect(evidence.ok()).to_be(true)
+expect(evidence.entry_name).to_equal("simple_2d_fill_u32")
+expect(evidence.operation).to_equal("simple2d_fill")
+expect(evidence.source_origin).to_equal("compiler-portable-compute")
+expect(evidence.source_byte_count).to_equal(4096)
+expect(evidence.element_count).to_equal(8)
+expect(evidence.readback_byte_count).to_equal(32)
+expect(evidence.result_checksum).to_equal(9872)
+expect(evidence.expected_checksum).to_equal(9872)
+```
+
+</details>
+
+#### accepts zero checksum Simple2D fill evidence when readback matches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"ok\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_2d_fill_u32\",\"operation\":\"simple2d_fill\",\"source_origin\":\"compiler-portable-compute\",\"source_byte_count\":4096,\"source_checksum\":345678,\"element_count\":8,\"adapter\":true,\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":true,\"compute_pass_count\":1,\"dispatch_call_count\":1,\"dispatched_workgroups\":1,\"queue_submit_count\":1,\"readback_byte_count\":32,\"readback_valid\":true,\"result_checksum\":0,\"expected_checksum\":0,\"mismatch_count\":0,\"hardware_acceleration_verified\":false}", "", "/electron", "/helper", 0)
+
+expect(evidence.ok()).to_be(true)
+expect(evidence.operation).to_equal("simple2d_fill")
+expect(evidence.result_checksum).to_equal(0)
+expect(evidence.expected_checksum).to_equal(0)
+```
+
+</details>
+
+#### preserves explicit mismatch and readback counts from Chromium JSON
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"processing-mismatch:readback\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_2d_fill_u32\",\"operation\":\"simple2d_fill\",\"source_origin\":\"compiler-portable-compute\",\"source_byte_count\":4096,\"source_checksum\":345678,\"element_count\":8,\"adapter\":true,\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":true,\"compute_pass_count\":1,\"dispatch_call_count\":1,\"dispatched_workgroups\":1,\"queue_submit_count\":1,\"readback_byte_count\":32,\"readback_valid\":true,\"result_checksum\":7404,\"expected_checksum\":9872,\"mismatch_count\":2,\"hardware_acceleration_verified\":false,\"output_matches\":false,\"output_count\":8}", "", "/electron", "/helper", 0)
+
+expect(evidence.ok()).to_be(false)
+expect(evidence.processing_failed()).to_be(true)
+expect(evidence.host_unavailable()).to_be(false)
+expect(evidence.mismatch_count).to_equal(2)
+expect(evidence.readback_byte_count).to_equal(32)
+```
+
+</details>
+
+#### reports post-adapter compute launch exceptions as processing failures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = chrome_webgpu_compute_evidence_from_json("{\"status\":\"processing-failed:compute-launch\",\"diagnostic_text\":\"bind group layout mismatch\",\"backend_target\":\"webgpu\",\"source_format\":\"wgsl\",\"binary_format\":\"source\",\"tool_hint\":\"browser-webgpu-host-import\",\"entry_name\":\"simple_2d_fill_u32\",\"operation\":\"simple2d_fill\",\"source_origin\":\"compiler-portable-compute\",\"source_byte_count\":4096,\"source_checksum\":345678,\"element_count\":8,\"adapter\":true,\"adapter_info\":\"vendor=test\",\"fallback_adapter\":false,\"device_configured\":true,\"shader_module_valid\":true,\"pipeline_valid\":true,\"bind_group_valid\":false,\"readback_byte_count\":0,\"readback_valid\":false,\"result_checksum\":0,\"expected_checksum\":0,\"mismatch_count\":0,\"hardware_acceleration_verified\":false}", "", "/electron", "/helper", 0)
+
+expect(evidence.ok()).to_be(false)
+expect(evidence.processing_failed()).to_be(true)
+expect(evidence.host_unavailable()).to_be(false)
+expect(evidence.adapter).to_be(true)
+expect(evidence.device_configured).to_be(true)
+```
+
+</details>
+
 #### does not treat empty readback as successful compute evidence
 
 <details>
@@ -231,8 +316,8 @@ expect(evidence.exit_code).to_equal(127)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
