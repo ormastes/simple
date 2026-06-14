@@ -408,7 +408,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 137 lines folded for reproduction.
+Runnable source: 139 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -445,6 +445,8 @@ expect(row).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_
 expect(row).to_contain("doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md")
 expect(row).to_contain("scripts/check/check-thread-spawn-with-args-native.shs")
 expect(row).to_contain("test/01_unit/lib/nogc_async_mut/multicore_green_native.spl")
+expect(row).to_contain("Native/evidence trace: runtime-pool resolver exports `rt_pool_*` counter symbols")
+expect(row).to_contain("cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols")
 expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl")
