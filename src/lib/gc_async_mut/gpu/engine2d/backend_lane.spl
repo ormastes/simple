@@ -63,6 +63,20 @@ struct Engine2dHostGpuEventFlowEvidence:
     pixel_hash: i64
     event_order_preserved: bool
 
+struct Engine2dHostGpuQueuePacket:
+    ok: bool
+    diagnostic: text
+    sequence: i64
+    source_lane: text
+    target_lane: text
+    operation: text
+    execution_kind: text
+    payload_bytes: i64
+    max_packet_bytes: i64
+    payload_checksum: i64
+    fallback_explicit: bool
+    committed_on_host: bool
+
 fn engine2d_drawing_backend_lane(backend_name: text) -> Engine2dBackendLane:
     Engine2dBackendLane(
         lane: ENGINE2D_BACKEND_LANE_DRAWING,
@@ -228,6 +242,12 @@ fn _engine2d_host_gpu_speedup_x1000(baseline_ms: i64, candidate_ms: i64) -> i64:
         return 0
     (baseline_ms * 1000) / candidate_ms
 
+fn _engine2d_host_gpu_payload_checksum(sequence: i64, payload_bytes: i64, operation: text) -> i64:
+    var checksum = sequence * 131 + payload_bytes * 17 + operation.len().to_i64()
+    if checksum < 0:
+        checksum = 0 - checksum
+    checksum
+
 fn engine2d_host_gpu_lane_schedule(source_lane: text, target_lane: text, operation: text, estimated_packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, per_widget_dispatch: bool, strict_backend_available: bool, baseline_ms: i64) -> Engine2dHostGpuLaneResult:
     """Validate and summarize a canonical target.later(...) host/gpu callback."""
     val execution_kind = _engine2d_host_gpu_execution_kind(source_lane, target_lane)
@@ -250,6 +270,32 @@ fn engine2d_host_gpu_lane_schedule(source_lane: text, target_lane: text, operati
 
 fn engine2d_host_gpu_lane_summary(result: Engine2dHostGpuLaneResult) -> text:
     "ok={result.ok};source={result.source_lane};target={result.target_lane};exec={result.execution_kind};host_commit={result.committed_on_host};gpu_batched={result.gpu_batched};fallback={result.fallback_explicit};packet={result.estimated_packet_bytes}/{result.max_packet_bytes};baseline_ms={result.baseline_ms};estimated_ms={result.estimated_ms};diagnostic={result.diagnostic}"
+
+fn engine2d_host_gpu_queue_packet(sequence: i64, source_lane: text, target_lane: text, operation: text, payload_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, per_widget_dispatch: bool, strict_backend_available: bool, baseline_ms: i64) -> Engine2dHostGpuQueuePacket:
+    """Build the deterministic queue packet descriptor expected from later(...) lowering."""
+    val schedule = engine2d_host_gpu_lane_schedule(source_lane, target_lane, operation, payload_bytes, max_packet_bytes, mutates_host_semantics, per_widget_dispatch, strict_backend_available, baseline_ms)
+    var ok = schedule.ok
+    var diagnostic = schedule.diagnostic
+    if sequence <= 0:
+        ok = false
+        diagnostic = "queue packet sequence must be positive"
+    Engine2dHostGpuQueuePacket(
+        ok: ok,
+        diagnostic: diagnostic,
+        sequence: sequence,
+        source_lane: source_lane,
+        target_lane: target_lane,
+        operation: operation,
+        execution_kind: schedule.execution_kind,
+        payload_bytes: payload_bytes,
+        max_packet_bytes: max_packet_bytes,
+        payload_checksum: _engine2d_host_gpu_payload_checksum(sequence, payload_bytes, operation),
+        fallback_explicit: schedule.fallback_explicit,
+        committed_on_host: schedule.committed_on_host
+    )
+
+fn engine2d_host_gpu_queue_packet_summary(packet: Engine2dHostGpuQueuePacket) -> text:
+    "ok={packet.ok};seq={packet.sequence};source={packet.source_lane};target={packet.target_lane};exec={packet.execution_kind};operation={packet.operation};payload={packet.payload_bytes}/{packet.max_packet_bytes};checksum={packet.payload_checksum};fallback={packet.fallback_explicit};host_commit={packet.committed_on_host};diagnostic={packet.diagnostic}"
 
 fn engine2d_host_gpu_event_flow_evidence(source_lane: text, target_lane: text, operation: text, event_count: i64, draw_ir_delta_count: i64, packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, per_widget_dispatch: bool, strict_backend_available: bool, event_to_draw_ir_ms: i64, draw_ir_to_submit_baseline_ms: i64, submit_to_present_baseline_ms: i64, baseline_frame_p50_ms: i64, baseline_frame_p95_ms: i64, pixel_hash: i64, event_order_preserved: bool) -> Engine2dHostGpuEventFlowEvidence:
     """Build deterministic host/GPU lane event-flow evidence for SSpec and perf reports."""
@@ -298,11 +344,12 @@ export ENGINE2D_BACKEND_LANE_DRAWING, ENGINE2D_BACKEND_LANE_PROCESSING, ENGINE2D
 export ENGINE2D_HOST_GPU_LANE_HOST, ENGINE2D_HOST_GPU_LANE_GPU
 export ENGINE2D_HOST_GPU_EXEC_DIRECT, ENGINE2D_HOST_GPU_EXEC_PACKET
 export Engine2dBackendLane, Engine2dBackendLanePlan
-export Engine2dHostGpuLaneResult, Engine2dHostGpuEventFlowEvidence
+export Engine2dHostGpuLaneResult, Engine2dHostGpuEventFlowEvidence, Engine2dHostGpuQueuePacket
 export engine2d_drawing_backend_lane, engine2d_processing_backend_lane, engine2d_combined_backend_lane
 export engine2d_backend_lane_summary, engine2d_backend_lane_plan, engine2d_operation_lane
 export engine2d_backend_lane_drawing_preference_order, engine2d_backend_lane_full_preference_order
 export engine2d_backend_lane_preference_summary, engine2d_backend_lane_preferred_candidate
 export engine2d_font_offload_backend_order, engine2d_backend_lane_preferred_font_offload_candidate
 export engine2d_host_gpu_lane_schedule, engine2d_host_gpu_lane_summary
+export engine2d_host_gpu_queue_packet, engine2d_host_gpu_queue_packet_summary
 export engine2d_host_gpu_event_flow_evidence, engine2d_host_gpu_event_flow_summary

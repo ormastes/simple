@@ -57,6 +57,7 @@ Generated/manual mirror:
 | HGL-005 | Per-widget GPU dispatch inside loops emits a warning | `test/03_system/feature/language/host_gpu_lane_spec.spl`; `src/compiler_rust/driver/src/cli/check.rs` | should warn for per-widget GPU dispatch inside a loop; `test_check_warns_for_loop_local_gpu_later_dispatch` | Full for lane contract and native driver source; deployed binary refresh pending |
 | HGL-006 | Strict GPU event-flow evidence records timing, pixel hash, and speedup fields | `test/03_system/feature/language/host_gpu_lane_spec.spl`; `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.spl` | should record faster strict GPU event-flow evidence; records event flow timings and speedup for strict GPU batches | Full for deterministic contract evidence; measured full-GPU host run pending |
 | HGL-007 | Draw IR execution feeds rendered command counts and pixel readback into host/GPU event-flow evidence | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | feeds rendered Draw IR command counts into host GPU event-flow evidence | Full for CPU-fallback Draw IR executor evidence; real GPU device submission pending |
+| HGL-008 | Runtime/lowering queue packets have deterministic sequence, payload bounds, checksum, fallback, and host-commit fields | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.spl` | builds deterministic queue packets for cross-lane lowering; rejects queue packets without a positive sequence | Full for deterministic packet descriptor; compiler lowering/runtime transport pending |
 
 ## Evidence Policy
 

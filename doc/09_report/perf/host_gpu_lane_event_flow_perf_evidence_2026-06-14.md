@@ -25,6 +25,7 @@ changing pixel hashes, event order, or fallback reporting.
 |---|---|---|
 | Host/GPU lane validator | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Rejects per-widget GPU dispatch, host semantic mutation on GPU, invalid lanes, and oversized packets; summarizes `baseline_ms` and `estimated_ms`. |
 | Host/GPU event-flow evidence | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Records event count, Draw IR delta count, queue packet bounds, event-to-present stages, p50/p95 baseline/candidate timings, pixel hash, fallback honesty, and event-order preservation. |
+| Host/GPU queue packet descriptor | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Records deterministic `later(...)` queue-packet sequence, source/target lanes, operation, execution kind, payload bytes, max packet bytes, payload checksum, fallback state, and host-commit ownership for future lowering/runtime transport. |
 | Draw IR executor event-flow bridge | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | Feeds real `engine2d_draw_ir_adv_composition` rendered-command counts and pixel readback into host/GPU event-flow evidence. |
 | Native `simple check` lane lint | `src/compiler_rust/driver/src/cli/check.rs` | Emits `HGL-SEMANTIC` for GPU semantic mutation and `HGL-BATCH` for per-widget GPU dispatch in the production Rust check path. |
 | Full render offload plan | `doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md` | Defines CPU host tree/events/layout -> Draw IR/Graph IR -> GPU render graph/raster/composite/present. |
@@ -68,6 +69,7 @@ Results:
 |---|---|
 | WebGPU real probe spec | PASS: 12 tests, spec runtime 22 ms, total runner duration 29 ms. This is an availability/contract gate, not a frame-time benchmark. |
 | Host/GPU lane unit spec | PASS: 16 tests, including strict-GPU event-flow timing, fallback honesty, and event-order rejection. |
+| Host/GPU queue packet descriptor | PASS: backend lane unit spec now covers 18 tests, including deterministic cross-lane queue packet checksum and invalid sequence rejection. |
 | Host/GPU lane system SSpec | PASS: 6 scenarios, including canonical grammar, semantic ownership, per-widget dispatch diagnostics, and strict-GPU event-flow evidence. |
 | Draw IR executor event-flow bridge | PASS: 4 tests; `feeds rendered Draw IR command counts into host GPU event-flow evidence` records `draw_ir_delta_count=2`, `packet_bytes=256`, `pixel_hash=0xff00ff00`, and `speedup_x1000=2000` from a real Engine2D Draw IR composition result. |
 | Native driver `HGL-SEMANTIC` unit | PASS: `test_check_rejects_host_semantic_mutation_in_gpu_lane`, 1 passed. |

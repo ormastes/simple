@@ -90,6 +90,13 @@ count, and the Engine2D pixel readback value is carried as the pixel-hash field.
 This proves the event-flow evidence is connected to the runtime Draw IR executor
 surface even when the current host uses CPU fallback.
 
+`Engine2dHostGpuQueuePacket` is the deterministic descriptor future
+`later(...)` lowering/runtime transport must emit. It records sequence,
+source/target lanes, operation, execution kind, payload bytes, max packet bytes,
+payload checksum, fallback state, and host-commit ownership. The descriptor does
+not submit to a device; it makes the queue packet ABI testable before the
+hardware backend lands.
+
 ## Performance Model
 
 For this slice, GPU batch performance is a deterministic evidence estimate:

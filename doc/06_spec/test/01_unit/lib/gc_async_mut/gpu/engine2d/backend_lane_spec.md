@@ -27,7 +27,7 @@ backend_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -374,6 +374,69 @@ expect(result.diagnostic).to_contain("per-widget GPU dispatch")
 
 </details>
 
+#### builds deterministic queue packets for cross-lane lowering
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val packet = engine2d_host_gpu_queue_packet(
+    7,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    384,
+    4096,
+    false,
+    false,
+    true,
+    20
+)
+
+expect(packet.ok).to_equal(true)
+expect(packet.sequence).to_equal(7)
+expect(packet.execution_kind).to_equal(ENGINE2D_HOST_GPU_EXEC_PACKET)
+expect(packet.payload_bytes).to_equal(384)
+expect(packet.max_packet_bytes).to_equal(4096)
+expect(packet.payload_checksum).to_equal(7458)
+expect(packet.fallback_explicit).to_equal(false)
+expect(packet.committed_on_host).to_equal(false)
+expect(engine2d_host_gpu_queue_packet_summary(packet)).to_contain("seq=7")
+```
+
+</details>
+
+#### rejects queue packets without a positive sequence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val packet = engine2d_host_gpu_queue_packet(
+    0,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    384,
+    4096,
+    false,
+    false,
+    true,
+    20
+)
+
+expect(packet.ok).to_equal(false)
+expect(packet.diagnostic).to_contain("sequence")
+```
+
+</details>
+
 #### records event flow timings and speedup for strict GPU batches
 
 <details>
@@ -511,8 +574,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

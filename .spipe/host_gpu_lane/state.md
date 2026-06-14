@@ -35,3 +35,5 @@ implementing
 - spec: Added Draw IR executor bridge coverage that feeds `engine2d_draw_ir_adv_composition` rendered-command counts and pixel readback into host/GPU event-flow evidence.
 - perf: Recorded bounded GTK fallback, `wm_compare` software, and `simple_runner` smoke evidence in `doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md`; these prove harness/fallback honesty, not real GPU less-ms completion.
 - doc: Refreshed SPipe and UI/WebGPU guide references for the canonical host GPU event-flow wrapper and remaining full-GPU evidence gap.
+- impl: Added `Engine2dHostGpuQueuePacket` as the deterministic queue-packet descriptor future `later(...)` lowering/runtime transport must emit.
+- spec: Extended backend lane SSpec coverage to 18 tests for cross-lane packet sequence, payload checksum, fallback state, and invalid sequence rejection; regenerated `doc/06_spec/test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.md`.
