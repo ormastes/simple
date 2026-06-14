@@ -488,9 +488,9 @@ expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green
 step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=11")
-expect(row).to_contain("checked_in_misuse_fixtures=27")
-expect(row).to_contain("total_misuse_fixtures=38")
-expect(row).to_contain("thread_spawn_number_suffix_alias.spl rejects numbered API aliases")
+expect(row).to_contain("checked_in_misuse_fixtures=29")
+expect(row).to_contain("total_misuse_fixtures=40")
+expect(row).to_contain("number_suffix_alias.spl fixtures reject numbered API aliases")
 expect(absent_in_text(row, "misuse_fixtures=611")).to_equal(1)
 expect(row).to_contain("task_spawn approved")
 expect(row).to_contain("thread_spawn_with_args_wrong_surface_import.spl rejects cooperative-green facade")
@@ -596,7 +596,7 @@ expect(system_plan).to_contain("cooperative-presence")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -607,9 +607,11 @@ expect(plan).to_contain("generated misuse contract")
 expect(plan).to_contain("misuse_fixtures=11")
 step("Verify the checked-in misuse fixture inventory is named separately")
 expect(plan).to_contain("checked-in fixture contract")
-expect(plan).to_contain("checked_in_misuse_fixtures=27")
+expect(plan).to_contain("checked_in_misuse_fixtures=29")
+expect(plan).to_contain("number_suffix_alias.spl fixture family")
+expect(plan).to_contain("`thread_spawn`, `spawn_isolated`, and `spawn_limited` surfaces")
 step("Verify the shell-enforced total cannot silently omit checked-in fixtures")
-expect(plan).to_contain("total shell-enforced `total_misuse_fixtures=38`")
+expect(plan).to_contain("total shell-enforced `total_misuse_fixtures=40`")
 expect(absent_in_text(plan, "misuse_fixtures=611")).to_equal(1)
 ```
 

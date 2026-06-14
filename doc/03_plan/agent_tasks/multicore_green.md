@@ -426,7 +426,7 @@ Each agent reports:
   SimpleOS evidence docs, final SimpleOS AP ring/user handoff wording,
   handle-array native lowering, thread-spawn native regression coverage, and
   the concurrency API misuse inventory (`positive_fixtures=6`,
-  `checked_in_misuse_fixtures=27`, `total_misuse_fixtures=38`).
+  `checked_in_misuse_fixtures=29`, `total_misuse_fixtures=40`).
 - The shared default checkout remains dirty outside this lane because other
   sessions are active in WebGPU/UI/loader work. Multicore-green syncs continue
   in the separate jj workspace and must keep unrelated files out of lane

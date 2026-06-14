@@ -90,8 +90,9 @@ SIMPLE_BIN=src/compiler_rust/target/debug/simple bin/simple test test/03_system/
 ## Examples
 
 - `thread_spawn` must be imported from `std.concurrent.thread`.
-- `thread_spawn2` must remain a rejected numbered alias; use
-  `thread_spawn_with_args` for explicit-argument spawning.
+- Numbered aliases must remain rejected; use meaningful names such as
+  `thread_spawn_with_args`, `spawn_isolated_with_args`, or
+  `spawn_limited_with_args` for explicit-argument spawning.
 - `thread_spawn_with_args` must stay available as the explicit-argument
   OS-thread API.
 - `cooperative_green_spawn` must stay on the cooperative-green surface.
@@ -144,8 +145,8 @@ Failed: 0
 
 ## Manual Review Notes
 
-- Reviewers should treat `thread_spawn2` only as a forbidden input string; it is
-  not an API name that application code may import.
+- Reviewers should treat numbered aliases only as forbidden input strings; they
+  are not API names that application code may import.
 - The preferred explicit-argument OS-thread name is `thread_spawn_with_args`.
 - Cooperative-green APIs intentionally stay on `std.concurrent.cooperative_green`.
 - Low-level green-thread APIs intentionally stay on `std.concurrent.green_thread`.
@@ -170,7 +171,7 @@ Failed: 0
 #### covers every checked-in misuse fixture
 
 - Count the checked-in concurrency misuse fixtures
-   - Expected: fixture_count() equals `27`
+   - Expected: fixture_count() equals `29`
 
 
 <details>
@@ -181,7 +182,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Count the checked-in concurrency misuse fixtures")
-expect(fixture_count()).to_equal(27)
+expect(fixture_count()).to_equal(29)
 ```
 
 </details>
@@ -235,8 +236,8 @@ expect(output).to_contain("public_multicore_green_sliced_result=19")
 expect(output).to_contain("positive_fixtures=6")
 expect(output).to_contain("fixtures=11")
 expect(output).to_contain("misuse_fixtures=11")
-expect(output).to_contain("checked_in_misuse_fixtures=27")
-expect(output).to_contain("total_misuse_fixtures=38")
+expect(output).to_contain("checked_in_misuse_fixtures=29")
+expect(output).to_contain("total_misuse_fixtures=40")
 ```
 
 </details>
@@ -244,6 +245,8 @@ expect(output).to_contain("total_misuse_fixtures=38")
 #### rejects OS-thread surface misuse
 
 - Reject numbered suffix aliases for OS-thread APIs
+- expect compile error
+- expect compile error
 - expect compile error
 - Reject thread_spawn imported from the cooperative-green surface
 - expect compile error
@@ -260,12 +263,14 @@ expect(output).to_contain("total_misuse_fixtures=38")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Reject numbered suffix aliases for OS-thread APIs")
 expect_compile_error("thread_spawn_number_suffix_alias.spl", "E-PAR-002", "thread_spawn2 is a numbered name")
+expect_compile_error("spawn_isolated_number_suffix_alias.spl", "E-PAR-002", "spawn_isolated2 is a numbered name")
+expect_compile_error("spawn_limited_number_suffix_alias.spl", "E-PAR-002", "spawn_limited2 is a numbered name")
 step("Reject thread_spawn imported from the cooperative-green surface")
 expect_compile_error("thread_spawn_wrong_surface_import.spl", "E-PAR-003", "thread_spawn belongs to std.concurrent.thread")
 step("Reject thread_spawn_with_args imported from the cooperative-green surface")
