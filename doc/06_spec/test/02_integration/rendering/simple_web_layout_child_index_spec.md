@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -129,6 +129,24 @@ expect(height).to_equal("11")
 
 </details>
 
+#### keeps overlapping CSS buckets sorted and unique
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>" +
+    "*{height:5px}div,.target{height:9px}.target{height:13px}#target{height:17px}" +
+    "</style></head><body><div id=\"target\" class=\"target\">row</div></body></html>"
+val height = simple_web_layout_debug_style_by_id(html, "target", "height")
+expect(height).to_equal("17")
+```
+
+</details>
+
 #### keeps malformed CSS rule admission stable with pre-counted rules
 
 <details>
@@ -163,6 +181,27 @@ val html = "<html><head><style>" +
     "</style></head><body><section class=\"outer\"><div class=\"inner\"><span id=\"target\" class=\"target\">row</span></div></section></body></html>"
 val height = simple_web_layout_debug_style_by_id(html, "target", "height")
 expect(height).to_equal("17")
+```
+
+</details>
+
+#### keeps descendant has selectors scoped to the subtree
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val has_target = ":has(.target)"
+val html = "<html><head><style>" +
+    "section{height:7px}.outer" + has_target + "{height:23px}" +
+    "</style></head><body><section id=\"hit\" class=\"outer\"><div><span class=\"target\">row</span></div></section><section id=\"miss\" class=\"outer\"><div><span>row</span></div></section></body></html>"
+val hit_height = simple_web_layout_debug_style_by_id(html, "hit", "height")
+val miss_height = simple_web_layout_debug_style_by_id(html, "miss", "height")
+expect(hit_height).to_equal("23")
+expect(miss_height).to_equal("7")
 ```
 
 </details>
@@ -394,8 +433,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
