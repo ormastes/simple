@@ -89,6 +89,38 @@ static SIMPLE_KEEP_RT_DYN_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i
 static SIMPLE_KEEP_RT_PS_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i64) -> u64 =
     rt_ps_torch_tensor_from_bits_1d;
 
+#[allow(clashing_extern_declarations)]
+unsafe extern "C" {
+    pub fn rt_pool_submit(entry: extern "C" fn(i64) -> i64, closure_ptr: i64) -> i64;
+    pub fn rt_pool_join(handle: i64) -> i64;
+    pub fn rt_pool_is_done(handle: i64) -> i64;
+    pub fn rt_pool_set_parallelism(workers: i64) -> i64;
+    pub fn rt_pool_get_parallelism() -> i64;
+    pub fn rt_pool_uses_global_fifo_queue() -> i64;
+    pub fn rt_pool_uses_work_stealing() -> i64;
+    pub fn rt_pool_submitted_count() -> i64;
+    pub fn rt_pool_completed_count() -> i64;
+    pub fn rt_pool_pending_count() -> i64;
+    pub fn rt_pool_busy_count() -> i64;
+    pub fn rt_pool_blocked_count() -> i64;
+}
+
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_SUBMITTED_COUNT: unsafe extern "C" fn() -> i64 = rt_pool_submitted_count;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_COMPLETED_COUNT: unsafe extern "C" fn() -> i64 = rt_pool_completed_count;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_PENDING_COUNT: unsafe extern "C" fn() -> i64 = rt_pool_pending_count;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_BUSY_COUNT: unsafe extern "C" fn() -> i64 = rt_pool_busy_count;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_BLOCKED_COUNT: unsafe extern "C" fn() -> i64 = rt_pool_blocked_count;
+
 #[cfg(not(feature = "pytorch"))]
 fn torch_runtime_library() -> Option<&'static libloading::Library> {
     use std::sync::OnceLock;

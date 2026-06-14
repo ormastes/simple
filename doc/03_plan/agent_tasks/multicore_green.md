@@ -136,6 +136,12 @@ Acceptance evidence:
 - report row showing Simple multicore green native still beats the C pthread
   large fanout stress baseline while remaining slower than Go until further
   scheduler/runtime work lands.
+- 2026-06-14 native resolver evidence: `cargo test -p simple-compiler
+  elf_utils::tests::resolves_runtime_pool_symbols` and
+  `SIMPLE_BIN=src/compiler_rust/target/debug/simple sh
+  test/05_perf/profile_scripts/concurrency_api_contract_test.shs` pass with
+  `public_multicore_green_sliced_result=19` and runtime-pool counter symbols
+  exported by the rebuilt driver.
 
 ## Simple OS-Thread Baseline Agent
 

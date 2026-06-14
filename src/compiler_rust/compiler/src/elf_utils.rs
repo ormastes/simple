@@ -550,6 +550,18 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_actor_spawn" => simple_runtime::rt_actor_spawn as *const () as usize,
         "rt_actor_send" => simple_runtime::rt_actor_send as *const () as usize,
         "rt_actor_recv" => simple_runtime::rt_actor_recv as *const () as usize,
+        "rt_pool_submit" => simple_runtime::rt_pool_submit as *const () as usize,
+        "rt_pool_join" => simple_runtime::rt_pool_join as *const () as usize,
+        "rt_pool_is_done" => simple_runtime::rt_pool_is_done as *const () as usize,
+        "rt_pool_set_parallelism" => simple_runtime::rt_pool_set_parallelism as *const () as usize,
+        "rt_pool_get_parallelism" => simple_runtime::rt_pool_get_parallelism as *const () as usize,
+        "rt_pool_uses_global_fifo_queue" => simple_runtime::rt_pool_uses_global_fifo_queue as *const () as usize,
+        "rt_pool_uses_work_stealing" => simple_runtime::rt_pool_uses_work_stealing as *const () as usize,
+        "rt_pool_submitted_count" => simple_runtime::rt_pool_submitted_count as *const () as usize,
+        "rt_pool_completed_count" => simple_runtime::rt_pool_completed_count as *const () as usize,
+        "rt_pool_pending_count" => simple_runtime::rt_pool_pending_count as *const () as usize,
+        "rt_pool_busy_count" => simple_runtime::rt_pool_busy_count as *const () as usize,
+        "rt_pool_blocked_count" => simple_runtime::rt_pool_blocked_count as *const () as usize,
 
         // Generator operations
         "rt_generator_new" => simple_runtime::rt_generator_new as *const () as usize,
@@ -706,6 +718,26 @@ mod tests {
             "rt_security_host_import_allowed",
             "rt_security_last_host_import_allowed",
             "rt_security_host_import_denials",
+        ] {
+            assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
+        }
+    }
+
+    #[test]
+    fn resolves_runtime_pool_symbols() {
+        for symbol in [
+            "rt_pool_submit",
+            "rt_pool_join",
+            "rt_pool_is_done",
+            "rt_pool_set_parallelism",
+            "rt_pool_get_parallelism",
+            "rt_pool_uses_global_fifo_queue",
+            "rt_pool_uses_work_stealing",
+            "rt_pool_submitted_count",
+            "rt_pool_completed_count",
+            "rt_pool_pending_count",
+            "rt_pool_busy_count",
+            "rt_pool_blocked_count",
         ] {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }
