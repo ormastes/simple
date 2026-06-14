@@ -13,7 +13,16 @@
 use std.simd_crypto.{Vec16u8, simd_aes_round, simd_aes_round_last}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+# Baremetal-safe array allocation. rt_array_new_with_cap is an interpreter-only
+# extern with no native/baremetal runtime symbol, so importing this module into a
+# baremetal image (e.g. the RV64 SSH live image) fails the link with
+# "undefined symbol: rt_array_new_with_cap". The empty-array literal lowers to the
+# array `n` intrinsic that links in every target; cap is only a growth hint and
+# every call site below fills via push, so this is an exact drop-in.
+fn _new_u8(_cap: i64) -> [u8]:
+    var a: [u8] = []
+    a
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
@@ -23,7 +32,7 @@ fn _u8_at(buf: [u8], idx: u64) -> u8:
 # ============================================================================
 
 fn _aes_sbox_table() -> [u8]:
-    var t: [u8] = rt_array_new_with_cap(256)
+    var t: [u8] = _new_u8(256)
     t.push(0x63)
     t.push(0x7c)
     t.push(0x77)
@@ -283,7 +292,7 @@ fn _aes_sbox_table() -> [u8]:
     t
 
 fn _aes_rcon_table() -> [u8]:
-    var t: [u8] = rt_array_new_with_cap(10)
+    var t: [u8] = _new_u8(10)
     t.push(0x01)
     t.push(0x02)
     t.push(0x04)
@@ -327,7 +336,7 @@ fn aes256_key_expansion(key: [u8]) -> [u8]:
     val total_words: u64 = 4 * (nr + 1)  # 60
     val total_bytes: u64 = total_words * 4
 
-    var expanded: [u8] = rt_array_new_with_cap(total_bytes.to_i64())
+    var expanded: [u8] = _new_u8(total_bytes.to_i64())
 
     var i: u64 = 0
     while i < 32:
@@ -503,13 +512,13 @@ fn aes256_encrypt_block(plaintext: [u8], key: [u8]) -> [u8]:
 
 fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
     """Multiply two 128-bit elements in GF(2^128) (poly x^128 + x^7 + x^2 + x + 1)."""
-    var z: [u8] = rt_array_new_with_cap(16)
+    var z: [u8] = _new_u8(16)
     var i: u64 = 0
     while i < 16:
         z.push(0x00)
         i = i + 1
 
-    var v: [u8] = rt_array_new_with_cap(16)
+    var v: [u8] = _new_u8(16)
     i = 0
     while i < 16:
         v.push(_u8_at(y, i))
@@ -521,7 +530,7 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
         val bit_idx = 7 - (i % 8)
 
         if ((_u8_at(x, byte_idx) >> bit_idx) & 0x01) != 0:
-            var z_next: [u8] = rt_array_new_with_cap(16)
+            var z_next: [u8] = _new_u8(16)
             var j: u64 = 0
             while j < 16:
                 z_next.push(_u8_at(z, j) ^ _u8_at(v, j))
@@ -529,7 +538,7 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
             z = z_next
 
         val lsb = _u8_at(v, 15) & 0x01
-        var v_next: [u8] = rt_array_new_with_cap(16)
+        var v_next: [u8] = _new_u8(16)
         var first = (_u8_at(v, 0).to_u32() >> 1).to_u8()
         if lsb != 0:
             first = first ^ 0xE1
@@ -551,7 +560,7 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
 
 fn _ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
     """Process one 16-byte block: Y_i = (Y_{i-1} XOR X_i) * H."""
-    var xored: [u8] = rt_array_new_with_cap(16)
+    var xored: [u8] = _new_u8(16)
     var i: u64 = 0
     while i < 16:
         xored.push(_u8_at(y, i) ^ _u8_at(x_block, i))
@@ -564,7 +573,7 @@ fn _pad_to_16(data: [u8]) -> [u8]:
         data.len()
     else:
         ((data.len() / 16) + 1) * 16
-    var result: [u8] = rt_array_new_with_cap(padded_len.to_i64())
+    var result: [u8] = _new_u8(padded_len.to_i64())
     var i: u64 = 0
     while i < data.len():
         result.push(_u8_at(data, i))
@@ -575,7 +584,7 @@ fn _pad_to_16(data: [u8]) -> [u8]:
 
 fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
     """Append two byte arrays."""
-    var out: [u8] = rt_array_new_with_cap((a.len() + b.len()).to_i64())
+    var out: [u8] = _new_u8((a.len() + b.len()).to_i64())
     var i: u64 = 0
     while i < a.len():
         out.push(_u8_at(a, i))
@@ -588,7 +597,7 @@ fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
 
 fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     """Compute GHASH for GCM: pad(A) || pad(C) || len(A) || len(C)."""
-    var y: [u8] = rt_array_new_with_cap(16)
+    var y: [u8] = _new_u8(16)
     var i: u64 = 0
     while i < 16:
         y.push(0x00)
@@ -597,7 +606,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     val padded_aad = _pad_to_16(aad)
     i = 0
     while i < padded_aad.len():
-        var block: [u8] = rt_array_new_with_cap(16)
+        var block: [u8] = _new_u8(16)
         var j: u64 = 0
         while j < 16:
             block.push(_u8_at(padded_aad, i + j))
@@ -608,7 +617,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     val padded_ct = _pad_to_16(ciphertext)
     i = 0
     while i < padded_ct.len():
-        var block: [u8] = rt_array_new_with_cap(16)
+        var block: [u8] = _new_u8(16)
         var j: u64 = 0
         while j < 16:
             block.push(_u8_at(padded_ct, i + j))
@@ -619,7 +628,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     val aad_bits: u64 = aad.len() * 8
     val ct_bits: u64 = ciphertext.len() * 8
 
-    var len_block: [u8] = rt_array_new_with_cap(16)
+    var len_block: [u8] = _new_u8(16)
     len_block.push(((aad_bits >> 56) & 0xFF).to_u8())
     len_block.push(((aad_bits >> 48) & 0xFF).to_u8())
     len_block.push(((aad_bits >> 40) & 0xFF).to_u8())
@@ -652,7 +661,7 @@ fn _inc32(counter: [u8]) -> [u8]:
             _u8_at(counter, 15).to_u32()
     val c_inc = (c + 1) & 0xFFFFFFFF
 
-    var result: [u8] = rt_array_new_with_cap(16)
+    var result: [u8] = _new_u8(16)
     var i: u64 = 0
     while i < 12:
         result.push(_u8_at(counter, i))
@@ -675,7 +684,7 @@ fn gctr256(key: [u8], icb: [u8], input: [u8]) -> [u8]:
         return []
 
     val schedule = aes256_key_expansion(key)
-    var output: [u8] = rt_array_new_with_cap(input.len().to_i64())
+    var output: [u8] = _new_u8(input.len().to_i64())
     var cb = icb
     val num_full_blocks = input.len() / 16
 
@@ -707,7 +716,7 @@ fn gctr256(key: [u8], icb: [u8], input: [u8]) -> [u8]:
 
 fn _make_j0(nonce: [u8]) -> [u8]:
     """J0 = nonce || 0x00000001 (12-byte nonce path, RFC 5288 / SP 800-38D)."""
-    var j0: [u8] = rt_array_new_with_cap(16)
+    var j0: [u8] = _new_u8(16)
     var i: u64 = 0
     while i < 12:
         j0.push(_u8_at(nonce, i))
@@ -739,7 +748,7 @@ fn aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
         return fast
 
     # Compute hash subkey H = AES_K(0^128)
-    var zero_block: [u8] = rt_array_new_with_cap(16)
+    var zero_block: [u8] = _new_u8(16)
     var i: u64 = 0
     while i < 16:
         zero_block.push(0x00)
@@ -778,14 +787,14 @@ fn aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
         val status = _u8_at(fast, 0)
         if status == 0x00:
             return Aes256GcmResult.Err("authentication tag mismatch")
-        var pt: [u8] = rt_array_new_with_cap((fast.len() - 1).to_i64())
+        var pt: [u8] = _new_u8((fast.len() - 1).to_i64())
         var fi: u64 = 1
         while fi < fast.len():
             pt.push(_u8_at(fast, fi))
             fi = fi + 1
         return Aes256GcmResult.Ok(data: pt)
 
-    var zero_block: [u8] = rt_array_new_with_cap(16)
+    var zero_block: [u8] = _new_u8(16)
     var i: u64 = 0
     while i < 16:
         zero_block.push(0x00)
