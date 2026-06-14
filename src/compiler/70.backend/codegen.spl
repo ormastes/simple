@@ -69,6 +69,12 @@ struct Codegen:
     block_map: Dict<i64, i64>       # BlockId -> Cranelift block
     function_map: Dict<text, i64>   # name -> function id
     symbol_map: Dict<i64, text>     # SymbolId -> function name
+    host_gpu_lane_depth: i64
+    host_gpu_lane_packet_count: i64
+    host_gpu_lane_body_inst_count: i64
+    host_gpu_lane_payload_bytes: i64
+    host_gpu_lane_max_packet_bytes: i64
+    host_gpu_lane_last_lane: text
     errors: [CodegenError]
 
 """Target architecture."""
@@ -104,6 +110,12 @@ impl Codegen:
             block_map: {},
             function_map: {},
             symbol_map: {},
+            host_gpu_lane_depth: 0,
+            host_gpu_lane_packet_count: 0,
+            host_gpu_lane_body_inst_count: 0,
+            host_gpu_lane_payload_bytes: 0,
+            host_gpu_lane_max_packet_bytes: 0,
+            host_gpu_lane_last_lane: "",
             errors: []
         )
 
@@ -263,6 +275,7 @@ impl Codegen:
 
     me compile_inst(inst: MirInst):
         """Compile a MIR instruction."""
+        self.track_host_gpu_lane_body_instruction(inst)
         match inst.kind:
             case Const(dest, value, type_):
                 val cl_value = self.compile_const(value, type_)
@@ -384,11 +397,49 @@ impl Codegen:
                 # Needs ML runtime + dimension checking
                 self.error("layer connection requires ML runtime (not yet implemented in native mode)", nil)
 
+            case HostGpuLaneBegin(lane, max_packet):
+                self.host_gpu_lane_depth = self.host_gpu_lane_depth + 1
+                self.host_gpu_lane_last_lane = lane
+                self.host_gpu_lane_max_packet_bytes = self.host_gpu_lane_max_packet_value(max_packet)
+                self.host_gpu_lane_body_inst_count = 0
+
+            case HostGpuLaneEnd(lane):
+                if self.host_gpu_lane_depth <= 0:
+                    self.error("host/GPU lane end without matching begin", inst.span)
+                else:
+                    self.host_gpu_lane_packet_count = self.host_gpu_lane_packet_count + 1
+                    self.host_gpu_lane_payload_bytes = self.host_gpu_lane_body_inst_count * 64
+                    self.host_gpu_lane_depth = self.host_gpu_lane_depth - 1
+                    self.host_gpu_lane_last_lane = lane
+
             case Nop:
                 pass
 
             case _:
                 self.error("unsupported codegen instruction: {inst.kind}", nil)
+
+    me track_host_gpu_lane_body_instruction(inst: MirInst):
+        if self.host_gpu_lane_depth <= 0:
+            return
+        match inst.kind:
+            case HostGpuLaneBegin(_, _) | HostGpuLaneEnd(_):
+                pass
+            case _:
+                self.host_gpu_lane_body_inst_count = self.host_gpu_lane_body_inst_count + 1
+
+    me host_gpu_lane_max_packet_value(max_packet: MirOperand?) -> i64:
+        if max_packet.?:
+            val operand = max_packet.unwrap()
+            match operand.kind:
+                case Const(value, _):
+                    match value:
+                        case Int(v):
+                            return v
+                        case _:
+                            pass
+                case _:
+                    pass
+        4096
 
     me compile_const(value: MirConstValue, type_: MirType) -> i64:
         """Compile a constant value."""
