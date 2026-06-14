@@ -303,7 +303,7 @@ expect(probe).to_contain("USER_CR3_READY")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -337,10 +337,14 @@ expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/com
 expect(report).to_contain("2026-06-14 Live Final-Handoff Rerun Attempt")
 expect(report).to_contain("completed without the Simple")
 expect(report).to_contain("test runner's 120s timeout")
-expect(report).to_contain("Cranelift freestanding build reaches the linker")
+expect(report).to_contain("x86_64 freestanding runtime ABI fix")
+expect(report).to_contain("current-source Cranelift build now links")
 expect(report).to_contain("rt_string_char_code_at")
 expect(report).to_contain("rt_for_iterable")
-expect(report).to_contain("`--backend llvm` is unavailable")
+expect(report).to_contain("Direct QEMU boot of that ELF")
+expect(report).to_contain("timed out after 30")
+expect(report).to_contain("without `[smp]` or `[green-carrier-qemu]` serial markers")
+expect(report).to_contain("`--backend llvm` remains unavailable")
 expect(report).to_contain("uses the fast blocker contract below as the current release-visible guard")
 expect(report).to_contain("doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md")
 expect(report).to_contain("src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean")

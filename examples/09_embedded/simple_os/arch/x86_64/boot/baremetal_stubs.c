@@ -449,6 +449,8 @@ RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue v
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 RuntimeValue rt_string_from_cstr(const char *cstr);
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
+RuntimeValue rt_for_iterable(RuntimeValue collection);
+RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue idx);
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
 RuntimeValue rt_value_to_string(RuntimeValue val);
 RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, RuntimeValue fmt_len);
@@ -724,6 +726,21 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
     int64_t i = (int64_t)idx;
     if (i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
     return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
+}
+
+RuntimeValue rt_for_iterable(RuntimeValue collection)
+{
+    return collection;
+}
+
+RuntimeValue rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
+{
+    if (!IS_HEAP(str)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return 0;
+    int64_t i = (int64_t)idx;
+    if (i < 0 || (uint64_t)i >= s->len) return 0;
+    return (RuntimeValue)(uint8_t)s->data[i];
 }
 
 RuntimeValue char_code_at(RuntimeValue str, RuntimeValue idx)
