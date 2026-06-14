@@ -153,7 +153,7 @@ Shared layers already in place:
 | Rank | Action | Files | Estimated Savings | Risk |
 |------|--------|-------|-------------------|------|
 | 1a | **DONE 2026-06-14** — added `default_qemu_timeout_ms() -> i64: 60000`; the 6 QEMU `_timeout_ms()` now delegate to it (darwin keeps its own 15000). `simple check` OK. | `qemu_systest_contract.spl` | ~5 L | Very Low |
-| 1b | Probe interpreter safety of `[text]` literal return; if safe, add `fn standard_smf_markers() -> [text]` | `qemu_systest_contract.spl` | ~20 L | Low (needs probe) |
+| 1b | **DONE 2026-06-14** — interpreter `[text]`-helper-delegation probe passed (count=5, exit 0); added `standard_smf_markers() -> [text]`; the 3 lanes with the exact 5-marker set (riscv32, arm32, x86_64) delegate. riscv64 (extra `SIMPLEOS_RISCV_SMF_FS_PASS`), arm64 (EL0 svc set), x86_32 (initrd set), darwin (hosted set) keep their own. Byte-identical literals (git diff verified) + `simple check` OK. | `qemu_systest_contract.spl` | ~12 L | Low (needs probe) |
 
 ### Tier 2 — C header extraction (no freestanding build logic change, additive only)
 
@@ -221,7 +221,7 @@ Investigated and dropped. Two findings settle it:
 
 | Tier | Safe Lines Saved | Status |
 |------|-----------------|--------|
-| Tier 1 (spl timeout/markers) | ~25 L | Ready |
+| Tier 1 (spl timeout/markers) | ~17 L | **DONE 2026-06-14** (1a timeout + 1b markers landed) |
 | Tier 2 (C headers) | ~600 L | Ready after arm32/riscv arch analysis |
 | Tier 3 (linker scripts) | ~200 L | Ready after Tier 2 proven |
 | Tier 4 (contract table) | ~270 L | Blocked — interpreter bug |
