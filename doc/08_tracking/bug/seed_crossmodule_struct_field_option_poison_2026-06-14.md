@@ -83,7 +83,26 @@ There is no app-level escape: `backend_cpu` (render), `builder` (build tree) and
    collision in the `raw_to_mangled` / `build_import_map` merge (see MEMORY.md cross-module notes).
 3. Add the 3-import repro as a regression fixture once fixed.
 
-## Status
-OPEN — recorded, not fixed. Apps/libs verified correct via deployed `bin/simple` (gate green).
-Fix deferred: it is a Rust-seed semantic-analyzer change with bootstrap blast-radius and must not be
-landed without a full bootstrap pass.
+## FIXED (2026-06-15, commit e9ee640c)
+The "import-map / type-inference" framing above was a red herring — it is a **runtime value
+marshalling** bug. Culprit: `60fd804c` ("auto-wrap plain returns into Option for `-> T?`",
+2026-06-12) made `-> T?` functions return explicit `Option::Some(x)`, but the rest of the
+interpreter still represents Optionals as `plain value | nil`. So a Some-wrapped value funneled into
+a non-Optional sink stayed wrapped, and member access on it failed with "… on Option". The
+responsive-showcase path hit it via `require_widget_record() -> WidgetRecord` (returns `found` from
+a `-> WidgetRecord?` call) and the `[WidgetNode]` children pipeline.
+
+Fix — three symmetric, conservative `Some`-coercions (each gated on `Value::Enum{Option,Some}` and
+a *concrete* non-Optional declared type; `any`/`Option`/`Result`/bare-generics excluded):
+- `interpreter_call/core/function_exec.rs` — unwrap `Some(x)→x` on a concrete non-Optional **return**.
+- `interpreter_call/core/arg_binding.rs` — same unwrap when binding into a concrete non-Optional **param**.
+- `interpreter_method/mod.rs` — forward a user **method call** on `Some(x)` to the inner value, but
+  only after every real Option/Result/enum method has missed.
+`None` is never unwrapped, so nil-dereferences still error.
+
+Verification: responsive-showcase gate GREEN on the freshly-built dev seed (CPU nav bottom/rail/
+sidebar, PPMs pairwise-different, Metal `gpu_frame_complete=true × 4`); 51 Option/Result interpreter
+unit tests pass; nil-safety preserved (`None.member` still errors). The 2 unrelated CLI test
+failures (`check::…gc_boundary`, `…safe_mode_child_args`) are pre-existing and do not touch the
+interpreter. NOTE: a full 3-stage bootstrap was NOT run (interpreter-only change; disk-constrained
+environment) — run `bin/simple build bootstrap` when convenient to fully certify.
