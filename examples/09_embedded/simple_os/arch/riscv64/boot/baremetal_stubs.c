@@ -1435,6 +1435,11 @@ RuntimeValue rt_net_recv_version_text(int64_t sock_fd)
     return rt_string_from_cstr(line);
 }
 
+/* Freestanding loop safepoint: baremetal is single-core with no thread pool to
+ * yield to, so the compiler-injected safepoint hook is a no-op. Mirrors the
+ * x86_64 freestanding stub. */
+int64_t rt_pool_safepoint(void) { return 0; }
+
 __attribute__((naked, section(".text.entry"))) void _start(void)
 {
     __asm__ volatile(

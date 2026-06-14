@@ -1837,6 +1837,11 @@ void vmm_switch_address_space(RuntimeValue root_phys) { (void)root_phys; }
 void cap_init_task_record(RuntimeValue task, RuntimeValue full) { (void)task; (void)full; }
 RuntimeValue spl_f64_to_bits(RuntimeValue value) { return value; }
 
+/* Freestanding loop safepoint: baremetal is single-core with no thread pool to
+ * yield to, so the compiler-injected safepoint hook is a no-op. Mirrors the
+ * x86_64 freestanding stub. */
+int64_t rt_pool_safepoint(void) { return 0; }
+
 static uint32_t g_arm32_fat32_bps = 0;
 static uint32_t g_arm32_fat32_spc = 0;
 static uint32_t g_arm32_fat32_reserved = 0;
