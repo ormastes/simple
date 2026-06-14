@@ -27,7 +27,7 @@ multicore_green_large_profile_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -128,6 +128,10 @@ queue_model=work_stealing
   mutation cases.
 - This SSpec parses the same current checked-in report and keeps the numeric
   large-fanout comparisons executable in Simple.
+- The checked-in report must keep the broader workload inventory visible:
+  artifact footprint, cold startup, warm fib throughput, worker fanout, stress
+  fanout, parallel artifact footprint, and peak RSS. The M:N fanout evidence is
+  not a substitute for the rest of the profile variety.
 - The older `cross_language_perf_parallel_large_2026-06-07.md` report remains
   historical evidence only.
 - The current report path must stay
@@ -172,6 +176,38 @@ queue_model=work_stealing
 ## Scenarios
 
 ### multicore green large cross-language profile gate
+
+#### keeps the profile workload variety visible
+
+- Check non-concurrency baseline sections
+- Check concurrency and resource sections
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = rt_file_read_text(current_report_path()) ?? ""
+
+step("Check non-concurrency baseline sections")
+expect(report).to_contain("Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads")
+expect(report).to_contain("Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS")
+expect(report).to_contain("## Artifact Footprint — hello and fib")
+expect(report).to_contain("## Cold Startup — hello world")
+expect(report).to_contain("## Warm Throughput — fib(")
+
+step("Check concurrency and resource sections")
+expect(report).to_contain("## OS Thread Parallel Workers")
+expect(report).to_contain("## Large Fanout Scheduling")
+expect(report).to_contain("## Simple vs Go vs C Large Fanout Stress")
+expect(report).to_contain("## Parallel Artifact Footprint")
+expect(report).to_contain("## Parallel Peak RSS")
+```
+
+</details>
 
 #### records the large profile dimensions and runtime-pool evidence
 
@@ -268,8 +304,8 @@ expect(model_text(row_for_label(stress, "Simple multicore green (native)"))).to_
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

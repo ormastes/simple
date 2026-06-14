@@ -435,7 +435,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 141 lines folded for reproduction.
+Runnable source: 144 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -531,6 +531,7 @@ expect(row).to_contain("go_scheduler_width_mismatch")
 expect(row).to_contain("os_thread_profile_row_thread_spawn_with_args")
 expect(row).to_contain("os_thread_profile_row_missing")
 expect(row).to_contain("os_thread_profile_timing_fail")
+expect(row).to_contain("workload_variety_methodology_missing")
 expect(row).to_contain("docker_simple_binary_probe_wording_corrupt")
 expect(row).to_contain("forbidden_number_suffix_api_name")
 step("Verify the negative profile script emits the same release-visible cases")
@@ -557,6 +558,7 @@ expect(negative_contract).to_contain("case=cooperative_green_profile_row_missing
 expect(negative_contract).to_contain("case=os_thread_profile_row_thread_spawn_with_args")
 expect(negative_contract).to_contain("case=os_thread_profile_row_missing")
 expect(negative_contract).to_contain("case=os_thread_profile_timing_fail")
+expect(negative_contract).to_contain("case=workload_variety_methodology_missing")
 expect(negative_contract).to_contain("case=docker_simple_binary_probe_wording_corrupt")
 expect(negative_contract).to_contain("case=forbidden_number_suffix_api_name")
 step("Verify the system-test plan describes cooperative-green and OS-thread negative profile cases")
@@ -573,6 +575,7 @@ expect(system_plan).to_contain("simple_multicore_smf_fanout_row_missing")
 expect(system_plan).to_contain("os_thread_profile_row_thread_spawn_with_args")
 expect(system_plan).to_contain("os_thread_profile_row_missing")
 expect(system_plan).to_contain("os_thread_profile_timing_fail")
+expect(system_plan).to_contain("workload_variety_methodology_missing")
 expect(system_plan).to_contain("docker_simple_binary_probe_wording_corrupt")
 expect(system_plan).to_contain("OS-thread-label")
 expect(system_plan).to_contain("OS-thread-presence")
