@@ -17,7 +17,7 @@
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
-| [WebGPU JS WASM Simple System Evidence](test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Minimal | N/A | 121 | 20% | 35 lines |
+| [WebGPU JS WASM Simple System Evidence](test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Minimal | N/A | 122 | 20% | 40 lines |
 | [Browser Chrome WebGPU Draw Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.md) | Minimal | N/A | 1 | 20% | 23 lines |
 | [Browser Chrome WebGPU Compute Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.md) | Minimal | N/A | 1 | 20% | 22 lines |
 
@@ -35,11 +35,11 @@
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Chrome WebGPU Draw Evidence Parser](test/01_unit/browser_engine/chrome_webgpu_draw_evidence_spec.md) | Minimal | N/A | 5 | 20% | 19 lines |
-| [Chrome WebGPU Compute Evidence Parser](test/01_unit/browser_engine/chrome_webgpu_compute_evidence_spec.md) | Minimal | N/A | 6 | 20% | 19 lines |
+| [Chrome WebGPU Compute Evidence Parser](test/01_unit/browser_engine/chrome_webgpu_compute_evidence_spec.md) | Minimal | N/A | 7 | 20% | 19 lines |
 
 ## Compiler (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Gpu Target Contract Specification](test/01_unit/compiler/semantics/gpu_target_contract_spec.md) | Auto-generated | N/A | 5 | 0% | 0 lines |
-| [Gpu Portable Compute Specification](test/01_unit/compiler/codegen/gpu_portable_compute_spec.md) | Auto-generated | N/A | 24 | 0% | 0 lines |
+| [Gpu Portable Compute Specification](test/01_unit/compiler/codegen/gpu_portable_compute_spec.md) | Auto-generated | N/A | 25 | 0% | 0 lines |

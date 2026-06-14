@@ -27,7 +27,7 @@ gpu_portable_compute_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -118,7 +118,7 @@ expect(artifact.source).to_contain("uint gid [[thread_position_in_grid]]")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -126,10 +126,22 @@ val cuda = emit_portable_u32_add_kernel(PortableComputeTarget.Cuda, "add_u32")
 val hip = emit_portable_u32_add_kernel(PortableComputeTarget.Hip, "add_u32")
 val opencl = emit_portable_u32_add_kernel(PortableComputeTarget.OpenCl, "add_u32")
 val metal = emit_portable_u32_add_kernel(PortableComputeTarget.Metal, "add_u32")
+val webgpu = emit_portable_u32_add_kernel(PortableComputeTarget.WebGpu, "simple_webgpu_add_u32")
 expect(cuda.source).to_contain("out[i] = a[i] + b[i];")
 expect(hip.source).to_contain("out[i] = a[i] + b[i];")
 expect(opencl.source).to_contain("out[i] = a[i] + b[i];")
 expect(metal.source).to_contain("out[i] = a[i] + b[i];")
+expect(webgpu.binary_format).to_equal("source")
+expect(webgpu.is_source_only()).to_be(true)
+expect(webgpu.source).to_contain("@group(0) @binding(0)")
+expect(webgpu.source).to_contain("@group(0) @binding(1)")
+expect(webgpu.source).to_contain("@group(0) @binding(2)")
+expect(webgpu.source).to_contain("var<storage, read> a")
+expect(webgpu.source).to_contain("var<storage, read_write> out")
+expect(webgpu.source).to_contain("fn simple_webgpu_add_u32")
+expect(webgpu.source).to_contain("let i = global_id.x")
+expect(webgpu.source).to_contain("arrayLength(&out)")
+expect(webgpu.source.contains("u32 i =")).to_be(false)
 ```
 
 </details>
@@ -159,6 +171,30 @@ expect(opencl_plan.binary_format).to_equal("spirv")
 expect(opencl_plan.tool_hint).to_equal("opencl-c-to-spirv")
 expect(metal_plan.binary_format).to_equal("metallib")
 expect(metal_plan.source_format).to_equal("metal-shading-language")
+```
+
+</details>
+
+#### builds a source-only WebGPU WGSL compile plan for browser host import
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val artifact = emit_portable_u32_add_kernel(PortableComputeTarget.WebGpu, "simple_webgpu_add_u32")
+val plan = portable_compute_compile_plan(artifact, "simple_webgpu_add_u32")
+val source_only_evidence = portable_compute_compiled_artifact_evidence(plan, "WGSL", "simple_webgpu_add_u32", artifact.source.len())
+
+expect(plan.source_format).to_equal("wgsl")
+expect(plan.binary_format).to_equal("source")
+expect(plan.tool_hint).to_equal("browser-webgpu-host-import")
+expect(plan.artifact_path_suffix).to_equal("simple_webgpu_add_u32.wgsl")
+expect(plan.produces_binary()).to_equal(false)
+expect(source_only_evidence.artifact_valid).to_equal(false)
+expect(source_only_evidence.reason).to_equal("source-only-plan")
 ```
 
 </details>
@@ -644,7 +680,7 @@ expect(unsupported.diagnostic).to_contain("unsupported generated 2D operation fa
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/codegen/gpu_portable_compute_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-14 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -656,8 +692,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

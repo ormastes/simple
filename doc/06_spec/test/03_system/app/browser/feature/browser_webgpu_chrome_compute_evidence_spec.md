@@ -11,6 +11,7 @@
 @direction LR
 
 browser_webgpu_chrome_compute_evidence_spec -> std
+browser_webgpu_chrome_compute_evidence_spec -> compiler
 ```
 
 </details>
@@ -47,7 +48,7 @@ This host-adaptive scenario proves that the Chrome/Electron WebGPU processing la
 | Design | doc/05_design/browser_wasm_webgpu_infra.md |
 | Research | doc/01_research/local/browser_wasm_webgpu_infra.md |
 | Source | `test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-06-14 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -80,11 +81,14 @@ start with `host-unavailable:` and keep output counters at zero.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val evidence = chrome_webgpu_compute_add_u32_evidence(8)
+val generated = emit_portable_u32_add_kernel(PortableComputeTarget.WebGpu, "simple_webgpu_add_u32")
+expect(generated.source).to_contain("@compute @workgroup_size(64)")
+expect(generated.source).to_contain("fn simple_webgpu_add_u32")
+val evidence = chrome_webgpu_compute_add_u32_generated_source_evidence(8, generated.source, generated.entry_name)
 
 if evidence.ok():
     expect(evidence.status).to_equal("ok")
@@ -94,6 +98,9 @@ if evidence.ok():
     expect(evidence.binary_format).to_equal("source")
     expect(evidence.tool_hint).to_equal("browser-webgpu-host-import")
     expect(evidence.entry_name).to_equal("simple_webgpu_add_u32")
+    expect(evidence.source_origin).to_equal("compiler-portable-compute")
+    expect(evidence.source_byte_count).to_be_greater_than(0)
+    expect(evidence.source_checksum).to_be_greater_than(0)
     expect(evidence.fallback_adapter).to_be(false)
     expect(evidence.device_configured).to_be(true)
     expect(evidence.shader_module_valid).to_be(true)

@@ -1,6 +1,6 @@
 # WebGPU JS WASM Simple System Evidence
 
-> This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, Simple 2D and Simple 3D command facades, software WebGPU command replay, BrowserSession JavaScript and Simple-script integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory. It also covers bounded declared `webgpu.requestAdapter`, `webgpu.dispatch`, and `webgpu.writeBuffer` host-import callbacks from WASM into JavaScript, including dispatch callbacks that receive WASM-provided `x/y/z` workgroup dimensions, buffer callbacks that receive WASM-provided byte payloads, and exported WebAssembly.Memory buffers that expose WASM stores to host callback code.
+> This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, Simple 2D and Simple 3D command facades, software WebGPU command replay, BrowserSession JavaScript and Simple-script integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory. It also covers bounded declared `webgpu.requestAdapter`, `webgpu.dispatch`, and `webgpu.writeBuffer` host-import callbacks from WASM into JavaScript, including dispatch callbacks that receive WASM-provided `x/y/z` workgroup dimensions, buffer callbacks that receive WASM-provided byte payloads, and exported WebAssembly.Memory buffers that expose WASM stores to host callback code. It also proves a bounded software WebGPU device queue where `device.createBuffer` creates an observable buffer and `device.queue.writeBuffer` copies bytes from a `Uint8Array` into that buffer with count, offset, length, and checksum evidence.
 
 <!-- sdn-diagram:id=webgpu_js_wasm_simple_spec.arch -->
 <details class="sdn-source">
@@ -28,14 +28,14 @@ webgpu_js_wasm_simple_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 121 | 121 | 0 | 0 |
+| 122 | 122 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # WebGPU JS WASM Simple System Evidence
 
-This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, Simple 2D and Simple 3D command facades, software WebGPU command replay, BrowserSession JavaScript and Simple-script integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory. It also covers bounded declared `webgpu.requestAdapter`, `webgpu.dispatch`, and `webgpu.writeBuffer` host-import callbacks from WASM into JavaScript, including dispatch callbacks that receive WASM-provided `x/y/z` workgroup dimensions, buffer callbacks that receive WASM-provided byte payloads, and exported WebAssembly.Memory buffers that expose WASM stores to host callback code.
+This executable system manual covers the active GUI hardening JS/WebEngine/WASM lane. It verifies secure WebGPU exposure, canvas WebGPU context behavior, Simple 2D and Simple 3D command facades, software WebGPU command replay, BrowserSession JavaScript and Simple-script integration, WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains, bounded WASM exports, traps, memory/table/global export metadata, imported function binding, and typed-array/DataView access to WebAssembly.Memory. It also covers bounded declared `webgpu.requestAdapter`, `webgpu.dispatch`, and `webgpu.writeBuffer` host-import callbacks from WASM into JavaScript, including dispatch callbacks that receive WASM-provided `x/y/z` workgroup dimensions, buffer callbacks that receive WASM-provided byte payloads, and exported WebAssembly.Memory buffers that expose WASM stores to host callback code. It also proves a bounded software WebGPU device queue where `device.createBuffer` creates an observable buffer and `device.queue.writeBuffer` copies bytes from a `Uint8Array` into that buffer with count, offset, length, and checksum evidence.
 
 ## At a Glance
 
@@ -64,7 +64,10 @@ also covers bounded declared `webgpu.requestAdapter`, `webgpu.dispatch`, and
 `webgpu.writeBuffer` host-import callbacks from WASM into JavaScript, including
 dispatch callbacks that receive WASM-provided `x/y/z` workgroup dimensions,
 buffer callbacks that receive WASM-provided byte payloads, and exported
-WebAssembly.Memory buffers that expose WASM stores to host callback code.
+WebAssembly.Memory buffers that expose WASM stores to host callback code. It
+also proves a bounded software WebGPU device queue where `device.createBuffer`
+creates an observable buffer and `device.queue.writeBuffer` copies bytes from a
+`Uint8Array` into that buffer with count, offset, length, and checksum evidence.
 
 ## Examples
 
@@ -77,7 +80,9 @@ being shared with `Uint8Array` and `DataView` views. Bounded WebGPU host-import
 examples call declared `webgpu.requestAdapter`, `webgpu.dispatch`, and
 `webgpu.writeBuffer` callbacks from WASM exports, including WebGPU-like void
 dispatch calls, Simple2D rectangle payload bytes, and `Uint8Array` reads from
-`i.exports.memory.buffer`.
+`i.exports.memory.buffer`. Browser-shaped queue evidence resolves
+`adapter.requestDevice`, creates a bounded buffer, and records a queue upload
+from typed-array backing storage into observable buffer bytes.
 
 **Requirements:** .spipe/browser-wasm-webgpu-infra/state.md
 **Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
@@ -1275,6 +1280,53 @@ match session.take_pending_request():
                 expect("unexpected commit error: {err}").to_equal("")
     nil:
         expect("missing fetch request").to_equal("")
+```
+
+</details>
+
+#### should create a bounded WebGPU buffer and record queue writes through BrowserSession
+
+- var session = BrowserSession new
+- session open html
+- Ok
+   - Expected: _display_js(value) equals `adapter-queued`
+- Err
+   - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `device-queued`
+- Err
+   - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `function:6:6:8:1:1:3:24:0,6,8,10,0,0:1:1:3:24`
+- Err
+   - Expected: "unexpected writeBuffer js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-buffer.html", "<html><body>WebGPU Buffer</body></html>")
+match session.eval_script("var adapter = null; var device = null; var buffer = null; var upload = ''; navigator.gpu.requestAdapter().then(function(a) { adapter = a; }); 'adapter-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("adapter-queued")
+    Err(err):
+        expect("unexpected adapter queue error: {err}").to_equal("")
+match session.eval_script("adapter.requestDevice().then(function(d) { device = d; }); 'device-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("device-queued")
+    Err(err):
+        expect("unexpected device queue error: {err}").to_equal("")
+val result = session.eval_script("buffer = device.createBuffer({size: 6, usage: 8}); var data = new Uint8Array(new ArrayBuffer(4)); data.buffer[0] = 4; data.buffer[1] = 6; data.buffer[2] = 8; data.buffer[3] = 10; device.queue.writeBuffer(buffer, 1, data, 1, 3); upload = typeof device.createBuffer + ':' + buffer.size + ':' + buffer.byteLength + ':' + buffer.usage + ':' + buffer.writeCount + ':' + buffer.lastWriteOffset + ':' + buffer.lastWriteByteLength + ':' + buffer.lastWriteChecksum + ':' + buffer[0] + ',' + buffer[1] + ',' + buffer[2] + ',' + buffer[3] + ',' + buffer[4] + ',' + buffer[5] + ':' + device.queue.writeCount + ':' + device.queue.lastWriteBufferOffset + ':' + device.queue.lastWriteByteLength + ':' + device.queue.lastWriteChecksum; upload")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("function:6:6:8:1:1:3:24:0,6,8,10,0,0:1:1:3:24")
+    Err(err):
+        expect("unexpected writeBuffer js error: {err}").to_equal("")
 ```
 
 </details>
@@ -3812,8 +3864,8 @@ match result:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 121 |
-| Active scenarios | 121 |
+| Total scenarios | 122 |
+| Active scenarios | 122 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

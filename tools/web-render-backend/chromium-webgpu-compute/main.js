@@ -7,6 +7,16 @@ app.commandLine.appendSwitch('force-color-profile', 'srgb');
 
 const outPath = process.env.CWC_OUT || '/tmp/simple_chrome_webgpu_compute_evidence.json';
 const count = Number(process.env.CWC_COUNT || 8);
+const defaultWgslSource = '@group(0) @binding(0) var<storage, read> a: array<u32>; @group(0) @binding(1) var<storage, read> b: array<u32>; @group(0) @binding(2) var<storage, read_write> out: array<u32>; @compute @workgroup_size(64) fn simple_webgpu_add_u32(@builtin(global_invocation_id) global_id: vec3<u32>) { let i = global_id.x; if (i < arrayLength(&out)) { out[i] = a[i] + b[i]; } }';
+const wgslSource = process.env.CWC_WGSL_SOURCE || defaultWgslSource;
+const entryName = process.env.CWC_ENTRY_NAME || 'simple_webgpu_add_u32';
+const sourceOrigin = process.env.CWC_SOURCE_ORIGIN || (process.env.CWC_WGSL_SOURCE ? 'external' : 'helper-default');
+
+function textChecksum(value) {
+  let out = 0;
+  for (let i = 0; i < value.length; i += 1) out = (out + value.charCodeAt(i)) >>> 0;
+  return out;
+}
 
 function clean(value) {
   return String(value || '').replace(/[\\"]/g, "'");
@@ -23,6 +33,16 @@ function evidence(status, patch = {}) {
     shader_valid: Boolean(patch.shader_valid),
     pipeline_valid: Boolean(patch.pipeline_valid),
     bind_group_valid: Boolean(patch.bind_group_valid),
+    backend_target: clean(patch.backend_target || 'webgpu'),
+    source_format: clean(patch.source_format || 'wgsl'),
+    binary_format: clean(patch.binary_format || 'source'),
+    tool_hint: clean(patch.tool_hint || 'browser-webgpu-host-import'),
+    entry_name: clean(patch.entry_name || entryName),
+    operation: clean(patch.operation || 'u32_add'),
+    source_origin: clean(patch.source_origin || sourceOrigin),
+    source_byte_count: patch.source_byte_count || wgslSource.length,
+    source_checksum: patch.source_checksum || textChecksum(wgslSource),
+    element_count: patch.element_count || count,
     dispatch_count: patch.dispatch_count || 0,
     workgroup_count: patch.workgroup_count || 0,
     submitted: Boolean(patch.submitted),
@@ -43,7 +63,7 @@ function html() {
 <script>
 const count = ${JSON.stringify(count)};
 function fail(status, diagnostic_text) {
-  window.__simpleWebGPUComputeEvidence = { status, diagnostic_text, adapter:false, adapter_info:'', fallback_adapter:false, device_configured:false, shader_valid:false, pipeline_valid:false, bind_group_valid:false, dispatch_count:0, workgroup_count:0, submitted:false, readback_valid:false, output_count:0, output_checksum:0, expected_checksum:0, output_matches:false };
+  window.__simpleWebGPUComputeEvidence = { status, diagnostic_text, backend_target:'webgpu', source_format:'wgsl', binary_format:'source', tool_hint:'browser-webgpu-host-import', entry_name:${JSON.stringify(entryName)}, operation:'u32_add', source_origin:${JSON.stringify(sourceOrigin)}, source_byte_count:${JSON.stringify(wgslSource.length)}, source_checksum:${JSON.stringify(textChecksum(wgslSource))}, element_count:count, adapter:false, adapter_info:'', fallback_adapter:false, device_configured:false, shader_valid:false, pipeline_valid:false, bind_group_valid:false, dispatch_count:0, workgroup_count:0, submitted:false, readback_valid:false, output_count:0, output_checksum:0, expected_checksum:0, output_matches:false };
 }
 function checksum(values) {
   let out = 0;
@@ -58,8 +78,11 @@ function checksum(values) {
     if (adapter.isFallbackAdapter) return fail('host-unavailable:fallback-adapter', 'Chrome reported fallback WebGPU adapter');
     const adapterInfo = adapter.info ? JSON.stringify(adapter.info) : '';
     const device = await adapter.requestDevice();
-    const shader = device.createShaderModule({ code: '@group(0) @binding(0) var<storage, read> a: array<u32>; @group(0) @binding(1) var<storage, read> b: array<u32>; @group(0) @binding(2) var<storage, read_write> out: array<u32>; @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) { let i = id.x; if (i < arrayLength(&out)) { out[i] = a[i] + b[i]; } }' });
-    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module: shader, entryPoint: 'main' } });
+    const shader = device.createShaderModule({ code: ${JSON.stringify(wgslSource)} });
+    const compilationInfo = shader.getCompilationInfo ? await shader.getCompilationInfo() : { messages: [] };
+    const shaderErrors = (compilationInfo.messages || []).filter(message => message.type === 'error');
+    if (shaderErrors.length > 0) return fail('compile-failed:wgsl', shaderErrors.map(message => message.message).join('; '));
+    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module: shader, entryPoint: ${JSON.stringify(entryName)} } });
     const byteLength = count * 4;
     const aValues = new Uint32Array(count);
     const bValues = new Uint32Array(count);
@@ -99,7 +122,7 @@ function checksum(values) {
     for (let i = 0; i < values.length && matches; i += 1) {
       if (values[i] !== expected[i]) matches = false;
     }
-    window.__simpleWebGPUComputeEvidence = { status:'ok', diagnostic_text:'', adapter:true, adapter_info:adapterInfo, fallback_adapter:false, device_configured:true, shader_valid:true, pipeline_valid:true, bind_group_valid:true, dispatch_count:1, workgroup_count:workgroups, submitted:true, readback_valid:values.length === count, output_count:values.length, output_checksum:outputChecksum, expected_checksum:expectedChecksum, output_matches:matches };
+    window.__simpleWebGPUComputeEvidence = { status:'ok', diagnostic_text:'', backend_target:'webgpu', source_format:'wgsl', binary_format:'source', tool_hint:'browser-webgpu-host-import', entry_name:${JSON.stringify(entryName)}, operation:'u32_add', source_origin:${JSON.stringify(sourceOrigin)}, source_byte_count:${JSON.stringify(wgslSource.length)}, source_checksum:${JSON.stringify(textChecksum(wgslSource))}, element_count:count, adapter:true, adapter_info:adapterInfo, fallback_adapter:false, device_configured:true, shader_valid:true, pipeline_valid:true, bind_group_valid:true, dispatch_count:1, workgroup_count:workgroups, submitted:true, readback_valid:values.length === count, output_count:values.length, output_checksum:outputChecksum, expected_checksum:expectedChecksum, output_matches:matches };
   } catch (err) {
     fail('host-unavailable:compute-launch', String(err && err.message || err));
   }
@@ -128,7 +151,7 @@ app.whenReady().then(async () => {
     await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html()));
     const pageEvidence = await waitForEvidence(win.webContents);
     if (pageEvidence.status === 'ok' && (!pageEvidence.output_matches || pageEvidence.output_checksum <= 0 || pageEvidence.expected_checksum <= 0 || pageEvidence.output_count !== count)) {
-      writeEvidence(evidence('host-unavailable:compute-mismatch', { ...pageEvidence, diagnostic_text: 'Chrome WebGPU compute completed but readback did not match expected data' }));
+      writeEvidence(evidence('processing-mismatch:readback', { ...pageEvidence, diagnostic_text: 'Chrome WebGPU compute completed but readback did not match expected data' }));
     } else {
       writeEvidence(evidence(pageEvidence.status, pageEvidence));
     }
