@@ -474,18 +474,27 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::UserMacros);
         }
 
-        // F-strings need string interpolation
+        // F-strings: every plain double-quoted string literal parses as an
+        // FString. A pure-literal FString (only `Literal` parts, no `{expr}`
+        // interpolation) is just a string constant — it lowers to a single
+        // `ConstString` and the native backend compiles it directly, so it must
+        // NOT force interpreter fallback. Only genuine interpolation (an `Expr`
+        // or `ExprWithFormat` part) needs the runtime string-format path.
         Expr::FString { parts, .. } => {
+            let mut has_interpolation = false;
             for part in parts {
                 match part {
                     simple_parser::ast::FStringPart::Expr(e)
                     | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
+                        has_interpolation = true;
                         analyze_expr(e, reasons);
                     }
                     _ => {}
                 }
             }
-            add_reason(reasons, FallbackReason::StringOps);
+            if has_interpolation {
+                add_reason(reasons, FallbackReason::StringOps);
+            }
         }
 
         // i18n strings - need runtime locale lookup

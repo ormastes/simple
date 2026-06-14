@@ -6,7 +6,7 @@
 # Writes: doc/09_report/perf/perf_baseline_os_2026-06-13.md
 #         doc/10_metrics/perf/perf_baseline_os_table.md
 
-use app.test.bench.bench_report.{bench_emit_rows}
+use app.test.bench.bench_report.{bench_emit_rows, bench_find_simple_bin, bench_smf_capture, bench_extract_us}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -154,6 +154,30 @@ fn main():
     metrics.push("latency_us_per_spawn")
     values.push(spawn_us_per)
     units.push("us/spawn")
+
+    # --- smf rows: compile+run os_smf_workload in standalone SMF and parse ---
+    # Graceful skip (never fake) when the compiled SMF produced no RESULT lines.
+    val smf_iters: i64 = 20
+    val simple_bin = bench_find_simple_bin()
+    val smf_out = bench_smf_capture(simple_bin, "test/05_perf/os/os_smf_workload.spl", "build/test-artifacts/os_smf_workload.smf")
+    val smf_w_us = bench_extract_us(smf_out, "fs_write_10kb")
+    val smf_r_us = bench_extract_us(smf_out, "fs_read_10kb")
+    if smf_w_us >= 0 and smf_r_us >= 0:
+        val smf_w_per: i64 = if smf_iters > 0: smf_w_us / smf_iters else: 0
+        val smf_r_per: i64 = if smf_iters > 0: smf_r_us / smf_iters else: 0
+        names.push("fs_write_10kb")
+        modes.push("smf")
+        metrics.push("latency_us_per_op")
+        values.push(smf_w_per)
+        units.push("us/op")
+        names.push("fs_read_10kb")
+        modes.push("smf")
+        metrics.push("latency_us_per_op")
+        values.push(smf_r_per)
+        units.push("us/op")
+        print("smf fs_write us/op=" + _i64_to_text_local(smf_w_per) + "  smf fs_read us/op=" + _i64_to_text_local(smf_r_per))
+    else:
+        print("smf capture empty — skipping smf rows (no fake data)")
 
     print("fs_write KB/s=" + _i64_to_text_local(w_kb_per_s) + "  fs_read KB/s=" + _i64_to_text_local(r_kb_per_s) + "  spawn us=" + _i64_to_text_local(spawn_us_per))
     print("Writing OS benchmark docs ...")
