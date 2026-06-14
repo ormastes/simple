@@ -317,7 +317,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -339,6 +339,8 @@ val report_index = rt_file_read_text("doc/09_report/README.md") ?? ""
 val spipe_state = rt_file_read_text(".spipe/multicore_green/state.md") ?? ""
 val older_smoke_report = rt_file_read_text("doc/09_report/cross_language_perf_2026-06-07_smoke.md") ?? ""
 val oldest_smoke_report = rt_file_read_text("doc/09_report/cross_language_perf_2026-06-06.md") ?? ""
+val parallel_smoke_report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_smoke.md") ?? ""
+val parallel_large_report = rt_file_read_text("doc/09_report/cross_language_perf_parallel_large_2026-06-07.md") ?? ""
 step("Verify architecture and design name the API misuse gate")
 expect(architecture).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(architecture).to_contain("numbered aliases")
@@ -371,6 +373,10 @@ expect(absent_in_text(older_smoke_report, "for current\n> Go-like")).to_equal(1)
 expect(oldest_smoke_report).to_contain("cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
 expect(oldest_smoke_report).to_contain("historical chronology only")
 expect(absent_in_text(oldest_smoke_report, "for current\n> gated")).to_equal(1)
+expect(parallel_smoke_report).to_contain("**Historical report:** retained for chronology")
+expect(parallel_smoke_report).to_contain("cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(parallel_large_report).to_contain("**Historical report:** retained for chronology")
+expect(parallel_large_report).to_contain("active report checked by the large-profile gate")
 ```
 
 </details>

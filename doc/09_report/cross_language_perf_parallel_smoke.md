@@ -9,6 +9,13 @@
 **Profile contract:** enforced by test/05_perf/profile_scripts/profile_report_contract_test.shs
 **Docker isolation:** inside_container=0 | image=`simple-cross-language-perf:latest` | memory=2g | cpus=2.0
 
+> **Historical report:** retained for chronology. Current contract-gated
+> Go-like M:N profile evidence is
+> `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`,
+> which adds Docker isolation metadata, pinned Go scheduler width, OS-thread
+> row naming, runtime-pool counter evidence, and the refreshed
+> green/cooperative runner behavior.
+
 ## Methodology
 
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
