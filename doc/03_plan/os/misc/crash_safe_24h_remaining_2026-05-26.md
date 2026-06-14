@@ -11,7 +11,7 @@ Origin: May 25 host hard-lockup during parallel QEMU/build/agent work.
   disk space, available memory, swap overcommit, CPU headroom, QEMU guest
   count, kernel log danger patterns, git working tree cleanliness, stale
   lock files.
-- `test/03_system/infra/heavy_work_preflight_spec.spl` — structure verification.
+- `test/03_system/infrastructure/infra/heavy_work_preflight_spec.spl` — structure verification.
 - Env overrides: `MIN_DISK_GIB`, `MIN_MEM_GIB`, `MAX_CPU_FRACTION`.
 - Outputs `PASS/FAIL/INFO/BLOCKED` lines and `preflight=READY|BLOCKED` summary.
 

@@ -25,6 +25,18 @@ This plan tracks what is **not yet done** but in scope for closing issue #10. Ea
 
 **Acceptance**: 5+ unit tests pass; live spec passes against real M365 tenant; daily-debug pipeline produces a real debug report end-to-end.
 
+**Progress (2026-06-14)**: 1.3 done — `src/app/itf/adapter_outlook_curl.spl` exists.
+1.4 done — `test/01_unit/app/itf/adapter_outlook_curl_spec.spl` landed: 12 unit
+tests pass (client construction, OAuth2 token-cache freshness + render/parse
+roundtrip, token-POST and Graph-GET argv shape, 401/403/404/429/500/0 error
+mapping, status-tail parse, response split). Behavior re-verified via
+`bin/simple run` probe (the runner only checks file loading for some specs).
+URL-builder unit coverage (`outlook_curl_folder_list_url`/`_messages_url`) is
+omitted because `url_encode` is unresolvable in the interpreter — see
+`doc/08_tracking/bug/interp_http_url_encode_utilities_unresolved_2026-06-14.md`.
+Items 1.5–1.7 (live spec, live run, daily-debug wiring) remain blocked on M365
+credentials; the plan stays DEFERRED overall.
+
 ---
 
 ## 2. Jira live with real auth + write paths
