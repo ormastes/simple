@@ -3,7 +3,10 @@
 #
 # These examples intentionally use only built-in SPipe matchers and current
 # repo APIs. The browser bridge path covers fetched WASM bytes, JS WebGPU APIs,
-# and a bounded declared WebGPU host import callback in one session.
+# and bounded declared WebGPU host import callbacks for requestAdapter,
+# dispatch-shaped bindings with WASM-provided workgroup dimensions, and
+# writeBuffer-shaped bindings with WASM-provided memory payload bytes and
+# exported WebAssembly.Memory buffer visibility in one session.
 """
 # WebGPU JS WASM Simple System Evidence
 
@@ -15,7 +18,12 @@ Simple 2D and Simple 3D command facades, software WebGPU command replay,
 BrowserSession JavaScript and Simple-script integration,
 WebAssembly validation/compile/instantiate behavior, fetched WASM byte chains,
 bounded WASM exports, traps, memory/table/global export metadata, imported
-function binding, and typed-array/DataView access to WebAssembly.Memory.
+function binding, and typed-array/DataView access to WebAssembly.Memory. It
+also covers bounded declared `webgpu.requestAdapter`, `webgpu.dispatch`, and
+`webgpu.writeBuffer` host-import callbacks from WASM into JavaScript, including
+dispatch callbacks that receive WASM-provided `x/y/z` workgroup dimensions,
+buffer callbacks that receive WASM-provided byte payloads, and exported
+WebAssembly.Memory buffers that expose WASM stores to host callback code.
 
 ## Examples
 
@@ -24,7 +32,11 @@ Representative browser evidence includes `WebAssembly.instantiate` returning
 or fail-closed `wasm-trap:*` strings, fetched `/mod.wasm` bytes flowing through
 `arrayBuffer()` into instantiation, Simple-script `simple2d.*` and `simple3d.*`
 commands becoming structured browser evidence, and WebAssembly.Memory bytes
-being shared with `Uint8Array` and `DataView` views.
+being shared with `Uint8Array` and `DataView` views. Bounded WebGPU host-import
+examples call declared `webgpu.requestAdapter`, `webgpu.dispatch`, and
+`webgpu.writeBuffer` callbacks from WASM exports, including WebGPU-like void
+dispatch calls, Simple2D rectangle payload bytes, and `Uint8Array` reads from
+`i.exports.memory.buffer`.
 
 **Requirements:** .spipe/browser-wasm-webgpu-infra/state.md
 **Plan:** doc/03_plan/platform/webgpu_js_wasm_simple.md
@@ -525,14 +537,14 @@ describe "WebGPU JS WASM Simple system examples":
                                     expect(_display_js(value)).to_equal("instantiated:11:true:bgra8unorm:function")
                                 Err(err):
                                     expect("unexpected js error: {err}").to_equal("")
-                            match session.eval_script("navigator.gpu.requestAdapter().then(function(adapter) { adapterName = adapter.name + ':' + adapter.isFallbackAdapter; }); adapterName"):
+                            match session.eval_script("navigator.gpu.requestAdapter().then(function(adapter) { adapterName = adapter.name + ':' + adapter.isFallbackAdapter + ':' + typeof adapter.requestDevice; }); adapterName"):
                                 Ok(value):
                                     expect(_display_js(value)).to_equal("")
                                 Err(err):
                                     expect("unexpected adapter queue error: {err}").to_equal("")
                             match session.eval_script("adapterName"):
                                 Ok(value):
-                                    expect(_display_js(value)).to_equal("Simple WebGPU Software Adapter:true")
+                                    expect(_display_js(value)).to_equal("Simple WebGPU Software Adapter:true:function")
                                 Err(err):
                                     expect("unexpected adapter js error: {err}").to_equal("")
                         Err(err):
@@ -1297,6 +1309,76 @@ describe "WebGPU JS WASM Simple system examples":
             match result:
                 Ok(value):
                     expect(_display_js(value)).to_equal("true:webgpu:requestAdapter:function:instantiated:0:7:1")
+                Err(err):
+                    expect("unexpected js error: {err}").to_equal("")
+
+        it "should invoke a declared WebGPU dispatch host import from WASM through BrowserSession":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val result = session.eval_script("var calls = 0; var last = 0; var imports = { webgpu: { dispatch: function() { calls = calls + 1; last = 9; return last; } } }; var m = new WebAssembly.Module('0061736d010000000105016000017f021301067765626770750864697370617463680000030201000707010372756e00010a0601040010000b'); var i = new WebAssembly.Instance(m, imports); m.hasImportSection + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + m.firstImportKind + ':' + i.status + ':' + calls + ':' + i.exports.run() + ':' + calls + ':' + last")
+            match result:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("true:webgpu:dispatch:function:instantiated:0:9:1:9")
+                Err(err):
+                    expect("unexpected js error: {err}").to_equal("")
+
+        it "should pass WASM workgroup dimensions into a declared WebGPU dispatch import":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val result = session.eval_script("var calls = 0; var dims = ''; var imports = { webgpu: { dispatch: function(x, y, z) { calls = calls + 1; dims = x + 'x' + y + 'x' + z; return x * 100 + y * 10 + z; } } }; var m = new WebAssembly.Module('0061736d01000000010c0260037f7f7f017f6000017f021301067765626770750864697370617463680000030201010707010372756e00010a0c010a0041024103410410000b'); var i = new WebAssembly.Instance(m, imports); m.hasImportSection + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + i.status + ':' + calls + ':' + i.exports.run() + ':' + calls + ':' + dims")
+            match result:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("true:webgpu:dispatch:instantiated:0:234:1:2x3x4")
+                Err(err):
+                    expect("unexpected js error: {err}").to_equal("")
+
+        it "should pass WASM workgroup dimensions into a void WebGPU dispatch import":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val result = session.eval_script("var calls = 0; var dims = ''; var imports = { webgpu: { dispatch: function(x, y, z) { calls = calls + 1; dims = x + 'x' + y + 'x' + z; } } }; var m = new WebAssembly.Module('0061736d01000000010b0260037f7f7f006000017f021301067765626770750864697370617463680000030201010707010372756e00010a0e010c00410241034104100041010b'); var i = new WebAssembly.Instance(m, imports); m.hasImportSection + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + i.status + ':' + calls + ':' + i.exports.run() + ':' + calls + ':' + dims")
+            match result:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("true:webgpu:dispatch:instantiated:0:1:1:2x3x4")
+                Err(err):
+                    expect("unexpected js error: {err}").to_equal("")
+
+        it "should pass a WASM memory payload into a declared WebGPU writeBuffer import":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val result = session.eval_script("var calls = 0; var payload = ''; var m; var imports = { webgpu: { writeBuffer: function(ptr, len) { calls = calls + 1; payload = ptr + ':' + len + ':' + m.runtimeMemoryByte0 + ',' + m.runtimeMemoryByte1 + ',' + m.runtimeMemoryByte2; return m.runtimeMemoryByte0 + m.runtimeMemoryByte1 + m.runtimeMemoryByte2; } } }; m = new WebAssembly.Module('0061736d01000000010b0260027f7f017f6000017f021601067765626770750b777269746542756666657200000302010105030100010707010372756e00010a1f011d00410041053a0000410141073a00004102410b3a00004100410310000b'); var i = new WebAssembly.Instance(m, imports); m.hasImportSection + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + i.status + ':' + calls + ':' + i.exports.run() + ':' + calls + ':' + payload")
+            match result:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("true:webgpu:writeBuffer:instantiated:0:23:1:0:3:5,7,11")
+                Err(err):
+                    expect("unexpected js error: {err}").to_equal("")
+
+        it "should mirror WASM halfword and word stores into a WebGPU writeBuffer import":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val result = session.eval_script("var calls = 0; var payload = ''; var m; var imports = { webgpu: { writeBuffer: function(ptr, len) { calls = calls + 1; payload = ptr + ':' + len + ':' + m.runtimeMemoryByte0 + ',' + m.runtimeMemoryByte1 + ',' + m.runtimeMemoryByte2 + ',' + m.runtimeMemoryByte3 + ',' + m.runtimeMemoryByte4 + ',' + m.runtimeMemoryByte5; return m.runtimeMemoryByte0 + m.runtimeMemoryByte1 + m.runtimeMemoryByte2 + m.runtimeMemoryByte3 + m.runtimeMemoryByte4 + m.runtimeMemoryByte5; } } }; m = new WebAssembly.Module('0061736d01000000010b0260027f7f017f6000017f021601067765626770750b777269746542756666657200000302010105030100010707010372756e00010a1901170041004181043b0100410241043602004100410610000b'); var i = new WebAssembly.Instance(m, imports); m.hasImportSection + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + i.status + ':' + calls + ':' + i.exports.run() + ':' + calls + ':' + payload")
+            match result:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("true:webgpu:writeBuffer:instantiated:0:7:1:0:6:1,2,4,0,0,0")
+                Err(err):
+                    expect("unexpected js error: {err}").to_equal("")
+
+        it "should pass a WASM Simple2D rectangle payload into a WebGPU writeBuffer import":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val result = session.eval_script("var calls = 0; var payload = ''; var m; var imports = { webgpu: { writeBuffer: function(ptr, len) { calls = calls + 1; payload = ptr + ':' + len + ':rect:' + m.runtimeMemoryByte0 + ',' + m.runtimeMemoryByte1 + ',' + m.runtimeMemoryByte2 + ',' + m.runtimeMemoryByte3 + ':rgba:' + m.runtimeMemoryByte4 + ',' + m.runtimeMemoryByte5 + ',' + m.runtimeMemoryByte6 + ',' + m.runtimeMemoryByte7; return m.runtimeMemoryByte0 + m.runtimeMemoryByte1 + m.runtimeMemoryByte2 + m.runtimeMemoryByte3 + m.runtimeMemoryByte4 + m.runtimeMemoryByte5 + m.runtimeMemoryByte6 + m.runtimeMemoryByte7; } } }; m = new WebAssembly.Module('0061736d01000000010b0260027f7f017f6000017f021601067765626770750b777269746542756666657200000302010105030100010707010372756e00010a45014300410041083a00004101410c3a0000410241283a0000410341183a0000410441333a0000410541e6003a000041064199013a0000410741ff013a00004100410810000b'); var i = new WebAssembly.Instance(m, imports); m.hasImportSection + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + i.status + ':' + calls + ':' + i.exports.run() + ':' + calls + ':' + payload")
+            match result:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("true:webgpu:writeBuffer:instantiated:0:645:1:0:8:rect:8,12,40,24:rgba:51,102,153,255")
+                Err(err):
+                    expect("unexpected js error: {err}").to_equal("")
+
+        it "should expose WASM memory stores to a WebGPU writeBuffer import through exported Memory":
+            var session = BrowserSession.new()
+            session.open_html("https://example.com/webgpu-wasm.html", "<html><body>WASM GPU</body></html>")
+            val result = session.eval_script("var calls = 0; var payload = ''; var i; var imports = { webgpu: { writeBuffer: function(ptr, len) { calls = calls + 1; var view = new Uint8Array(i.exports.memory.buffer); payload = ptr + ':' + len + ':' + view[ptr] + ',' + view[ptr + 1] + ',' + view[ptr + 2] + ':' + view.length; return view[ptr] + view[ptr + 1] + view[ptr + 2] + len; } } }; var m = new WebAssembly.Module('0061736d01000000010b0260027f7f017f6000017f021601067765626770750b77726974654275666665720000030201010503010001071002066d656d6f727902000372756e00010a1f011d00410041093a00004101410a3a00004102410b3a00004100410310000b'); i = new WebAssembly.Instance(m, imports); m.hasMemorySection + ':' + m.firstImportModuleName + ':' + m.firstImportFieldName + ':' + i.status + ':' + calls + ':' + i.exports.run() + ':' + calls + ':' + payload")
+            match result:
+                Ok(value):
+                    expect(_display_js(value)).to_equal("true:webgpu:writeBuffer:instantiated:0:33:1:0:3:9,10,11:65536")
                 Err(err):
                     expect("unexpected js error: {err}").to_equal("")
 

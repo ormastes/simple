@@ -14,6 +14,7 @@ use std.js.engine.runtime.{NATIVE_NODE_HTTP_REQUEST_DESTROY}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_GET, NATIVE_NODE_HTTPS_GET}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_RESPONSE_PAUSE, NATIVE_NODE_HTTP_RESPONSE_RESUME, NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED, NATIVE_NODE_HTTP_RESPONSE_DESTROY, NATIVE_NODE_HTTP_RESPONSE_READ, NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING, NATIVE_NODE_HTTP_RESPONSE_PIPE, NATIVE_NODE_HTTP_RESPONSE_UNPIPE, NATIVE_NODE_HTTP_RESPONSE_ITERATOR_NEXT}
 use std.js.engine.runtime.{NATIVE_UINT8_ARRAY_FILL, NATIVE_UINT8_ARRAY_INCLUDES, NATIVE_UINT8_ARRAY_INDEX_OF, NATIVE_UINT8_ARRAY_JOIN, NATIVE_UINT8_ARRAY_REVERSE, NATIVE_UINT8_ARRAY_TO_REVERSED, NATIVE_UINT8_ARRAY_TO_SORTED, NATIVE_UINT8_ARRAY_WITH, NATIVE_UINT8_ARRAY_LAST_INDEX_OF, NATIVE_UINT8_ARRAY_TO_STRING, NATIVE_UINT8_ARRAY_TO_LOCALE_STRING, NATIVE_UINT8_ARRAY_AT, NATIVE_UINT8_ARRAY_COPY_WITHIN, NATIVE_UINT8_ARRAY_KEYS, NATIVE_UINT8_ARRAY_VALUES, NATIVE_UINT8_ARRAY_ENTRIES, NATIVE_UINT8_ARRAY_ITERATOR_NEXT, NATIVE_UINT8_ARRAY_ITERATOR_SELF, NATIVE_UINT8_ARRAY_SET, NATIVE_UINT8_ARRAY_SLICE}
+use std.js.engine.runtime.{NATIVE_WEBGPU_ADAPTER_REQUEST_DEVICE, NATIVE_WEBGPU_QUEUE_WRITE_BUFFER}
 use std.js.engine.runtime.{NATIVE_NODE_CHILD_PROCESS_SPAWN, NATIVE_NODE_EVENT_EMITTER_CONSTRUCTOR, NATIVE_NODE_EVENT_EMITTER_EMIT, NATIVE_NODE_EVENT_EMITTER_LISTENER_COUNT, NATIVE_NODE_EVENT_EMITTER_LISTENERS, NATIVE_NODE_EVENT_EMITTER_ON, NATIVE_NODE_EVENT_EMITTER_ONCE, NATIVE_NODE_EVENT_EMITTER_REMOVE_ALL_LISTENERS, NATIVE_NODE_EVENT_EMITTER_REMOVE_LISTENER, NATIVE_NODE_FS_EXISTS_SYNC, NATIVE_NODE_FS_MKDIR_SYNC, NATIVE_NODE_FS_PROMISES_READ_FILE, NATIVE_NODE_FS_PROMISES_WRITE_FILE, NATIVE_NODE_FS_READ_FILE_SYNC, NATIVE_NODE_FS_READDIR_SYNC, NATIVE_NODE_FS_STAT_SYNC, NATIVE_NODE_FS_WRITE_FILE_SYNC, NATIVE_NODE_HTTP_CREATE_SERVER, NATIVE_NODE_HTTP_REQUEST, NATIVE_NODE_HTTP_SERVER_CLOSE, NATIVE_NODE_HTTP_SERVER_LISTEN, NATIVE_NODE_HTTPS_REQUEST, NATIVE_NODE_NET_CREATE_CONNECTION, NATIVE_NODE_NET_SOCKET, NATIVE_NODE_READLINE_CLOSE, NATIVE_NODE_READLINE_CREATE_INTERFACE, NATIVE_NODE_READLINE_QUESTION}
 use std.js.engine.parser.{JsParser, js_parse_program_subset}
 use std.js.builtins.json.{json_is_valid}
@@ -129,6 +130,10 @@ impl JsInterpreter:
             return self._native_storage_key(this_val, arg_vals)
         if native_id == NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER:
             return self._native_navigator_gpu_request_adapter(this_val, arg_vals)
+        if native_id == NATIVE_WEBGPU_ADAPTER_REQUEST_DEVICE:
+            return self._native_webgpu_adapter_request_device(this_val, arg_vals)
+        if native_id == NATIVE_WEBGPU_QUEUE_WRITE_BUFFER:
+            return self._native_webgpu_queue_write_buffer(this_val, arg_vals)
         if native_id == NATIVE_ARRAY_BUFFER_CONSTRUCTOR:
             return self._native_array_buffer(arg_vals)
         if native_id == NATIVE_ARRAY_BUFFER_SLICE:
@@ -4812,6 +4817,35 @@ impl JsInterpreter:
                 return JsValue.Function(id: fn_id)
         JsValue.Undefined
 
+    me _native_webassembly_bound_import_function_for_module(module_id: i64) -> JsValue:
+        if module_id < 0:
+            return JsValue.Undefined
+        match self.get_object_property(module_id, "__simple_wasm_single_bound_import"):
+            JsValue.Function(fn_id): JsValue.Function(id: fn_id)
+            _: JsValue.Undefined
+
+    me _native_webassembly_call_import_value(module_id: i64, arg_vals: [JsValue]) -> JsValue:
+        val fn_id = _get_fn_id(self._native_webassembly_bound_import_function_for_module(module_id))
+        if fn_id < 0:
+            return JsValue.Undefined
+        match self._invoke_promise_callback(fn_id, arg_vals):
+            Ok(value):
+                value
+            Err(_):
+                JsValue.Undefined
+
+    me _native_webassembly_set_runtime_memory_byte(module_id: i64, address: i64, byte_value: i64):
+        if module_id < 0 or address < 0:
+            return
+        self.set_object_property(module_id, "runtimeMemoryByte{address}", JsValue.Number(v: byte_value.to_f64()))
+        match self.get_object_property(module_id, "__simple_wasm_runtime_memory_buffer"):
+            JsValue.Number(v):
+                val buffer_id = f64_to_i64(v)
+                if buffer_id >= 0:
+                    self.set_object_property(buffer_id, address.to_text(), JsValue.Number(v: byte_value.to_f64()))
+            _:
+                pass_dn
+
     me _native_webassembly_instantiate(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val result_id = self.create_object()
         self._define_method_on(result_id, "then", NATIVE_WEBASSEMBLY_INSTANTIATE_THEN)
@@ -5056,6 +5090,15 @@ impl JsInterpreter:
         if has_memory and memory_name != "":
             val memory_value = self._native_webassembly_memory_from_pages(memory_pages, memory_max_pages)
             self.set_object_property(exports_id, memory_name, memory_value)
+            match memory_value:
+                JsValue.Object(memory_id):
+                    match self.get_object_property(memory_id, "buffer"):
+                        JsValue.Object(buffer_id):
+                            self.set_object_property(module_id, "__simple_wasm_runtime_memory_buffer", JsValue.Number(v: buffer_id.to_f64()))
+                        _:
+                            pass_dn
+                _:
+                    pass_dn
         var table_name = ""
         match self.get_object_property(module_id, "tableExportName"):
             JsValue.String(v): table_name = v
@@ -5078,6 +5121,14 @@ impl JsInterpreter:
         while index < function_count:
             val function_name = self._native_webassembly_module_function_export_name_at(module_id, index)
             if function_name != "":
+                var exported_wasm_index = -1
+                match self.get_object_property(module_id, "functionExportWasmIndex{index}"):
+                    JsValue.Number(v): exported_wasm_index = f64_to_i64(v)
+                    _: pass_dn
+                var function_import_count = 0
+                match self.get_object_property(module_id, "functionImportCount"):
+                    JsValue.Number(v): function_import_count = f64_to_i64(v)
+                    _: pass_dn
                 val fn_id = self._register_native(function_name, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION)
                 self.set_object_property(exports_id, function_name, JsValue.Function(id: fn_id))
                 var body_fn_ids = self.wasm_export_body_fn_ids
@@ -5101,13 +5152,15 @@ impl JsInterpreter:
                 val bound_import = self._native_webassembly_bound_single_import_function(module_id, imports_value)
                 match bound_import:
                     JsValue.Function(id):
-                        self.set_object_property(exports_id, "__simple_wasm_single_bound_import", bound_import)
-                        var fn_ids = self.wasm_export_fn_ids
-                        var bound_imports = self.wasm_export_bound_imports
-                        fn_ids.push(fn_id)
-                        bound_imports.push(bound_import)
-                        self.wasm_export_fn_ids = fn_ids
-                        self.wasm_export_bound_imports = bound_imports
+                        self.set_object_property(module_id, "__simple_wasm_single_bound_import", bound_import)
+                        if exported_wasm_index >= 0 and exported_wasm_index < function_import_count:
+                            self.set_object_property(exports_id, "__simple_wasm_single_bound_import", bound_import)
+                            var fn_ids = self.wasm_export_fn_ids
+                            var bound_imports = self.wasm_export_bound_imports
+                            fn_ids.push(fn_id)
+                            bound_imports.push(bound_import)
+                            self.wasm_export_fn_ids = fn_ids
+                            self.wasm_export_bound_imports = bound_imports
                     _: pass_dn
             index = index + 1
         exports_id
@@ -5982,6 +6035,25 @@ impl JsInterpreter:
             return "global"
         ""
 
+    me _native_webassembly_import_type_index_at(hex: text, wanted_index: i64) -> i64:
+        val pos = self._native_webassembly_import_entry_pos(hex, wanted_index)
+        val end = self._native_webassembly_section_payload_end(hex, 2)
+        if pos < 0 or end <= pos:
+            return -1
+        val module_len = self._native_webassembly_read_leb_value(hex, pos)
+        val module_start = self._native_webassembly_read_leb_next(hex, pos)
+        if module_len < 0 or module_start < 0:
+            return -1
+        val field_pos = module_start + module_len
+        val field_len = self._native_webassembly_read_leb_value(hex, field_pos)
+        val field_start = self._native_webassembly_read_leb_next(hex, field_pos)
+        if field_len < 0 or field_start < 0:
+            return -1
+        val kind_pos = field_start + field_len
+        if kind_pos >= end or self._native_webassembly_hex_byte_at(hex, kind_pos) != 0:
+            return -1
+        self._native_webassembly_read_leb_value(hex, kind_pos + 1)
+
     me _native_webassembly_import_entry_pos(hex: text, wanted_index: i64) -> i64:
         val start = self._native_webassembly_section_payload_start(hex, 2)
         val end = self._native_webassembly_section_payload_end(hex, 2)
@@ -6243,6 +6315,46 @@ impl JsInterpreter:
                 result_index = result_index + 1
             if type_index == wanted_type_index:
                 return param_count
+            type_pos = result_pos
+            type_index = type_index + 1
+        -1
+
+    me _native_webassembly_type_i32_result_count(hex: text, wanted_type_index: i64) -> i64:
+        val type_start = self._native_webassembly_section_payload_start(hex, 1)
+        val type_end = self._native_webassembly_section_payload_end(hex, 1)
+        if type_start < 0 or type_end <= type_start:
+            return -1
+        val type_count = self._native_webassembly_read_leb_value(hex, type_start)
+        var type_pos = self._native_webassembly_read_leb_next(hex, type_start)
+        if type_count < 0 or type_pos < 0 or wanted_type_index < 0 or wanted_type_index >= type_count:
+            return -1
+        var type_index = 0
+        while type_index < type_count and type_pos < type_end:
+            val form = self._native_webassembly_hex_byte_at(hex, type_pos)
+            if form != 96:
+                return -1
+            val param_count = self._native_webassembly_read_leb_value(hex, type_pos + 1)
+            var param_pos = self._native_webassembly_read_leb_next(hex, type_pos + 1)
+            if param_count < 0 or param_pos < 0 or param_pos > type_end:
+                return -1
+            var param_index = 0
+            while param_index < param_count:
+                if param_pos >= type_end or self._native_webassembly_hex_byte_at(hex, param_pos) != 127:
+                    return -1
+                param_pos = param_pos + 1
+                param_index = param_index + 1
+            val result_count = self._native_webassembly_read_leb_value(hex, param_pos)
+            var result_pos = self._native_webassembly_read_leb_next(hex, param_pos)
+            if result_count < 0 or result_pos < 0 or result_pos > type_end:
+                return -1
+            var result_index = 0
+            while result_index < result_count:
+                if result_pos >= type_end or self._native_webassembly_hex_byte_at(hex, result_pos) != 127:
+                    return -1
+                result_pos = result_pos + 1
+                result_index = result_index + 1
+            if type_index == wanted_type_index:
+                return result_count
             type_pos = result_pos
             type_index = type_index + 1
         -1
@@ -6750,6 +6862,7 @@ impl JsInterpreter:
                         if not found:
                             memory_addrs.push(address)
                             memory_bytes.push(store_byte)
+                        self._native_webassembly_set_runtime_memory_byte(module_id, address, store_byte)
                         cursor = next_pos
                         continue
                     if opcode == 59:
@@ -6784,6 +6897,7 @@ impl JsInterpreter:
                             if not found:
                                 memory_addrs.push(wanted_addr)
                                 memory_bytes.push(store_byte)
+                            self._native_webassembly_set_runtime_memory_byte(module_id, wanted_addr, store_byte)
                             store_index = store_index + 1
                         cursor = next_pos
                         continue
@@ -6819,6 +6933,7 @@ impl JsInterpreter:
                             if not found:
                                 memory_addrs.push(wanted_addr)
                                 memory_bytes.push(store_byte)
+                            self._native_webassembly_set_runtime_memory_byte(module_id, wanted_addr, store_byte)
                             store_index = store_index + 1
                         cursor = next_pos
                         continue
@@ -6829,7 +6944,34 @@ impl JsInterpreter:
                             return -1
                         val function_import_count = self._native_webassembly_function_import_count(hex)
                         val called_body_index = function_index - function_import_count
-                        if called_body_index < 0 or called_body_index == wanted_body_index:
+                        if called_body_index < 0:
+                            if module_id < 0 or function_import_count != 1 or function_index != 0:
+                                return -1
+                            val import_type_index = self._native_webassembly_import_type_index_at(hex, function_index)
+                            val import_param_count = self._native_webassembly_type_i32_param_count(hex, import_type_index)
+                            val import_result_count = self._native_webassembly_type_i32_result_count(hex, import_type_index)
+                            if import_param_count < 0 or import_result_count < 0 or import_result_count > 1 or stack.len() < import_param_count:
+                                return -1
+                            var import_args: [JsValue] = []
+                            var import_param_index = 0
+                            while import_param_index < import_param_count:
+                                val import_arg_value = stack.get(stack.len() - import_param_count + import_param_index)
+                                import_args.push(JsValue.Number(v: import_arg_value.to_f64()))
+                                import_param_index = import_param_index + 1
+                            var import_pop_index = 0
+                            while import_pop_index < import_param_count:
+                                stack.pop()
+                                import_pop_index = import_pop_index + 1
+                            val imported_value = self._native_webassembly_call_import_value(module_id, import_args)
+                            if import_result_count == 1:
+                                match imported_value:
+                                    JsValue.Number(v):
+                                        stack.push(f64_to_i64(v))
+                                    _:
+                                        return -1
+                            cursor = next_pos
+                            continue
+                        if called_body_index == wanted_body_index:
                             return -1
                         val param_count = self._native_webassembly_function_body_i32_param_count(hex, called_body_index)
                         if param_count < 0 or stack.len() < param_count:
@@ -8216,7 +8358,80 @@ impl JsInterpreter:
         self.set_object_property(adapter_id, "isFallbackAdapter", JsValue.Boolean(v: true))
         self.set_object_property(adapter_id, "features", JsValue.String(v: "texture-compression-bc,timestamp-query"))
         self.set_object_property(adapter_id, "limitsProfile", JsValue.String(v: "mvp"))
+        self._define_method_on(adapter_id, "requestDevice", NATIVE_WEBGPU_ADAPTER_REQUEST_DEVICE)
         JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: adapter_id), false))
+
+    me _native_webgpu_adapter_request_device(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val adapter_id = _get_obj_id(this_val)
+        if adapter_id < 0:
+            return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+        match self.get_object_property(adapter_id, "__simple_webgpu_adapter_host"):
+            JsValue.Boolean(is_host):
+                if not is_host:
+                    return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+            _:
+                return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+        val queue_id = self.create_object()
+        self.set_object_property(queue_id, "__simple_webgpu_queue_host", JsValue.Boolean(v: true))
+        self.set_object_property(queue_id, "writeCount", JsValue.Number(v: 0.0))
+        self.set_object_property(queue_id, "submitCount", JsValue.Number(v: 0.0))
+        self._define_method_on(queue_id, "writeBuffer", NATIVE_WEBGPU_QUEUE_WRITE_BUFFER)
+        val device_id = self.create_object()
+        self.set_object_property(device_id, "__simple_webgpu_device_host", JsValue.Boolean(v: true))
+        self.set_object_property(device_id, "label", JsValue.String(v: "Simple WebGPU Software Device"))
+        self.set_object_property(device_id, "queue", JsValue.Object(id: queue_id))
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: device_id), false))
+
+    me _native_webgpu_queue_write_buffer(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val queue_id = _get_obj_id(this_val)
+        if queue_id < 0:
+            return JsValue.Undefined
+        match self.get_object_property(queue_id, "__simple_webgpu_queue_host"):
+            JsValue.Boolean(is_host):
+                if not is_host:
+                    return JsValue.Undefined
+            _:
+                return JsValue.Undefined
+        var buffer_offset = 0
+        if arg_vals.len() > 1:
+            buffer_offset = f64_to_i64(to_number(arg_vals.get(1)))
+            if buffer_offset < 0:
+                buffer_offset = 0
+        val source_id = if arg_vals.len() > 2: _get_obj_id(arg_vals.get(2)) else: -1
+        var byte_length = 0
+        var checksum = 0
+        if source_id >= 0:
+            match self.get_object_property(source_id, "__simple_typed_array"):
+                JsValue.Boolean(is_typed):
+                    if is_typed:
+                        byte_length = self._native_uint8_array_length(source_id)
+                        var i = 0
+                        while i < byte_length:
+                            checksum = checksum + f64_to_i64(to_number(self._native_uint8_array_byte_at(source_id, i)))
+                            i = i + 1
+                _:
+                    match self.get_object_property(source_id, "__simple_array_buffer"):
+                        JsValue.Boolean(is_buffer):
+                            if is_buffer:
+                                match self.get_object_property(source_id, "byteLength"):
+                                    JsValue.Number(v): byte_length = f64_to_i64(v)
+                                    _: pass_dn
+                                var i = 0
+                                while i < byte_length:
+                                    checksum = checksum + f64_to_i64(to_number(self.get_object_property(source_id, i.to_text())))
+                                    i = i + 1
+                        _:
+                            pass_dn
+        var write_count = 0
+        match self.get_object_property(queue_id, "writeCount"):
+            JsValue.Number(v): write_count = f64_to_i64(v)
+            _: pass_dn
+        write_count = write_count + 1
+        self.set_object_property(queue_id, "writeCount", JsValue.Number(v: write_count.to_f64()))
+        self.set_object_property(queue_id, "lastWriteBufferOffset", JsValue.Number(v: buffer_offset.to_f64()))
+        self.set_object_property(queue_id, "lastWriteByteLength", JsValue.Number(v: byte_length.to_f64()))
+        self.set_object_property(queue_id, "lastWriteChecksum", JsValue.Number(v: checksum.to_f64()))
+        JsValue.Undefined
 
     me _response_content_type(response_id: i64) -> text:
         match self.get_object_property(response_id, "headersText"):

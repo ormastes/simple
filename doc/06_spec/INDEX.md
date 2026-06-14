@@ -1,13 +1,13 @@
 # Test Specification Index
 
-*Generated: 2026-06-13*
+*Generated: 2026-06-14*
 
 ## Quick Stats
 
 - **Total Features:** 12
 - **Complete Documentation:** 5 (50%)
 - **Stubs Remaining:** 5
-- **Total Lines:** 109
+- **Total Lines:** 118
 - **Warnings:** 10
 
 ---
@@ -17,7 +17,7 @@
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
-| [WebGPU JS WASM Simple System Evidence](test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Minimal | N/A | 114 | 20% | 26 lines |
+| [WebGPU JS WASM Simple System Evidence](test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Minimal | N/A | 121 | 20% | 35 lines |
 | [Browser Chrome WebGPU Draw Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.md) | Minimal | N/A | 1 | 20% | 23 lines |
 | [Browser Chrome WebGPU Compute Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.md) | Minimal | N/A | 1 | 20% | 22 lines |
 
