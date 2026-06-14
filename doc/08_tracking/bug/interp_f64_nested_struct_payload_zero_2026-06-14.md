@@ -36,6 +36,14 @@ But:
   `CellValue.NumberVal` after it traversed the recursive-descent evaluator
   yields `0.0`. `=SUM(1,2,3,4)` → `0` (pre-existing function), `=SQRT(16)` → `0`,
   every numeric formula → `0`.
+- **Even shallow leaf-math is unreliable**: calling thin public wrappers over the
+  leaf helpers (e.g. `office_sqrt(16.0).to_i64()`) was correct in the single
+  exact-integer case (`16 → 4`), but `office_floor(2.7).to_i64()`,
+  `office_ceil(2.1).to_i64()`, and `office_round(2.5,0).to_i64()` returned
+  **garbage bit patterns** (e.g. `274721116585879142`) or `0` — and reusing a
+  returned f64 in further arithmetic (`office_sqrt(2.0) * 100.0`) also produced
+  garbage. So the math cannot be positively verified even shallowly; the new
+  formula functions are "correct by construction" only.
 
 ## Per-backend behavior (probe: `evaluate_formula` over `app.office.sheets`)
 
@@ -44,7 +52,7 @@ But:
 | `bin/simple run` (interpreter) | `0` | payload zeroed through nesting |
 | `bin/simple <file>.smf` (compiled, interp fallback) | `0` | same |
 | test runner (compiled mode) | `0` | numeric examples fail; empty-result examples pass |
-| `simple native-build` (clang/native) | **core dump** | crashes on the first `evaluate_formula` call; see recent "native-build codegen root cause" work |
+| `simple native-build` (clang/native) | **core dump** (one probe) | the single probe built so far cored on its first `evaluate_formula` call; not yet isolated. See recent "native-build codegen root cause" work |
 
 The integer-safe display path (`evaluate_formula_display_text`, pure `i64`)
 works for **literal** arithmetic (`=2+3` → `5`, `=10-4` → `6`) under
@@ -58,8 +66,10 @@ runner's compiled mode returns empty for even literal arithmetic.
   formula engine end-to-end. Only **termination/structural** behavior (e.g.
   circular-reference depth guard returning an empty display) is verifiable in
   the test runner.
-- Likely affects any numeric-heavy module that carries `f64` through nested
-  struct/enum returns (perf, ML, geometry) on the interpreter/runner path.
+- Observed in the spreadsheet formula engine only. It *may* affect other
+  numeric-heavy modules that carry `f64` through nested struct/enum returns
+  (perf, ML, geometry) on the interpreter/runner path, but that is unverified
+  beyond this module — do not assume broad impact without reproducing.
 
 ## Repro
 
