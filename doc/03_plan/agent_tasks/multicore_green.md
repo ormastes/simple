@@ -418,3 +418,28 @@ Each agent reports:
   sessions are active in WebGPU/UI/loader work. Multicore-green syncs continue
   in the separate jj workspace and must keep unrelated files out of lane
   commits unless the user explicitly asks for an integration commit.
+
+## Current Sync Status (2026-06-14)
+
+- Current multicore-green lane state is rebased on `main@origin` after the
+  unrelated GUI renderer syncs through
+  `d7115ef664c7 perf(gui): prune selector has subtree scans`; those remote
+  changes did not touch the multicore-green owned paths.
+- The latest multicore-green doc/spec slice is
+  `e949435419d5 docs: require multicore green resolver smoke visibility`.
+  It made `doc/07_guide/compiler/check_perf.md` and `test/05_perf/README.md`
+  require the native resolver smoke
+  `cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols`
+  whenever multicore-green native/profile counter evidence changes.
+- The tracking SSpec and generated manual now assert that the perf guide and
+  perf README keep that resolver-smoke visibility, so public
+  `multicore_green_*_count` profile evidence cannot drift away from native
+  `rt_pool_*` counter-symbol resolver coverage.
+- Focused checks from the 2026-06-14 resolver-smoke visibility slice passed:
+  local tracking SSpec with 13 scenarios, Docker-isolated tracking SSpec with
+  13 scenarios, `cargo test -p simple-compiler
+  elf_utils::tests::resolves_runtime_pool_symbols`, and
+  `find doc/06_spec -name '*_spec.spl' | wc -l` returning `0`.
+- The broader Go-like runtime roadmap remains `current`, not `done`: ordinary
+  closure preemption, full scheduler-aware host M:N behavior, and ongoing
+  profile parity work remain explicit follow-up gates.

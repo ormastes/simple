@@ -707,7 +707,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 142 lines folded for reproduction.
+Runnable source: 149 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -720,6 +720,7 @@ val coding = rt_file_read_text(".codex/skills/coding/SKILL.md") ?? ""
 val profile_contract = rt_file_read_text("test/05_perf/profile_scripts/profile_report_contract_test.shs") ?? ""
 val api_contract = rt_file_read_text("test/05_perf/profile_scripts/concurrency_api_contract_test.shs") ?? ""
 val sys_test_plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
+val agent_plan = rt_file_read_text("doc/03_plan/agent_tasks/multicore_green.md") ?? ""
 val perf_readme = rt_file_read_text("test/05_perf/README.md") ?? ""
 val fanout_runner_bug = rt_file_read_text("doc/08_tracking/bug/multicore_green_fanout_spec_runner_mismatch_2026-06-11.md") ?? ""
 val fanout_spec = rt_file_read_text("test/05_perf/stress/multicore_green_fanout_spec.spl") ?? ""
@@ -804,6 +805,12 @@ expect(sys_test_plan).to_contain("must not import `rt_pool_join` directly")
 expect(sys_test_plan).to_contain("report_index_checked=doc/09_report/README.md")
 expect(sys_test_plan).to_contain("agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md")
 expect(sys_test_plan).to_contain("report index and agent handoff cannot silently point future agents at stale evidence")
+expect(sys_test_plan).to_contain("## Current Sync Status (2026-06-14)")
+expect(sys_test_plan).to_contain("e949435419d5 docs: require multicore green resolver smoke visibility")
+expect(sys_test_plan).to_contain("Docker-isolated interpreter")
+expect(agent_plan).to_contain("## Current Sync Status (2026-06-14)")
+expect(agent_plan).to_contain("d7115ef664c7 perf(gui): prune selector has subtree scans")
+expect(agent_plan).to_contain("broader Go-like runtime roadmap remains `current`, not `done`")
 expect(fanout_runner_bug).to_contain("historical resolved-bug evidence only")
 expect(fanout_runner_bug).to_contain("current reruns use")
 expect(fanout_runner_bug).to_contain("report_index_checked")

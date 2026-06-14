@@ -150,3 +150,20 @@
   `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
   `USER_SYSCALL_PASS=true`; those final markers remain exclusive to the
   `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` lane.
+
+## Current Sync Status (2026-06-14)
+
+- The current jj workspace is rebased on `main@origin` after unrelated GUI
+  renderer changes through `d7115ef664c7`; no multicore-green files were
+  folded in from that remote lane.
+- The 2026-06-14 resolver-smoke visibility slice
+  `e949435419d5 docs: require multicore green resolver smoke visibility`
+  updates the perf guide, perf README, tracking SSpec, and generated tracking
+  manual so future multicore-green profile edits keep
+  `cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols`
+  paired with `rt_pool_*` counter evidence.
+- Focused verification for that slice passed: `simple check
+  test/03_system/feature/usage/multicore_green_tracking_spec.spl`, local
+  interpreter tracking SSpec with 13 scenarios, Docker-isolated interpreter
+  tracking SSpec with 13 scenarios, the native resolver smoke above, and the
+  generated-spec layout guard returning `0`.

@@ -213,6 +213,16 @@ go-runtime-hardening
 - verification: `scheduler.spl` and `green_carrier.spl` checks passed, and
   `scheduler_green_parallelism_spec.spl` passed 29 examples including named
   runtime and compiler safepoint coverage.
+- sync: 2026-06-14 jj workspace is current on `main@origin` after rebasing over
+  unrelated GUI renderer slices; multicore-green work remains isolated in the
+  scratch workspace with `doc/06_spec/**/*_spec.spl` guard at `0`.
+- evidence: 2026-06-14 resolver-smoke visibility is now tracked in
+  `doc/07_guide/compiler/check_perf.md`, `test/05_perf/README.md`,
+  `test/03_system/feature/usage/multicore_green_tracking_spec.spl`, and the
+  generated manual. The required smoke is
+  `cargo test -p simple-compiler elf_utils::tests::resolves_runtime_pool_symbols`.
+- verification: 2026-06-14 focused checks passed for the tracking spec in local
+  and Docker-isolated interpreter runs, and the native resolver smoke passed.
 
 ## Completion Audit - 2026-06-07
 
