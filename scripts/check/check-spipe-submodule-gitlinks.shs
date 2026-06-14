@@ -23,14 +23,35 @@ case "$MODE" in
 esac
 
 failures=0
+HAVE_GIT_INDEX=0
+HAVE_JJ_WORKSPACE=0
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  HAVE_GIT_INDEX=1
+elif jj root >/dev/null 2>&1; then
+  HAVE_JJ_WORKSPACE=1
+fi
 
 check_one() {
   path="$1"
-  entries="$(git ls-files --stage "$path" | wc -l | tr -d ' ')"
-  mode="$(git ls-files --stage "$path" | awk 'NR == 1 { print $1 }')"
-  if [ "$entries" = "1" ] && [ "$mode" = "160000" ]; then
-    echo "gitlink_ok $path"
-    return
+  if [ "$HAVE_GIT_INDEX" -eq 1 ]; then
+    entries="$(git ls-files --stage "$path" | wc -l | tr -d ' ')"
+    mode="$(git ls-files --stage "$path" | awk 'NR == 1 { print $1 }')"
+    if [ "$entries" = "1" ] && [ "$mode" = "160000" ]; then
+      echo "gitlink_ok $path"
+      return
+    fi
+  elif [ "$HAVE_JJ_WORKSPACE" -eq 1 ]; then
+    entries="$(jj file list "$path" | wc -l | tr -d ' ')"
+    first="$(jj file list "$path" | awk 'NR == 1 { print $0 }')"
+    if [ "$entries" = "1" ] && [ "$first" = "$path" ]; then
+      echo "gitlink_ok $path"
+      return
+    fi
+    mode="jj-tree"
+  else
+    entries=0
+    mode="missing-vcs"
   fi
   failures=$((failures + 1))
   echo "gitlink_bad $path entries=$entries mode=${mode:-missing}"
@@ -38,11 +59,23 @@ check_one() {
 
 check_tracked_tree() {
   path="$1"
-  entries="$(git ls-files --stage "$path" | wc -l | tr -d ' ')"
-  mode="$(git ls-files --stage "$path" | awk 'NR == 1 { print $1 }')"
-  if [ "$entries" -gt 1 ] && [ "$mode" != "160000" ]; then
-    echo "tracked_tree_ok $path entries=$entries"
-    return
+  if [ "$HAVE_GIT_INDEX" -eq 1 ]; then
+    entries="$(git ls-files --stage "$path" | wc -l | tr -d ' ')"
+    mode="$(git ls-files --stage "$path" | awk 'NR == 1 { print $1 }')"
+    if [ "$entries" -gt 1 ] && [ "$mode" != "160000" ]; then
+      echo "tracked_tree_ok $path entries=$entries"
+      return
+    fi
+  elif [ "$HAVE_JJ_WORKSPACE" -eq 1 ]; then
+    entries="$(jj file list "$path" | wc -l | tr -d ' ')"
+    if [ "$entries" -gt 1 ]; then
+      echo "tracked_tree_ok $path entries=$entries"
+      return
+    fi
+    mode="jj-gitlink"
+  else
+    entries=0
+    mode="missing-vcs"
   fi
   failures=$((failures + 1))
   echo "tracked_tree_bad $path entries=$entries mode=${mode:-missing}"
@@ -50,6 +83,11 @@ check_tracked_tree() {
 
 repair_one() {
   path="$1"
+  if [ "$HAVE_GIT_INDEX" -ne 1 ]; then
+    echo "gitlink_repair_requires_git_index $path" >&2
+    failures=$((failures + 1))
+    return
+  fi
   if [ ! -d "$path" ]; then
     echo "gitlink_repair_missing_worktree $path" >&2
     failures=$((failures + 1))

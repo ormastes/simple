@@ -395,7 +395,11 @@ Each agent reports:
   - `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
   - `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`
   - `doc/08_tracking/feature/feature_db.sdn` lint
-  - `/sp_dev` wiring check
+  - `/sp_dev` wiring check through
+    `sh scripts/setup/install-spipe-dev-command.shs --check`; the delegated
+    submodule-gitlink check now has a read-only jj-workspace path, so the
+    scratch pherallel lane can run it without a `.git` directory while repair
+    still requires a Git index.
   - `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 - Prior 2026-06-12/early-2026-06-13 evidence remains valid for Docker
   auto-binary selection, Docker isolation, the fixed generated
