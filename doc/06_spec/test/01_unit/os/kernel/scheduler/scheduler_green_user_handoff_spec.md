@@ -1,6 +1,6 @@
 # Scheduler Green User Handoff Specification
 
-> The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a real x86_64 user process image, creates a hosted scheduler task through `create_user_task_pid`, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
+> The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a scheduler-level x86_64 user process image, creates a hosted scheduler task through `create_user_task_pid`, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
 
 <!-- sdn-diagram:id=scheduler_green_user_handoff_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ scheduler_green_user_handoff_spec -> os
 
 # Scheduler Green User Handoff Specification
 
-The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a real x86_64 user process image, creates a hosted scheduler task through `create_user_task_pid`, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
+The green-carrier scheduler lane and the normal OS task lane must remain separate. This spec builds a scheduler-level x86_64 user process image, creates a hosted scheduler task through `create_user_task_pid`, dispatches the pid through the green-carrier queue, and verifies that the user handoff record still exposes the same user context expected by syscall `14`.
 
 ## At a Glance
 
@@ -54,10 +54,10 @@ The green-carrier scheduler lane and the normal OS task lane must remain separat
 ## Overview
 
 The green-carrier scheduler lane and the normal OS task lane must remain
-separate. This spec builds a real x86_64 user process image, creates a hosted
-scheduler task through `create_user_task_pid`, dispatches the pid through the
-green-carrier queue, and verifies that the user handoff record still exposes
-the same user context expected by syscall `14`.
+separate. This spec builds a scheduler-level x86_64 user process image, creates
+a hosted scheduler task through `create_user_task_pid`, dispatches the pid
+through the green-carrier queue, and verifies that the user handoff record still
+exposes the same user context expected by syscall `14`.
 
 ## Syntax
 
@@ -87,7 +87,7 @@ and cannot replace the final live QEMU AP ring/user marker triplet.
 
 #### dispatches a real user handoff pid through the green lane
 
-- build a real x86_64 user process image from executable bytes
+- build a scheduler-level x86_64 user process image
 - create a hosted scheduler user task through the real spawn path
 - var sched = Scheduler new with cpu count
    - Expected: created_present equals `1`
@@ -123,14 +123,12 @@ and cannot replace the final live QEMU AP ring/user marker triplet.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 72 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("build a real x86_64 user process image from executable bytes")
-val image_result = build_user_process_image("/sys/apps/green_ring3_probe", make_x86_64_exec(), Architecture.X86_64, [], [])
-expect(image_result.is_ok()).to_be(true)
-val image = image_result.unwrap()
+step("build a scheduler-level x86_64 user process image")
+val image = make_x86_64_user_image()
 val expected_entry = image.entry
 val expected_user_sp = image.initial_sp & 0xFFFFFFFFFFFFFFF0
 val expected_stack_top = image.stack_top
