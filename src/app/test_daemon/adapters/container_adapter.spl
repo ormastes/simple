@@ -28,6 +28,7 @@ class ContainerAdapter:
     base: SessionAdapter
     runtime: text          # "docker" or "podman"
     default_image: text    # e.g. "simple-test:latest"
+    resource_flags: text   # cgroup caps so a runaway `simple` can't OOM the host
 
 fn detect_container_runtime() -> text:
     """
@@ -47,7 +48,10 @@ fn container_adapter_new() -> ContainerAdapter:
     ContainerAdapter(
         base: session_adapter_new(SESSION_KIND_CONTAINER, "container"),
         runtime: runtime,
-        default_image: "simple-test:latest"
+        default_image: "simple-test:latest",
+        # --memory-swap == --memory disables swap, so a leaking `simple` is
+        # killed at the cap instead of thrashing host swap into a global OOM.
+        resource_flags: "--memory=4g --memory-swap=4g --pids-limit=512 --cpus=4.0"
     )
 
 # ============================================================================
@@ -112,7 +116,7 @@ impl ContainerAdapter:
             self.default_image
 
         # Build create command with volume mount for project
-        val create_cmd = "{rt} create --name {container_name} -v .:/workspace -w /workspace {actual_image} sleep infinity"
+        val create_cmd = "{rt} create --name {container_name} {self.resource_flags} -v .:/workspace -w /workspace {actual_image} sleep infinity"
         rt_shell_exec(create_cmd)
         val create_exit = rt_shell_exit_code()
 
@@ -191,7 +195,7 @@ impl ContainerAdapter:
                 self.default_image
 
             # Recreate
-            val create_cmd = "{rt} create --name {lease.session_id} -v .:/workspace -w /workspace {actual_image} sleep infinity"
+            val create_cmd = "{rt} create --name {lease.session_id} {self.resource_flags} -v .:/workspace -w /workspace {actual_image} sleep infinity"
             rt_shell_exec(create_cmd)
             if rt_shell_exit_code() != 0:
                 return false
