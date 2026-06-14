@@ -97,26 +97,26 @@ fn _emit_for_rect(node: WidgetNode, rect: WidgetRect, cmds: [DrawCmd]) -> [DrawC
 
     if kind == "button":
         # Fill + outline + centered label text
-        result = result + [_rect_cmd(rect.id, rect.x, rect.y, rect.w, rect.h, BUTTON_BG)]
-        result = result + [_outline_cmd(rect.id, rect.x, rect.y, rect.w, rect.h, BUTTON_BG)]
+        result.push(_rect_cmd(rect.id, rect.x, rect.y, rect.w, rect.h, BUTTON_BG))
+        result.push(_outline_cmd(rect.id, rect.x, rect.y, rect.w, rect.h, BUTTON_BG))
         val lbl = node.get_prop("label")
         if lbl != "":
             val tx = rect.x + 6
             val ty = rect.y + rect.h / 2
-            result = result + [_text_cmd(rect.id, tx, ty, TEXT_FG, lbl, 7)]
+            result.push(_text_cmd(rect.id, tx, ty, TEXT_FG, lbl, 7))
     elif kind == "label" or kind == "text":
         # Text only
         val lbl = node.get_prop("label")
         if lbl != "":
-            result = result + [_text_cmd(rect.id, rect.x, rect.y + rect.h / 2, TEXT_FG, lbl, 7)]
+            result.push(_text_cmd(rect.id, rect.x, rect.y + rect.h / 2, TEXT_FG, lbl, 7))
     elif kind == "column" or kind == "row" or kind == "panel":
         # Container: fill with nav or generic color
         val nav_pat = node.get_prop("nav_pattern")
         val bg = if nav_pat != "": NAV_BG else: GENERIC_BG
-        result = result + [_rect_cmd(rect.id, rect.x, rect.y, rect.w, rect.h, bg)]
+        result.push(_rect_cmd(rect.id, rect.x, rect.y, rect.w, rect.h, bg))
     else:
         # Default: generic background rect
-        result = result + [_rect_cmd(rect.id, rect.x, rect.y, rect.w, rect.h, GENERIC_BG)]
+        result.push(_rect_cmd(rect.id, rect.x, rect.y, rect.w, rect.h, GENERIC_BG))
 
     return result
 
@@ -125,10 +125,14 @@ fn _emit_for_rect(node: WidgetNode, rect: WidgetRect, cmds: [DrawCmd]) -> [DrawC
 # =========================================================================
 
 fn _collect_nodes(node: WidgetNode, all_nodes: [WidgetNode]) -> [WidgetNode]:
-    """Collect all nodes in the tree (pre-order)."""
-    var result = all_nodes + [node]
+    """Collect layout-visible nodes in the same pre-order shape as compute_layout."""
+    var result = all_nodes
+    result.push(node)
+    if not node.is_visible():
+        return result
     for child in node.children():
-        result = _collect_nodes(child, result)
+        if child.is_visible():
+            result = _collect_nodes(child, result)
     return result
 
 fn _find_node(nodes: [WidgetNode], id: text) -> WidgetNode?:
@@ -157,14 +161,26 @@ fn widget_tree_to_draw_cmds(root: WidgetNode, w: i32, h: i32) -> [DrawCmd]:
     all_nodes = _collect_nodes(root, all_nodes)
 
     var cmds: [DrawCmd] = []
-    for rect in rects:
-        val node = _find_node(all_nodes, rect.id)
-        if node != nil:
-            cmds = _emit_for_rect(node, rect, cmds)
+    var rect_idx = 0
+    while rect_idx < rects.len():
+        val rect = rects[rect_idx]
+        if rect_idx < all_nodes.len():
+            val candidate = all_nodes[rect_idx]
+            if candidate.id == rect.id:
+                cmds = _emit_for_rect(candidate, rect, cmds)
+            else:
+                val node = _find_node(all_nodes, rect.id)
+                if node != nil:
+                    cmds = _emit_for_rect(node, rect, cmds)
+        else:
+            val node = _find_node(all_nodes, rect.id)
+            if node != nil:
+                cmds = _emit_for_rect(node, rect, cmds)
+        rect_idx = rect_idx + 1
 
     # Probe: emit the root's nav_pattern as a greppable text cmd
     val nav_pattern_val = root.get_prop("nav_pattern")
     val probe_label = if nav_pattern_val != "": nav_pattern_val else: "none"
-    cmds = cmds + [_text_cmd("nav_pattern_probe", 0, 0, TEXT_FG, probe_label, 7)]
+    cmds.push(_text_cmd("nav_pattern_probe", 0, 0, TEXT_FG, probe_label, 7))
 
     return cmds
