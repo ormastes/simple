@@ -2312,6 +2312,10 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
     var tag_keys_raw: [text] = [""; bucket_capacity]
     var tag_counts_raw: [i32] = [0; bucket_capacity]
     var tag_key_count = 0
+    var entry_kinds: [i32] = [0; bucket_capacity]
+    var entry_buckets: [i32] = [0; bucket_capacity]
+    var entry_rules: [i32] = [0; bucket_capacity]
+    var entry_count = 0
     var fallback_count = 0
     var r = 0
     while r < rule_count:
@@ -2330,6 +2334,10 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
                     id_keys_raw[idx] = key
                     id_key_count = id_key_count + 1
                 id_counts_raw[idx] = id_counts_raw[idx] + 1
+                entry_kinds[entry_count] = 1
+                entry_buckets[entry_count] = idx
+                entry_rules[entry_count] = r
+                entry_count = entry_count + 1
             elif kind == "class" and key.len() > 0:
                 var idx = text_key_index_count(class_keys_raw, key, class_key_count)
                 if idx < 0:
@@ -2337,6 +2345,10 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
                     class_keys_raw[idx] = key
                     class_key_count = class_key_count + 1
                 class_counts_raw[idx] = class_counts_raw[idx] + 1
+                entry_kinds[entry_count] = 2
+                entry_buckets[entry_count] = idx
+                entry_rules[entry_count] = r
+                entry_count = entry_count + 1
             elif kind == "tag" and key.len() > 0:
                 var idx = text_key_index_count(tag_keys_raw, key, tag_key_count)
                 if idx < 0:
@@ -2344,7 +2356,15 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
                     tag_keys_raw[idx] = key
                     tag_key_count = tag_key_count + 1
                 tag_counts_raw[idx] = tag_counts_raw[idx] + 1
+                entry_kinds[entry_count] = 3
+                entry_buckets[entry_count] = idx
+                entry_rules[entry_count] = r
+                entry_count = entry_count + 1
             else:
+                entry_kinds[entry_count] = 4
+                entry_buckets[entry_count] = fallback_count
+                entry_rules[entry_count] = r
+                entry_count = entry_count + 1
                 fallback_count = fallback_count + 1
             g = g + 1
         r = r + 1
@@ -2361,43 +2381,29 @@ fn build_rule_buckets(rules: Rules) -> RuleBuckets:
     var tag_rules = rule_lists_from_counts(tag_counts)
     var tag_positions: [i32] = [0; tag_counts.len()]
     var fallback_rules: [i32] = [0; fallback_count]
-    var fallback_pos = 0
-    r = 0
-    while r < rule_count:
-        val groups = rules.group_parts[r]
-        var g = 0
-        val group_count = groups.len()
-        while g < group_count:
-            val right = selector_rightmost_part(groups[g])
-            val base = selector_bucket_base(right)
-            val kind = selector_bucket_kind_from_base(base)
-            val key = selector_bucket_value_from_base(base)
-            if kind == "id" and key.len() > 0:
-                val idx = text_key_index(id_keys, key)
-                if idx >= 0:
-                    var bucket = id_rules[idx]
-                    bucket[id_positions[idx]] = r
-                    id_rules[idx] = bucket
-                    id_positions[idx] = id_positions[idx] + 1
-            elif kind == "class" and key.len() > 0:
-                val idx = text_key_index(class_keys, key)
-                if idx >= 0:
-                    var bucket = class_rules[idx]
-                    bucket[class_positions[idx]] = r
-                    class_rules[idx] = bucket
-                    class_positions[idx] = class_positions[idx] + 1
-            elif kind == "tag" and key.len() > 0:
-                val idx = text_key_index(tag_keys, key)
-                if idx >= 0:
-                    var bucket = tag_rules[idx]
-                    bucket[tag_positions[idx]] = r
-                    tag_rules[idx] = bucket
-                    tag_positions[idx] = tag_positions[idx] + 1
-            else:
-                fallback_rules[fallback_pos] = r
-                fallback_pos = fallback_pos + 1
-            g = g + 1
-        r = r + 1
+    var entry_i = 0
+    while entry_i < entry_count:
+        val entry_kind = entry_kinds[entry_i]
+        val bucket_idx = entry_buckets[entry_i]
+        val rule_idx = entry_rules[entry_i]
+        if entry_kind == 1:
+            var bucket = id_rules[bucket_idx]
+            bucket[id_positions[bucket_idx]] = rule_idx
+            id_rules[bucket_idx] = bucket
+            id_positions[bucket_idx] = id_positions[bucket_idx] + 1
+        elif entry_kind == 2:
+            var bucket = class_rules[bucket_idx]
+            bucket[class_positions[bucket_idx]] = rule_idx
+            class_rules[bucket_idx] = bucket
+            class_positions[bucket_idx] = class_positions[bucket_idx] + 1
+        elif entry_kind == 3:
+            var bucket = tag_rules[bucket_idx]
+            bucket[tag_positions[bucket_idx]] = rule_idx
+            tag_rules[bucket_idx] = bucket
+            tag_positions[bucket_idx] = tag_positions[bucket_idx] + 1
+        else:
+            fallback_rules[bucket_idx] = rule_idx
+        entry_i = entry_i + 1
     RuleBuckets(id_keys: id_keys, id_rules: id_rules, class_keys: class_keys, class_rules: class_rules, tag_keys: tag_keys, tag_rules: tag_rules, fallback_rules: fallback_rules)
 
 fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
@@ -2560,31 +2566,61 @@ fn build_rule_specificities(rules: Rules) -> [i32]:
         r = r + 1
     specificities
 
+fn _candidate_sort_before(left: i32, right: i32, rule_specificities: [i32]) -> bool:
+    val left_spec = rule_specificities[left]
+    val right_spec = rule_specificities[right]
+    if left_spec < right_spec:
+        return true
+    if left_spec > right_spec:
+        return false
+    left <= right
+
 fn _sort_candidates_by_specificity(candidates: [i32], rule_specificities: [i32]) -> [i32]:
     val n = candidates.len()
     if n <= 1:
         return candidates
-    var result: [i32] = [0; n]
+    var src: [i32] = [0; n]
+    var dest: [i32] = [0; n]
     var i = 0
     while i < n:
-        result[i] = candidates[i]
+        src[i] = candidates[i]
         i = i + 1
-    var outer = 1
-    while outer < n:
-        val cur = result[outer]
-        val cur_spec = rule_specificities[cur]
-        var inner = outer - 1
-        while inner >= 0:
-            val prev = result[inner]
-            val prev_spec = rule_specificities[prev]
-            if prev_spec > cur_spec or (prev_spec == cur_spec and prev > cur):
-                result[inner + 1] = result[inner]
-                inner = inner - 1
-            else:
-                break
-        result[inner + 1] = cur
-        outer = outer + 1
-    result
+    var width = 1
+    while width < n:
+        var start = 0
+        while start < n:
+            var mid = start + width
+            if mid > n:
+                mid = n
+            var endv = start + width + width
+            if endv > n:
+                endv = n
+            var left_i = start
+            var right_i = mid
+            var out_i = start
+            while left_i < mid and right_i < endv:
+                if _candidate_sort_before(src[left_i], src[right_i], rule_specificities):
+                    dest[out_i] = src[left_i]
+                    left_i = left_i + 1
+                else:
+                    dest[out_i] = src[right_i]
+                    right_i = right_i + 1
+                out_i = out_i + 1
+            while left_i < mid:
+                dest[out_i] = src[left_i]
+                left_i = left_i + 1
+                out_i = out_i + 1
+            while right_i < endv:
+                dest[out_i] = src[right_i]
+                right_i = right_i + 1
+                out_i = out_i + 1
+            start = start + width + width
+        i = 0
+        while i < n:
+            src[i] = dest[i]
+            i = i + 1
+        width = width + width
+    src
 
 # ---------------------------------------------------------------------------
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
