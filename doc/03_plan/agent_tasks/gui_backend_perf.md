@@ -235,6 +235,10 @@ Updated: 2026-06-14
   derives widget, icon-image, and focused class flags in one class-attribute
   scan instead of running repeated substring searches for every classed node
   during GUI startup parsing.
+- this commit -- Simple Web close-tag name allocation removal: close-tag stack
+  matching now compares the raw tag-inner range in place, including uppercase
+  close tags and trailing whitespace, instead of allocating and lowercasing a
+  temporary close-tag name during startup parsing.
 - this commit -- debug attr loop length hoist:
   `simple_web_layout_debug_attr_by_id` now reuses the parsed node count instead
   of dispatching `nodes.len()` on every scan iteration.
