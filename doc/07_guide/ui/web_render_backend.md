@@ -25,6 +25,9 @@ val opened = r.show_live_window(html_path)             # true for chromium (live
 
 `render_html_to_pixels` produces a comparable buffer from **both** engines — this
 is what the honest bit-level gate uses (pure-Simple ≡ Chromium OSR, `mismatch=0`).
+Pure-Simple pixel artifacts stamp their `engine2d_backend` from the same
+Engine2D `auto` resolution path used for rendering; do not hard-code default
+artifact provenance as `software`.
 `show_live_window` opens each backend's native window (chromium = live DOM;
 pure_simple has no live shell and returns false so the caller presents pixels).
 

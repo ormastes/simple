@@ -29,7 +29,7 @@ web_render_backend_api_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -191,6 +191,28 @@ match backend_result:
         val ppm = backend.snapshot_ppm_text()
         expect(ppm).to_start_with("P3\n64 48\n255\n")
         expect(ppm).to_contain("255\n")
+```
+
+</details>
+
+#### stamps default pure simple pixel artifacts with the resolved auto Engine2D backend
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "main", "", "<main class=\"simple-web-success\">ok</main>", "", "", 16, 12)
+val expected_backend = web_render_resolved_engine2d_backend_name(16, 12, "auto")
+val request_artifact = web_render_request_to_pixel_artifact(req)
+val html_artifact = web_render_html_request_to_pixel_artifact(req, "<html><body><main class=\"simple-web-success\">ok</main></body></html>")
+
+expect(request_artifact.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
+expect(request_artifact.engine2d_backend).to_equal(expected_backend)
+expect(html_artifact.engine2d_backend).to_equal(expected_backend)
+expect(request_artifact.pixels.len()).to_equal(16 * 12)
 ```
 
 </details>
@@ -485,8 +507,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
