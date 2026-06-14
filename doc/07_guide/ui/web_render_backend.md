@@ -35,8 +35,12 @@ HTML through Electron offscreen and returns comparable pixels for web-renderer
 parity. Use `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence`
 and `tools/web-render-backend/chromium-webgpu-draw/` when the requirement is
 Chrome/Electron WebGPU drawing. That wrapper reports either positive adapter,
-non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a deterministic
-`host-unavailable:*` status without falling back to Simple software replay.
+non-fallback adapter, device, pipeline, draw, capture, and pixel evidence, or a
+deterministic `host-unavailable:*` status without falling back to Simple
+software replay. For WASM-originated Simple2D evidence, use
+`chrome_webgpu_draw_wasm_simple2d_payload_evidence`; it parses
+`rect:x,y,w,h:rgba:r,g,b,a`, converts RGB to `#rrggbb`, and records payload
+byte/checksum provenance even when the host reports unavailable WebGPU.
 
 For in-process browser Simple-script drawing evidence, use
 `canvas_get_context_simple2d` or `canvas_get_context_simple3d` from

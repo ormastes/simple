@@ -64,6 +64,73 @@ fn _json_i64(json: text, key: text) -> i64:
 fn _json_i32(json: text, key: text) -> i32:
     _json_i64(json, key).to_i32()
 
+fn _parse_nonnegative_i32(token: text) -> i32:
+    val trimmed = token.trim()
+    if trimmed == "":
+        return -1
+    var i = 0
+    while i < trimmed.len():
+        val c = trimmed[i]
+        if (c != "0" and c != "1" and c != "2" and c != "3" and c != "4" and
+            c != "5" and c != "6" and c != "7" and c != "8" and c != "9"):
+            return -1
+        i = i + 1
+    trimmed.to_i32()
+
+fn _hex_digit(n: i32) -> text:
+    val digits = "0123456789abcdef"
+    digits[n : n + 1]
+
+fn _byte_hex(n: i32) -> text:
+    _hex_digit(n / 16) + _hex_digit(n % 16)
+
+class ChromeWebGPUSimple2DRectPayload:
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    r: i32
+    g: i32
+    b: i32
+    a: i32
+    color_hex: text
+
+pub fn chrome_webgpu_parse_simple2d_rect_payload(payload: text) -> ChromeWebGPUSimple2DRectPayload?:
+    val parts = payload.split(":")
+    if parts.len() != 4:
+        return nil
+    if parts[0] != "rect" or parts[2] != "rgba":
+        return nil
+    val rect = parts[1].split(",")
+    val rgba = parts[3].split(",")
+    if rect.len() != 4 or rgba.len() != 4:
+        return nil
+    val x = _parse_nonnegative_i32(rect[0])
+    val y = _parse_nonnegative_i32(rect[1])
+    val w = _parse_nonnegative_i32(rect[2])
+    val h = _parse_nonnegative_i32(rect[3])
+    val r = _parse_nonnegative_i32(rgba[0])
+    val g = _parse_nonnegative_i32(rgba[1])
+    val b = _parse_nonnegative_i32(rgba[2])
+    val a = _parse_nonnegative_i32(rgba[3])
+    if x < 0 or y < 0 or w <= 0 or h <= 0:
+        return nil
+    if x > 255 or y > 255 or w > 255 or h > 255:
+        return nil
+    if r < 0 or r > 255 or g < 0 or g > 255 or b < 0 or b > 255 or a < 0 or a > 255:
+        return nil
+    ChromeWebGPUSimple2DRectPayload(
+        x: x,
+        y: y,
+        w: w,
+        h: h,
+        r: r,
+        g: g,
+        b: b,
+        a: a,
+        color_hex: "#" + _byte_hex(r) + _byte_hex(g) + _byte_hex(b)
+    )
+
 class ChromeWebGPUDrawEvidence:
     status: text
     diagnostic_text: text
@@ -82,6 +149,9 @@ class ChromeWebGPUDrawEvidence:
     electron_path: text
     helper_path: text
     exit_code: i64
+    source_origin: text
+    payload_byte_count: i64
+    payload_checksum: i64
 
 impl ChromeWebGPUDrawEvidence:
     fn ok(self) -> bool:
@@ -102,7 +172,7 @@ impl ChromeWebGPUDrawEvidence:
         self.status.starts_with("host-unavailable:")
 
     fn summary(self) -> text:
-        "status={self.status} adapter={self.adapter} device={self.device_configured} pipeline={self.pipeline_valid} render_passes={self.render_pass_count} draws={self.draw_call_count} presented={self.presented} checksum={self.pixel_checksum} non_bg={self.non_background_pixels} exit={self.exit_code}"
+        "status={self.status} source={self.source_origin} payload_bytes={self.payload_byte_count} payload_checksum={self.payload_checksum} adapter={self.adapter} device={self.device_configured} pipeline={self.pipeline_valid} render_passes={self.render_pass_count} draws={self.draw_call_count} presented={self.presented} checksum={self.pixel_checksum} non_bg={self.non_background_pixels} exit={self.exit_code}"
 
 pub fn chrome_webgpu_draw_unavailable(reason: text, diagnostic: text, electron_path: text, helper_path: text, exit_code: i64) -> ChromeWebGPUDrawEvidence:
     ChromeWebGPUDrawEvidence(
@@ -122,7 +192,34 @@ pub fn chrome_webgpu_draw_unavailable(reason: text, diagnostic: text, electron_p
         presented: false,
         electron_path: electron_path,
         helper_path: helper_path,
-        exit_code: exit_code
+        exit_code: exit_code,
+        source_origin: "",
+        payload_byte_count: 0,
+        payload_checksum: 0
+    )
+
+pub fn chrome_webgpu_draw_invalid(reason: text, diagnostic: text, source_origin: text, payload_byte_count: i64, payload_checksum: i64) -> ChromeWebGPUDrawEvidence:
+    ChromeWebGPUDrawEvidence(
+        status: "invalid:" + reason,
+        diagnostic_text: diagnostic,
+        pixel_checksum: 0,
+        non_background_pixels: 0,
+        capture_width: 0,
+        capture_height: 0,
+        adapter: false,
+        adapter_info: "",
+        fallback_adapter: false,
+        device_configured: false,
+        pipeline_valid: false,
+        render_pass_count: 0,
+        draw_call_count: 0,
+        presented: false,
+        electron_path: "",
+        helper_path: "",
+        exit_code: 0,
+        source_origin: source_origin,
+        payload_byte_count: payload_byte_count,
+        payload_checksum: payload_checksum
     )
 
 pub fn chrome_webgpu_draw_evidence_from_json(json: text, diagnostic: text, electron_path: text, helper_path: text, exit_code: i64) -> ChromeWebGPUDrawEvidence:
@@ -143,7 +240,34 @@ pub fn chrome_webgpu_draw_evidence_from_json(json: text, diagnostic: text, elect
         presented: _json_bool(json, "presented"),
         electron_path: electron_path,
         helper_path: helper_path,
-        exit_code: exit_code
+        exit_code: exit_code,
+        source_origin: _json_text(json, "source_origin", ""),
+        payload_byte_count: _json_i64(json, "payload_byte_count"),
+        payload_checksum: _json_i64(json, "payload_checksum")
+    )
+
+fn _chrome_webgpu_draw_with_source_metadata(evidence: ChromeWebGPUDrawEvidence, source_origin: text, payload_byte_count: i64, payload_checksum: i64) -> ChromeWebGPUDrawEvidence:
+    ChromeWebGPUDrawEvidence(
+        status: evidence.status,
+        diagnostic_text: evidence.diagnostic_text,
+        pixel_checksum: evidence.pixel_checksum,
+        non_background_pixels: evidence.non_background_pixels,
+        capture_width: evidence.capture_width,
+        capture_height: evidence.capture_height,
+        adapter: evidence.adapter,
+        adapter_info: evidence.adapter_info,
+        fallback_adapter: evidence.fallback_adapter,
+        device_configured: evidence.device_configured,
+        pipeline_valid: evidence.pipeline_valid,
+        render_pass_count: evidence.render_pass_count,
+        draw_call_count: evidence.draw_call_count,
+        presented: evidence.presented,
+        electron_path: evidence.electron_path,
+        helper_path: evidence.helper_path,
+        exit_code: evidence.exit_code,
+        source_origin: source_origin,
+        payload_byte_count: payload_byte_count,
+        payload_checksum: payload_checksum
     )
 
 pub fn chrome_webgpu_draw_rect_evidence(width: i32, height: i32, x: i32, y: i32, w: i32, h: i32, color_hex: text) -> ChromeWebGPUDrawEvidence:
@@ -169,3 +293,27 @@ pub fn chrome_webgpu_draw_rect_evidence(width: i32, height: i32, x: i32, y: i32,
     if json.trim() == "":
         return chrome_webgpu_draw_unavailable("electron-launch", result.1, electron, helper, result.2)
     chrome_webgpu_draw_evidence_from_json(json, result.1, electron, helper, result.2)
+
+pub fn chrome_webgpu_draw_wasm_simple2d_rect_evidence(width: i32, height: i32, x: i32, y: i32, w: i32, h: i32, color_hex: text, payload_byte_count: i64, payload_checksum: i64) -> ChromeWebGPUDrawEvidence:
+    _chrome_webgpu_draw_with_source_metadata(
+        chrome_webgpu_draw_rect_evidence(width, height, x, y, w, h, color_hex),
+        "wasm-simple2d-payload",
+        payload_byte_count,
+        payload_checksum
+    )
+
+fn _simple2d_rect_payload_checksum(payload: ChromeWebGPUSimple2DRectPayload) -> i64:
+    payload.x.to_i64() + payload.y.to_i64() + payload.w.to_i64() + payload.h.to_i64() +
+        payload.r.to_i64() + payload.g.to_i64() + payload.b.to_i64() + payload.a.to_i64()
+
+pub fn chrome_webgpu_draw_wasm_simple2d_payload_evidence(width: i32, height: i32, payload: text, payload_byte_count: i64, payload_checksum: i64) -> ChromeWebGPUDrawEvidence:
+    if val Some(parsed) = chrome_webgpu_parse_simple2d_rect_payload(payload):
+        if payload_byte_count != 8:
+            return chrome_webgpu_draw_invalid("wasm-simple2d-payload-byte-count", "expected 8 WASM Simple2D payload bytes, got {payload_byte_count}", "wasm-simple2d-payload", payload_byte_count, payload_checksum)
+        val parsed_checksum = _simple2d_rect_payload_checksum(parsed)
+        if parsed_checksum != payload_checksum:
+            return chrome_webgpu_draw_invalid("wasm-simple2d-payload-checksum", "expected WASM Simple2D payload checksum {parsed_checksum}, got {payload_checksum}", "wasm-simple2d-payload", payload_byte_count, payload_checksum)
+        if parsed.x + parsed.w > width or parsed.y + parsed.h > height:
+            return chrome_webgpu_draw_invalid("wasm-simple2d-payload-bounds", "WASM Simple2D payload rectangle exceeds capture bounds", "wasm-simple2d-payload", payload_byte_count, payload_checksum)
+        return chrome_webgpu_draw_wasm_simple2d_rect_evidence(width, height, parsed.x, parsed.y, parsed.w, parsed.h, parsed.color_hex, payload_byte_count, payload_checksum)
+    chrome_webgpu_draw_invalid("wasm-simple2d-payload", "invalid wasm Simple2D rect payload: {payload}", "wasm-simple2d-payload", payload_byte_count, payload_checksum)

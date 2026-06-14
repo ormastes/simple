@@ -81,12 +81,15 @@ start with `host-unavailable:` and keep pixel counters at zero.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val evidence = chrome_webgpu_draw_rect_evidence(96, 64, 8, 8, 32, 24, "#33aa66")
+val evidence = chrome_webgpu_draw_wasm_simple2d_payload_evidence(96, 64, "rect:8,12,40,24:rgba:51,102,153,255", 8, 645)
 
+expect(evidence.source_origin).to_equal("wasm-simple2d-payload")
+expect(evidence.payload_byte_count).to_equal(8)
+expect(evidence.payload_checksum).to_equal(645)
 if evidence.ok():
     expect(evidence.status).to_equal("ok")
     expect(evidence.adapter).to_be(true)

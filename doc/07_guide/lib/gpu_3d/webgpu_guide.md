@@ -12,7 +12,7 @@ Simple exposes WebGPU in these places:
 2. **HTTP Server Asset Middleware** — `std.http_server.webgpu_assets` serves WGSL shaders, SPIR-V binaries, and compressed textures with correct MIME types, plus cross-origin isolation headers required for `SharedArrayBuffer`.
 3. **Browser Canvas Integration** — browser canvas elements support `CANVAS_CONTEXT_WEBGPU`, and 3D transforms route through `composite_to_gpu.spl`.
 4. **Browser Simple3D Facade** — `std.gc_async_mut.gpu.browser_engine.script.canvas_api` exposes `canvas_get_context_simple3d` for Simple-script 3D command capture and in-process WebGPU scene-upload evidence.
-5. **Chrome/Electron Draw Evidence** — `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence` launches a dedicated Electron app under `tools/web-render-backend/chromium-webgpu-draw` and records whether real Chrome WebGPU drawing produced pixels or whether the host explicitly lacks browser WebGPU support.
+5. **Chrome/Electron Draw Evidence** — `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence` launches a dedicated Electron app under `tools/web-render-backend/chromium-webgpu-draw` and records whether real Chrome WebGPU drawing produced pixels or whether the host explicitly lacks browser WebGPU support. The WASM Simple2D wrapper parses `rect:x,y,w,h:rgba:r,g,b,a` payloads, converts RGB to `#rrggbb`, and preserves source/payload metadata through host-adaptive evidence.
 
 All WebGPU types in the engine mirror the Chrome WebGPU API (`GPUTexture`, `GPUSampler`, `GPURenderPipeline`, etc.) for portability.
 

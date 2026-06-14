@@ -27,7 +27,7 @@ chrome_webgpu_draw_evidence_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,11 +77,11 @@ constructor helpers must keep pixel counters at zero and expose
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val evidence = chrome_webgpu_draw_evidence_from_json("{\"status\":\"ok\",\"diagnostic_text\":\"\",\"pixel_checksum\":12345,\"non_background_pixels\":768,\"capture_width\":96,\"capture_height\":64,\"adapter\":true,\"adapter_info\":\"vendor=test\",\"fallback_adapter\":false,\"device_configured\":true,\"pipeline_valid\":true,\"render_pass_count\":1,\"draw_call_count\":1,\"presented\":true}", "", "/electron", "/helper", 0)
+val evidence = chrome_webgpu_draw_evidence_from_json("{\"status\":\"ok\",\"diagnostic_text\":\"\",\"pixel_checksum\":12345,\"non_background_pixels\":768,\"capture_width\":96,\"capture_height\":64,\"adapter\":true,\"adapter_info\":\"vendor=test\",\"fallback_adapter\":false,\"device_configured\":true,\"pipeline_valid\":true,\"render_pass_count\":1,\"draw_call_count\":1,\"presented\":true,\"source_origin\":\"wasm-simple2d-payload\",\"payload_byte_count\":8,\"payload_checksum\":645}", "", "/electron", "/helper", 0)
 
 expect(evidence.ok()).to_be(true)
 expect(evidence.host_unavailable()).to_be(false)
@@ -95,7 +95,11 @@ expect(evidence.fallback_adapter).to_be(false)
 expect(evidence.render_pass_count).to_equal(1)
 expect(evidence.draw_call_count).to_equal(1)
 expect(evidence.presented).to_be(true)
+expect(evidence.source_origin).to_equal("wasm-simple2d-payload")
+expect(evidence.payload_byte_count).to_equal(8)
+expect(evidence.payload_checksum).to_equal(645)
 expect(evidence.summary()).to_contain("status=ok")
+expect(evidence.summary()).to_contain("source=wasm-simple2d-payload")
 ```
 
 </details>
@@ -105,7 +109,7 @@ expect(evidence.summary()).to_contain("status=ok")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -117,6 +121,8 @@ expect(evidence.status).to_equal("host-unavailable:navigator-gpu")
 expect(evidence.diagnostic_text).to_equal("navigator.gpu missing")
 expect(evidence.pixel_checksum).to_equal(0)
 expect(evidence.non_background_pixels).to_equal(0)
+expect(evidence.source_origin).to_equal("")
+expect(evidence.payload_byte_count).to_equal(0)
 ```
 
 </details>
@@ -180,12 +186,108 @@ expect(evidence.exit_code).to_equal(127)
 
 </details>
 
+#### parses WASM Simple2D rectangle payloads for Chrome WebGPU draw
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val parsed = chrome_webgpu_parse_simple2d_rect_payload("rect:8,12,40,24:rgba:51,102,153,255")
+
+if val Some(payload) = parsed:
+    expect(payload.x).to_equal(8)
+    expect(payload.y).to_equal(12)
+    expect(payload.w).to_equal(40)
+    expect(payload.h).to_equal(24)
+    expect(payload.r).to_equal(51)
+    expect(payload.g).to_equal(102)
+    expect(payload.b).to_equal(153)
+    expect(payload.a).to_equal(255)
+    expect(payload.color_hex).to_equal("#336699")
+else:
+    expect("payload should parse").to_equal("")
+```
+
+</details>
+
+#### fails closed for malformed WASM Simple2D draw payloads
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val parsed = chrome_webgpu_parse_simple2d_rect_payload("rect:8,nope,40,24:rgba:51,102,153,255")
+val evidence = chrome_webgpu_draw_wasm_simple2d_payload_evidence(96, 64, "rect:8,nope,40,24:rgba:51,102,153,255", 8, 645)
+
+if val Some(payload) = parsed:
+    expect("invalid payload should not parse: {payload.y}").to_equal("")
+else:
+    expect("invalid payload rejected").to_equal("invalid payload rejected")
+expect(evidence.ok()).to_be(false)
+expect(evidence.host_unavailable()).to_be(false)
+expect(evidence.status).to_equal("invalid:wasm-simple2d-payload")
+expect(evidence.source_origin).to_equal("wasm-simple2d-payload")
+expect(evidence.payload_byte_count).to_equal(8)
+expect(evidence.payload_checksum).to_equal(645)
+```
+
+</details>
+
+#### fails closed when WASM Simple2D payload provenance does not match
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrong_count = chrome_webgpu_draw_wasm_simple2d_payload_evidence(96, 64, "rect:8,12,40,24:rgba:51,102,153,255", 7, 645)
+val wrong_checksum = chrome_webgpu_draw_wasm_simple2d_payload_evidence(96, 64, "rect:8,12,40,24:rgba:51,102,153,255", 8, 644)
+
+expect(wrong_count.ok()).to_be(false)
+expect(wrong_count.host_unavailable()).to_be(false)
+expect(wrong_count.status).to_equal("invalid:wasm-simple2d-payload-byte-count")
+expect(wrong_checksum.ok()).to_be(false)
+expect(wrong_checksum.host_unavailable()).to_be(false)
+expect(wrong_checksum.status).to_equal("invalid:wasm-simple2d-payload-checksum")
+```
+
+</details>
+
+#### fails closed before Chrome launch when WASM Simple2D payload exceeds capture bounds
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val evidence = chrome_webgpu_draw_wasm_simple2d_payload_evidence(32, 32, "rect:8,12,40,24:rgba:51,102,153,255", 8, 645)
+
+expect(evidence.ok()).to_be(false)
+expect(evidence.host_unavailable()).to_be(false)
+expect(evidence.status).to_equal("invalid:wasm-simple2d-payload-bounds")
+expect(evidence.source_origin).to_equal("wasm-simple2d-payload")
+expect(evidence.payload_byte_count).to_equal(8)
+expect(evidence.payload_checksum).to_equal(645)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
