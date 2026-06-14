@@ -769,7 +769,7 @@ expect(coding).to_contain("MulticoreGreenSlicedHandle.ran_inline_fallback()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 154 lines folded for reproduction.
+Runnable source: 156 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -915,6 +915,8 @@ expect(sys_test_plan).to_contain("test/05_perf/profile_scripts/profile_docker_is
 expect(sys_test_plan).to_contain("Go fanout")
 expect(sys_test_plan).to_contain("Go stress rows are slower than C pthread rows")
 expect(sys_test_plan).to_contain("--network=none")
+expect(sys_test_plan).to_contain("full profile environment handoff")
+expect(sys_test_plan).to_contain("silently dropping tuning knobs")
 expect(sys_test_plan).to_contain("separate process/container boundary")
 
 step("Verify forbidden numbered API-name scans cover the public concurrency family")
