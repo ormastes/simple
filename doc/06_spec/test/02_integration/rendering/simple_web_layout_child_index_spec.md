@@ -110,7 +110,7 @@ expect(margin).to_equal(3)
 
 </details>
 
-#### keeps CSS bucket candidates in cascade order
+#### keeps CSS bucket candidates in specificity order
 
 <details>
 <summary>Executable SSpec</summary>
@@ -124,7 +124,7 @@ val html = "<html><head><style>" +
     "div,.target{height:9px}#target{height:11px}.target{height:13px}" +
     "</style></head><body><div id=\"target\" class=\"target target\">row</div></body></html>"
 val height = simple_web_layout_debug_style_by_id(html, "target", "height")
-expect(height).to_equal("13")
+expect(height).to_equal("11")
 ```
 
 </details>
