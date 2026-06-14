@@ -27,7 +27,7 @@ backend_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -199,6 +199,181 @@ expect(engine2d_backend_lane_preferred_font_offload_candidate(["unknown"])).to_e
 
 </details>
 
+#### commits host semantic callbacks on the host lane
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = engine2d_host_gpu_lane_schedule(
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    "focus_commit",
+    128,
+    512,
+    true,
+    false,
+    true,
+    7
+)
+
+expect(result.ok).to_equal(true)
+expect(result.execution_kind).to_equal(ENGINE2D_HOST_GPU_EXEC_PACKET)
+expect(result.committed_on_host).to_equal(true)
+expect(result.gpu_batched).to_equal(false)
+expect(result.estimated_ms).to_equal(7)
+expect(engine2d_host_gpu_lane_summary(result)).to_contain("host_commit=true")
+```
+
+</details>
+
+#### records faster coarse GPU render batches with explicit packet bounds
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = engine2d_host_gpu_lane_schedule(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    256,
+    4096,
+    false,
+    false,
+    true,
+    12
+)
+
+expect(result.ok).to_equal(true)
+expect(result.execution_kind).to_equal(ENGINE2D_HOST_GPU_EXEC_PACKET)
+expect(result.committed_on_host).to_equal(false)
+expect(result.gpu_batched).to_equal(true)
+expect(result.fallback_explicit).to_equal(false)
+expect(result.estimated_ms).to_equal(6)
+expect(engine2d_host_gpu_lane_summary(result)).to_contain("estimated_ms=6")
+```
+
+</details>
+
+#### keeps same-lane callbacks direct
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = engine2d_host_gpu_lane_schedule(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    "focus_commit",
+    64,
+    512,
+    true,
+    false,
+    true,
+    5
+)
+
+expect(result.ok).to_equal(true)
+expect(result.execution_kind).to_equal(ENGINE2D_HOST_GPU_EXEC_DIRECT)
+expect(result.committed_on_host).to_equal(true)
+```
+
+</details>
+
+#### rejects GPU callbacks that mutate host semantics
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = engine2d_host_gpu_lane_schedule(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    128,
+    512,
+    true,
+    false,
+    true,
+    8
+)
+
+expect(result.ok).to_equal(false)
+expect(result.diagnostic).to_contain("cannot mutate host semantic")
+expect(result.estimated_ms).to_equal(8)
+```
+
+</details>
+
+#### rejects oversized host GPU lane packets
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = engine2d_host_gpu_lane_schedule(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    2048,
+    512,
+    false,
+    false,
+    true,
+    8
+)
+
+expect(result.ok).to_equal(false)
+expect(result.diagnostic).to_contain("exceeds max_packet")
+expect(result.estimated_packet_bytes).to_equal(2048)
+expect(result.max_packet_bytes).to_equal(512)
+```
+
+</details>
+
+#### rejects per widget GPU dispatch instead of batching
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = engine2d_host_gpu_lane_schedule(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    128,
+    512,
+    false,
+    true,
+    true,
+    8
+)
+
+expect(result.ok).to_equal(false)
+expect(result.diagnostic).to_contain("per-widget GPU dispatch")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -218,8 +393,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
