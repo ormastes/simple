@@ -317,7 +317,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -359,6 +359,8 @@ expect(report_index).to_contain("Current contract-passing Docker-isolated cross-
 expect(report_index).to_contain("used_runtime_pool()")
 expect(report_index).to_contain("pool_used=N/N")
 expect(report_index).to_contain("counter_delta=submitted/completed,pending=0,busy=0,blocked=0")
+expect(report_index).to_contain("2026-06-14 interpreter-run refresh")
+expect(report_index).to_contain("final handoff blocker specs")
 expect(report_index).to_contain("cross_language_perf_2026-06-08_docker_contract.md")
 expect(report_index).to_contain("Historical")
 step("Verify the SPipe state audit points at current profile evidence")
@@ -836,12 +838,12 @@ expect(sys_test_plan).to_contain("report_index_checked=doc/09_report/README.md")
 expect(sys_test_plan).to_contain("agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md")
 expect(sys_test_plan).to_contain("report index and agent handoff cannot silently point future agents at stale evidence")
 expect(sys_test_plan).to_contain("## Current Sync Status (2026-06-14)")
-expect(sys_test_plan).to_contain("e375cd6cb2d4 docs: refresh simpleos multicore green evidence")
-expect(sys_test_plan).to_contain("2026-06-14 evidence-refresh slice")
-expect(sys_test_plan).to_contain("four interpreter-run SimpleOS feature specs")
+expect(sys_test_plan).to_contain("d9720ebdd144 docs: align multicore green plan status")
+expect(sys_test_plan).to_contain("2026-06-14 plan-status slice")
+expect(sys_test_plan).to_contain("latest interpreter-run SimpleOS cooperative, multicore scheduler, green-channel")
 expect(agent_plan).to_contain("## Current Sync Status (2026-06-14)")
-expect(agent_plan).to_contain("e375cd6cb2d4 docs: refresh simpleos multicore green evidence")
-expect(agent_plan).to_contain("2026-06-14 refresh visible")
+expect(agent_plan).to_contain("d9720ebdd144 docs: align multicore green plan status")
+expect(agent_plan).to_contain("2026-06-14 plan-status slice")
 expect(agent_plan).to_contain("broader Go-like runtime roadmap remains `current`, not `done`")
 expect(fanout_runner_bug).to_contain("historical resolved-bug evidence only")
 expect(fanout_runner_bug).to_contain("current reruns use")

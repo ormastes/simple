@@ -435,24 +435,19 @@ Each agent reports:
 ## Current Sync Status (2026-06-14)
 
 - Current multicore-green lane state is rebased on `main@origin` after the
-  unrelated GUI renderer syncs through
-  `d7115ef664c7 perf(gui): prune selector has subtree scans`; those remote
-  changes did not touch the multicore-green owned paths.
+  pushed `d9720ebdd144 docs: align multicore green plan status` slice; the
+  latest remote GUI syncs did not touch the multicore-green owned paths.
 - The latest pushed multicore-green doc/spec slice is
-  `e375cd6cb2d4 docs: refresh simpleos multicore green evidence`.
-  It refreshed the SimpleOS evidence report, feature-tracking row, tracking
-  SSpec, and generated manual after rerunning the interpreter SimpleOS
-  cooperative, multicore scheduler, green-channel wake, and final handoff
-  blocker specs.
+  `d9720ebdd144 docs: align multicore green plan status`. It aligned the
+  agent-task plan, system-test plan, tracking SSpec, and generated manual with
+  the 2026-06-14 SimpleOS evidence refresh.
 - The tracking SSpec and generated manual now assert that the SimpleOS report
-  and feature-tracking row keep the 2026-06-14 refresh visible, so future
-  agents do not treat older 2026-06-13 hosted evidence as the latest state.
-- Focused checks from the 2026-06-14 evidence-refresh slice passed: profile
-  report contract, negative profile contract, profile help, profile binary
-  autoselect, profile Docker isolation, concurrency API contract, four
-  interpreter-run SimpleOS feature specs, SDN lint, local tracking SSpec with
-  13 scenarios, and `find doc/06_spec -name '*_spec.spl' | wc -l` returning
-  `0`.
+  index, feature-tracking row, system-test plan, and agent-task handoff keep
+  the 2026-06-14 refresh visible, so future agents do not treat older
+  2026-06-13 hosted evidence as the latest state.
+- Focused checks from the 2026-06-14 plan-status slice passed: profile report
+  contract, SPipe dev command wiring, local tracking SSpec with 13 scenarios,
+  and `find doc/06_spec -name '*_spec.spl' | wc -l` returning `0`.
 - The broader Go-like runtime roadmap remains `current`, not `done`: ordinary
   closure preemption, full scheduler-aware host M:N behavior, and ongoing
   profile parity work remain explicit follow-up gates.

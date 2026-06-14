@@ -154,15 +154,12 @@
 ## Current Sync Status (2026-06-14)
 
 - The current jj workspace is rebased on `main@origin` after the pushed
-  `e375cd6cb2d4 docs: refresh simpleos multicore green evidence` slice.
-- The 2026-06-14 evidence-refresh slice updates the SimpleOS report,
-  feature-tracking row, tracking SSpec, and generated tracking manual so future
-  multicore-green status reads see the latest interpreter-run SimpleOS
-  cooperative, multicore scheduler, green-channel wake, and final handoff
-  blocker evidence.
-- Focused verification for that slice passed: profile report contract,
-  negative profile contract, profile help, profile binary autoselect, profile
-  Docker isolation, concurrency API contract, four interpreter-run SimpleOS
-  feature specs, SDN lint for `doc/08_tracking/feature/feature_db.sdn`, local
-  interpreter tracking SSpec with 13 scenarios, and the generated-spec layout
-  guard returning `0`.
+  `d9720ebdd144 docs: align multicore green plan status` slice.
+- The 2026-06-14 plan-status slice updates the agent-task plan, system-test
+  plan, tracking SSpec, and generated tracking manual so future
+  multicore-green status reads see the latest pushed state and the latest
+  interpreter-run SimpleOS cooperative, multicore scheduler, green-channel
+  wake, and final handoff blocker evidence.
+- Focused verification for that slice passed: profile report contract, SPipe
+  dev command wiring, local interpreter tracking SSpec with 13 scenarios, and
+  the generated-spec layout guard returning `0`.
