@@ -851,10 +851,11 @@ expect(pixels.len()).to_equal(96 * 64)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+expect(SimpleWebRenderer.create_with_backend(96, 64, "auto").backend_name).to_equal(simple_web_resolved_engine2d_backend_name(96, 64, "auto"))
 expect(SimpleWebRenderer.create_with_backend(96, 64, "cuda").backend_name).to_equal("cuda")
 expect(SimpleWebRenderer.create_with_backend(96, 64, "hip").backend_name).to_equal("rocm")
 expect(SimpleWebRenderer.create_with_backend(96, 64, "opencl").backend_name).to_equal("opencl")
@@ -941,8 +942,8 @@ val simple = SimpleWebRenderer.create(120, 80)
 val browser = BrowserRenderer.create_with_backend(120, 80, simple.backend_name)
 val simple_pixels = simple.render_html_to_pixels(html)
 val browser_pixels = browser.render_html_to_pixels(html).pixel_data
-expect(simple.backend_name).to_equal("auto")
-expect(simple_web_resolved_engine2d_backend_name(120, 80, simple.backend_name).len()).to_be_greater_than(0)
+expect(simple.backend_name).to_equal(simple_web_resolved_engine2d_backend_name(120, 80, "auto"))
+expect(simple.backend_name.len()).to_be_greater_than(0)
 expect(_pixels_equal(simple_pixels, browser_pixels)).to_equal(true)
 ```
 
