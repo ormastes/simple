@@ -1,105 +1,96 @@
-# web_bench_driver.spl — emits a web-server perf benchmark doc (in-process, x86_64).
+# web_bench_driver.spl — Runnable WEB-domain benchmark driver.
 #
-# Drives the in-memory request path (parse_request_line → HttpResponse.json →
-# serialize_response) without a real socket. Times warm throughput; asserts an
-# absolute oracle (serialized wire contains "HTTP/1.1 200" + body) before recording.
+# Drives test/05_perf/web/web_smf_workload.spl in BOTH planes:
+#   - script: `<simple_bin> run web_smf_workload.spl`              (interpreter)
+#   - smf:    `<simple_bin> compile web_smf_workload.spl -o x.smf
+#              && <simple_bin> run x.smf`                          (two-step, supported)
+# and parses its self-timed `RESULT|<name>|<elapsed_us>|5000` rows.
+#
+# The web-domain representative ops are the in-memory HTTP parse + serialize
+# seam (no socket): http_parse_request_line and http_serialize_response.
+# ns/op = elapsed_us * 1000 / 5000.
+#
+# REAL numbers only — if a capture is empty, that plane's rows are SKIPPED
+# (never faked). Modeled on src/app/test/bench/bench_baseline_driver.spl.
+#
 # Run:  bin/simple run test/05_perf/web/web_bench_driver.spl
-# Writes: doc/09_report/perf/perf_baseline_web_2026-06-13.md
-#         doc/10_metrics/perf/perf_baseline_web_table.md
+#
+# Writes:
+#   doc/09_report/perf/perf_baseline_web_2026-06-14.md  — dated run report
+#   doc/10_metrics/perf/perf_baseline_web_table.md       — persistent table
 
-use std.nogc_sync_mut.http_server.types.{HttpResponse}
-use std.nogc_sync_mut.http_server.response.{serialize_response}
-use std.nogc_sync_mut.http_server.parser.{parse_request_line}
 use app.test.bench.bench_report.{bench_emit_rows}
+use app.test.bench.bench_report.{bench_find_simple_bin}
+use app.test.bench.bench_report.{bench_script_capture}
+use app.test.bench.bench_report.{bench_smf_capture}
+use app.test.bench.bench_report.{bench_extract_us}
 
-extern fn rt_time_now_unix_micros() -> i64
+val ITERS: i64 = 5000
 
-val HEALTH_BODY: text = "{\"status\": \"ok\"}"
-val REQ_LINE: text = "GET /health HTTP/1.1"
-
-fn _i64_to_text_local(n: i64) -> text:
-    if n == 0:
-        return "0"
-    var digits: [text] = []
-    var v = n
-    val negative = v < 0
-    if negative:
-        v = 0 - v
-    while v > 0:
-        val d = v % 10
-        val ch: text = if d == 0: "0"
-            elif d == 1: "1"
-            elif d == 2: "2"
-            elif d == 3: "3"
-            elif d == 4: "4"
-            elif d == 5: "5"
-            elif d == 6: "6"
-            elif d == 7: "7"
-            elif d == 8: "8"
-            else: "9"
-        digits.push(ch)
-        v = v / 10
-    var result = if negative: "-" else: ""
-    var di: i64 = digits.len() - 1
-    while di >= 0:
-        result = result + digits[di]
-        di = di - 1
-    result
-
-fn _handle_once() -> text:
-    # in-memory request path: parse the request line, build + serialize a JSON 200.
-    val _parsed = parse_request_line(REQ_LINE)
-    val resp = HttpResponse.json(HEALTH_BODY)
-    serialize_response(resp)
+fn _push_plane(names: [text], modes: [text], metrics: [text], values: [i64], units: [text], mode: text, parse_us: i64, serial_us: i64):
+    # parse row
+    names.push("http_parse_request_line")
+    modes.push(mode)
+    metrics.push("ns/op")
+    values.push((parse_us * 1000) / ITERS)
+    units.push("ns/op")
+    # serialize row
+    names.push("http_serialize_response")
+    modes.push(mode)
+    metrics.push("ns/op")
+    values.push((serial_us * 1000) / ITERS)
+    units.push("ns/op")
 
 fn main():
-    val date_str = "2026-06-13"
+    val date_str = "2026-06-14"
     val arch = "x86_64"
-    val mode = "inproc"
-    val report_path = "doc/09_report/perf/perf_baseline_web_2026-06-13.md"
+
+    val report_path = "doc/09_report/perf/perf_baseline_web_2026-06-14.md"
     val table_path  = "doc/10_metrics/perf/perf_baseline_web_table.md"
 
-    # ABSOLUTE ORACLE before timing: the wire must be a real 200 with the body.
-    val sample = _handle_once()
-    val has_200 = sample.contains("HTTP/1.1 200")
-    val has_body = sample.contains("status")
-    if not has_200 or not has_body:
-        print("ORACLE FAILED: wire missing 200/body — not recording. wire_len=" + _i64_to_text_local(sample.len()))
+    val workload = "test/05_perf/web/web_smf_workload.spl"
+    val smf_path = "/tmp/web_bench_workload.smf"
+
+    val simple_bin = bench_find_simple_bin()
+    if simple_bin.len() == 0:
+        print("ERROR: no simple binary found (bin/simple or seed) — cannot run workloads.")
         return
-
-    val iters: i64 = 100000
-    print("Running web parse+json+serialize x" + _i64_to_text_local(iters) + " ...")
-    val t0 = rt_time_now_unix_micros()
-    var i: i64 = 0
-    while i < iters:
-        val _w = _handle_once()
-        i = i + 1
-    val us = rt_time_now_unix_micros() - t0
-
-    val ops_per_sec: i64 = if us > 0: (iters * 1000000) / us else: 0
-    val ns_per_op: i64 = if us > 0 and iters > 0: (us * 1000) / iters else: 0
 
     var names:   [text] = []
     var modes:   [text] = []
     var metrics: [text] = []
     var values:  [i64]  = []
     var units:   [text] = []
-    names.push("web_parse_json_serialize")
-    modes.push(mode)
-    metrics.push("ops/sec")
-    values.push(ops_per_sec)
-    units.push("ops/sec")
-    names.push("web_parse_json_serialize")
-    modes.push(mode)
-    metrics.push("ns/op")
-    values.push(ns_per_op)
-    units.push("ns/op")
 
-    print("web ops/sec=" + _i64_to_text_local(ops_per_sec) + "  ns/op=" + _i64_to_text_local(ns_per_op))
-    print("NOTE: cold-start/process row omitted (server main is a blocking accept-loop, no one-shot flag).")
+    # --- script plane (interpreter) ---
+    print("Running web workload (script) ...")
+    val script_out = bench_script_capture(simple_bin, workload)
+    val sc_parse = bench_extract_us(script_out, "http_parse_request_line")
+    val sc_serial = bench_extract_us(script_out, "http_serialize_response")
+    if sc_parse > 0 and sc_serial > 0:
+        _push_plane(names, modes, metrics, values, units, "script", sc_parse, sc_serial)
+        print("  script rows added.")
+    else:
+        print("  WARN: script rows skipped (capture empty).")
+
+    # --- smf plane (compile -o x.smf && run x.smf) ---
+    print("Compiling + running web workload (smf) ...")
+    val smf_out = bench_smf_capture(simple_bin, workload, smf_path)
+    val smf_parse = bench_extract_us(smf_out, "http_parse_request_line")
+    val smf_serial = bench_extract_us(smf_out, "http_serialize_response")
+    if smf_parse > 0 and smf_serial > 0:
+        _push_plane(names, modes, metrics, values, units, "smf", smf_parse, smf_serial)
+        print("  smf rows added.")
+    else:
+        print("  WARN: smf rows skipped (capture empty) — script rows only.")
+
+    if names.len() == 0:
+        print("ERROR: no rows captured in either plane — nothing written.")
+        return
+
     print("Writing web benchmark docs ...")
     val ok = bench_emit_rows(names, modes, metrics, values, units, arch, date_str, report_path, table_path)
     if ok:
-        print("Done. Web docs written.")
+        print("Done. Both docs written.")
     else:
-        print("ERROR: web doc write failed.")
+        print("ERROR: one or both docs failed to write.")

@@ -109,7 +109,7 @@ fn main() {
 fn compile_c_runtime_sources() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let runtime_c_dir = manifest_dir.join("../../runtime");
-    let c_sources = ["runtime_memory.c", "runtime_time.c", "runtime_db.c", "runtime_pool.c"];
+    let c_sources = ["runtime_memory.c", "runtime_time.c", "runtime_db.c", "runtime_pool.c", "runtime_smf_socket_shims.c"];
 
     let mut build = cc::Build::new();
     build.opt_level(2).warnings(false);
@@ -166,7 +166,7 @@ fn collect_defined_runtime_symbols(root: &Path, c_root: &Path, runtime_regex: bo
 }
 
 fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
-    const LINKED_C_SOURCES: &[&str] = &["runtime_memory.c", "runtime_time.c", "runtime_db.c", "runtime_pool.c"];
+    const LINKED_C_SOURCES: &[&str] = &["runtime_memory.c", "runtime_time.c", "runtime_db.c", "runtime_pool.c", "runtime_smf_socket_shims.c"];
     for source in LINKED_C_SOURCES {
         let path = root.join(source);
         let Ok(file) = fs::read_to_string(path) else {
