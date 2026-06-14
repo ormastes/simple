@@ -28,7 +28,7 @@ scheduler_green_user_handoff_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 1 | 1 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -68,7 +68,6 @@ uses before the hardware bridge:
 scheduler.run_green_carrier_once(queues, cpu)
 scheduler.get_user_handoff_task(pid)
 validate_enter_user_blocking_handoff(pid, scheduler)
-scheduler.set_user_task_address_space_for_probe(pid, cr3)
 ```
 
 ## Evidence Boundary
@@ -202,80 +201,12 @@ if validation.context != nil:
 
 </details>
 
-#### clears IF and preserves IOPL for the final QEMU probe CR3
-
-- create a hosted x86_64 user task for the probe hook
-- var sched = Scheduler new with cpu count
-- replace the handoff CR3 through the diagnostic final-probe hook
-- verify the task and user context keep IOPL=3 but clear IF
-   - Expected: task_present equals `1`
-   - Expected: handoff.address_space equals `probe_cr3`
-   - Expected: handoff.context.rflags & 0x3000 equals `0x3000`
-   - Expected: handoff.context.rflags & 0x200 equals `0`
-   - Expected: user_context_present equals `1`
-   - Expected: user_ctx.rflags & 0x3000 equals `0x3000`
-   - Expected: user_ctx.rflags & 0x200 equals `0`
-- validate the final-probe handoff record without entering ring-3
-   - Expected: validation.cr3 equals `probe_cr3`
-   - Expected: context_present equals `1`
-   - Expected: ctx.rflags & 0x3000 equals `0x3000`
-   - Expected: ctx.rflags & 0x200 equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 37 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("create a hosted x86_64 user task for the probe hook")
-val image = make_x86_64_user_image()
-var sched = Scheduler.new_with_cpu_count(2u32)
-val pid = sched.create_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())
-expect(pid).to_be_greater_than(0)
-
-step("replace the handoff CR3 through the diagnostic final-probe hook")
-val probe_cr3: u64 = 0x0F000000u64
-val replaced = sched.set_user_task_address_space_for_probe(pid, probe_cr3)
-expect(replaced).to_be(true)
-
-step("verify the task and user context keep IOPL=3 but clear IF")
-val task = sched.get_user_handoff_task(pid)
-val task_present = if task == nil: 0 else: 1
-expect(task_present).to_equal(1)
-if task != nil:
-    val handoff = task
-    expect(handoff.address_space).to_equal(probe_cr3)
-    expect(handoff.context.rflags & 0x3000).to_equal(0x3000)
-    expect(handoff.context.rflags & 0x200).to_equal(0)
-    val user_context_present = if handoff.user_context == nil: 0 else: 1
-    expect(user_context_present).to_equal(1)
-    if handoff.user_context != nil:
-        val user_ctx = handoff.user_context.unwrap()
-        expect(user_ctx.rflags & 0x3000).to_equal(0x3000)
-        expect(user_ctx.rflags & 0x200).to_equal(0)
-
-step("validate the final-probe handoff record without entering ring-3")
-val validation = validate_enter_user_blocking_handoff(pid, sched)
-expect(validation.ok).to_be(true)
-expect(validation.cr3).to_equal(probe_cr3)
-val context_present = if validation.context == nil: 0 else: 1
-expect(context_present).to_equal(1)
-if validation.context != nil:
-    val ctx = validation.context.unwrap()
-    expect(ctx.rflags & 0x3000).to_equal(0x3000)
-    expect(ctx.rflags & 0x200).to_equal(0)
-```
-
-</details>
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 1 |
+| Active scenarios | 1 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -399,10 +399,10 @@ guest ensures the x86_64 trap runtime is installed, calls
 `install_syscall_entry()`, observes `syscall_entry_installed()`, and resolves a
 nonzero `kernel_syscall_entry_asm` address through `kernel_syscall_entry_addr()`.
 
-At this 2026-06-08 stage this was prerequisite evidence only. It proved the live AP probe could arm the
+This is prerequisite evidence only. It proves the live AP probe can arm the
 trap/syscall entry bridge needed before a real syscall-14 handoff. It does not
 execute `rt_x86_enter_user_first`, does not enter user mode, and does not
-observe a user-mode syscall return. The later final live gate required
+observe a user-mode syscall return. The final live gate still requires
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true`
 from the real AP ring/user path.
 
@@ -413,12 +413,11 @@ The live green-carrier guest probe now has a non-final
 guest initializes the `os.kernel.abi.syscall_shim` keepalive path and calls the
 strong `spl_handle_debug_write` override for syscall 60.
 
-At this 2026-06-08 stage this was prerequisite evidence only. It proved the
-live AP probe linked and could dispatch the kernel-side syscall shim needed by
-a future user-mode debug-write payload. It did not execute
-`rt_x86_enter_user_first`, did not enter user mode, and did not observe a
-user-mode syscall return. The later final live gate required
-`HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
+This is prerequisite evidence only. It proves the live AP probe links and can
+dispatch the kernel-side syscall shim needed by a future user-mode debug-write
+payload. It does not execute `rt_x86_enter_user_first`, does not enter user
+mode, and does not observe a user-mode syscall return. The final live gate
+still requires `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 `USER_SYSCALL_PASS=true` from the real AP ring/user path.
 
 ## 2026-06-08 Final-Entry Probe Investigation

@@ -18,6 +18,46 @@ Simple exposes WebGPU in these places:
 
 All WebGPU types in the engine mirror the Chrome WebGPU API (`GPUTexture`, `GPUSampler`, `GPURenderPipeline`, etc.) for portability.
 
+Host/GPU event-flow evidence now splits queue ownership from backend-lane
+planning: `std.gpu.engine2d.host_gpu_event_queue` owns event decision, submit,
+and receipt evidence, while `std.gpu.engine2d.host_gpu_draw_ir_event_flow`
+adapts Draw IR event metadata. Current Linux native evidence is in
+`doc/09_report/vulkan_engine2d_readback_2026-06-14.md` and
+`doc/09_report/cuda_generated_2d_readback_2026-06-14.md`; Metal and ROCm/HIP
+reports on Linux are host-unavailable evidence, not production backend passes.
+
+Do not collapse these evidence layers in reports:
+
+- Evidence adapter: Pure Simple host/GPU event helpers classify routing,
+  fallback, packet bounds, submit, and receipt summaries.
+- Runtime queue emission: runtime externs can record and drain queue packets for
+  interpreted `target.later(...) gpu` and Engine2D runtime-submit helpers.
+- Backend readback: Vulkan Engine2D and CUDA generated 2D reports prove
+  backend-specific submit/sync/readback on their fixtures; Metal and ROCm/HIP
+  reports are typed unavailable on this Linux host.
+- GUI/web production integration: `src/app/ui.browser/backend.spl` still has a
+  local event queue and Engine2D pixel artifact path, but no documented bridge
+  that drains host/GPU runtime queue packets into backend submit/readback for a
+  GUI/web frame. Until that bridge exists, call the result adapter/runtime/
+  backend evidence, not production GUI/web GPU rendering. The current
+  production posture is fail-closed: unavailable or CPU fallback is the correct
+  result when the ordered GUI/web queue -> runtime packet -> backend submit ->
+  drain/readback path is not proven.
+
+Current production gaps to keep visible in WebGPU/Engine2D reports:
+
+- Interpreter GPU queue emission uses `backend_code=0` and drains as
+  `UNAVAILABLE`; it is not a real WebGPU/Vulkan/CUDA/Metal/ROCm backend handle.
+- Real backend handles are not plumbed into runtime packets yet.
+- Rust and C runtime queues share a `1024` pending-packet capacity, but
+  backpressure/overflow tests are still required for the production contract.
+- `SUBMITTED` is modeled, but the current drain path reports terminal
+  `COMPLETED` or `UNAVAILABLE` directly.
+- Interpreter lane `END` accounting is not exception-safe if the lane body
+  raises before normal completion.
+- Backpressure, error-path, and real-backend-handle tests remain required
+  before claiming production GUI/web queue-drain integration.
+
 ---
 
 ## 3D Engine WebGPU Backend

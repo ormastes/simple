@@ -82,10 +82,11 @@ requires a batch.
 
 ## Out Of Scope
 
-This spec does not prove native parser lowering, runtime queue transport,
-device submission, or GPU readback. Those are tracked by the implementation
-plan and perf report. This spec provides the red/green contract that those
-later layers must preserve.
+This spec proves parser acceptance plus statement-position runtime marker
+lowering for interpreter and native execution. It does not prove expression
+position lane markers, backend device submission, or GPU readback. Those are
+tracked by the implementation plan and perf report. Queue packets currently use
+backend code 0 and drain as typed unavailable evidence.
 
 ## Generated Manual Policy
 
@@ -126,6 +127,18 @@ fn check_source(name: text, source: text) -> (text, text, i64):
     expect(rt_file_write_text(path, source)).to_equal(true)
     rt_process_run(SIMPLE, ["check", path])
 
+fn run_source(name: text, source: text) -> (text, text, i64):
+    reset_spec_root()
+    val path = SPEC_ROOT + "/" + name + ".spl"
+    expect(rt_file_write_text(path, source)).to_equal(true)
+    rt_process_run(SIMPLE, [path])
+
+fn run_source_native(name: text, source: text) -> (text, text, i64):
+    reset_spec_root()
+    val path = SPEC_ROOT + "/" + name + ".spl"
+    expect(rt_file_write_text(path, source)).to_equal(true)
+    rt_process_run(SIMPLE, ["run", path, "--mode=native", "--force-rebuild", "--clean"])
+
 fn combined_output(stdout: text, stderr: text) -> text:
     stdout + "\n" + stderr
 
@@ -158,6 +171,167 @@ describe "host/GPU lane grammar and event-flow contract":
 
         expect(code).to_equal(0)
         expect(combined_output(stdout, stderr)).to_contain("All checks passed")
+
+    it "should emit runtime begin and end events around an interpreted GPU lane":
+        step("Run a GPU lane and inspect the runtime marker counters")
+        val source =
+            "extern fn rt_host_gpu_lane_reset()\n" +
+            "extern fn rt_host_gpu_lane_event_count() -> i64\n" +
+            "extern fn rt_host_gpu_lane_begin_count() -> i64\n" +
+            "extern fn rt_host_gpu_lane_end_count() -> i64\n" +
+            "extern fn rt_host_gpu_lane_last_lane() -> i64\n" +
+            "extern fn rt_host_gpu_lane_last_phase() -> i64\n" +
+            "extern fn rt_host_gpu_queue_packet_count() -> i64\n" +
+            "extern fn rt_host_gpu_queue_last_status() -> i64\n" +
+            "extern fn rt_host_gpu_queue_drain(max_packets: i64) -> i64\n\n" +
+            "class Target:\n" +
+            "    fn later():\n" +
+            "        pass_do_nothing(\"lane runtime probe\")\n\n" +
+            "rt_host_gpu_lane_reset()\n" +
+            "val target = Target()\n" +
+            "var body_ran = false\n" +
+            "target.later() gpu \\:\n" +
+            "    body_ran = true\n" +
+            "print(\"body=\" + str(body_ran))\n" +
+            "print(\"events=\" + str(rt_host_gpu_lane_event_count()))\n" +
+            "print(\"begin=\" + str(rt_host_gpu_lane_begin_count()))\n" +
+            "print(\"end=\" + str(rt_host_gpu_lane_end_count()))\n" +
+            "print(\"lane=\" + str(rt_host_gpu_lane_last_lane()))\n" +
+            "print(\"phase=\" + str(rt_host_gpu_lane_last_phase()))\n" +
+            "print(\"queue=\" + str(rt_host_gpu_queue_packet_count()))\n" +
+            "print(\"queue_status=\" + str(rt_host_gpu_queue_last_status()))\n" +
+            "print(\"drain=\" + str(rt_host_gpu_queue_drain(1)))\n" +
+            "print(\"drain_status=\" + str(rt_host_gpu_queue_last_status()))\n"
+
+        val (stdout, stderr, code) = run_source("gpu_lane_runtime_markers", source)
+        val output = combined_output(stdout, stderr)
+
+        expect(code).to_equal(0)
+        expect(output).to_contain("body=true")
+        expect(output).to_contain("events=2")
+        expect(output).to_contain("begin=1")
+        expect(output).to_contain("end=1")
+        expect(output).to_contain("lane=2")
+        expect(output).to_contain("phase=2")
+        expect(output).to_contain("queue=1")
+        expect(output).to_contain("queue_status=1")
+        expect(output).to_contain("drain=1")
+        expect(output).to_contain("drain_status=4")
+
+    it "should emit native runtime queue evidence for a GPU lane":
+        step("Force native execution and inspect host/GPU lane queue counters")
+        val source =
+            "extern fn rt_host_gpu_lane_reset()\n" +
+            "extern fn rt_host_gpu_lane_event_count() -> i64\n" +
+            "extern fn rt_host_gpu_lane_begin_count() -> i64\n" +
+            "extern fn rt_host_gpu_lane_end_count() -> i64\n" +
+            "extern fn rt_host_gpu_queue_reset()\n" +
+            "extern fn rt_host_gpu_queue_packet_count() -> i64\n" +
+            "extern fn rt_host_gpu_queue_drain(max_packets: i64) -> i64\n" +
+            "extern fn rt_host_gpu_queue_last_status() -> i64\n\n" +
+            "class Target:\n" +
+            "    fn later():\n" +
+            "        val marker = 1\n\n" +
+            "rt_host_gpu_lane_reset()\n" +
+            "rt_host_gpu_queue_reset()\n" +
+            "val target = Target()\n" +
+            "target.later() gpu \\:\n" +
+            "    val draw_ir_batch = \"DisplayGraphIR batch\"\n" +
+            "print(\"events=\" + str(rt_host_gpu_lane_event_count()))\n" +
+            "print(\"begin=\" + str(rt_host_gpu_lane_begin_count()))\n" +
+            "print(\"end=\" + str(rt_host_gpu_lane_end_count()))\n" +
+            "print(\"queue=\" + str(rt_host_gpu_queue_packet_count()))\n" +
+            "print(\"drain=\" + str(rt_host_gpu_queue_drain(1)))\n" +
+            "print(\"drain_status=\" + str(rt_host_gpu_queue_last_status()))\n"
+
+        val (stdout, stderr, code) = run_source_native("gpu_lane_native_runtime_queue", source)
+        val output = combined_output(stdout, stderr)
+
+        expect(code).to_equal(0)
+        expect(output).to_contain("events=2")
+        expect(output).to_contain("begin=1")
+        expect(output).to_contain("end=1")
+        expect(output).to_contain("queue=1")
+        expect(output).to_contain("drain=1")
+        expect(output).to_contain("drain_status=4")
+
+    it "should match native runtime queue capacity and backpressure semantics":
+        step("Fill the native runtime queue, reject one overflow packet, drain, and accept the next packet")
+        val source =
+            "extern fn rt_host_gpu_queue_reset()\n" +
+            "extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_code: i64) -> i64\n" +
+            "extern fn rt_host_gpu_queue_packet_count() -> i64\n" +
+            "extern fn rt_host_gpu_queue_drain(max_packets: i64) -> i64\n" +
+            "extern fn rt_host_gpu_queue_last_status() -> i64\n\n" +
+            "rt_host_gpu_queue_reset()\n" +
+            "var accepted = 0\n" +
+            "var last_id = 0\n" +
+            "for _i in 0..1024:\n" +
+            "    last_id = rt_host_gpu_queue_emit(2, 1, 8, 1)\n" +
+            "    if last_id > 0:\n" +
+            "        accepted = accepted + 1\n" +
+            "val overflow_id = rt_host_gpu_queue_emit(2, 1, 8, 1)\n" +
+            "val queued = rt_host_gpu_queue_packet_count()\n" +
+            "val drained = rt_host_gpu_queue_drain(1024)\n" +
+            "val after_drain_id = rt_host_gpu_queue_emit(2, 1, 8, 1)\n" +
+            "print(\"accepted=\" + str(accepted))\n" +
+            "print(\"last_id=\" + str(last_id))\n" +
+            "print(\"overflow_id=\" + str(overflow_id))\n" +
+            "print(\"queued=\" + str(queued))\n" +
+            "print(\"drained=\" + str(drained))\n" +
+            "print(\"after_drain_id=\" + str(after_drain_id))\n" +
+            "print(\"status=\" + str(rt_host_gpu_queue_last_status()))\n"
+
+        val (stdout, stderr, code) = run_source_native("gpu_lane_native_queue_capacity", source)
+        val output = combined_output(stdout, stderr)
+
+        expect(code).to_equal(0)
+        expect(output).to_contain("accepted=1024")
+        expect(output).to_contain("last_id=1024")
+        expect(output).to_contain("overflow_id=0")
+        expect(output).to_contain("queued=1024")
+        expect(output).to_contain("drained=1024")
+        expect(output).to_contain("after_drain_id=1025")
+        expect(output).to_contain("status=1")
+
+    it "should record host to GPU to host callback marker sequence":
+        step("Run host, GPU, and host callbacks through target.later lane markers")
+        val source =
+            "extern fn rt_host_gpu_lane_reset()\n" +
+            "extern fn rt_host_gpu_lane_event_count() -> i64\n" +
+            "extern fn rt_host_gpu_lane_begin_count() -> i64\n" +
+            "extern fn rt_host_gpu_lane_end_count() -> i64\n" +
+            "extern fn rt_host_gpu_lane_last_lane() -> i64\n" +
+            "extern fn rt_host_gpu_lane_last_phase() -> i64\n\n" +
+            "class Target:\n" +
+            "    fn later():\n" +
+            "        pass_do_nothing(\"lane callback sequence\")\n\n" +
+            "rt_host_gpu_lane_reset()\n" +
+            "val target = Target()\n" +
+            "var callbacks = 0\n" +
+            "target.later() host \\:\n" +
+            "    callbacks = callbacks + 1\n" +
+            "target.later() gpu \\:\n" +
+            "    callbacks = callbacks + 1\n" +
+            "target.later() host \\:\n" +
+            "    callbacks = callbacks + 1\n" +
+            "print(\"callbacks=\" + str(callbacks))\n" +
+            "print(\"events=\" + str(rt_host_gpu_lane_event_count()))\n" +
+            "print(\"begin=\" + str(rt_host_gpu_lane_begin_count()))\n" +
+            "print(\"end=\" + str(rt_host_gpu_lane_end_count()))\n" +
+            "print(\"lane=\" + str(rt_host_gpu_lane_last_lane()))\n" +
+            "print(\"phase=\" + str(rt_host_gpu_lane_last_phase()))\n"
+
+        val (stdout, stderr, code) = run_source("host_gpu_host_runtime_markers", source)
+        val output = combined_output(stdout, stderr)
+
+        expect(code).to_equal(0)
+        expect(output).to_contain("callbacks=3")
+        expect(output).to_contain("events=6")
+        expect(output).to_contain("begin=3")
+        expect(output).to_contain("end=3")
+        expect(output).to_contain("lane=1")
+        expect(output).to_contain("phase=2")
 
     it "should accept host-owned semantic mutation in a host lane":
         step("Check that semantic state mutation remains legal on the host lane")

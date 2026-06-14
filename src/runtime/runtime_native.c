@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <math.h>
 #include <time.h>
 #include <fcntl.h>
@@ -41,6 +42,47 @@
 #include <pthread.h>
 #endif
 
+bool rt_dir_create(const char* path, bool recursive) {
+    if (!path || !*path) return false;
+    if (!recursive) {
+#if defined(_WIN32)
+        return _mkdir(path) == 0 || errno == EEXIST;
+#else
+        return mkdir(path, 0755) == 0 || errno == EEXIST;
+#endif
+    }
+
+    char* tmp = spl_strdup(path);
+    if (!tmp) return false;
+    size_t len = strlen(tmp);
+    while (len > 1 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
+        tmp[--len] = '\0';
+    }
+    for (char* p = tmp + 1; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            char saved = *p;
+            *p = '\0';
+#if defined(_WIN32)
+            if (_mkdir(tmp) != 0 && errno != EEXIST) {
+#else
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+#endif
+                *p = saved;
+                free(tmp);
+                return false;
+            }
+            *p = saved;
+        }
+    }
+#if defined(_WIN32)
+    bool ok = _mkdir(tmp) == 0 || errno == EEXIST;
+#else
+    bool ok = mkdir(tmp, 0755) == 0 || errno == EEXIST;
+#endif
+    free(tmp);
+    return ok;
+}
+
 #define RT_VALUE_TAG_MASK 0x7ULL
 #define RT_VALUE_TAG_INT 0x0ULL
 #define RT_VALUE_TAG_HEAP 0x1ULL
@@ -54,6 +96,116 @@
 #define RT_VALUE_HEAP_ENUM 0x04U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
+#define RT_HOST_GPU_LANE_HOST 1
+#define RT_HOST_GPU_LANE_GPU 2
+#define RT_HOST_GPU_PHASE_BEGIN 1
+#define RT_HOST_GPU_PHASE_END 2
+#define RT_HOST_GPU_QUEUE_STATUS_EMPTY 0
+#define RT_HOST_GPU_QUEUE_STATUS_QUEUED 1
+#define RT_HOST_GPU_QUEUE_STATUS_SUBMITTED 2
+#define RT_HOST_GPU_QUEUE_STATUS_COMPLETED 3
+#define RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE 4
+#define RT_HOST_GPU_QUEUE_CAPACITY 1024
+
+static int64_t rt_host_gpu_lane_event_total = 0;
+static int64_t rt_host_gpu_lane_begin_total = 0;
+static int64_t rt_host_gpu_lane_end_total = 0;
+static int64_t rt_host_gpu_lane_last_lane_code = 0;
+static int64_t rt_host_gpu_lane_last_phase_code = 0;
+static int64_t rt_host_gpu_queue_next_packet_id = 1;
+static int64_t rt_host_gpu_queue_head = 0;
+static int64_t rt_host_gpu_queue_depth = 0;
+static int64_t rt_host_gpu_queue_packet_total = 0;
+static int64_t rt_host_gpu_queue_submitted_total = 0;
+static int64_t rt_host_gpu_queue_completed_total = 0;
+static int64_t rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_EMPTY;
+static int64_t rt_host_gpu_queue_lane_codes[RT_HOST_GPU_QUEUE_CAPACITY];
+static int64_t rt_host_gpu_queue_backend_codes[RT_HOST_GPU_QUEUE_CAPACITY];
+
+void rt_host_gpu_queue_reset(void);
+
+int64_t rt_host_gpu_lane_event(int64_t lane_code, int64_t phase_code) {
+    if ((lane_code != RT_HOST_GPU_LANE_HOST && lane_code != RT_HOST_GPU_LANE_GPU) ||
+        (phase_code != RT_HOST_GPU_PHASE_BEGIN && phase_code != RT_HOST_GPU_PHASE_END)) {
+        return 0;
+    }
+    rt_host_gpu_lane_event_total += 1;
+    if (phase_code == RT_HOST_GPU_PHASE_BEGIN) {
+        rt_host_gpu_lane_begin_total += 1;
+    } else {
+        rt_host_gpu_lane_end_total += 1;
+    }
+    rt_host_gpu_lane_last_lane_code = lane_code;
+    rt_host_gpu_lane_last_phase_code = phase_code;
+    return 1;
+}
+
+void rt_host_gpu_lane_reset(void) {
+    rt_host_gpu_lane_event_total = 0;
+    rt_host_gpu_lane_begin_total = 0;
+    rt_host_gpu_lane_end_total = 0;
+    rt_host_gpu_lane_last_lane_code = 0;
+    rt_host_gpu_lane_last_phase_code = 0;
+    rt_host_gpu_queue_reset();
+}
+
+int64_t rt_host_gpu_lane_event_count(void) { return rt_host_gpu_lane_event_total; }
+int64_t rt_host_gpu_lane_begin_count(void) { return rt_host_gpu_lane_begin_total; }
+int64_t rt_host_gpu_lane_end_count(void) { return rt_host_gpu_lane_end_total; }
+int64_t rt_host_gpu_lane_last_lane(void) { return rt_host_gpu_lane_last_lane_code; }
+int64_t rt_host_gpu_lane_last_phase(void) { return rt_host_gpu_lane_last_phase_code; }
+
+void rt_host_gpu_queue_reset(void) {
+    rt_host_gpu_queue_next_packet_id = 1;
+    rt_host_gpu_queue_head = 0;
+    rt_host_gpu_queue_depth = 0;
+    rt_host_gpu_queue_packet_total = 0;
+    rt_host_gpu_queue_submitted_total = 0;
+    rt_host_gpu_queue_completed_total = 0;
+    rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_EMPTY;
+}
+
+int64_t rt_host_gpu_queue_emit(int64_t lane_code, int64_t kind_code, int64_t payload_size, int64_t backend_code) {
+    if ((lane_code != RT_HOST_GPU_LANE_HOST && lane_code != RT_HOST_GPU_LANE_GPU) ||
+        kind_code < 0 || payload_size < 0 || backend_code < 0) {
+        return 0;
+    }
+    if (rt_host_gpu_queue_depth >= RT_HOST_GPU_QUEUE_CAPACITY) {
+        return 0;
+    }
+    int64_t packet_id = rt_host_gpu_queue_next_packet_id++;
+    int64_t tail = (rt_host_gpu_queue_head + rt_host_gpu_queue_depth) % RT_HOST_GPU_QUEUE_CAPACITY;
+    rt_host_gpu_queue_lane_codes[tail] = lane_code;
+    rt_host_gpu_queue_backend_codes[tail] = backend_code;
+    rt_host_gpu_queue_depth += 1;
+    rt_host_gpu_queue_packet_total += 1;
+    rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_QUEUED;
+    return packet_id;
+}
+
+int64_t rt_host_gpu_queue_drain(int64_t max_packets) {
+    if (max_packets <= 0 || rt_host_gpu_queue_depth <= 0) return 0;
+    int64_t drained = 0;
+    while (drained < max_packets && rt_host_gpu_queue_depth > 0) {
+        int64_t lane_code = rt_host_gpu_queue_lane_codes[rt_host_gpu_queue_head];
+        int64_t backend_code = rt_host_gpu_queue_backend_codes[rt_host_gpu_queue_head];
+        rt_host_gpu_queue_head = (rt_host_gpu_queue_head + 1) % RT_HOST_GPU_QUEUE_CAPACITY;
+        rt_host_gpu_queue_depth -= 1;
+        rt_host_gpu_queue_submitted_total += 1;
+        rt_host_gpu_queue_completed_total += 1;
+        rt_host_gpu_queue_last_status_code =
+            (lane_code == RT_HOST_GPU_LANE_GPU && backend_code == 0)
+            ? RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE
+            : RT_HOST_GPU_QUEUE_STATUS_COMPLETED;
+        drained += 1;
+    }
+    return drained;
+}
+
+int64_t rt_host_gpu_queue_packet_count(void) { return rt_host_gpu_queue_packet_total; }
+int64_t rt_host_gpu_queue_submitted_count(void) { return rt_host_gpu_queue_submitted_total; }
+int64_t rt_host_gpu_queue_completed_count(void) { return rt_host_gpu_queue_completed_total; }
+int64_t rt_host_gpu_queue_last_status(void) { return rt_host_gpu_queue_last_status_code; }
 
 typedef struct RtCoreString {
     uint32_t kind;
@@ -1581,6 +1733,10 @@ void rt_bdd_expect_truthy_rv(int64_t value) {
     }
 }
 
+void rt_bdd_expect_truthy(int64_t value) {
+    rt_bdd_expect_truthy_rv(value);
+}
+
 int64_t rt_bdd_format_results(void) {
     rt_bdd_describe_end();
     return rt_bdd_failed;
@@ -1940,19 +2096,20 @@ static char* rt_core_shell_quote(const char* s) {
 }
 
 SplArray* rt_process_run(const char* cmd, SplArray* args) {
-    SplArray* result = spl_array_new_cap(3);
+    SplArray* result = rt_array_new(3);
     if (!cmd || !*cmd) {
-        spl_array_push(result, spl_str(""));
-        spl_array_push(result, spl_str("missing command"));
-        spl_array_push(result, spl_int(-1));
+        rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+        rt_array_push(result, rt_string_new((const uint8_t*)"missing command", 15));
+        rt_array_push(result, rt_value_int(-1));
         return result;
     }
 
     char* command = rt_core_shell_quote(cmd);
-    int64_t argc = spl_array_len(args);
+    int64_t argc = rt_array_len(args);
     for (int64_t i = 0; i < argc; i++) {
-        SplValue arg = spl_array_get(args, i);
-        const char* arg_s = arg.tag == SPL_STRING ? spl_as_str(arg) : "";
+        int64_t arg = rt_array_get(args, i);
+        const uint8_t* arg_data = rt_string_data(arg);
+        const char* arg_s = arg_data ? (const char*)arg_data : "";
         char* quoted = rt_core_shell_quote(arg_s);
         size_t new_len = strlen(command) + strlen(quoted) + 2;
         char* joined = (char*)malloc(new_len);
@@ -1971,9 +2128,9 @@ SplArray* rt_process_run(const char* cmd, SplArray* args) {
     free(command);
     if (redirected) free(redirected);
     if (!pipe) {
-        spl_array_push(result, spl_str(""));
-        spl_array_push(result, spl_str("process spawn failed"));
-        spl_array_push(result, spl_int(-1));
+        rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+        rt_array_push(result, rt_string_new((const uint8_t*)"process spawn failed", 20));
+        rt_array_push(result, rt_value_int(-1));
         return result;
     }
 
@@ -1997,9 +2154,10 @@ SplArray* rt_process_run(const char* cmd, SplArray* args) {
     int status = pclose(pipe);
     int exit_code = status == -1 ? -1 : (status >> 8);
 
-    spl_array_push(result, spl_str(stdout_buf ? stdout_buf : ""));
-    spl_array_push(result, spl_str(""));
-    spl_array_push(result, spl_int(exit_code));
+    const char* stdout_text = stdout_buf ? stdout_buf : "";
+    rt_array_push(result, rt_string_new((const uint8_t*)stdout_text, (uint64_t)strlen(stdout_text)));
+    rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+    rt_array_push(result, rt_value_int(exit_code));
     if (stdout_buf) free(stdout_buf);
     return result;
 }

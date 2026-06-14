@@ -9,8 +9,8 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Value, ATTR_STRONG};
 
 use super::super::{
-    exec_node, exec_block_fn, exec_if_expr, exec_if_core, exec_match_expr, exec_match_core, pattern_matches,
-    ClassDef, Control, Enums, Env, FunctionDef, ImplMethods,
+    exec_node, exec_block_fn, exec_if_expr, exec_if_core, exec_match_expr, exec_match_core, pattern_matches, ClassDef,
+    Control, Enums, Env, FunctionDef, ImplMethods,
 };
 use crate::value::CowEnv;
 
@@ -176,16 +176,12 @@ pub(super) fn eval_control_expr(
                                     continue;
                                 }
                                 Node::If(if_stmt) => {
-                                    let (flow, val) = exec_if_core(
-                                        if_stmt,
-                                        &mut arm_env,
-                                        functions,
-                                        classes,
-                                        enums,
-                                        impl_methods,
-                                    )?;
+                                    let (flow, val) =
+                                        exec_if_core(if_stmt, &mut arm_env, functions, classes, enums, impl_methods)?;
                                     match flow {
-                                        Control::Next => { result = val; }
+                                        Control::Next => {
+                                            result = val;
+                                        }
                                         Control::Return(v) => return Ok(Some(v)),
                                         Control::Break(..) => return Ok(Some(Value::Nil)),
                                         Control::Continue(_) => break,
@@ -202,7 +198,9 @@ pub(super) fn eval_control_expr(
                                         impl_methods,
                                     )?;
                                     match flow {
-                                        Control::Next => { result = last_val.unwrap_or(Value::Nil); }
+                                        Control::Next => {
+                                            result = last_val.unwrap_or(Value::Nil);
+                                        }
                                         Control::Return(v) => return Ok(Some(v)),
                                         Control::Break(..) => return Ok(Some(Value::Nil)),
                                         Control::Continue(_) => break,

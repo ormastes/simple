@@ -28,7 +28,7 @@ sha512_direct_kat_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -67,6 +67,26 @@ expect(_hex(sha512([0x61, 0x62, 0x63]))).to_equal("ddaf35a193617abacc417349ae204
 
 </details>
 
+#### matches SHA-512 RFC8032 Ed25519 test seed
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val seed: [u8] = [
+    0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+    0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+    0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+    0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+]
+expect(_hex(sha512(seed))).to_equal("357c83864f2833cb427a2ef1c00a013cfdff2768d980c0a3a520f006904de90f9b4f0afe280b746a778684e75442502057b7473a03f08f96f5a38e9287e01f8f")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -86,8 +106,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

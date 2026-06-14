@@ -7,9 +7,10 @@ Status: CLOSED on 2026-06-08. The live
 `doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md`.
 
 Current refresh note, 2026-06-14: this closure record is historical evidence.
-The current `/tmp/simple-pherallel-loop-jj` refresh reaches AP/scheduler,
-`USER_CR3_READY=true`, and the final marker triplet. The follow-up refresh
-blocker is closed in
+The current `/tmp/simple-pherallel-continue-jj` refresh fixed the x86_64
+freestanding boot entry and reaches AP/scheduler/readiness markers through
+`USER_CR3_READY=true`, but it has not refreshed the final marker triplet. Track
+the current open refresh blocker in
 `doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md`.
 
 ## Summary
@@ -237,11 +238,11 @@ task through `create_user_task_pid`, dispatches that pid through
 `run_green_carrier_once` on CPU1, and validates syscall-14 handoff readiness through
 `validate_enter_user_blocking_handoff`.
 
-At this 2026-06-08 stage this was prerequisite evidence only. It proved guest-side payload,
+This is still prerequisite evidence only. It proves guest-side payload,
 scheduler task, green-lane dispatch, and non-entering user handoff validation
-could compose in the live AP probe. It did not execute `rt_x86_enter_user_first`,
-did not enter user mode, and did not observe a user-mode syscall return.
-The later final live gate required `HW_HANDOFF_PASS=true`,
+can compose in the live AP probe. It does not execute `rt_x86_enter_user_first`,
+does not enter user mode, and does not observe a user-mode syscall return.
+The final live gate still requires `HW_HANDOFF_PASS=true`,
 `USER_ENTRY_PASS=true`, and `USER_SYSCALL_PASS=true` from the real AP ring/user
 path.
 
@@ -284,9 +285,9 @@ A follow-up attempt to initialize PMM/VMM inside
 `green_carrier_probe_entry.spl` stopped before PMM returned, even after moving
 the scalar PMM bitmap away from stale guessed kernel bounds. The built probe's
 ELF showed `_kernel_end` near `0x0ecef000`, proving the old `0x01400000`
-reserved-end guess was invalid for this entry. At that point the final path
-appeared to need a safe direct-boot memory bootstrap or a dedicated minimal
-user page-table allocator before it could replace the legacy `cr3=1` sentinel.
+reserved-end guess was invalid for this entry. The failure mode is now sharper:
+the final path needs a safe direct-boot memory bootstrap or a dedicated minimal
+user page-table allocator before it can replace the legacy `cr3=1` sentinel.
 
 Do not claim the final marker triplet from the default live probe until the
 payload actually emits those markers after the enter bridge. The readiness
@@ -307,25 +308,3 @@ experiment. At that intermediate stage the user payload still had not emitted
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`;
 the later final live lane closed that remaining ring/user transition and
 syscall-return observation gap.
-
-## 2026-06-14 Final Live QEMU Refresh
-
-The current `/tmp/simple-pherallel-loop-jj` refresh closed the remaining live
-QEMU proof gap. The x86_64 freestanding boot runtime now exports a no-op
-`rt_pool_safepoint` so compiler-inserted loop safepoints link in SimpleOS, and
-the diagnostic final-handoff hook clears IF while keeping IOPL=3 so the minimal
-probe CR3 can emit COM1 markers before the syscall-return marker.
-
-Current direct QEMU serial evidence reaches:
-
-```text
-[green-carrier-qemu] USER_CR3_READY=true
-[green-carrier-qemu] HW_HANDOFF_PASS=true
-[green-carrier-qemu] USER_ENTRY_PASS=true
-[green-carrier-qemu] USER_SYSCALL_PASS=true
-```
-
-The opt-in SSpec gate
-`SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 ... green_carrier_qemu_spec.spl`
-passed 3 scenarios in 74244ms. The default live readiness lane remains
-separate and must not print the final marker triplet.

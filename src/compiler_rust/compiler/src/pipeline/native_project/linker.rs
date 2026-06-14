@@ -1226,10 +1226,15 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                                 continue;
                             }
                             let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
+                            let ssh_live_boot = std::env::var("SIMPLE_SSH_LIVE_BUILD_MARKER").is_ok();
+                            if ssh_live_boot && stem == "baremetal_stubs" {
+                                continue;
+                            }
                             if minimal_boot
                                 && !skip_boot_autodiscovery
                                 && stem != "baremetal_stubs"
                                 && stem != "freestanding_runtime"
+                                && !(ssh_live_boot && stem == "full_networking_runtime")
                                 && stem != "curve25519_ring_helper"
                                 && stem != "ed25519_scalar_helper"
                                 && stem != "ed25519_sha512_helper"

@@ -121,6 +121,21 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     // Bootstrap driver bridge
     "compiler__driver__driver__compiler_driver_create",
     "compiler__driver__driver__CompilerDriver_dot_compile",
+    // Host/GPU lane marker runtime bridge
+    "rt_host_gpu_lane_event",
+    "rt_host_gpu_lane_reset",
+    "rt_host_gpu_lane_event_count",
+    "rt_host_gpu_lane_begin_count",
+    "rt_host_gpu_lane_end_count",
+    "rt_host_gpu_lane_last_lane",
+    "rt_host_gpu_lane_last_phase",
+    "rt_host_gpu_queue_reset",
+    "rt_host_gpu_queue_emit",
+    "rt_host_gpu_queue_drain",
+    "rt_host_gpu_queue_packet_count",
+    "rt_host_gpu_queue_submitted_count",
+    "rt_host_gpu_queue_completed_count",
+    "rt_host_gpu_queue_last_status",
     // I/O functions (print now adds newline by default, like Python)
     "print",      // prints with newline (new behavior)
     "print_raw",  // prints without newline (for old print behavior)

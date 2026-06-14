@@ -7,14 +7,14 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 38
-- **Warnings:** 1
+- **Total Lines:** 7
+- **Warnings:** 7
 
 ---
 
-## Hardware & OS (1 features)
+## Standard Library (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Scheduler Green User Handoff Specification](test/01_unit/os/kernel/scheduler/scheduler_green_user_handoff_spec.md) | Minimal | N/A | 2 | 20% | 38 lines |
+| [Web Render Pixel Backend Runtime Queue Spec](test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.md) | Minimal | N/A | 2 | 20% | 7 lines |
 

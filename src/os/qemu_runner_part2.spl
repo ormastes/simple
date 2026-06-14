@@ -145,7 +145,7 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
     if _is_arm64_wm_qemu_target(target) or _is_arm_fs_exec_target(target) or _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target):
         args.push("--timeout")
         args.push("180")
-    elif _is_ssh_live_target(target):
+    elif _is_riscv64_live_helper_target(target) or _is_ssh_live_target(target):
         # The SSH live image pulls in the full network/storage/userland slice,
         # and several reachable modules routinely exceed the default 60s
         # per-file watchdog on cold LLVM builds even when the lane is healthy.
@@ -177,7 +177,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     if cached_build_matches and rt_file_exists(target.output):
         print "[build][{arch_label}] phase=native-build cached output={target.output}"
         return true
-    val build_marker = if _is_ssh_live_target(target): _ssh_live_build_marker_value(backend) else: ""
+    val build_marker = if _is_riscv64_live_helper_target(target): _ssh_live_build_marker_value(backend) else: ""
     val log_mode = _os_build_log_mode()
     val timeout_ms = _os_build_timeout_ms()
     val args = os_native_build_args(target, backend_name)
@@ -405,7 +405,7 @@ fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
     _find_simple_binary()
 
 fn _build_sources(target: OsTarget) -> [text]:
-    if _is_riscv64_ssh_live_target(target):
+    if _is_riscv64_live_helper_target(target):
         return ["build/os/generated", "src", "examples"]
     if _is_ssh_live_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os"]
@@ -450,7 +450,7 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
         envs.push("SIMPLE_BOOT_MINIMAL=1")
     if _needs_arm_freestanding_stub_env(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
-    if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_ssh_live_target(target):
+    if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target):
         envs.push("SIMPLE_BOOT_MINIMAL=1")
     if _needs_freestanding_stub_env(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
@@ -462,9 +462,16 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
 fn _is_ssh_live_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/x86_64/ssh_live_entry.spl" or _is_riscv64_ssh_live_target(target)
 
+fn _is_riscv64_live_helper_target(target: OsTarget) -> bool:
+    _is_riscv64_ssh_live_target(target) or _is_riscv64_x25519_probe_target(target)
+
 fn _is_riscv64_ssh_live_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl" and
         target.output == "build/os/simpleos_riscv64_ssh_live.elf"
+
+fn _is_riscv64_x25519_probe_target(target: OsTarget) -> bool:
+    target.entry == "examples/09_embedded/simple_os/arch/riscv64/x25519_probe_entry.spl" and
+        target.output == "build/os/simpleos_riscv64_x25519_probe.elf"
 
 fn _ssh_live_build_marker_value(backend: text) -> text:
     "ssh-live-build:{backend}:{_now_ms()}"
@@ -507,7 +514,7 @@ fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
     if not rt_file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
         print "[build] could not write SimpleOS log compile config"
         return false
-    if _is_ssh_live_target(target):
+    if build_marker != "":
         if not rt_file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
             print "[build] could not write SSH live build marker"
             return false
@@ -548,7 +555,7 @@ fn _apply_build_env(target: OsTarget, objcopy_prefix: text) -> bool:
     if _needs_arm_freestanding_stub_env(target):
         if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
-    if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_ssh_live_target(target):
+    if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target):
         if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
             return false
     if _needs_freestanding_stub_env(target):

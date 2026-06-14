@@ -909,9 +909,7 @@ pub(super) fn eval_op_expr(
                 BinOp::NotEq => {
                     // See BinOp::Eq above: nil literal and Option::None compare equal.
                     if left_val.is_nil_like() || right_val.is_nil_like() {
-                        Ok(Value::Bool(
-                            !(left_val.is_nil_like() && right_val.is_nil_like()),
-                        ))
+                        Ok(Value::Bool(!(left_val.is_nil_like() && right_val.is_nil_like())))
                     } else if let Some(result) = try_object_binop_method(
                         "__ne__",
                         &left_val,
@@ -1047,7 +1045,11 @@ pub(super) fn eval_op_expr(
                     // `x is nil` mirrors `x == nil`: bridge nil literal / Option::None.
                     if left_val.is_nil_like() || right_val.is_nil_like() {
                         Ok(Value::Bool(left_val.is_nil_like() && right_val.is_nil_like()))
-                    } else if let Value::EnumVariantConstructor { enum_name: ref re, variant_name: ref rv } = right_val {
+                    } else if let Value::EnumVariantConstructor {
+                        enum_name: ref re,
+                        variant_name: ref rv,
+                    } = right_val
+                    {
                         // `x is EnumName.Variant` where the variant carries a payload:
                         // the RHS evaluates to EnumVariantConstructor (not a Value::Enum),
                         // so structural equality would always be false.  Check only the

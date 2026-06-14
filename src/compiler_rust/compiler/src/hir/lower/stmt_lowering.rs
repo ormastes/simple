@@ -415,35 +415,31 @@ impl Lowerer {
                 // Infer the element type from the iterable type
                 // Handles: Arrays [T] → T, Strings → u8, Tuples → common type
                 // Ranges and custom iterators fallback to i64
-                let element_ty = self
-                    .module
-                    .types
-                    .get_iterable_element(iterable.ty)
-                    .unwrap_or_else(|| {
-                        // For range BuiltinCalls (rt_range / rt_range_inclusive),
-                        // the element type is the integer type of the start/end args.
-                        // Without this, loop vars get TypeId::ANY, which skips BoxInt
-                        // in rt_value_to_string lowering, producing <value:0xN> in native.
-                        if let crate::hir::HirExprKind::BuiltinCall { ref name, ref args } = iterable.kind {
-                            if name == "rt_range" || name == "rt_range_inclusive" {
-                                if let Some(start) = args.first() {
-                                    match start.ty {
-                                        crate::hir::TypeId::I8
-                                        | crate::hir::TypeId::I16
-                                        | crate::hir::TypeId::I32
-                                        | crate::hir::TypeId::I64
-                                        | crate::hir::TypeId::U8
-                                        | crate::hir::TypeId::U16
-                                        | crate::hir::TypeId::U32
-                                        | crate::hir::TypeId::U64 => return start.ty,
-                                        _ => {}
-                                    }
+                let element_ty = self.module.types.get_iterable_element(iterable.ty).unwrap_or_else(|| {
+                    // For range BuiltinCalls (rt_range / rt_range_inclusive),
+                    // the element type is the integer type of the start/end args.
+                    // Without this, loop vars get TypeId::ANY, which skips BoxInt
+                    // in rt_value_to_string lowering, producing <value:0xN> in native.
+                    if let crate::hir::HirExprKind::BuiltinCall { ref name, ref args } = iterable.kind {
+                        if name == "rt_range" || name == "rt_range_inclusive" {
+                            if let Some(start) = args.first() {
+                                match start.ty {
+                                    crate::hir::TypeId::I8
+                                    | crate::hir::TypeId::I16
+                                    | crate::hir::TypeId::I32
+                                    | crate::hir::TypeId::I64
+                                    | crate::hir::TypeId::U8
+                                    | crate::hir::TypeId::U16
+                                    | crate::hir::TypeId::U32
+                                    | crate::hir::TypeId::U64 => return start.ty,
+                                    _ => {}
                                 }
-                                return crate::hir::TypeId::I64;
                             }
+                            return crate::hir::TypeId::I64;
                         }
-                        crate::hir::TypeId::ANY
-                    });
+                    }
+                    crate::hir::TypeId::ANY
+                });
 
                 // Check if this is a tuple pattern for destructuring
                 if let Pattern::Tuple(patterns) = &for_stmt.pattern {
@@ -592,6 +588,9 @@ impl Lowerer {
             Node::Expression(expr) => {
                 if matches!(expr, Expr::String(_) | Expr::TypedString(_, _)) {
                     return Ok(vec![]);
+                }
+                if let Some(stmts) = self.try_lower_host_gpu_lane_statement(expr, ctx)? {
+                    return Ok(stmts);
                 }
                 // Intercept BDD/SPipe calls at statement level so we can emit
                 // start/body/end sequences (describe, it, expect, etc.)
@@ -1000,10 +999,7 @@ impl Lowerer {
                             // effective_declared_ty, so we must patch the local's type now
                             // to match the concrete field type, otherwise the MIR Store
                             // uses ANY and the value is mis-formatted at runtime.
-                            let field_ty = struct_fields
-                                .get(i)
-                                .map(|(_, ty)| *ty)
-                                .unwrap_or(TypeId::ANY);
+                            let field_ty = struct_fields.get(i).map(|(_, ty)| *ty).unwrap_or(TypeId::ANY);
                             // Patch the local's type to the concrete field type.
                             if field_ty != TypeId::ANY {
                                 if let Some(local) = ctx.locals.get_mut(local_idx) {
@@ -1069,7 +1065,11 @@ impl Lowerer {
                         // variant field types). Using the value type ensures the MIR Store
                         // and subsequent uses see the correct concrete type rather than ANY,
                         // preventing misformatting (e.g. i64 field printed as float zero).
-                        let let_ty = if class_struct_fields.is_some() { value.ty } else { binding_ty };
+                        let let_ty = if class_struct_fields.is_some() {
+                            value.ty
+                        } else {
+                            binding_ty
+                        };
                         binding_stmts.push(HirStmt::Let {
                             local_index: local_idx,
                             ty: let_ty,
@@ -1421,6 +1421,102 @@ impl Lowerer {
         Ok(stmts)
     }
 
+    /// Try to lower a statement-position host/GPU lane marker.
+    /// Returns Some(stmts) only for `target.later(...) gpu|host \:` shape.
+    ///
+    /// Expression-position marker calls remain regular calls for now.
+    fn try_lower_host_gpu_lane_statement(
+        &mut self,
+        expr: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<Vec<HirStmt>>> {
+        let (name, args) = match expr {
+            Expr::Call { callee, args } => {
+                if let Expr::Identifier(name) = callee.as_ref() {
+                    (name.as_str(), args)
+                } else {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
+        };
+
+        let lane_code = match name {
+            "host" => 1,
+            "gpu" => 2,
+            _ => return Ok(None),
+        };
+        if args.len() != 2 || !matches!(args.last().map(|arg| &arg.value), Some(Expr::Lambda { .. })) {
+            return Ok(None);
+        }
+
+        let payload_size = match &args[0].value {
+            Expr::MethodCall {
+                method,
+                args: later_args,
+                ..
+            } if method == "later" => Self::host_gpu_lane_payload_size(later_args),
+            _ => return Ok(None),
+        };
+
+        let mut stmts = Vec::new();
+        stmts.push(HirStmt::Expr(self.lower_expr(&args[0].value, ctx)?));
+
+        stmts.push(Self::host_gpu_lane_event_stmt(lane_code, 1));
+        if lane_code == 2 {
+            stmts.push(HirStmt::Expr(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_host_gpu_queue_emit".to_string(),
+                    args: vec![
+                        Self::i64_hir(lane_code),
+                        Self::i64_hir(1),
+                        Self::i64_hir(payload_size),
+                        Self::i64_hir(0),
+                    ],
+                },
+                ty: TypeId::I64,
+            }));
+        }
+        self.lower_bdd_body(&args[args.len() - 1].value, &mut stmts, ctx)?;
+        stmts.push(Self::host_gpu_lane_event_stmt(lane_code, 2));
+
+        Ok(Some(stmts))
+    }
+
+    fn host_gpu_lane_payload_size(later_args: &[ast::Argument]) -> i64 {
+        for arg in later_args {
+            let is_max_packet = arg.name.as_deref() == Some("max_packet") || arg.label.as_deref() == Some("max_packet");
+            if is_max_packet {
+                if let Expr::Integer(value) = &arg.value {
+                    return (*value).max(0);
+                }
+            }
+        }
+        if later_args.len() == 1 {
+            if let Expr::Integer(value) = &later_args[0].value {
+                return (*value).max(0);
+            }
+        }
+        0
+    }
+
+    fn host_gpu_lane_event_stmt(lane_code: i64, phase_code: i64) -> HirStmt {
+        HirStmt::Expr(HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_host_gpu_lane_event".to_string(),
+                args: vec![Self::i64_hir(lane_code), Self::i64_hir(phase_code)],
+            },
+            ty: TypeId::I64,
+        })
+    }
+
+    fn i64_hir(value: i64) -> HirExpr {
+        HirExpr {
+            kind: HirExprKind::Integer(value),
+            ty: TypeId::I64,
+        }
+    }
+
     /// Try to lower a BDD/SPipe call expression as a statement sequence.
     /// Returns Some(stmts) if the expression is a BDD call, None otherwise.
     ///
@@ -1607,5 +1703,85 @@ impl Lowerer {
         let body_hir = self.lower_expr(body_expr, ctx)?;
         stmts.push(HirStmt::Expr(body_hir));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod host_gpu_lane_statement_tests {
+    use super::super::lower;
+    use crate::hir::types::{HirExprKind, HirModule, HirStmt};
+    use simple_parser::Parser;
+
+    fn lower_source(source: &str) -> crate::hir::lower::LowerResult<HirModule> {
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        lower(&ast)
+    }
+
+    fn builtin_name(stmt: &HirStmt) -> Option<&str> {
+        match stmt {
+            HirStmt::Expr(expr) => match &expr.kind {
+                HirExprKind::BuiltinCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn builtin_args<'a>(stmt: &'a HirStmt, target_name: &str) -> Option<&'a [crate::hir::types::HirExpr]> {
+        match stmt {
+            HirStmt::Expr(expr) => match &expr.kind {
+                HirExprKind::BuiltinCall { name, args } if name == target_name => Some(args.as_slice()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn lowers_statement_position_gpu_lane_to_queue_wrapped_body() {
+        let module = lower_source(
+            "class Target:\n    fn later(max_packet: i64):\n        pass\n\nfn run() -> i64:\n    val target = Target()\n    target.later(max_packet: 4096) gpu \\:\n        val draw_ir_batch = 1\n    return 0\n",
+        )
+        .unwrap();
+
+        let func = module
+            .functions
+            .iter()
+            .find(|func| func.name == "run")
+            .expect("run function should lower");
+        let names: Vec<&str> = func.body.iter().filter_map(builtin_name).collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "rt_host_gpu_lane_event",
+                "rt_host_gpu_queue_emit",
+                "rt_host_gpu_lane_event"
+            ]
+        );
+        let queue_args = func
+            .body
+            .iter()
+            .find_map(|stmt| builtin_args(stmt, "rt_host_gpu_queue_emit"))
+            .expect("gpu lane should emit runtime queue packet");
+        assert!(matches!(queue_args.get(2).map(|expr| &expr.kind), Some(HirExprKind::Integer(4096))));
+    }
+
+    #[test]
+    fn lowers_statement_position_host_lane_without_queue_emit() {
+        let module = lower_source(
+            "class Target:\n    fn later():\n        pass\n\nfn run() -> i64:\n    val target = Target()\n    target.later() host \\:\n        val semantic_owner = 1\n    return 0\n",
+        )
+        .unwrap();
+
+        let func = module
+            .functions
+            .iter()
+            .find(|func| func.name == "run")
+            .expect("run function should lower");
+        let names: Vec<&str> = func.body.iter().filter_map(builtin_name).collect();
+
+        assert_eq!(names, vec!["rt_host_gpu_lane_event", "rt_host_gpu_lane_event"]);
     }
 }

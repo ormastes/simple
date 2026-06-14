@@ -1,6 +1,9 @@
 //! Tests for async/future functionality
 
-use super::{rt_future_all, rt_future_await, rt_future_is_ready, rt_future_new, rt_future_race, rt_future_resolve, rt_future_wrap};
+use super::{
+    rt_future_all, rt_future_await, rt_future_is_ready, rt_future_new, rt_future_race, rt_future_resolve,
+    rt_future_wrap,
+};
 use crate::executor::{configure_async_mode, AsyncMode};
 use crate::value::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, RuntimeValue};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -232,8 +235,8 @@ fn test_b5_nested_await_future_value() {
     // identity must hold; must not NIL or crash.
     configure_async_mode(AsyncMode::Threaded);
     let future = rt_future_resolve(RuntimeValue::from_int(55));
-    let resolved = rt_future_await(future);   // RuntimeFuture → 55
-    let again   = rt_future_await(resolved);  // plain int → identity → 55
+    let resolved = rt_future_await(future); // RuntimeFuture → 55
+    let again = rt_future_await(resolved); // plain int → identity → 55
     assert_eq!(again.as_int(), 55);
 }
 
@@ -255,7 +258,10 @@ fn test_b5_promise_object_through_rt_future_await() {
     let eager_value = RuntimeValue::from_int(0x42); // arbitrary non-NIL value
     let result = rt_future_await(eager_value);
     // Must be identity: neither NIL nor corrupted
-    assert!(!result.is_nil(), "rt_future_await must not return NIL for non-Future (eager-async identity)");
+    assert!(
+        !result.is_nil(),
+        "rt_future_await must not return NIL for non-Future (eager-async identity)"
+    );
     assert_eq!(result.as_int(), 0x42);
 }
 
@@ -283,7 +289,11 @@ fn test_b5_lazy_future_await_returns_body_value() {
 fn test_b5_canonical_wrap_int() {
     // rt_future_wrap(i64) must produce a ready future that await extracts correctly.
     let wrapped = rt_future_wrap(RuntimeValue::from_int(42));
-    assert_eq!(rt_future_is_ready(wrapped), 1, "rt_future_wrap must produce a ready future");
+    assert_eq!(
+        rt_future_is_ready(wrapped),
+        1,
+        "rt_future_wrap must produce a ready future"
+    );
     let result = rt_future_await(wrapped);
     assert_eq!(result.as_int(), 42);
 }
@@ -316,8 +326,8 @@ fn test_b5_canonical_wrap_nested_await() {
     // await(await(rt_future_wrap(v))) — second await hits the plain extracted int
     // (identity path), must return the same value, not NIL or crash.
     let wrapped = rt_future_wrap(RuntimeValue::from_int(99));
-    let first = rt_future_await(wrapped);   // RuntimeFuture → 99
-    let second = rt_future_await(first);    // plain int → identity → 99
+    let first = rt_future_await(wrapped); // RuntimeFuture → 99
+    let second = rt_future_await(first); // plain int → identity → 99
     assert_eq!(second.as_int(), 99);
 }
 

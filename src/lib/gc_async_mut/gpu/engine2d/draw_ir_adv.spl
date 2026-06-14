@@ -5,6 +5,7 @@
 # as metadata/fallback policy; real GPU plugin migration is a later backend job.
 
 use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
     DRAW_IR_COMMAND_RECT,
     DRAW_IR_COMMAND_TEXT,
     DrawIrBatch,
@@ -15,6 +16,20 @@ use common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_lane.{
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    engine2d_host_gpu_lane_schedule
+}
+use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    Engine2dHostGpuRuntimeDrainResult,
+    Engine2dHostGpuRuntimeQueue,
+    Engine2dHostGpuRuntimeSubmitResult,
+    engine2d_host_gpu_event,
+    engine2d_host_gpu_event_handler_decision,
+    engine2d_host_gpu_event_submit_to_runtime,
+    engine2d_host_gpu_runtime_drain
+}
 
 struct Engine2dDrawIrAdvResult:
     schema: text
@@ -25,6 +40,18 @@ struct Engine2dDrawIrAdvResult:
     rendered_command_count: i32
     skipped_command_count: i32
     pixels: [u32]
+
+struct Engine2dDrawIrRuntimeQueueResult:
+    render: Engine2dDrawIrAdvResult
+    runtime_submit: Engine2dHostGpuRuntimeSubmitResult
+    runtime_drain: Engine2dHostGpuRuntimeDrainResult
+    queued_for_gpu: bool
+
+fn _engine2d_draw_ir_empty_submit(unit_id: text, status: text, diagnostic: text) -> Engine2dHostGpuRuntimeSubmitResult:
+    Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: status, queue_handle: 0, event_id: unit_id, packet_id: 0, packet_bytes: 0, diagnostic: diagnostic)
+
+fn _engine2d_draw_ir_empty_drain(status: text, diagnostic: text) -> Engine2dHostGpuRuntimeDrainResult:
+    Engine2dHostGpuRuntimeDrainResult(drained: 0, status: status, queue_handle: 0, submitted_count: 0, completed_count: 0, last_status_code: 0, diagnostic: diagnostic)
 
 fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, pixels: [u32]) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
@@ -71,6 +98,33 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
         engine.clear_clip()
     _engine2d_draw_ir_result_from_plan(plan, rendered, skipped, engine.read_pixels())
 
+fn engine2d_draw_ir_adv_batch_runtime_queue(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrRuntimeQueueResult:
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    var runtime_submit = _engine2d_draw_ir_empty_submit(batch.batch_id, "host", "Draw IR batch selected CPU path")
+    var runtime_drain = _engine2d_draw_ir_empty_drain("empty", "runtime queue not used")
+    var queued_for_gpu = false
+    if plan.selected_backend == DRAW_IR_BACKEND_GPU:
+        val packet_bytes = plan.command_count * 64
+        val lane_result = engine2d_host_gpu_lane_schedule(
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            packet_bytes,
+            queue.max_packet_bytes,
+            false,
+            false,
+            queue.runtime_available,
+            plan.command_count
+        )
+        val event = engine2d_host_gpu_event(batch.batch_id, ENGINE2D_HOST_GPU_LANE_GPU, "draw_ir_delta", packet_bytes, queue.max_packet_bytes, false, false, false, queue.runtime_available)
+        val decision = engine2d_host_gpu_event_handler_decision(event, lane_result)
+        runtime_submit = engine2d_host_gpu_event_submit_to_runtime(queue, decision, lane_result)
+        queued_for_gpu = runtime_submit.submitted
+    val render = engine2d_draw_ir_adv_batch(engine, batch, gpu_available)
+    if queued_for_gpu:
+        runtime_drain = engine2d_host_gpu_runtime_drain(queue, 1)
+    Engine2dDrawIrRuntimeQueueResult(render: render, runtime_submit: runtime_submit, runtime_drain: runtime_drain, queued_for_gpu: queued_for_gpu)
+
 fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     var rendered = 0
@@ -92,3 +146,9 @@ fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposi
         if batch.embedding.clip:
             engine.clear_clip()
     _engine2d_draw_ir_result_from_composition_plan(plan, rendered, skipped, engine.read_pixels())
+
+export Engine2dDrawIrAdvResult
+export Engine2dDrawIrRuntimeQueueResult
+export engine2d_draw_ir_adv_batch
+export engine2d_draw_ir_adv_batch_runtime_queue
+export engine2d_draw_ir_adv_composition

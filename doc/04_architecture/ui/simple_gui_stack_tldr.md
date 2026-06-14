@@ -85,6 +85,35 @@ Host input
 - Simple2D hook: `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` accepts
   Draw IR through Engine2D with CPU fallback metadata and pixel readback.
 - Engine2D split contract: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+- Host/GPU event-flow evidence uses
+  `src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` for event
+  decision/submit/receipt evidence and
+  `src/lib/gc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl` for Draw
+  IR routing. Unresolved targets, stale target-cache events, and host-semantic
+  mutation stay on host; coarse render/effect batches may queue to GPU.
+- Web-render artifact diagnostics now carry queue submit/drain status, packet
+  id, drained count, and reason through `WebRenderArtifact.queue_*`; browser
+  frames mirror those fields as `BrowserBackend.last_artifact_queue_*`.
+- Production status is split: adapter evidence proves routing decisions,
+  runtime queue emission proves packets/counters/drain status, backend readback
+  proves backend-specific submit/sync/readback, and full GUI/web production
+  requires a completed frame bridge from GUI/web event queues to runtime queue
+  drain plus backend receipt. The current `BrowserBackend.render_frame`
+  regression still stalls in the shared pixel artifact path, so queue metadata
+  propagation is diagnostic evidence only.
+- Current backend readback reports: Vulkan Engine2D and CUDA generated 2D pass;
+  Linux Metal and ROCm/HIP generated 2D are typed unavailable. These are backend
+  fixtures, not proof that `src/app/ui.browser/backend.spl` drains GUI/web
+  frames through the host/GPU runtime queue.
+- Production GUI/web GPU rendering is fail-closed: adapter summaries, runtime
+  queue emit/drain, and backend readback are separate evidence layers until a
+  single GUI/web run proves event queue -> runtime packet -> backend submit ->
+  drain/readback receipt.
+- Current runtime gaps: interpreter GPU packets emit `backend_code=0` and drain
+  as `UNAVAILABLE`; real backend handles are not plumbed; `SUBMITTED` exists
+  but drain jumps to `COMPLETED`/`UNAVAILABLE`; interpreter lane `END` is not
+  exception-safe; Rust/C capacity is `1024` but backpressure, error-path, and
+  real-backend-handle tests are still required.
 - Pure Simple GUI/default Simple2D rendering enters through the shared Engine2D
   backend lane planner. GUI code should not bypass the lane planner with direct
   GPU calls.

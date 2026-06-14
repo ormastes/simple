@@ -939,10 +939,8 @@ impl Lowerer {
         for item in &ast_module.items {
             if let Node::Function(f) = item {
                 if f.params.iter().any(|p| p.default.is_some()) {
-                    self.fn_param_defaults.insert(
-                        f.name.clone(),
-                        f.params.iter().map(|p| p.default.clone()).collect(),
-                    );
+                    self.fn_param_defaults
+                        .insert(f.name.clone(), f.params.iter().map(|p| p.default.clone()).collect());
                 }
             }
         }

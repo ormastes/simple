@@ -715,11 +715,9 @@ impl ExecCore {
             })
         });
         if has_generator {
-            return Err(
-                "JIT does not support generator functions (for-in over gen fn); \
+            return Err("JIT does not support generator functions (for-in over gen fn); \
                  falling back to interpreter"
-                    .to_string(),
-            );
+                .to_string());
         }
 
         // Select JIT backend based on execution mode
@@ -902,9 +900,7 @@ mod tests {
     /// out early and let the interpreter fallback handle it.
     #[test]
     fn generator_yield_detected_in_mir_module() {
-        use simple_compiler::mir::{
-            MirBlock, MirFunction, MirInst, MirModule, VReg,
-        };
+        use simple_compiler::mir::{MirBlock, MirFunction, MirInst, MirModule, VReg};
         use simple_parser::ast::Visibility;
         use simple_compiler::hir::TypeId;
 
@@ -913,23 +909,18 @@ mod tests {
         let block = func.blocks.first_mut().expect("entry block exists");
         block.instructions.push(MirInst::Yield { value: VReg(0) });
 
-        let has_generator = func.blocks.iter().any(|b| {
-            b.instructions
-                .iter()
-                .any(|i| matches!(i, MirInst::Yield { .. }))
-        });
-        assert!(
-            has_generator,
-            "function with Yield should be detected as a generator"
-        );
+        let has_generator = func
+            .blocks
+            .iter()
+            .any(|b| b.instructions.iter().any(|i| matches!(i, MirInst::Yield { .. })));
+        assert!(has_generator, "function with Yield should be detected as a generator");
 
         // A plain function (no Yield) must NOT trigger the fallback.
         let plain = MirFunction::new("main".to_string(), TypeId::ANY, Visibility::Public);
-        let plain_has_generator = plain.blocks.iter().any(|b| {
-            b.instructions
-                .iter()
-                .any(|i| matches!(i, MirInst::Yield { .. }))
-        });
+        let plain_has_generator = plain
+            .blocks
+            .iter()
+            .any(|b| b.instructions.iter().any(|i| matches!(i, MirInst::Yield { .. })));
         assert!(
             !plain_has_generator,
             "plain function without Yield should not be flagged as a generator"

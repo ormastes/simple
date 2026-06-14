@@ -2259,24 +2259,124 @@ impl LlvmBackend {
                         suffix_match()?
                     };
 
-                    let fallback_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                        all_args.iter().map(|_| i64_type.into()).collect();
-                    let fallback_fn_type = i64_type.fn_type(&fallback_param_types, false);
                     let fallback_name = resolved
                         .map(|n| n.replace("_dot_", "."))
                         .unwrap_or_else(|| dotted_name.clone());
-                    let func =
-                        called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None));
+                    let native_c_process_run = fallback_name == "rt_process_run"
+                        || func_name == "rt_process_run"
+                        || dotted_name == "rt_process_run";
+                    let native_c_dir_create = fallback_name == "rt_dir_create"
+                        || func_name == "rt_dir_create"
+                        || dotted_name == "rt_dir_create";
+                    let runtime_spec = crate::codegen::runtime_sffi::RUNTIME_FUNCS
+                        .iter()
+                        .find(|spec| spec.name == fallback_name || spec.name == func_name || spec.name == dotted_name)
+                        .filter(|_| !native_c_process_run && !native_c_dir_create);
+                    let fallback_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = runtime_spec
+                        .map(|spec| {
+                            spec.params
+                                .iter()
+                                .map(|ty| {
+                                    if *ty == cranelift_codegen::ir::types::I8 {
+                                        self.context_ref().i8_type().into()
+                                    } else if *ty == cranelift_codegen::ir::types::I32 {
+                                        self.context_ref().i32_type().into()
+                                    } else {
+                                        i64_type.into()
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_else(|| all_args.iter().map(|_| i64_type.into()).collect());
+                    let fallback_fn_type = if let Some(spec) = runtime_spec {
+                        match spec.returns {
+                            [] => self.context_ref().void_type().fn_type(&fallback_param_types, false),
+                            [ret] if *ret == cranelift_codegen::ir::types::I8 => {
+                                self.context_ref().i8_type().fn_type(&fallback_param_types, false)
+                            }
+                            [ret] if *ret == cranelift_codegen::ir::types::I32 => {
+                                self.context_ref().i32_type().fn_type(&fallback_param_types, false)
+                            }
+                            _ => i64_type.fn_type(&fallback_param_types, false),
+                        }
+                    } else {
+                        i64_type.fn_type(&fallback_param_types, false)
+                    };
+                    let func = if let Some(spec) = runtime_spec {
+                        module
+                            .get_function(spec.name)
+                            .unwrap_or_else(|| module.add_function(spec.name, fallback_fn_type, None))
+                    } else {
+                        called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None))
+                    };
                     let declared_param_types = func.get_type().get_param_types();
-                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                    let mut raw_arg_vals: Vec<inkwell::values::IntValue> = Vec::new();
                     for (i, arg) in all_args.iter().enumerate() {
                         let val = self.get_vreg(arg, vreg_map)?;
                         let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
-                        arg_vals.push(casted.into());
+                        let mut int_val = casted.into_int_value();
+                        if native_c_process_run && i == 1 {
+                            int_val = builder
+                                .build_and(
+                                    int_val,
+                                    i64_type.const_int(!0x7_u64, false),
+                                    "process_args_raw_ptr",
+                                )
+                                .map_err(|e| crate::error::factory::llvm_build_failed("process args untag", &e))?;
+                        }
+                        raw_arg_vals.push(int_val);
+                    }
+                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                    if native_c_dir_create && raw_arg_vals.len() == 2 {
+                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
+                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            module.add_function("rt_string_data", fn_type, None)
+                        });
+                        let path_ptr = builder
+                            .build_call(rt_string_data, &[raw_arg_vals[0].into()], "dir_path_ptr")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        arg_vals.push(path_ptr.into());
+                        arg_vals.push(raw_arg_vals[1].into());
+                    } else if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(
+                        runtime_spec.map(|spec| spec.name).unwrap_or(&fallback_name),
+                    ) {
+                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
+                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            module.add_function("rt_string_data", fn_type, None)
+                        });
+                        let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
+                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                            module.add_function("rt_string_len", fn_type, None)
+                        });
+                        for (i, val) in raw_arg_vals.iter().enumerate() {
+                            if text_indices.contains(&i) {
+                                let ptr = builder
+                                    .build_call(rt_string_data, &[(*val).into()], "sffi_text_ptr")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                                let len = builder
+                                    .build_call(rt_string_len, &[(*val).into()], "sffi_text_len")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                                arg_vals.push(ptr.into());
+                                arg_vals.push(len.into());
+                            } else {
+                                arg_vals.push((*val).into());
+                            }
+                        }
+                    } else {
+                        arg_vals.extend(raw_arg_vals.iter().map(|v| (*v).into()));
                     }
                     let declared_params = func.get_type().get_param_types().len();
-                    let call_site = if declared_params != all_args.len() {
+                    let call_site = if declared_params != arg_vals.len() {
                         let fn_ptr = func.as_global_value().as_pointer_value();
                         builder
                             .build_indirect_call(fallback_fn_type, fn_ptr, &arg_vals, "mcall")

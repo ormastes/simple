@@ -5,9 +5,14 @@
 # importing the low-level Simple Web renderer directly.
 
 use std.common.ui.web_render_api.{
+    WEB_RENDER_QUEUE_STATUS_DRAINED,
+    WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED,
+    WEB_RENDER_QUEUE_STATUS_SUBMITTED,
+    WEB_RENDER_QUEUE_STATUS_UNAVAILABLE,
     WEB_RENDER_TARGET_PURE_SIMPLE,
     WebRenderArtifact,
     WebRenderRequest,
+    web_render_artifact_with_runtime_queue,
     web_render_dynamic_region_count,
     web_render_engine2d_rendered_artifact,
     web_render_full_html,
@@ -21,6 +26,54 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_resolved_engine2d_backend_name
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{SimpleWebEngine2DStaticPixelCache}
+use std.gc_async_mut.gpu.engine2d.backend_lane.{
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    engine2d_host_gpu_lane_schedule
+}
+use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    engine2d_host_gpu_event,
+    engine2d_host_gpu_event_handler_decision,
+    engine2d_host_gpu_event_submit_to_runtime,
+    engine2d_host_gpu_runtime_drain,
+    engine2d_host_gpu_runtime_queue
+}
+
+fn web_render_runtime_queue_backend_code(backend_name: text) -> i64:
+    if backend_name == "metal":
+        return 1
+    if backend_name == "cuda":
+        return 2
+    if backend_name == "rocm" or backend_name == "hip":
+        return 3
+    if backend_name == "vulkan":
+        return 7
+    0
+
+fn web_render_artifact_with_runtime_queue_evidence(artifact: WebRenderArtifact, backend_name: text) -> WebRenderArtifact:
+    val backend_code = web_render_runtime_queue_backend_code(backend_name)
+    if backend_code <= 0:
+        return artifact
+    val packet_bytes = artifact.viewport_w.to_i64() * artifact.viewport_h.to_i64() * 4
+    val queue = engine2d_host_gpu_runtime_queue(backend_name, backend_code, true, packet_bytes + 4096)
+    val lane_result = engine2d_host_gpu_lane_schedule(
+        ENGINE2D_HOST_GPU_LANE_HOST,
+        ENGINE2D_HOST_GPU_LANE_GPU,
+        "frame_batch",
+        packet_bytes,
+        queue.max_packet_bytes,
+        false,
+        false,
+        true,
+        1
+    )
+    val event = engine2d_host_gpu_event("web-render-frame", ENGINE2D_HOST_GPU_LANE_GPU, "frame_batch", packet_bytes, queue.max_packet_bytes, false, false, false, true)
+    val decision = engine2d_host_gpu_event_handler_decision(event, lane_result)
+    val submit = engine2d_host_gpu_event_submit_to_runtime(queue, decision, lane_result)
+    val drain = if submit.submitted: engine2d_host_gpu_runtime_drain(queue, 1) else: engine2d_host_gpu_runtime_drain(queue, 0)
+    val submit_status = if submit.submitted: WEB_RENDER_QUEUE_STATUS_SUBMITTED else: WEB_RENDER_QUEUE_STATUS_UNAVAILABLE
+    val drain_status = if drain.drained > 0: WEB_RENDER_QUEUE_STATUS_DRAINED else: WEB_RENDER_QUEUE_STATUS_UNAVAILABLE
+    web_render_artifact_with_runtime_queue(artifact, submit_status, drain_status, submit.packet_id, drain.drained, drain.diagnostic)
 
 class WebRenderPixelArtifactCache:
     width: i32
@@ -46,7 +99,8 @@ impl WebRenderPixelArtifactCache:
         if web_render_dynamic_region_count(req) > 0:
             return web_render_html_request_to_pixel_artifact_with_backend(req, full_html, self.backend_name)
         val pixels = self.pixel_cache.pixels_for_html(full_html)
-        web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), pixels), self.resolved_backend_name)
+        val artifact = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), pixels), self.resolved_backend_name)
+        web_render_artifact_with_runtime_queue_evidence(artifact, self.resolved_backend_name)
 
     me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
         self.html_request_to_pixel_artifact(req, web_render_full_html(req))
@@ -71,15 +125,18 @@ pub fn web_render_html_request_to_pixels_with_backend(req: WebRenderRequest, ful
 
 pub fn web_render_request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
     val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, "auto")
-    web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), web_render_request_to_pixels(req)), backend)
+    val artifact = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), web_render_request_to_pixels(req)), backend)
+    web_render_artifact_with_runtime_queue_evidence(artifact, backend)
 
 pub fn web_render_html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
     val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, "auto")
-    web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), web_render_html_request_to_pixels(req, full_html)), backend)
+    val artifact = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), web_render_html_request_to_pixels(req, full_html)), backend)
+    web_render_artifact_with_runtime_queue_evidence(artifact, backend)
 
 pub fn web_render_html_request_to_pixel_artifact_with_backend(req: WebRenderRequest, full_html: text, backend_name: text) -> WebRenderArtifact:
     val backend = web_render_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, backend_name)
-    web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), web_render_html_request_to_pixels_with_backend(req, full_html, backend_name)), backend)
+    val artifact = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), web_render_html_request_to_pixels_with_backend(req, full_html, backend_name)), backend)
+    web_render_artifact_with_runtime_queue_evidence(artifact, backend)
 
 pub fn web_render_pixel_artifact_cache(width: i32, height: i32, backend_name: text) -> WebRenderPixelArtifactCache:
     WebRenderPixelArtifactCache.create(width, height, backend_name)

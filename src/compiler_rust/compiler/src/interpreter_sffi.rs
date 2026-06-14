@@ -611,6 +611,72 @@ unsafe extern "C" fn interp_call_handler(
     let result = with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
+        } else if name.starts_with("rt_host_gpu_lane_") {
+            match name {
+                "rt_host_gpu_lane_event" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_lane_event(&args)
+                }
+                "rt_host_gpu_lane_reset" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_lane_reset(&args)
+                }
+                "rt_host_gpu_lane_event_count" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_lane_event_count(&args)
+                }
+                "rt_host_gpu_lane_begin_count" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_lane_begin_count(&args)
+                }
+                "rt_host_gpu_lane_end_count" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_lane_end_count(&args)
+                }
+                "rt_host_gpu_lane_last_lane" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_lane_last_lane(&args)
+                }
+                "rt_host_gpu_lane_last_phase" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_lane_last_phase(&args)
+                }
+                _ => crate::interpreter::interpreter_extern::call_extern_function_with_values(
+                    name,
+                    &args,
+                    env,
+                    funcs,
+                    classes,
+                    enums,
+                    impl_methods,
+                ),
+            }
+        } else if name.starts_with("rt_host_gpu_queue_") {
+            match name {
+                "rt_host_gpu_queue_reset" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_reset(&args)
+                }
+                "rt_host_gpu_queue_emit" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_emit(&args)
+                }
+                "rt_host_gpu_queue_drain" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_drain(&args)
+                }
+                "rt_host_gpu_queue_packet_count" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_packet_count(&args)
+                }
+                "rt_host_gpu_queue_submitted_count" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_submitted_count(&args)
+                }
+                "rt_host_gpu_queue_completed_count" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_completed_count(&args)
+                }
+                "rt_host_gpu_queue_last_status" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_last_status(&args)
+                }
+                _ => crate::interpreter::interpreter_extern::call_extern_function_with_values(
+                    name,
+                    &args,
+                    env,
+                    funcs,
+                    classes,
+                    enums,
+                    impl_methods,
+                ),
+            }
         } else if name.starts_with("rt_") || name.starts_with("spl_") {
             // Extern declarations routed through InterpCall by the hybrid
             // transform (e.g. JIT-unresolvable rt_torch_* in torch-less

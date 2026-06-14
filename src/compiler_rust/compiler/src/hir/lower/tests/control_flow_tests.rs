@@ -152,10 +152,18 @@ fn test_positional_class_pattern_match_lowering() {
     // Find the first HirStmt::If in the body (the match arm).
     // There may be Let stmts before it (e.g. parameter copies).
     // Its condition must be Bool(true) — NOT a BuiltinCall to rt_enum_check_discriminant.
-    let match_if = func.body.iter().find(|s| matches!(s, HirStmt::If { .. }))
+    let match_if = func
+        .body
+        .iter()
+        .find(|s| matches!(s, HirStmt::If { .. }))
         .unwrap_or_else(|| panic!("expected a HirStmt::If in function body; body: {:?}", func.body));
 
-    let HirStmt::If { condition, then_block, .. } = match_if else { unreachable!() };
+    let HirStmt::If {
+        condition, then_block, ..
+    } = match_if
+    else {
+        unreachable!()
+    };
 
     assert!(
         matches!(condition.kind, HirExprKind::Bool(true)),
@@ -188,10 +196,15 @@ fn test_enum_variant_pattern_condition_still_uses_discriminant() {
     let func = &module.functions[0];
 
     // Find the first HirStmt::If whose condition uses rt_enum_check_discriminant.
-    let match_if = func.body.iter().find(|s| matches!(s, HirStmt::If { .. }))
+    let match_if = func
+        .body
+        .iter()
+        .find(|s| matches!(s, HirStmt::If { .. }))
         .unwrap_or_else(|| panic!("expected a HirStmt::If in function body"));
 
-    let HirStmt::If { condition, .. } = match_if else { unreachable!() };
+    let HirStmt::If { condition, .. } = match_if else {
+        unreachable!()
+    };
 
     let repr = format!("{:?}", condition.kind);
     assert!(

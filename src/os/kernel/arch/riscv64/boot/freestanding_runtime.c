@@ -98,6 +98,10 @@ void rt_free(void *ptr) {
     (void)ptr;
 }
 
+spl_i64 rt_pool_safepoint(void) {
+    return 0;
+}
+
 void *rt_memcpy(void *dst, const void *src, spl_i64 n) {
     unsigned char *d = (unsigned char *)dst;
     const unsigned char *s = (const unsigned char *)src;
@@ -379,6 +383,24 @@ spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value) {
     array->data[array->len] = value;
     array->len = array->len + 1;
     return 1;
+}
+
+spl_i64 rt_array_concat(spl_i64 left_value, spl_i64 right_value) {
+    RtArray *left = rt_as_array(left_value);
+    RtArray *right = rt_as_array(right_value);
+    spl_u64 left_len = left ? left->len : 0ULL;
+    spl_u64 right_len = right ? right->len : 0ULL;
+    spl_i64 out = rt_array_new((spl_i64)(left_len + right_len));
+    if (!rt_as_array(out)) {
+        return rt_nil();
+    }
+    for (spl_u64 i = 0; i < left_len; i = i + 1) {
+        rt_array_push(out, left->data[i]);
+    }
+    for (spl_u64 i = 0; i < right_len; i = i + 1) {
+        rt_array_push(out, right->data[i]);
+    }
+    return out;
 }
 
 spl_i64 rt_index_get(spl_i64 collection, spl_i64 index_value) {
@@ -1259,6 +1281,7 @@ typedef struct RtPciDevice {
 #define RT_VIRTIO_NET_RX_QUEUE 0U
 #define RT_VIRTIO_NET_TX_QUEUE 1U
 #define RT_VIRTIO_NET_HDR_SIZE 10U
+#define RT_VIRTIO_NET_F_MAC (1U << 5)
 #define RT_VIRTQ_DESC_F_NEXT 1U
 #define RT_VIRTQ_DESC_F_WRITE 2U
 #define RT_NET_QUEUE_CAP 256U
@@ -2018,13 +2041,11 @@ spl_i64 rt_net_init(void) {
             rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, 0);
             rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_ACKNOWLEDGE);
             rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER);
-            rt_io_write32(g_rt_net_bar0, RT_VIRTIO_PCI_GUEST_FEATURES, rt_io_read32(g_rt_net_bar0, RT_VIRTIO_PCI_HOST_FEATURES));
-            rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER | RT_VIRTIO_STATUS_FEATURES_OK);
-            if ((rt_io_read8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS) & RT_VIRTIO_STATUS_FEATURES_OK) == 0) {
-                rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_FAILED);
-                g_rt_net_ready = 0;
-                return -3;
-            }
+            rt_io_write32(
+                g_rt_net_bar0,
+                RT_VIRTIO_PCI_GUEST_FEATURES,
+                rt_io_read32(g_rt_net_bar0, RT_VIRTIO_PCI_HOST_FEATURES) & RT_VIRTIO_NET_F_MAC
+            );
             if (rt_setup_virtqueue(g_rt_net_bar0, RT_VIRTIO_NET_RX_QUEUE, &g_rt_rx_desc, &g_rt_rx_avail, &g_rt_rx_used, &g_rt_rx_qsize) < 0) {
                 rt_io_write8(g_rt_net_bar0, RT_VIRTIO_PCI_STATUS, RT_VIRTIO_STATUS_FAILED);
                 g_rt_net_ready = 0;
@@ -2043,7 +2064,7 @@ spl_i64 rt_net_init(void) {
             rt_io_write8(
                 g_rt_net_bar0,
                 RT_VIRTIO_PCI_STATUS,
-                RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER | RT_VIRTIO_STATUS_FEATURES_OK | RT_VIRTIO_STATUS_DRIVER_OK
+                RT_VIRTIO_STATUS_ACKNOWLEDGE | RT_VIRTIO_STATUS_DRIVER | RT_VIRTIO_STATUS_DRIVER_OK
             );
             for (spl_u64 mac_i = 0; mac_i < 6; mac_i = mac_i + 1) {
                 g_rt_net_mac[mac_i] = rt_io_read8(g_rt_net_bar0, RT_VIRTIO_NET_MAC_OFFSET + mac_i);
@@ -2557,6 +2578,42 @@ spl_i64 rt_boot_tcp_take_version_text(spl_i64 fd) {
     }
     uart_line("BTCP VER TIMEOUT");
     return rt_string_new((spl_i64)(spl_u64)"", 0);
+}
+
+spl_i64 rt_boot_tcp_take_version_bytes(spl_i64 fd) {
+    spl_u64 line_end = 0ULL;
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return rt_byte_array_new_len(rt_int(0));
+    }
+    for (spl_u64 polls = 0ULL; polls < 50000ULL; polls = polls + 1ULL) {
+        while (line_end < g_boot_tcp_rx_len) {
+            if (g_boot_tcp_rx_buf[line_end] == '\n') {
+                spl_u64 text_len = line_end;
+                spl_u64 consume = line_end + 1ULL;
+                if (text_len > 0ULL && g_boot_tcp_rx_buf[text_len - 1ULL] == '\r') {
+                    text_len = text_len - 1ULL;
+                }
+                spl_i64 out = rt_byte_array_new_len(rt_int((spl_i64)text_len));
+                spl_i64 *data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
+                if (!data) {
+                    return rt_byte_array_new_len(rt_int(0));
+                }
+                for (spl_u64 i = 0ULL; i < text_len; i = i + 1ULL) {
+                    data[i] = rt_int((spl_i64)g_boot_tcp_rx_buf[i]);
+                }
+                spl_u64 unread = g_boot_tcp_rx_len - consume;
+                for (spl_u64 i = 0ULL; i < unread; i = i + 1ULL) {
+                    g_boot_tcp_rx_buf[i] = g_boot_tcp_rx_buf[consume + i];
+                }
+                g_boot_tcp_rx_len = unread;
+                g_boot_tcp_rx_off = 0ULL;
+                return out;
+            }
+            line_end = line_end + 1ULL;
+        }
+        rt_poll_rx_once();
+    }
+    return rt_byte_array_new_len(rt_int(0));
 }
 
 spl_i64 rt_boot_tcp_close(spl_i64 fd) {

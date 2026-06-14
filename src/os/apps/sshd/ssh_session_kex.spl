@@ -8,7 +8,7 @@ use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_negotiate_algorithms, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, host_key_set_advertised_algorithms}
 use os.apps.sshd.ssh_kex_core.{ssh_kex_compute_exchange_hash, ssh_derive_keys}
-use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _push_mpint_bytes}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _push_mpint_bytes, curve25519_shared_secret_mpint_bytes}
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_session_helpers.{_u8_at, _slice_range, _bytes_to_hex, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey}
 use os.kernel.log.klog_api.{log_info}
@@ -53,7 +53,7 @@ fn _live_exchange_hash_debug(
     serial_println("[sshd-session] exchash: q_s")
     hash_input = _push_string_live(hash_input, server_public)
     serial_println("[sshd-session] exchash: k")
-    hash_input = _push_mpint_bytes(hash_input, shared_secret)
+    hash_input = _push_mpint_bytes(hash_input, curve25519_shared_secret_mpint_bytes(shared_secret))
     serial_println("[sshd-session] exchash: sha256 input len={hash_input.len()}")
     val digest = rt_tls13_sha256(hash_input)
     serial_println("[sshd-session] exchash: sha256 out len={digest.len()}")
@@ -69,6 +69,15 @@ fn _live_exchange_hash_fast(
     server_public: [u8],
     shared_secret: [u8]
 ) -> [u8]:
+    serial_println("[sshd-session] exchash lens vc={client_version.len()} vs={server_version.len()} ic={client_kexinit.len()} is={server_kexinit.len()} ks={host_key_blob.len()} qc={client_public.len()} qs={server_public.len()} k={shared_secret.len()}")
+    serial_println("[sshd-session] exchash sha vc={_bytes_to_hex(rt_tls13_sha256(client_version))}")
+    serial_println("[sshd-session] exchash sha vs={_bytes_to_hex(rt_tls13_sha256(server_version))}")
+    serial_println("[sshd-session] exchash sha ic={_bytes_to_hex(rt_tls13_sha256(client_kexinit))}")
+    serial_println("[sshd-session] exchash sha is={_bytes_to_hex(rt_tls13_sha256(server_kexinit))}")
+    serial_println("[sshd-session] exchash sha ks={_bytes_to_hex(rt_tls13_sha256(host_key_blob))}")
+    serial_println("[sshd-session] exchash sha qc={_bytes_to_hex(rt_tls13_sha256(client_public))}")
+    serial_println("[sshd-session] exchash sha qs={_bytes_to_hex(rt_tls13_sha256(server_public))}")
+    serial_println("[sshd-session] exchash sha k={_bytes_to_hex(rt_tls13_sha256(shared_secret))}")
     var hash_input: [u8] = []
     hash_input = _push_string_live(hash_input, client_version)
     hash_input = _push_string_live(hash_input, server_version)
@@ -77,7 +86,7 @@ fn _live_exchange_hash_fast(
     hash_input = _push_string_live(hash_input, host_key_blob)
     hash_input = _push_string_live(hash_input, client_public)
     hash_input = _push_string_live(hash_input, server_public)
-    hash_input = _push_mpint_bytes(hash_input, shared_secret)
+    hash_input = _push_mpint_bytes(hash_input, curve25519_shared_secret_mpint_bytes(shared_secret))
     rt_tls13_sha256(hash_input)
 
 fn _live_bootstrap_x25519_private_key() -> [u8]:
@@ -140,29 +149,41 @@ fn _rv64_live_x25519_public_pure_probe(server_private: [u8]) -> [u8]:
     out
 
 fn _rv64_live_x25519_public_alpha(server_private: [u8]) -> [u8]:
-    dual_backend_run_bytes(
+    val runtime_out = _rv64_live_x25519_public_runtime_probe(server_private)
+    val pure_out = _rv64_live_x25519_public_pure_probe(server_private)
+    val selected = dual_backend_choose_bytes(
         "curve25519",
         "rv64_live_public",
-        dual_backend_default_config(),
+        dual_backend_alpha_default_mode(),
         [
             "priv_len=" + server_private.len().to_text()
         ],
-        fn(): _rv64_live_x25519_public_runtime_probe(server_private),
-        fn(): _rv64_live_x25519_public_pure_probe(server_private)
+        runtime_out,
+        pure_out
     )
+    if not dual_backend_bytes_equal(runtime_out, pure_out):
+        serial_println("[sshd-session] x25519 public alpha mismatch: refusing runtime output")
+        return []
+    selected
 
 fn _rv64_live_x25519_shared_alpha(server_private: [u8], client_public: [u8]) -> [u8]:
-    dual_backend_run_bytes(
+    val runtime_out = rt_tls13_x25519_shared_secret(server_private, client_public)
+    val pure_out = x25519(server_private, client_public)
+    val selected = dual_backend_choose_bytes(
         "curve25519",
         "rv64_live_shared",
-        dual_backend_default_config(),
+        dual_backend_alpha_default_mode(),
         [
             "priv_len=" + server_private.len().to_text(),
             "pub_len=" + client_public.len().to_text()
         ],
-        fn(): rt_tls13_x25519_shared_secret(server_private, client_public),
-        fn(): x25519(server_private, client_public)
+        runtime_out,
+        pure_out
     )
+    if not dual_backend_bytes_equal(runtime_out, pure_out):
+        serial_println("[sshd-session] x25519 shared alpha mismatch: refusing runtime output")
+        return []
+    selected
 
 
 fn _derive_session_x25519_private_key(host_seed: [u8]?, client_public: [u8], client_kexinit_payload: [u8]) -> [u8]:
@@ -564,6 +585,7 @@ impl SshSession:
         log_info("[app.sshd] " + "[sshd-session] exchange hash len={exchange_hash.len()}")
         if using_live_openssh_profile:
             serial_println("[sshd-session] exchange hash len={exchange_hash.len()}")
+            serial_println("[sshd-session] exchange hash={_bytes_to_hex(exchange_hash)}")
         else:
             serial_println("[sshd-session] exchange hash={_bytes_to_hex(exchange_hash)}")
 
@@ -592,7 +614,7 @@ impl SshSession:
                 val runtime_sig = ed25519_sign_live_runtime_only(stable_seed, stable_pub, stable_hash)
                 serial_println("[sshd-session] ed25519 alpha runtime done len={runtime_sig.len()}")
                 serial_println("[sshd-session] ed25519 alpha pure start")
-                val pure_sig = ed25519_sign_live_pure_fixed_rfc8032_test1(stable_pub, stable_hash)
+                val pure_sig = ed25519_sign_live_pure_only(stable_seed, stable_pub, stable_hash)
                 serial_println("[sshd-session] ed25519 alpha pure done len={pure_sig.len()}")
                 sig_raw = dual_backend_choose_bytes(
                     "ed25519",
@@ -612,6 +634,8 @@ impl SshSession:
             else:
                 sig_raw = ed25519_sign(stable_seed, stable_pub, stable_hash)
             serial_println("[sshd-session] host ed25519 sign pure len={sig_raw.len()}")
+            if using_live_openssh_profile:
+                serial_println("[sshd-session] host ed25519 sig raw={_bytes_to_hex(sig_raw)}")
             if sig_raw.len() != 64:
                 log_info("[app.sshd] " + "[sshd-session] host key signing err")
                 self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "host key signing failed")

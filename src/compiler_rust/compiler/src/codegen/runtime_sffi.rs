@@ -36,6 +36,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
     if name.starts_with("rt_vec_")
         || name.starts_with("rt_neighbor_load")
         || name.starts_with("rt_gpu_")
+        || name.starts_with("rt_host_gpu_")
         || name.starts_with("rt_vk_")
         || name.starts_with("rt_metal_")
         || name.starts_with("rt_cranelift_")
@@ -819,6 +820,20 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_gpu_shared_alloc", &[I64], &[I64]), // size -> ptr
     RuntimeFuncSpec::new("rt_gpu_shared_reset", &[], &[]),       // () -> ()
+    RuntimeFuncSpec::new("rt_host_gpu_lane_event", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_lane_reset", &[], &[]),
+    RuntimeFuncSpec::new("rt_host_gpu_lane_event_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_lane_begin_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_lane_end_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_lane_last_lane", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_lane_last_phase", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_reset", &[], &[]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_emit", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_drain", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_packet_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_submitted_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_completed_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_last_status", &[], &[I64]),
     // =========================================================================
     // GPU kernel launch
     // =========================================================================
@@ -1168,14 +1183,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Process execution
     // =========================================================================
-    // rt_process_run(cmd_ptr, cmd_len, args) -> RuntimeValue (tuple of stdout, stderr, exit_code)
-    RuntimeFuncSpec::new("rt_process_run", &[I64, I64, I64], &[I64]),
-    // rt_process_spawn(cmd_ptr, cmd_len, args) -> pid (i64)
-    RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64, I64], &[I64]),
-    // rt_process_execute(cmd_ptr, cmd_len, args) -> exit_code (i32)
-    RuntimeFuncSpec::new("rt_process_execute", &[I64, I64, I64], &[I32]),
-    // rt_process_run_timeout(cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (tuple of stdout, stderr, exit_code)
-    RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
+    // Native libsimple_runtime.a process functions use C strings and SplArray pointers.
+    RuntimeFuncSpec::new("rt_process_run", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_execute", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64], &[I64]),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
@@ -1456,7 +1468,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_mmap_read_text_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
-    RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64], &[I8]), // path, content -> bool
     RuntimeFuncSpec::new("rt_file_fsync", &[I64, I64], &[I8]),         // path -> bool
     RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),  // path -> bool, prefer write-at cache
     RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),        // text -> i64 (CRC32 checksum)
@@ -1471,7 +1483,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_hash_sha256", &[I64, I64], &[I64]),                 // path -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]),             // old, new -> bool
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]),        // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64], &[I8]),                  // path, content -> bool
     RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),                  // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]), // ptr, len -> RuntimeValue (byte array)
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
@@ -1481,8 +1493,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Directory Operations
     // =========================================================================
-    RuntimeFuncSpec::new("rt_dir_create", &[I64, I64], &[I8]), // path -> bool
-    RuntimeFuncSpec::new("rt_dir_create_all", &[I64, I64], &[I8]), // path -> bool
+    RuntimeFuncSpec::new("rt_dir_create", &[I64, I8], &[I8]), // path, recursive -> bool
+    RuntimeFuncSpec::new("rt_dir_create_all", &[I64], &[I8]), // path -> bool
     RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]),  // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64], &[I8]), // path -> bool
     RuntimeFuncSpec::new("rt_dir_remove_all", &[I64, I64], &[I8]), // path -> bool

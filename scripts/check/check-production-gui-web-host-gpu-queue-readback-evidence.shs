@@ -1,0 +1,264 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/production_gui_web_host_gpu_queue_readback}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_host_gpu_queue_readback_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-./bin/simple}"
+ENV_PATH="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$ENV_PATH" "$REPORT_PATH"
+
+field_of() {
+    key="$1"
+    file="$2"
+    if [ -s "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+append_env() {
+    key="$1"
+    value="$2"
+    printf '%s=%s\n' "$key" "$value" >>"$ENV_PATH"
+}
+
+is_positive_int() {
+    value="${1:-}"
+    case "$value" in
+        '' | *[!0-9]*) return 1 ;;
+        0) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+normalize_backend_verdict() {
+    name="$1"
+    status="$2"
+    reason="$3"
+    case "$status" in
+        pass)
+            printf '%s\n' "pass"
+            ;;
+        unavailable)
+            case "$name:$reason" in
+                metal:* | rocm:*)
+                    printf '%s\n' "host-unavailable"
+                    ;;
+                vulkan:missing-* | cuda:missing-*)
+                    printf '%s\n' "host-unavailable"
+                    ;;
+                *)
+                    printf '%s\n' "unavailable"
+                    ;;
+            esac
+            ;;
+        *)
+            printf '%s\n' "fail"
+            ;;
+    esac
+}
+
+run_child() {
+    name="$1"
+    script="$2"
+    status_key="$3"
+    reason_key="$4"
+    case_dir="$BUILD_DIR/$name"
+    mkdir -p "$case_dir"
+    set +e
+    BUILD_DIR="$case_dir/build" SIMPLE_VULKAN_READBACK_WORK_DIR="$case_dir/build" REPORT_PATH="$case_dir/report.md" sh "$script" >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    code=$?
+    set -e
+    status="$(field_of "$status_key" "$case_dir/stdout.env")"
+    reason="$(field_of "$reason_key" "$case_dir/stdout.env")"
+    if [ -z "${status:-}" ] && [ -s "$case_dir/build/evidence.env" ]; then
+        status="$(field_of "$status_key" "$case_dir/build/evidence.env")"
+        reason="$(field_of "$reason_key" "$case_dir/build/evidence.env")"
+    fi
+    verdict="$(normalize_backend_verdict "$name" "${status:-missing}" "${reason:-missing}")"
+    append_env "readback_${name}_exit_code" "$code"
+    append_env "readback_${name}_status" "${status:-missing}"
+    append_env "readback_${name}_reason" "${reason:-missing}"
+    append_env "readback_${name}_verdict" "$verdict"
+    append_env "readback_${name}_report" "$case_dir/report.md"
+}
+
+write_queue_probe() {
+    cat >"$BUILD_DIR/queue_probe.spl" <<'SPL'
+extern fn rt_host_gpu_queue_reset()
+extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_code: i64) -> i64
+extern fn rt_host_gpu_queue_drain(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_packet_count() -> i64
+extern fn rt_host_gpu_queue_submitted_count() -> i64
+extern fn rt_host_gpu_queue_completed_count() -> i64
+extern fn rt_host_gpu_queue_last_status() -> i64
+
+fn main() -> i32:
+    rt_host_gpu_queue_reset()
+    val unavailable_packet = rt_host_gpu_queue_emit(2, 1, 512, 0)
+    val unavailable_queued_status = rt_host_gpu_queue_last_status()
+    val unavailable_drained = rt_host_gpu_queue_drain(4)
+    val unavailable_status = rt_host_gpu_queue_last_status()
+    print("queue_zero_backend_packet_id=" + unavailable_packet.to_text())
+    print("queue_zero_backend_queued_status=" + unavailable_queued_status.to_text())
+    print("queue_zero_backend_drained=" + unavailable_drained.to_text())
+    print("queue_zero_backend_last_status=" + unavailable_status.to_text())
+
+    rt_host_gpu_queue_reset()
+    val backend_packet = rt_host_gpu_queue_emit(2, 1, 512, 7)
+    val backend_queued_status = rt_host_gpu_queue_last_status()
+    val backend_drained = rt_host_gpu_queue_drain(4)
+    val backend_status = rt_host_gpu_queue_last_status()
+    print("queue_nonzero_backend_packet_id=" + backend_packet.to_text())
+    print("queue_nonzero_backend_queued_status=" + backend_queued_status.to_text())
+    print("queue_nonzero_backend_drained=" + backend_drained.to_text())
+    print("queue_nonzero_backend_packet_count=" + rt_host_gpu_queue_packet_count().to_text())
+    print("queue_nonzero_backend_submitted_count=" + rt_host_gpu_queue_submitted_count().to_text())
+    print("queue_nonzero_backend_completed_count=" + rt_host_gpu_queue_completed_count().to_text())
+    print("queue_nonzero_backend_last_status=" + backend_status.to_text())
+    return 0
+SPL
+}
+
+run_queue_probe() {
+    write_queue_probe
+    set +e
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run "$BUILD_DIR/queue_probe.spl" --mode=interpreter >"$BUILD_DIR/queue_probe.env" 2>"$BUILD_DIR/queue_probe.err"
+    code=$?
+    set -e
+    append_env "queue_probe_exit_code" "$code"
+    for key in \
+        queue_zero_backend_packet_id queue_zero_backend_queued_status queue_zero_backend_drained queue_zero_backend_last_status \
+        queue_nonzero_backend_packet_id queue_nonzero_backend_queued_status queue_nonzero_backend_drained \
+        queue_nonzero_backend_packet_count queue_nonzero_backend_submitted_count queue_nonzero_backend_completed_count \
+        queue_nonzero_backend_last_status
+    do
+        append_env "$key" "$(field_of "$key" "$BUILD_DIR/queue_probe.env")"
+    done
+}
+
+run_existing_runtime_spec() {
+    set +e
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" test test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl --mode=interpreter >"$BUILD_DIR/draw_ir_runtime_queue_spec.out" 2>"$BUILD_DIR/draw_ir_runtime_queue_spec.err"
+    code=$?
+    set -e
+    append_env "draw_ir_runtime_queue_spec_exit_code" "$code"
+}
+
+audit_capacity_and_status() {
+    c_capacity="$(sed -n 's/^#define RT_HOST_GPU_QUEUE_CAPACITY //p' src/runtime/runtime_native.c | tail -n 1)"
+    rust_capacity="$(sed -n 's/^pub const RT_HOST_GPU_QUEUE_CAPACITY: usize = \\([0-9][0-9]*\\);/\\1/p' src/compiler_rust/runtime/src/host_gpu_lane.rs | tail -n 1)"
+    submitted_assignments="$(rg -n 'last_status.*RT_HOST_GPU_QUEUE_STATUS_SUBMITTED|RT_HOST_GPU_QUEUE_STATUS_SUBMITTED.*last_status' src/compiler_rust/runtime/src/host_gpu_lane.rs src/runtime/runtime_native.c | wc -l | tr -d ' ')"
+    concrete_handle_fields="$(rg -n 'host_gpu_queue_.*handle|backend_handle|runtime_handle' src/compiler_rust/runtime/src/host_gpu_lane.rs src/runtime/runtime_native.c | wc -l | tr -d ' ')"
+    append_env "queue_c_capacity" "${c_capacity:-missing}"
+    append_env "queue_rust_capacity" "${rust_capacity:-missing}"
+    if [ -n "${c_capacity:-}" ] && [ "$c_capacity" = "${rust_capacity:-}" ]; then
+        append_env "queue_capacity_parity_status" "pass"
+    else
+        append_env "queue_capacity_parity_status" "gap"
+    fi
+    append_env "queue_submitted_status_assignment_count" "$submitted_assignments"
+    if [ "$submitted_assignments" = "0" ]; then
+        append_env "queue_submitted_status_usage" "unused"
+    else
+        append_env "queue_submitted_status_usage" "used"
+    fi
+    append_env "queue_concrete_backend_handle_field_count" "$concrete_handle_fields"
+    if [ "$concrete_handle_fields" = "0" ]; then
+        append_env "queue_concrete_backend_handle_status" "missing"
+    else
+        append_env "queue_concrete_backend_handle_status" "present"
+    fi
+}
+
+status_of() {
+    field_of "$1" "$BUILD_DIR/evidence.env"
+}
+
+run_queue_probe
+run_existing_runtime_spec
+run_child "vulkan" "scripts/check/check-vulkan-engine2d-readback.shs" "vulkan_engine2d_readback_status" "vulkan_engine2d_readback_reason"
+run_child "cuda" "scripts/check/check-cuda-generated-2d-readback.shs" "cuda_generated_2d_readback_status" "cuda_generated_2d_readback_reason"
+run_child "metal" "scripts/check/check-metal-generated-2d-readback.shs" "metal_generated_2d_readback_status" "metal_generated_2d_readback_reason"
+run_child "rocm" "scripts/check/check-rocm-generated-2d-readback.shs" "rocm_generated_2d_readback_status" "rocm_generated_2d_readback_reason"
+audit_capacity_and_status
+
+queue_emit_status="fail"
+queue_zero_backend_status="fail"
+queue_nonzero_backend_drain_status="fail"
+if [ "$(status_of queue_probe_exit_code)" = "0" ] && is_positive_int "$(status_of queue_zero_backend_packet_id)" && is_positive_int "$(status_of queue_nonzero_backend_packet_id)"; then
+    queue_emit_status="pass"
+fi
+if [ "$(status_of queue_zero_backend_drained)" = "1" ] && [ "$(status_of queue_zero_backend_last_status)" = "4" ]; then
+    queue_zero_backend_status="unavailable"
+fi
+if [ "$(status_of queue_nonzero_backend_drained)" = "1" ] && [ "$(status_of queue_nonzero_backend_last_status)" = "3" ]; then
+    queue_nonzero_backend_drain_status="pass"
+fi
+
+production_runtime_queue_integration_status="fail"
+production_runtime_queue_integration_reason="nonzero-backend-code-drains-completed-but-no-concrete-vulkan-or-cuda-runtime-handle-is-carried-through-queue-packet"
+
+append_env "queue_emit_status" "$queue_emit_status"
+append_env "queue_zero_backend_status" "$queue_zero_backend_status"
+append_env "queue_nonzero_backend_drain_status" "$queue_nonzero_backend_drain_status"
+append_env "production_runtime_queue_integration_status" "$production_runtime_queue_integration_status"
+append_env "production_runtime_queue_integration_reason" "$production_runtime_queue_integration_reason"
+append_env "metal_host_availability" "host-unavailable-linux"
+append_env "metal_host_unavailable_reason" "Metal requires Apple platform runtime; this host is Linux."
+append_env "rocm_host_availability" "host-unavailable-or-runtime-missing"
+append_env "rocm_host_unavailable_reason" "ROCm requires AMD ROCm runtime, device, probe tool, and verified HSACO on host."
+append_env "production_gui_web_host_gpu_queue_readback_status" "fail"
+append_env "production_gui_web_host_gpu_queue_readback_reason" "backend-runtime-queue-integration-not-proven"
+
+{
+    echo "# Production GUI/Web Host-GPU Queue Readback Evidence"
+    echo
+    echo "Date: $(date -u +%F)"
+    echo
+    echo "## Summary"
+    echo
+    echo "- status: $(status_of production_gui_web_host_gpu_queue_readback_status)"
+    echo "- reason: $(status_of production_gui_web_host_gpu_queue_readback_reason)"
+    echo "- queue emission via rt_host_gpu_queue_emit: $queue_emit_status"
+    echo "- backend_code=0 drain result: $queue_zero_backend_status"
+    echo "- nonzero backend-code drain result: $queue_nonzero_backend_drain_status"
+    echo "- production runtime queue integration: $production_runtime_queue_integration_status"
+    echo
+    echo "The queue probe distinguishes emission and drain from backend-capable submit. Interpreter or fallback GPU packets with backend_code=0 drain as typed UNAVAILABLE and are not counted as backend runtime integration. A nonzero backend code drains as COMPLETED, but this wrapper does not treat that as production-ready Vulkan/CUDA queue integration because no concrete backend runtime handle is carried in the queue packet."
+    echo
+    echo "## Readback Matrix"
+    echo
+    echo "| Backend | Child status | Production subcheck | Reason | Report |"
+    echo "| --- | --- | --- | --- | --- |"
+    for name in vulkan cuda metal rocm; do
+        echo "| $name | $(status_of readback_${name}_status) | $(status_of readback_${name}_verdict) | $(status_of readback_${name}_reason) | $(status_of readback_${name}_report) |"
+    done
+    echo
+    echo "## Production Gaps"
+    echo
+    echo "- Rust/C capacity parity: $(status_of queue_capacity_parity_status) (C capacity $(status_of queue_c_capacity), Rust $(status_of queue_rust_capacity))."
+    echo "- SUBMITTED status usage: $(status_of queue_submitted_status_usage) ($(status_of queue_submitted_status_assignment_count) assignments observed outside constants)."
+    echo "- Concrete runtime backend handle carried through queue packet: $(status_of queue_concrete_backend_handle_status) ($(status_of queue_concrete_backend_handle_field_count) matching runtime queue fields observed)."
+    echo "- Metal: $(status_of metal_host_unavailable_reason)"
+    echo "- ROCm: $(status_of rocm_host_unavailable_reason)"
+    echo
+    echo "## TODO Tracker"
+    echo
+    echo "- Attach a concrete Vulkan/CUDA backend runtime handle to queue packets instead of only backend_code."
+    echo "- Align Rust and C queue capacity behavior and add overflow evidence."
+    echo "- Either use RT_HOST_GPU_QUEUE_STATUS_SUBMITTED during drain or remove it from the public status contract."
+    echo "- Add Linux ROCm pass evidence when ROCm runtime, probe, device, and verified HSACO are present."
+    echo
+    echo "## Raw Evidence"
+    echo
+    awk -F= '{ print "- " $1 "=" $2 }' "$ENV_PATH"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+exit 1

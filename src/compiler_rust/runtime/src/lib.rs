@@ -25,6 +25,7 @@ pub mod debug;
 pub mod executor;
 pub mod fiber_identity;
 pub mod gemm_runtime;
+pub mod host_gpu_lane;
 pub mod memory;
 #[cfg(feature = "monoio-net")]
 pub mod monoio_runtime;

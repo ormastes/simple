@@ -1050,9 +1050,7 @@ impl Value {
     pub fn is_nil_like(&self) -> bool {
         match self {
             Value::Nil => true,
-            Value::Enum { enum_name, variant, .. } => {
-                enum_name == enum_names::OPTION && variant == enum_names::NONE
-            }
+            Value::Enum { enum_name, variant, .. } => enum_name == enum_names::OPTION && variant == enum_names::NONE,
             _ => false,
         }
     }

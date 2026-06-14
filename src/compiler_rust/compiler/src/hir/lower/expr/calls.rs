@@ -251,9 +251,7 @@ impl Lowerer {
             | Expr::Symbol(_)
             | Expr::Atom(_) => true,
             Expr::Unary { operand, .. } => Self::is_constant_default(operand),
-            Expr::Binary { left, right, .. } => {
-                Self::is_constant_default(left) && Self::is_constant_default(right)
-            }
+            Expr::Binary { left, right, .. } => Self::is_constant_default(left) && Self::is_constant_default(right),
             _ => false,
         }
     }

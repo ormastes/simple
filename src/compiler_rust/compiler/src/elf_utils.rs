@@ -3,6 +3,7 @@
 //! Supports both ELF (Linux) and COFF (Windows) object formats via the `object` crate.
 
 use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind};
+use simple_runtime::host_gpu_lane;
 use simple_runtime::value;
 
 /// Helper to extract a null-terminated section name from the string table.
@@ -494,6 +495,37 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_dict_clear" => value::rt_dict_clear as *const () as usize,
         "rt_dict_keys" => value::rt_dict_keys as *const () as usize,
         "rt_dict_values" => value::rt_dict_values as *const () as usize,
+
+        // Host/GPU lane marker runtime bridge
+        "rt_host_gpu_lane_event" => host_gpu_lane::rt_host_gpu_lane_event as *const () as usize,
+        "rt_host_gpu_lane_reset" => host_gpu_lane::rt_host_gpu_lane_reset as *const () as usize,
+        "rt_host_gpu_lane_event_count" => host_gpu_lane::rt_host_gpu_lane_event_count as *const () as usize,
+        "rt_host_gpu_lane_begin_count" => host_gpu_lane::rt_host_gpu_lane_begin_count as *const () as usize,
+        "rt_host_gpu_lane_end_count" => host_gpu_lane::rt_host_gpu_lane_end_count as *const () as usize,
+        "rt_host_gpu_lane_last_lane" => host_gpu_lane::rt_host_gpu_lane_last_lane as *const () as usize,
+        "rt_host_gpu_lane_last_phase" => host_gpu_lane::rt_host_gpu_lane_last_phase as *const () as usize,
+        "rt_host_gpu_queue_reset" => host_gpu_lane::rt_host_gpu_queue_reset as *const () as usize,
+        "rt_host_gpu_queue_emit" => host_gpu_lane::rt_host_gpu_queue_emit as *const () as usize,
+        "rt_host_gpu_queue_drain" => host_gpu_lane::rt_host_gpu_queue_drain as *const () as usize,
+        "rt_host_gpu_queue_packet_count" => host_gpu_lane::rt_host_gpu_queue_packet_count as *const () as usize,
+        "rt_host_gpu_queue_submitted_count" => {
+            host_gpu_lane::rt_host_gpu_queue_submitted_count as *const () as usize
+        },
+        "rt_host_gpu_queue_completed_count" => {
+            host_gpu_lane::rt_host_gpu_queue_completed_count as *const () as usize
+        },
+        "rt_host_gpu_queue_last_status" => host_gpu_lane::rt_host_gpu_queue_last_status as *const () as usize,
+
+        // Process operations
+        "rt_process_run" => value::rt_process_run as *const () as usize,
+        "rt_process_run_timeout" => value::rt_process_run_timeout as *const () as usize,
+        "rt_process_run_with_limits" => value::sffi::rt_process_run_with_limits as *const () as usize,
+        "rt_process_spawn" => value::rt_process_spawn as *const () as usize,
+        "rt_process_spawn_async" => value::rt_process_spawn_async as *const () as usize,
+        "rt_process_execute" => value::rt_process_execute as *const () as usize,
+        "rt_process_is_running" => value::rt_process_is_running as *const () as usize,
+        "rt_process_wait" => value::rt_process_wait as *const () as usize,
+        "rt_process_kill" => value::rt_process_kill as *const () as usize,
 
         // Index/slice operations
         "rt_index_get" => simple_runtime::rt_index_get as *const () as usize,

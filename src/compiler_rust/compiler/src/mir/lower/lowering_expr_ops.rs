@@ -59,8 +59,10 @@ impl<'a> MirLowerer<'a> {
                     _ => None,
                 };
                 if let Some(gname) = rhs_global_name {
-                    let variant_name: Option<&str> =
-                        gname.rsplit_once("::").or_else(|| gname.rsplit_once('.')).map(|(_, v)| v);
+                    let variant_name: Option<&str> = gname
+                        .rsplit_once("::")
+                        .or_else(|| gname.rsplit_once('.'))
+                        .map(|(_, v)| v);
                     let is_enum_rhs = variant_name.is_some()
                         && self
                             .type_registry

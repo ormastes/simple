@@ -18,7 +18,8 @@
 
 use os.crypto.ed25519_ops.{EdPoint, fe_neg, fe_is_negative, fe_pow2252m3, fe_sqrt, _fe_sqrt_m1, _ed25519_d, _ed25519_2d, _ed25519_base_point, ed_point_identity, ed_point_add, ed_point_double, ed_point_cselect, ed_scalar_mul, ed_scalar_mul_basepoint, ed_point_encode, ed_point_decode}
 use os.crypto.ed25519_scalar.{sc_reduce, sc_muladd, _bytes_to_limbs32, _sc_sub_L}
-use os.crypto.dual_backend.{DualBackendMode, DualBackendPreference, dual_backend_choose_bytes, dual_backend_default_config}
+use os.crypto.dual_backend.{DualBackendMode, DualBackendPreference, dual_backend_bytes_equal, dual_backend_choose_bytes, dual_backend_default_config, dual_backend_hex}
+use os.crypto.sha512.{sha512}
 # Pure-Simple SHA-512 (FIPS 180-4) — drop-in replacement for the
 # baremetal C `rt_sha512_*` extern that has no interpreter dispatch.
 # Brings `rotr64` into scope transitively for the indexed sha512_bytes lib.
@@ -102,17 +103,29 @@ fn _sha512_modl(data: [u8]) -> [u8]:
     Returns 32-byte scalar.
     """
     val hash = _sha512_u8(data)
-    val reduced = rt_ed25519_sc_reduce_64(hash)
-    if reduced.len() == 32:
-        return reduced
     sc_reduce(hash)
 
 fn _sha512_u8_live(data: [u8]) -> [u8]:
     rt_tls13_sha512_full(data)
 
+fn _sha512_u8_live_pure(data: [u8]) -> [u8]:
+    sha512(data)
+
+fn _sha512_u8_live_checked(label: text, data: [u8]) -> [u8]:
+    val live_hash = _sha512_u8_live(data)
+    val pure_hash = _sha512_u8_live_pure(data)
+    if live_hash.len() == 64 and pure_hash.len() == 64:
+        if not dual_backend_bytes_equal(live_hash, pure_hash):
+            serial_println("[ed25519] live sha512 mismatch label=" + label + " len=" + data.len().to_text())
+            serial_println("[ed25519] live sha512=" + dual_backend_hex(live_hash, 64))
+            serial_println("[ed25519] pure sha512=" + dual_backend_hex(pure_hash, 64))
+        return live_hash
+    serial_println("[ed25519] live sha512 invalid label=" + label + " live_len=" + live_hash.len().to_text() + " pure_len=" + pure_hash.len().to_text())
+    live_hash
+
 fn _sha512_modl_live(data: [u8]) -> [u8]:
     serial_println("[ed25519] live modl: sha512 start")
-    val hash = _sha512_u8_live(data)
+    val hash = _sha512_u8_live_checked("modl", data)
     serial_println("[ed25519] live modl: sha512 done")
     serial_println("[ed25519] live modl: reduce start")
     val reduced = rt_ed25519_sc_reduce_64(hash)
@@ -121,6 +134,9 @@ fn _sha512_modl_live(data: [u8]) -> [u8]:
 
 fn _sc_muladd_live(a: [u8], b: [u8], c: [u8]) -> [u8]:
     rt_ed25519_sc_muladd(a, b, c)
+
+fn _sha512_modl_live_pure(data: [u8]) -> [u8]:
+    sc_reduce(_sha512_u8_live_pure(data))
 
 fn _ed25519_nonzero_count(data: [u8]) -> u64:
     var count: u64 = 0
@@ -281,12 +297,9 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     serial_println("[ed25519] sign: done")
     sig
 
-fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
-    val direct_sig = rt_ed25519_sign_seed(private_seed, public_key, message)
-    if direct_sig.len() == 64:
-        return direct_sig
+fn _ed25519_sign_live_runtime_components(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     serial_println("[ed25519] sign: seed sha512 start")
-    val h = _sha512_u8_live(private_seed)
+    val h = _sha512_u8_live_checked("seed", private_seed)
     serial_println("[ed25519] sign: seed sha512 done")
     val a = _ed25519_clamp(h)
 
@@ -347,11 +360,73 @@ fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8
     serial_println("[ed25519] sign: done")
     sig
 
+fn _ed25519_sign_live_runtime(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    val direct_sig = rt_ed25519_sign_seed(private_seed, public_key, message)
+    val component_sig = _ed25519_sign_live_runtime_components(private_seed, public_key, message)
+    if direct_sig.len() == 64 and component_sig.len() == 64:
+        if dual_backend_bytes_equal(direct_sig, component_sig):
+            return direct_sig
+        serial_println("[ed25519] direct runtime sign mismatch: using component runtime path")
+        return component_sig
+    if component_sig.len() == 64:
+        return component_sig
+    direct_sig
+
 fn ed25519_sign_live_runtime_only(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     _ed25519_sign_live_runtime(private_seed, public_key, message)
 
+fn _ed25519_sign_live_pure(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    val h = _sha512_u8_live_pure(private_seed)
+    val a = _ed25519_clamp(h)
+
+    var prefix: [u8] = []
+    var i: u64 = 32
+    while i < 64:
+        prefix.push(_u8_at(h, i))
+        i = i + 1
+
+    var prefix_msg: [u8] = []
+    i = 0
+    while i < prefix.len():
+        prefix_msg.push(_u8_at(prefix, i))
+        i = i + 1
+    i = 0
+    while i < message.len():
+        prefix_msg.push(_u8_at(message, i))
+        i = i + 1
+    val r = _sha512_modl_live_pure(prefix_msg)
+
+    val big_r = ed_scalar_mul_basepoint(r)
+    val r_enc = ed_point_encode(big_r)
+
+    var k_input: [u8] = []
+    i = 0
+    while i < r_enc.len():
+        k_input.push(_u8_at(r_enc, i))
+        i = i + 1
+    i = 0
+    while i < public_key.len():
+        k_input.push(_u8_at(public_key, i))
+        i = i + 1
+    i = 0
+    while i < message.len():
+        k_input.push(_u8_at(message, i))
+        i = i + 1
+    val k = _sha512_modl_live_pure(k_input)
+
+    val s = sc_muladd(k, a, r)
+    var sig: [u8] = []
+    i = 0
+    while i < 64:
+        if i < 32:
+            sig.push(_u8_at(r_enc, i))
+        else:
+            sig.push(_u8_at(s, i - 32))
+        i = i + 1
+    sig
+
 fn ed25519_sign_live_pure_only(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
-    ed25519_sign(private_seed, public_key, message)
+    _ed25519_sign_live_pure(private_seed, public_key, message)
 
 fn ed25519_sign_live(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     val config = dual_backend_default_config()

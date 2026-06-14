@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 4 };
+    pub const CURRENT: Self = Self { major: 1, minor: 5 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -205,6 +205,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_tls13_")
         || name.starts_with("rt_neighbor_load")
         || name.starts_with("rt_gpu_")
+        || name.starts_with("rt_host_gpu_")
         || name.starts_with("rt_cuda_")
         || name.starts_with("rt_vk_")
         || name.starts_with("rt_metal_")
@@ -1433,6 +1434,20 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_gpu_num_groups",
     "rt_gpu_shared_alloc",
     "rt_gpu_shared_reset",
+    "rt_host_gpu_lane_event",
+    "rt_host_gpu_lane_reset",
+    "rt_host_gpu_lane_event_count",
+    "rt_host_gpu_lane_begin_count",
+    "rt_host_gpu_lane_end_count",
+    "rt_host_gpu_lane_last_lane",
+    "rt_host_gpu_lane_last_phase",
+    "rt_host_gpu_queue_reset",
+    "rt_host_gpu_queue_emit",
+    "rt_host_gpu_queue_drain",
+    "rt_host_gpu_queue_packet_count",
+    "rt_host_gpu_queue_submitted_count",
+    "rt_host_gpu_queue_completed_count",
+    "rt_host_gpu_queue_last_status",
     "rt_handle_free",
     "rt_handle_get",
     "rt_handle_is_valid",

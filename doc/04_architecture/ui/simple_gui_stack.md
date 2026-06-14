@@ -334,6 +334,51 @@ handle primitive draw, framebuffer ownership, present, and readback. Processing
 backends handle compute kernels, generated artifacts, filters, and offload.
 Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan, Metal,
 or WebGPU, but GUI code sees only the typed Simple 2D and plugin contracts.
+Host/GPU event ownership is explicit: `host_gpu_event_queue.spl` records the
+event decision, submit, and receipt evidence, and
+`host_gpu_draw_ir_event_flow.spl` keeps unresolved targets, stale target-cache
+events, and host-semantic mutation on the host while allowing coarse Draw IR
+render/effect batches to queue to the GPU lane.
+
+Production status is deliberately split by proof type:
+
+| Layer | Current evidence | Production meaning |
+|---|---|---|
+| Evidence adapter | `src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` and `host_gpu_draw_ir_event_flow.spl` produce deterministic decision, submit, receipt, and Draw IR routing summaries. | Proves host-vs-GPU routing policy and packet-size/fallback classification. It is not by itself proof that a GUI/web frame was drained through a backend. |
+| Runtime queue emission | `target.later(...) gpu` interpreter handling and `engine2d_host_gpu_event_submit_to_runtime` can emit queue packets and expose queue counters/drain status through runtime externs. | Proves packets can enter the host/GPU runtime queue. Native lowering and full Draw IR payload serialization are still required for production parity. |
+| Web artifact diagnostics | `src/lib/common/ui/web_render_api.spl` stores `WebRenderArtifact.queue_*` metadata, `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl` can attach runtime queue evidence for GPU-selected artifacts, and `src/app/ui.browser/backend.spl` mirrors it as `last_artifact_queue_*`. | Proves queue evidence can be carried through the web-render artifact contract. It is still diagnostic propagation unless a full frame completes with one packet and one drain receipt. |
+| Backend readback | Generated/native reports under `doc/09_report/` prove backend-specific readback when the backend is available: Vulkan Engine2D readback is `pass`, CUDA generated 2D readback is `pass`, and Linux Metal/ROCm generated readback is typed `unavailable`. | Proves backend submit/sync/readback only for the reported backend fixtures. It does not prove the GUI/web queue-drain path uses those backends. |
+| GUI/web integration | `src/app/ui.browser/backend.spl` owns a local UI event queue, an Engine2D pixel artifact path, and queue diagnostic fields, but the focused `BrowserBackend.render_frame` regression currently stalls in the shared pixel artifact path after widget-store optional-access fixes. | This is the remaining production gap: GUI/web redraw must complete, connect Draw IR/runtime queue packets to backend drain receipts, and expose typed backend terminal status before accelerated GUI/web rendering can be claimed. |
+
+The current production posture is fail-closed. Adapter summaries, runtime
+queue emit/drain receipts, and Vulkan/CUDA readback reports are valid evidence
+for their own layers, but the GUI/web path must keep reporting unavailable or
+CPU fallback until one ordered run proves GUI/web event queue -> runtime packet
+-> backend submit -> drain/readback receipt.
+
+Known runtime/production gaps:
+
+- Interpreter GPU queue packets currently emit `backend_code=0` and drain as
+  `UNAVAILABLE`, not as a real backend handle submission.
+- Rust and C runtime queues now share a `1024` pending-packet capacity, but
+  production still needs explicit backpressure/overflow tests for the final
+  contract.
+- A `SUBMITTED` status exists, but drain currently reports terminal
+  `COMPLETED` or `UNAVAILABLE` directly instead of exposing an observable
+  submitted-in-flight phase.
+- Interpreter lane `END` accounting is not exception-safe if the lane body
+  errors before normal completion.
+- Real backend handles are not plumbed into runtime packets yet, so queue drain
+  cannot prove backend submission from GUI/web frames.
+- `BrowserBackend.render_frame` currently needs a focused fix for the
+  shared-pixel-artifact stall before its `last_artifact_queue_*` propagation can
+  be release evidence.
+- Backpressure, error-path, and real-backend-handle tests are still missing.
+
+Until the GUI/web queue-drain bridge exists, documentation and test reports must
+say "adapter evidence", "runtime queue emission", or "backend readback" instead
+of "production GUI/web GPU rendering" unless a single run proves all four
+stages in order.
 
 Backend preference has two layers. `backend_full_preference_order()` records the
 stable user-visible order, with explicit native surfaces first:
@@ -426,6 +471,8 @@ dispatch commands and forwards them to the web adapter protocol.
 | WM dispatch | `src/lib/common/ui/wm_runtime_dispatch.spl` | `WmRuntimeDispatchCommand`, `WmRuntimeShellState`, backend-neutral WM command adapter |
 | Engine2D Draw IR | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | `Engine2dDrawIrAdvResult`, first Simple2D-facing Draw IR executor (rect/text, CPU fallback, pixel readback) |
 | Backend lane | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split contract |
+| Host/GPU event queue | `src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` | Host event decision, queue submit, and queue receipt evidence |
+| Host/GPU Draw IR flow | `src/lib/gc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl` | Draw IR event routing into host or GPU queue lanes |
 | DirectX drawing backend | `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl` | D3D11 drawing backend; native on Windows, DXVK/vkd3d→Vulkan on Linux, platform probe + leaf evidence |
 | DXVK/vkd3d ICD shims | `src/lib/nogc_async_mut/gpu/vulkan_icd_sffi.spl` (+ `dxvk_d3d9/10/11.spl`, `vkd3d_d3d12.spl`) | D3D→Vulkan dispatch chain with `leaf=dlopen\|structured` evidence; Linux setup via `scripts/setup/setup-directx-linux.shs` |
 | Renderer capability | `src/app/ui.render/capability.spl` | Implementation-free HTML/CSS/TUI renderer capability metadata |
@@ -476,6 +523,9 @@ Every implementation of this architecture needs evidence for:
 - CPU fallback rendering for every Draw IR feature;
 - plugin fallback reason reporting;
 - pixel/capture/hash evidence for GPU execution claims;
+- host/GPU queue evidence that names the proof layer: adapter decision/submit,
+  runtime queue emission/drain, backend readback, or full GUI/web queue-drain
+  integration;
 - warm redraw latency, input-to-paint latency, max RSS, cache-hit behavior, and
   startup probe cost;
 - focused backend startup-order evidence:

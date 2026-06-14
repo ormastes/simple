@@ -2245,9 +2245,6 @@ fn needs_runtime_value_result_tagging<M: Module>(ctx: &InstrContext<'_, M>, func
 /// runtime SFFI function. Text arguments are RuntimeValue strings that must be
 /// expanded to (ptr, len) pairs when calling the C-ABI SFFI function.
 ///
-/// For example, `rt_process_run(cmd, args)` has text at index 0: the `cmd`
-/// RuntimeValue string must be expanded to `(cmd_ptr, cmd_len)` before calling
-/// the Rust SFFI function `rt_process_run(cmd_ptr, cmd_len, args)`.
 pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         // Print/IO (text → ptr, len)
@@ -2275,10 +2272,8 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_mmap_len"
         | "rt_file_mmap_read_bytes" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
-        "rt_file_write_text"
-        | "rt_file_copy"
+        "rt_file_copy"
         | "rt_file_rename"
-        | "rt_file_append_text"
         | "rt_file_move"
         | "rt_file_wrap_smf_dynlib"
         | "rt_file_extract_smf_dynlib"
@@ -2286,8 +2281,9 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
-        "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all"
-        | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir" => Some(&[0]),
+        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir" => {
+            Some(&[0])
+        }
         "rt_file_find" => Some(&[0, 1]),
 
         // Async I/O driver text arguments
@@ -2298,10 +2294,6 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_path_basename" | "rt_path_dirname" | "rt_path_ext" | "rt_path_absolute" | "rt_path_stem" => Some(&[0]),
         // Path operations (two paths)
         "rt_path_relative" | "rt_path_join" => Some(&[0, 1]),
-
-        // Process execution (cmd is text, args is RuntimeValue array)
-        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" => Some(&[0]),
-        "rt_process_run_timeout" => Some(&[0]),
 
         // Contract checking (func_name is text at different positions)
         "simple_contract_check" => Some(&[2]),
@@ -2362,6 +2354,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 /// These functions accept `*const c_char` and the runtime guarantees null termination.
 pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
+        // Native process functions in libsimple_runtime.a use C strings and
+        // SplArray pointers, not Rust RuntimeValue string ptr/len pairs.
+        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => Some(&[0]),
+        "rt_file_write_text" | "rt_file_append_text" => Some(&[0, 1]),
+        "rt_dir_create" | "rt_dir_create_all" => Some(&[0]),
         "rt_cuda_launch_kernel" => Some(&[1]),
         "rt_cuda_module_load_data" => Some(&[0]),
         // Fast in-memory DB: C functions accept const char* for string params
@@ -2374,6 +2371,15 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_db_update_int" => Some(&[1]),     // pk
         "rt_db_update_text" => Some(&[1, 3]), // pk, value
         "rt_db_put_value_text" => Some(&[3]), // value
+        _ => None,
+    }
+}
+
+fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
+    match func_name {
+        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => {
+            Some((&[0], &[1]))
+        }
         _ => None,
     }
 }
@@ -2430,6 +2436,23 @@ fn expand_text_cstr_args<M: Module>(
             expanded.push(ptr);
         } else {
             expanded.push(val);
+        }
+    }
+    expanded
+}
+
+fn expand_process_c_runtime_args<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    arg_vals: &[cranelift_codegen::ir::Value],
+    cstr_indices: &[usize],
+    array_indices: &[usize],
+) -> Vec<cranelift_codegen::ir::Value> {
+    let mut expanded = expand_text_cstr_args(ctx, builder, arg_vals, cstr_indices);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    for index in array_indices {
+        if let Some(value) = expanded.get_mut(*index) {
+            *value = builder.ins().band(*value, ptr_mask);
         }
     }
     expanded
@@ -2893,6 +2916,8 @@ pub fn compile_call<M: Module>(
         // Two modes: (ptr, len) for Rust-style APIs, or ptr-only for C-string APIs.
         let arg_vals = if sffi_name == "rt_file_write_bytes" {
             expand_file_write_bytes_args(ctx, builder, &arg_vals).unwrap_or(arg_vals)
+        } else if let Some((cstr_indices, array_indices)) = process_c_runtime_arg_indices(sffi_name) {
+            expand_process_c_runtime_args(ctx, builder, &arg_vals, cstr_indices, array_indices)
         } else if let Some(text_indices) = text_arg_indices(sffi_name) {
             expand_text_args(ctx, builder, &arg_vals, text_indices)
         } else if let Some(cstr_indices) = text_cstr_arg_indices(sffi_name) {

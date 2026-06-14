@@ -28,3 +28,10 @@ The stale frontend/semantic blocker is cleared and this helper-proof milestone i
 1. Preserve the exact helper contract when future decode helpers are added; new helper paths should follow the same overlay-bitfield plus field-write pattern.
 2. Extend the helper-driven shell cleanup from bounded dispatch/trap orchestration into the remaining handwritten decode/update islands without reintroducing raw `imem_rdata` reconstruction when a generated helper contract already exists.
 3. Sequence the next milestone around CSR/privilege/MMU/interrupt/full-trap completion, DTB plus firmware handoff, OpenSBI/U-Boot/Linux boot validation, and final ownership handoff to the canonical RV64 Linux RTL lane.
+
+## 2026-06-14 Codex Progress
+
+- Advanced the CSR/privilege portion of the next milestone by fixing RV64GC RTL `MRET` privilege return semantics: `trap64_mret` now reports the saved `mstatus.MPP` target mode before clearing `MPP`, restores `MIE` from `MPIE`, sets `MPIE`, and clears `MPP` to U-mode after return.
+- Added direct integration coverage for S-mode and U-mode `MRET` returns in `test/01_unit/lib/hardware/rv64gc_rtl/core64_integration_spec.spl`.
+- Made `rv64gc_rtl.csr` and `rv64gc_rtl.csr_s` export the constants and helpers imported directly by `trap.spl`, allowing focused module checks to validate the touched trap path.
+- Wired `core64_update` to execute `MRET`, `SRET`, and `SFENCE.VMA` as non-halting SYSTEM instructions: MRET updates PC/privilege/mstatus through `trap64_mret`, SRET updates PC/privilege/sstatus through `trap64_sret` and `trap64_sret_csr`, and SFENCE.VMA advances PC as a fence. Added decode/core integration coverage for these cases.

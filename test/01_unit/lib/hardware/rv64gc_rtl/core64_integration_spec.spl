@@ -38,14 +38,39 @@ requires compiled mode with the RTL simulation harness.
 """
 
 use std.spipe.*
-use std.hardware.rv64gc_rtl.core.{CoreState64, SocBus64, Core64StepResult, core64_init, core64_step, soc_bus64_init}
+use std.hardware.rv64gc_rtl.core.{CoreState64, CoreCombResult64, Core64StepResult, core64_init, core64_update, core64_step}
 use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode64}
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_init, csr64_write}
-use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s_init}
-use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu_sv39_init}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s_init, csr_s64_write}
+use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu_sv39_init, mmu64_tlb_insert}
 use std.hardware.rv64gc_rtl.mul_div.{MulDivState, MulDivResult64, mul_div64_init, mul_div64_step}
 use std.hardware.rv64gc_rtl.trap.{TrapState64, trap64_state_init, trap64_enter, trap64_mret, trap64_sret}
 use std.hardware.rv64gc_rtl.lsu.{LsuResult64, lsu64_access}
+use std.hardware.rv64gc_rtl.pkg.{SocBus64, soc_bus64_init}
+
+
+fn _system_comb(instr: u32, pc: i64) -> CoreCombResult64:
+    val dec = decode64(instr)
+    CoreCombResult64(
+        dec: dec,
+        rs1_data: 0,
+        rs2_data: 0,
+        a0_val: 0,
+        a1_val: 0,
+        alu_result: 0,
+        alu_zero: false,
+        branch_taken: false,
+        branch_target: pc + 4,
+        pc_next: pc + 4,
+        pc_plus4: pc + 4,
+        rd_data: 0,
+        dmem_addr: 0,
+        dmem_wdata: 0,
+        dmem_we: false,
+        dmem_re: false,
+        dmem_width: 0,
+        imem_addr: pc
+    )
 
 
 # ============================================================================
@@ -90,6 +115,12 @@ describe "RV64GC Privilege Modes":
 # ============================================================================
 
 describe "Decode64 SRET and SFENCE.VMA":
+    it "AC-1: decode64 recognizes MRET instruction encoding":
+        # MRET = 0x30200073
+        val mret_instr = 0x30200073
+        val decoded = decode64(mret_instr)
+        expect(decoded.is_mret).to_equal(true)
+
     it "AC-1: decode64 recognizes SRET instruction encoding":
         # SRET = 0x10200073 (funct7=0001000, rs2=00010, rs1=00000, funct3=000, rd=00000, opcode=1110011)
         val sret_instr = 0x10200073
@@ -126,14 +157,68 @@ describe "Trap64 S-mode Delegation":
         expect(result.target_mode).to_equal(1)
 
     it "AC-1: trap64_mret restores previous privilege mode":
-        val csr_m = csr64_init()
+        val csr_m0 = csr64_write(csr64_init(), 0x300, 0x880)
+        val csr_m = csr64_write(csr_m0, 0x341, 0x8000_2000)
         val result = trap64_mret(csr_m)
-        expect(result.target_mode).to_be_less_than(4)
+        expect(result.target_mode).to_equal(1)
+        expect(result.return_pc).to_equal(0x8000_2000)
+        expect(result.csr.mstatus & 0x8).to_equal(0x8)
+        expect(result.csr.mstatus & 0x80).to_equal(0x80)
+        expect(result.csr.mstatus & 0x1800).to_equal(0)
+
+    it "AC-1: trap64_mret can return to U-mode":
+        val csr_m0 = csr64_write(csr64_init(), 0x300, 0x80)
+        val csr_m = csr64_write(csr_m0, 0x341, 0x4000)
+        val result = trap64_mret(csr_m)
+        expect(result.target_mode).to_equal(0)
+        expect(result.return_pc).to_equal(0x4000)
+        expect(result.csr.mstatus & 0x1800).to_equal(0)
 
     it "AC-1: trap64_sret restores previous privilege from sstatus.SPP":
         val csr_s = csr_s_init()
         val result = trap64_sret(csr_s)
         expect(result.target_mode).to_be_less_than(4)
+
+
+# ============================================================================
+# AC-1: Core SYSTEM instruction update (REQ-5)
+# ============================================================================
+
+describe "Core64 SYSTEM trap returns":
+    it "AC-1: core64_update applies MRET to PC, privilege, and mstatus":
+        var state = core64_init(0x1000)
+        val csr_m0 = csr64_write(state.csr_m, 0x300, 0x880)
+        state.csr_m = csr64_write(csr_m0, 0x341, 0x8000_2000)
+        val comb = _system_comb(0x30200073, state.pc)
+        val next = core64_update(state, 0x30200073, comb, 0, 0)
+        expect(next.halt).to_equal(false)
+        expect(next.pc).to_equal(0x8000_2000)
+        expect(next.priv_mode).to_equal(1)
+        expect(next.csr_m.mstatus & 0x8).to_equal(0x8)
+        expect(next.csr_m.mstatus & 0x1800).to_equal(0)
+
+    it "AC-1: core64_update applies SRET to PC, privilege, and sstatus":
+        var state = core64_init(0x1000)
+        state.priv_mode = 1
+        val csr_s0 = csr_s64_write(state.csr_s, 0x100, 0x120)
+        state.csr_s = csr_s64_write(csr_s0, 0x141, 0x8000_3000)
+        val comb = _system_comb(0x10200073, state.pc)
+        val next = core64_update(state, 0x10200073, comb, 0, 0)
+        expect(next.halt).to_equal(false)
+        expect(next.pc).to_equal(0x8000_3000)
+        expect(next.priv_mode).to_equal(1)
+        expect(next.csr_s.sstatus & 0x2).to_equal(0x2)
+        expect(next.csr_s.sstatus & 0x100).to_equal(0)
+
+    it "AC-1: core64_update treats SFENCE.VMA as non-halting fence":
+        var state = core64_init(0x1000)
+        state.mmu = mmu64_tlb_insert(state.mmu, 0x80000, 0x40000, 0xCF)
+        val comb = _system_comb(0x12000073, state.pc)
+        val next = core64_update(state, 0x12000073, comb, 0, 0)
+        expect(next.halt).to_equal(false)
+        expect(next.pc).to_equal(0x1004)
+        expect(next.mmu.tlb_count).to_equal(0)
+        expect(next.mmu.tlb_0.valid).to_equal(false)
 
 
 # ============================================================================

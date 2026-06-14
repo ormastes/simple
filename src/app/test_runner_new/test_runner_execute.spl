@@ -172,6 +172,200 @@ fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileRe
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
+fn spipe_inline_helpers() -> text:
+    "# === spipe inline helpers (compile-mode only) ===\n" +
+    "extern fn rt_bdd_expect_truthy(value)\n\n" +
+    "fn expect(value):\n" +
+    "    rt_bdd_expect_truthy(value)\n\n" +
+    "fn step(description: text):\n" +
+    "    if description == \"\":\n" +
+    "        return\n\n" +
+    "fn pending(name: text):\n" +
+    "    print \"    {name} ... pending\"\n\n" +
+    "fn skip(name: text, reason: text):\n" +
+    "    print \"    {name} ... skipped ({reason})\"\n\n" +
+    "fn skip_it(name: text, block: fn()):\n" +
+    "    print \"    {name} ... skipped (compiled-only)\"\n\n" +
+    "fn check(condition: bool):\n" +
+    "    expect condition\n\n" +
+    "fn check_msg(condition: bool, message: text):\n" +
+    "    if not condition:\n" +
+    "        print \"    check failed: {message}\"\n" +
+    "    expect condition\n\n" +
+    "fn fail_assertion(message: text):\n" +
+    "    print \"    assertion failed: {message}\"\n" +
+    "    expect false\n\n" +
+    "fn fail_test(message: text):\n" +
+    "    fail_assertion(message)\n\n" +
+    "fn assert_eq(a, b):\n" +
+    "    expect a == b\n\n" +
+    "fn assert_ne(a, b):\n" +
+    "    expect a != b\n\n" +
+    "fn assert_true(value):\n" +
+    "    expect value\n\n" +
+    "fn assert_false(value):\n" +
+    "    expect not value\n\n" +
+    "fn assert_nil(value):\n" +
+    "    expect value == nil\n\n" +
+    "fn assert_not_nil(value):\n" +
+    "    expect value != nil\n\n" +
+    "fn pending_on(name: text, deps: text, block: fn()):\n" +
+    "    it(name, block)\n\n" +
+    "fn pending_skip(name: text, deps: text):\n" +
+    "    print \"    {name} ... pending (waiting on: {deps})\"\n" +
+    "# === end spipe inline helpers ===\n"
+
+fn spipe_last_index_of(haystack: text, needle: text) -> i64:
+    if needle.len() == 0 or haystack.len() < needle.len():
+        return -1
+    var idx = haystack.len() - needle.len()
+    while idx >= 0:
+        if haystack.slice(idx, idx + needle.len()) == needle:
+            return idx
+        idx = idx - 1
+    -1
+
+fn spipe_rewrite_infix_expect_line(line: text) -> text:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("expect ") or trimmed.starts_with("expect("):
+        return line
+    val matchers: [text] = ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with"]
+    var i = 0
+    while i < matchers.len():
+        val matcher = matchers[i]
+        val needle = " " + matcher + " "
+        val split_at = trimmed.index_of(needle) ?? -1
+        if split_at >= 0:
+            val actual = trimmed.substring(7, split_at).trim()
+            val expected = trimmed.substring(split_at + needle.len()).trim()
+            if actual.len() == 0 or expected.len() == 0:
+                return line
+            val indent_len = line.len() - line.trim_start().len()
+            val indent = line.substring(0, indent_len)
+            return indent + "expect(" + actual + ")." + matcher + "(" + expected + ")"
+        i = i + 1
+    line
+
+fn spipe_rewrite_method_expect_line(line: text) -> text:
+    val trimmed_start = line.trim_start()
+    if not trimmed_start.starts_with("expect(") and not trimmed_start.starts_with("expect ("):
+        return line
+    val indent_len = line.len() - trimmed_start.len()
+    val indent = line.substring(0, indent_len)
+    val rest_after_expect = trimmed_start.substring(6)
+    val after_open_paren = rest_after_expect.trim_start()
+    if not after_open_paren.starts_with("("):
+        return line
+    val inner = after_open_paren.substring(1)
+    var depth = 1
+    var i = 0
+    var actual_end = -1
+    while i < inner.len():
+        val ch = inner.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                actual_end = i
+                break
+        i = i + 1
+    if actual_end < 0:
+        return line
+    val actual = inner.substring(0, actual_end).trim()
+    val after_actual = inner.substring(actual_end + 1).trim_start()
+    if not after_actual.starts_with("."):
+        return line
+    var negated = false
+    var after_neg = after_actual.substring(1)
+    if after_neg.starts_with("not_()"):
+        val next = after_neg.substring(6).trim_start()
+        if not next.starts_with("."):
+            return line
+        negated = true
+        after_neg = next.substring(1)
+    val matcher_end = after_neg.index_of("(") ?? -1
+    if matcher_end < 0:
+        return line
+    val matcher = after_neg.substring(0, matcher_end)
+    val matcher_args = after_neg.substring(matcher_end + 1)
+    val close_idx = spipe_last_index_of(matcher_args, ")")
+    if close_idx < 0:
+        return line
+    val arg_str = matcher_args.substring(0, close_idx).trim()
+    var form = ""
+    if matcher == "to_equal" or matcher == "to_be":
+        form = if negated: actual + " != " + arg_str else: actual + " == " + arg_str
+    elif matcher == "to_be_nil":
+        form = if negated: actual + " != nil" else: actual + " == nil"
+    elif matcher == "to_be_truthy" or matcher == "to_be_true":
+        form = if negated: "not (" + actual + ")" else: actual
+    elif matcher == "to_be_falsy" or matcher == "to_be_false":
+        form = if negated: actual else: "not (" + actual + ")"
+    elif matcher == "to_be_greater_than":
+        form = if negated: actual + " <= " + arg_str else: actual + " > " + arg_str
+    elif matcher == "to_be_less_than":
+        form = if negated: actual + " >= " + arg_str else: actual + " < " + arg_str
+    elif matcher == "to_be_at_least":
+        form = if negated: actual + " < " + arg_str else: actual + " >= " + arg_str
+    elif matcher == "to_be_at_most":
+        form = if negated: actual + " > " + arg_str else: actual + " <= " + arg_str
+    elif matcher == "to_contain":
+        form = if negated: "not ((" + actual + ").contains(" + arg_str + "))" else: "(" + actual + ").contains(" + arg_str + ")"
+    elif matcher == "to_start_with":
+        form = if negated: "not ((" + actual + ").starts_with(" + arg_str + "))" else: "(" + actual + ").starts_with(" + arg_str + ")"
+    elif matcher == "to_end_with":
+        form = if negated: "not ((" + actual + ").ends_with(" + arg_str + "))" else: "(" + actual + ").ends_with(" + arg_str + ")"
+    elif matcher == "to_have_length":
+        form = if negated: "(" + actual + ").len() != " + arg_str else: "(" + actual + ").len() == " + arg_str
+    elif matcher == "to_be_empty":
+        form = if negated: "(" + actual + ").len() != 0" else: "(" + actual + ").len() == 0"
+    else:
+        return line
+    indent + "expect " + form
+
+fn spipe_brace_delta(line: text) -> i64:
+    var delta = 0
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == "{":
+            delta = delta + 1
+        elif ch == "}":
+            delta = delta - 1
+        i = i + 1
+    delta
+
+fn spipe_is_top_level_start(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or
+    trimmed.starts_with("async fn ") or
+    trimmed.starts_with("static fn ") or
+    trimmed.starts_with("extern fn ") or
+    trimmed.starts_with("class ") or
+    trimmed.starts_with("impl ") or
+    trimmed.starts_with("enum ") or
+    trimmed.starts_with("trait ") or
+    trimmed.starts_with("type ") or
+    trimmed.starts_with("val ") or
+    trimmed.starts_with("let ") or
+    trimmed.starts_with("var ") or
+    trimmed.starts_with("mod ")
+
+fn spipe_helpers_used(body: text, top_level: text) -> bool:
+    val helper_names: [text] = [
+        "step", "pending", "skip", "skip_it", "check", "check_msg",
+        "fail_assertion", "fail_test", "assert_eq", "assert_ne",
+        "assert_true", "assert_false", "assert_nil", "assert_not_nil",
+        "pending_on", "pending_skip", "expect"
+    ]
+    var i = 0
+    while i < helper_names.len():
+        val needle = helper_names[i] + "("
+        if body.contains(needle) or top_level.contains(needle):
+            return true
+        i = i + 1
+    false
+
 fn preprocess_spipe_file(file_path: text) -> text:
     """Wrap SPipe file content in fn main() for native compilation.
     Returns path to temporary wrapped file, or original path if not SPipe."""
@@ -190,9 +384,29 @@ fn preprocess_spipe_file(file_path: text) -> text:
     var in_docstring = false
     var in_top_fn = false
     var top_fn_indent = 0
+    var in_import_block = false
+    var import_brace_depth = 0
+    var skipping_spec_import = false
 
-    for line in lines:
+    for raw_line in lines:
+        val infix_line = spipe_rewrite_infix_expect_line(raw_line)
+        val line = spipe_rewrite_method_expect_line(infix_line)
         val trimmed = line.trim()
+
+        if skipping_spec_import:
+            import_brace_depth = import_brace_depth + spipe_brace_delta(line)
+            if import_brace_depth <= 0:
+                skipping_spec_import = false
+                import_brace_depth = 0
+            continue
+
+        if in_import_block:
+            import_parts.push(line)
+            import_brace_depth = import_brace_depth + spipe_brace_delta(line)
+            if import_brace_depth <= 0:
+                in_import_block = false
+                import_brace_depth = 0
+            continue
 
         # Track multi-line docstrings (""")
         if trimmed.starts_with("\"\"\""):
@@ -223,14 +437,24 @@ fn preprocess_spipe_file(file_path: text) -> text:
 
         # Import/use statements go before fn main()
         if trimmed.starts_with("import ") or trimmed.starts_with("use "):
+            if trimmed.starts_with("import std.spec") or trimmed.starts_with("use std.spec"):
+                val delta = spipe_brace_delta(line)
+                if delta > 0:
+                    skipping_spec_import = true
+                    import_brace_depth = delta
+                continue
             import_parts.push(line)
+            val delta = spipe_brace_delta(line)
+            if delta > 0:
+                in_import_block = true
+                import_brace_depth = delta
             continue
 
-        # Top-level function definitions (at column 0 only) stay outside main
+        # Top-level declarations (at column 0 only) stay outside main.
         if not in_top_fn:
             val line_indent = line.len() - trimmed.len()
             if line_indent == 0:
-                if trimmed.starts_with("fn ") or trimmed.starts_with("async fn ") or trimmed.starts_with("static fn "):
+                if spipe_is_top_level_start(trimmed):
                     in_top_fn = true
                     top_fn_indent = 0
                     top_level_parts.push(line)
@@ -260,7 +484,8 @@ fn preprocess_spipe_file(file_path: text) -> text:
     val imports = import_parts.join("\n")
     val top_level = top_level_parts.join("\n")
     val body = body_parts.join("\n")
-    val wrapped = imports + "\n\n" + top_level + "\nfn main():\n" + body
+    val helpers = if spipe_helpers_used(body, top_level): spipe_inline_helpers() else: ""
+    val wrapped = imports + "\n" + helpers + "\n" + top_level + "\nfn main():\n" + body
     val tmp_path = "/tmp/spipe_wrapped_" + file_path.replace("/", "_")
     file_write(tmp_path, wrapped)
     tmp_path

@@ -117,6 +117,7 @@ pub mod rapier2d_sffi;
 pub mod io_driver;
 pub mod qmp_socket;
 pub mod host_wm_bridge;
+pub mod host_gpu_lane;
 
 // Import parent interpreter types
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -308,6 +309,41 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("native_is_tty", terminal::native_is_tty);
     insert_simple!("native_stderr", terminal::native_stderr);
+    insert_simple!("rt_host_gpu_lane_event", host_gpu_lane::rt_host_gpu_lane_event);
+    insert_simple!("rt_host_gpu_lane_reset", host_gpu_lane::rt_host_gpu_lane_reset);
+    insert_simple!(
+        "rt_host_gpu_lane_event_count",
+        host_gpu_lane::rt_host_gpu_lane_event_count
+    );
+    insert_simple!(
+        "rt_host_gpu_lane_begin_count",
+        host_gpu_lane::rt_host_gpu_lane_begin_count
+    );
+    insert_simple!("rt_host_gpu_lane_end_count", host_gpu_lane::rt_host_gpu_lane_end_count);
+    insert_simple!("rt_host_gpu_lane_last_lane", host_gpu_lane::rt_host_gpu_lane_last_lane);
+    insert_simple!(
+        "rt_host_gpu_lane_last_phase",
+        host_gpu_lane::rt_host_gpu_lane_last_phase
+    );
+    insert_simple!("rt_host_gpu_queue_reset", host_gpu_lane::rt_host_gpu_queue_reset);
+    insert_simple!("rt_host_gpu_queue_emit", host_gpu_lane::rt_host_gpu_queue_emit);
+    insert_simple!("rt_host_gpu_queue_drain", host_gpu_lane::rt_host_gpu_queue_drain);
+    insert_simple!(
+        "rt_host_gpu_queue_packet_count",
+        host_gpu_lane::rt_host_gpu_queue_packet_count
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_submitted_count",
+        host_gpu_lane::rt_host_gpu_queue_submitted_count
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_completed_count",
+        host_gpu_lane::rt_host_gpu_queue_completed_count
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_last_status",
+        host_gpu_lane::rt_host_gpu_queue_last_status
+    );
     insert_simple!("native_stdin", terminal::native_stdin);
     insert_simple!("native_stdout", terminal::native_stdout);
     insert_simple!("native_tcp_accept", network::native_tcp_accept);
@@ -2039,6 +2075,36 @@ pub(crate) fn call_extern_function_with_values(
 
     if name.starts_with("rt_rapier2d_") {
         return rapier2d_sffi::dispatch(name, &evaluated);
+    }
+
+    if name.starts_with("rt_host_gpu_lane_") {
+        return match name {
+            "rt_host_gpu_lane_event" => host_gpu_lane::rt_host_gpu_lane_event(evaluated),
+            "rt_host_gpu_lane_reset" => host_gpu_lane::rt_host_gpu_lane_reset(evaluated),
+            "rt_host_gpu_lane_event_count" => host_gpu_lane::rt_host_gpu_lane_event_count(evaluated),
+            "rt_host_gpu_lane_begin_count" => host_gpu_lane::rt_host_gpu_lane_begin_count(evaluated),
+            "rt_host_gpu_lane_end_count" => host_gpu_lane::rt_host_gpu_lane_end_count(evaluated),
+            "rt_host_gpu_lane_last_lane" => host_gpu_lane::rt_host_gpu_lane_last_lane(evaluated),
+            "rt_host_gpu_lane_last_phase" => host_gpu_lane::rt_host_gpu_lane_last_phase(evaluated),
+            _ => Err(common::unknown_function(name)),
+        };
+    }
+
+    if name.starts_with("rt_host_gpu_queue_") {
+        return match name {
+            "rt_host_gpu_queue_reset" => host_gpu_lane::rt_host_gpu_queue_reset(evaluated),
+            "rt_host_gpu_queue_emit" => host_gpu_lane::rt_host_gpu_queue_emit(evaluated),
+            "rt_host_gpu_queue_drain" => host_gpu_lane::rt_host_gpu_queue_drain(evaluated),
+            "rt_host_gpu_queue_packet_count" => host_gpu_lane::rt_host_gpu_queue_packet_count(evaluated),
+            "rt_host_gpu_queue_submitted_count" => {
+                host_gpu_lane::rt_host_gpu_queue_submitted_count(evaluated)
+            }
+            "rt_host_gpu_queue_completed_count" => {
+                host_gpu_lane::rt_host_gpu_queue_completed_count(evaluated)
+            }
+            "rt_host_gpu_queue_last_status" => host_gpu_lane::rt_host_gpu_queue_last_status(evaluated),
+            _ => Err(common::unknown_function(name)),
+        };
     }
 
     if name.starts_with("rt_driver_") {

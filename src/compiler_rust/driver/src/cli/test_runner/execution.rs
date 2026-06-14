@@ -880,6 +880,15 @@ fn emit_scenario_artifacts(path: &Path, result: &TestFileResult) {
 /// so a failing `check(false)` correctly trips the BDD failure state.
 const SPIPE_INLINE_HELPERS: &str = r#"
 # === spipe inline helpers (R2-broader fix; compile-mode only) ===
+extern fn rt_bdd_expect_truthy(value)
+
+fn expect(value):
+    rt_bdd_expect_truthy(value)
+
+fn step(description: text):
+    if description == "":
+        return
+
 fn pending(name: text):
     print "    {name} ... pending"
 
@@ -1401,6 +1410,7 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     // helpers caused `Undefined symbol: expect (required by relocation N)`
     // SMF link failures for any spec that didn't otherwise need them.
     const SPIPE_HELPER_NAMES: &[&str] = &[
+        "step",
         "pending",
         "skip",
         "skip_it",

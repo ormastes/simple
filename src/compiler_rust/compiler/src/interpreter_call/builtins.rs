@@ -5,12 +5,14 @@ use std::sync::Arc;
 use super::core::{eval_arg, eval_arg_int};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    check_effect_violations, create_range_object, evaluate_expr, message_to_value, spawn_actor_with_expr,
-    spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX, ACTOR_OUTBOX, GENERATOR_YIELDS,
+    check_effect_violations, create_range_object, evaluate_expr, exec_block_fn, message_to_value,
+    spawn_actor_with_expr, spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX, ACTOR_OUTBOX,
+    GENERATOR_YIELDS,
 };
 use crate::value::*;
 use simple_common::actor::Message;
-use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, RangeBound};
+use simple_parser::ast::{Argument, Block, ClassDef, EnumDef, Expr, FunctionDef, RangeBound};
+use simple_runtime::host_gpu_lane;
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 
@@ -32,6 +34,51 @@ pub(super) fn eval_builtin(
     }
 
     match name {
+        "gpu" | "host" if matches!(args.last().map(|arg| &arg.value), Some(Expr::Lambda { .. })) => {
+            if args.len() > 1 {
+                for arg in &args[..args.len() - 1] {
+                    evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                }
+            }
+
+            let lane_code = if name == "gpu" {
+                host_gpu_lane::RT_HOST_GPU_LANE_GPU
+            } else {
+                host_gpu_lane::RT_HOST_GPU_LANE_HOST
+            };
+            host_gpu_lane::record_host_gpu_lane_event(lane_code, host_gpu_lane::RT_HOST_GPU_PHASE_BEGIN);
+            if lane_code == host_gpu_lane::RT_HOST_GPU_LANE_GPU {
+                host_gpu_lane::rt_host_gpu_queue_emit(lane_code, 1, 0, 0);
+            }
+
+            let body_result: Result<Value, CompileError> = match &args[args.len() - 1].value {
+                Expr::Lambda { body, .. } => match body.as_ref() {
+                    Expr::DoBlock(statements) => {
+                        let block = Block {
+                            statements: statements.clone(),
+                            ..Block::default()
+                        };
+                        match exec_block_fn(&block, env, functions, classes, enums, impl_methods) {
+                            Ok((control, last_value)) => match control {
+                                crate::interpreter::Control::Next => Ok(last_value.unwrap_or(Value::Nil)),
+                                crate::interpreter::Control::Return(value) => Ok(value),
+                                crate::interpreter::Control::Break(_, _) | crate::interpreter::Control::Continue(_) => {
+                                    Err(CompileError::Runtime(
+                                        "host/GPU lane body cannot break or continue outside a loop".to_string(),
+                                    ))
+                                }
+                            },
+                            Err(err) => Err(err),
+                        }
+                    }
+                    other => evaluate_expr(other, env, functions, classes, enums, impl_methods),
+                },
+                _ => unreachable!("lane marker builtin only matches lambda arguments"),
+            };
+
+            host_gpu_lane::record_host_gpu_lane_event(lane_code, host_gpu_lane::RT_HOST_GPU_PHASE_END);
+            Ok(Some(body_result?))
+        }
         "range" => {
             // Handle range(n) as range(0, n) and range(start, end)
             let (start, end) = if args.len() == 1 {

@@ -453,8 +453,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     };
     // cranelift has no rv32 codegen backend; default rv32 targets to LLVM when the
     // user did not pass an explicit --backend (explicit --backend still wins above).
-    if backend.is_empty()
-        && config.target.as_ref().map(|t| t.arch) == Some(simple_common::target::TargetArch::Riscv32)
+    if backend.is_empty() && config.target.as_ref().map(|t| t.arch) == Some(simple_common::target::TargetArch::Riscv32)
     {
         backend = "llvm".to_string();
     }

@@ -28,6 +28,8 @@ use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready}
 use std.hardware.rv64gc_rtl.atomics.AtomicsState
 use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create}
 use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create}
+use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
+use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush}
 use std.hardware.rv64gc_rtl.pkg.{SocBus64, soc_bus64_init}
 
 # ============================================================================
@@ -48,6 +50,7 @@ struct CoreState64:
     priv_mode: i64      # Current privilege mode: M=3, S=1, U=0
     csr_m: CsrFile64    # M-mode CSR file
     csr_s: CsrSMode64   # S-mode CSR file
+    mmu: MmuState64      # Sv39 MMU state, including TLB
 
 # ============================================================================
 # Combinational result bundle
@@ -254,6 +257,10 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
     var new_semi_trigger: bool = false
     var new_mul_div = state.mul_div
     var new_atomics = state.atomics
+    var new_priv_mode = state.priv_mode
+    var new_csr_m = state.csr_m
+    var new_csr_s = state.csr_s
+    var new_mmu = state.mmu
 
     if state.halt == false:
         if imem_data == SEMI_ENTRY and state.semi_phase == 0:
@@ -277,6 +284,28 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
             else:
                 new_pc = comb.pc_plus4
 
+        else if comb.dec.is_mret and state.semi_phase == 0:
+            val result = trap64_mret(state.csr_m)
+            new_pc = result.return_pc
+            new_priv_mode = result.target_mode
+            new_csr_m = result.csr
+            new_semi_phase = 0
+            new_semi_suppress = false
+
+        else if comb.dec.is_sret and state.semi_phase == 0:
+            val result = trap64_sret(state.csr_s)
+            new_pc = result.return_pc
+            new_priv_mode = result.target_mode
+            new_csr_s = trap64_sret_csr(state.csr_s)
+            new_semi_phase = 0
+            new_semi_suppress = false
+
+        else if comb.dec.is_sfence_vma and state.semi_phase == 0:
+            new_pc = comb.pc_plus4
+            new_mmu = mmu64_flush(state.mmu)
+            new_semi_phase = 0
+            new_semi_suppress = false
+
         else if comb.dec.opcode == OP_SYSTEM and state.semi_phase == 0:
             new_halt = true
 
@@ -295,9 +324,10 @@ fn core64_update(state: CoreState64, imem_data: u32, comb: CoreCombResult64, a0_
         semi_trigger: new_semi_trigger,
         mul_div: new_mul_div,
         atomics: new_atomics,
-        priv_mode: state.priv_mode,
-        csr_m: state.csr_m,
-        csr_s: state.csr_s
+        priv_mode: new_priv_mode,
+        csr_m: new_csr_m,
+        csr_s: new_csr_s,
+        mmu: new_mmu
     )
 
 # ============================================================================
@@ -345,7 +375,8 @@ fn core64_reset(reset_addr: i64) -> CoreState64:
         atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
         priv_mode: 3,
         csr_m: csr64_create(0),
-        csr_s: csr_s64_create()
+        csr_s: csr_s64_create(),
+        mmu: mmu64_create()
     )
 
 # ============================================================================
@@ -367,7 +398,8 @@ fn core64_init(reset_vec: i64) -> CoreState64:
         atomics: AtomicsState(reservation_valid: false, reservation_addr: 0),
         priv_mode: 3,
         csr_m: csr64_create(0),
-        csr_s: csr_s64_create()
+        csr_s: csr_s64_create(),
+        mmu: mmu64_create()
     )
 
 # ============================================================================

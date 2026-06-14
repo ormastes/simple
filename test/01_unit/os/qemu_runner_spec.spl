@@ -2,7 +2,7 @@ use os.qemu_runner.{
     build_qemu_command, build_qemu_command_with_options,
     get_all_targets, get_gui_target, get_qemu_target, get_target,
     get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
-    scenario_riscv64_virtio_fat32_smf, scenario_riscv64_hosted, scenario_riscv32_virtio_fat32_smf,
+    scenario_riscv64_virtio_fat32_smf, scenario_riscv64_hosted, scenario_rv64_x25519_probe, scenario_riscv32_virtio_fat32_smf,
     scenario_x64_desktop_uefi, scenario_x64_wm_simple_web_check,
     scenario_x64_net_user, scenario_x64_ssh,
     build_scenario_command, scenario_test_timeout_ms, arm_fs_exec_disk_image_path,
@@ -608,6 +608,28 @@ describe "Qemu runner serial routing":
         val hosted_target = scenario_target(hosted)
         expect(hosted_target.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl")
         expect(hosted_target.output).to_equal("build/os/simpleos_riscv64_hosted.elf")
+
+    it "defines an RV64 X25519 diagnostic lane with live helper build inputs":
+        val probe = scenario_rv64_x25519_probe()
+        expect(probe.name).to_equal("rv64-x25519-probe")
+        expect(probe.arch).to_equal(Architecture.Riscv64)
+        expect(scenario_name_or_missing("rv64-x25519-probe")).to_equal("rv64-x25519-probe")
+
+        val target = scenario_target(probe)
+        expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/x25519_probe_entry.spl")
+        expect(target.output).to_equal("build/os/simpleos_riscv64_x25519_probe.elf")
+        expect(default_os_build_backend_for_target(target)).to_equal("cranelift")
+        expect(os_native_build_sources(target)).to_equal(["build/os/generated", "src", "examples"])
+        expect(os_native_build_args(target, "cranelift")).to_contain("--timeout")
+        expect(os_native_build_args(target, "cranelift")).to_contain("180")
+        expect(os_native_build_env_prefix(target, "")).to_contain("SIMPLE_BOOT_MINIMAL=1")
+
+        val cmd = build_scenario_command(probe, target.output)
+        expect(cmd[0]).to_equal("qemu-system-riscv64")
+        expect(cmd).to_contain("-kernel")
+        expect(cmd).to_contain("build/os/simpleos_riscv64_x25519_probe.elf")
+        expect(scenario_qemu_exit_success(probe, 124)).to_equal(true)
+        expect(scenario_qemu_exit_success(probe, -1)).to_equal(true)
 
     it "uses per-platform x86_64 FAT32 media for filesystem scenarios":
         val scenario = get_scenario("x64-nvme-fat32")

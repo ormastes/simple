@@ -132,9 +132,9 @@ pub use collections::{
     rt_array_set_len_known_text, rt_array_set_text, rt_byte_array_new, rt_byte_array_new_len, rt_bytes_u32_le_at,
     rt_bytes_u64_le_at, rt_bytes_u8_at, rt_bytes_u8_set, rt_contains, rt_cstring_to_text, rt_hash_text,
     rt_for_iterable, rt_index_get, rt_index_set, rt_len, rt_range, rt_range_inclusive, rt_slice, rt_string_char_at,
-    rt_string_bytes, rt_string_chars, rt_string_char_code_at, rt_string_concat, rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find,
-    rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_replace, rt_string_rfind,
-    rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_lower,
+    rt_string_bytes, rt_string_chars, rt_string_char_code_at, rt_string_concat, rt_string_data, rt_string_ends_with,
+    rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_replace,
+    rt_string_rfind, rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_lower,
     rt_string_to_upper, rt_string_trim, rt_string_trim_end, rt_string_trim_start, rt_to_string, rt_tuple_get,
     rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push, rt_typed_words_u32_at,
     rt_typed_words_u32_data_at, rt_typed_words_u32_push, rt_typed_words_u32_push_known_at,
@@ -296,9 +296,8 @@ pub use sync::{RuntimeAtomic, RuntimeBarrier, RuntimeMutex, RuntimeRwLock, Runti
 pub use async_gen::{
     rt_async_get_ctx, rt_async_get_state, rt_async_mark_done, rt_async_set_state, rt_future_all, rt_future_await,
     rt_future_get_result, rt_future_is_ready, rt_future_new, rt_future_race, rt_future_reject, rt_future_resolve,
-    rt_future_wrap,
-    rt_generator_get_ctx, rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done, rt_generator_new,
-    rt_generator_next, rt_generator_set_state, rt_generator_store_slot,
+    rt_future_wrap, rt_generator_get_ctx, rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done,
+    rt_generator_new, rt_generator_next, rt_generator_set_state, rt_generator_store_slot,
 };
 
 // Re-export core SFFI functions
