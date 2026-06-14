@@ -86,6 +86,7 @@ SimpleOS scheduler work distinct and verifiable.
   `test/05_perf/profile_scripts/profile_help_contract_test.shs`,
   `test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`,
   `test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`,
+  `test/05_perf/profile_scripts/concurrency_api_contract_test.shs`,
   `test/03_system/feature/usage/concurrency_api_misuse_spec.spl`,
   `test/05_perf/stress/multicore_green_fanout_spec.spl`,
   `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`,

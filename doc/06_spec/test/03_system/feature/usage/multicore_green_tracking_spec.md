@@ -265,7 +265,7 @@ expect(absent_in_text(row, "\"done\"")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -284,6 +284,7 @@ expect(feature_req).to_contain("doc/09_report/cross_language_perf_2026-06-11_thr
 expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_help_contract_test.shs")
 expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
 expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(feature_req).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(feature_req).to_contain("docker_simple_binary_probe_wording_corrupt")
 expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(nfr_req).to_contain("docker_simple_binary_probe_wording_corrupt")
