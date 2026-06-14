@@ -242,6 +242,9 @@ Updated: 2026-06-14
 - this commit -- Simple Web close-tag char lowercase allocation removal:
   mixed-case close-tag matching now uses direct ASCII character comparisons
   instead of allocating a one-character lowercase value for each tag character.
+- this commit -- Simple Web lowercase tag-name fast path: `tag_name_of` now
+  skips `.lower()` for already-lowercase opening tags while preserving uppercase
+  HTML normalization, avoiding an allocation on the common generated-GUI path.
 - this commit -- debug attr loop length hoist:
   `simple_web_layout_debug_attr_by_id` now reuses the parsed node count instead
   of dispatching `nodes.len()` on every scan iteration.
