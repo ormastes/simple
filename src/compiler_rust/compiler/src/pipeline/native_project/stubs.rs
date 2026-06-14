@@ -590,6 +590,18 @@ pub(crate) fn generate_stub_object(
         }
     }
 
+    // LOAD milestone (see memory: simple-bootstrap-stage4-runtime-symbol-gap):
+    // the self-hosted bootstrap runtime is intentionally incomplete — some rt_*
+    // helpers (rt_array_filter/all/any, rt_value_*, rt_any_add, ...) are not yet
+    // implemented under the names codegen emits. Normally rt_* are excluded from
+    // stubbing (is_runtime_owned_symbol) because the runtime owns them; under
+    // bootstrap we weak-stub the genuinely-undefined ones (those absent from
+    // `defined`, i.e. not provided by any linked archive) so the binary can LOAD
+    // and run programs that don't exercise them. Real implementations replace
+    // these stubs incrementally. No effect on complete-runtime builds: there are
+    // no undefined rt_* to stub there.
+    let stub_missing_runtime = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
+        || std::env::var("SIMPLE_STUB_MISSING_RT").as_deref() == Ok("1");
     let needs_stub: Vec<String> = undefined
         .into_iter()
         .filter(|s| !defined.contains(s))
@@ -599,7 +611,7 @@ pub(crate) fn generate_stub_object(
         })
         .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_compiler_provided_runtime_symbol(s))
-        .filter(|s| !is_runtime_owned_symbol(s))
+        .filter(|s| stub_missing_runtime || !is_runtime_owned_symbol(s))
         .filter(|s| !is_system_symbol(s))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
