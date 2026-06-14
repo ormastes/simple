@@ -28,4 +28,10 @@ dev-done
 - dev: Created state file with 7 acceptance criteria (type: feature).
 - impl: Added focused BrowserBackend runtime queue diagnostics coverage for
   GPU-selected frames and cache-hit reset. Remaining production blockers are
-  real backend-handle propagation and observable in-flight `SUBMITTED` status.
+  real backend-handle propagation and backend submit/readback receipts.
+- impl: Added runtime submit/complete phase APIs so `SUBMITTED` is observable
+  before terminal completion, with Rust runtime and SPipe event-path coverage.
+- impl: Split Engine2D runtime queue identity from backend-handle identity,
+  changed Simple drain evidence to read `rt_host_gpu_queue_last_backend_handle()`,
+  and made the production GUI/web wrapper run the BrowserBackend frame probe
+  while keeping same-frame backend readback fail-closed.

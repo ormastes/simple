@@ -364,17 +364,17 @@ Known runtime/production gaps:
   Rust runtime coverage for overflow rejection and post-drain reuse. A typed
   overflow/backpressure status remains a follow-up if callers need to
   distinguish capacity rejection from invalid arguments.
-- A `SUBMITTED` status exists, but drain currently reports terminal
-  `COMPLETED` or `UNAVAILABLE` directly instead of exposing an observable
-  submitted-in-flight phase.
+- A two-phase runtime submit/complete path now exposes observable in-flight
+  `SUBMITTED` before terminal `COMPLETED` or `UNAVAILABLE` status.
 - Interpreter lane `END` accounting is exception-safe for lane body errors, with
   Rust interpreter regression coverage.
-- Real backend handles are not plumbed into runtime packets yet; the runtime
-  exposes `rt_host_gpu_queue_last_backend_handle()` and currently reports `0`,
-  so queue drain cannot prove backend submission from GUI/web frames.
+- Runtime packets can now expose a submitted backend-handle value through
+  `rt_host_gpu_queue_last_backend_handle()`, and BrowserBackend frames mirror
+  that value from the WebRenderArtifact. Queue drain still cannot prove backend
+  submission until a same-frame backend readback receipt is tied to the frame.
 - `BrowserBackend.render_frame` now completes for generated widget frames and
-  has focused queue-diagnostic coverage, but observable in-flight `SUBMITTED`
-  and real-backend-handle tests are still missing.
+  has focused queue-diagnostic coverage, but real-backend-handle tests are still
+  missing.
 
 Until the GUI/web queue-drain bridge exists, documentation and test reports must
 say "adapter evidence", "runtime queue emission", or "backend readback" instead

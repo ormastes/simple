@@ -53,11 +53,11 @@ Current production gaps to keep visible in WebGPU/Engine2D reports:
   runtime coverage for overflow rejection and post-drain reuse. A typed
   overflow/backpressure status remains a follow-up if callers need to
   distinguish capacity rejection from invalid arguments.
-- `SUBMITTED` is modeled, but the current drain path reports terminal
-  `COMPLETED` or `UNAVAILABLE` directly.
+- `SUBMITTED` is observable through the runtime submit/complete path before
+  terminal `COMPLETED` or `UNAVAILABLE` status.
 - Interpreter lane `END` accounting is exception-safe for lane body errors.
-- Focused BrowserBackend queue diagnostics are covered, but observable
-  in-flight `SUBMITTED` and real-backend-handle tests remain required before
+- Focused BrowserBackend queue diagnostics and runtime in-flight `SUBMITTED`
+  evidence are covered, but real-backend-handle tests remain required before
   claiming production GUI/web queue-drain integration.
 
 ---

@@ -132,9 +132,12 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_host_gpu_queue_reset",
     "rt_host_gpu_queue_emit",
     "rt_host_gpu_queue_drain",
+    "rt_host_gpu_queue_submit",
+    "rt_host_gpu_queue_complete",
     "rt_host_gpu_queue_packet_count",
     "rt_host_gpu_queue_submitted_count",
     "rt_host_gpu_queue_completed_count",
+    "rt_host_gpu_queue_in_flight_count",
     "rt_host_gpu_queue_last_status",
     "rt_host_gpu_queue_last_backend_handle",
     // I/O functions (print now adds newline by default, like Python)

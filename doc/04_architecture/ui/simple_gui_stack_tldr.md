@@ -110,11 +110,11 @@ Host input
   single GUI/web run proves event queue -> runtime packet -> backend submit ->
   drain/readback receipt.
 - Current runtime gaps: interpreter GPU packets emit `backend_code=0` and drain
-  as `UNAVAILABLE`; `rt_host_gpu_queue_last_backend_handle()` is exposed but
-  still reports `0`; `SUBMITTED` exists but drain jumps to
-  `COMPLETED`/`UNAVAILABLE`; interpreter lane `END` is not exception-safe;
-  Rust/C capacity is `1024` but backpressure, error-path, and real-backend-handle
-  tests are still required.
+  as `UNAVAILABLE`; runtime packets and BrowserBackend frames can round-trip a
+  backend-handle value, but same-frame backend readback is not fused yet;
+  `SUBMITTED` is observable through the runtime submit/complete path;
+  interpreter lane `END` is exception-safe; Rust/C capacity is `1024` with
+  overflow coverage, but same-frame backend-readback tests are still required.
 - Pure Simple GUI/default Simple2D rendering enters through the shared Engine2D
   backend lane planner. GUI code should not bypass the lane planner with direct
   GPU calls.

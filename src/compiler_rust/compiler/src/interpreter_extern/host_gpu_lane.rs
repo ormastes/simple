@@ -72,6 +72,16 @@ pub fn rt_host_gpu_queue_drain(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_drain(max_packets)))
 }
 
+pub fn rt_host_gpu_queue_submit(args: &[Value]) -> Result<Value, CompileError> {
+    let max_packets = expect_int(args.first(), "rt_host_gpu_queue_submit expects max packet count")?;
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_submit(max_packets)))
+}
+
+pub fn rt_host_gpu_queue_complete(args: &[Value]) -> Result<Value, CompileError> {
+    let max_packets = expect_int(args.first(), "rt_host_gpu_queue_complete expects max packet count")?;
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_complete(max_packets)))
+}
+
 pub fn rt_host_gpu_queue_packet_count(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_packet_count()))
 }
@@ -82,6 +92,10 @@ pub fn rt_host_gpu_queue_submitted_count(_args: &[Value]) -> Result<Value, Compi
 
 pub fn rt_host_gpu_queue_completed_count(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_completed_count()))
+}
+
+pub fn rt_host_gpu_queue_in_flight_count(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_in_flight_count()))
 }
 
 pub fn rt_host_gpu_queue_last_status(_args: &[Value]) -> Result<Value, CompileError> {

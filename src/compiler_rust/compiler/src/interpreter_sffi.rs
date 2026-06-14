@@ -655,6 +655,12 @@ unsafe extern "C" fn interp_call_handler(
                 "rt_host_gpu_queue_drain" => {
                     crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_drain(&args)
                 }
+                "rt_host_gpu_queue_submit" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_submit(&args)
+                }
+                "rt_host_gpu_queue_complete" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_complete(&args)
+                }
                 "rt_host_gpu_queue_packet_count" => {
                     crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_packet_count(&args)
                 }
@@ -663,6 +669,9 @@ unsafe extern "C" fn interp_call_handler(
                 }
                 "rt_host_gpu_queue_completed_count" => {
                     crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_completed_count(&args)
+                }
+                "rt_host_gpu_queue_in_flight_count" => {
+                    crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_in_flight_count(&args)
                 }
                 "rt_host_gpu_queue_last_status" => {
                     crate::interpreter::interpreter_extern::host_gpu_lane::rt_host_gpu_queue_last_status(&args)

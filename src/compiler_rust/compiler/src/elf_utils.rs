@@ -507,17 +507,16 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_host_gpu_queue_reset" => host_gpu_lane::rt_host_gpu_queue_reset as *const () as usize,
         "rt_host_gpu_queue_emit" => host_gpu_lane::rt_host_gpu_queue_emit as *const () as usize,
         "rt_host_gpu_queue_drain" => host_gpu_lane::rt_host_gpu_queue_drain as *const () as usize,
+        "rt_host_gpu_queue_submit" => host_gpu_lane::rt_host_gpu_queue_submit as *const () as usize,
+        "rt_host_gpu_queue_complete" => host_gpu_lane::rt_host_gpu_queue_complete as *const () as usize,
         "rt_host_gpu_queue_packet_count" => host_gpu_lane::rt_host_gpu_queue_packet_count as *const () as usize,
-        "rt_host_gpu_queue_submitted_count" => {
-            host_gpu_lane::rt_host_gpu_queue_submitted_count as *const () as usize
-        },
-        "rt_host_gpu_queue_completed_count" => {
-            host_gpu_lane::rt_host_gpu_queue_completed_count as *const () as usize
-        },
+        "rt_host_gpu_queue_submitted_count" => host_gpu_lane::rt_host_gpu_queue_submitted_count as *const () as usize,
+        "rt_host_gpu_queue_completed_count" => host_gpu_lane::rt_host_gpu_queue_completed_count as *const () as usize,
+        "rt_host_gpu_queue_in_flight_count" => host_gpu_lane::rt_host_gpu_queue_in_flight_count as *const () as usize,
         "rt_host_gpu_queue_last_status" => host_gpu_lane::rt_host_gpu_queue_last_status as *const () as usize,
         "rt_host_gpu_queue_last_backend_handle" => {
             host_gpu_lane::rt_host_gpu_queue_last_backend_handle as *const () as usize
-        },
+        }
 
         // Process operations
         "rt_process_run" => value::rt_process_run as *const () as usize,

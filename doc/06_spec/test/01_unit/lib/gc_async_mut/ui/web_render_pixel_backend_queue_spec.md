@@ -1,6 +1,6 @@
 # Web Render Pixel Backend Runtime Queue Spec
 
-> This focused spec proves the shared WebRenderArtifact boundary carries
+> This focused spec proves the shared WebRenderArtifact boundary carries host/GPU runtime queue submit and drain provenance for GPU-backed web pixel artifacts. BrowserBackend mirrors these fields from the artifact after `render_frame`.
 
 <!-- sdn-diagram:id=web_render_pixel_backend_queue_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ web_render_pixel_backend_queue_spec -> common
 
 # Web Render Pixel Backend Runtime Queue Spec
 
-This focused spec proves the shared WebRenderArtifact boundary carries
+This focused spec proves the shared WebRenderArtifact boundary carries host/GPU runtime queue submit and drain provenance for GPU-backed web pixel artifacts. BrowserBackend mirrors these fields from the artifact after `render_frame`.
 
 ## At a Glance
 
@@ -43,15 +43,43 @@ This focused spec proves the shared WebRenderArtifact boundary carries
 |-------|-------|
 | Category | Standard Library |
 | Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md |
+| Design | doc/04_architecture/ui/simple_gui_stack.md |
+| Research | N/A |
 | Source | `test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
+## Overview
+
 This focused spec proves the shared WebRenderArtifact boundary carries
 host/GPU runtime queue submit and drain provenance for GPU-backed web pixel
 artifacts. BrowserBackend mirrors these fields from the artifact after
-`render_frame`; the direct browser-frame unit path is tracked separately because
-that broader layout/render test currently has unrelated render-frame failures.
+`render_frame`.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+The GPU scenario renders a tiny HTML fixture through the Vulkan-selected
+Engine2D pixel backend, then asserts that the `WebRenderArtifact` records a
+submitted packet, one drained packet, and the runtime backend handle. The
+software scenario asserts the same artifact fields remain queue-neutral.
 
 ## Scenarios
 
@@ -65,12 +93,13 @@ that broader layout/render test currently has unrelated render-frame failures.
    - Expected: artifact.queue_drain_status equals `WEB_RENDER_QUEUE_STATUS_DRAINED`
    - Expected: artifact.queue_packet_id equals `1`
    - Expected: artifact.queue_drained equals `1`
+   - Expected: artifact.queue_backend_handle equals `7`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -83,6 +112,7 @@ expect(artifact.queue_submit_status).to_equal("submitted")
 expect(artifact.queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_DRAINED)
 expect(artifact.queue_packet_id).to_equal(1)
 expect(artifact.queue_drained).to_equal(1)
+expect(artifact.queue_backend_handle).to_equal(7)
 expect(artifact.queue_reason).to_contain("drained runtime queue")
 ```
 
@@ -96,12 +126,13 @@ expect(artifact.queue_reason).to_contain("drained runtime queue")
    - Expected: artifact.queue_drain_status equals `WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED`
    - Expected: artifact.queue_packet_id equals `0`
    - Expected: artifact.queue_drained equals `0`
+   - Expected: artifact.queue_backend_handle equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -114,6 +145,7 @@ expect(artifact.queue_submit_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUES
 expect(artifact.queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
 expect(artifact.queue_packet_id).to_equal(0)
 expect(artifact.queue_drained).to_equal(0)
+expect(artifact.queue_backend_handle).to_equal(0)
 ```
 
 </details>
@@ -127,6 +159,12 @@ expect(artifact.queue_drained).to_equal(0)
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md](doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md)
+- **Design:** [doc/04_architecture/ui/simple_gui_stack.md](doc/04_architecture/ui/simple_gui_stack.md)
 
 
 </details>

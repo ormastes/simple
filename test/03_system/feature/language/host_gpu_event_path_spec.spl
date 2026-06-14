@@ -1,11 +1,41 @@
 """
 # Host/GPU Event Path Spec
 
+## Overview
+
 These scenarios prove the Engine2D evidence adapter can move from a host event
 decision to queue submit and receipt evidence without requiring real GPU
 hardware. They cover the production routing rule: unresolved, stale-cache, and
 host-semantic events remain on host; coarse Draw IR batches can be queued to the
 GPU lane.
+
+The runtime scenarios also prove the bridge can emit real host/GPU queue
+packets, expose an in-flight `submitted` state through the explicit
+submit/complete phase API, and preserve the one-step drain compatibility path
+used by existing callers.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+The `should expose submitted state before runtime queue completion` scenario
+emits one GPU packet, submits it without completing it, asserts
+`status=submitted` and `in_flight_count=1`, then completes the packet and
+asserts terminal `completed` status.
 """
 
 use std.spec.*
@@ -24,6 +54,8 @@ use std.gpu.engine2d.host_gpu_event_queue.{
     engine2d_host_gpu_runtime_queue,
     engine2d_host_gpu_event_submit_to_runtime,
     engine2d_host_gpu_runtime_submit_summary,
+    engine2d_host_gpu_runtime_submit_pending,
+    engine2d_host_gpu_runtime_complete_pending,
     engine2d_host_gpu_runtime_drain,
     engine2d_host_gpu_runtime_drain_summary
 }
@@ -114,6 +146,29 @@ describe "host/GPU event path evidence":
         expect(drain.last_status_code).to_equal(4)
         expect(drain.status).to_equal("typed_unavailable")
         expect(engine2d_host_gpu_runtime_drain_summary(drain)).to_contain("status=typed_unavailable")
+
+    it "should expose submitted state before runtime queue completion":
+        step("Emit a runtime queue packet and submit it without completion")
+        rt_host_gpu_queue_reset()
+        rt_host_gpu_queue_emit(2, 1, 512, 7)
+        val queue = engine2d_host_gpu_runtime_queue("vulkan", 7, true, 4096)
+        val submitted = engine2d_host_gpu_runtime_submit_pending(queue, 1)
+
+        expect(submitted.count).to_equal(1)
+        expect(submitted.status).to_equal("submitted")
+        expect(submitted.in_flight_count).to_equal(1)
+        expect(submitted.submitted_count).to_equal(1)
+        expect(submitted.completed_count).to_equal(0)
+        expect(submitted.last_status_code).to_equal(2)
+
+        step("Complete the in-flight packet and observe terminal completion")
+        val completed = engine2d_host_gpu_runtime_complete_pending(queue, 1)
+        expect(completed.count).to_equal(1)
+        expect(completed.status).to_equal("completed")
+        expect(completed.in_flight_count).to_equal(0)
+        expect(completed.submitted_count).to_equal(1)
+        expect(completed.completed_count).to_equal(1)
+        expect(completed.last_status_code).to_equal(3)
 
     it "should distinguish runtime submission from evidence-only queueing":
         step("Submit only accepted GPU packet decisions to the runtime queue")

@@ -1,6 +1,6 @@
 # Host/GPU Event Path Spec
 
-> These scenarios prove the Engine2D evidence adapter can move from a host event
+> These scenarios prove the Engine2D evidence adapter can move from a host event decision to queue submit and receipt evidence without requiring real GPU hardware. They cover the production routing rule: unresolved, stale-cache, and host-semantic events remain on host; coarse Draw IR batches can be queued to the GPU lane.
 
 <!-- sdn-diagram:id=host_gpu_event_path_spec.arch -->
 <details class="sdn-source">
@@ -27,14 +27,14 @@ host_gpu_event_path_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Host/GPU Event Path Spec
 
-These scenarios prove the Engine2D evidence adapter can move from a host event
+These scenarios prove the Engine2D evidence adapter can move from a host event decision to queue submit and receipt evidence without requiring real GPU hardware. They cover the production routing rule: unresolved, stale-cache, and host-semantic events remain on host; coarse Draw IR batches can be queued to the GPU lane.
 
 ## At a Glance
 
@@ -42,15 +42,49 @@ These scenarios prove the Engine2D evidence adapter can move from a host event
 |-------|-------|
 | Category | Other |
 | Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md |
+| Design | doc/04_architecture/ui/simple_gui_stack.md |
+| Research | N/A |
 | Source | `test/03_system/feature/language/host_gpu_event_path_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
 
 These scenarios prove the Engine2D evidence adapter can move from a host event
 decision to queue submit and receipt evidence without requiring real GPU
 hardware. They cover the production routing rule: unresolved, stale-cache, and
 host-semantic events remain on host; coarse Draw IR batches can be queued to the
 GPU lane.
+
+The runtime scenarios also prove the bridge can emit real host/GPU queue
+packets, expose an in-flight `submitted` state through the explicit
+submit/complete phase API, and preserve the one-step drain compatibility path
+used by existing callers.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+The `should expose submitted state before runtime queue completion` scenario
+emits one GPU packet, submits it without completing it, asserts
+`status=submitted` and `in_flight_count=1`, then completes the packet and
+asserts terminal `completed` status.
 
 ## Scenarios
 
@@ -203,6 +237,58 @@ expect(engine2d_host_gpu_runtime_drain_summary(drain)).to_contain("status=typed_
 
 </details>
 
+#### should expose submitted state before runtime queue completion
+
+- Emit a runtime queue packet and submit it without completion
+- rt host gpu queue reset
+- rt host gpu queue emit
+   - Expected: submitted.count equals `1`
+   - Expected: submitted.status equals `submitted`
+   - Expected: submitted.in_flight_count equals `1`
+   - Expected: submitted.submitted_count equals `1`
+   - Expected: submitted.completed_count equals `0`
+   - Expected: submitted.last_status_code equals `2`
+- Complete the in-flight packet and observe terminal completion
+   - Expected: completed.count equals `1`
+   - Expected: completed.status equals `completed`
+   - Expected: completed.in_flight_count equals `0`
+   - Expected: completed.submitted_count equals `1`
+   - Expected: completed.completed_count equals `1`
+   - Expected: completed.last_status_code equals `3`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Emit a runtime queue packet and submit it without completion")
+rt_host_gpu_queue_reset()
+rt_host_gpu_queue_emit(2, 1, 512, 7)
+val queue = engine2d_host_gpu_runtime_queue("vulkan", 7, true, 4096)
+val submitted = engine2d_host_gpu_runtime_submit_pending(queue, 1)
+
+expect(submitted.count).to_equal(1)
+expect(submitted.status).to_equal("submitted")
+expect(submitted.in_flight_count).to_equal(1)
+expect(submitted.submitted_count).to_equal(1)
+expect(submitted.completed_count).to_equal(0)
+expect(submitted.last_status_code).to_equal(2)
+
+step("Complete the in-flight packet and observe terminal completion")
+val completed = engine2d_host_gpu_runtime_complete_pending(queue, 1)
+expect(completed.count).to_equal(1)
+expect(completed.status).to_equal("completed")
+expect(completed.in_flight_count).to_equal(0)
+expect(completed.submitted_count).to_equal(1)
+expect(completed.completed_count).to_equal(1)
+expect(completed.last_status_code).to_equal(3)
+```
+
+</details>
+
 #### should distinguish runtime submission from evidence-only queueing
 
 - Submit only accepted GPU packet decisions to the runtime queue
@@ -265,11 +351,17 @@ expect(runtime_drain.status).to_equal("completed")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md](doc/03_plan/agent_tasks/real_host_gpu_runtime_queue_emission.md)
+- **Design:** [doc/04_architecture/ui/simple_gui_stack.md](doc/04_architecture/ui/simple_gui_stack.md)
 
 
 </details>

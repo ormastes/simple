@@ -830,9 +830,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_host_gpu_queue_reset", &[], &[]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_emit", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_drain", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_submit", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_complete", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_packet_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_submitted_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_completed_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_in_flight_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_status", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_backend_handle", &[], &[I64]),
     // =========================================================================
@@ -1469,7 +1472,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_mmap_read_text_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_bytes_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
-    RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64], &[I8]), // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64], &[I8]),    // path, content -> bool
     RuntimeFuncSpec::new("rt_file_fsync", &[I64, I64], &[I8]),         // path -> bool
     RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),  // path -> bool, prefer write-at cache
     RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),        // text -> i64 (CRC32 checksum)
@@ -1496,13 +1499,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_dir_create", &[I64, I8], &[I8]), // path, recursive -> bool
     RuntimeFuncSpec::new("rt_dir_create_all", &[I64], &[I8]), // path -> bool
-    RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]),  // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_dir_list", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_dir_remove", &[I64, I64], &[I8]), // path -> bool
     RuntimeFuncSpec::new("rt_dir_remove_all", &[I64, I64], &[I8]), // path -> bool
     RuntimeFuncSpec::new("rt_file_find", &[I64, I64, I64, I64], &[I64]), // dir, pattern -> RuntimeValue
-    RuntimeFuncSpec::new("rt_dir_glob", &[I64, I64], &[I64]),  // pattern -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_dir_walk", &[I64, I64], &[I64]),  // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_current_dir", &[], &[I64]),       // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_dir_glob", &[I64, I64], &[I64]), // pattern -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_dir_walk", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_current_dir", &[], &[I64]),      // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_set_current_dir", &[I64, I64], &[I8]), // path -> bool
     // =========================================================================
     // File Descriptor Operations

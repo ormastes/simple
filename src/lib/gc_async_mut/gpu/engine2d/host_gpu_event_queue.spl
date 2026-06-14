@@ -50,6 +50,7 @@ struct Engine2dHostGpuQueueReceiptEvidence:
 struct Engine2dHostGpuRuntimeQueue:
     backend_name: text
     queue_handle: i64
+    backend_handle: i64
     runtime_available: bool
     max_packet_bytes: i64
 
@@ -66,15 +67,29 @@ struct Engine2dHostGpuRuntimeDrainResult:
     drained: i64
     status: text
     queue_handle: i64
+    last_backend_handle: i64
     submitted_count: i64
     completed_count: i64
     last_status_code: i64
     diagnostic: text
 
-extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_code: i64) -> i64
+struct Engine2dHostGpuRuntimePhaseResult:
+    count: i64
+    status: text
+    queue_handle: i64
+    in_flight_count: i64
+    submitted_count: i64
+    completed_count: i64
+    last_status_code: i64
+    diagnostic: text
+
+extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
 extern fn rt_host_gpu_queue_drain(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_submit(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_complete(max_packets: i64) -> i64
 extern fn rt_host_gpu_queue_submitted_count() -> i64
 extern fn rt_host_gpu_queue_completed_count() -> i64
+extern fn rt_host_gpu_queue_in_flight_count() -> i64
 extern fn rt_host_gpu_queue_last_status() -> i64
 
 fn engine2d_host_gpu_event(event_id: text, requested_lane: text, operation: text, packet_bytes: i64, max_packet_bytes: i64, mutates_host_semantics: bool, stale_target_cache: bool, unresolved_target: bool, strict_backend_available: bool) -> Engine2dHostGpuEvent:
@@ -104,7 +119,10 @@ fn engine2d_host_gpu_receipt_summary(evidence: Engine2dHostGpuQueueReceiptEviden
     "event={evidence.event_id};lane={evidence.target_lane};host_commit={evidence.committed_on_host};gpu_batched={evidence.gpu_batched};diagnostic={evidence.diagnostic}"
 
 fn engine2d_host_gpu_runtime_queue(backend_name: text, queue_handle: i64, runtime_available: bool, max_packet_bytes: i64) -> Engine2dHostGpuRuntimeQueue:
-    Engine2dHostGpuRuntimeQueue(backend_name: backend_name, queue_handle: queue_handle, runtime_available: runtime_available, max_packet_bytes: max_packet_bytes)
+    Engine2dHostGpuRuntimeQueue(backend_name: backend_name, queue_handle: queue_handle, backend_handle: 0, runtime_available: runtime_available, max_packet_bytes: max_packet_bytes)
+
+fn engine2d_host_gpu_runtime_queue_with_backend_handle(backend_name: text, queue_handle: i64, backend_handle: i64, runtime_available: bool, max_packet_bytes: i64) -> Engine2dHostGpuRuntimeQueue:
+    Engine2dHostGpuRuntimeQueue(backend_name: backend_name, queue_handle: queue_handle, backend_handle: backend_handle, runtime_available: runtime_available, max_packet_bytes: max_packet_bytes)
 
 fn engine2d_host_gpu_event_submit_to_runtime(queue: Engine2dHostGpuRuntimeQueue, decision: Engine2dHostGpuHandlerDecision, lane_result: Engine2dHostGpuLaneResult) -> Engine2dHostGpuRuntimeSubmitResult:
     if not decision.accepted:
@@ -115,7 +133,7 @@ fn engine2d_host_gpu_event_submit_to_runtime(queue: Engine2dHostGpuRuntimeQueue,
         return Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: "runtime_unavailable", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: 0, packet_bytes: decision.event.packet_bytes, diagnostic: "runtime queue unavailable")
     if decision.event.packet_bytes > queue.max_packet_bytes:
         return Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: "packet_too_large", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: 0, packet_bytes: decision.event.packet_bytes, diagnostic: "packet exceeds runtime queue limit")
-    val packet_id = rt_host_gpu_queue_emit(2, 1, decision.event.packet_bytes, queue.queue_handle)
+    val packet_id = rt_host_gpu_queue_emit(2, 1, decision.event.packet_bytes, queue.backend_handle)
     Engine2dHostGpuRuntimeSubmitResult(submitted: packet_id > 0, status: if packet_id > 0: "submitted" else: "emit_failed", queue_handle: queue.queue_handle, event_id: decision.event.event_id, packet_id: packet_id, packet_bytes: decision.event.packet_bytes, diagnostic: decision.reason)
 
 fn engine2d_host_gpu_runtime_submit_summary(result: Engine2dHostGpuRuntimeSubmitResult) -> text:
@@ -134,18 +152,36 @@ fn engine2d_host_gpu_runtime_status_name(status_code: i64) -> text:
         return "typed_unavailable"
     "unknown"
 
+fn engine2d_host_gpu_runtime_submit_pending(queue: Engine2dHostGpuRuntimeQueue, max_packets: i64) -> Engine2dHostGpuRuntimePhaseResult:
+    if not queue.runtime_available or queue.queue_handle <= 0:
+        return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "runtime_unavailable", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "runtime queue unavailable")
+    if max_packets <= 0:
+        return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "empty", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "no packets requested")
+    val submitted = rt_host_gpu_queue_submit(max_packets)
+    val last_status = rt_host_gpu_queue_last_status()
+    Engine2dHostGpuRuntimePhaseResult(count: submitted, status: if submitted > 0: engine2d_host_gpu_runtime_status_name(last_status) else: "empty", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: last_status, diagnostic: if submitted > 0: "submitted runtime queue" else: "runtime queue empty")
+
+fn engine2d_host_gpu_runtime_complete_pending(queue: Engine2dHostGpuRuntimeQueue, max_packets: i64) -> Engine2dHostGpuRuntimePhaseResult:
+    if not queue.runtime_available or queue.queue_handle <= 0:
+        return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "runtime_unavailable", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "runtime queue unavailable")
+    if max_packets <= 0:
+        return Engine2dHostGpuRuntimePhaseResult(count: 0, status: "empty", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "no packets requested")
+    val completed = rt_host_gpu_queue_complete(max_packets)
+    val last_status = rt_host_gpu_queue_last_status()
+    Engine2dHostGpuRuntimePhaseResult(count: completed, status: if completed > 0: engine2d_host_gpu_runtime_status_name(last_status) else: "empty", queue_handle: queue.queue_handle, in_flight_count: rt_host_gpu_queue_in_flight_count(), submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: last_status, diagnostic: if completed > 0: "completed runtime queue" else: "runtime queue empty")
+
 fn engine2d_host_gpu_runtime_drain(queue: Engine2dHostGpuRuntimeQueue, max_packets: i64) -> Engine2dHostGpuRuntimeDrainResult:
     if not queue.runtime_available or queue.queue_handle <= 0:
-        return Engine2dHostGpuRuntimeDrainResult(drained: 0, status: "runtime_unavailable", queue_handle: queue.queue_handle, submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "runtime queue unavailable")
+        return Engine2dHostGpuRuntimeDrainResult(drained: 0, status: "runtime_unavailable", queue_handle: queue.queue_handle, last_backend_handle: 0, submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "runtime queue unavailable")
     if max_packets <= 0:
-        return Engine2dHostGpuRuntimeDrainResult(drained: 0, status: "empty", queue_handle: queue.queue_handle, submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "no packets requested")
+        return Engine2dHostGpuRuntimeDrainResult(drained: 0, status: "empty", queue_handle: queue.queue_handle, last_backend_handle: 0, submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: rt_host_gpu_queue_last_status(), diagnostic: "no packets requested")
     val drained = rt_host_gpu_queue_drain(max_packets)
     val last_status = rt_host_gpu_queue_last_status()
     val status = if drained <= 0: "empty" else: engine2d_host_gpu_runtime_status_name(last_status)
-    Engine2dHostGpuRuntimeDrainResult(drained: drained, status: status, queue_handle: queue.queue_handle, submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: last_status, diagnostic: if drained > 0: "drained runtime queue" else: "runtime queue empty")
+    Engine2dHostGpuRuntimeDrainResult(drained: drained, status: status, queue_handle: queue.queue_handle, last_backend_handle: if drained > 0: queue.backend_handle else: 0, submitted_count: rt_host_gpu_queue_submitted_count(), completed_count: rt_host_gpu_queue_completed_count(), last_status_code: last_status, diagnostic: if drained > 0: "drained runtime queue" else: "runtime queue empty")
 
 fn engine2d_host_gpu_runtime_drain_summary(result: Engine2dHostGpuRuntimeDrainResult) -> text:
-    "drained={result.drained};status={result.status};queue_handle={result.queue_handle};submitted={result.submitted_count};completed={result.completed_count};last_status={result.last_status_code};diagnostic={result.diagnostic}"
+    "drained={result.drained};status={result.status};queue_handle={result.queue_handle};last_backend_handle={result.last_backend_handle};submitted={result.submitted_count};completed={result.completed_count};last_status={result.last_status_code};diagnostic={result.diagnostic}"
 
 export Engine2dHostGpuEvent
 export Engine2dHostGpuHandlerDecision
@@ -154,6 +190,7 @@ export Engine2dHostGpuQueueReceiptEvidence
 export Engine2dHostGpuRuntimeQueue
 export Engine2dHostGpuRuntimeSubmitResult
 export Engine2dHostGpuRuntimeDrainResult
+export Engine2dHostGpuRuntimePhaseResult
 export engine2d_host_gpu_event
 export engine2d_host_gpu_event_handler_decision
 export engine2d_host_gpu_event_submit
@@ -161,8 +198,11 @@ export engine2d_host_gpu_submit_summary
 export engine2d_host_gpu_event_receipt
 export engine2d_host_gpu_receipt_summary
 export engine2d_host_gpu_runtime_queue
+export engine2d_host_gpu_runtime_queue_with_backend_handle
 export engine2d_host_gpu_event_submit_to_runtime
 export engine2d_host_gpu_runtime_submit_summary
 export engine2d_host_gpu_runtime_status_name
+export engine2d_host_gpu_runtime_submit_pending
+export engine2d_host_gpu_runtime_complete_pending
 export engine2d_host_gpu_runtime_drain
 export engine2d_host_gpu_runtime_drain_summary

@@ -34,7 +34,7 @@ pub struct HostGpuQueuePacket {
     pub lane_code: i64,
     pub kind_code: i64,
     pub payload_size: i64,
-    pub backend_code: i64,
+    pub backend_handle: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,10 +53,12 @@ pub struct HostGpuQueueDrain {
 struct HostGpuQueueState {
     next_packet_id: i64,
     packets: VecDeque<HostGpuQueuePacket>,
+    in_flight: VecDeque<HostGpuQueuePacket>,
     packet_count: i64,
     submitted_count: i64,
     completed_count: i64,
     last_status: i64,
+    last_backend_handle: i64,
 }
 
 impl HostGpuQueueState {
@@ -64,10 +66,12 @@ impl HostGpuQueueState {
         Self {
             next_packet_id: 1,
             packets: VecDeque::new(),
+            in_flight: VecDeque::new(),
             packet_count: 0,
             submitted_count: 0,
             completed_count: 0,
             last_status: RT_HOST_GPU_QUEUE_STATUS_EMPTY,
+            last_backend_handle: 0,
         }
     }
 
@@ -156,15 +160,20 @@ pub extern "C" fn rt_host_gpu_queue_reset() {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_code: i64) -> i64 {
-    if !valid_lane(lane_code) || kind_code < 0 || payload_size < 0 || backend_code < 0 {
+pub extern "C" fn rt_host_gpu_queue_emit(
+    lane_code: i64,
+    kind_code: i64,
+    payload_size: i64,
+    backend_handle: i64,
+) -> i64 {
+    if !valid_lane(lane_code) || kind_code < 0 || payload_size < 0 || backend_handle < 0 {
         return 0;
     }
 
     let Ok(mut state) = queue_state().lock() else {
         return 0;
     };
-    if state.packets.len() >= RT_HOST_GPU_QUEUE_CAPACITY {
+    if state.packets.len() + state.in_flight.len() >= RT_HOST_GPU_QUEUE_CAPACITY {
         return 0;
     }
     let packet_id = state.next_packet_id;
@@ -176,9 +185,62 @@ pub extern "C" fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload
         lane_code,
         kind_code,
         payload_size,
-        backend_code,
+        backend_handle,
     });
     packet_id
+}
+
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_submit(max_packets: i64) -> i64 {
+    if max_packets <= 0 {
+        return 0;
+    }
+    let Ok(mut state) = queue_state().lock() else {
+        return 0;
+    };
+
+    let mut submitted = 0;
+    while submitted < max_packets {
+        let Some(packet) = state.packets.pop_front() else {
+            break;
+        };
+        state.submitted_count += 1;
+        state.last_status = RT_HOST_GPU_QUEUE_STATUS_SUBMITTED;
+        state.last_backend_handle = packet.backend_handle;
+        state.in_flight.push_back(packet);
+        submitted += 1;
+    }
+    submitted
+}
+
+fn complete_packet(state: &mut HostGpuQueueState, packet: HostGpuQueuePacket) {
+    state.completed_count += 1;
+    state.last_backend_handle = packet.backend_handle;
+    state.last_status = if packet.lane_code == RT_HOST_GPU_LANE_GPU && packet.backend_handle == 0 {
+        RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE
+    } else {
+        RT_HOST_GPU_QUEUE_STATUS_COMPLETED
+    };
+}
+
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_complete(max_packets: i64) -> i64 {
+    if max_packets <= 0 {
+        return 0;
+    }
+    let Ok(mut state) = queue_state().lock() else {
+        return 0;
+    };
+
+    let mut completed = 0;
+    while completed < max_packets {
+        let Some(packet) = state.in_flight.pop_front() else {
+            break;
+        };
+        complete_packet(&mut state, packet);
+        completed += 1;
+    }
+    completed
 }
 
 #[no_mangle]
@@ -192,16 +254,17 @@ pub extern "C" fn rt_host_gpu_queue_drain(max_packets: i64) -> i64 {
 
     let mut drained = 0;
     while drained < max_packets {
+        if let Some(packet) = state.in_flight.pop_front() {
+            complete_packet(&mut state, packet);
+            drained += 1;
+            continue;
+        }
         let Some(packet) = state.packets.pop_front() else {
             break;
         };
         state.submitted_count += 1;
-        state.completed_count += 1;
-        state.last_status = if packet.lane_code == RT_HOST_GPU_LANE_GPU && packet.backend_code == 0 {
-            RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE
-        } else {
-            RT_HOST_GPU_QUEUE_STATUS_COMPLETED
-        };
+        state.last_status = RT_HOST_GPU_QUEUE_STATUS_SUBMITTED;
+        complete_packet(&mut state, packet);
         drained += 1;
     }
     drained
@@ -223,6 +286,14 @@ pub extern "C" fn rt_host_gpu_queue_completed_count() -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_in_flight_count() -> i64 {
+    queue_state()
+        .lock()
+        .map(|state| state.in_flight.len() as i64)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_host_gpu_queue_last_status() -> i64 {
     queue_state()
         .lock()
@@ -232,7 +303,7 @@ pub extern "C" fn rt_host_gpu_queue_last_status() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_host_gpu_queue_last_backend_handle() -> i64 {
-    0
+    queue_state().lock().map(|state| state.last_backend_handle).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -267,6 +338,43 @@ mod tests {
         assert_eq!(rt_host_gpu_queue_completed_count(), 1);
         assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE);
         assert_eq!(rt_host_gpu_queue_last_backend_handle(), 0);
+    }
+
+    #[test]
+    fn carries_runtime_backend_handle_through_submitted_packet() {
+        rt_host_gpu_lane_reset();
+
+        let packet_id = rt_host_gpu_queue_emit(RT_HOST_GPU_LANE_GPU, 1, 512, 7);
+        assert_eq!(packet_id, 1);
+        assert_eq!(rt_host_gpu_queue_last_backend_handle(), 0);
+
+        assert_eq!(rt_host_gpu_queue_drain(1), 1);
+        assert_eq!(rt_host_gpu_queue_submitted_count(), 1);
+        assert_eq!(rt_host_gpu_queue_completed_count(), 1);
+        assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_COMPLETED);
+        assert_eq!(rt_host_gpu_queue_last_backend_handle(), 7);
+    }
+
+    #[test]
+    fn submit_phase_leaves_packet_observably_in_flight_until_complete() {
+        rt_host_gpu_lane_reset();
+
+        let packet_id = rt_host_gpu_queue_emit(RT_HOST_GPU_LANE_GPU, 1, 512, 7);
+        assert_eq!(packet_id, 1);
+        assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_QUEUED);
+
+        assert_eq!(rt_host_gpu_queue_submit(1), 1);
+        assert_eq!(rt_host_gpu_queue_submitted_count(), 1);
+        assert_eq!(rt_host_gpu_queue_completed_count(), 0);
+        assert_eq!(rt_host_gpu_queue_in_flight_count(), 1);
+        assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_SUBMITTED);
+        assert_eq!(rt_host_gpu_queue_last_backend_handle(), 7);
+
+        assert_eq!(rt_host_gpu_queue_complete(1), 1);
+        assert_eq!(rt_host_gpu_queue_completed_count(), 1);
+        assert_eq!(rt_host_gpu_queue_in_flight_count(), 0);
+        assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_COMPLETED);
+        assert_eq!(rt_host_gpu_queue_last_backend_handle(), 7);
     }
 
     #[test]

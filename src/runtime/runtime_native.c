@@ -119,8 +119,13 @@ static int64_t rt_host_gpu_queue_packet_total = 0;
 static int64_t rt_host_gpu_queue_submitted_total = 0;
 static int64_t rt_host_gpu_queue_completed_total = 0;
 static int64_t rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_EMPTY;
+static int64_t rt_host_gpu_queue_last_backend_handle_value = 0;
 static int64_t rt_host_gpu_queue_lane_codes[RT_HOST_GPU_QUEUE_CAPACITY];
-static int64_t rt_host_gpu_queue_backend_codes[RT_HOST_GPU_QUEUE_CAPACITY];
+static int64_t rt_host_gpu_queue_backend_handles[RT_HOST_GPU_QUEUE_CAPACITY];
+static int64_t rt_host_gpu_queue_in_flight_head = 0;
+static int64_t rt_host_gpu_queue_in_flight_depth = 0;
+static int64_t rt_host_gpu_queue_in_flight_lane_codes[RT_HOST_GPU_QUEUE_CAPACITY];
+static int64_t rt_host_gpu_queue_in_flight_backend_handles[RT_HOST_GPU_QUEUE_CAPACITY];
 
 void rt_host_gpu_queue_reset(void);
 
@@ -159,42 +164,100 @@ void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_next_packet_id = 1;
     rt_host_gpu_queue_head = 0;
     rt_host_gpu_queue_depth = 0;
+    rt_host_gpu_queue_in_flight_head = 0;
+    rt_host_gpu_queue_in_flight_depth = 0;
     rt_host_gpu_queue_packet_total = 0;
     rt_host_gpu_queue_submitted_total = 0;
     rt_host_gpu_queue_completed_total = 0;
     rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_EMPTY;
+    rt_host_gpu_queue_last_backend_handle_value = 0;
 }
 
-int64_t rt_host_gpu_queue_emit(int64_t lane_code, int64_t kind_code, int64_t payload_size, int64_t backend_code) {
+int64_t rt_host_gpu_queue_emit(int64_t lane_code, int64_t kind_code, int64_t payload_size, int64_t backend_handle) {
     if ((lane_code != RT_HOST_GPU_LANE_HOST && lane_code != RT_HOST_GPU_LANE_GPU) ||
-        kind_code < 0 || payload_size < 0 || backend_code < 0) {
+        kind_code < 0 || payload_size < 0 || backend_handle < 0) {
         return 0;
     }
-    if (rt_host_gpu_queue_depth >= RT_HOST_GPU_QUEUE_CAPACITY) {
+    if (rt_host_gpu_queue_depth + rt_host_gpu_queue_in_flight_depth >= RT_HOST_GPU_QUEUE_CAPACITY) {
         return 0;
     }
     int64_t packet_id = rt_host_gpu_queue_next_packet_id++;
     int64_t tail = (rt_host_gpu_queue_head + rt_host_gpu_queue_depth) % RT_HOST_GPU_QUEUE_CAPACITY;
     rt_host_gpu_queue_lane_codes[tail] = lane_code;
-    rt_host_gpu_queue_backend_codes[tail] = backend_code;
+    rt_host_gpu_queue_backend_handles[tail] = backend_handle;
     rt_host_gpu_queue_depth += 1;
     rt_host_gpu_queue_packet_total += 1;
     rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_QUEUED;
     return packet_id;
 }
 
-int64_t rt_host_gpu_queue_drain(int64_t max_packets) {
+int64_t rt_host_gpu_queue_submit(int64_t max_packets) {
     if (max_packets <= 0 || rt_host_gpu_queue_depth <= 0) return 0;
-    int64_t drained = 0;
-    while (drained < max_packets && rt_host_gpu_queue_depth > 0) {
+    int64_t submitted = 0;
+    while (submitted < max_packets && rt_host_gpu_queue_depth > 0) {
         int64_t lane_code = rt_host_gpu_queue_lane_codes[rt_host_gpu_queue_head];
-        int64_t backend_code = rt_host_gpu_queue_backend_codes[rt_host_gpu_queue_head];
+        int64_t backend_handle = rt_host_gpu_queue_backend_handles[rt_host_gpu_queue_head];
+        rt_host_gpu_queue_head = (rt_host_gpu_queue_head + 1) % RT_HOST_GPU_QUEUE_CAPACITY;
+        rt_host_gpu_queue_depth -= 1;
+        int64_t tail = (rt_host_gpu_queue_in_flight_head + rt_host_gpu_queue_in_flight_depth) % RT_HOST_GPU_QUEUE_CAPACITY;
+        rt_host_gpu_queue_in_flight_lane_codes[tail] = lane_code;
+        rt_host_gpu_queue_in_flight_backend_handles[tail] = backend_handle;
+        rt_host_gpu_queue_in_flight_depth += 1;
+        rt_host_gpu_queue_submitted_total += 1;
+        rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_SUBMITTED;
+        rt_host_gpu_queue_last_backend_handle_value = backend_handle;
+        submitted += 1;
+    }
+    return submitted;
+}
+
+static void rt_host_gpu_queue_complete_packet(int64_t lane_code, int64_t backend_handle) {
+    rt_host_gpu_queue_last_backend_handle_value = backend_handle;
+    rt_host_gpu_queue_completed_total += 1;
+    rt_host_gpu_queue_last_status_code =
+        (lane_code == RT_HOST_GPU_LANE_GPU && backend_handle == 0)
+        ? RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE
+        : RT_HOST_GPU_QUEUE_STATUS_COMPLETED;
+}
+
+int64_t rt_host_gpu_queue_complete(int64_t max_packets) {
+    if (max_packets <= 0 || rt_host_gpu_queue_in_flight_depth <= 0) return 0;
+    int64_t completed = 0;
+    while (completed < max_packets && rt_host_gpu_queue_in_flight_depth > 0) {
+        int64_t lane_code = rt_host_gpu_queue_in_flight_lane_codes[rt_host_gpu_queue_in_flight_head];
+        int64_t backend_handle = rt_host_gpu_queue_in_flight_backend_handles[rt_host_gpu_queue_in_flight_head];
+        rt_host_gpu_queue_in_flight_head = (rt_host_gpu_queue_in_flight_head + 1) % RT_HOST_GPU_QUEUE_CAPACITY;
+        rt_host_gpu_queue_in_flight_depth -= 1;
+        rt_host_gpu_queue_complete_packet(lane_code, backend_handle);
+        completed += 1;
+    }
+    return completed;
+}
+
+int64_t rt_host_gpu_queue_drain(int64_t max_packets) {
+    if (max_packets <= 0 || (rt_host_gpu_queue_depth <= 0 && rt_host_gpu_queue_in_flight_depth <= 0)) return 0;
+    int64_t drained = 0;
+    while (drained < max_packets) {
+        if (rt_host_gpu_queue_in_flight_depth > 0) {
+            int64_t lane_code = rt_host_gpu_queue_in_flight_lane_codes[rt_host_gpu_queue_in_flight_head];
+            int64_t backend_handle = rt_host_gpu_queue_in_flight_backend_handles[rt_host_gpu_queue_in_flight_head];
+            rt_host_gpu_queue_in_flight_head = (rt_host_gpu_queue_in_flight_head + 1) % RT_HOST_GPU_QUEUE_CAPACITY;
+            rt_host_gpu_queue_in_flight_depth -= 1;
+            rt_host_gpu_queue_complete_packet(lane_code, backend_handle);
+            drained += 1;
+            continue;
+        }
+        if (rt_host_gpu_queue_depth <= 0) break;
+        int64_t lane_code = rt_host_gpu_queue_lane_codes[rt_host_gpu_queue_head];
+        int64_t backend_handle = rt_host_gpu_queue_backend_handles[rt_host_gpu_queue_head];
         rt_host_gpu_queue_head = (rt_host_gpu_queue_head + 1) % RT_HOST_GPU_QUEUE_CAPACITY;
         rt_host_gpu_queue_depth -= 1;
         rt_host_gpu_queue_submitted_total += 1;
+        rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_SUBMITTED;
+        rt_host_gpu_queue_last_backend_handle_value = backend_handle;
         rt_host_gpu_queue_completed_total += 1;
         rt_host_gpu_queue_last_status_code =
-            (lane_code == RT_HOST_GPU_LANE_GPU && backend_code == 0)
+            (lane_code == RT_HOST_GPU_LANE_GPU && backend_handle == 0)
             ? RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE
             : RT_HOST_GPU_QUEUE_STATUS_COMPLETED;
         drained += 1;
@@ -205,8 +268,9 @@ int64_t rt_host_gpu_queue_drain(int64_t max_packets) {
 int64_t rt_host_gpu_queue_packet_count(void) { return rt_host_gpu_queue_packet_total; }
 int64_t rt_host_gpu_queue_submitted_count(void) { return rt_host_gpu_queue_submitted_total; }
 int64_t rt_host_gpu_queue_completed_count(void) { return rt_host_gpu_queue_completed_total; }
+int64_t rt_host_gpu_queue_in_flight_count(void) { return rt_host_gpu_queue_in_flight_depth; }
 int64_t rt_host_gpu_queue_last_status(void) { return rt_host_gpu_queue_last_status_code; }
-int64_t rt_host_gpu_queue_last_backend_handle(void) { return 0; }
+int64_t rt_host_gpu_queue_last_backend_handle(void) { return rt_host_gpu_queue_last_backend_handle_value; }
 
 typedef struct RtCoreString {
     uint32_t kind;

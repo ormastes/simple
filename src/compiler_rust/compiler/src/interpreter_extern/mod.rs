@@ -328,6 +328,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_host_gpu_queue_reset", host_gpu_lane::rt_host_gpu_queue_reset);
     insert_simple!("rt_host_gpu_queue_emit", host_gpu_lane::rt_host_gpu_queue_emit);
     insert_simple!("rt_host_gpu_queue_drain", host_gpu_lane::rt_host_gpu_queue_drain);
+    insert_simple!("rt_host_gpu_queue_submit", host_gpu_lane::rt_host_gpu_queue_submit);
+    insert_simple!("rt_host_gpu_queue_complete", host_gpu_lane::rt_host_gpu_queue_complete);
     insert_simple!(
         "rt_host_gpu_queue_packet_count",
         host_gpu_lane::rt_host_gpu_queue_packet_count
@@ -339,6 +341,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!(
         "rt_host_gpu_queue_completed_count",
         host_gpu_lane::rt_host_gpu_queue_completed_count
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_in_flight_count",
+        host_gpu_lane::rt_host_gpu_queue_in_flight_count
     );
     insert_simple!(
         "rt_host_gpu_queue_last_status",
@@ -2095,14 +2101,14 @@ pub(crate) fn call_extern_function_with_values(
             "rt_host_gpu_queue_reset" => host_gpu_lane::rt_host_gpu_queue_reset(evaluated),
             "rt_host_gpu_queue_emit" => host_gpu_lane::rt_host_gpu_queue_emit(evaluated),
             "rt_host_gpu_queue_drain" => host_gpu_lane::rt_host_gpu_queue_drain(evaluated),
+            "rt_host_gpu_queue_submit" => host_gpu_lane::rt_host_gpu_queue_submit(evaluated),
+            "rt_host_gpu_queue_complete" => host_gpu_lane::rt_host_gpu_queue_complete(evaluated),
             "rt_host_gpu_queue_packet_count" => host_gpu_lane::rt_host_gpu_queue_packet_count(evaluated),
-            "rt_host_gpu_queue_submitted_count" => {
-                host_gpu_lane::rt_host_gpu_queue_submitted_count(evaluated)
-            }
-            "rt_host_gpu_queue_completed_count" => {
-                host_gpu_lane::rt_host_gpu_queue_completed_count(evaluated)
-            }
+            "rt_host_gpu_queue_submitted_count" => host_gpu_lane::rt_host_gpu_queue_submitted_count(evaluated),
+            "rt_host_gpu_queue_completed_count" => host_gpu_lane::rt_host_gpu_queue_completed_count(evaluated),
+            "rt_host_gpu_queue_in_flight_count" => host_gpu_lane::rt_host_gpu_queue_in_flight_count(evaluated),
             "rt_host_gpu_queue_last_status" => host_gpu_lane::rt_host_gpu_queue_last_status(evaluated),
+            "rt_host_gpu_queue_last_backend_handle" => host_gpu_lane::rt_host_gpu_queue_last_backend_handle(evaluated),
             _ => Err(common::unknown_function(name)),
         };
     }

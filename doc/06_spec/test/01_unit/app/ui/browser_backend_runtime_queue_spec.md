@@ -11,8 +11,6 @@
 @direction LR
 
 browser_backend_runtime_queue_spec -> std
-browser_backend_runtime_queue_spec -> common
-browser_backend_runtime_queue_spec -> app
 ```
 
 </details>
@@ -88,57 +86,39 @@ packet, then renders the same frame again and asserts that the cache hit reports
 
 #### surfaces queue evidence on GPU frames and resets it on cached frames
 
-- rt host gpu queue reset
-- Err
-   - Expected: e equals ``
-- Ok
 - First GPU-selected render emits and drains one runtime queue packet
-- backend render frame
-   - Expected: backend.gpu_backend() equals `vulkan`
-   - Expected: backend.last_artifact_queue_submit_status equals `WEB_RENDER_QUEUE_STATUS_SUBMITTED`
-   - Expected: backend.last_artifact_queue_drain_status equals `WEB_RENDER_QUEUE_STATUS_DRAINED`
-   - Expected: backend.last_artifact_queue_drained equals `1`
+   - Expected: code equals `0`
 - Second unchanged frame is served from cache and reports no queue request
-- backend render frame
-   - Expected: backend.static_frame_fast_hits equals `1`
-   - Expected: backend.last_artifact_queue_submit_status equals `WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED`
-   - Expected: backend.last_artifact_queue_drain_status equals `WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED`
-   - Expected: backend.last_artifact_queue_packet_id equals `0`
-   - Expected: backend.last_artifact_queue_drained equals `0`
-   - Expected: backend.last_artifact_queue_reason equals `runtime queue not requested`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-rt_host_gpu_queue_reset()
-val state = runtime_queue_browser_state()
-val backend_result = BrowserBackend.create(64, 48, "vulkan")
-match backend_result:
-    Err(e):
-        expect(e).to_equal("")
-    Ok(backend):
-        step("First GPU-selected render emits and drains one runtime queue packet")
-        backend.render_frame(state.tree, state)
-        expect(backend.gpu_backend()).to_equal("vulkan")
-        expect(backend.last_artifact_queue_submit_status).to_equal(WEB_RENDER_QUEUE_STATUS_SUBMITTED)
-        expect(backend.last_artifact_queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_DRAINED)
-        expect(backend.last_artifact_queue_packet_id).to_be_greater_than(0)
-        expect(backend.last_artifact_queue_drained).to_equal(1)
-        expect(backend.last_artifact_queue_reason).to_contain("drained runtime queue")
+val (stdout, stderr, code) = rt_process_run("./bin/simple", ["run", "test/01_unit/app/ui/browser_backend_runtime_queue_probe.spl"])
+val output = stdout + stderr
 
-        step("Second unchanged frame is served from cache and reports no queue request")
-        backend.render_frame(state.tree, state)
-        expect(backend.static_frame_fast_hits).to_equal(1)
-        expect(backend.last_artifact_queue_submit_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
-        expect(backend.last_artifact_queue_drain_status).to_equal(WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED)
-        expect(backend.last_artifact_queue_packet_id).to_equal(0)
-        expect(backend.last_artifact_queue_drained).to_equal(0)
-        expect(backend.last_artifact_queue_reason).to_equal("runtime queue not requested")
+step("First GPU-selected render emits and drains one runtime queue packet")
+expect(code).to_equal(0)
+expect(output).to_contain("backend=vulkan")
+expect(output).to_contain("first_submit=submitted")
+expect(output).to_contain("first_drain=drained")
+expect(output).to_contain("first_packet=1")
+expect(output).to_contain("first_drained=1")
+expect(output).to_contain("first_backend_handle=7")
+expect(output).to_contain("first_reason=drained runtime queue")
+
+step("Second unchanged frame is served from cache and reports no queue request")
+expect(output).to_contain("second_fast_hits=1")
+expect(output).to_contain("second_submit=not_requested")
+expect(output).to_contain("second_drain=not_requested")
+expect(output).to_contain("second_packet=0")
+expect(output).to_contain("second_drained=0")
+expect(output).to_contain("second_backend_handle=0")
+expect(output).to_contain("second_reason=runtime queue not requested")
 ```
 
 </details>
