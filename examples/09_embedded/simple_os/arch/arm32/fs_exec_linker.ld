@@ -52,13 +52,5 @@ SECTIONS {
         __heap_end = .;
     } > RAM
 
-    _kernel_end = .;
-
-    /DISCARD/ : {
-        *(.note*)
-        *(.eh_frame*)
-        *(.comment)
-        *(.ARM.attributes)
-        *(.ARM.exidx*)
-    }
+INCLUDE "examples/09_embedded/simple_os/arch/common/linker_arm_common.ld"
 }
