@@ -911,7 +911,7 @@ expect(s).to_be_less_than(c)
 
 </details>
 
-#### backend_default_priority_order keeps platform native then CUDA HIP then Vulkan
+#### backend_default_priority_order starts at Metal then CUDA HIP then Vulkan
 
 <details>
 <summary>Executable SSpec</summary>

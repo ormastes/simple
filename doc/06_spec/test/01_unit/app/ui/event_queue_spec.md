@@ -1,6 +1,6 @@
 # Event Queue Specification
 
-> 1. Ok
+> <details>
 
 <!-- sdn-diagram:id=event_queue_spec.arch -->
 <details class="sdn-source">
@@ -29,7 +29,7 @@ event_queue_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -42,9 +42,9 @@ event_queue_spec -> common
 
 #### starts with no events
 
-1. Ok
+- Ok
    - Expected: event == nil is true
-2. Err
+- Err
    - Expected: false is true
 
 
@@ -68,10 +68,10 @@ match result:
 
 #### injects and polls a single event
 
-1. Ok
-2. backend inject event
+- Ok
+- backend inject event
    - Expected: event != nil is true
-3. Err
+- Err
    - Expected: false is true
 
 
@@ -96,13 +96,13 @@ match result:
 
 #### injects multiple events and polls in FIFO order
 
-1. Ok
-2. backend inject events
+- Ok
+- backend inject events
    - Expected: e1 != nil is true
    - Expected: e2 != nil is true
    - Expected: e3 != nil is true
    - Expected: e4 == nil is true
-3. Err
+- Err
    - Expected: false is true
 
 
@@ -134,6 +134,57 @@ match result:
 
 </details>
 
+#### drains long injected event batches without changing visible queue state
+
+- Ok
+- events push
+- backend inject events
+   - Expected: backend.event_queue.len() equals `80`
+- UIEvent KeyPress
+   - Expected: key equals `"k" + drained.to_string()`
+   - Expected: drained equals `-1`
+   - Expected: backend.event_queue.len() equals `0`
+- Err
+   - Expected: e equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = NoneBackend.new()
+match result:
+    Ok(backend) =>
+        var events: [UIEvent] = []
+        var i = 0
+        while i < 80:
+            events.push(UIEvent.KeyPress(key: "k" + i.to_string()))
+            i = i + 1
+        backend.inject_events(events)
+
+        expect(backend.event_queue.len()).to_equal(80)
+
+        var drained = 0
+        while drained < 80:
+            val event = backend.poll_event(0)
+            match event:
+                UIEvent.KeyPress(key) =>
+                    expect(key).to_equal("k" + drained.to_string())
+                _ =>
+                    expect(drained).to_equal(-1)
+            drained = drained + 1
+
+        expect(backend.poll_event(0)).to_be_nil()
+        expect(backend.event_queue.len()).to_equal(0)
+    Err(e) =>
+        expect(e).to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -153,8 +204,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

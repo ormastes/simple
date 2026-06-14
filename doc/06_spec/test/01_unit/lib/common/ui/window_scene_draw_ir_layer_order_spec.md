@@ -28,7 +28,7 @@ window_scene_draw_ir_layer_order_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,6 +59,26 @@ expect(composition.batches[5].embedding.surface_id).to_equal("top")
 
 </details>
 
+#### orders sparse z-index windows without losing stable equal-layer order
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val composition = shared_wm_scene_draw_ir_composition(_sparse_layered_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+
+expect(composition.batches.len()).to_equal(6)
+expect(composition.batches[2].embedding.surface_id).to_equal("bottom")
+expect(composition.batches[3].embedding.surface_id).to_equal("middle-a")
+expect(composition.batches[4].embedding.surface_id).to_equal("middle-b")
+expect(composition.batches[5].embedding.surface_id).to_equal("top")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -78,8 +98,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

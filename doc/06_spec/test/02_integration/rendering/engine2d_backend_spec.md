@@ -266,7 +266,7 @@ e3.shutdown()
 
 #### Engine2D explicit backend selection
 
-#### documents the default backend preference as platform native then CUDA HIP then Vulkan
+#### documents the default backend preference as Metal then CUDA HIP then Vulkan
 
 <details>
 <summary>Executable SSpec</summary>

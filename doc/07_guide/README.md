@@ -46,6 +46,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/lint.md](tooling/lint.md) | Linter configuration and usage |
 | [tooling/logging.md](tooling/logging.md) | Production logging, debug logging, and script print policy |
 | [app/ui/ui_access.md](app/ui/ui_access.md) | Canonical UI snapshot, act, and history workflow |
+| [app/ui/engine2d_backend_order.md](app/ui/engine2d_backend_order.md) | Engine2D GUI backend preference order and font offload lanes |
 | [app/ui/ui_render.md](app/ui/ui_render.md) | UI rendering pipeline, shared web render contract, HTML/CSS cache planning |
 | [tooling/llm_dashboard_web_login.md](tooling/llm_dashboard_web_login.md) | Web login, bootstrap admin credentials, and auth-session storage for `llm_dashboard` |
 | [tooling/llm_approval_flow.md](tooling/llm_approval_flow.md) | LLM approval flow |
