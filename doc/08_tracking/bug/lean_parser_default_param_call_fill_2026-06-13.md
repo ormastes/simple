@@ -9,8 +9,29 @@
 - **Date:** 2026-06-13
 - **Component:** `src/compiler/20.hir` / `src/compiler/30.types` — call lowering /
   call-signature resolution (self-hosted pipeline).
-- **Status:** OPEN. Parser + IR-capture half DONE (commit fce662c707d1); call-site
-  *application* half not started (own milestone).
+- **Status:** RESOLVED on the active (Rust) frontend 2026-06-14 (commit 4e151c2649b).
+  The deployed compiler's `run`/`jit`/`aot` path uses the Rust HIR frontend, and
+  that path now fills omitted trailing default args (verified: `greet("hi")`→103,
+  `multi(1)`→31, no-default `add(2,3)`→5; regression spec
+  `test/01_unit/compiler/default_param_call_fill_spec.spl`). The self-hosted (.spl)
+  `20.hir`/`35.semantics` pipeline carries forward-scaffolding fill
+  (`MethodResolver.fill_call_defaults`, currently inert — that pipeline is not the
+  active frontend and is blocked by LIM-010); it must reach parity before the
+  self-hosted frontend is deployed delegation-free. Parser + IR-capture half was
+  DONE earlier (commit fce662c707d1).
+
+## Resolution (Rust frontend, 2026-06-14)
+
+The HIR function *type* carries only parameter TypeIds, not default exprs, so the
+call site could not see defaults. Fix: capture each free function's parameter
+default exprs during module lowering (`Lowerer.fn_param_defaults` via
+`collect_fn_param_defaults`, modeled on Pass 0.5c `method_return_types`), then in
+`lower_call`'s regular-call path append the missing trailing defaults. Scoped to
+directly-named free-function callees, purely positional calls, and CONSTANT
+default exprs (literals + unary/binary of literals) which cannot reference
+caller-scope locals or sibling params; anything else is left unfilled (prior
+behavior), never silently miscompiled. Method/`Path`-callee and cross-module
+imported-callee defaults are follow-ups.
 
 ## What works (commit fce662c707d1)
 - The lean parser accepts `fn f(x: T = expr)` in both param-parsing sites
