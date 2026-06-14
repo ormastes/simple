@@ -442,6 +442,8 @@ Each agent reports:
   agent-task plan, system-test plan, tracking SSpec, and generated manual
   aligned with the 2026-06-14 SimpleOS evidence refresh without depending on a
   volatile pushed commit id.
+- Status summaries use stable artifact names without depending on a volatile
+  pushed commit id.
 - The tracking SSpec and generated manual now assert that the SimpleOS report
   index, feature-tracking row, system-test plan, and agent-task handoff keep
   the 2026-06-14 refresh visible, so future agents do not treat older

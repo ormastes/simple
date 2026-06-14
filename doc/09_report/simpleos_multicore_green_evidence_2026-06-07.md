@@ -31,6 +31,9 @@ must not be conflated with host runtime-pool profile evidence.
 Commands below are the canonical repo-root checks for this lane. The latest
 interpreter-run SimpleOS feature-spec refresh was rerun from
 `/tmp/simple-pherallel-continue-jj` on 2026-06-14 after syncing shared `main`.
+The release-visible final-handoff gate is the fast blocker contract; the live
+QEMU final-handoff command remains opt-in and is used only when intentionally
+refreshing AP ring/user hardware evidence.
 
 ```sh
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean
@@ -45,6 +48,25 @@ interpreter-run SimpleOS feature-spec refresh was rerun from
 ./src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 SIMPLEOS_GREEN_CARRIER_QEMU_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+```
+
+## 2026-06-14 Live Final-Handoff Rerun Attempt
+
+After syncing shared `main` in `/tmp/simple-pherallel-continue-jj`, the opt-in
+final AP ring/user lane was attempted again:
+
+```sh
+SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
+```
+
+Result: FAIL/TIMEOUT at the Simple test runner's 120s file timeout. The run did
+not produce fresh current PASS evidence for `HW_HANDOFF_PASS=true`,
+`USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`. Therefore this report keeps
+the earlier live QEMU final-handoff proof as historical opt-in evidence and uses
+the fast blocker contract below as the current release-visible guard:
+
+```sh
+src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean
 ```
 
 ## Results

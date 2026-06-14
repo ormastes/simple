@@ -213,6 +213,10 @@ parallel/fanout/stress aggregates.
 
 ### Languages compared
 
+Python participates when available. Bun, Java, and Erlang rows are emitted when
+their toolchains exist; C and Go remain the required native baselines for
+release-blocking M:N comparison gates.
+
 | Language | Execution model | Why included |
 |----------|----------------|--------------|
 | Simple (interpreter) | Tree-walk | Baseline — current default mode |

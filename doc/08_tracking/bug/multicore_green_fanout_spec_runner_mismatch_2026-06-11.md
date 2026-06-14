@@ -28,7 +28,7 @@ Verified on 2026-06-11 from `/home/ormastes/dev/pub/simple`:
   -> PASS (historical resolved-bug evidence only; current reruns use
   `sh test/05_perf/profile_scripts/profile_report_contract_test.shs` so the
   canonical freshbin report and `doc/09_report/README.md` index are checked
-  together)
+  together with `report_index_checked`)
 - `src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_fanout_spec.spl --mode=interpreter --clean`
   -> PASS (`Passed: 3`, `Failed: 0`)
 
