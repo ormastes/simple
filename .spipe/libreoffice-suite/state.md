@@ -90,8 +90,14 @@ possible so they are runner-verifiable.
    ui/style parser bug is fixed.
 5. TODO — **Excel deeper**: dependency-graph recalc, cell-ref numeric path
    (gated on the f64 blocker), more functions (COUNTA/VLOOKUP/text fns).
-6. TODO — **Plugin split**: word/ppt/excel as separate plugins on the md module
-   via `app.plugin.registry` (reuse ide-office-plugin-suite manifest adapter).
+6. DONE (landed origin d4323508) — **Plugin split**: `app.office.plugins`
+   registers office-word/office-ppt/office-excel as three separate `PluginEntry`
+   manifests over the shared md/CSS substrate, via the project's plugin registry
+   format (same path the IDE adapter uses). Manifest round-trips + validates.
+   Spec `test/01_unit/app/office/plugins_spec.spl` 5/5.
+   NOTE: the higher-level office *apps* (`word_app`/`sheets_app`/... exercised by
+   `office_suite_spec.spl`) have 13 PRE-EXISTING failures unrelated to these
+   slices (stale `word/render.spl` DocBlock API, etc.) — separate cleanup.
 7. TODO — **Harden db / SDD-draw / math**: `simple_db`, `common/drawing`,
    math; connect draw to the CSS/render substrate.
 8. TODO — **Game-tool migrate + connect**: `examples/11_advanced/game2d`
@@ -112,4 +118,9 @@ possible so they are runner-verifiable.
   styled HTML render via resolver, d0ca1b9, spec 4/4). Refactored ResolvedStyle
   accessors to free functions (style_value/style_has) to avoid a bare-method
   collision with ThemeRegistry.get. Filed pre-existing ui/style.spl parser bug.
-  Next: slice 3 (IDE WYSIWYG view), slice 6 (plugin split via app.plugin.registry).
+- 2026-06-14 dev: Landed slice 2d (word styled HTML render, 2ec0229, spec 4/4)
+  and slice 6 (office plugin split, d4323508, spec 5/5). Core suite architecture
+  now in place: CSS substrate + all 3 surfaces (md/slides/word) rendering through
+  it + word/ppt/excel as separate registered plugins. Remaining: slice 3 (IDE
+  WYSIWYG view), 5 (deeper Excel, f64-blocked), 7 (db/draw/math), 8 (game
+  connect), 9 (rename to LibreOffice, last/minimal).
