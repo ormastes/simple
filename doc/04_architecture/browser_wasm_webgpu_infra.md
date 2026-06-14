@@ -45,6 +45,13 @@ browser target for WASM/JS-hosted WGSL source plans because browser WebGPU
 compilation and queue execution happen through `navigator.gpu`, not through the
 native backend factory.
 
+This ordering is specific to compiler/browser-hosted portable compute. The
+default Pure Simple GUI and Simple2D render path uses the Engine2D backend lane
+planner documented in `doc/04_architecture/ui/simple_gui_stack_tldr.md` and
+`doc/07_guide/app/ui/engine2d_backend_order.md`: explicit native surfaces stay
+caller-owned, while automatic GUI drawing starts at platform-native Metal, then
+CUDA/HIP, Qualcomm, Vulkan, DirectX, OpenCL, and CPU fallbacks.
+
 ## MDSOC Fit
 
 This lane is a virtual capsule crossing compiler, browser session, browser
