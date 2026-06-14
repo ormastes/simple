@@ -15,6 +15,7 @@
 #else
     #define RT_POOL_PTHREAD
     #include <pthread.h>
+    #include <sched.h>
     #include <unistd.h>
 #endif
 
@@ -477,6 +478,19 @@ int64_t rt_pool_uses_global_fifo_queue(void) {
 
 int64_t rt_pool_uses_work_stealing(void) {
     return 1;
+}
+
+int64_t rt_pool_safepoint(void) {
+    if (!g_pool_worker_tls) return 0;
+    rt_pool_mark_worker_blocked();
+    int64_t spawned = rt_pool_maybe_spawn_compensation_worker();
+#ifdef RT_POOL_PTHREAD
+    sched_yield();
+#else
+    Sleep(0);
+#endif
+    rt_pool_mark_worker_unblocked();
+    return spawned;
 }
 
 int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {

@@ -48,6 +48,14 @@
 - `test/03_system/feature/usage/multicore_green_agent_plan_spec.spl` checks that `doc/03_plan/agent_tasks/multicore_green.md` uses meaningful parallel-agent lane names instead of `Agent A`/`Agent B` labels, and keeps each lane tied to deliverables and acceptance evidence.
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl` keeps the ordinary-closure boundary explicit: with hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task unfinished during the first short observation window on both source-run and standalone native paths. This is future ordinary-closure preemption work, not the supported hosted fairness contract.
 - `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl` proves that raw `thread_yield()` inside a one-worker hosted multicore-green task still does not let queued work progress during that same first short window, so future plain-closure preemption needs compiler/runtime cooperation rather than a bare OS-thread yield primitive.
+- `test/03_system/feature/usage/multicore_green_safepoint_fairness_regression_spec.spl`
+  proves the new explicit runtime-pool safepoint hook makes queued work
+  progress on standalone native with hosted parallelism pinned to `1`: a long
+  worker that calls `multicore_green_safepoint()` lets a later quick task
+  finish during the first observation window, returns the original slow-task
+  value, and records compensation capacity by observing
+  `multicore_green_parallelism() == 2` after join. This is a compiler/runtime
+  poll insertion point, not automatic ordinary-closure preemption.
 - `test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.spl`
   proves source-run and standalone native hosted pool width remains bounded and
   that non-positive `multicore_green_set_parallelism` requests clamp to `1`
@@ -173,3 +181,7 @@
 - Focused verification for that slice passed: profile report contract, SPipe
   dev command wiring, local interpreter tracking SSpec with 13 scenarios, and
   the generated-spec layout guard returning `0`.
+- The later 2026-06-14 safepoint slice added
+  `multicore_green_safepoint()` as an explicit runtime/compiler poll hook and
+  executable standalone-native fairness evidence while keeping ordinary
+  `multicore_green_spawn` closure preemption future work.

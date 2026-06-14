@@ -538,6 +538,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         concurrency::rt_pool_uses_global_fifo_queue
     );
     insert_simple!("rt_pool_uses_work_stealing", concurrency::rt_pool_uses_work_stealing);
+    insert_simple!("rt_pool_safepoint", concurrency::rt_pool_safepoint);
     insert_simple!("rt_channel_recv", concurrency::rt_channel_recv);
     insert_simple!("rt_channel_send", concurrency::rt_channel_send);
     insert_simple!("rt_channel_try_recv", concurrency::rt_channel_try_recv);

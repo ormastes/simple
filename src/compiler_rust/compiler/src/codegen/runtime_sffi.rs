@@ -655,6 +655,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_pool_get_parallelism", &[], &[I64]),
     RuntimeFuncSpec::new("rt_pool_uses_global_fifo_queue", &[], &[I64]),
     RuntimeFuncSpec::new("rt_pool_uses_work_stealing", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_pool_safepoint", &[], &[I64]),
     RuntimeFuncSpec::new("rt_pool_submitted_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_pool_completed_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_pool_pending_count", &[], &[I64]),

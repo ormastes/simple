@@ -6,13 +6,14 @@
 
 use std.concurrent.channel.{channel_new, channel_from_id}
 
-extern fn rt_pool_submit(closure: Any) -> i64
+extern fn rt_pool_submit(closure: Any, env_ptr: i64) -> i64
 extern fn rt_pool_join(handle: i64) -> i64
 extern fn rt_pool_is_done(handle: i64) -> i64
 extern fn rt_pool_set_parallelism(workers: i64) -> i64
 extern fn rt_pool_get_parallelism() -> i64
 extern fn rt_pool_uses_global_fifo_queue() -> i64
 extern fn rt_pool_uses_work_stealing() -> i64
+extern fn rt_pool_safepoint() -> i64
 extern fn rt_pool_submitted_count() -> i64
 extern fn rt_pool_completed_count() -> i64
 extern fn rt_pool_pending_count() -> i64
@@ -99,7 +100,7 @@ fn multicore_green_run_slices_inline(initial_state: i64, step_fn: fn(i64) -> Mul
 
 fn multicore_green_spawn(task: fn() -> i64) -> MulticoreGreenHandle:
     """Spawn a value task on the bounded runtime worker pool when available."""
-    val native_handle = rt_pool_submit(task)
+    val native_handle = rt_pool_submit(task, 0)
     if native_handle > 0:
         return MulticoreGreenHandle(
             native_handle: native_handle,
@@ -123,7 +124,7 @@ fn multicore_green_spawn_sliced(initial_state: i64, step_fn: fn(i64) -> Multicor
     val work = channel_new()
     val results = channel_new()
     work.send(initial_state)
-    val native_handle = rt_pool_submit(\: multicore_green_slice_worker(work.id(), results.id(), step_fn))
+    val native_handle = rt_pool_submit(\: multicore_green_slice_worker(work.id(), results.id(), step_fn), 0)
     if native_handle == 0:
         return MulticoreGreenSlicedHandle(
             result_channel_id: results.id(),
@@ -165,6 +166,18 @@ fn multicore_green_uses_global_fifo_queue() -> bool:
 fn multicore_green_uses_work_stealing() -> bool:
     """Return true when the hosted runtime pool uses per-worker queues with stealing."""
     rt_pool_uses_work_stealing() == 1
+
+fn multicore_green_safepoint() -> i64:
+    """Poll a runtime-pool safepoint from the current pool worker.
+
+    This is an explicit runtime safepoint hook for future compiler-inserted
+    loop polls. It is not automatic preemption: ordinary closures only become
+    fair when user code or generated code calls this function inside a long
+    running body. The hook may start compensation capacity and yield the
+    current OS worker; callers must not rely on the returned progress count for
+    correctness.
+    """
+    rt_pool_safepoint()
 
 fn multicore_green_submitted_count() -> i64:
     """Return hosted runtime-pool tasks accepted by the multicore-green pool."""

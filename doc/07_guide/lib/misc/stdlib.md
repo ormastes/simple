@@ -155,7 +155,7 @@ for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
 | Spawn a platform thread | `std.concurrent.thread.{thread_spawn}` | `src/lib/nogc_async_mut/concurrent/thread.spl` / `thread_sffi.spl` | Uses OS threads (`pthread_create` / `CreateThread`) |
 | Schedule lightweight cooperative work | `std.concurrent.cooperative_green.{cooperative_green_spawn, cooperative_green_spawn_value, cooperative_green_run_one, cooperative_green_run_all}` | `src/lib/nogc_async_mut/concurrent/cooperative_green.spl` over `green_thread.spl` | Runs queued work/results on the current OS thread; no preemption or CPU parallelism |
 | Coordinate logical green tasks | `std.concurrent.green_channel.{green_channel_new, green_channel_recv, green_channel_send}` | `src/lib/nogc_async_mut/concurrent/green_channel.spl` | Pure Simple nonblocking channel contract; empty recv parks a logical green task, send unparks a waiter, bounded full send reports backpressure |
-| Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_spawn_sliced, multicore_green_set_parallelism, multicore_green_parallelism}` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` / `MulticoreGreenSlicedHandle.used_runtime_pool()` / `MulticoreGreenSlicedHandle.ran_inline_fallback()` / `MulticoreGreenSliceResult` / `multicore_green_{submitted,completed,pending,busy,blocked}_count()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over runtime-seed `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done` support; profile rows require runtime-pool acceptance and treat inline fallback as non-M:N. Set parallelism before the first spawn for a Go `GOMAXPROCS`-like hosted pool limit. Counter helpers are scheduler evidence for submitted/completed progress and queue/worker state; they are not automatic preemption evidence. Use `multicore_green_spawn_sliced` when a long task can expose scalar progress state and yield fairness by requeueing between slices; the sliced handle must also report `used_runtime_pool()` before profile evidence can call this hosted fairness. Live pools can grow but plain closures do not claim shrink/preemption behavior yet. |
+| Schedule bounded CPU-parallel value work | `std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_spawn_sliced, multicore_green_safepoint, multicore_green_set_parallelism, multicore_green_parallelism}` / `MulticoreGreenHandle.used_runtime_pool()` / `MulticoreGreenHandle.ran_inline_fallback()` / `MulticoreGreenSlicedHandle.used_runtime_pool()` / `MulticoreGreenSlicedHandle.ran_inline_fallback()` / `MulticoreGreenSliceResult` / `multicore_green_{submitted,completed,pending,busy,blocked}_count()` | `src/lib/nogc_async_mut/concurrent/multicore_green.spl` | Pure Simple facade over runtime-seed `rt_pool_submit` / `rt_pool_join` / `rt_pool_is_done` support; profile rows require runtime-pool acceptance and treat inline fallback as non-M:N. Set parallelism before the first spawn for a Go `GOMAXPROCS`-like hosted pool limit. Counter helpers are scheduler evidence for submitted/completed progress and queue/worker state; they are not automatic preemption evidence. Use `multicore_green_spawn_sliced` when a long task can expose scalar progress state and yield fairness by requeueing between slices. Use `multicore_green_safepoint()` only as an explicit runtime/compiler poll hook inside long hosted workers; it may grow compensation capacity and yield the current OS worker, but it is not automatic ordinary-closure preemption. Live pools can grow but plain closures do not claim shrink/preemption behavior yet. |
 | Reuse a worker pool | `task_spawn` / `TaskHandle` | `src/lib/nogc_async_mut/thread_pool.spl` | Lower-level queue-backed task API. Current cross-language M:N profile rows use `multicore_green_spawn` so profile evidence stays tied to `used_runtime_pool()` and public multicore-green counters. |
 | Send values between concurrent work | `std.concurrent.channel.{channel_new, channel_from_id}` | `src/lib/nogc_sync_mut/concurrent/channel.spl` | Runtime MPMC channel surface |
 | Cancel async work cooperatively | `std.async.cancellation.{CancellationToken}` | `src/lib/nogc_async_mut/async/cancellation.spl` | Token registry with child-token propagation; poll `is_cancelled()` inside tasks |
@@ -203,6 +203,7 @@ API itself, or use future scheduler-aware green-thread work when that lands.
 ```simple
 use std.concurrent.multicore_green.{
     multicore_green_parallelism,
+    multicore_green_safepoint,
     multicore_green_set_parallelism,
     multicore_green_spawn,
     multicore_green_spawn_sliced,
@@ -251,6 +252,11 @@ closure blocker and does not change the semantics of plain
 surface (`E-PAR-003`), called without both an integer initial state and a step
 function (`E-PAR-004`), or given an inline step lambda that mutates shared state
 (`E-PAR-006`).
+`multicore_green_safepoint()` is the lower-level explicit poll hook for future
+compiler-inserted loop safepoints. A long hosted worker may call it to let the
+runtime mark the worker blocked, start compensation capacity, and yield the OS
+worker so queued tasks can progress. Do not use it as evidence of automatic
+plain-closure preemption, and do not build correctness on its numeric return.
 
 ---
 

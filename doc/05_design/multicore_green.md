@@ -53,7 +53,9 @@ preemptive, or Go M:N.
 
 ### Multicore Green Runtime-Pool Candidate
 
-`multicore_green_spawn(task)` calls `rt_pool_submit(task)`.
+`multicore_green_spawn(task)` calls `rt_pool_submit(task, 0)`: the public
+facade passes a zero environment pointer explicitly so the Simple surface stays
+closure-based while the native runtime ABI remains the two-slot `fn/env` form.
 
 Data structure:
 
@@ -78,11 +80,17 @@ Behavior:
   starvation diagnostics.
 - `multicore_green_set_parallelism(workers)` clamps non-positive requests to
   `1` at the Pure Simple API boundary before delegating to runtime support.
+- `multicore_green_safepoint()` is an explicit runtime-pool poll hook for
+  long hosted workers and future compiler-inserted loop polls. When called from
+  a pool worker it can mark the worker blocked, start compensation capacity,
+  and yield the current OS worker so queued work can progress. It is not
+  automatic preemption and callers must not rely on a numeric progress count.
 
 Design rule: only positive-handle work with work-stealing evidence can support
 hosted M:N claims. Inline fallback is correct behavior but not M:N evidence.
 Plain closures do not claim automatic preemption; counters prove pool progress,
-not preemptive green-thread scheduling.
+not preemptive green-thread scheduling. Explicit safepoint evidence proves a
+runtime/compiler insertion point; raw `thread_yield()` is still insufficient.
 
 ### Explicit Sliced Fairness API
 

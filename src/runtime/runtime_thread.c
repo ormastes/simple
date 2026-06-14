@@ -27,6 +27,7 @@
 #else
     #define SPL_THREAD_PTHREAD
     #include <pthread.h>
+    #include <sched.h>
     #include <unistd.h>
     #include <time.h>
     #include <errno.h>
@@ -664,12 +665,13 @@ static BOOL CALLBACK rt_pool_init_once(PINIT_ONCE once, PVOID param, PVOID* cont
 }
 #endif
 
-static void rt_pool_start(void) {
+static int rt_pool_start(void) {
 #ifdef SPL_THREAD_PTHREAD
     pthread_mutex_lock(&g_pool_lock);
     if (g_pool_started) {
+        int count = g_pool_worker_count;
         pthread_mutex_unlock(&g_pool_lock);
-        return;
+        return count;
     }
     g_pool_started = 1;
     g_pool_worker_count = rt_pool_effective_worker_count();
@@ -683,12 +685,14 @@ static void rt_pool_start(void) {
     pthread_mutex_lock(&g_pool_lock);
     g_pool_worker_count = started;
     pthread_mutex_unlock(&g_pool_lock);
+    return started;
 #else
     InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
     EnterCriticalSection(&g_pool_lock);
     if (g_pool_started) {
+        int count = g_pool_worker_count;
         LeaveCriticalSection(&g_pool_lock);
-        return;
+        return count;
     }
     g_pool_started = 1;
     g_pool_worker_count = rt_pool_effective_worker_count();
@@ -702,6 +706,7 @@ static void rt_pool_start(void) {
     EnterCriticalSection(&g_pool_lock);
     g_pool_worker_count = started;
     LeaveCriticalSection(&g_pool_lock);
+    return started;
 #endif
 }
 
@@ -881,6 +886,19 @@ int64_t rt_pool_uses_work_stealing(void) {
     return 1;
 }
 
+int64_t rt_pool_safepoint(void) {
+    if (!g_pool_worker_tls) return 0;
+    rt_pool_mark_worker_blocked();
+    int64_t spawned = rt_pool_maybe_spawn_compensation_worker();
+#ifdef SPL_THREAD_PTHREAD
+    sched_yield();
+#else
+    Sleep(0);
+#endif
+    rt_pool_mark_worker_unblocked();
+    return spawned;
+}
+
 int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {
     int64_t closure_ptr = (arg1 != 0) ? arg1 : arg0;
     if (!closure_ptr) return 0;
@@ -914,7 +932,21 @@ int64_t rt_pool_submit(int64_t arg0, int64_t arg1) {
         return 0;
     }
 
-    rt_pool_start();
+    if (rt_pool_start() <= 0) {
+#ifdef SPL_THREAD_PTHREAD
+        pthread_mutex_lock(&g_pool_lock);
+        g_pool_submitted_tasks++;
+        pthread_mutex_unlock(&g_pool_lock);
+#else
+        InitOnceExecuteOnce(&g_pool_once, rt_pool_init_once, NULL, NULL);
+        EnterCriticalSection(&g_pool_lock);
+        g_pool_submitted_tasks++;
+        LeaveCriticalSection(&g_pool_lock);
+#endif
+        rt_pool_complete_task(task, task->entry(task->closure_ptr));
+        return handle;
+    }
+
     rt_pool_push_task(task);
     return handle;
 }

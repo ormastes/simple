@@ -98,6 +98,7 @@ unsafe extern "C" {
     pub fn rt_pool_get_parallelism() -> i64;
     pub fn rt_pool_uses_global_fifo_queue() -> i64;
     pub fn rt_pool_uses_work_stealing() -> i64;
+    pub fn rt_pool_safepoint() -> i64;
     pub fn rt_pool_submitted_count() -> i64;
     pub fn rt_pool_completed_count() -> i64;
     pub fn rt_pool_pending_count() -> i64;
@@ -120,6 +121,9 @@ static SIMPLE_KEEP_RT_POOL_BUSY_COUNT: unsafe extern "C" fn() -> i64 = rt_pool_b
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_POOL_BLOCKED_COUNT: unsafe extern "C" fn() -> i64 = rt_pool_blocked_count;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_SAFEPOINT: unsafe extern "C" fn() -> i64 = rt_pool_safepoint;
 
 #[cfg(not(feature = "pytorch"))]
 fn torch_runtime_library() -> Option<&'static libloading::Library> {

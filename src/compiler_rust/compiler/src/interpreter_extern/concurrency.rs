@@ -187,6 +187,11 @@ pub fn rt_pool_uses_work_stealing(_args: &[Value]) -> Result<Value, CompileError
     Ok(Value::Int(0))
 }
 
+/// Interpreter mode has no native runtime-pool worker to safepoint.
+pub fn rt_pool_safepoint(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
 /// Native worker spawning is unavailable in interpreter mode.
 pub fn spl_thread_pool_spawn_worker(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))

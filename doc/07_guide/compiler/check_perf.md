@@ -165,6 +165,10 @@ Evidence` section that checks source/native sliced quick-task progress with
 hosted parallelism pinned to `1`. Do not claim automatic preemption for
 ordinary `multicore_green_spawn` closures unless a separate executable fairness
 gate is added.
+`multicore_green_safepoint()` is that lower-level runtime/compiler poll hook:
+standalone-native evidence may use it to prove queued work can progress when a
+long hosted worker explicitly polls, but the profile row must still describe it
+as explicit safepoint fairness rather than Go-style automatic preemption.
 They also fail closed before measuring work if the runtime reports
 `queue_model=global_fifo` or `queue_model=scheduler_owned`; only a single
 `queue_model=work_stealing` marker may support M:N profile evidence.
@@ -226,7 +230,7 @@ release-blocking M:N comparison gates.
 | Simple (SMF loader) | Bytecode VM | Shows bytecode dispatch win |
 | Simple (native) | AOT (LLVM/Cranelift) | Shows AOT ceiling |
 | Simple `cooperative_green_spawn` / `cooperative_green_spawn_value` | Cooperative queue on current OS thread | Implemented green-thread API, but not CPU-parallel or preemptive |
-| Simple `multicore_green_spawn` / `multicore_green_spawn_sliced` | Bounded runtime worker pool through runtime-seed `rt_pool_*` support | Current Pure Simple M:N candidate row for CPU-heavy comparisons uses `multicore_green_spawn`; `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work. Profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if value or sliced handles report `used_runtime_pool()` as false. Public `multicore_green_*_count` helpers are runtime-pool progress evidence, not ordinary-closure preemption evidence |
+| Simple `multicore_green_spawn` / `multicore_green_spawn_sliced` / `multicore_green_safepoint` | Bounded runtime worker pool through runtime-seed `rt_pool_*` support | Current Pure Simple M:N candidate row for CPU-heavy comparisons uses `multicore_green_spawn`; `multicore_green_spawn_sliced` is the explicit scalar-state fairness API for long hosted work; `multicore_green_safepoint` is an explicit runtime/compiler poll hook and not automatic plain-closure preemption. Profile workloads set and print hosted parallelism plus a fail-closed `queue_model=work_stealing` marker and fail if value or sliced handles report `used_runtime_pool()` as false. Public `multicore_green_*_count` helpers are runtime-pool progress evidence, not ordinary-closure preemption evidence |
 | Simple `task_spawn` | Runtime worker pool when `rt_pool_*` links | Lower-level pool-backed task API with focused API/native evidence; not the named cross-language M:N profile row |
 | C (gcc -O2) | AOT native | Absolute performance floor |
 | Go | AOT + goroutines | Low-overhead concurrency |
