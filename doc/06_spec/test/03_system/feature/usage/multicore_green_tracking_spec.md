@@ -318,7 +318,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 76 lines folded for reproduction.
+Runnable source: 77 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -379,6 +379,7 @@ expect(report_index).to_contain("simpleos_green_hardware_handoff_blocker_spec.sp
 expect(report_index).to_contain("live final-handoff rerun with `--timeout 240` completed without the runner timeout")
 expect(report_index).to_contain("Cranelift freestanding build links with missing `rt_string_char_code_at` / `rt_for_iterable` symbols")
 expect(report_index).to_contain("LLVM backend is unavailable in this driver build")
+expect(report_index).to_contain("doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md")
 expect(report_index).to_contain("prior live QEMU final-handoff claim is therefore not refreshed by this report")
 expect(report_index).to_contain("cross_language_perf_2026-06-08_docker_contract.md")
 expect(report_index).to_contain("Historical")
@@ -1015,7 +1016,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1033,6 +1034,7 @@ expect(row).to_contain("release wrapper remains probe-required")
 expect(row).to_contain("bootstrap-from-scratch.sh --deploy")
 step("Verify the SimpleOS final handoff closure remains visible")
 expect(row).to_contain("doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md")
+expect(row).to_contain("doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md")
 expect(row).to_contain("SimpleOS final ring/user handoff is closed")
 expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
 step("Verify the QEMU live spec metadata matches current closed evidence")

@@ -303,7 +303,7 @@ expect(probe).to_contain("USER_CR3_READY")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -342,6 +342,7 @@ expect(report).to_contain("rt_string_char_code_at")
 expect(report).to_contain("rt_for_iterable")
 expect(report).to_contain("`--backend llvm` is unavailable")
 expect(report).to_contain("uses the fast blocker contract below as the current release-visible guard")
+expect(report).to_contain("doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md")
 expect(report).to_contain("src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean")
 expect(absent_in_text(report, "SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")).to_equal(1)
 expect(report).to_contain("[green-carrier-qemu] HW_HANDOFF_PASS=true")

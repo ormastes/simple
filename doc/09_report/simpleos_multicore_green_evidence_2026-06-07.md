@@ -74,6 +74,9 @@ contract below as the current release-visible guard:
 src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean
 ```
 
+The current refresh blocker is tracked in
+`doc/08_tracking/bug/simpleos_green_final_qemu_refresh_build_blocker_2026-06-14.md`.
+
 ## Results
 
 | Evidence | Result | Assertions |
