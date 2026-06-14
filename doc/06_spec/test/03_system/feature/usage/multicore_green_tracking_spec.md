@@ -318,7 +318,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 74 lines folded for reproduction.
+Runnable source: 76 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -376,8 +376,10 @@ expect(report_index).to_contain("2026-06-14 interpreter-run refresh")
 expect(report_index).to_contain("final handoff blocker specs")
 expect(report_index).to_contain("release-visible gate is the fast")
 expect(report_index).to_contain("simpleos_green_hardware_handoff_blocker_spec.spl")
-expect(report_index).to_contain("live final-handoff rerun on this host timed out at 120s")
-expect(report_index).to_contain("prior live QEMU final-handoff claim is not refreshed by this report")
+expect(report_index).to_contain("live final-handoff rerun with `--timeout 240` completed without the runner timeout")
+expect(report_index).to_contain("Cranelift freestanding build links with missing `rt_string_char_code_at` / `rt_for_iterable` symbols")
+expect(report_index).to_contain("LLVM backend is unavailable in this driver build")
+expect(report_index).to_contain("prior live QEMU final-handoff claim is therefore not refreshed by this report")
 expect(report_index).to_contain("cross_language_perf_2026-06-08_docker_contract.md")
 expect(report_index).to_contain("Historical")
 step("Verify the SPipe state audit points at current profile evidence")
@@ -452,7 +454,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 158 lines folded for reproduction.
+Runnable source: 161 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -555,6 +557,7 @@ expect(row).to_contain("os_thread_profile_row_missing")
 expect(row).to_contain("os_thread_profile_timing_fail")
 expect(row).to_contain("workload_variety_methodology_missing")
 expect(row).to_contain("optional_language_inventory_missing")
+expect(row).to_contain("docker_cpu_quota_scheduler_width_missing")
 expect(row).to_contain("simpleos_report_index_row_missing")
 expect(row).to_contain("hosted_sliced_fairness_report_index_marker_missing")
 expect(row).to_contain("docker_simple_binary_probe_wording_corrupt")
@@ -585,6 +588,7 @@ expect(negative_contract).to_contain("case=os_thread_profile_row_missing")
 expect(negative_contract).to_contain("case=os_thread_profile_timing_fail")
 expect(negative_contract).to_contain("case=workload_variety_methodology_missing")
 expect(negative_contract).to_contain("case=optional_language_inventory_missing")
+expect(negative_contract).to_contain("case=docker_cpu_quota_scheduler_width_missing")
 expect(negative_contract).to_contain("case=simpleos_report_index_row_missing")
 expect(negative_contract).to_contain("case=hosted_sliced_fairness_report_index_marker_missing")
 expect(negative_contract).to_contain("case=docker_simple_binary_probe_wording_corrupt")
@@ -605,6 +609,7 @@ expect(system_plan).to_contain("os_thread_profile_row_missing")
 expect(system_plan).to_contain("os_thread_profile_timing_fail")
 expect(system_plan).to_contain("workload_variety_methodology_missing")
 expect(system_plan).to_contain("optional_language_inventory_missing")
+expect(system_plan).to_contain("docker_cpu_quota_scheduler_width_missing")
 expect(system_plan).to_contain("simpleos_report_index_row_missing")
 expect(system_plan).to_contain("hosted_sliced_fairness_report_index_marker_missing")
 expect(system_plan).to_contain("docker_simple_binary_probe_wording_corrupt")
@@ -781,7 +786,7 @@ expect(coding).to_contain("MulticoreGreenSlicedHandle.ran_inline_fallback()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 164 lines folded for reproduction.
+Runnable source: 168 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -822,6 +827,8 @@ expect(stdlib).to_contain("GOMAXPROCS")
 expect(perf).to_contain("used_runtime_pool()")
 expect(perf).to_contain("queue_model=work_stealing")
 expect(perf).to_contain("GOMAXPROCS=$CPU_WORKERS")
+expect(perf).to_contain("Docker CPU quota is containment metadata")
+expect(perf).to_contain("CPU_WORKERS == GOMAXPROCS")
 expect(perf).to_contain("contract-gated reports must keep")
 expect(perf).to_contain("checked large-fanout row")
 expect(perf).to_contain("checked stress report")
@@ -936,8 +943,10 @@ expect(sys_test_plan).to_contain("silently dropping tuning knobs")
 expect(sys_test_plan).to_contain("separate process/container boundary")
 expect(report_index).to_contain("optional Python/Bun/Java/Erlang rows documented when those toolchains exist")
 expect(profile_contract).to_contain("Optional language inventory is explicit")
+expect(profile_contract).to_contain("Docker CPU quota is containment metadata")
 expect(profile_contract).to_contain("C and Go remain the required native baselines")
 expect(profile_negative).to_contain("optional_language_inventory_missing")
+expect(profile_negative).to_contain("docker_cpu_quota_scheduler_width_missing")
 
 step("Verify forbidden numbered API-name scans cover the public concurrency family")
 expect(profile_contract).to_contain("thread_spawn_with_args")

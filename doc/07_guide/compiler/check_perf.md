@@ -132,6 +132,9 @@ binary is missing. Use
 `PROFILE_DOCKER_SIMPLE_BINARY=src/compiler_rust/target/debug/simple` only when
 you are explicitly retesting the debug-binary linker regression tracked in
 `doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md`.
+The Docker CPU quota is containment metadata, not the scheduler-width proof;
+release-blocking M:N comparisons use the recorded `CPU_WORKERS == GOMAXPROCS`
+scheduler-width contract.
 The report records the Go toolchain and the generated Go probe's
 `runtime.GOMAXPROCS(0)` / `runtime.NumCPU()` values so Go-like M:N comparisons
 name the scheduler limit used by the goroutine rows. The harness exports

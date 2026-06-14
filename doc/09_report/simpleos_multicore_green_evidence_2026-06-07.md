@@ -59,11 +59,16 @@ final AP ring/user lane was attempted again:
 SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/compiler_rust/target/debug/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl --mode=interpreter --clean
 ```
 
-Result: FAIL/TIMEOUT at the Simple test runner's 120s file timeout. The run did
-not produce fresh current PASS evidence for `HW_HANDOFF_PASS=true`,
-`USER_ENTRY_PASS=true`, or `USER_SYSCALL_PASS=true`. Therefore this report keeps
-the earlier live QEMU final-handoff proof as historical opt-in evidence and uses
-the fast blocker contract below as the current release-visible guard:
+Result: FAIL. A follow-up run with `--timeout 240` completed without the Simple
+test runner's 120s timeout, but the final live lane still failed before fresh
+marker proof. Direct build classification showed the current debug compiler's
+Cranelift freestanding build reaches the linker with missing
+`rt_string_char_code_at` / `rt_for_iterable` symbols, while `--backend llvm` is
+unavailable in this driver build. The run did not produce fresh current PASS
+evidence for `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, or
+`USER_SYSCALL_PASS=true`. Therefore this report keeps the earlier live QEMU
+final-handoff proof as historical opt-in evidence and uses the fast blocker
+contract below as the current release-visible guard:
 
 ```sh
 src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.spl --mode=interpreter --clean
