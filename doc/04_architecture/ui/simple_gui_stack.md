@@ -478,6 +478,10 @@ Every implementation of this architecture needs evidence for:
 - pixel/capture/hash evidence for GPU execution claims;
 - warm redraw latency, input-to-paint latency, max RSS, cache-hit behavior, and
   startup probe cost;
+- focused backend startup-order evidence:
+  `test/05_perf/graphics_2d/backend_preference_startup_spec.spl` verifies the
+  Engine2D auto/full preference order and bounds the pure helper startup path
+  without requiring local GPU hardware;
 - WM dispatch command parity: `wm_runtime_dispatch_command` output must match
   across web bridge, SimpleOS WM, and standalone hosts;
 - `doc/06_spec` layout safety: executable specs stay under `test/**`, not
