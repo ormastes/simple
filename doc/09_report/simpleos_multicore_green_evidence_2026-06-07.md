@@ -28,9 +28,9 @@ must not be conflated with host runtime-pool profile evidence.
 
 ## Verified Commands
 
-Commands below are the canonical repo-root checks for this lane. The interpreter-run SimpleOS
-feature specs were rerun from `/home/ormastes/dev/pub/simple` on
-2026-06-11.
+Commands below are the canonical repo-root checks for this lane. The latest
+interpreter-run SimpleOS feature-spec refresh was rerun from
+`/tmp/simple-pherallel-continue-jj` on 2026-06-14 after syncing shared `main`.
 
 ```sh
 ./src/compiler_rust/target/debug/simple test test/03_system/os/simpleos/feature/simpleos_cooperative_green_spec.spl --mode=interpreter --clean

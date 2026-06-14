@@ -435,7 +435,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 139 lines folded for reproduction.
+Runnable source: 141 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -450,8 +450,10 @@ expect(row).to_contain("test/03_system/os/qemu/os/scheduler/green_carrier_qemu_s
 expect(row).to_contain("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md")
 expect(row).to_contain("2026-06-14 interpreter-run SimpleOS refresh")
 expect(row).to_contain("after shared-main sync")
+expect(row).to_contain("\"2026-06-14\",true")
 val simpleos_report = rt_file_read_text("doc/09_report/simpleos_multicore_green_evidence_2026-06-07.md") ?? ""
 expect(simpleos_report).to_contain("## 2026-06-14 Interpreter-Run Refresh")
+expect(simpleos_report).to_contain("latest interpreter-run SimpleOS feature-spec refresh")
 expect(simpleos_report).to_contain("Interpreter-run SimpleOS scheduler/carrier evidence")
 expect(absent_in_text(simpleos_report, "hosted SimpleOS")).to_equal(1)
 expect(simpleos_report).to_contain("simpleos_multicore_green_spec.spl --mode=interpreter --clean")
