@@ -55,10 +55,16 @@ source-reproducible (fixed 2026-06-14).
 3. ~~riscv32 LLVM-driver wiring~~ ✅ DONE 2026-06-14 — the driver now auto-selects
    the LLVM backend for rv32 targets (`compile_commands.rs` + `native_build.rs`);
    explicit `--backend` still wins.
-4. **linker.rs boot-dir glob** (Rust seed — follow-up). The compiler auto-globs
-   every `.c` in `arch/<arch>/boot/` instead of honoring each lane's declared
-   `boot_c_sources` / `grandfathered_native_sources`. This is the shared root cause
-   of the riscv64 + arm64 footguns; fixing it prevents the whole class.
+4. ~~linker.rs boot-dir glob footgun~~ ✅ DONE 2026-06-14 (gated, not rewritten).
+   The compiler auto-globs every `.c`/`.S` in `arch/<arch>/boot/`, so a stray
+   wrapper or cross-arch symlink is silently compiled in — the shared root cause of
+   the riscv64 + arm64 bugs. Rather than rewrite the core glob (would break every
+   lane — the manifests weren't complete), the existing `native_surface_policy_verify`
+   is now a **fail-closed gate**: completed the per-lane boot-source manifests (15
+   legit sources), made `find` catch symlinks (was `-type f` only), added
+   `scripts/check-simpleos-native-surface.shs`, and wired it into the pre-commit hook
+   (runs when boot/runtime/manifest files change). Verified: planted symlink AND
+   planted stray `.c` both FAIL; clean tree PASSes. Origin tip `e81a1794602`.
 5. Dedup tier 4 (contract→platform_targets table, ~270 L) — BLOCKED by the
    interpreter struct-array-literal hang; revisit when that's fixed.
 

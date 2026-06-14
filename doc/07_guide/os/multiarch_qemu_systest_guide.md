@@ -76,10 +76,16 @@ failure, never `skip()`.
   `arch/riscv64/boot/` was also removed.
 - **riscv32**: builds with the LLVM backend, now **auto-selected** for rv32 targets
   by the driver (cranelift has no rv32 codegen) — no manual `--backend llvm` needed.
-- **Root-cause class** (follow-up, Rust seed): the compiler's `linker.rs`
-  auto-globs every `.c` in the entry's `boot/` dir instead of honoring each lane's
-  declared `boot_c_sources` / `grandfathered_native_sources`. Both bugs above were
-  instances of this. Fixing the glob would prevent the whole class.
+- **Root-cause class — now gated (2026-06-14).** The compiler's `linker.rs`
+  auto-globs every `.c`/`.S` in the entry's `boot/` dir, so a stray wrapper or a
+  cross-arch symlink is silently compiled in (both bugs above). Instead of
+  rewriting the core glob (the per-lane manifests weren't complete, so that would
+  break every lane), the existing native-surface verifier is now a **fail-closed
+  gate**: `scripts/check-simpleos-native-surface.shs` runs `native_surface_policy_verify`
+  (which now also catches symlinks) from the pre-commit hook whenever boot/runtime/
+  manifest files change. Any boot source not declared in a lane's
+  `boot_c_sources` / `boot_asm_sources` / `grandfathered_native_sources` fails the
+  commit. Run it manually: `sh scripts/check-simpleos-native-surface.shs`.
 
 ## De-duplication
 

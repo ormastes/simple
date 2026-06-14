@@ -219,8 +219,12 @@ git-plumbing.
 **Reproducibility caveats — RESOLVED 2026-06-14:** riscv64 regression fixed
 (accidental boot-dir wrapper renamed); arm64 rebuild env fixed (x86 `glass_render.c`
 symlink removed); riscv32 LLVM-driver requirement fixed (driver auto-selects LLVM
-for rv32). **Remaining follow-up (Rust seed):** the compiler's `linker.rs` auto-globs
-every `.c` in `arch/<arch>/boot/` instead of honoring each lane's declared
-`boot_c_sources` / `grandfathered_native_sources` — the shared root cause of the
-riscv64 + arm64 footguns. Dedup tier 4 still BLOCKED by the interpreter
+for rv32). **Boot-dir-glob footgun — RESOLVED 2026-06-14 (gated):** `linker.rs`
+auto-globs every `.c`/`.S` in `arch/<arch>/boot/`, so a stray wrapper or cross-arch
+symlink is silently compiled in (the riscv64 + arm64 root cause). Rather than rewrite
+the core glob (manifests were incomplete → would break every lane), the existing
+`native_surface_policy_verify` is now a fail-closed gate: per-lane boot-source
+manifests completed (15 sources), verifier `find` catches symlinks, gate script
+`scripts/check-simpleos-native-surface.shs` wired into pre-commit. Verified planted
+symlink + stray `.c` both fail. Dedup tier 4 still BLOCKED by the interpreter
 struct-array-literal hang.
