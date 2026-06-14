@@ -66,8 +66,9 @@ pub(crate) fn bind_args_with_injected(
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
 
-    let coerce_unsigned = |value: Value, ty: Option<&Type>| -> Value {
-        match ty {
+    let coerce_param = |value: Value, ty: Option<&Type>| -> Value {
+        // Unsigned-int coercion for u8..u64 parameter types.
+        let value = match ty {
             Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") => {
                 let width: u8 = match type_name.as_str() {
                     "u8" => 8,
@@ -92,7 +93,23 @@ pub(crate) fn bind_args_with_injected(
                 }
             }
             _ => value,
+        };
+        // Unwrap Some(x) -> x when binding into a CONCRETE non-Optional parameter.
+        // Mirrors the return-value unwrap in function_exec: `-> T?` functions
+        // Some-wrap their plain returns, so passing such a value to a `param: T`
+        // site (e.g. `if v != nil: emit(v)` where v came from a `-> WidgetNode?`
+        // call and `emit(node: WidgetNode)`) must not leave it Option-wrapped.
+        if let (Some(t), Value::Enum { enum_name, variant, payload }) = (ty, &value) {
+            if enum_name == "Option"
+                && variant == "Some"
+                && super::function_exec::return_type_unwraps_option_some(t)
+            {
+                if let Some(inner) = payload {
+                    return (**inner).clone();
+                }
+            }
         }
+        value
     };
 
     for arg in args {
@@ -126,7 +143,7 @@ pub(crate) fn bind_args_with_injected(
                         // Regular parameter before variadic
                         let param = params_to_bind[positional_idx];
                         let val =
-                            coerce_unsigned(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
+                            coerce_param(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
                         validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     } else {
@@ -156,7 +173,7 @@ pub(crate) fn bind_args_with_injected(
                         ));
                     }
                     let param = params_to_bind[positional_idx];
-                    let val = coerce_unsigned(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
+                    let val = coerce_param(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
                     validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                     bound.insert(param.name.clone(), val);
                 }
@@ -205,7 +222,7 @@ pub(crate) fn bind_args_with_injected(
                         }
                     }
                 }
-                let val = coerce_unsigned(
+                let val = coerce_param(
                     wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref())),
                     param.and_then(|p| p.ty.as_ref()),
                 );
@@ -220,7 +237,7 @@ pub(crate) fn bind_args_with_injected(
                     } else {
                         // Regular positional parameter before variadic
                         let param = params_to_bind[positional_idx];
-                        let val = coerce_unsigned(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
+                        let val = coerce_param(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
                         validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     }
@@ -265,7 +282,7 @@ pub(crate) fn bind_args_with_injected(
                             ));
                         }
                     }
-                    let val = coerce_unsigned(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
+                    let val = coerce_param(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
                     validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                     bound.insert(param.name.clone(), val);
                 }
@@ -284,7 +301,7 @@ pub(crate) fn bind_args_with_injected(
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
                 let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
-                let v = coerce_unsigned(wrap_trait_object!(v, param.ty.as_ref()), param.ty.as_ref());
+                let v = coerce_param(wrap_trait_object!(v, param.ty.as_ref()), param.ty.as_ref());
                 validate_unit!(
                     &v,
                     param.ty.as_ref(),
@@ -341,8 +358,9 @@ pub(crate) fn bind_args_with_values(
         ));
     }
 
-    let coerce_unsigned = |value: Value, ty: Option<&Type>| -> Value {
-        match ty {
+    let coerce_param = |value: Value, ty: Option<&Type>| -> Value {
+        // Unsigned-int coercion for u8..u64 parameter types.
+        let value = match ty {
             Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") => {
                 let width: u8 = match type_name.as_str() {
                     "u8" => 8,
@@ -367,7 +385,23 @@ pub(crate) fn bind_args_with_values(
                 }
             }
             _ => value,
+        };
+        // Unwrap Some(x) -> x when binding into a CONCRETE non-Optional parameter.
+        // Mirrors the return-value unwrap in function_exec: `-> T?` functions
+        // Some-wrap their plain returns, so passing such a value to a `param: T`
+        // site (e.g. `if v != nil: emit(v)` where v came from a `-> WidgetNode?`
+        // call and `emit(node: WidgetNode)`) must not leave it Option-wrapped.
+        if let (Some(t), Value::Enum { enum_name, variant, payload }) = (ty, &value) {
+            if enum_name == "Option"
+                && variant == "Some"
+                && super::function_exec::return_type_unwraps_option_some(t)
+            {
+                if let Some(inner) = payload {
+                    return (**inner).clone();
+                }
+            }
         }
+        value
     };
 
     let mut bound = HashMap::new();
@@ -397,7 +431,7 @@ pub(crate) fn bind_args_with_values(
             ));
         };
 
-        let value = coerce_unsigned(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
+        let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
         validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
         bound.insert(param.name.clone(), value);
     }

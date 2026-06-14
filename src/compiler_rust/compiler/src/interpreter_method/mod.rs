@@ -777,6 +777,34 @@ pub(crate) fn evaluate_method_call(
                     }
                 }
             }
+
+            // Some(x) member-call forwarding. Since 60fd804c, `-> T?` functions
+            // Some-wrap their plain returns; such a value can then be funneled
+            // into a non-Optional context the lib treats as a bare value — e.g.
+            // an element of a `[WidgetNode]` built from `get_widget(...)` calls.
+            // After every real Option/Result/enum method has missed, dispatch a
+            // *user* method to the inner value so `Some(node).is_visible()` works
+            // as `node.is_visible()` did before wrapping. `None` is left to the
+            // error below, so nil-dereferences stay caught.
+            if enum_name == "Option" && variant == "Some" {
+                if let Some(inner) = payload {
+                    let inner_val = (**inner).clone();
+                    const FWD_RECV: &str = "__option_some_fwd_receiver__";
+                    let prev = env.insert(FWD_RECV.to_string(), inner_val);
+                    let fwd_expr: Box<Expr> = Box::new(Expr::Identifier(FWD_RECV.to_string()));
+                    let forwarded =
+                        evaluate_method_call(&fwd_expr, method, args, env, functions, classes, enums, impl_methods);
+                    match prev {
+                        Some(v) => {
+                            env.insert(FWD_RECV.to_string(), v);
+                        }
+                        None => {
+                            env.remove(FWD_RECV);
+                        }
+                    }
+                    return forwarded;
+                }
+            }
         }
         // EnumType method call = variant constructor call
         // EnumName.VariantName(args) -> create enum with payload

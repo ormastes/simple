@@ -252,6 +252,24 @@ fn execute_function_body(
                 payload: Some(Box::new(result)),
             },
         }
+    } else if let (Some(rt), Value::Enum { enum_name, variant, payload }) = (&func.return_type, &result) {
+        // Symmetric counterpart to the auto-wrap above. When `-> T?` functions
+        // Some-wrap their plain returns, callers that funnel that value into a
+        // CONCRETE non-Optional return — e.g. `fn require() -> T:
+        //   val v = get_opt(); if v != nil: return v` — would otherwise return
+        // `Some(v)` where a bare `T` is declared, and any field/method access on
+        // the result fails with "… on Option". Unwrap Some(x) -> x when the
+        // declared return type is a concrete non-Option type. Only `Some` is
+        // unwrapped; `None` against a concrete return type is left for the
+        // existing return-type validation to flag.
+        if enum_name == "Option" && variant == "Some" && return_type_unwraps_option_some(rt) {
+            match payload {
+                Some(inner) => (**inner).clone(),
+                None => result,
+            }
+        } else {
+            result
+        }
     } else {
         result
     };
@@ -406,6 +424,29 @@ pub(crate) fn exec_function_with_captured_env(
 }
 
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
+/// True when a function whose body produced an `Option::Some(x)` should have it
+/// unwrapped to `x` to satisfy a CONCRETE non-Optional declared return type.
+/// Conservative by design: anything that could legitimately hold an Option
+/// (`any`, `Option`/`Result`, bare generic params, unions, trait objects, …)
+/// is left wrapped. Mirrors the `-> T?` auto-wrap so the two stay in lockstep.
+pub(crate) fn return_type_unwraps_option_some(t: &Type) -> bool {
+    match t {
+        Type::Optional(_) => false,
+        Type::Simple(n) => {
+            n != "any"
+                && n != "Any"
+                && n != "Option"
+                && n != "Result"
+                // exclude lone generic type params (e.g. `T`, `U`)
+                && !(n.len() == 1 && n.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+        }
+        Type::Generic { name, .. } => name != "Option" && name != "Result",
+        Type::Array { .. } | Type::Tuple(_) | Type::LabeledTuple(_) => true,
+        Type::Capability { inner, .. } => return_type_unwraps_option_some(inner),
+        _ => false,
+    }
+}
+
 fn exec_function_inner(
     func: &FunctionDef,
     args: &[Argument],
