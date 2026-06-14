@@ -28,7 +28,7 @@ browser_backend_pixel_paths_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -98,6 +98,35 @@ expect(BrowserBackend.create(8, 8, "vulkan").unwrap().gpu_backend()).to_equal("v
 
 </details>
 
+#### collects wide render layout entries without dropping hit-test boxes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = panel("wide_layout_root", "Wide Layout", [
+    text_widget("wide_layout_0", "zero"),
+    text_widget("wide_layout_1", "one"),
+    text_widget("wide_layout_2", "two"),
+    text_widget("wide_layout_3", "three"),
+    text_widget("wide_layout_4", "four"),
+    text_widget("wide_layout_5", "five"),
+    text_widget("wide_layout_6", "six"),
+    text_widget("wide_layout_7", "seven")
+])
+val state = init_state(build_tree_with_title(root, "Wide Layout", "dark"))
+val backend = BrowserBackend.create(120, 96, "software").unwrap()
+
+backend.render_frame(state.tree, state)
+
+expect(backend.layout_cache.len()).to_be_greater_than(8)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -117,8 +146,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
