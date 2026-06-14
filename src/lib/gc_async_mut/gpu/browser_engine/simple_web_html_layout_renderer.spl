@@ -56,6 +56,12 @@ class HtmlChildIndex:
     next_sibling: [i32]
     child_count: [i32]
 
+class SelectorContext:
+    child_index: HtmlChildIndex
+    element_position: [i32]
+    element_sibling_count: [i32]
+    has_content_child: [bool]
+
 fn mk_node(tag: text, parent: i64) -> HNode:
     HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent)
 
@@ -77,6 +83,33 @@ fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
             child_count[parent] = child_count[parent] + 1
         i = i + 1
     HtmlChildIndex(first_child: first_child, next_sibling: next_sibling, child_count: child_count)
+
+fn build_selector_context(nodes: [HNode], child_index: HtmlChildIndex) -> SelectorContext:
+    val node_count = nodes.len()
+    var element_position: [i32] = [1; node_count]
+    var element_sibling_count: [i32] = [1; node_count]
+    var has_content_child: [bool] = [false; node_count]
+    var parent = 0
+    while parent < node_count:
+        var element_count = 0
+        var child = child_index.first_child[parent]
+        while child >= 0:
+            val nd = nodes[child]
+            if nd.tag == "#text":
+                if nd.text_trimmed.len() > 0:
+                    has_content_child[parent] = true
+            else:
+                has_content_child[parent] = true
+                element_count = element_count + 1
+                element_position[child] = element_count
+            child = child_index.next_sibling[child]
+        child = child_index.first_child[parent]
+        while child >= 0:
+            if nodes[child].tag != "#text":
+                element_sibling_count[child] = element_count
+            child = child_index.next_sibling[child]
+        parent = parent + 1
+    SelectorContext(child_index: child_index, element_position: element_position, element_sibling_count: element_sibling_count, has_content_child: has_content_child)
 
 # ---------------------------------------------------------------------------
 # Position-aware string find (works around index_of(needle,pos) ignoring pos)
@@ -358,7 +391,8 @@ pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> t
 pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) -> text:
     val nodes = parse_html(html)
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index)
     var i = 0
     val node_count = nodes.len()
     while i < node_count:
@@ -406,8 +440,8 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
 pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32, id: text, field: text) -> text:
     val nodes = parse_html(html)
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules)
     val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index)
     val node_count = nodes.len().to_i32()
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
@@ -1777,34 +1811,16 @@ fn class_contains(cls: text, want: text) -> bool:
     cls.contains(want)
 
 # Count element-type siblings of node[idx] up to and including idx (1-based child position).
-fn _child_position(nodes: [HNode], idx: i32) -> i32:
-    val parent = nodes[idx].parent
-    if parent < 0:
+fn _child_position(ctx: SelectorContext, idx: i32) -> i32:
+    if idx < 0 or idx >= ctx.element_position.len():
         return 1
-    var pos = 0
-    var c = 0
-    val node_count = nodes.len()
-    while c < node_count:
-        if nodes[c].parent == parent and nodes[c].tag != "#text":
-            pos = pos + 1
-            if c == idx:
-                return pos
-        c = c + 1
-    1
+    ctx.element_position[idx]
 
 # Count total element-type children of parent of node[idx].
-fn _sibling_count(nodes: [HNode], idx: i32) -> i32:
-    val parent = nodes[idx].parent
-    if parent < 0:
+fn _sibling_count(ctx: SelectorContext, idx: i32) -> i32:
+    if idx < 0 or idx >= ctx.element_sibling_count.len():
         return 1
-    var count = 0
-    var c = 0
-    val node_count = nodes.len()
-    while c < node_count:
-        if nodes[c].parent == parent and nodes[c].tag != "#text":
-            count = count + 1
-        c = c + 1
-    count
+    ctx.element_sibling_count[idx]
 
 # Evaluate :nth-child(expr) where expr is odd, even, or an+b / n+b / b.
 fn _nth_child_matches(expr: text, pos: i32) -> bool:
@@ -1830,16 +1846,16 @@ fn _nth_child_matches(expr: text, pos: i32) -> bool:
     parse_int(e) == pos
 
 # Check whether any node that is a child of parent_idx matches simple selector sel_arg.
-fn _has_direct_child_match(nodes: [HNode], parent_idx: i32, sel_arg: text) -> bool:
-    val parent_idx64 = parent_idx.to_i64()
-    var c = 0
-    val node_count = nodes.len()
-    while c < node_count:
+fn _has_direct_child_match(nodes: [HNode], ctx: SelectorContext, parent_idx: i32, sel_arg: text) -> bool:
+    if parent_idx < 0 or parent_idx >= ctx.child_index.first_child.len():
+        return false
+    var c = ctx.child_index.first_child[parent_idx]
+    while c >= 0:
         val nd = nodes[c]
-        if nd.parent == parent_idx64 and nd.tag != "#text":
+        if nd.tag != "#text":
             if simple_match(sel_arg, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw):
                 return true
-        c = c + 1
+        c = ctx.child_index.next_sibling[c]
     false
 
 # Check whether any descendant of node[idx] matches simple selector sel_arg.
@@ -1868,34 +1884,24 @@ fn _has_descendant_match(nodes: [HNode], idx: i32, sel_arg: text) -> bool:
     false
 
 # Check any :has() option (space-separated = descendant, "> .x" = direct child).
-fn _has_option_matches(nodes: [HNode], idx: i32, opt: text) -> bool:
+fn _has_option_matches(nodes: [HNode], ctx: SelectorContext, idx: i32, opt: text) -> bool:
     val trimmed = opt.trim()
     if trimmed.starts_with("> "):
         val child_sel = trimmed.substring(2, trimmed.len()).trim()
-        return _has_direct_child_match(nodes, idx, child_sel)
+        return _has_direct_child_match(nodes, ctx, idx, child_sel)
     if trimmed == ">":
         return false
     _has_descendant_match(nodes, idx, trimmed)
 
 # Check whether a node has any child element (non-text) or non-whitespace text children.
-fn _node_is_empty(nodes: [HNode], idx: i32) -> bool:
-    val idx64 = idx.to_i64()
-    var c = 0
-    val node_count = nodes.len()
-    while c < node_count:
-        val nd = nodes[c]
-        if nd.parent == idx64:
-            if nd.tag == "#text":
-                if nd.text_trimmed.len() > 0:
-                    return false
-            else:
-                return false
-        c = c + 1
-    true
+fn _node_is_empty(ctx: SelectorContext, idx: i32) -> bool:
+    if idx < 0 or idx >= ctx.has_content_child.len():
+        return true
+    not ctx.has_content_child[idx]
 
 # Full-context pseudo-class check. Called after simple_match() passes the base check.
 # Returns true if all pseudo-class conditions on sel are satisfied given node context.
-fn _pseudo_ctx_matches(sel: text, nodes: [HNode], idx: i32) -> bool:
+fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32) -> bool:
     val colon = text_index_of(sel, ":")
     if colon < 0:
         return true
@@ -1905,17 +1911,17 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], idx: i32) -> bool:
         # Already handled in simple_match; return true here.
         return true
     if pseudo == "empty":
-        return _node_is_empty(nodes, idx)
+        return _node_is_empty(ctx, idx)
     if pseudo == "first-child":
-        return _child_position(nodes, idx) == 1
+        return _child_position(ctx, idx) == 1
     if pseudo == "last-child":
-        val pos = _child_position(nodes, idx)
-        val total = _sibling_count(nodes, idx)
+        val pos = _child_position(ctx, idx)
+        val total = _sibling_count(ctx, idx)
         return pos == total
     if pseudo == "only-child":
-        return _sibling_count(nodes, idx) == 1
+        return _sibling_count(ctx, idx) == 1
     if pseudo == "nth-child":
-        val pos = _child_position(nodes, idx)
+        val pos = _child_position(ctx, idx)
         return _nth_child_matches(arg, pos)
     if pseudo == "has":
         # split arg on commas (depth-aware) to get :has(opt1, opt2, ...)
@@ -1944,7 +1950,7 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], idx: i32) -> bool:
             opt_count = opt_count + 1
         var j = 0
         while j < opt_count:
-            if _has_option_matches(nodes, idx, opts[j]):
+            if _has_option_matches(nodes, ctx, idx, opts[j]):
                 return true
             j = j + 1
         return false
@@ -1952,10 +1958,10 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], idx: i32) -> bool:
     true
 
 # Full-context simple match: base match + pseudo-class positional check.
-fn simple_match_ctx(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text, nodes: [HNode], idx: i32) -> bool:
+fn simple_match_ctx(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text, nodes: [HNode], ctx: SelectorContext, idx: i32) -> bool:
     if not simple_match(sel, tag, cls, class_words, id, attrs):
         return false
-    _pseudo_ctx_matches(sel, nodes, idx)
+    _pseudo_ctx_matches(sel, nodes, ctx, idx)
 
 fn split_selector_groups(sel: text) -> [text]:
     var depth = 0
@@ -2421,7 +2427,7 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
         i = i + 1
     merge_sorted_rule_lists_unique_count(lists, list_count)
 
-fn selector_group_matches_node_parts(nodes: [HNode], idx: i32, parts: [text]) -> bool:
+fn selector_group_matches_node_parts(nodes: [HNode], ctx: SelectorContext, idx: i32, parts: [text]) -> bool:
     var right = parts.len() - 1
     while right >= 0 and parts[right] == "":
         right = right - 1
@@ -2431,7 +2437,7 @@ fn selector_group_matches_node_parts(nodes: [HNode], idx: i32, parts: [text]) ->
     # Use full-context match for the rightmost part (the target element) so that
     # position-based pseudos (:first-child, :last-child, :nth-child, :empty, :has, etc.)
     # are evaluated against the real node tree.
-    if not simple_match_ctx(parts[right], nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, idx):
+    if not simple_match_ctx(parts[right], nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, idx):
         return false
     var ancestor = nd.parent
     var want = right - 1
@@ -2467,11 +2473,11 @@ fn selector_group_matches_node_parts(nodes: [HNode], idx: i32, parts: [text]) ->
             want = want - 1
     not require_direct
 
-fn selector_matches_node_group_parts(nodes: [HNode], idx: i32, group_parts: [[text]]) -> bool:
+fn selector_matches_node_group_parts(nodes: [HNode], ctx: SelectorContext, idx: i32, group_parts: [[text]]) -> bool:
     var g = 0
     val group_count = group_parts.len()
     while g < group_count:
-        if selector_group_matches_node_parts(nodes, idx, group_parts[g]):
+        if selector_group_matches_node_parts(nodes, ctx, idx, group_parts[g]):
             return true
         g = g + 1
     false
@@ -2575,8 +2581,9 @@ fn _sort_candidates_by_specificity(candidates: [i32], rules: Rules) -> [i32]:
 # Compute styles (cascade: inherit -> tag defaults -> matched rules -> inline)
 # ---------------------------------------------------------------------------
 
-fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
+fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex) -> [Style]:
     val rule_buckets = build_rule_buckets(rules)
+    val selector_ctx = build_selector_context(nodes, child_index)
     val node_count = nodes.len()
     var styles: [Style] = [default_style(); node_count]
     var i = 0
@@ -2590,7 +2597,7 @@ fn compute_styles(nodes: [HNode], rules: Rules) -> [Style]:
         val candidate_count = candidates.len()
         while candidate_i < candidate_count:
             val r = candidates[candidate_i]
-            if selector_matches_node_group_parts(nodes, i, rules.group_parts[r]):
+            if selector_matches_node_group_parts(nodes, selector_ctx, i, rules.group_parts[r]):
                 st = apply_decls(st, rules.decls[r])
             candidate_i = candidate_i + 1
         if nd.style_attr.len() > 0:
@@ -4802,8 +4809,8 @@ fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
     val nodes = parse_html(html)
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules)
     val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index)
     val node_count = nodes.len().to_i32()
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
@@ -4832,8 +4839,8 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32) -> [u32]:
     val nodes = parse_html(html)
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules)
     val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index)
     val node_count = nodes.len().to_i32()
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
@@ -4872,8 +4879,8 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
     val virtual_h = height + clamp_scroll
     val nodes = parse_html(html)
     val rules = extract_css(html)
-    val styles = compute_styles(nodes, rules)
     val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index)
     val node_count = nodes.len().to_i32()
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)

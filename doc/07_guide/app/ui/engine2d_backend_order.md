@@ -10,6 +10,16 @@ The current shared order is:
 
 `metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
 
+`backend_full_preference_order()` also includes explicit native surfaces before
+the automatic list:
+
+`baremetal > virtio_gpu > metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > software > cpu_simd > cpu`
+
+`baremetal` and `virtio_gpu` require a caller-owned framebuffer/device and are
+not part of generic `auto` probing. GUI/lib callers that do not request a
+backend should still enter through the Simple 2D/Engine2D backend lane planner,
+not call GPU APIs directly and not bypass to app-specific rendering code.
+
 Font offload uses the same native-GPU-first processing lane, but after WebGPU it
 prefers `cpu_simd` before `software` so glyph/vector preparation uses SIMD CPU
 kernels before falling back to the generic software path:
@@ -61,8 +71,14 @@ kernels before falling back to the generic software path:
   pretending a different backend was selected.
 - Baremetal and virtio-gpu remain explicit construction paths, not part of the
   generic auto-detect order.
+- Pure Simple GUI paths default through the typed Simple 2D/Engine2D backend
+  lane. The lane planner chooses the best available drawing/processing backend
+  in the order above and falls back to CPU paths without changing app code.
 - Font offload planners must use `engine2d_font_offload_backend_order()` and
-  keep the CPU tail as `cpu_simd > software > cpu`.
+  keep the CPU tail as `cpu_simd > software > cpu`. Vector-font and bitmap-font
+  offload must keep readback/evidence gates: GPU or SIMD preparation is valid
+  only when the rendered pixels/checksums match the CPU reference path for the
+  covered fixture.
 - `directx` on Linux requires the local prefix (build/dx/prefix) built via
   `scripts/setup/setup-directx-linux.shs`, or system libvulkan.so.1. When
   neither is present the backend falls back to `structured` leaf mode and
