@@ -53,6 +53,7 @@ Stability And Misuse Diagnostics, and SimpleOS Hardware Proof Gate.
 - `sh test/05_perf/profile_scripts/profile_report_contract_test.shs`
 - `sh test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`
   including the `docker_simple_binary_probe_wording_corrupt` failure case
+- `sh test/05_perf/profile_scripts/profile_help_contract_test.shs`
 - `sh test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`
 - `sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`
 - `sh test/05_perf/profile_scripts/concurrency_api_contract_test.shs`

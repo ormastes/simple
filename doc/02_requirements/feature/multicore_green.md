@@ -83,6 +83,7 @@ SimpleOS scheduler work distinct and verifiable.
 - Performance/profile gates: `scripts/check/check-cross-language-perf.shs`,
   `test/05_perf/profile_scripts/profile_report_contract_test.shs`,
   `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs`,
+  `test/05_perf/profile_scripts/profile_help_contract_test.shs`,
   `test/05_perf/profile_scripts/profile_binary_autoselect_test.shs`,
   `test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs`,
   `test/03_system/feature/usage/concurrency_api_misuse_spec.spl`,

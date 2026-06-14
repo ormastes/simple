@@ -265,7 +265,7 @@ expect(absent_in_text(row, "\"done\"")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -281,11 +281,13 @@ expect(absent_in_text(row, "doc/02_requirements/feature/multicore_green_options.
 expect(absent_in_text(row, "doc/02_requirements/nfr/multicore_green_options.md")).to_equal(1)
 step("Verify requirement evidence points at current profile gates")
 expect(feature_req).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
+expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_help_contract_test.shs")
 expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
 expect(feature_req).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(feature_req).to_contain("docker_simple_binary_probe_wording_corrupt")
 expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(nfr_req).to_contain("docker_simple_binary_probe_wording_corrupt")
+expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_help_contract_test.shs")
 expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(nfr_req).to_contain("sh test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
 expect(nfr_req).to_contain("src/compiler_rust/target/debug/simple test test/05_perf/stress/multicore_green_cross_language_gate_spec.spl --mode=interpreter --clean")
@@ -397,7 +399,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 134 lines folded for reproduction.
+Runnable source: 135 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -423,6 +425,7 @@ expect(row).to_contain("test/05_perf/stress/multicore_green_fanout_spec.spl")
 expect(row).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_spec.spl")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_report_contract_test.shs")
 expect(row).to_contain("canonical no-arg profile contract")
+expect(row).to_contain("test/05_perf/profile_scripts/profile_help_contract_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
 expect(row).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(row).to_contain("test/02_integration/simple_wrapper_runtime_probe_test.shs")
@@ -691,7 +694,7 @@ expect(coding).to_contain("MulticoreGreenSliceResult")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 132 lines folded for reproduction.
+Runnable source: 134 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -797,6 +800,7 @@ expect(perf_readme).to_contain("doc/09_report/README.md")
 expect(perf_readme).to_contain("report_index_checked=doc/09_report/README.md")
 expect(perf_readme).to_contain("agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md")
 expect(perf_readme).to_contain("profile_scripts/profile_report_contract_negative_test.shs")
+expect(perf_readme).to_contain("profile_scripts/profile_help_contract_test.shs")
 expect(perf_readme).to_contain("profile_scripts/profile_binary_autoselect_test.shs")
 expect(perf_readme).to_contain("profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(perf_readme).to_contain("profile_scripts/concurrency_api_contract_test.shs")
@@ -811,6 +815,7 @@ expect(perf).to_contain("PROFILE_DOCKER_SIMPLE_BINARY=src/compiler_rust/target/d
 expect(sys_test_plan).to_contain("test/02_integration/simple_wrapper_runtime_probe_test.shs")
 expect(sys_test_plan).to_contain("bin/sj")
 expect(sys_test_plan).to_contain("bin/simple-interp")
+expect(sys_test_plan).to_contain("test/05_perf/profile_scripts/profile_help_contract_test.shs")
 expect(sys_test_plan).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
 expect(sys_test_plan).to_contain("Go fanout")
 expect(sys_test_plan).to_contain("Go stress rows are slower than C pthread rows")
