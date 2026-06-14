@@ -101,13 +101,19 @@ possible so they are runner-verifiable.
    NOTE: the higher-level office *apps* (`word_app`/`sheets_app`/... exercised by
    `office_suite_spec.spl`) have 13 PRE-EXISTING failures unrelated to these
    slices (stale `word/render.spl` DocBlock API, etc.) — separate cleanup.
-7. PARTIAL — **Harden db / SDD-draw / math**: Draw/Base/Math are named as
-   LibreOffice apps (slice 9) but not yet substrate-backed. BLOCKER found:
-   `common/drawing` is a RASTER model (`DrawingDocument` pixel layers + f64
-   `SkPoint`/`SkRect` primitives) with no vector-shape list, so a verifiable
-   draw→SVG renderer needs (a) a shape model and (b) the f64 toolchain fix
-   (coords are f64 — same nested-payload bug). Do not fabricate an unverifiable
-   renderer. `simple_db` and a Math formula-editor remain to scope.
+7. PARTIAL — **Harden db / SDD-draw / math**:
+   - DRAW: DONE (landed origin 0bb2ebae). New `common/drawing/vector_shapes.spl`
+     — DrawShape(rect/line/circle/label) on a canvas → well-formed SVG, using
+     INTEGER coords to sidestep the f64 bug (the existing Skia SkPoint/SkRect are
+     f64). Draw flipped to implemented in the LibreOffice branding (4 live apps).
+     Spec 6/6; coords verified via direct run.
+   - BASE (db): attempted an in-memory relational table; BLOCKED — comparing an
+     array-extracted text element with a string (`row.get(i) == value`) returns
+     false in this code path (even `built.get(1) == "q"` after push), so query/
+     filtering can't work. Did NOT ship a db whose filter is broken. Trigger
+     unclear (formula.spl compares `tokens.get(pos) == ")"` fine).
+   - MATH: not yet scoped (LibreOffice Math = equation editor, distinct from
+     Calc's formula evaluator).
 8. DONE (landed origin effc1b1) — **Game-tool connect** (`office/game_bridge.spl`):
    declares game↔{calc,draw,db} connection targets; implements Calc-as-game-data
    (`calc_cells_to_game_values`/`calc_row_to_game_tokens` — a game reads level/
