@@ -38,15 +38,20 @@ riscv32, riscv64, arm32, arm64, x86_32, x86_64 (bare-metal QEMU) + aarch64-darwi
   weaken a marker assertion, or print markers unconditionally — each marker must
   assert a real capability on the live success path.
 - After any source/dedup change to a lane, **rebuild + reboot + re-verify** that
-  lane; **revert** any change that drops a marker. For lanes that cannot be rebuilt
-  (riscv64 regression, arm64 env), verify a refactor **statically** (linker
-  INCLUDE-expansion == original; C TU diff == header-guards/forward-decls only).
+  lane; **revert** any change that drops a marker. For a lane that genuinely cannot
+  be rebuilt in your env, verify a refactor **statically** (linker INCLUDE-expansion
+  == original; C TU diff == header-guards/forward-decls only). Watch the boot-dir
+  glob: any `.c` in `arch/<arch>/boot/` is auto-compiled — a stray wrapper or
+  wrong-arch symlink silently bloats the kernel and breaks boot.
 - Parallel sessions clobber uncommitted edits within ~1 min: commit per verified
   step and confirm the green-making source is on **origin** (`git diff origin/main`),
   not just the working tree.
 
 ## Known status (2026-06-14)
 
-5/6 QEMU lanes GREEN (riscv32, arm64, arm32, x86_32, x86_64) + darwin honest-RED on
-Linux. **riscv64 RED** — bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14`
-(both backends boot OpenSBI then die; good artifact lost).
+**6/6 QEMU lanes GREEN** (riscv32, riscv64, arm32, arm64, x86_32, x86_64) + darwin
+honest-RED on Linux (GREEN on Apple Silicon). riscv64 + arm64 are now
+source-reproducible (fixed 2026-06-14: accidental boot-dir `.c` files pulled
+oversized/wrong-arch runtimes into the minimal kernel via the linker's boot-dir
+glob; bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14` closed). rv32 now
+auto-selects the LLVM backend (cranelift has no rv32 codegen).

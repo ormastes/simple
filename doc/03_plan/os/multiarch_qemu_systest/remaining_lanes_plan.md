@@ -200,11 +200,11 @@ git-plumbing.
 
 | Lane | State | Build/boot notes |
 |------|-------|------------------|
-| riscv64 | **RED (fresh sweep 2026-06-14)** | both LLVM+cranelift rebuilds boot OpenSBI then die silent; good Jun-8 ELF lost (overwritten by dedup verify). Was never source-reproducible this session. Bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14` |
-| arm64 | GREEN (genuine EL0) | rebuild blocked by pre-existing env (x86 modules in arm64 scope); green from Jun-13 ELF; linker dedup statically verified |
+| riscv64 | **GREEN ✅ (source-reproducible 2026-06-14)** | root cause: accidental `arch/riscv64/boot/freestanding_runtime.c` `#include`-ing the 100 KB networking runtime, compiled in via the linker boot-dir glob + minimal allowlist (78→175 KB, displaced reset vector). Renamed → `full_networking_runtime.c` (`ab37912`). x86 `glass_render.c` symlink also removed. Verified: fresh 78 KB build, real OpenSBI boot, 6/6 markers. Bug closed |
+| arm64 | GREEN ✅ (source-reproducible 2026-06-14) | `arch/arm64/boot/glass_render.c` was a symlink to the x86_64 157 KB GUI file (boot-dir glob pulled it in); removed (`3027ff15`); rebuilds green from source, 7/7 markers |
 | x86_32 | GREEN | unchanged |
 | arm32 | GREEN ✅ | rebuilt; virtio-blk init fix (`fc1c73a`) |
-| riscv32 | GREEN ✅ | **needs LLVM-backed driver** (cranelift blocks rv32); rebuilt green |
+| riscv32 | GREEN ✅ | LLVM backend **auto-selected** for rv32 by the driver (`d319068`, cranelift blocks rv32); rebuilt green |
 | x86_64 | GREEN ✅ | NVMe + FAT32 (O1 ratified, `0c4561b`); rebuilt green |
 | aarch64-darwin | hosted — RED on Linux (honest `missing-media`), GREEN on Apple Silicon | 7th platform; merged into contract + build matrix; both files check OK |
 
@@ -216,6 +216,11 @@ git-plumbing.
   (EL0-adjacent, ~15 L). Contract-table tier 4 BLOCKED by interpreter struct-array
   hang (see `duplication_analysis.md`).
 
-**Reproducibility caveats to fix later:** riscv64 cranelift regression (bug filed);
-arm64 rebuild env (x86 modules pulled into arm64 source scope); riscv32 LLVM-driver
-requirement (document in build tooling).
+**Reproducibility caveats — RESOLVED 2026-06-14:** riscv64 regression fixed
+(accidental boot-dir wrapper renamed); arm64 rebuild env fixed (x86 `glass_render.c`
+symlink removed); riscv32 LLVM-driver requirement fixed (driver auto-selects LLVM
+for rv32). **Remaining follow-up (Rust seed):** the compiler's `linker.rs` auto-globs
+every `.c` in `arch/<arch>/boot/` instead of honoring each lane's declared
+`boot_c_sources` / `grandfathered_native_sources` — the shared root cause of the
+riscv64 + arm64 footguns. Dedup tier 4 still BLOCKED by the interpreter
+struct-array-literal hang.

@@ -26,33 +26,41 @@ and document the whole thing (plan, guide, skill, this spipe).
   extraction verify-or-revert (build-verify where buildable, static-equivalence
   where not). ✅ DONE.
 - AC-4: Final full fresh boot-sweep run + per-lane verdict recorded; reproducibility
-  caveats and any regression filed as bugs. ✅ DONE (riscv64 RED — see Status).
+  caveats and any regression filed as bugs. ✅ DONE (all 6 QEMU lanes GREEN — see Status).
 - AC-5: doc + guide + skill + spipe updated and pushed to origin. ⏳ this commit.
 
 ## Status (2026-06-14)
 | Lane | State |
 |------|-------|
-| riscv32 | GREEN (LLVM driver — cranelift blocks rv32) |
+| riscv32 | GREEN (LLVM backend auto-selected for rv32) |
 | arm64 | GREEN (genuine EL0) |
 | arm32 | GREEN |
 | x86_32 | GREEN |
 | x86_64 | GREEN (NVMe + FAT32, O1 ratified) |
-| riscv64 | **RED** — both backends boot OpenSBI then die silent; good Jun-8 ELF lost. Bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14` |
+| riscv64 | **GREEN** — source-reproducible (fixed: accidental boot-dir wrapper pulled the 100 KB networking runtime into the minimal kernel; renamed). Bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14` closed. Verified: fresh 78 KB build, real OpenSBI boot, 6/6 markers |
 | aarch64-darwin | hosted — RED on Linux (missing-media), GREEN on Apple Silicon |
 
-Net: **5/6 QEMU lanes GREEN + darwin hosted**; riscv64 regressed (artifact lost,
-not source-reproducible this session).
+Net: **6/6 QEMU lanes GREEN + darwin hosted**; riscv64 + arm64 now
+source-reproducible (fixed 2026-06-14).
 
 ## Next Steps (open)
-1. **riscv64 restore** — bisect/debug why the rebuilt kernel dies right after the
-   OpenSBI handoff (both LLVM+cranelift; 86 KB good → 164–171 KB bad). Highest
-   priority open item.
-2. **arm64 rebuild env** — fix x86 kernel modules being pulled into arm64 source
-   scope so arm64 is source-reproducible (currently green from committed ELF).
-3. **riscv32 LLVM-driver requirement** — wire the LLVM driver into the standard
-   build tooling so rv32 isn't a manual step.
-4. Dedup tier 4 (contract→platform_targets table, ~270 L) is BLOCKED by the
-   interpreter struct-array-literal hang — revisit when that's fixed.
+1. ~~riscv64 restore~~ ✅ DONE 2026-06-14 — root cause was an accidental
+   `arch/riscv64/boot/freestanding_runtime.c` wrapper `#include`-ing the 100 KB
+   networking runtime; the linker boot-dir glob + minimal allowlist compiled it in
+   (78→175 KB, displaced reset vector). Renamed → `full_networking_runtime.c`.
+   Verified 6/6 markers on a fresh build.
+2. ~~arm64 rebuild env~~ ✅ DONE 2026-06-14 — `arch/arm64/boot/glass_render.c` was
+   a symlink to the x86_64 157 KB GUI file (boot-dir glob pulled it in). Removed;
+   source-reproducible. The same symlink in `arch/riscv64/boot/` was also removed.
+3. ~~riscv32 LLVM-driver wiring~~ ✅ DONE 2026-06-14 — the driver now auto-selects
+   the LLVM backend for rv32 targets (`compile_commands.rs` + `native_build.rs`);
+   explicit `--backend` still wins.
+4. **linker.rs boot-dir glob** (Rust seed — follow-up). The compiler auto-globs
+   every `.c` in `arch/<arch>/boot/` instead of honoring each lane's declared
+   `boot_c_sources` / `grandfathered_native_sources`. This is the shared root cause
+   of the riscv64 + arm64 footguns; fixing it prevents the whole class.
+5. Dedup tier 4 (contract→platform_targets table, ~270 L) — BLOCKED by the
+   interpreter struct-array-literal hang; revisit when that's fixed.
 
 ## Key References
 - Plan: `doc/03_plan/os/multiarch_qemu_systest/remaining_lanes_plan.md`

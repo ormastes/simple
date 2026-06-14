@@ -8,12 +8,12 @@ the per-lane caveats discovered 2026-06-14.
 
 | Lane | qemu | Status | Caveat |
 |------|------|--------|--------|
-| riscv32 | qemu-system-riscv32 | ✅ GREEN | **build only with the LLVM-backed driver** (cranelift blocks rv32) |
+| riscv32 | qemu-system-riscv32 | ✅ GREEN | LLVM backend **auto-selected** for rv32 by the driver (cranelift blocks rv32) |
 | arm64 | qemu-system-aarch64 | ✅ GREEN | genuine EL0 execution + syscall round-trip |
 | arm32 | qemu-system-arm | ✅ GREEN | loader-device boot (no `-kernel`) |
 | x86_32 | qemu-system-i386 | ✅ GREEN | `-initrd` FAT32, Limine/multiboot |
 | x86_64 | qemu-system-x86_64 | ✅ GREEN | **NVMe + FAT32** block device (not `-initrd`) |
-| riscv64 | qemu-system-riscv64 | ❌ RED | rebuild boots OpenSBI then dies silent on **both** backends; good artifact lost — bug `riscv64_cranelift_smf_fs_boot_regression_2026-06-14` |
+| riscv64 | qemu-system-riscv64 | ✅ GREEN | source-reproducible (fixed 2026-06-14); accidental `freestanding_runtime.c` boot wrapper pulled the 100 KB networking runtime into the minimal kernel — renamed → `full_networking_runtime.c` |
 | aarch64-darwin | none (native process) | hosted — RED on Linux (`missing-media`), GREEN on Apple Silicon | no QEMU; HOSTED_* markers |
 
 ## Source of truth
@@ -61,12 +61,25 @@ failure, never `skip()`.
 
 ## Known reproducibility caveats
 
-- **riscv64**: rebuild regressed (both backends); only the now-lost Jun-8 86 KB ELF
-  booted. Restoration = bisect/debug the riscv64 kernel boot after OpenSBI handoff.
-- **arm64**: rebuild blocked in some envs (x86 kernel modules pulled into arm64
-  source scope); the committed Jun-13 ELF boots green. Linker dedup statically
-  verified equivalent so the lane is safe.
-- **riscv32**: not buildable with the default cranelift driver — use LLVM.
+- **riscv64**: ✅ source-reproducible (fixed 2026-06-14). The regression was an
+  accidental `arch/riscv64/boot/freestanding_runtime.c` whose sole content was an
+  `#include` of the full ~100 KB networking runtime. The linker auto-globs every
+  `.c` in the entry's `boot/` dir and the `SIMPLE_BOOT_MINIMAL=1` allowlist matched
+  its stem, so it was compiled into the minimal kernel (78 KB → 175 KB, displaced
+  the `0x80200000` reset vector, silent death after OpenSBI). Fixed by renaming it
+  → `full_networking_runtime.c` (out of the minimal allowlist; `ssh_live` still
+  gets it). Verified: fresh 78 KB build, real OpenSBI boot, 6/6 markers. bug
+  `riscv64_cranelift_smf_fs_boot_regression_2026-06-14` (closed).
+- **arm64**: ✅ source-reproducible (fixed 2026-06-14). `arch/arm64/boot/glass_render.c`
+  was a symlink to the **x86_64** 157 KB GUI file, pulled in by the boot-dir glob.
+  Deleted; rebuilds green from source with no flag. The identical x86 symlink in
+  `arch/riscv64/boot/` was also removed.
+- **riscv32**: builds with the LLVM backend, now **auto-selected** for rv32 targets
+  by the driver (cranelift has no rv32 codegen) — no manual `--backend llvm` needed.
+- **Root-cause class** (follow-up, Rust seed): the compiler's `linker.rs`
+  auto-globs every `.c` in the entry's `boot/` dir instead of honoring each lane's
+  declared `boot_c_sources` / `grandfathered_native_sources`. Both bugs above were
+  instances of this. Fixing the glob would prevent the whole class.
 
 ## De-duplication
 
