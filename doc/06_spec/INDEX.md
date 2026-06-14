@@ -17,7 +17,7 @@
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
-| [WebGPU JS WASM Simple System Evidence](test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Minimal | N/A | 122 | 20% | 40 lines |
+| [WebGPU JS WASM Simple System Evidence](test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md) | Minimal | N/A | 126 | 20% | 40 lines |
 | [Browser Chrome WebGPU Draw Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.md) | Minimal | N/A | 1 | 20% | 23 lines |
 | [Browser Chrome WebGPU Compute Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.md) | Minimal | N/A | 1 | 20% | 22 lines |
 

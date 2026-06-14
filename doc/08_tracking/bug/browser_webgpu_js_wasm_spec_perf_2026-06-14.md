@@ -7,15 +7,15 @@ OPEN
 ## Summary
 
 `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` passed after
-the bounded `GPUDevice.createBuffer` and `GPUQueue.writeBuffer(buffer, ...)`
-scenario was added, but the runner reported a perf threshold warning:
+the bounded `GPUDevice.createBuffer`, `GPUQueue.writeBuffer(buffer, ...)`, and
+software compute encoder/submit scenarios were added, but the broad runner
+remains near the perf threshold:
 
 ```text
-PASSED (73627ms)
-Passed: 122
+PASSED (56485ms)
+Passed: 126
 Failed: 0
-Duration: 73652ms
-[PERF BUG]
+Duration: 56503ms
 ```
 
 ## Impact
@@ -27,8 +27,9 @@ integration spec while keeping the broad scenario manual intact.
 
 ## Follow-Up
 
-- Profile which BrowserSession scenarios dominate the 122-case run.
-- Add a focused queue/buffer spec for `requestDevice`, `createBuffer`, and
-  `queue.writeBuffer` evidence if the SSpec promise harness remains stable.
+- Profile which BrowserSession scenarios dominate the 126-case run.
+- Keep the resolved WASM-memory queue upload scenario stable and consider
+  splitting queue/buffer evidence into a smaller focused spec if broad runtime
+  cost grows again.
 - Keep `webgpu_js_wasm_simple_spec.spl` as broad end-to-end evidence, but avoid
   adding more expensive setup-heavy cases without splitting.

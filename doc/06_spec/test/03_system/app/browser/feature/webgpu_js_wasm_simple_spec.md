@@ -28,7 +28,7 @@ webgpu_js_wasm_simple_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 122 | 122 | 0 | 0 |
+| 126 | 126 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1327,6 +1327,194 @@ match result:
         expect(_display_js(value)).to_equal("function:6:6:8:1:1:3:24:0,6,8,10,0,0:1:1:3:24")
     Err(err):
         expect("unexpected writeBuffer js error: {err}").to_equal("")
+```
+
+</details>
+
+#### should upload exported WASM memory bytes through a WebGPU device queue
+
+- var session = BrowserSession new
+- session open html
+- Ok
+   - Expected: _display_js(value) equals `adapter-queued`
+- Err
+   - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `device-queued`
+- Err
+   - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `3:1:1:4:3:39:0,0,0,0,12,13,14,0:1:4:3:39`
+- Err
+   - Expected: "unexpected WASM queue writeBuffer js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-queue-wasm.html", "<html><body>WebGPU Queue WASM</body></html>")
+match session.eval_script("var adapter = null; var device = null; navigator.gpu.requestAdapter().then(function(a) { adapter = a; }); 'adapter-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("adapter-queued")
+    Err(err):
+        expect("unexpected adapter queue error: {err}").to_equal("")
+match session.eval_script("adapter.requestDevice().then(function(d) { device = d; }); 'device-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("device-queued")
+    Err(err):
+        expect("unexpected device queue error: {err}").to_equal("")
+val result = session.eval_script("var calls = 0; var i; var imports = { webgpu: { writeBuffer: function(ptr, len) { calls = calls + 1; return len; } } }; var m = new WebAssembly.Module('0061736d01000000010b0260027f7f017f6000017f021601067765626770750b77726974654275666665720000030201010503010001071002066d656d6f727902000372756e00010a1f011d004100410c3a00004101410d3a00004102410e3a00004100410310000b'); i = new WebAssembly.Instance(m, imports); var source = new Uint8Array(i.exports.memory.buffer); var target = device.createBuffer({size: 8, usage: 8}); var runResult = i.exports.run(); device.queue.writeBuffer(target, 4, source, 0, 3); runResult + ':' + calls + ':' + target.writeCount + ':' + target.lastWriteOffset + ':' + target.lastWriteByteLength + ':' + target.lastWriteChecksum + ':' + target[0] + ',' + target[1] + ',' + target[2] + ',' + target[3] + ',' + target[4] + ',' + target[5] + ',' + target[6] + ',' + target[7] + ':' + device.queue.writeCount + ':' + device.queue.lastWriteBufferOffset + ':' + device.queue.lastWriteByteLength + ':' + device.queue.lastWriteChecksum")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("3:1:1:4:3:39:0,0,0,0,12,13,14,0:1:4:3:39")
+    Err(err):
+        expect("unexpected WASM queue writeBuffer js error: {err}").to_equal("")
+```
+
+</details>
+
+#### should encode and submit a bounded WebGPU compute dispatch through BrowserSession
+
+- var session = BrowserSession new
+- session open html
+- Ok
+   - Expected: _display_js(value) equals `adapter-queued`
+- Err
+   - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `device-queued`
+- Err
+   - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `function:function:function:true:wgsl:true:main:true:1:24:true:1:1:24:1:1:1:1:24`
+- Err
+   - Expected: "unexpected compute dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-compute-encoder.html", "<html><body>WebGPU Compute Encoder</body></html>")
+match session.eval_script("var adapter = null; var device = null; navigator.gpu.requestAdapter().then(function(a) { adapter = a; }); 'adapter-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("adapter-queued")
+    Err(err):
+        expect("unexpected adapter queue error: {err}").to_equal("")
+match session.eval_script("adapter.requestDevice().then(function(d) { device = d; }); 'device-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("device-queued")
+    Err(err):
+        expect("unexpected device queue error: {err}").to_equal("")
+val result = session.eval_script("var shader = device.createShaderModule({code: '@compute @workgroup_size(1) fn main() {}'}); var pipeline = device.createComputePipeline({module: shader, entryPoint: 'main'}); var encoder = device.createCommandEncoder(); var pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.dispatchWorkgroups(2, 3, 4); pass.end(); var commands = encoder.finish(); device.queue.submit([commands]); typeof device.createShaderModule + ':' + typeof device.createComputePipeline + ':' + typeof device.createCommandEncoder + ':' + shader.valid + ':' + shader.sourceFormat + ':' + pipeline.valid + ':' + pipeline.entryPoint + ':' + pass.pipelineValid + ':' + pass.dispatchCallCount + ':' + pass.dispatchedWorkgroups + ':' + commands.valid + ':' + commands.computePassCount + ':' + commands.dispatchCallCount + ':' + commands.dispatchedWorkgroups + ':' + device.queue.submitCount + ':' + device.queue.lastSubmitCommandBufferCount + ':' + device.queue.lastSubmitComputePassCount + ':' + device.queue.lastSubmitDispatchCallCount + ':' + device.queue.lastSubmitDispatchedWorkgroups")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("function:function:function:true:wgsl:true:main:true:1:24:true:1:1:24:1:1:1:1:24")
+    Err(err):
+        expect("unexpected compute dispatch js error: {err}").to_equal("")
+```
+
+</details>
+
+#### should aggregate WebGPU compute counters and ignore invalid active-pass command buffers
+
+- var session = BrowserSession new
+- session open html
+- Ok
+   - Expected: _display_js(value) equals `adapter-queued`
+- Err
+   - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `device-queued`
+- Err
+   - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `2:2:5:false:0:0:0:2:0:0:0:0:2:5`
+- Err
+   - Expected: "unexpected compute aggregate js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-compute-aggregate.html", "<html><body>WebGPU Compute Aggregate</body></html>")
+match session.eval_script("var adapter = null; var device = null; navigator.gpu.requestAdapter().then(function(a) { adapter = a; }); 'adapter-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("adapter-queued")
+    Err(err):
+        expect("unexpected adapter queue error: {err}").to_equal("")
+match session.eval_script("adapter.requestDevice().then(function(d) { device = d; }); 'device-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("device-queued")
+    Err(err):
+        expect("unexpected device queue error: {err}").to_equal("")
+val result = session.eval_script("var shader = device.createShaderModule({code: '@compute @workgroup_size(1) fn main() {}'}); var pipeline = device.createComputePipeline({module: shader, entryPoint: 'main'}); var encoder = device.createCommandEncoder(); var pass1 = encoder.beginComputePass(); pass1.setPipeline(pipeline); pass1.dispatchWorkgroups(2, 1, 1); pass1.end(); pass1.dispatchWorkgroups(7, 1, 1); pass1.end(); var pass2 = encoder.beginComputePass(); pass2.setPipeline(pipeline); pass2.dispatchWorkgroups(3, 1, 1); pass2.end(); var validCommands = encoder.finish(); device.queue.submit([validCommands]); var invalidEncoder = device.createCommandEncoder(); var activePass = invalidEncoder.beginComputePass(); activePass.setPipeline(pipeline); activePass.dispatchWorkgroups(9, 1, 1); var invalidCommands = invalidEncoder.finish(); device.queue.submit([invalidCommands]); validCommands.computePassCount + ':' + validCommands.dispatchCallCount + ':' + validCommands.dispatchedWorkgroups + ':' + invalidCommands.valid + ':' + invalidCommands.computePassCount + ':' + invalidCommands.dispatchCallCount + ':' + invalidCommands.dispatchedWorkgroups + ':' + device.queue.submitCount + ':' + device.queue.lastSubmitCommandBufferCount + ':' + device.queue.lastSubmitComputePassCount + ':' + device.queue.lastSubmitDispatchCallCount + ':' + device.queue.lastSubmitDispatchedWorkgroups + ':' + device.queue.computePassCount + ':' + device.queue.dispatchedWorkgroups")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("2:2:5:false:0:0:0:2:0:0:0:0:2:5")
+    Err(err):
+        expect("unexpected compute aggregate js error: {err}").to_equal("")
+```
+
+</details>
+
+#### should drive a WebGPU compute pass with WASM-originated dispatch dimensions
+
+- var session = BrowserSession new
+- session open html
+- Ok
+   - Expected: _display_js(value) equals `adapter-queued`
+- Err
+   - Expected: "unexpected adapter queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `device-queued`
+- Err
+   - Expected: "unexpected device queue error: {err}" equals ``
+- Ok
+   - Expected: _display_js(value) equals `instantiated:1:1:2x3x4:1:24:1:1:24:1:1:1:1:24`
+- Err
+   - Expected: "unexpected WASM compute dispatch js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu-wasm-compute.html", "<html><body>WebGPU WASM Compute</body></html>")
+match session.eval_script("var adapter = null; var device = null; navigator.gpu.requestAdapter().then(function(a) { adapter = a; }); 'adapter-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("adapter-queued")
+    Err(err):
+        expect("unexpected adapter queue error: {err}").to_equal("")
+match session.eval_script("adapter.requestDevice().then(function(d) { device = d; }); 'device-queued'"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("device-queued")
+    Err(err):
+        expect("unexpected device queue error: {err}").to_equal("")
+val result = session.eval_script("var shader = device.createShaderModule({code: '@compute @workgroup_size(1) fn main() {}'}); var pipeline = device.createComputePipeline({module: shader, entryPoint: 'main'}); var encoder = device.createCommandEncoder(); var pass = encoder.beginComputePass(); pass.setPipeline(pipeline); var calls = 0; var dims = ''; var imports = { webgpu: { dispatch: function(x, y, z) { calls = calls + 1; dims = x + 'x' + y + 'x' + z; pass.dispatchWorkgroups(x, y, z); } } }; var m = new WebAssembly.Module('0061736d01000000010b0260037f7f7f006000017f021301067765626770750864697370617463680000030201010707010372756e00010a0e010c00410241034104100041010b'); var i = new WebAssembly.Instance(m, imports); var runResult = i.exports.run(); pass.end(); var commands = encoder.finish(); device.queue.submit([commands]); i.status + ':' + runResult + ':' + calls + ':' + dims + ':' + pass.dispatchCallCount + ':' + pass.dispatchedWorkgroups + ':' + commands.computePassCount + ':' + commands.dispatchCallCount + ':' + commands.dispatchedWorkgroups + ':' + device.queue.submitCount + ':' + device.queue.lastSubmitCommandBufferCount + ':' + device.queue.lastSubmitComputePassCount + ':' + device.queue.lastSubmitDispatchCallCount + ':' + device.queue.lastSubmitDispatchedWorkgroups")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("instantiated:1:1:2x3x4:1:24:1:1:24:1:1:1:1:24")
+    Err(err):
+        expect("unexpected WASM compute dispatch js error: {err}").to_equal("")
 ```
 
 </details>
@@ -3864,8 +4052,8 @@ match result:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 122 |
-| Active scenarios | 122 |
+| Total scenarios | 126 |
+| Active scenarios | 126 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

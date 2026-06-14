@@ -62,16 +62,23 @@ Result: PASS, 1 test from cache.
 bin/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl --mode=interpreter
 ```
 
-Result: PASS, 122 tests. The latest uncached run took 73652 ms and retains bounded
+Result: PASS, 126 tests. The latest uncached run took 56503 ms and retains bounded
 WASM-originated `webgpu.writeBuffer(ptr, len)` memory payload evidence for
 byte, halfword, word, Simple2D rectangle payload stores, and exported
 `WebAssembly.Memory` buffer reads beside the existing `webgpu.requestAdapter`
 and `webgpu.dispatch(x, y, z)` import proofs. It also proves the
 `adapter.requestDevice` function shape plus bounded software `device.createBuffer`
 and `device.queue.writeBuffer(buffer, ...)` mutation of observable buffer
-bytes/counts/checksums. Full WASM-memory-backed `device.queue.writeBuffer` SSpec
-evidence remains tracked separately; broad-spec runtime now has a perf follow-up
-in `doc/08_tracking/bug/browser_webgpu_js_wasm_spec_perf_2026-06-14.md`.
+bytes/counts/checksums, including exported WASM memory bytes `12,13,14`
+uploaded through `new Uint8Array(i.exports.memory.buffer)` into a software
+WebGPU buffer at offset `4` with checksum `39`. It also proves browser-shaped
+software compute submission counters through `createShaderModule`,
+`createComputePipeline`, `createCommandEncoder`, `beginComputePass`,
+`dispatchWorkgroups(2, 3, 4)`, `finish`, and `queue.submit`, including multi-pass
+counter accumulation, invalid active-pass command-buffer filtering, and
+WASM-originated `webgpu.dispatch(2, 3, 4)` dimensions forwarded into a compute
+pass and submitted as `24` workgroups. Broad-spec runtime still has a
+perf follow-up in `doc/08_tracking/bug/browser_webgpu_js_wasm_spec_perf_2026-06-14.md`.
 
 ```sh
 bin/simple test test/03_system/app/browser/feature/browser_webgpu_chrome_draw_evidence_spec.spl --mode=interpreter
@@ -99,7 +106,7 @@ Result: `0`.
 | Browser `text/simple` beside JS | `browser_session_simple_script_spec.spl` | PASS |
 | Fetched WASM -> `WebAssembly.instantiate` -> same-session WebGPU metadata | `browser_session_wasm_fetch_bridge_spec.spl` | PASS |
 | Bounded WASM -> WebGPU host imports | `webgpu_js_wasm_simple_spec.spl` covers `webgpu.requestAdapter`, zero-arg `webgpu.dispatch`, WASM-originated `webgpu.dispatch(x, y, z)`, and WASM memory payload handoff through `webgpu.writeBuffer(ptr, len)` using store8/store16/store32 mirrors, Simple2D rectangle bytes `8,12,40,24` plus RGBA `51,102,153,255`, and host reads through `new Uint8Array(i.exports.memory.buffer)` | PASS |
-| Browser-shaped WebGPU device queue | `webgpu_js_wasm_simple_spec.spl` proves `adapter.requestDevice`, `device.createBuffer`, and `device.queue.writeBuffer(buffer, offset, Uint8Array, sourceOffset, size)` with observable buffer bytes/counts/checksums | WARN: nested WASM-memory queue-upload SSpec and broad-spec perf need follow-up |
+| Browser-shaped WebGPU device queue/compute submit | `webgpu_js_wasm_simple_spec.spl` proves `adapter.requestDevice`, `device.createBuffer`, `device.queue.writeBuffer(buffer, offset, Uint8Array, sourceOffset, size)`, exported WASM-memory `Uint8Array` queue upload, bounded compute encoder/pipeline/pass/submit counters, and WASM-originated compute dispatch dimensions with observable buffer and dispatch evidence | WARN: broad-spec perf still has a follow-up |
 | Simple2D/Simple3D WebGPU submission records | `webgpu_js_wasm_simple_spec.spl` | PASS |
 | GPU process/codegen order and WebGPU/WGSL source-only target | `gpu_portable_compute_spec.spl` covers portable Metal -> CUDA -> HIP -> OpenCL -> WebGPU ordering, valid compiler-emitted WGSL for `simple_webgpu_add_u32`, and source-only `.wgsl` compile-plan metadata | PASS |
 | Chrome WebGPU compute parsing | `chrome_webgpu_compute_evidence_spec.spl` covers explicit generated-source metadata and processing-mismatch classification | PASS |
@@ -116,9 +123,10 @@ Result: `0`.
   `doc/09_report/browser_wasm_webgpu_chrome_host_probe_2026-06-14.md` as
   `host-unavailable:navigator-gpu` for both draw and compute.
 - A complete WASM-originated WebGPU binding ABI remains future bridge work; the
-  current lane proves the asset-loading, instantiation, metadata, adapter, and
-  bounded declared adapter/dispatch host-import paths with WASM-provided
-  workgroup dimensions and memory payload bytes.
+  current lane proves the asset-loading, instantiation, metadata, adapter,
+  bounded declared adapter/dispatch/writeBuffer host-import paths, bounded
+  exported-memory queue upload, and browser-shaped software compute submit
+  counters with WASM-provided workgroup dimensions and memory payload bytes.
 - Positive Chrome hardware WebGPU evidence requires a host that returns
   non-fallback adapter/device/pipeline/readback data. Host-unavailable results
   are valid fail-closed evidence, not positive hardware proof.
