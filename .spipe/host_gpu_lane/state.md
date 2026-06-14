@@ -33,3 +33,5 @@ implementing
 - spec: Extended unit and system SSpec coverage for strict-GPU event-flow speedup, fallback honesty, and event-order rejection.
 - doc: Updated system-test plan, detail design, and performance evidence report with HGL-006 traceability.
 - spec: Added Draw IR executor bridge coverage that feeds `engine2d_draw_ir_adv_composition` rendered-command counts and pixel readback into host/GPU event-flow evidence.
+- perf: Recorded bounded GTK fallback, `wm_compare` software, and `simple_runner` smoke evidence in `doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md`; these prove harness/fallback honesty, not real GPU less-ms completion.
+- doc: Refreshed SPipe and UI/WebGPU guide references for the canonical host GPU event-flow wrapper and remaining full-GPU evidence gap.

@@ -285,6 +285,12 @@ lane owns generated kernels, filter/layout compute, vector/font offload, and
 SIMD/GPU preparation work. A backend may implement both lanes on one device, but
 that is a `combined` lane plan rather than an implicit assumption. The current
 contract is in `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+Host/GPU `target.later(...) gpu \:` event-flow evidence is recorded through
+`Engine2dHostGpuEventFlowEvidence` in the same module. That evidence surface
+tracks event counts, Draw IR deltas, packet bounds, fallback state,
+event-to-present stages, p50/p95 baseline and candidate timings, pixel hash,
+and speedup; fallback probes and small software smokes are harness checks only,
+not strict GPU less-ms proof.
 Font offload evidence is intentionally split by font class:
 `src/lib/gc_async_mut/gpu/engine2d/vector_font_offload.spl` proves when vector
 glyph pixels have actually returned from a GPU path, while

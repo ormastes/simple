@@ -70,6 +70,10 @@ Host input
 - Preferred next refactor: typed GUI AST -> WebRender IR -> Draw IR; resolve
   GUI/HTML AST and CSS before Draw IR, then keep source kind/id and style
   revision on the batch for cache/debug/GPU grouping.
+- Host/GPU lane evidence: `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`
+  owns `Engine2dHostGpuEventFlowEvidence`; less-ms claims need strict GPU
+  p50/p95 evidence plus matching readback, while fallback/smoke runs only prove
+  harness health.
 - UI test helpers: Protocol v1 `/api/test/*` stays stable; Protocol v2 Draw IR
   is optional and capability-gated at `/api/test/draw-ir`,
   `/api/test/draw-ir?id=...`, `/api/test/draw-ir/diff`, and

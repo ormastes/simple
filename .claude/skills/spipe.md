@@ -268,6 +268,7 @@ To verify correctness across execution modes and benchmark against other languag
 - **Guide:** [`doc/07_guide/compiler/check_perf.md`](../../doc/07_guide/compiler/check_perf.md) — interpreter / SMF loader / native mode checks + cross-language perf matrix
 - **Harness:** `sh scripts/check/check-cross-language-perf.shs` — measures size, cold startup, warm throughput (fib35), parallel spawn + binary sizes + peak RSS (baseline-subtracted per-worker delta) against bun, python, go, erlang, java, C. Use `RUN_TIMEOUT=<seconds>` for bounded smoke or slow-host runs; the harness removes failed Simple outputs so stale native/SMF artifacts are not measured.
 - **GUI perf:** `sh scripts/check/check-gtk-gui-size-speed-baseline.shs` — frame time, binary size, cache hit rates, peak RSS (Simple vs GTK; GTK measured inside xvfb-run)
+- **Host/GPU event-flow perf:** `doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md` is the current wrapper report for `target.later(...) gpu \:` lane evidence. It combines `Engine2dHostGpuEventFlowEvidence`, Draw IR rendered-command/readback evidence, fallback-honesty probes, and bounded software smoke baselines. Treat fallback-only or smoke-size runs as harness evidence, not a real GPU less-ms claim.
 - **Startup audit:** `sh scripts/check/check-startup-size-performance-audit.shs` — cold startup, binary size, ELF sections, library deps, peak RSS
 - **TL;DR:** [`doc/07_guide/compiler/check_perf_tldr.md`](../../doc/07_guide/compiler/check_perf_tldr.md)
 

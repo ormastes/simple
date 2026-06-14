@@ -20,6 +20,7 @@ web_render_backend:
     pure_simple: { layout: simple, raster: engine2d.auto, window: winit, live: false }
     chromium:    { engine: real-chromium(electron), window: BrowserWindow, live: true }
   gate: check-electron-simple-web-engine2d-bitmap-evidence.shs  # mismatch=0
+  host_gpu_lane: "doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md"
   perf: pure_simple interpreted+canvas-bound; keep viewport small; binary must
         carry the in-place array-write fix (2d4579a0) or every pixel write clones.
 ```

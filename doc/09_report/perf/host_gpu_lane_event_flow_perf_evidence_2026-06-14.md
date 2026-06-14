@@ -81,6 +81,39 @@ Results:
 These smoke values prove the parser/runtime surface is runnable here, but they
 are too small for release claims. Use them only as harness health evidence.
 
+## Quick Fallback And Software Smoke Evidence
+
+Additional bounded commands run on 2026-06-14:
+
+```sh
+GTK_EVIDENCE_FALLBACK_PROBE_ONLY=1 \
+BUILD_DIR=/tmp/simple-gtk-gui-size-speed-baseline \
+REPORT_PATH=/tmp/simple-gtk-gui-size-speed-baseline.md \
+sh scripts/check/check-gtk-gui-size-speed-baseline.shs
+
+bin/simple run src/app/wm_compare/backend_measurement_software_export.spl -- \
+  --software-render-backend software --width 64 --height 64 \
+  --warmup-count 1 --sample-count 3 \
+  --fixture host-gpu-software-smoke --shell simple-web \
+  --command software-smoke --host "$(hostname)"
+
+bin/simple run test/05_perf/graphics_2d/simple_runner.spl
+```
+
+| Surface | Result |
+|---|---|
+| GTK fallback probe | PASS fallback-honesty probe: `gtk_benchmark_evidence_status=unavailable`, `gtk_benchmark_evidence_reason=forced-vector-font-unavailable`, `gtk_benchmark_fallback_probe_status=pass`, `simple_vector_text_ink_pixels=0`, `simple_vector_text_deterministic=true`. This is not a GPU speed claim. |
+| `wm_compare` software smoke | PASS CPU software baseline at 64x64: `warmup_count=1`, `sample_count=3`, `cold_start_us=49923`, `warm_start_us=49923`, `p50_frame_us=49923`, `p95_frame_us=54479`, `p95_input_to_paint_us=54479`, `max_rss_kb=1`, `pixel_proof=nonzero_pixels:4096`, `checksum=sum32:17555811179296`, `runtime_compute_target=cpu_scalar`, `fallback_used=false`. |
+| `simple_runner` fill smoke | PASS CPU scalar smoke: `p50_ns=185000`, `p50_ms=0`, `p95_ms=0`, `pixels_per_sec=1383783`, `draws_per_sec=545945`, `pixel_hash=1113616374`, `mode=smoke`. |
+| `simple_runner` blit smoke | PASS CPU scalar smoke: `p50_ns=24000`, `pixels_per_sec=10666666`, `draws_per_sec=83333`, `pixel_hash=970686405`, `mode=smoke`. |
+| `simple_runner` clipped-scroll smoke | PASS CPU scalar smoke: `p50_ns=16000`, `pixels_per_sec=16000000`, `draws_per_sec=687500`, `pixel_hash=3754790201`, `mode=smoke`. |
+
+The fallback probe proves the reporting path does not silently count unavailable
+GTK/native evidence as a GPU win. The software smoke gives a reproducible CPU
+baseline harness shape, but the dimensions and sample counts are intentionally
+small; the full less-ms claim still requires the full commands below on a host
+with a strict GPU backend.
+
 ## Pending Full Commands
 
 Run these when the host has the native Simple binary and GPU/display stack

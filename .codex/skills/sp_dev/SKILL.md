@@ -103,6 +103,13 @@ exists, and cite the canonical implementation paths such as
 `src/lib/common/ui/draw_ir.spl`,
 `src/lib/common/ui/window_scene_draw_ir.spl`, and
 `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+For host/GPU `target.later(...) gpu \:` lane work, keep
+`Engine2dHostGpuEventFlowEvidence` and
+`doc/09_report/perf/host_gpu_lane_event_flow_perf_evidence_2026-06-14.md`
+current. Fallback probes and small software smokes prove harness health and
+honest fallback reporting only; a less-ms claim requires a strict GPU backend,
+matching pixel/readback hashes, p50/p95 baseline-vs-candidate timings, and the
+full warmup/sample contract recorded in that report.
 
 For UI-test helper work, keep the test-library surface consistent: new SSpec
 manual specs use canonical `use std.spec.*` and `step("...")`, existing
