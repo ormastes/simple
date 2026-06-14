@@ -46,6 +46,19 @@ fn main():
   `-> [u8]` fn triggers it just as well once `backend_cpu` is imported. Points at an import-map
   symbol collision / capacity issue, not return-type inference of any single function.
 
+## Refined root cause (2026-06-14, post-rebuild) — RUNTIME marshalling, not static inference
+- Statically `cmd` IS correctly typed `DrawCmd`: HIR lowering rejects `cmd.is_some` with
+  "cannot infer field type … struct 'DrawCmd' field 'is_some'". The type checker knows it's a DrawCmd.
+- At **runtime** the interpreter holds `cmd` as `Value::Enum{ enum_name:"Option" }` → `.kind` hits
+  `interpreter/expr/calls.rs:779` ("unknown property … on Option").
+- So `widget_tree_to_draw_cmds` (declared `-> [DrawCmd]`) returns an array whose **elements are
+  Option-wrapped** crossing the module boundary back to the caller — only with `backend_cpu`'s large
+  closure also in the unit. The marshalling site is not grep-localizable; needs bisect/instrumentation.
+- Same family as OPEN bug `interp_run_cross_module_db_option_mutation` (2026-06-13): cross-module
+  Option/struct returns mis-marshalled in the interpreter `run` path.
+- Survives all 131 commits landed 06-13..06-14 incl fix(seed) a60b5453 / fix(hir) 17991574
+  (fresh `cargo build --release -p simple-driver` still reproduces, 3/3).
+
 ## Workarounds tested — ALL FAIL
 The corruption is global to type resolution, not local inference, so use-site annotations do not help:
 - `val cmds: [DrawCmd] = ...` — still poisoned.
