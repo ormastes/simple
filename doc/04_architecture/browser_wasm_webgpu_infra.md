@@ -32,7 +32,7 @@ than promoting WebGPU into the native backend ABI.
 | WebGPU browser model | `src/lib/gc_async_mut/gpu/browser_engine/script/*webgpu*` | Model secure-context GPU access, context configuration, resources, command validation, software replay, and queue submission. |
 | Chrome evidence wrappers | `src/lib/gc_async_mut/gpu/browser_engine/chrome_webgpu_*_evidence.spl` | Execute host-adaptive Chrome/Electron draw and compute probes; return explicit `host-unavailable:*` status when hardware/browser support is absent. |
 | Compiler GPU target metadata | `src/compiler/00.common/gpu_target_metadata.spl`, `src/compiler/35.semantics/gpu_checker.spl` | Preserve automatic preference order Vulkan -> Metal -> CUDA/HIP -> OpenCL; require explicit WebGPU opt-in for browser/WASM host import plans. |
-| Portable compute planning | `src/compiler/70.backend/backend/gpu_portable_compute.spl` | Emit WebGPU/WGSL source-only compile plans and diagnostics, not native binaries. |
+| Portable compute planning | `src/compiler/70.backend/backend/gpu_portable_compute.spl` | Emit WebGPU/WGSL source-only compile plans and diagnostics, not native binaries. The browser/WASM bridge plan records the `vulkan(dedicated),metal,cuda,hip,opencl,webgpu` priority boundary and the WebGPU host-import/payload contract. |
 
 ## Backend Ordering
 

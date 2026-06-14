@@ -1,27 +1,25 @@
 # Test Specification Index
 
-*Generated: 2026-06-01*
+*Generated: 2026-06-14*
 
 ## Quick Stats
 
-- **Total Features:** 3
-- **Complete Documentation:** 2 (66%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 41
-- **Warnings:** 3
+- **Total Features:** 2
+- **Complete Documentation:** 0 (0%)
+- **Stubs Remaining:** 2
+- **Total Lines:** 0
+- **Warnings:** 2
 
 ---
 
-## Other (1 features)
+## Compiler (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Chrome WebGPU Compute Evidence Parser](test/01_unit/browser_engine/chrome_webgpu_compute_evidence_spec.md) | Minimal | N/A | 13 | 20% | 19 lines |
+| [Gpu Portable Compute Specification](test/01_unit/compiler/codegen/gpu_portable_compute_spec.md) | Auto-generated | N/A | 27 | 0% | 0 lines |
 
-## Application (2 features)
+## Application (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
-| [Browser Chrome WebGPU Compute Evidence](test/03_system/app/browser/feature/browser_webgpu_chrome_compute_evidence_spec.md) | Minimal | N/A | 2 | 20% | 22 lines |
-

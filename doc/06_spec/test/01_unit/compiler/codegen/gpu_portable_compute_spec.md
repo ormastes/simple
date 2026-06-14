@@ -27,7 +27,7 @@ gpu_portable_compute_spec -> compiler
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 27 | 27 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -672,6 +672,53 @@ expect(plan.rows[4].status).to_equal("metadata-ready")
 
 </details>
 
+#### builds browser WASM WebGPU bridge plan after native GPU priority order
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val bridge = portable_compute_browser_wasm_webgpu_bridge_plan("auto", "simple_2d_optimization", "wasm-simple2d-fill-payload")
+
+expect(bridge.ready).to_equal(true)
+expect(bridge.native_priority_order).to_equal("vulkan(dedicated),metal,cuda,hip,opencl,webgpu")
+expect(bridge.target_names()).to_equal("metal,cuda,hip,opencl,webgpu")
+expect(bridge.explicit_webgpu_opt_in).to_be(true)
+expect(bridge.webgpu_plan.source_format).to_equal("wgsl")
+expect(bridge.webgpu_plan.binary_format).to_equal("source")
+expect(bridge.webgpu_plan.produces_binary()).to_equal(false)
+expect(bridge.webgpu_plan.entry_name).to_equal("simple_2d_fill_u32")
+expect(bridge.webgpu_plan.required_symbols).to_contain("simple_2d_fill_u32")
+expect(bridge.host_import_contract).to_equal("browser-webgpu-host-import")
+expect(bridge.wasm_payload_contract).to_equal("wasm-simple2d-fill-payload")
+expect(bridge.summary()).to_contain("priority=vulkan(dedicated),metal,cuda,hip,opencl,webgpu")
+```
+
+</details>
+
+#### keeps browser WASM WebGPU bridge closed without a WebGPU target
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val bridge = portable_compute_browser_wasm_webgpu_bridge_plan("metal,cuda,hip", "simple_2d_optimization", "wasm-simple2d-fill-payload")
+
+expect(bridge.ready).to_equal(false)
+expect(bridge.target_names()).to_equal("metal,cuda,hip")
+expect(bridge.explicit_webgpu_opt_in).to_be(false)
+expect(bridge.source_only).to_be(true)
+expect(bridge.diagnostic).to_contain("requires a webgpu target")
+```
+
+</details>
+
 #### keeps operation metadata closed for Vulkan SPIR-V and unsupported operation families
 
 <details>
@@ -704,7 +751,7 @@ expect(unsupported.diagnostic).to_contain("unsupported generated 2D operation fa
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/codegen/gpu_portable_compute_spec.spl` |
-| Updated | 2026-06-14 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -716,8 +763,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
