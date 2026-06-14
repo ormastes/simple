@@ -257,11 +257,6 @@ RuntimeValue rt_riscv_native_gui_process_render(void)
     return bytes_contains((const unsigned char *)g_riscv_gui_surface, sizeof(g_riscv_gui_surface), "pid=1002") ? 1 : 0;
 }
 
-/* Freestanding loop safepoint: baremetal is single-core with no thread pool to
- * yield to, so the compiler-injected safepoint hook is a no-op. Mirrors the
- * x86_64 freestanding stub. */
-int64_t rt_pool_safepoint(void) { return 0; }
-
 __attribute__((naked, section(".text.entry"))) void _start(void)
 {
     __asm__ volatile(

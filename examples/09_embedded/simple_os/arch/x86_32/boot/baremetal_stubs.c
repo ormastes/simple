@@ -1419,11 +1419,6 @@ RuntimeValue rt_x86_32_fpu_restore(RuntimeValue ctx_ptr_val)
     return NIL_VALUE;
 }
 
-/* Freestanding loop safepoint: baremetal is single-core with no thread pool to
- * yield to, so the compiler-injected safepoint hook is a no-op. Mirrors the
- * x86_64 freestanding stub. */
-int64_t rt_pool_safepoint(void) { return 0; }
-
 /* ===================================================================
  * Crypto — shared portable implementation
  * =================================================================== */

@@ -246,15 +246,18 @@ This surfaced a real regression the stale-ELF boots had masked.
 |------|----------------------|-------|
 | riscv64 | **GREEN (reproducible)** | 80 KB ELF, 0 unresolved, OpenSBI boot, 6/6 markers |
 | x86_64 | **GREEN (reproducible)** | 269 KB ELF, 0 unresolved, NVMe→FAT32→SMF, 5/5 + SMF_FS_PASS |
-| arm64 | **was RED → FIXED → GREEN (reproducible)** | clean build hit `undefined symbol: rt_pool_safepoint` (regression from the multicore-green loop-safepoint work — only x86_64's stub defined it). Fixed by adding the freestanding no-op stub to all baremetal arches (origin `8c8128fa815`); rebuilt 1880 KB ELF, 0 unresolved, **boots 7/7 markers incl genuine EL0 `user-svc-exit:ok`**. Bug `freestanding_rt_pool_safepoint_undefined_2026-06-14`. |
-| arm32 | **BLOCKED (env)** | requires `--backend llvm` (cranelift refuses armv7); no LLVM-enabled driver in this checkout. Fix stub applied (trivial no-op); boot unverified here. |
-| riscv32 | **BLOCKED (env)** | requires `--backend llvm` (cranelift refuses rv32); no LLVM-enabled driver in this checkout. build_stamp shows the env's llvm driver was replaced by a non-llvm build. Fix stub applied; unverified here. |
-| x86_32 | (re-verification in progress) | cranelift-capable; standard 5-marker set |
+| arm64 | **was RED → FIXED → GREEN (reproducible)** | clean cranelift build hit `undefined symbol: rt_pool_safepoint` (regression from the multicore-green loop-safepoint work — the cranelift backend emits the call at loop lowering, but only x86_64's freestanding stub defined it). Fixed by adding the no-op stub to arm64 (origin `8c8128fa815`, scoped down to arm64-only in the follow-up once the sweep showed no other lane references it); rebuilt 1880 KB ELF, 0 unresolved, **boots 7/7 markers incl genuine EL0 `user-svc-exit:ok`**. Bug `freestanding_rt_pool_safepoint_undefined_2026-06-14`. |
+| arm32 | **GREEN (reproducible)** | LLVM backend; clean rebuild from committed source → 153 KB ELF32 ARM, 0 unresolved, 5/5 markers, genuine crt0→UART→FS→SMF→TEST PASSED boot. Does **not** reference `rt_pool_safepoint` (LLVM never emits it). |
+| riscv32 | **GREEN (reproducible)** | LLVM backend; clean rebuild with an `--features llvm` driver built from committed Rust source → 33 KB ELF, 0 unresolved, 5/5 markers. Does not reference the safepoint symbol. |
+| x86_32 | **GREEN (reproducible)** | LLVM backend (no 32-bit x86 cranelift); the verifying agent **built the LLVM-enabled driver from committed source** then built a fresh 8.5 MB ELF, 0 unresolved, 5/5 markers. |
 
-The two `BLOCKED (env)` lanes are an **environment** limitation (missing LLVM driver),
-not a source-reproducibility failure; the recipe was validated against `build_stamp`.
-To unblock: rebuild an LLVM-enabled driver (`scripts/bootstrap/bootstrap-from-scratch.sh`,
-`--features llvm`; system LLVM present) and re-run those two lanes.
+**Net: 6/6 QEMU lanes GREEN and reproducible-from-committed-source** (+ darwin
+hosted, RED-on-Linux by design). The full sweep's value: it caught a real arm64
+regression (`rt_pool_safepoint`) that booting stale ELFs had masked, and confirmed
+the fix is needed on arm64 only (cranelift-emitted symbol; LLVM lanes and riscv64's
+lighter smf_fs kernel never reference it). The LLVM lanes require an `--features llvm`
+driver built from committed Rust source (system LLVM 18.1.8 present) — a one-time
+toolchain build, not a source change.
 
 **riscv64 independent re-verification — 2026-06-14:** rebuilt clean in a fresh git
 worktree off committed `origin/main` (zero pre-existing `build/os/*.elf`): seed-built

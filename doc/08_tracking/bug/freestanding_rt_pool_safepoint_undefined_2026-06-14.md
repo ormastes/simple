@@ -2,7 +2,7 @@
 
 **ID:** freestanding_rt_pool_safepoint_undefined_2026-06-14
 **Status:** FIXED (origin `8c8128fa815`)
-**Severity:** P1 — breaks the arm64 (and latently the arm32/riscv/x86_32) QEMU systest lanes from a clean source build
+**Severity:** P1 — breaks the arm64 QEMU systest lane from a clean source build (cranelift-emitted symbol; other lanes verified unaffected)
 **Found by:** multiarch QEMU systest full-sweep verification (clean-worktree rebuild of every lane)
 
 ## Symptom
@@ -37,26 +37,45 @@ riscv64's smf_fs kernel happens not to reference the symbol (its included code
 has no qualifying loop), so both passed and masked the gap. A clean-source
 rebuild of arm64 (which pulls in the fat32 write path) exposed it.
 
+**Backend finding (from the full sweep):** the symbol is emitted by the
+**cranelift** backend at loop lowering. The LLVM-backed lanes (arm32, riscv32,
+x86_32 — cranelift has no 32-bit codegen for these) were clean-rebuilt from
+committed source and showed **0 unresolved without the stub** — LLVM does not
+emit the call. So among the cranelift arches (arm64, riscv64, x86_64), only
+arm64's fs_exec kernel actually references it today; the LLVM lanes never do.
+
 ## Fix
 
-Add the same trivial no-op to each freestanding arch's `boot/baremetal_stubs.c`
-(single-core baremetal has no thread pool to yield to):
+Add the trivial no-op (single-core baremetal has no thread pool to yield to) to
+**arm64**'s `boot/baremetal_stubs.c` — mirroring the one x86_64 already has:
 
 ```c
 int64_t rt_pool_safepoint(void) { return 0; }
 ```
 
-Applied to arm64, arm32, riscv64, riscv32, x86_32 (x86_64 already had it). This
-completes the freestanding-runtime ABI surface consistently across all arches.
+**Scope: arm64 only.** The per-arch stub files define runtime symbols on an
+as-needed basis (they are deliberately different subsets), so the stub is added
+only where a clean-source build actually references it. The full-sweep rebuild
+proved every other freestanding lane links clean *without* it:
+- arm32 / riscv32 / x86_32 use the **LLVM** backend, which never emits the call
+  (0 unresolved, verified by clean rebuilds).
+- riscv64 is cranelift but its smf_fs kernel has no qualifying loop (0 unresolved,
+  verified). x86_64 already defines it (its fs_exec references it, like arm64's).
 
-## Verification
+So only arm64's fs_exec kernel (fat32 write + str_repeat loops, cranelift) needed
+the stub. Adding it elsewhere would be unused code.
 
-- **arm64**: rebuilt from committed source + the fix → links clean (0 unresolved,
-  1880 KB ELF, `T rt_pool_safepoint` defined) and **boots GREEN 7/7 markers**
-  including genuine EL0 `user-svc-exit:ok`. End-to-end confirmed.
-- arm32/riscv64/riscv32/x86_32: receive the identical trivial no-op
-  (`int64_t f(void){return 0;}` — cannot fail to compile). arm32 re-verified
-  by rebuild+boot.
+## Verification (full clean-rebuild sweep, 2026-06-14)
+
+All 6 QEMU lanes rebuilt from committed source in isolated worktrees / main:
+- **arm64**: with the fix → links clean (0 unresolved, 1880 KB ELF,
+  `T rt_pool_safepoint`) and **boots GREEN 7/7 markers** incl genuine EL0
+  `user-svc-exit:ok`. End-to-end confirmed.
+- **riscv64** (cranelift), **x86_64** (cranelift), **arm32** (LLVM),
+  **x86_32** (LLVM), **riscv32** (LLVM): all rebuilt clean from source (0
+  unresolved) and boot GREEN with their full marker sets — none reference the
+  symbol. The LLVM lanes required building an `--features llvm` driver from
+  committed Rust source (system LLVM 18.1.8).
 
 ## Prevention note
 
