@@ -153,13 +153,13 @@
 
 ## Current Sync Status (2026-06-14)
 
-- The current jj workspace is rebased on `main@origin` after the pushed
-  `f531dbb40312 docs: refresh multicore green report index` slice.
-- The 2026-06-14 report-index slice updates the report index, agent-task plan,
-  system-test plan, tracking SSpec, and generated tracking manual so future
-  multicore-green status reads see the latest pushed state and the latest
-  interpreter-run SimpleOS cooperative, multicore scheduler, green-channel
-  wake, and final handoff blocker evidence.
+- The current jj workspace is rebased on `main@origin` for the multicore-green
+  lane.
+- The 2026-06-14 status-alignment slice updates the report index, agent-task
+  plan, system-test plan, tracking SSpec, and generated tracking manual so
+  future multicore-green status reads see the latest interpreter-run SimpleOS
+  cooperative, multicore scheduler, green-channel wake, and final handoff
+  blocker evidence without depending on a volatile pushed commit id.
 - Focused verification for that slice passed: profile report contract, SPipe
   dev command wiring, local interpreter tracking SSpec with 13 scenarios, and
   the generated-spec layout guard returning `0`.
