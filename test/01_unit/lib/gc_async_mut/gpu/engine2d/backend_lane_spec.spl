@@ -20,6 +20,8 @@ use std.gpu.engine2d.backend_lane.{
     engine2d_combined_backend_lane,
     engine2d_drawing_backend_lane,
     engine2d_font_offload_backend_order,
+    engine2d_host_gpu_event_flow_evidence,
+    engine2d_host_gpu_event_flow_summary,
     engine2d_host_gpu_lane_schedule,
     engine2d_host_gpu_lane_summary,
     engine2d_operation_lane,
@@ -220,3 +222,88 @@ describe "Engine2D backend lane split":
 
         expect(result.ok).to_equal(false)
         expect(result.diagnostic).to_contain("per-widget GPU dispatch")
+
+    it "records event flow timings and speedup for strict GPU batches":
+        val evidence = engine2d_host_gpu_event_flow_evidence(
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            3,
+            2,
+            384,
+            4096,
+            false,
+            false,
+            true,
+            4,
+            6,
+            10,
+            20,
+            30,
+            1113616374,
+            true
+        )
+
+        expect(evidence.ok).to_equal(true)
+        expect(evidence.schedule.execution_kind).to_equal(ENGINE2D_HOST_GPU_EXEC_PACKET)
+        expect(evidence.schedule.gpu_batched).to_equal(true)
+        expect(evidence.schedule.fallback_explicit).to_equal(false)
+        expect(evidence.draw_ir_to_submit_ms).to_equal(3)
+        expect(evidence.submit_to_present_ms).to_equal(5)
+        expect(evidence.event_to_present_ms).to_equal(12)
+        expect(evidence.candidate_frame_p50_ms).to_equal(10)
+        expect(evidence.candidate_frame_p95_ms).to_equal(15)
+        expect(evidence.speedup_x1000).to_equal(2000)
+        expect(engine2d_host_gpu_event_flow_summary(evidence)).to_contain("speedup_x1000=2000")
+
+    it "keeps fallback event flow honest without claiming speedup":
+        val evidence = engine2d_host_gpu_event_flow_evidence(
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            2,
+            1,
+            256,
+            4096,
+            false,
+            false,
+            false,
+            4,
+            6,
+            10,
+            20,
+            30,
+            970686405,
+            true
+        )
+
+        expect(evidence.ok).to_equal(true)
+        expect(evidence.schedule.fallback_explicit).to_equal(true)
+        expect(evidence.candidate_frame_p50_ms).to_equal(20)
+        expect(evidence.candidate_frame_p95_ms).to_equal(30)
+        expect(evidence.speedup_x1000).to_equal(1000)
+        expect(engine2d_host_gpu_event_flow_summary(evidence)).to_contain("fallback=true")
+
+    it "rejects event flow evidence when event order is not preserved":
+        val evidence = engine2d_host_gpu_event_flow_evidence(
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            2,
+            1,
+            256,
+            4096,
+            false,
+            false,
+            true,
+            4,
+            6,
+            10,
+            20,
+            30,
+            970686405,
+            false
+        )
+
+        expect(evidence.ok).to_equal(false)
+        expect(evidence.diagnostic).to_contain("event order")

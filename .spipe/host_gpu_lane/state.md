@@ -1,0 +1,35 @@
+# Feature: host_gpu_lane
+
+## Raw Request
+$sp_dev imple comlletely with pherallel agents and sync git hub every hours. make sspec system tests and event flow and others work properly andcperf is faster than before and less ms.
+
+## Task Type
+feature
+
+## Refined Goal
+Implement and verify the Simple host/GPU `later(...) gpu \:` lane contract so host semantic events stay host-owned, GPU work is batched through bounded packets, SSpec manuals document the flow, and performance evidence proves lower milliseconds when a strict GPU lane is available.
+
+## Acceptance Criteria
+- AC-1: Canonical `target.later(...) gpu \:` and `target.later(...) host \:` syntax is accepted by `bin/simple check`.
+- AC-2: Host semantic mutation is accepted on the host lane and rejected on the GPU lane with a stable diagnostic.
+- AC-3: GPU work is accepted only as coarse render/effect/resource batches with explicit packet bounds; loop-local per-widget GPU dispatch is diagnosed.
+- AC-4: Event-flow evidence records event count, Draw IR delta count, packet bytes, fallback state, event-to-DrawIR time, submit/present time, frame p50/p95, pixel hash, and speedup versus baseline.
+- AC-5: Unit and system SSpec tests cover syntax, semantic ownership, queue-packet event flow, fallback honesty, and faster strict-GPU estimated timing.
+- AC-6: Generated `doc/06_spec` manuals are current and no executable `*_spec.spl` files exist under `doc/06_spec`.
+- AC-7: Relevant design, guide, SPipe state, and perf evidence docs identify the canonical commands and remaining host-specific full-GPU evidence gaps.
+- AC-8: Host/GPU lane commits are synced to GitHub without folding unrelated concurrent work into the lane.
+
+## Scope Exclusions
+- Full compiler lowering from lane marker AST into runtime queue transport remains a follow-up unless implemented and verified in this lane.
+- Real Vulkan/Metal/WebGPU/CUDA device submission requires suitable host hardware/display support and must not be claimed from fallback-only evidence.
+
+## Phase
+implementing
+
+## Log
+- dev: Restored SPipe state file from current host/GPU lane artifacts and active goal.
+- impl: Existing lane contract and Rust `simple check` diagnostics cover syntax, semantic ownership, and per-widget dispatch diagnostics.
+- impl: Added `Engine2dHostGpuEventFlowEvidence` with event-count, Draw IR delta, packet, p50/p95, event-to-present, pixel-hash, fallback, and event-order evidence fields.
+- spec: Extended unit and system SSpec coverage for strict-GPU event-flow speedup, fallback honesty, and event-order rejection.
+- doc: Updated system-test plan, detail design, and performance evidence report with HGL-006 traceability.
+- spec: Added Draw IR executor bridge coverage that feeds `engine2d_draw_ir_adv_composition` rendered-command counts and pixel readback into host/GPU event-flow evidence.

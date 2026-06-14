@@ -27,7 +27,7 @@ host_gpu_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -97,6 +97,8 @@ runtime queues must preserve when they land:
 - fallback is explicit evidence rather than silent success;
 - estimated GPU batch time must be lower than the CPU baseline when a strict
   backend is available.
+- event-flow evidence records event count, Draw IR delta count, packet size,
+  event-to-present timing, pixel hash, and speedup.
 
 ## Event Flow
 
@@ -129,6 +131,10 @@ HGL-005 per-widget dispatch diagnostic:
 the lane contract rejects one GPU `later()` callback per widget in a loop and
 requires a batch.
 
+HGL-006 event-flow timing evidence:
+a strict GPU batch records lower p50/p95 frame time than the host baseline,
+preserves event order, and carries a stable pixel hash.
+
 ## Out Of Scope
 
 This spec does not prove native parser lowering, runtime queue transport,
@@ -145,6 +151,7 @@ The generated manual should show the primary flow first:
 - GPU render/effect batch accepted;
 - GPU semantic mutation rejected;
 - per-widget GPU dispatch rejected.
+- event-flow timing evidence recorded.
 
 Executable SSpec remains folded below the manual scenarios. No screenshot,
 HTML, or raster evidence is needed because this is a compiler/contract system
@@ -321,12 +328,66 @@ expect(result.diagnostic).to_contain("per-widget GPU dispatch")
 
 </details>
 
+#### should record faster strict GPU event-flow evidence
+
+- Build event-flow evidence for host event to GPU Draw IR batch to present
+   - Expected: evidence.ok is true
+   - Expected: evidence.event_count equals `3`
+   - Expected: evidence.draw_ir_delta_count equals `2`
+   - Expected: evidence.event_to_present_ms equals `12`
+   - Expected: evidence.candidate_frame_p50_ms equals `10`
+   - Expected: evidence.candidate_frame_p95_ms equals `15`
+   - Expected: evidence.speedup_x1000 equals `2000`
+   - Expected: evidence.pixel_hash equals `1113616374`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Build event-flow evidence for host event to GPU Draw IR batch to present")
+val evidence = engine2d_host_gpu_event_flow_evidence(
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    "draw_ir_delta",
+    3,
+    2,
+    384,
+    4096,
+    false,
+    false,
+    true,
+    4,
+    6,
+    10,
+    20,
+    30,
+    1113616374,
+    true
+)
+
+expect(evidence.ok).to_equal(true)
+expect(evidence.event_count).to_equal(3)
+expect(evidence.draw_ir_delta_count).to_equal(2)
+expect(evidence.event_to_present_ms).to_equal(12)
+expect(evidence.candidate_frame_p50_ms).to_equal(10)
+expect(evidence.candidate_frame_p95_ms).to_equal(15)
+expect(evidence.speedup_x1000).to_equal(2000)
+expect(evidence.pixel_hash).to_equal(1113616374)
+expect(engine2d_host_gpu_event_flow_summary(evidence)).to_contain("candidate_p50_ms=10")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

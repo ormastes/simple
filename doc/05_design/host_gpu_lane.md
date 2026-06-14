@@ -31,8 +31,11 @@ Implementation path:
 The contract exposes:
 
 - `Engine2dHostGpuLaneResult`
+- `Engine2dHostGpuEventFlowEvidence`
 - `engine2d_host_gpu_lane_schedule`
 - `engine2d_host_gpu_lane_summary`
+- `engine2d_host_gpu_event_flow_evidence`
+- `engine2d_host_gpu_event_flow_summary`
 - host/gpu lane constants
 - direct versus queue-packet execution constants
 
@@ -49,6 +52,43 @@ availability, and CPU baseline milliseconds.
 - GPU operations must be coarse batches.
 - Host semantic commits are valid only on the host lane.
 - Same-lane callbacks are direct; cross-lane callbacks are queue packets.
+
+## Check Diagnostics
+
+Implementation path:
+`src/compiler_rust/driver/src/cli/check.rs`
+
+The native Rust `simple check` path includes source-level diagnostics that
+mirror the Engine2D lane contract:
+
+- `HGL-SEMANTIC` is a hard error when a `target.later(...) gpu \:` block writes
+  a host-owned semantic field such as `.checked`.
+- `HGL-BATCH` is a warning when `target.later(...) gpu \:` appears as a
+  per-widget loop dispatch instead of a frame-level render/effect batch.
+
+These diagnostics are covered by Rust driver unit tests. A local deployed
+`bin/simple` may still require a binary refresh before it reflects the edited
+driver source.
+
+## Event-Flow Evidence
+
+`Engine2dHostGpuEventFlowEvidence` records the deterministic boundary contract
+that full GPU submissions must later satisfy:
+
+- event count and Draw IR delta count are positive;
+- packet bytes stay within `max_packet`;
+- event order is preserved across the queue-packet boundary;
+- fallback is explicit and does not claim speedup;
+- strict GPU batches record lower event-to-present, frame p50, and frame p95
+  estimates than the host baseline;
+- pixel hash is carried as the correctness oracle field for measured runs.
+
+The Draw IR executor spec also feeds real `engine2d_draw_ir_adv_composition`
+results into this evidence record: rendered command count becomes
+`draw_ir_delta_count`, bounded packet bytes are derived from rendered command
+count, and the Engine2D pixel readback value is carried as the pixel-hash field.
+This proves the event-flow evidence is connected to the runtime Draw IR executor
+surface even when the current host uses CPU fallback.
 
 ## Performance Model
 

@@ -233,6 +233,7 @@ fn check_file(path: &Path, source_roots: &[PathBuf], deny_gc_boundary_crossings:
             validate_concurrency_api_calls(path, &module.items, &mut errors);
             validate_numbered_concurrency_source(path, &source, &mut errors);
             validate_short_grammar_suggestions(path, &source, &mut errors);
+            validate_host_gpu_lane_source(path, &source, &mut errors);
         }
         Err(e) => {
             // Convert ParseError to CheckError
@@ -323,6 +324,61 @@ fn validate_short_grammar_suggestions(file_path: &Path, source: &str, errors: &m
             notes: Vec::new(),
             help: vec![format!("replace with `{}`", suggestion.replacement)],
         });
+    }
+}
+
+fn validate_host_gpu_lane_source(file_path: &Path, source: &str, errors: &mut Vec<CheckError>) {
+    let mut in_gpu_lane = false;
+    let mut in_loop = false;
+
+    for (line_index, line) in source.lines().enumerate() {
+        let line_number = line_index + 1;
+        let trimmed = line.trim();
+        let starts_new_top_level = !trimmed.is_empty() && !line.starts_with(' ') && !line.starts_with('\t');
+
+        if starts_new_top_level {
+            in_gpu_lane = false;
+            in_loop = false;
+        }
+        if trimmed.starts_with("for ") {
+            in_loop = true;
+        }
+
+        if trimmed.contains(" host \\:") {
+            in_gpu_lane = false;
+        }
+        if trimmed.contains(" gpu \\:") {
+            in_gpu_lane = true;
+            if in_loop && trimmed.contains("later") {
+                errors.push(CheckError {
+                    file: file_path.display().to_string(),
+                    line: line_number,
+                    column: line.find("gpu \\:").map(|idx| idx + 1).unwrap_or(1),
+                    severity: ErrorSeverity::Warning,
+                    code: Some("HGL-BATCH".to_string()),
+                    message: "per-widget GPU later() call inside loop".to_string(),
+                    expected: Some("frame-level GPU batch".to_string()),
+                    found: Some("loop-local GPU dispatch".to_string()),
+                    notes: vec!["GPU lane work should cross the host/device boundary as coarse Draw IR, instance-buffer, or DisplayGraphIR delta batches.".to_string()],
+                    help: vec!["Move target.later(...) gpu \\: outside the per-widget loop or collect loop work into one frame batch.".to_string()],
+                });
+            }
+        }
+
+        if in_gpu_lane && trimmed.contains(".checked =") {
+            errors.push(CheckError {
+                file: file_path.display().to_string(),
+                line: line_number,
+                column: line.find(".checked =").map(|idx| idx + 1).unwrap_or(1),
+                severity: ErrorSeverity::Error,
+                code: Some("HGL-SEMANTIC".to_string()),
+                message: "GPU lambda cannot mutate host semantic field `checked`".to_string(),
+                expected: Some("host-owned semantic mutation".to_string()),
+                found: Some("GPU lane semantic mutation".to_string()),
+                notes: vec!["The host lane owns UI semantics and event state commits; GPU lanes are reserved for render/effect batch work.".to_string()],
+                help: vec!["Use target.later(...) host \\: for semantic mutation or return a host proposal from the GPU batch.".to_string()],
+            });
+        }
     }
 }
 
@@ -2500,6 +2556,39 @@ mod tests {
         assert_eq!(result.errors[0].severity, ErrorSeverity::Warning);
         assert_eq!(result.errors[0].code.as_deref(), Some("L-STYLE-001"));
         assert!(result.errors[0].help.iter().any(|h| h.contains("_1 * 2")));
+    }
+
+    #[test]
+    fn test_check_rejects_host_semantic_mutation_in_gpu_lane() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "fn main():\n    button.later() gpu \\:\n        button.checked = true"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Error);
+        assert!(result.errors.iter().any(|error| {
+            error.code.as_deref() == Some("HGL-SEMANTIC")
+                && error.message.contains("GPU lambda cannot mutate host semantic field")
+        }));
+    }
+
+    #[test]
+    fn test_check_warns_for_loop_local_gpu_later_dispatch() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "fn main():\n    for widget in widgets:\n        widget.later() gpu \\:\n            draw(widget)"
+        )
+        .unwrap();
+
+        let result = check_file(file.path(), &[], false);
+        assert_eq!(result.status, CheckStatus::Warning);
+        assert!(result.errors.iter().any(|error| {
+            error.code.as_deref() == Some("HGL-BATCH") && error.message.contains("per-widget GPU later() call")
+        }));
     }
 
     #[test]

@@ -24,6 +24,9 @@ changing pixel hashes, event order, or fallback reporting.
 | Surface | File | Evidence Role |
 |---|---|---|
 | Host/GPU lane validator | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Rejects per-widget GPU dispatch, host semantic mutation on GPU, invalid lanes, and oversized packets; summarizes `baseline_ms` and `estimated_ms`. |
+| Host/GPU event-flow evidence | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Records event count, Draw IR delta count, queue packet bounds, event-to-present stages, p50/p95 baseline/candidate timings, pixel hash, fallback honesty, and event-order preservation. |
+| Draw IR executor event-flow bridge | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | Feeds real `engine2d_draw_ir_adv_composition` rendered-command counts and pixel readback into host/GPU event-flow evidence. |
+| Native `simple check` lane lint | `src/compiler_rust/driver/src/cli/check.rs` | Emits `HGL-SEMANTIC` for GPU semantic mutation and `HGL-BATCH` for per-widget GPU dispatch in the production Rust check path. |
 | Full render offload plan | `doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md` | Defines CPU host tree/events/layout -> Draw IR/Graph IR -> GPU render graph/raster/composite/present. |
 | Host/GPU grammar system spec | `test/03_system/feature/language/host_gpu_lane_spec.spl` | Guards canonical `target.later(...) gpu \:` and `target.later(...) host \:` grammar. Do not edit for this lane. |
 | GUI retained-frame baseline | `scripts/check/check-gtk-gui-size-speed-baseline.shs` | Emits cached BrowserBackend frame, no-op frame, present cache, retained Engine2D pixels, vector text render, GTK comparison, RSS, and ratio fields. |
@@ -51,6 +54,12 @@ Commands run:
 ```sh
 bin/simple test test/05_perf/graphics_2d/webgpu_real_spec.spl --mode=interpreter
 bin/simple run test/05_perf/graphics_2d/simple_runner.spl
+bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_lane_spec.spl --mode=interpreter --clean
+bin/simple test test/03_system/feature/language/host_gpu_lane_spec.spl --mode=interpreter --clean
+bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl --mode=interpreter --clean
+cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --lib test_check_rejects_host_semantic_mutation_in_gpu_lane -- --nocapture
+cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --lib test_check_warns_for_loop_local_gpu_later_dispatch -- --nocapture
+src/compiler_rust/target/debug/simple check /tmp/hgl_check_*.spl
 ```
 
 Results:
@@ -58,6 +67,13 @@ Results:
 | Surface | Result |
 |---|---|
 | WebGPU real probe spec | PASS: 12 tests, spec runtime 22 ms, total runner duration 29 ms. This is an availability/contract gate, not a frame-time benchmark. |
+| Host/GPU lane unit spec | PASS: 16 tests, including strict-GPU event-flow timing, fallback honesty, and event-order rejection. |
+| Host/GPU lane system SSpec | PASS: 6 scenarios, including canonical grammar, semantic ownership, per-widget dispatch diagnostics, and strict-GPU event-flow evidence. |
+| Draw IR executor event-flow bridge | PASS: 4 tests; `feeds rendered Draw IR command counts into host GPU event-flow evidence` records `draw_ir_delta_count=2`, `packet_bytes=256`, `pixel_hash=0xff00ff00`, and `speedup_x1000=2000` from a real Engine2D Draw IR composition result. |
+| Native driver `HGL-SEMANTIC` unit | PASS: `test_check_rejects_host_semantic_mutation_in_gpu_lane`, 1 passed. |
+| Native driver `HGL-BATCH` unit | PASS: `test_check_warns_for_loop_local_gpu_later_dispatch`, 1 passed. |
+| Debug native `simple check` smoke | PASS/expected failure: `src/compiler_rust/target/debug/simple check` returns nonzero and prints `error[HGL-SEMANTIC]` for a GPU lane `.checked = true` mutation. |
+| Deterministic strict-GPU event-flow contract | PASS: sample evidence records `events=3`, `draw_ir_deltas=2`, `packet=384/4096`, `event_to_present_ms=12`, `baseline_p50_ms=20`, `candidate_p50_ms=10`, `candidate_p95_ms=15`, `speedup_x1000=2000`, `pixel_hash=1113616374`, `fallback=false`. |
 | `fill_1080p` smoke | `backend=simple_cpu_scalar`, 16x16 smoke, 3 frames, `p50_ns=186000`, `pixels_per_sec=1376344`, `draws_per_sec=543010`, `pixel_hash=1113616374`. |
 | `blit_tiles` smoke | `backend=simple_cpu_scalar`, 16x16 smoke, 3 frames, `p50_ns=22000`, `pixels_per_sec=11636363`, `draws_per_sec=90909`, `pixel_hash=970686405`. |
 | `clipped_scroll` smoke | `backend=simple_cpu_scalar`, 16x16 smoke, 3 frames, `p50_ns=16000`, `pixels_per_sec=16000000`, `draws_per_sec=687500`, `pixel_hash=3754790201`. |
@@ -101,4 +117,3 @@ task asked for quick safe commands when available.
 | Event-to-present | Candidate `event_to_present_p50_ms` improves by at least 25% for dirty-tile and frame-batch scenes. |
 | RSS | Candidate peak RSS is not more than 1.25x baseline unless the report explains persistent device-buffer/cache growth. |
 | Samples | Full claim uses at least 10 warmup frames and 100 timed frames. |
-

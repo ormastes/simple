@@ -46,6 +46,12 @@ use common.ui.draw_ir.{
     draw_ir_rect
 }
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition}
+use std.gpu.engine2d.backend_lane.{
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    engine2d_host_gpu_event_flow_evidence,
+    engine2d_host_gpu_event_flow_summary
+}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.ui_test.sgtti.{SgttiTestDriver, sgtti_snapshot_from_draw_ir_batch}
 
@@ -99,6 +105,47 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.skipped_command_count).to_equal(0)
         expect(result.pixels[1 * 32 + 1]).to_equal(RED)
         expect(result.pixels[8 * 32 + 7]).to_equal(GREEN)
+        engine.shutdown()
+
+    it "feeds rendered Draw IR command counts into host GPU event-flow evidence":
+        var engine = Engine2D.create_with_backend(32, 24, "cpu")
+        engine.clear(BG)
+        val desktop = draw_ir_batch("desktop", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("wm", "desktop", 0, 0, 32, 24, 0, 1000, false), [
+            draw_ir_rect("bg", 0, 0, 32, 24, RED)
+        ])
+        val window = draw_ir_batch("window", DRAW_IR_BACKEND_GPU, draw_ir_embedding_config("surf1", "win1", 6, 7, 12, 10, 10, 1000, true), [
+            draw_ir_rect("body", 0, 0, 4, 4, GREEN)
+        ])
+        val composition = draw_ir_composition("wm-composite", "scene-key", DRAW_IR_BACKEND_GPU, [desktop, window])
+
+        val result = engine2d_draw_ir_adv_composition(engine, composition, false)
+        val evidence = engine2d_host_gpu_event_flow_evidence(
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            1,
+            result.rendered_command_count.to_i64(),
+            result.rendered_command_count.to_i64() * 128,
+            4096,
+            false,
+            false,
+            true,
+            4,
+            6,
+            10,
+            20,
+            30,
+            result.pixels[8 * 32 + 7].to_i64(),
+            true
+        )
+
+        expect(result.rendered_command_count).to_equal(2)
+        expect(evidence.ok).to_equal(true)
+        expect(evidence.draw_ir_delta_count).to_equal(2)
+        expect(evidence.packet_bytes).to_equal(256)
+        expect(evidence.pixel_hash).to_equal(GREEN.to_i64())
+        expect(evidence.speedup_x1000).to_equal(2000)
+        expect(engine2d_host_gpu_event_flow_summary(evidence)).to_contain("draw_ir_deltas=2")
         engine.shutdown()
 
     it "reports unsupported Draw IR commands without rendering them":
