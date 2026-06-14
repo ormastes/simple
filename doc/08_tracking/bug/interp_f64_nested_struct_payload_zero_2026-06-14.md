@@ -3,7 +3,7 @@
 - **ID:** interp_f64_nested_struct_payload_zero_2026-06-14
 - **Severity:** P1 (blocks numeric verification of the whole spreadsheet formula engine)
 - **Discovered:** 2026-06-14, while hardening `src/app/office/sheets/formula.spl`
-- **Status:** OPEN
+- **Status:** OPEN — **root cause REFINED 2026-06-14** (see "Refined root cause" below; the "nested struct" framing was a symptom, not the cause)
 
 ## Summary
 
@@ -14,6 +14,33 @@ spreadsheet formula evaluator is exactly this shape, so every numeric formula �
 including the **pre-existing** `SUM`, `AVERAGE`, `MIN`, `MAX` — evaluates to `0`
 through the affected backends. This is a toolchain defect, not a defect in the
 formula logic.
+
+## Refined root cause (2026-06-14 — bisecting probes)
+
+The "nested struct/enum" framing is a **symptom**, not the cause. Minimal repro:
+
+```
+fn f() -> f64:
+    5.5
+fn main():
+    if f() > 5.0: print("direct:OK") else: print("direct:BAD")   # -> direct:OK
+    val x = f()
+    if x > 5.0: print("bound:OK") else: print("bound:BAD")        # -> bound:BAD
+    print("x.to_i64()={x.to_i64()}")                              # -> 0
+```
+
+Bisection results (interpreter, via probes in /tmp/f64/):
+- `f() > 5.0` used **directly inline** → correct.
+- `val x = f(); x > 5.0` → **wrong (x is 0.0)**, regardless of `val x: f64 =` annotation.
+- `val x = 5.5` (literal RHS) → correct. `val box = Box(v: 7.5); box.v` (literal stored in a struct field inside the callee, returned) → correct.
+- i64 function returns bound to a local → correct. f64 **param** passthrough, explicit `return`, arithmetic, and passing the call result as an arg all break the same way once the result is **stored/passed** rather than consumed inline.
+- Struct-wrap cross-check: `Box(v: x).v` of an already-bound `x` stays 0 → the stored bits are genuinely 0, not a mis-read.
+
+**Conclusion:** the bug is **type propagation of a function-call expression whose return type is `f64`** into a binding/argument slot. When the f64 call result is consumed inline, the comparison knows it is float and reads it correctly; when it is **bound to a local (or passed into another frame)**, the slot is treated as i64, so the float return (returned in a float register / float Value) is read as an integer `0`. It is NOT interpreter value-boxing and NOT struct-nesting.
+
+**Breadth (critical):** reproduces **identically** in all three execution paths — the seed Rust interpreter, the self-hosted interpreter, AND `native-build` (cranelift codegen). A defect common to all three lives in the **shared frontend type layer** (type-checking / HIR lowering of `Let`/argument bindings from call expressions), not in any one backend's value representation. native-build did NOT core in this minimal probe (it returned wrong values, exit 0); the earlier "core dump" was a separate/more-complex probe.
+
+**Where to fix:** the let/argument binding must take its type from the callee's declared return type. Present in BOTH the Rust seed (confirmed via `native-build`) and the self-hosted `.spl` compiler — so a complete fix touches both frontends + a seed rebuild, with i64/text regression guards. The string-interpolation "0.0" symptom is downstream (the bound value really is 0); fixing the binding type fixes it.
 
 ## Evidence
 
