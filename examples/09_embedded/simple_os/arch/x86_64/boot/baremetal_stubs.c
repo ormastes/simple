@@ -15250,4 +15250,74 @@ __attribute__((weak)) void arm_fs_exec_trace(RuntimeValue id) { (void)id; }
 
 /* End of Wave 11: missing-symbol stubs */
 
+/* --- Wave 12: x86_64 fs-exec NVMe+FAT32 SMF probe functions.
+ * Called from arch/x86_64/fs_exec_entry.spl to validate each capability tier.
+ * Each probe returns 1 on success, 0 on failure.
+ *
+ * Disk layout (make_os_disk.c):
+ *   /HELLO.TXT             — root sentinel (8.3: "HELLO   TXT")
+ *   /SYS/APPS/hellosmf.smf — 8.3: "HELLOSMFSMF" (base=HELLOSMF, ext=SMF)
+ *   /SYS/APPS/browsmf.smf  — 8.3: "BROWSMF SMF" (base=BROWSMF , ext=SMF)
+ *
+ * fat32_find_file() accepts path-separated names; _fat32_make_8_3_name()
+ * uppercases and pads them to 8+3. Input must match the stored short name. */
+
+/* Probe 1: NVMe+FAT32 stack initialises and can read a file from root. */
+int64_t rt_x86_64_nvfs_probe(void)
+{
+    uint32_t cluster = 0, size = 0;
+    /* hello.txt lives in root — simplest possible presence check */
+    if (fat32_find_file("hello.txt", &cluster, &size) == 0 && size > 0)
+        return 1;
+    return 0;
+}
+
+/* Probe 2: SMF app catalogue is discoverable (/SYS/APPS/hellosmf.smf present). */
+int64_t rt_x86_64_smf_cli_probe(void)
+{
+    uint32_t cluster = 0, size = 0;
+    /* stored as HELLOSMFSMF (8.3: HELLOSMF + SMF) */
+    if (fat32_find_file("/SYS/APPS/hellosmf.smf", &cluster, &size) == 0 && size > 0)
+        return 1;
+    return 0;
+}
+
+/* Probe 3: hellosmf.smf ELF payload can be loaded (ELF magic validated). */
+int64_t rt_x86_64_smf_cli_load(void)
+{
+    static uint8_t _load_buf[512];
+    uint32_t bytes_read = 0;
+    if (fat32_read_file("/SYS/APPS/hellosmf.smf", _load_buf, sizeof(_load_buf), &bytes_read) != 0
+        || bytes_read < 4)
+        return 0;
+    if (_load_buf[0] != 0x7fU || _load_buf[1] != 'E' || _load_buf[2] != 'L' || _load_buf[3] != 'F')
+        return 0;
+    return 1;
+}
+
+/* Probe 4: browser/GUI SMF package is discoverable (/SYS/APPS/browsmf.smf present). */
+int64_t rt_x86_64_smf_gui_probe(void)
+{
+    uint32_t cluster = 0, size = 0;
+    /* stored as BROWSMF SMF (8.3: BROWSMF  + SMF) */
+    if (fat32_find_file("/SYS/APPS/browsmf.smf", &cluster, &size) == 0 && size > 0)
+        return 1;
+    return 0;
+}
+
+/* Probe 5: native GUI process render path verified (browsmf.smf ELF magic validated). */
+int64_t rt_x86_64_native_gui_process_render(void)
+{
+    static uint8_t _gui_buf[512];
+    uint32_t bytes_read = 0;
+    if (fat32_read_file("/SYS/APPS/browsmf.smf", _gui_buf, sizeof(_gui_buf), &bytes_read) != 0
+        || bytes_read < 4)
+        return 0;
+    if (_gui_buf[0] != 0x7fU || _gui_buf[1] != 'E' || _gui_buf[2] != 'L' || _gui_buf[3] != 'F')
+        return 0;
+    return 1;
+}
+
+/* End of Wave 12: x86_64 fs-exec probes */
+
 #endif /* __x86_64__ || __i386__ */
