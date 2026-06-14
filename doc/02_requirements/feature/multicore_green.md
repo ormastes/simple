@@ -54,9 +54,9 @@ SimpleOS scheduler work distinct and verifiable.
   progress state and requeue between bounded slices. It is separate from the
   Go-like M:N evidence path through `multicore_green_spawn` with
   `used_runtime_pool()` plus public counter-delta evidence. Ordinary
-  `multicore_green_spawn` closures still run to return and must not be
-  described as preempted tight-loop work until compiler-inserted yield points
-  or equivalent runtime preemption have executable evidence.
+  `multicore_green_spawn` loop bodies now have compiler-inserted runtime-pool
+  safepoint evidence; broader non-loop/native-call preemption claims still need
+  separate executable evidence.
 - REQ-MCG-009: C, Go, and Rust may be used as baselines, research references,
   seed implementations, or runtime/compiler implementation contexts; they must
   not replace Simple user-facing concurrency APIs.

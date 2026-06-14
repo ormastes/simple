@@ -1,6 +1,6 @@
-# Multicore Green Thread Yield Gap
+# Multicore Green Thread Yield Loop Safepoint Regression
 
-> This SSpec proves that raw `thread_yield()` inside a hosted multicore-green task is not enough to create Go-like fairness. With hosted parallelism pinned to `1`, a long-running worker that calls `thread_yield()` still keeps a later quick task from completing during the first short observation window on both source-run and standalone native paths.
+> This SSpec keeps the former `thread_yield()` fairness gap covered as a regression: compiler-inserted runtime-pool loop safepoints let the later quick task complete while the earlier worker is still spinning.
 
 <!-- sdn-diagram:id=multicore_green_thread_yield_gap_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ multicore_green_thread_yield_gap_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Multicore Green Thread Yield Gap
+# Multicore Green Thread Yield Loop Safepoint Regression
 
-This SSpec proves that raw `thread_yield()` inside a hosted multicore-green task is not enough to create Go-like fairness. With hosted parallelism pinned to `1`, a long-running worker that calls `thread_yield()` still keeps a later quick task from completing during the first short observation window on both source-run and standalone native paths.
+This SSpec keeps the former `thread_yield()` fairness gap covered as a regression: compiler-inserted runtime-pool loop safepoints let the later quick task complete while the earlier worker is still spinning.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec proves that raw `thread_yield()` inside a hosted multicore-green task
 |-------|-------|
 | Feature IDs | #multicore-green-thread-yield-gap |
 | Category | Runtime / Hosted / Multicore Green |
-| Status | Blocked |
+| Status | Active |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,11 +53,9 @@ This SSpec proves that raw `thread_yield()` inside a hosted multicore-green task
 
 ## Overview
 
-This SSpec proves that raw `thread_yield()` inside a hosted multicore-green
-task is not enough to create Go-like fairness. With hosted parallelism pinned
-to `1`, a long-running worker that calls `thread_yield()` still keeps a later
-quick task from completing during the first short observation window on both
-source-run and standalone native paths.
+This SSpec keeps the former `thread_yield()` fairness gap covered as a
+regression: compiler-inserted runtime-pool loop safepoints let the later quick
+task complete while the earlier worker is still spinning.
 
 ## Requirements
 
@@ -83,11 +81,14 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ## Scenarios
 
-### multicore green thread_yield gap
+### multicore green thread_yield loop safepoint regression
 
-#### keeps raw thread_yield insufficiency explicit across source-run and native artifacts
+<details>
+<summary>Advanced: lets compiler loop safepoints make a thread-yielding spin fair across source-run and native artifacts</summary>
 
-- Prepare the native output directory for the checked-in thread-yield gap fixture
+#### lets compiler loop safepoints make a thread-yielding spin fair across source-run and native artifacts
+
+- Prepare the native output directory for the checked-in thread-yield regression fixture
    - Expected: mkdir_code equals `0`
 - Compile the fixture to standalone native
    - Expected: native_compile_code equals `0`
@@ -104,7 +105,7 @@ Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Prepare the native output directory for the checked-in thread-yield gap fixture")
+step("Prepare the native output directory for the checked-in thread-yield regression fixture")
 val (mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
 expect(mkdir_out.len()).to_be_greater_than(-1)
 expect(mkdir_code).to_equal(0)
@@ -117,19 +118,22 @@ expect(native_compile_code).to_equal(0)
 step("Run the fixture through the hosted source path")
 val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
 expect(interp_out).to_contain("parallelism_before=1")
-expect(interp_out).to_contain("quick_done_during_spin=false")
-expect(interp_out).to_contain("parallelism_after_join=1")
+expect(interp_out).to_contain("quick_done_during_spin=true")
+expect(interp_out).to_contain("parallelism_after_join=")
 expect(interp_out).to_contain("total=9")
 expect(interp_code).to_equal(0)
 
 step("Run the fixture through the hosted standalone native path")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
 expect(native_out).to_contain("parallelism_before=1")
-expect(native_out).to_contain("quick_done_during_spin=false")
-expect(native_out).to_contain("parallelism_after_join=1")
+expect(native_out).to_contain("quick_done_during_spin=true")
+expect(native_out).to_contain("parallelism_after_join=")
 expect(native_out).to_contain("total=9")
 expect(native_code).to_equal(0)
 ```
+
+</details>
+
 
 </details>
 

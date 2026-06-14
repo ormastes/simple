@@ -1,7 +1,7 @@
 # Host Multicore Green Fairness and Preemption Gap
 
 Date: 2026-06-11
-Status: closed-as-designed for hosted fairness contract; future ordinary-closure preemption remains open roadmap work
+Status: closed; ordinary loop-body fairness now has compiler/runtime safepoint evidence
 Owner: multicore-green lane
 
 ## Summary
@@ -13,18 +13,16 @@ The hosted `multicore_green_spawn` lane now has real runtime-pool evidence:
 - Go-vs-C-vs-Simple stress evidence is current
 
 That is enough for bounded CPU-parallel M:N candidate claims. The hosted
-fairness decision is now explicit: CPU-heavy work that needs fairness must use
-`multicore_green_spawn_sliced`, which requeues bounded scalar-state slices and
-has source/native/profile evidence.
+fairness decision now has two executable paths: explicit scalar-state fairness
+through `multicore_green_spawn_sliced`, and ordinary loop-body fairness through
+compiler-inserted runtime-pool safepoints in `multicore_green_spawn` closures.
 
-Plain `multicore_green_spawn` closures still run until they return. They must
-not be described as automatic tight-loop-preempted work until compiler-inserted
-yield points or equivalent runtime preemption have executable evidence.
+Plain `multicore_green_spawn` closures still run cooperatively at compiler
+safepoint boundaries, not by arbitrary async stack preemption. The previous open
+host-side gap is closed for tight loop bodies with source-run and standalone
+native evidence.
 
-The previous open host-side gap is therefore closed for the supported hosted
-fairness contract, not by overclaiming ordinary-closure preemption.
-
-## Why This Is Still Open
+## Why This Was Open
 
 Current hosted multicore-green evidence proves:
 
@@ -33,7 +31,7 @@ Current hosted multicore-green evidence proves:
 - work-stealing queue reporting
 - fanout/fanin checksum integrity
 
-Current hosted multicore-green evidence deliberately does not claim:
+Historical hosted multicore-green evidence deliberately did not claim:
 
 - ordinary long-running closures are preempted or yield-forced
 - plain-closure fairness semantics comparable to Go's async preemption under
@@ -75,16 +73,17 @@ Current hosted parallelism-boundary evidence also includes:
   parallelism `2`, the fresh hosted runtime stays at `2` under CPU saturation
 - bounded parallelism now has executable hosted regression coverage
 
-Current hosted fairness-gap evidence also includes:
+Current hosted fairness/preemption evidence now includes:
 
 - `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
-  keeps the one-worker monopolization boundary explicit: with hosted
-  parallelism pinned to `1`, one tight CPU task can still keep a later quick
-  task unfinished during the first short observation window
+  regression-covers ordinary loop-body fairness: with hosted parallelism
+  starting at `1`, one tight CPU task now reaches compiler-inserted
+  runtime-pool safepoints and a later quick task finishes during the first short
+  observation window
 - `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl`
-  proves raw `thread_yield()` is not enough for hosted fairness: even with
-  `thread_yield()` inside the monopolizing task, the later quick task still
-  does not finish during that same first short observation window
+  regression-covers the same compiler/runtime safepoint path when user code also
+  calls raw `thread_yield()`, keeping fairness attributed to runtime-pool
+  safepoints rather than bare OS-thread yielding
 - `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
   proves the explicit Pure Simple sliced-task API is the current positive
   hosted fairness path: with hosted parallelism pinned to `1`, a long
@@ -95,8 +94,8 @@ Current hosted fairness-gap evidence also includes:
   `Hosted Fairness Evidence` section with `Simple sliced (source)` and
   `Simple sliced (native)` rows. The profile-report contract requires
   `multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9`, so
-  this positive path remains visible without treating it as ordinary closure
-  preemption.
+  this explicit sliced path remains visible separately from compiler-inserted
+  ordinary loop-body safepoints.
 - `test/05_perf/profile_scripts/concurrency_api_contract_test.shs` also keeps
   the public sliced API executable by requiring the run/join marker
   `public_multicore_green_sliced_result=19 used_runtime_pool=true`.
@@ -137,6 +136,8 @@ Current positive hosted evidence:
 - `test/01_unit/lib/nogc_async_mut/multicore_green_spec.spl`
 - `test/01_unit/lib/nogc_async_mut/multicore_green_native.spl`
 - `test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl`
+- `test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl`
+- `test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl`
 - `test/05_perf/stress/multicore_green_fanout_spec.spl`
 - `test/05_perf/stress/multicore_green_cross_language_gate_spec.spl`
 - `doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md`
@@ -146,8 +147,9 @@ Current SimpleOS fairness/preemption evidence:
 - `test/01_unit/os/kernel/scheduler/scheduler_green_parallelism_spec.spl`
 - `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl`
 
-These close the supported hosted fairness contract only for explicit sliced
-work. They do not close future ordinary-closure preemption.
+These close the supported hosted fairness contract for explicit sliced work and
+ordinary loop-body closures. Non-loop long-running native calls remain outside
+this compiler safepoint evidence.
 
 ## Closure Criteria
 
@@ -160,8 +162,10 @@ lane now has executable evidence for:
   coverage
 - profile `Hosted Fairness Evidence` rows
 - public API and misuse coverage for the sliced API
+- compiler-inserted runtime-pool safepoints in ordinary `while`, `loop`, and
+  `for` loop bodies
+- source-run and native ordinary loop-body fairness regression coverage
 
-Future ordinary-closure preemption must remain separate work. It can use
-compiler-inserted yields, runtime safepoints, or another resumable closure
-mechanism, but it must add new executable evidence before docs call plain
-closures Go-like tight-loop preemptive work.
+Future work must keep any broader claims separate: arbitrary long-running
+native calls and straight-line CPU work without loop safepoints are not proven
+by this tracker.

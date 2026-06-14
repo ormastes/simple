@@ -1,6 +1,6 @@
-# Multicore Green Fairness And Preemption Gap
+# Multicore Green Fairness Loop Safepoint Regression
 
-> This SSpec pins the remaining hosted multicore-green fairness/preemption gap. With hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task from finishing during the first short observation window.
+> This SSpec pins the hosted multicore-green fairness/preemption regression. With hosted parallelism starting at `1`, compiler-inserted loop safepoints let a later quick task finish while an earlier task is still spinning.
 
 <!-- sdn-diagram:id=multicore_green_fairness_preemption_gap_spec.arch -->
 <details class="sdn-source">
@@ -32,9 +32,9 @@ multicore_green_fairness_preemption_gap_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Multicore Green Fairness And Preemption Gap
+# Multicore Green Fairness Loop Safepoint Regression
 
-This SSpec pins the remaining hosted multicore-green fairness/preemption gap. With hosted parallelism pinned to `1`, a tight CPU loop can still monopolize the only worker long enough to keep a later quick task from finishing during the first short observation window.
+This SSpec pins the hosted multicore-green fairness/preemption regression. With hosted parallelism starting at `1`, compiler-inserted loop safepoints let a later quick task finish while an earlier task is still spinning.
 
 ## At a Glance
 
@@ -42,7 +42,7 @@ This SSpec pins the remaining hosted multicore-green fairness/preemption gap. Wi
 |-------|-------|
 | Feature IDs | #multicore-green-fairness-preemption-gap |
 | Category | Runtime / Hosted / Multicore Green |
-| Status | Blocked |
+| Status | Active |
 | Requirements | doc/02_requirements/feature/multicore_green.md |
 | Plan | doc/03_plan/sys_test/multicore_green.md |
 | Design | doc/05_design/multicore_green.md |
@@ -53,10 +53,9 @@ This SSpec pins the remaining hosted multicore-green fairness/preemption gap. Wi
 
 ## Overview
 
-This SSpec pins the remaining hosted multicore-green fairness/preemption gap.
-With hosted parallelism pinned to `1`, a tight CPU loop can still monopolize
-the only worker long enough to keep a later quick task from finishing during
-the first short observation window.
+This SSpec pins the hosted multicore-green fairness/preemption regression.
+With hosted parallelism starting at `1`, compiler-inserted loop safepoints let
+a later quick task finish while an earlier task is still spinning.
 
 ## Requirements
 
@@ -82,11 +81,11 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ## Scenarios
 
-### multicore green fairness and preemption gap
+### multicore green fairness loop safepoint regression
 
-#### keeps the remaining host monopolization gap explicit across source-run and native artifacts
+#### lets a quick task run during a spinning closure across source-run and native artifacts
 
-- Prepare the native output directory for the checked-in fairness-gap fixture
+- Prepare the native output directory for the checked-in fairness regression fixture
    - Expected: mkdir_code equals `0`
 - Compile the fixture to standalone native
    - Expected: native_compile_code equals `0`
@@ -103,7 +102,7 @@ Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Prepare the native output directory for the checked-in fairness-gap fixture")
+step("Prepare the native output directory for the checked-in fairness regression fixture")
 val (mkdir_out, mkdir_code) = shell("mkdir -p " + BUILD_DIR)
 expect(mkdir_out.len()).to_be_greater_than(-1)
 expect(mkdir_code).to_equal(0)
@@ -116,16 +115,16 @@ expect(native_compile_code).to_equal(0)
 step("Run the fixture through the hosted source path")
 val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
 expect(interp_out).to_contain("parallelism_before=1")
-expect(interp_out).to_contain("quick_done_during_spin=false")
-expect(interp_out).to_contain("parallelism_after_join=1")
+expect(interp_out).to_contain("quick_done_during_spin=true")
+expect(interp_out).to_contain("parallelism_after_join=")
 expect(interp_out).to_contain("total=9")
 expect(interp_code).to_equal(0)
 
 step("Run the fixture through the hosted standalone native path")
 val (native_out, native_code) = shell("timeout 20s " + NATIVE_PATH)
 expect(native_out).to_contain("parallelism_before=1")
-expect(native_out).to_contain("quick_done_during_spin=false")
-expect(native_out).to_contain("parallelism_after_join=1")
+expect(native_out).to_contain("quick_done_during_spin=true")
+expect(native_out).to_contain("parallelism_after_join=")
 expect(native_out).to_contain("total=9")
 expect(native_code).to_equal(0)
 ```

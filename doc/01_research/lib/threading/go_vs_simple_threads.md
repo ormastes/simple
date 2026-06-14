@@ -80,15 +80,14 @@ This is a green-thread API, but it is not a Go-style CPU-parallel scheduler.
 
 This is enough for bounded CPU-parallel profile comparisons, and the hosted
 blocking-compensation path now has executable regression coverage, but it is
-still short of Go's full scheduler model because final preemption/fairness
-claims are not complete across every path.
+still short of Go's full scheduler model because preemption/fairness claims are
+not complete across every path.
 
-The current host-side reason is concrete: the runtime pool pops one closure and
-runs it to return before that worker looks at queued work again. That means raw
-`thread_yield()` inside a multicore-green task is still only an OS-thread hint,
-not a Go-like task preemption point. The remaining host gap is therefore
-compiler/runtime safepoints or another resumable task-slice mechanism, not a
-missing plain thread-yield primitive.
+The current host-side boundary is concrete: compiler lowering now inserts
+runtime-pool safepoints into Simple loop bodies, so ordinary tight loops can let
+queued multicore-green work progress. Raw `thread_yield()` remains only an
+OS-thread hint; broader non-loop straight-line work and native calls need
+separate evidence before they are described as Go-like preempted work.
 
 The strongest in-repo reuse path for that remaining gap is already present:
 

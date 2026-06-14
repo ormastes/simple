@@ -250,8 +250,9 @@ Acceptance evidence:
 ## Host Fairness And Blocking Agent
 
 Goal: keep the host-side fairness boundary explicit: the supported CPU-heavy
-host fairness contract is `multicore_green_spawn_sliced`, while future
-ordinary-closure preemption remains separate runtime/compiler work.
+host fairness contract includes `multicore_green_spawn_sliced` for explicit
+scalar-state slicing and ordinary loop-body fairness through compiler-inserted
+runtime-pool safepoints in `multicore_green_spawn` closures.
 
 Primary paths:
 
@@ -263,17 +264,17 @@ Primary paths:
 
 Deliverables:
 
-- dedicated tracking for the hosted fairness decision and future
-  ordinary-closure preemption boundary;
+- dedicated tracking for the hosted fairness decision and the remaining
+  non-loop/native-call preemption boundary;
 - executable proof that hosted blocking compensation stays fixed while sliced
   fairness is the supported contract for CPU-heavy work;
 - executable blocker coverage for the explicit resumable host-fairness path,
   including the scalar-state `multicore_green_spawn_sliced` source/native
   regression and historical closure of the earlier callback-id prototype;
 - profile/report visibility for the generated hosted sliced-fairness evidence
-  section without reclassifying ordinary closure scheduling as preemptive,
-  including sliced-handle `used_runtime_pool()` proof so inline fallback cannot
-  pass as hosted fairness;
+  section, kept separate from compiler-inserted ordinary loop-body safepoint
+  evidence, including sliced-handle `used_runtime_pool()` proof so inline
+  fallback cannot pass as hosted fairness;
 - public API contract visibility for the scalar-state sliced API through
   `public_multicore_green_sliced_result=19 used_runtime_pool=true`;
 - updated research and architecture text when that boundary changes.
@@ -281,6 +282,8 @@ Deliverables:
 Acceptance evidence:
 
 - `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_host_parity_gap_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl --mode=interpreter --clean`
+- `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl --mode=interpreter --clean`
 - `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_sliced_fairness_regression_spec.spl --mode=interpreter --clean`
 - `src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicore_green_tracking_spec.spl --mode=interpreter --clean`
 - `src/compiler_rust/target/debug/simple lint doc/08_tracking/feature/feature_db.sdn`
@@ -338,8 +341,9 @@ Green-semantics split gate: Cooperative Green Semantics Agent and Multicore
 Green Runtime-Pool Agent can run in parallel because cooperative green and
 multicore green must stay semantically distinct.
 
-Host fairness gate: Host Fairness And Blocking Agent keeps the sliced fairness
-contract and the future ordinary-closure preemption boundary explicit.
+Host fairness gate: Host Fairness And Blocking Agent keeps sliced fairness,
+ordinary loop-body safepoints, and the remaining non-loop/native-call boundary
+explicit.
 
 SimpleOS carrier gate: SimpleOS Green Carrier Agent consumes stable
 host/library contracts into SimpleOS and QEMU proof.
@@ -358,9 +362,9 @@ refreshed after executable specs and profile scripts change.
   must provide `used_runtime_pool()` plus public counter-delta evidence, and Go
   Profile Evidence Agent must gate the row numerically.
 - If a change claims hosted fairness/preemption parity with Go, Host Fairness
-  And Blocking Agent must distinguish explicit sliced fairness from future
-  ordinary-closure preemption and update the dedicated tracker plus executable
-  specs before the claim is accepted.
+  And Blocking Agent must distinguish explicit sliced fairness, compiler-inserted
+  ordinary loop-body safepoints, and any still-unproven non-loop/native-call
+  preemption before the claim is accepted.
 - If a SimpleOS QEMU probe uses a fixed-slot helper, SimpleOS Green Carrier
   Agent must state exactly what is proven and what remains future hardware
   handoff work.

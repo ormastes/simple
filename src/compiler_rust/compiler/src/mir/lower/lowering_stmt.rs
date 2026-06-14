@@ -12,6 +12,17 @@ use crate::mir::function::MirLocal;
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior};
 
 impl<'a> MirLowerer<'a> {
+    fn emit_runtime_pool_safepoint(&mut self) -> MirLowerResult<()> {
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Call {
+                dest: None,
+                target: CallTarget::from_name("rt_pool_safepoint"),
+                args: vec![],
+            });
+        })
+    }
+
     pub(super) fn lower_stmt(&mut self, stmt: &HirStmt, contract: Option<&HirContract>) -> MirLowerResult<()> {
         match stmt {
             HirStmt::Let {
@@ -1042,6 +1053,7 @@ impl<'a> MirLowerer<'a> {
 
                 // Lower body
                 self.set_current_block(body_id)?;
+                self.emit_runtime_pool_safepoint()?;
                 if let Some(proof) = bound_proof {
                     self.active_array_len_bounds.push(proof);
                     if let Some(data_ptr) = hoisted_data_ptr {
@@ -1121,6 +1133,7 @@ impl<'a> MirLowerer<'a> {
                 })?;
 
                 self.set_current_block(body_id)?;
+                self.emit_runtime_pool_safepoint()?;
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
@@ -1514,6 +1527,7 @@ impl<'a> MirLowerer<'a> {
                 })?;
 
                 // Execute body statements
+                self.emit_runtime_pool_safepoint()?;
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
@@ -1869,6 +1883,7 @@ impl<'a> MirLowerer<'a> {
         self.set_current_block(body_id)?;
 
         // Execute body statements
+        self.emit_runtime_pool_safepoint()?;
         for stmt in body {
             self.lower_stmt(stmt, contract)?;
         }

@@ -231,20 +231,19 @@ Repository guards:
 
 ## Hosted Fairness Decision
 
-The supported hosted fairness contract for CPU-heavy multicore-green work is
-the explicit sliced helper API, separate from the Go-like M:N evidence path
-through `multicore_green_spawn` with `used_runtime_pool`. The
+The supported hosted fairness contract for CPU-heavy multicore-green work has
+two paths, both separate from raw OS-thread yielding. The
 `multicore_green_spawn_sliced` helper lets user code expose scalar progress
 state, execute one bounded slice, and requeue itself so other runtime-pool work
-can run even when hosted parallelism is `1`.
+can run even when hosted parallelism is `1`. Ordinary `multicore_green_spawn`
+loop bodies now receive compiler-inserted runtime-pool safepoints in the MIR
+lowerer.
 
-This is a deliberate API decision rather than an implicit preemption claim:
-ordinary `multicore_green_spawn` closures still run until they return, and the
-profile `Hosted Fairness Evidence` section must keep describing sliced fairness
-as explicit scalar-state requeueing and must require sliced-handle
-`used_runtime_pool()` evidence. Future compiler/runtime preemption can
-extend the model, but it must add separate executable evidence before docs call
-plain closures Go-like tight-loop preemptive work.
+This is a deliberate runtime/compiler decision rather than a claim of arbitrary
+async stack preemption. The profile `Hosted Fairness Evidence` section must keep
+describing sliced fairness as explicit scalar-state requeueing and must require
+sliced-handle `used_runtime_pool()` evidence. Broader non-loop/native-call
+preemption must add separate executable evidence before docs claim it.
 
 ## Open Design Decisions
 
@@ -255,12 +254,11 @@ plain closures Go-like tight-loop preemptive work.
   limits. The AP ring/user context-switch proof itself is now closed by the
   opt-in live gate tracked in
   `doc/08_tracking/bug/simpleos_green_hardware_context_switch_handoff_2026-06-07.md`.
-- Future ordinary-closure preemption strategy: compiler-inserted yields or
-  runtime safepoints. Current hosted runtime-pool workers run
-  each popped closure to return before selecting another queued task, so raw
-  `thread_yield()` inside that closure is not enough to provide Go-like
-  fairness on the host lane.
-- Concrete implementation seams for that remaining work are now known:
+- Broader preemption strategy: compiler-inserted loop safepoints are now in
+  `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`, but non-loop
+  straight-line CPU work and native calls still need separate evidence before
+  they are described as preempted.
+- Concrete implementation seams for future broadening remain known:
   `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` owns the current
   `HirStmt::While` / `HirStmt::Loop` / `HirStmt::For` lowering path for native
   and SMF loops, while `src/compiler_rust/compiler/src/interpreter_control.rs`

@@ -1,6 +1,6 @@
 # Multicore Green Host Parity Gap Tracking Specification
 
-> This specification keeps the hosted multicore-green fairness boundary explicit. Hosted runtime-pool evidence is real, and CPU-heavy hosted fairness is supported through `multicore_green_spawn_sliced`. Ordinary `multicore_green_spawn` closures still run until return, so future tight-loop preemption must remain separate runtime/compiler work rather than being implied closed by SimpleOS-only proofs.
+> This specification keeps the hosted multicore-green fairness boundary explicit. Hosted runtime-pool evidence is real, CPU-heavy hosted fairness is supported through `multicore_green_spawn_sliced`, and ordinary Simple loop bodies now receive compiler-inserted runtime-pool safepoints. Broader non-loop/native-call preemption remains separate work rather than being implied closed by SimpleOS proofs.
 
 <!-- sdn-diagram:id=multicore_green_host_parity_gap_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ multicore_green_host_parity_gap_spec -> std
 
 # Multicore Green Host Parity Gap Tracking Specification
 
-This specification keeps the hosted multicore-green fairness boundary explicit. Hosted runtime-pool evidence is real, and CPU-heavy hosted fairness is supported through `multicore_green_spawn_sliced`. Ordinary `multicore_green_spawn` closures still run until return, so future tight-loop preemption must remain separate runtime/compiler work rather than being implied closed by SimpleOS-only proofs.
+This specification keeps the hosted multicore-green fairness boundary explicit. Hosted runtime-pool evidence is real, CPU-heavy hosted fairness is supported through `multicore_green_spawn_sliced`, and ordinary Simple loop bodies now receive compiler-inserted runtime-pool safepoints. Broader non-loop/native-call preemption remains separate work rather than being implied closed by SimpleOS proofs.
 
 ## At a Glance
 
@@ -54,10 +54,10 @@ This specification keeps the hosted multicore-green fairness boundary explicit. 
 ## Overview
 
 This specification keeps the hosted multicore-green fairness boundary explicit.
-Hosted runtime-pool evidence is real, and CPU-heavy hosted fairness is supported
-through `multicore_green_spawn_sliced`. Ordinary `multicore_green_spawn`
-closures still run until return, so future tight-loop preemption must remain
-separate runtime/compiler work rather than being implied closed by SimpleOS-only
+Hosted runtime-pool evidence is real, CPU-heavy hosted fairness is supported
+through `multicore_green_spawn_sliced`, and ordinary Simple loop bodies now
+receive compiler-inserted runtime-pool safepoints. Broader non-loop/native-call
+preemption remains separate work rather than being implied closed by SimpleOS
 proofs.
 
 ## Requirements
@@ -84,9 +84,9 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 
 ## Examples
 
-- Hosted multicore-green pool, work-stealing, blocking-compensation, and sliced
-  fairness evidence are current, but that does not close ordinary-closure
-  preemption.
+- Hosted multicore-green pool, work-stealing, blocking-compensation, sliced
+  fairness, and ordinary loop-body safepoint evidence are current, but that does
+  not close broader non-loop/native-call preemption.
 - SimpleOS scheduler preemption evidence is relevant context, but it must not
   be used by itself to claim hosted Go-like parity.
 - `multicore_green_spawn_sliced` is the explicit positive hosted fairness
@@ -100,9 +100,9 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 #### keeps the host-side fairness contract explicit in requirements research and tracking
 
 - Read the selected requirement document
-- Verify the requirement names sliced fairness without overclaiming plain closure preemption
+- Verify the requirement names sliced fairness and loop safepoints without overclaiming broader preemption
 - Read the Go-versus-Simple research note
-- Verify the research keeps the remaining host/runtime gap explicit
+- Verify the research keeps the remaining host/runtime boundary explicit
 - Read the canonical feature tracking row
 - Read the dedicated host gap tracker
 
@@ -110,25 +110,26 @@ src/compiler_rust/target/debug/simple test test/03_system/feature/usage/multicor
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Read the selected requirement document")
 val requirements = read_text("doc/02_requirements/feature/multicore_green.md")
-step("Verify the requirement names sliced fairness without overclaiming plain closure preemption")
+step("Verify the requirement names sliced fairness and loop safepoints without overclaiming broader preemption")
 expect(requirements).to_contain("blocking integration")
 expect(requirements).to_contain("the supported hosted fairness contract")
 expect(requirements).to_contain("multicore_green_spawn_sliced")
 expect(requirements).to_contain("Ordinary `multicore_green_spawn`")
-expect(requirements).to_contain("compiler-inserted yield points")
+expect(requirements).to_contain("compiler-inserted runtime-pool safepoint evidence")
+expect(requirements).to_contain("broader non-loop/native-call preemption claims")
 
 step("Read the Go-versus-Simple research note")
 val research = read_text("doc/01_research/lib/threading/go_vs_simple_threads.md")
-step("Verify the research keeps the remaining host/runtime gap explicit")
+step("Verify the research keeps the remaining host/runtime boundary explicit")
 expect(research).to_contain("blocking compensation")
-expect(research).to_contain("final preemption/fairness")
-expect(research).to_contain("claims are not complete")
+expect(research).to_contain("runtime-pool safepoints into Simple loop bodies")
+expect(research).to_contain("broader non-loop straight-line work and native calls")
 
 step("Read the canonical feature tracking row")
 val feature_db = read_text("doc/08_tracking/feature/feature_db.sdn")
@@ -136,9 +137,9 @@ expect(feature_db).to_contain("host_multicore_green_fairness_preemption_gap_2026
 
 step("Read the dedicated host gap tracker")
 val bug = read_text("doc/08_tracking/bug/host_multicore_green_fairness_preemption_gap_2026-06-11.md")
-expect(bug).to_contain("Status: closed-as-designed for hosted fairness contract")
+expect(bug).to_contain("Status: closed; ordinary loop-body fairness now has compiler/runtime safepoint evidence")
 expect(bug).to_contain("multicore_green_spawn_sliced")
-expect(bug).to_contain("ordinary-closure preemption remains open roadmap work")
+expect(bug).to_contain("ordinary loop-body fairness through compiler-inserted runtime-pool safepoints")
 expect(bug).to_contain("SimpleOS has scheduler-facing")
 expect(bug).to_contain("multicore_green_blocking_compensation_gap_spec.spl")
 expect(bug).to_contain("blocking compensation now has executable hosted coverage")
@@ -153,13 +154,13 @@ expect(bug).to_contain("multicore_green_fairness_preemption_gap_spec.spl")
 
 - Read the host gap tracker and the architecture note
 - Verify the host tracker keeps hosted evidence separate from SimpleOS-only evidence
-- Verify the architecture treats sliced fairness and future closure preemption separately
+- Verify the architecture treats sliced fairness, loop safepoints, and broader preemption separately
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -168,29 +169,33 @@ val bug = read_text("doc/08_tracking/bug/host_multicore_green_fairness_preemptio
 val architecture = read_text("doc/04_architecture/runtime/multicore_green.md")
 
 step("Verify the host tracker keeps hosted evidence separate from SimpleOS-only evidence")
-expect(bug).to_contain("They do not close future ordinary-closure preemption")
+expect(bug).to_contain("ordinary loop-body closures")
+expect(bug).to_contain("Non-loop long-running native calls remain outside")
 expect(bug).to_contain("Current SimpleOS fairness/preemption evidence")
 expect(bug).to_contain("two sleeping tasks still allow a third quick task")
 expect(bug).to_contain("bounded parallelism")
-expect(bug).to_contain("parallelism pinned to `1`")
+expect(bug).to_contain("parallelism starting at `1`")
 expect(bug).to_contain("quick task")
 expect(bug).to_contain("thread_yield()")
 
-step("Verify the architecture treats sliced fairness and future closure preemption separately")
+step("Verify the architecture treats sliced fairness, loop safepoints, and broader preemption separately")
 expect(architecture).to_contain("supported hosted fairness contract")
 expect(architecture).to_contain("multicore_green_spawn_sliced")
-expect(architecture).to_contain("ordinary-closure")
-expect(architecture).to_contain("tight-loop preemption comparable to Go")
+expect(architecture).to_contain("compiler-inserted runtime-pool safepoints")
+expect(architecture).to_contain("broader non-loop/native-call preemption claims")
 ```
 
 </details>
 
-#### keeps explicit sliced fairness evidence visible without closing ordinary closure preemption
+<details>
+<summary>Advanced: keeps explicit sliced fairness evidence visible alongside loop safepoint evidence</summary>
+
+#### keeps explicit sliced fairness evidence visible alongside loop safepoint evidence
 
 - Read the host gap tracker and profile/API contracts
 - Verify hosted sliced fairness profile evidence remains fail-closed
 - Verify the public sliced API run/join marker remains covered
-- Verify the positive sliced path is not documented as ordinary closure preemption
+- Verify the positive sliced path stays distinct from loop safepoint evidence
 
 
 <details>
@@ -217,9 +222,12 @@ expect(report).to_contain("multicore_green_spawn_sliced used_runtime_pool=true, 
 step("Verify the public sliced API run/join marker remains covered")
 expect(bug).to_contain("public_multicore_green_sliced_result=19 used_runtime_pool=true")
 expect(api_contract).to_contain("public_multicore_green_sliced_result=19 used_runtime_pool=true")
-step("Verify the positive sliced path is not documented as ordinary closure preemption")
-expect(bug).to_contain("without treating it as ordinary closure")
+step("Verify the positive sliced path stays distinct from loop safepoint evidence")
+expect(bug).to_contain("explicit sliced path remains visible separately")
 ```
+
+</details>
+
 
 </details>
 

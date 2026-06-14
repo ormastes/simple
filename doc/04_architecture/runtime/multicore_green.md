@@ -85,8 +85,9 @@ Responsibilities:
 - Expose `rt_pool_safepoint` through the Pure Simple
   `multicore_green_safepoint()` facade as an explicit poll hook. A pool worker
   can mark itself blocked, start compensation capacity, and yield its OS worker
-  so queued work can progress. This is the runtime/compiler insertion point for
-  future loop safepoints, not a user-facing automatic preemption claim.
+  so queued work can progress. Compiler lowering now inserts this poll at
+  Simple loop-body boundaries; broader non-loop/native-call preemption remains a
+  separate claim.
 
 ### Profile And Evidence Layer
 
@@ -153,16 +154,14 @@ Hosted runtime-pool path:
   `src/compiler_rust/runtime/src/executor.rs` only brackets
   `rt_thread_sleep(...)` with `rt_pool_worker_block_begin/end`, so it covers
   real blocking sleep rather than general CPU-loop fairness.
-- The explicit hosted safepoint hook is the next runtime step:
+- The explicit hosted safepoint hook is now the runtime/compiler loop step:
   `multicore_green_safepoint()` calls `rt_pool_safepoint` from long hosted
   workers and can grow compensation capacity from `1` to `2` so queued quick
   work runs while the long worker continues. This is executable safepoint
   evidence; raw `thread_yield()` still does not satisfy the same contract.
-- If hosted fairness changes in the future, the narrow compiler seam already
-  exists in `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`, where
-  `HirStmt::While`, `HirStmt::Loop`, and `HirStmt::For` lower into the current
-  native/SMF loop form. That is the natural insertion point for a safepoint or
-  compiler-yield contract.
+- `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs` now inserts the
+  `rt_pool_safepoint` poll as `HirStmt::While`, `HirStmt::Loop`, and
+  `HirStmt::For` lower into native/SMF loop body blocks.
 
 Cooperative path:
 
@@ -264,15 +263,13 @@ The selected Full Go-Like Runtime Roadmap uses all layers:
   wake/IPI intent, and AP evidence.
 
 Future roadmap work remains explicit: expanding blocking coverage beyond the
-current green-channel wake pass, and wiring final IDT/APIC-owned queue state
-plus actual compiler insertion/poll-placement before claiming ordinary-closure
-tight-loop preemption comparable to Go. The supported hosted fairness helper
-contract for CPU-heavy Simple work is the explicit resumable task-slice model
-exposed by `multicore_green_spawn_sliced`; the explicit
-`multicore_green_safepoint()` poll hook is runtime/compiler safepoint evidence;
-profile and API evidence must keep both separate from the Go-like M:N path
-through `multicore_green_spawn` plus `used_runtime_pool` closure semantics. The
-final AP ring/user handoff proof itself is now closed by the opt-in live gate.
+current green-channel wake pass and keeping final IDT/APIC-owned queue state
+separate from hosted evidence. The supported hosted fairness helper contract for
+CPU-heavy Simple work includes the explicit resumable task-slice model exposed by
+`multicore_green_spawn_sliced` and compiler-inserted runtime-pool safepoints for
+ordinary Simple loop bodies. Profile and API evidence must keep those separate
+from broader non-loop/native-call preemption claims. The final AP ring/user
+handoff proof itself is now closed by the opt-in live gate.
 
 ## Known Gaps
 
