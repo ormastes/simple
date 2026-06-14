@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use simple_parser::{Pattern, Type};
+use simple_parser::{Expr, Pattern, Type};
 
 use super::super::capability::CapabilityEnv;
 use super::super::lifetime::LifetimeContext;
@@ -71,6 +71,11 @@ pub struct Lowerer {
     pub(super) type_inference_config: TypeInferenceConfig,
     /// Pre-registered method return types: "ClassName.method" -> return TypeId
     pub(super) method_return_types: HashMap<String, TypeId>,
+    /// M12 3b: free-function parameter default-value expressions, keyed by
+    /// function name (one Option per declared parameter; None = no default).
+    /// Captured from the AST during module lowering so omitted trailing
+    /// arguments can be filled at call sites (`lower_call`).
+    pub(super) fn_param_defaults: HashMap<String, Vec<Option<Expr>>>,
     /// Whole-program map of free-function name -> declared (named) return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -146,6 +151,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),
@@ -189,6 +195,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),
@@ -255,6 +262,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             lenient_types: false,
             extern_fn_names: HashSet::new(),

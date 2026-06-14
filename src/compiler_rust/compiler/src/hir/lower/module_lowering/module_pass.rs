@@ -925,6 +925,23 @@ impl Lowerer {
         }
     }
 
+    /// M12 3b: record each free function's parameter default-value expressions
+    /// so omitted trailing arguments can be filled at call sites (`lower_call`).
+    /// Captured here (from the AST) because the HIR function *type* carries only
+    /// parameter TypeIds, not the default exprs.
+    fn collect_fn_param_defaults(&mut self, ast_module: &Module) {
+        for item in &ast_module.items {
+            if let Node::Function(f) = item {
+                if f.params.iter().any(|p| p.default.is_some()) {
+                    self.fn_param_defaults.insert(
+                        f.name.clone(),
+                        f.params.iter().map(|p| p.default.clone()).collect(),
+                    );
+                }
+            }
+        }
+    }
+
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
         // SPipe `it` block) to module scope so the rest of the lowering
@@ -934,6 +951,7 @@ impl Lowerer {
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
 
         self.module.name = ast_module.name.clone();
+        self.collect_fn_param_defaults(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
         // This registers placeholders so types can reference each other
@@ -1361,6 +1379,7 @@ impl Lowerer {
 
         // Perform all lowering passes
         self.module.name = ast_module.name.clone();
+        self.collect_fn_param_defaults(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
         for item in &ast_module.items {

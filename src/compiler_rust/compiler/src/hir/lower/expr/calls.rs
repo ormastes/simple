@@ -188,7 +188,39 @@ impl Lowerer {
 
         // Regular function call
         let func_hir = Box::new(self.lower_expr(callee, ctx)?);
-        let args_hir = self.lower_call_args(args, ctx)?;
+        let mut args_hir = self.lower_call_args(args, ctx)?;
+
+        // M12 3b: fill omitted trailing arguments from the callee's parameter
+        // defaults. Restricted to a directly-named free function called purely
+        // positionally, and to constant default exprs (which cannot reference
+        // caller-scope locals or sibling parameters); anything else is left
+        // unfilled, preserving prior behavior. Method/Path-callee defaults are a
+        // separate follow-up.
+        if let Expr::Identifier(name) = callee {
+            if args.iter().all(|a| a.name.is_none()) {
+                let to_fill: Vec<Expr> = match self.fn_param_defaults.get(name) {
+                    Some(params) if params.len() > args_hir.len() => {
+                        let mut pending = Vec::new();
+                        for slot in &params[args_hir.len()..] {
+                            match slot {
+                                Some(expr) if Self::is_constant_default(expr) => {
+                                    pending.push(expr.clone());
+                                }
+                                // Positional fill must be contiguous: stop at the
+                                // first trailing param lacking a constant default.
+                                _ => break,
+                            }
+                        }
+                        pending
+                    }
+                    _ => Vec::new(),
+                };
+                for default_expr in to_fill {
+                    let lowered = self.lower_expr(&default_expr, ctx)?;
+                    args_hir.push(lowered);
+                }
+            }
+        }
 
         // Prefer the declared return type for the named callee when we know it.
         // This keeps local variables initialized from imported/helper calls on a
@@ -202,6 +234,28 @@ impl Lowerer {
             },
             ty: ret_ty,
         })
+    }
+
+    /// True for default-value expressions that are self-contained constants —
+    /// safe to lower at a call site because they cannot reference caller-scope
+    /// locals or sibling parameters. Conservative: anything not provably
+    /// constant (identifiers, calls, field access, …) returns false and is left
+    /// unfilled rather than risk a silent miscompile.
+    fn is_constant_default(expr: &Expr) -> bool {
+        match expr {
+            Expr::Integer(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+            | Expr::Bool(_)
+            | Expr::Nil
+            | Expr::Symbol(_)
+            | Expr::Atom(_) => true,
+            Expr::Unary { operand, .. } => Self::is_constant_default(operand),
+            Expr::Binary { left, right, .. } => {
+                Self::is_constant_default(left) && Self::is_constant_default(right)
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn lower_bitfield_constructor(
