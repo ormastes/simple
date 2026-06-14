@@ -509,7 +509,7 @@ expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 - Verify current SimpleOS evidence commands avoid the stale release wrapper
    - Expected: absent_in_text(report, "bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl") equals `1`
    - Expected: absent_in_text(report, "bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl") equals `1`
-- Verify the hosted SimpleOS refresh is current and Docker-isolated
+- Verify the interpreter-run SimpleOS refresh is current and Docker-isolated
 - Verify SimpleOS evidence preserves host-runtime and cooperative-green boundaries
 - Verify SimpleOS evidence does not introduce numeric-suffix public API names
    - Expected: absent_in_text(self_doc, forbidden_thread_alias) equals `1`
@@ -548,8 +548,8 @@ expect(report).to_contain("SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1 src/com
 expect(absent_in_text(report, "bin/release/simple test test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl")).to_equal(1)
 expect(absent_in_text(report, "bin/release/simple test test/03_system/os/qemu/os/scheduler/green_carrier_qemu_spec.spl")).to_equal(1)
 
-step("Verify the hosted SimpleOS refresh is current and Docker-isolated")
-expect(report).to_contain("## 2026-06-13 Hosted Refresh")
+step("Verify the interpreter-run SimpleOS refresh is current and Docker-isolated")
+expect(report).to_contain("## 2026-06-13 Interpreter-Run Refresh")
 expect(report).to_contain("/tmp/simple-mgreen-next-jj-4101862")
 expect(report).to_contain("Docker process isolation")
 expect(report).to_contain("SIMPLE_BOOTSTRAP_DRIVER=/seed/simple")
@@ -557,9 +557,9 @@ expect(report).to_contain("simpleos_cooperative_green_spec.spl --mode=interprete
 expect(report).to_contain("simpleos_multicore_green_spec.spl --mode=interpreter --clean")
 expect(report).to_contain("simpleos_green_channel_wake_spec.spl --mode=interpreter --clean")
 expect(report).to_contain("PASS, 7 scenarios")
-expect(report_index).to_contain("2026-06-13 hosted Docker-isolated refresh")
+expect(report_index).to_contain("2026-06-13 hosted Docker-isolated interpreter refresh")
 expect(report_index).to_contain("does not rerun or alter the opt-in live QEMU final-handoff claim")
-expect(plan).to_contain("The 2026-06-13 hosted SimpleOS refresh")
+expect(plan).to_contain("The 2026-06-13 interpreter-run SimpleOS refresh")
 expect(plan).to_contain("Docker process isolation")
 
 step("Verify SimpleOS evidence preserves host-runtime and cooperative-green boundaries")

@@ -313,7 +313,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -338,10 +338,18 @@ expect(architecture).to_contain("numbered aliases")
 expect(architecture).to_contain("doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
 expect(absent_in_text(architecture, "cross_language_perf_parallel_smoke.md")).to_equal(1)
 expect(design).to_contain("test/05_perf/profile_scripts/concurrency_api_contract_test.shs")
+expect(design).to_contain("test/05_perf/profile_scripts/profile_report_contract_negative_test.shs")
+expect(design).to_contain("test/05_perf/profile_scripts/profile_help_contract_test.shs")
+expect(design).to_contain("test/05_perf/profile_scripts/profile_binary_autoselect_test.shs")
+expect(design).to_contain("test/05_perf/profile_scripts/profile_docker_isolation_contract_test.shs")
+expect(design).to_contain("test/05_perf/stress/multicore_green_large_profile_gate_spec.spl")
 expect(design).to_contain("numeric-suffix concurrency aliases")
 step("Verify the report index promotes the current freshbin profile evidence")
 expect(report_index).to_contain("cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md")
 expect(report_index).to_contain("Current contract-passing Docker-isolated cross-language profile")
+expect(report_index).to_contain("used_runtime_pool()")
+expect(report_index).to_contain("pool_used=N/N")
+expect(report_index).to_contain("counter_delta=submitted/completed,pending=0,busy=0,blocked=0")
 expect(report_index).to_contain("cross_language_perf_2026-06-08_docker_contract.md")
 expect(report_index).to_contain("Historical")
 ```
