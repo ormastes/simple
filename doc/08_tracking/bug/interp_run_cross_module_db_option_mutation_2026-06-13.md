@@ -31,5 +31,47 @@ Minimal: a 2-module program where module B calls `PureDatabase.memory()` from mo
 3. Workaround meanwhile: emit db benchmark numbers from compiled (`test`/smf/native) mode, or keep
    db construction + use in one module.
 
+## Root cause (CONFIRMED)
+NOT cross-module, NOT enum-specific, NOT an Option/struct-return or receiver-mutation
+boxing problem (the original framing was a red herring — a minimal cross-module
+Option/struct-return + me-method mutation repro passed cleanly).
+
+The real bug: the interpreter's `==` / `!=` (and `is`) operators compared the bare
+`nil` literal and an `Option::None` value as **unequal**, because they have distinct
+runtime representations:
+- the `nil` literal evaluates to `Value::Nil`;
+- a function declared `-> T?` that does `return nil` yields `Value::Enum { enum_name:
+  "Option", variant: "None" }` (an `Option::None`).
+
+So `if opt != nil:` was wrongly **true** when `opt` was a returned `Option::None`,
+and the following `opt.unwrap()` then correctly saw None and panicked
+`called unwrap on None`. In the db path this fires in `sql_parser._keyword_kind`
+(returns `SqlTokenKind?`): for a non-keyword identifier like `bench` it returns nil,
+but `if kw != nil:` passed and `kw.unwrap()` panicked — aborting `sql_tokenize` →
+`sql_parse` → `exec` → `exec_sql` → the workload's first `db.exec_sql(...)`.
+
+JIT was already correct (it normalizes None/nil); the db path only hits the
+interpreter because its `var`-on-shared-pointer code fails JIT lowering (W1003) and
+falls back to the interpreter. The W1003 fallback is a separate, out-of-scope issue.
+
+## Fix
+`src/compiler_rust/compiler/src/value.rs` — new `Value::is_nil_like()` (true for
+`Value::Nil` and `Option::None`; false for `Some(_)`, `Result::Ok/Err`, and all
+other values).
+`src/compiler_rust/compiler/src/interpreter/expr/ops.rs` — `BinOp::Eq`, `BinOp::NotEq`,
+`BinOp::Is` arms: when either operand is nil-like, the result is `both nil-like`
+(checked before the `__eq__`/`__ne__` overload dispatch so a user enum's operator
+can't shadow nil semantics).
+
+Regression fixture: `test/fixtures/interp_nil_option/nil_option_eq.spl`.
+
+## Verification
+- `SIMPLE_EXECUTION_MODE=interpret simple run test/05_perf/db/db_smf_workload.spl`
+  → `RESULT|db_ram_insert100|<us>|50` (the `==50` oracle passes; previously panicked).
+- Default JIT mode: same RESULT row.
+- Fixture passes interpreter + JIT; nil/Some/Result/int/str vs nil all behave;
+  `cargo test -p simple-compiler --lib ops::` 34/34.
+
 ## Status
-OPEN — staged. db benchmark doc emits with honest omitted rows; correctness covered in compiled mode.
+FIXED 2026-06-14 — interpreter `==`/`!=`/`is` now bridge the `nil` literal and
+`Option::None`. db RAM-insert workload runs in interpreter/script mode.

@@ -884,7 +884,14 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::Eq => {
-                    if let Some(result) = try_object_binop_method(
+                    // `nil` literal (Value::Nil) and `Option::None` are distinct
+                    // runtime representations of the same "absent" concept. Bridge
+                    // them so `opt == nil` works whether `opt` is a bare nil or a
+                    // function-returned Option::None. Checked before __eq__ so a
+                    // user enum's operator overload can't shadow nil semantics.
+                    if left_val.is_nil_like() || right_val.is_nil_like() {
+                        Ok(Value::Bool(left_val.is_nil_like() && right_val.is_nil_like()))
+                    } else if let Some(result) = try_object_binop_method(
                         "__eq__",
                         &left_val,
                         &right_val,
@@ -900,7 +907,12 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::NotEq => {
-                    if let Some(result) = try_object_binop_method(
+                    // See BinOp::Eq above: nil literal and Option::None compare equal.
+                    if left_val.is_nil_like() || right_val.is_nil_like() {
+                        Ok(Value::Bool(
+                            !(left_val.is_nil_like() && right_val.is_nil_like()),
+                        ))
+                    } else if let Some(result) = try_object_binop_method(
                         "__ne__",
                         &left_val,
                         &right_val,
@@ -1031,7 +1043,14 @@ pub(super) fn eval_op_expr(
                         }
                     }
                 },
-                BinOp::Is => Ok(Value::Bool(left_val == right_val)),
+                BinOp::Is => {
+                    // `x is nil` mirrors `x == nil`: bridge nil literal / Option::None.
+                    if left_val.is_nil_like() || right_val.is_nil_like() {
+                        Ok(Value::Bool(left_val.is_nil_like() && right_val.is_nil_like()))
+                    } else {
+                        Ok(Value::Bool(left_val == right_val))
+                    }
+                }
                 BinOp::And | BinOp::AndSuspend => {
                     let left_result = left_val.truthy();
                     let right_result = right_val.truthy();

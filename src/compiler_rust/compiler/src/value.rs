@@ -1037,6 +1037,26 @@ impl Value {
         Value::FrozenDict(Arc::new(map))
     }
 
+    /// True if this value is "nil-like": either the bare `nil` literal
+    /// (`Value::Nil`) or an `Option::None` enum.
+    ///
+    /// These two share semantics ("absence of a value") but have distinct
+    /// runtime representations: a `nil` literal evaluates to `Value::Nil`,
+    /// while a function declared to return `T?` that does `return nil` yields
+    /// `Option::None` (a `Value::Enum`). Equality (`==` / `!=`) against the
+    /// `nil` literal must treat both as equal, so callers like
+    /// `if opt != nil:` work regardless of which representation `opt` holds.
+    /// `Result::Err`/`Result::Ok` and `Option::Some(_)` are NOT nil-like.
+    pub fn is_nil_like(&self) -> bool {
+        match self {
+            Value::Nil => true,
+            Value::Enum { enum_name, variant, .. } => {
+                enum_name == enum_names::OPTION && variant == enum_names::NONE
+            }
+            _ => false,
+        }
+    }
+
     /// Create a new fixed-size array with runtime size checking
     /// Returns error if data length doesn't match expected size
     pub fn fixed_size_array(size: usize, data: Vec<Value>) -> Result<Self, String> {
