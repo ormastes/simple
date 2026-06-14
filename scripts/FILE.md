@@ -22,4 +22,5 @@ Build, audit, bootstrap, and utility scripts.
 | `setup` | Project setup and install scripts |
 | `smoke` | Protocol smoke test scripts |
 | `check-workspace-root-guard.shs` | Workspace root guard |
+| `check-simpleos-native-surface.shs` | SimpleOS native-surface policy gate |
 | `FILE.md` | This manifest |
