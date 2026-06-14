@@ -2,9 +2,22 @@
 
 - **ID:** interp_qualified_enum_is_payload_variant
 - **Severity:** P1 (silent wrong result)
-- **Status:** OPEN (workaround applied at call sites via `match`)
+- **Status:** resolved (2026-06-14)
 - **Date:** 2026-06-14
 - **Component:** interpreter / seed (`src/compiler`)
+
+## Resolution (2026-06-14)
+
+The `bin/simple run` path uses the Cranelift JIT (not the tree-walker); MIR
+lowering emitted `BinOp::Is` as a raw pointer `icmp` of two distinct heap
+allocations, so it was always false. Fixed in
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs`: when the RHS is
+an enum-variant global (`E.A` or called `E.A()`), lower `is` to
+`rt_enum_check_discriminant(value, hash(variant)&0xFFFFFFFF)` — the same check
+`match` uses. The tree-walk interpreter path (`interpreter/expr/ops.rs`) got the
+matching discriminant-only fix. Verified: `a is E.A` → true (payload variant),
+`b is E.B` → true (unit), cross-variant → false, `match` non-regressed. Requires
+seed rebuild to deploy.
 
 ## Symptom
 

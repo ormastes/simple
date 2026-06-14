@@ -428,6 +428,10 @@ impl<'a> Parser<'a> {
                 TokenKind::Lazy => Some("lazy".to_string()),
                 TokenKind::Skip => Some("skip".to_string()),
                 TokenKind::Exists => Some("exists".to_string()),
+                // Grid is a keyword for 2D matrix literals, but must be usable as a
+                // named constructor/function argument (e.g., P(grid: 0), LaunchShape(grid: ..., block: ...)).
+                // expect_identifier already handles TokenKind::Grid for field access (p.grid).
+                TokenKind::Grid => Some("grid".to_string()),
                 _ => None,
             };
             if let Some(id_clone) = maybe_name {

@@ -1047,6 +1047,17 @@ pub(super) fn eval_op_expr(
                     // `x is nil` mirrors `x == nil`: bridge nil literal / Option::None.
                     if left_val.is_nil_like() || right_val.is_nil_like() {
                         Ok(Value::Bool(left_val.is_nil_like() && right_val.is_nil_like()))
+                    } else if let Value::EnumVariantConstructor { enum_name: ref re, variant_name: ref rv } = right_val {
+                        // `x is EnumName.Variant` where the variant carries a payload:
+                        // the RHS evaluates to EnumVariantConstructor (not a Value::Enum),
+                        // so structural equality would always be false.  Check only the
+                        // discriminant (enum_name + variant name), ignoring payload — this
+                        // matches `match` semantics.
+                        Ok(Value::Bool(matches!(
+                            &left_val,
+                            Value::Enum { enum_name: le, variant: lv, .. }
+                                if le == re && lv == rv
+                        )))
                     } else {
                         Ok(Value::Bool(left_val == right_val))
                     }

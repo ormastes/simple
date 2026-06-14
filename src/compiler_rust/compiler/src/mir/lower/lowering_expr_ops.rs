@@ -1,7 +1,7 @@
 //! Operator expression lowering: Binary, Unary, Cast.
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{BinOp, HirExpr, HirType, TypeId, UnaryOp};
+use crate::hir::{BinOp, HirExpr, HirExprKind, HirType, TypeId, UnaryOp};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
@@ -38,6 +38,60 @@ impl<'a> MirLowerer<'a> {
 
             Ok(dest)
         } else {
+            // `is` against a qualified enum variant (e.g. `a is E.A` or `a is E::A`):
+            // The RHS is either Global("E::A") (bare field access, no args) or
+            // Call{Global("E::A"), []} (called with no args). In both cases the HIR
+            // type is HirType::Enum. Plain pointer equality (icmp) always fails because
+            // LHS and RHS are distinct heap allocations. Emit
+            // rt_enum_check_discriminant(lhs, disc) where disc is the same hash used
+            // by rt_enum_new / match patterns. We check this BEFORE lowering the RHS
+            // to avoid emitting the dead rt_enum_new constructor call.
+            if op == BinOp::Is {
+                let rhs_global_name: Option<&str> = match &right.kind {
+                    HirExprKind::Global(name) => Some(name.as_str()),
+                    HirExprKind::Call { func, .. } => {
+                        if let HirExprKind::Global(name) = &func.kind {
+                            Some(name.as_str())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(gname) = rhs_global_name {
+                    let variant_name: Option<&str> =
+                        gname.rsplit_once("::").or_else(|| gname.rsplit_once('.')).map(|(_, v)| v);
+                    let is_enum_rhs = variant_name.is_some()
+                        && self
+                            .type_registry
+                            .and_then(|tr| tr.get(right.ty))
+                            .is_some_and(|ty| matches!(ty, HirType::Enum { .. }));
+                    if let (true, Some(variant)) = (is_enum_rhs, variant_name) {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        variant.hash(&mut hasher);
+                        let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
+                        let left_reg = self.lower_expr(left)?;
+                        return self.with_func(|func, current_block| {
+                            let disc_reg = func.new_vreg();
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::ConstInt {
+                                dest: disc_reg,
+                                value: disc,
+                            });
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(dest),
+                                target: crate::mir::CallTarget::from_name("rt_enum_check_discriminant"),
+                                args: vec![left_reg, disc_reg],
+                            });
+                            dest
+                        });
+                    }
+                }
+            }
+
             // Non-coverage path or non-boolean operations
             let left_reg = self.lower_expr(left)?;
             let right_reg = self.lower_expr(right)?;

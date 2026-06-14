@@ -568,6 +568,7 @@ pub struct ActorDef {
 /// Type alias definition with optional refinement predicate (CTR-020)
 ///
 /// Simple: `type UserId = i64`
+/// Generic: `type Alias<T> = Result<T, text>` (params consumed but not yet resolved)
 /// Refined: `type PosI64 = i64 where self > 0`
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeAliasDef {

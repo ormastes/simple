@@ -603,15 +603,19 @@ impl Parser<'_> {
         }))
     }
 
-    /// Parse type alias with optional refinement predicate (CTR-020)
+    /// Parse type alias with optional generic params and optional refinement predicate (CTR-020)
     ///
     /// Simple: `type UserId = i64`
+    /// Generic: `type Alias<T> = Result<T, text>`
     /// Refined: `type PosI64 = i64 where self > 0`
     pub(crate) fn parse_type_alias(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Type)?;
 
         let name = self.expect_identifier()?;
+        // Consume optional generic params (e.g. `<T, U>`) so `=` parses correctly.
+        // Params are not yet resolved by the alias system (consistent with self-hosted behaviour).
+        self.parse_generic_params_as_strings()?;
         self.expect(&TokenKind::Assign)?;
         let ty = self.parse_type()?;
 

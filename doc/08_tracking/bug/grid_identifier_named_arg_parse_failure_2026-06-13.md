@@ -2,8 +2,18 @@
 
 - **Date:** 2026-06-13
 - **Severity:** P2 (grammar regression — common identifier unusable in named-arg position)
-- **Status:** Open
+- **Status:** resolved (2026-06-14)
 - **Area:** parser (likely GPU launch grammar `kernel<<<grid, block>>>(args)` token handling)
+
+## Resolution (2026-06-14)
+
+`grid` is the lexer keyword `TokenKind::Grid` (2D matrix literals). The named-arg
+helper in `src/compiler_rust/parser/src/expressions/helpers.rs` now maps
+`TokenKind::Grid => Some("grid")`, so `P(grid: 0)` parses as an ordinary named
+argument. Verified: `P(grid: 7)` runs and prints `grid=7`; `block` and `<<<...>>>`
+launch syntax unaffected. The workaround fields (`grid_dim`/`block_dim`) in
+`src/lib/nogc_sync_mut/gpu/queue.spl` may be reverted to `grid`/`block` once the
+seed is redeployed.
 
 ## Repro
 
