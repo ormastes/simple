@@ -58,6 +58,10 @@ pub struct LlvmBackend {
     pub(super) data_exports: std::sync::Arc<std::collections::HashSet<String>>,
     /// Per-module use map from `use` statements
     pub(super) use_map: std::collections::HashMap<String, String>,
+    /// Module symbol prefix, used to name the per-module `__module_init_<prefix>`
+    /// function so the linker's init-caller aggregator can discover it. Mirrors
+    /// the cranelift backend's `module_prefix` (common_backend.rs).
+    pub(super) module_prefix: Option<String>,
 }
 
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
@@ -171,6 +175,7 @@ impl LlvmBackend {
                 import_map: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 use_map: std::collections::HashMap::new(),
+                module_prefix: None,
             })
         }
     }
@@ -188,6 +193,13 @@ impl LlvmBackend {
     /// Set the per-module use map from `use` statements
     pub fn set_use_map(&mut self, map: std::collections::HashMap<String, String>) {
         self.use_map = map;
+    }
+
+    /// Set the module symbol prefix used to name `__module_init_<prefix>`.
+    /// Mirrors the cranelift backend so heap-typed module globals get a runtime
+    /// initializer discoverable by the linker's init-caller aggregator.
+    pub fn set_module_prefix(&mut self, prefix: String) {
+        self.module_prefix = Some(prefix);
     }
 
     /// Enable coverage instrumentation
@@ -221,6 +233,29 @@ impl LlvmBackend {
         let function_names: std::collections::HashSet<&str> =
             module_ir.functions.iter().map(|f| f.name.as_str()).collect();
 
+        // A global with a heap-typed runtime initializer (string/array/struct/fn)
+        // must be emitted WRITABLE: `__module_init` stores the freshly-built handle
+        // into it at startup. An immutable `val X = "..."` would otherwise land in
+        // .rodata and fault on that store. The init-map keys are post-mangle for
+        // strings/arrays/functions; struct keys are not remapped by mangle_mir, so
+        // also probe the de-prefixed tail.
+        let has_runtime_init = |name: &str| -> bool {
+            if module_ir.global_init_strings.contains_key(name)
+                || module_ir.global_init_arrays.contains_key(name)
+                || module_ir.global_init_functions.contains_key(name)
+                || module_ir.global_init_structs.contains_key(name)
+            {
+                return true;
+            }
+            // struct fallback: `prefix__bare` global vs unmangled `bare` key
+            if let Some((_, bare)) = name.rsplit_once("__") {
+                if module_ir.global_init_structs.contains_key(bare) {
+                    return true;
+                }
+            }
+            false
+        };
+
         for (name, _ty, is_mutable) in &module_ir.globals {
             // Extern/runtime functions are modeled as globals in MIR so GlobalLoad
             // can treat them as values, but they must not become LLVM data globals.
@@ -240,7 +275,9 @@ impl LlvmBackend {
             }
 
             let global = m.add_global(rv_type, None, name);
-            global.set_constant(!*is_mutable);
+            // Init-backed globals are written at startup by `__module_init`, so they
+            // cannot be constant even if declared `val`.
+            global.set_constant(!*is_mutable && !has_runtime_init(name));
 
             if module_ir.local_globals.contains(name) {
                 let init = module_ir
@@ -278,6 +315,292 @@ impl LlvmBackend {
                 }
             }
         }
+    }
+
+    /// Generate a `__module_init_<prefix>` function that initializes heap-backed
+    /// module globals at startup. Mirrors the cranelift backend's
+    /// `generate_module_init` (common_backend.rs): for each entry in
+    /// `global_init_strings / _arrays / _functions / _structs`, build the heap
+    /// object via `rt_string_new` / `rt_array_new`(+push) / `rt_byte_array_new`
+    /// (+`rt_typed_bytes_u8_push`) / `rt_alloc`, and store the handle into the
+    /// global. The linker's `generate_init_caller` discovers `__module_init_*` and
+    /// aggregates them into `__simple_call_module_inits`.
+    #[cfg(feature = "llvm")]
+    fn generate_module_init(&self, module_ir: &MirModule) -> Result<(), CompileError> {
+        use inkwell::AddressSpace;
+
+        if std::env::var("SIMPLE_DEBUG_MODINIT").is_ok() {
+            eprintln!(
+                "[modinit] prefix={:?} strings={} arrays={} fns={} structs={} globals={}",
+                self.module_prefix,
+                module_ir.global_init_strings.len(),
+                module_ir.global_init_arrays.len(),
+                module_ir.global_init_functions.len(),
+                module_ir.global_init_structs.len(),
+                module_ir.globals.len(),
+            );
+        }
+
+        if module_ir.global_init_strings.is_empty()
+            && module_ir.global_init_arrays.is_empty()
+            && module_ir.global_init_functions.is_empty()
+            && module_ir.global_init_structs.is_empty()
+        {
+            return Ok(());
+        }
+
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return Ok(());
+        };
+        let ctx = self.context_ref();
+        let builder = ctx.create_builder();
+        let i64_type = self.runtime_int_type();
+        let ptr_type = ctx.ptr_type(AddressSpace::default());
+
+        let init_name = match &self.module_prefix {
+            Some(prefix) => format!("__module_init_{}", prefix),
+            None => "__module_init".to_string(),
+        };
+
+        let void_type = ctx.void_type();
+        let fn_type = void_type.fn_type(&[], false);
+        let init_fn = m.add_function(&init_name, fn_type, None);
+        // External so the linker's `starts_with("__module_init_")` symbol scan can
+        // find it (an internal symbol would stay invisible → silent null globals).
+        init_fn.set_linkage(inkwell::module::Linkage::External);
+        let entry = ctx.append_basic_block(init_fn, "entry");
+        builder.position_at_end(entry);
+
+        // --- runtime helper declarations (lazy) ---
+        let get_rt = |name: &str, nargs: usize| -> inkwell::values::FunctionValue<'static> {
+            m.get_function(name).unwrap_or_else(|| {
+                let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    std::iter::repeat_n(i64_type.into(), nargs).collect();
+                let ft = i64_type.fn_type(&params, false);
+                let f = m.add_function(name, ft, None);
+                f.set_linkage(inkwell::module::Linkage::External);
+                f
+            })
+        };
+
+        // Build a static i8 data global for `bytes`, return its i64 pointer value.
+        let mut str_const_counter: u32 = 0;
+        let make_str_ptr = |bytes: &[u8], counter: &mut u32| -> Result<inkwell::values::IntValue<'static>, CompileError> {
+            let cval = ctx.const_string(bytes, false);
+            let name = format!("{}.str.{}", init_name, *counter);
+            *counter += 1;
+            let g = m.add_global(cval.get_type(), None, &name);
+            g.set_initializer(&cval);
+            g.set_constant(true);
+            g.set_linkage(inkwell::module::Linkage::Private);
+            let p = builder
+                .build_pointer_cast(g.as_pointer_value(), ptr_type, "str_p")
+                .map_err(|e| crate::error::factory::llvm_build_failed("str ptr cast", &e))?;
+            builder
+                .build_ptr_to_int(p, i64_type, "str_pi")
+                .map_err(|e| crate::error::factory::llvm_build_failed("str ptrtoint", &e))
+        };
+
+        // Resolve the global symbol for `global_name`, trying the direct key then
+        // the `<prefix>__<name>` mangled form (struct keys are not pre-mangled).
+        let resolve_global = |global_name: &str| -> Option<inkwell::values::GlobalValue<'static>> {
+            if let Some(g) = m.get_global(global_name) {
+                return Some(g);
+            }
+            if let Some(prefix) = &self.module_prefix {
+                let mangled = format!("{}__{}", prefix, global_name);
+                if let Some(g) = m.get_global(&mangled) {
+                    return Some(g);
+                }
+            }
+            None
+        };
+
+        let store_to_global = |global_name: &str,
+                               val: inkwell::values::IntValue<'static>|
+         -> Result<(), CompileError> {
+            if let Some(g) = resolve_global(global_name) {
+                builder
+                    .build_store(g.as_pointer_value(), val)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("init store", &e))?;
+            }
+            // If not found, the global lives in another module (cross-module) — skip.
+            Ok(())
+        };
+
+        let call_i64 = |f: inkwell::values::FunctionValue<'static>,
+                        args: &[inkwell::values::IntValue<'static>],
+                        tag: &str|
+         -> Result<inkwell::values::IntValue<'static>, CompileError> {
+            let metas: Vec<inkwell::values::BasicMetadataValueEnum> =
+                args.iter().map(|a| (*a).into()).collect();
+            let cs = builder
+                .build_call(f, &metas, tag)
+                .map_err(|e| crate::error::factory::llvm_build_failed(tag, &e))?;
+            Ok(cs
+                .try_as_basic_value()
+                .left()
+                .map(|v| v.into_int_value())
+                .unwrap_or_else(|| i64_type.const_int(0, false)))
+        };
+
+        // --- strings ---
+        let mut sorted_strings: Vec<_> = module_ir.global_init_strings.iter().collect();
+        sorted_strings.sort_by_key(|(name, _)| (*name).clone());
+        if !sorted_strings.is_empty() {
+            let string_new = get_rt("rt_string_new", 2);
+            for (global_name, string_val) in sorted_strings {
+                let bytes = string_val.as_bytes();
+                let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
+                let len = i64_type.const_int(bytes.len() as u64, false);
+                let rv = call_i64(string_new, &[ptr, len], "init_str")?;
+                store_to_global(global_name, rv)?;
+            }
+        }
+
+        // --- arrays ---
+        let mut sorted_arrays: Vec<_> = module_ir.global_init_arrays.iter().collect();
+        sorted_arrays.sort_by_key(|(name, _)| (*name).clone());
+        for (global_name, init) in sorted_arrays {
+            let element_count = init
+                .string_values
+                .as_ref()
+                .map(|s| s.len())
+                .unwrap_or(init.values.len());
+            let capacity = i64_type.const_int(element_count as u64, false);
+            let array_rv = if let Some(strings) = &init.string_values {
+                let array_new = get_rt("rt_array_new", 1);
+                let array_push = get_rt("rt_array_push", 2);
+                let string_new = get_rt("rt_string_new", 2);
+                let array = call_i64(array_new, &[capacity], "init_arr")?;
+                for string_val in strings {
+                    let bytes = string_val.as_bytes();
+                    let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
+                    let len = i64_type.const_int(bytes.len() as u64, false);
+                    let s = call_i64(string_new, &[ptr, len], "init_arr_str")?;
+                    let _ = call_i64(array_push, &[array, s], "init_arr_push")?;
+                }
+                array
+            } else if init.element_type == crate::hir::TypeId::U8 {
+                let byte_array_new = get_rt("rt_byte_array_new", 1);
+                let byte_push = get_rt("rt_typed_bytes_u8_push", 2);
+                let array = call_i64(byte_array_new, &[capacity], "init_barr")?;
+                for value in &init.values {
+                    let byte = i64_type.const_int((*value & 0xff) as u64, false);
+                    let _ = call_i64(byte_push, &[array, byte], "init_barr_push")?;
+                }
+                array
+            } else {
+                let array_new = get_rt("rt_array_new", 1);
+                let array_push = get_rt("rt_array_push", 2);
+                let array = call_i64(array_new, &[capacity], "init_iarr")?;
+                for value in &init.values {
+                    // Box small ints: raw << 3 (matches cranelift compile path).
+                    let raw = i64_type.const_int(*value as u64, true);
+                    let shift = i64_type.const_int(3, false);
+                    let boxed = builder
+                        .build_left_shift(raw, shift, "box")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("init box shl", &e))?;
+                    let _ = call_i64(array_push, &[array, boxed], "init_iarr_push")?;
+                }
+                array
+            };
+            store_to_global(global_name, array_rv)?;
+        }
+
+        // --- function-closure globals ---
+        let mut sorted_functions: Vec<_> = module_ir.global_init_functions.iter().collect();
+        sorted_functions.sort_by_key(|(name, _)| (*name).clone());
+        if !sorted_functions.is_empty() {
+            let alloc = get_rt("rt_alloc", 1);
+            for (global_name, func_name) in sorted_functions {
+                let callee = m
+                    .get_function(func_name)
+                    .or_else(|| {
+                        let sanitized = func_name.replace('.', "_dot_");
+                        m.get_function(&sanitized)
+                    })
+                    .ok_or_else(|| {
+                        CompileError::Codegen(format!(
+                            "function global initializer '{}' references unknown function '{}'",
+                            global_name, func_name
+                        ))
+                    })?;
+                let closure_size = i64_type.const_int(16, false);
+                let closure_pi = call_i64(alloc, &[closure_size], "init_closure")?;
+                let closure_ptr = builder
+                    .build_int_to_ptr(closure_pi, ptr_type, "closure_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("closure inttoptr", &e))?;
+                let fn_addr = callee.as_global_value().as_pointer_value();
+                let fn_addr_i = builder
+                    .build_ptr_to_int(fn_addr, i64_type, "fn_addr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("fn ptrtoint", &e))?;
+                let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
+                builder
+                    .build_store(closure_ptr, fn_addr_i)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("closure store fn", &e))?;
+                let marker_slot = unsafe {
+                    builder
+                        .build_gep(i64_type, closure_ptr, &[i64_type.const_int(1, false)], "marker_slot")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("closure gep", &e))?
+                };
+                builder
+                    .build_store(marker_slot, direct_marker)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("closure store marker", &e))?;
+                store_to_global(global_name, closure_pi)?;
+            }
+        }
+
+        // --- struct-literal globals ---
+        let mut sorted_structs: Vec<_> = module_ir.global_init_structs.iter().collect();
+        sorted_structs.sort_by_key(|(name, _)| (*name).clone());
+        if !sorted_structs.is_empty() {
+            let alloc = get_rt("rt_alloc", 1);
+            for (global_name, init) in sorted_structs {
+                let size = (init.fields.len().max(1) * 8) as u64;
+                let struct_pi = call_i64(alloc, &[i64_type.const_int(size, false)], "init_struct")?;
+                let struct_ptr = builder
+                    .build_int_to_ptr(struct_pi, ptr_type, "struct_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("struct inttoptr", &e))?;
+                for (idx, field) in init.fields.iter().enumerate() {
+                    let field_val = match field {
+                        crate::hir::HirGlobalFieldInit::Value(v) => i64_type.const_int(*v as u64, true),
+                        crate::hir::HirGlobalFieldInit::Str(string_val) => {
+                            let string_new = get_rt("rt_string_new", 2);
+                            let bytes = string_val.as_bytes();
+                            let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
+                            let len = i64_type.const_int(bytes.len() as u64, false);
+                            call_i64(string_new, &[ptr, len], "init_struct_str")?
+                        }
+                        crate::hir::HirGlobalFieldInit::EmptyArray => {
+                            let array_new = get_rt("rt_array_new", 1);
+                            call_i64(array_new, &[i64_type.const_int(0, false)], "init_struct_arr")?
+                        }
+                    };
+                    let slot = unsafe {
+                        builder
+                            .build_gep(
+                                i64_type,
+                                struct_ptr,
+                                &[i64_type.const_int(idx as u64, false)],
+                                "field_slot",
+                            )
+                            .map_err(|e| crate::error::factory::llvm_build_failed("struct gep", &e))?
+                    };
+                    builder
+                        .build_store(slot, field_val)
+                        .map_err(|e| crate::error::factory::llvm_build_failed("struct store", &e))?;
+                }
+                store_to_global(global_name, struct_pi)?;
+            }
+        }
+
+        builder
+            .build_return(None)
+            .map_err(|e| crate::error::factory::llvm_build_failed("init return", &e))?;
+
+        Ok(())
     }
 
     #[cfg(feature = "llvm")]
@@ -845,6 +1168,12 @@ impl NativeBackend for LlvmBackend {
         }
         #[cfg(feature = "llvm")]
         self.define_dot_alias_bodies()?;
+
+        // Emit the per-module init function for heap-typed module globals
+        // (strings/arrays/structs/closures). The linker aggregates all
+        // `__module_init_*` into `__simple_call_module_inits`, run before entry.
+        #[cfg(feature = "llvm")]
+        self.generate_module_init(module)?;
 
         // Fix linkage after compilation:
         // 1. Declarations (no body) must have External linkage, not WeakAny.

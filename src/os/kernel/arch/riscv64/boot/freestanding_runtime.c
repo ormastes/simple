@@ -714,6 +714,58 @@ spl_i64 rt_string_trim(spl_i64 value) {
     return rt_string_new((spl_i64)(spl_u64)&string->data[start], (spl_i64)(end - start));
 }
 
+/* Mirrors src/runtime/simple_core/core_string.spl rt_string_to_int:
+ * parse a base-10 integer from a string value, returning the raw i64 (0 on
+ * non-string / empty). Freestanding: no libc strtoll, so parse inline. Honors
+ * an optional leading '+'/'-' and stops at the first non-digit (strtoll-style).
+ */
+spl_i64 rt_string_to_int(spl_i64 value) {
+    RtString *string = rt_as_string(value);
+    if (!string || string->len == 0) {
+        return 0;
+    }
+    spl_u64 i = 0;
+    spl_i64 sign = 1;
+    if (string->data[0] == '-') {
+        sign = -1;
+        i = 1;
+    } else if (string->data[0] == '+') {
+        i = 1;
+    }
+    spl_i64 acc = 0;
+    while (i < string->len) {
+        spl_u8 ch = (spl_u8)string->data[i];
+        if (ch < '0' || ch > '9') {
+            break;
+        }
+        acc = acc * 10 + (spl_i64)(ch - '0');
+        i = i + 1;
+    }
+    return sign * acc;
+}
+
+/* Mirrors src/runtime/simple_core/core_string.spl rt_contains:
+ * substring membership when both operands are strings, else array membership
+ * via element-wise rt_native_eq. Returns raw 0/1 (matching rt_native_eq).
+ */
+spl_i64 rt_contains(spl_i64 collection, spl_i64 value) {
+    RtString *text = rt_as_string(collection);
+    RtString *needle = rt_as_string(value);
+    if (text && needle) {
+        return rt_string_find(collection, value) >= 0 ? 1 : 0;
+    }
+    RtArray *array = rt_as_array(collection);
+    if (array) {
+        spl_i64 len = rt_array_len(collection);
+        for (spl_i64 i = 0; i < len; i = i + 1) {
+            if (rt_native_eq(rt_array_get(collection, rt_int(i)), value) > 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 spl_i64 rt_string_ends_with(spl_i64 value, spl_i64 suffix_value) {
     RtString *string = rt_as_string(value);
     RtString *suffix = rt_as_string(suffix_value);
@@ -1210,6 +1262,16 @@ spl_u64 rt_riscv_seed(void) {
     __asm__ volatile("rdtime %0" : "=r"(time));
     __asm__ volatile("rdinstret %0" : "=r"(instret));
     return cycle ^ (time << 21) ^ (time >> 7) ^ (instret << 13) ^ (instret >> 17);
+}
+
+spl_u64 rt_riscv_read_sstatus(void) {
+#if defined(__riscv)
+    spl_u64 value;
+    __asm__ volatile("csrr %0, sstatus" : "=r"(value));
+    return value;
+#else
+    return 0;
+#endif
 }
 
 spl_i64 vmm_map_page(spl_i64 virt, spl_i64 phys, spl_i64 flags) {
@@ -3191,6 +3253,20 @@ spl_i64 rt_bytes_from_raw(spl_i64 ptr_value, spl_i64 len_value) {
     }
     for (spl_i64 i = 0; i < len; i = i + 1) {
         rt_array_push(out, rt_int((spl_i64)src[i]));
+    }
+    return out;
+}
+
+/* rt_bytes_alloc(len) -> [u8]: allocate a freestanding byte array of `len`
+ * zero-initialized elements. `len` is a RAW spl_i64 (extern signature
+ * `(len: i64) -> [u8]`), not a boxed tagged int. Each element is boxed as a
+ * tagged int (0 << 3) so it shares the exact representation produced by
+ * rt_bytes_from_raw / rt_byte_array_new_len. len<=0 yields an empty array. */
+spl_i64 rt_bytes_alloc(spl_i64 len_value) {
+    spl_i64 len = len_value < 0 ? 0 : len_value;
+    spl_i64 out = rt_array_new(len);
+    for (spl_i64 i = 0; i < len; i = i + 1) {
+        rt_array_push(out, rt_int(0));
     }
     return out;
 }

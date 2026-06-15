@@ -706,6 +706,16 @@ int main(int argc, char** argv) {
                 }
                 _ => {}
             }
+            // Freestanding RISC-V kernels load high (e.g. 0x80200000); the init
+            // caller takes the address of each __module_init_* via HI20/LO12, so
+            // it must use the same medany code model as the kernel objects, or
+            // those relocations overflow medlow's ±2GB-from-zero window.
+            if matches!(
+                cross_target.arch,
+                simple_common::target::TargetArch::Riscv64 | simple_common::target::TargetArch::Riscv32
+            ) {
+                cmd.arg("-mcmodel=medany");
+            }
             cmd.arg(&init_cpp)
                 .status()
                 .map_err(|e| format!("compile init_all: {e}"))?
@@ -732,6 +742,14 @@ int main(int argc, char** argv) {
                     cmd.arg("-march=rv32imac").arg("-mabi=ilp32");
                 }
                 _ => {}
+            }
+            // Match the kernel objects' medany code model (see HI20-overflow note
+            // in the clang-cl arm above) so high-loaded freestanding RISC-V links.
+            if matches!(
+                cross_target.arch,
+                simple_common::target::TargetArch::Riscv64 | simple_common::target::TargetArch::Riscv32
+            ) {
+                cmd.arg("-mcmodel=medany");
             }
             cmd.arg(&init_cpp)
                 .arg("-o")

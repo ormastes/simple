@@ -3,7 +3,18 @@
 - **ID:** llvm_backend_missing_module_init_heap_globals_2026-06-15
 - **Severity:** P1 (silent: any `var/val X: [T] = [...]`, `= "..."`, or struct-literal module-global is null at runtime under the LLVM backend; `.len()`/index/field/method on it derefs null)
 - **Backend:** LLVM (target-independent — reproduced on `x86_64-unknown-linux-gnu` host and `riscv64-unknown-none` kernel)
-- **Status:** OPEN — hard blocker for the RV64 SimpleOS web gate (`scripts/qemu/qemu_rv64_http_test.shs`)
+- **Status:** RESOLVED 2026-06-15 — LLVM backend now emits `__module_init_<prefix>`
+  for heap-typed module globals (mirrors cranelift `generate_module_init`); rv64
+  boot calls `__simple_call_module_inits` after heap init; init-caller compiled
+  with `-mcmodel=medany`. Oracle `scripts/qemu/qemu_rv64_http_test.shs
+  --with-storage` now reaches `GET /health (HTTP)... PASS (200)`. See
+  `codegen/llvm/backend_core.rs:generate_module_init`,
+  `pipeline/native_project/{compiler.rs,linker.rs}`,
+  `src/os/kernel/arch/riscv64/boot.spl`. NOTE: a cache-key gap masked the fix on
+  the first attempt — see `native_object_cache_key_omits_seed_version_2026-06-15`.
+  Separately, `for v in <array>` segfaults on BOTH backends (even local arrays)
+  — a pre-existing iterator bug, NOT this issue; explicit indexing + `.len()`
+  on init'd globals verified correct.
 
 ## Symptom
 

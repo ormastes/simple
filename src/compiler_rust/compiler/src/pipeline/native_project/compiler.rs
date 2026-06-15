@@ -518,6 +518,9 @@ pub(crate) fn compile_file_to_object(
             llvm.set_import_map(imports.import_map.clone());
             llvm.set_data_exports(imports.data_exports.clone());
             llvm.set_use_map(use_map.clone());
+            if !no_mangle {
+                llvm.set_module_prefix(module_prefix_from_path(file_path, source_root));
+            }
             let obj = llvm
                 .compile(&mir)
                 .map_err(|e| format!("{}: llvm codegen: {e}", file_path.display()))?;
