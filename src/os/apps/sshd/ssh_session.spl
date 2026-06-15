@@ -23,7 +23,7 @@ use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelStat
 use os.apps.sshd.rsa_pubkey.{ssh_rsa_blob_to_spki_der}
 use os.apps.sshd.ssh_remote_shell.{SshRemoteShell}
 use os.kernel.log.klog_api.{log_info}
-use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
+use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_ssh_encrypted_packet, rt_net_recv_version_text, rt_net_recv_version_bytes, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
 
 # Pull in helpers and split impl blocks
@@ -48,9 +48,6 @@ extern fn rt_boot_tcp_send_newkeys_fixed(fd: i64) -> i64
 extern fn rt_boot_tcp_send_plain_payload(fd: i64, data: [u8]) -> i64
 extern fn rt_boot_tcp_send_ssh_banner(fd: i64) -> i64
 extern fn serial_println(msg: text)
-
-fn log_raw_println(msg: text):
-    serial_println(msg)
 
 fn _live_openssh_client_version_bytes() -> [u8]:
     serial_println("[sshd-session] version builder start")
@@ -387,6 +384,21 @@ impl SshSession:
             self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
             return stable_payload
 
+        if self.socket_fd as i64 == 200 and self.negotiated_cipher_c2s == "aes256-gcm@openssh.com":
+            val enc_packet = rt_net_recv_ssh_encrypted_packet(self.socket_fd as i64)
+            if enc_packet.len() == 0:
+                serial_println("[sshd-session] recv encrypted live packet empty seq={self.cipher.seq_c2s}")
+                return []
+            serial_println("[sshd-session] recv encrypted live packet len={enc_packet.len()} seq={self.cipher.seq_c2s}")
+            serial_println("[sshd-session] recv encrypted live packet data={_bytes_to_hex(enc_packet)}")
+            val decrypted = ssh_decrypt_packet_aes_gcm(enc_packet, self.cipher.seq_c2s, self.enc_key_c2s, self.iv_c2s)
+            if decrypted.is_ok():
+                self.cipher.seq_c2s = (self.cipher.seq_c2s + 1) & 0xFFFFFFFF
+                self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
+                return decrypted.unwrap()
+            serial_println("[sshd-session] recv decrypt fail aes256-gcm live seq={self.cipher.seq_c2s}")
+            return []
+
         var i: u64 = 0
         if self.recv_buf.len() == 0:
             var empty_spins: u64 = 0
@@ -473,7 +485,6 @@ impl SshSession:
         log_info("[app.sshd] " + "[sshd-session] disconnect reason={reason} description={description}")
         val msg = ssh_build_disconnect(reason, description)
         serial_println("[sshd-session] disconnect payload={_bytes_to_hex(msg)}")
-        log_raw_println("[sshd-session] disconnect payload={_bytes_to_hex(msg)}")
         self.send_packet(msg)
         self.state = SessionState.Closed
 

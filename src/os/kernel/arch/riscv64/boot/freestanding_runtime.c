@@ -1624,6 +1624,34 @@ static spl_u64 g_boot_tcp_rx_off = 0;
 
 spl_i64 rt_boot_tcp_bind_port(spl_i64 port);
 
+static void rt_boot_tcp_compact_rx_buf(void) {
+    if (g_boot_tcp_rx_off > 0ULL && g_boot_tcp_rx_off < g_boot_tcp_rx_len) {
+        spl_u64 unread = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
+        for (spl_u64 i = 0ULL; i < unread; i = i + 1ULL) {
+            g_boot_tcp_rx_buf[i] = g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i];
+        }
+        g_boot_tcp_rx_len = unread;
+        g_boot_tcp_rx_off = 0ULL;
+    } else if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
+        g_boot_tcp_rx_len = 0ULL;
+        g_boot_tcp_rx_off = 0ULL;
+    }
+}
+
+static spl_u16 rt_boot_tcp_rx_window(void) {
+    rt_boot_tcp_compact_rx_buf();
+    spl_u64 used = g_boot_tcp_rx_len;
+    spl_u64 capacity = sizeof(g_boot_tcp_rx_buf);
+    if (used >= capacity) {
+        return 0U;
+    }
+    spl_u64 free_bytes = capacity - used;
+    if (free_bytes > 4096ULL) {
+        free_bytes = 4096ULL;
+    }
+    return (spl_u16)free_bytes;
+}
+
 static spl_u16 rt_be16(const spl_u8 *p) {
     return (spl_u16)(((spl_u16)p[0] << 8) | (spl_u16)p[1]);
 }
@@ -1742,7 +1770,7 @@ static void rt_send_tcp_packet(spl_u8 flags, const spl_u8 *payload, spl_u16 payl
     rt_put_be32(frame + 42, g_boot_tcp_recv_next);
     frame[46] = 0x50U;
     frame[47] = flags;
-    rt_put_be16(frame + 48, 4096);
+    rt_put_be16(frame + 48, rt_boot_tcp_rx_window());
     if (payload_len > 0) {
         for (spl_u64 i = 0; i < payload_len; i = i + 1) {
             frame[54 + i] = payload[i];
@@ -1848,19 +1876,11 @@ static void rt_process_tcp(const spl_u8 *frame, spl_u64 len) {
             payload[5] == ' ') {
             g_boot_tcp_response_kind = 2;
         }
-        if (g_boot_tcp_rx_off > 0ULL && g_boot_tcp_rx_off < g_boot_tcp_rx_len) {
-            spl_u64 unread = g_boot_tcp_rx_len - g_boot_tcp_rx_off;
-            for (spl_u64 i = 0ULL; i < unread; i = i + 1ULL) {
-                g_boot_tcp_rx_buf[i] = g_boot_tcp_rx_buf[g_boot_tcp_rx_off + i];
-            }
-            g_boot_tcp_rx_len = unread;
-            g_boot_tcp_rx_off = 0ULL;
-        } else if (g_boot_tcp_rx_off >= g_boot_tcp_rx_len) {
-            g_boot_tcp_rx_len = 0ULL;
-            g_boot_tcp_rx_off = 0ULL;
-        }
+        rt_boot_tcp_compact_rx_buf();
         if (payload_len > sizeof(g_boot_tcp_rx_buf) - g_boot_tcp_rx_len) {
-            payload_len = sizeof(g_boot_tcp_rx_buf) - g_boot_tcp_rx_len;
+            uart_line("BTCP RX FULL");
+            rt_send_tcp_packet(0x10U, (const spl_u8 *)0, 0);
+            return;
         }
         for (spl_u64 i = 0; i < payload_len; i = i + 1ULL) {
             g_boot_tcp_rx_buf[g_boot_tcp_rx_len + i] = payload[i];
@@ -2718,6 +2738,39 @@ spl_i64 rt_boot_tcp_read_ssh_plain_packet_payload(spl_i64 fd) {
     return out;
 }
 
+spl_i64 rt_boot_tcp_read_ssh_encrypted_packet(spl_i64 fd) {
+    spl_u8 header[4];
+    spl_u8 body[4112];
+    spl_u32 packet_len;
+    spl_u32 body_len;
+    spl_i64 out;
+    if (fd != 200 || !g_boot_tcp_client_open) {
+        return rt_array_new(0);
+    }
+    if (rt_boot_tcp_read_raw(header, 4ULL) != 4ULL) {
+        return rt_array_new(0);
+    }
+    packet_len = ((spl_u32)header[0] << 24) | ((spl_u32)header[1] << 16) | ((spl_u32)header[2] << 8) | (spl_u32)header[3];
+    if (packet_len < 1U || packet_len > 4096U) {
+        return rt_array_new(0);
+    }
+    body_len = packet_len + 16U;
+    if ((spl_u64)body_len > sizeof(body)) {
+        return rt_array_new(0);
+    }
+    if (rt_boot_tcp_read_raw(body, (spl_u64)body_len) != (spl_u64)body_len) {
+        return rt_array_new(0);
+    }
+    out = rt_array_new((spl_i64)(4U + body_len));
+    for (spl_u32 i = 0U; i < 4U; i = i + 1U) {
+        rt_array_push(out, rt_int((spl_i64)header[i]));
+    }
+    for (spl_u32 i = 0U; i < body_len; i = i + 1U) {
+        rt_array_push(out, rt_int((spl_i64)body[i]));
+    }
+    return out;
+}
+
 spl_i64 rt_boot_tcp_read_bytes(spl_i64 max_len) {
     spl_u64 want = max_len <= 0 ? 0ULL : (spl_u64)max_len;
     spl_u64 available;
@@ -3094,4 +3147,78 @@ spl_i64 rt_display_width(void) {
 
 spl_i64 rt_display_height(void) {
     return g_rt_display_ready ? RT_GPU_HEIGHT : 0;
+}
+
+/* ========================================================================
+ * Sandbox-boot residual primitives (RV64 freestanding closure).
+ *
+ * These mirror the hosted/runtime_minimal definitions but use only the
+ * freestanding RtString/RtArray heap primitives above. They resolve the
+ * undefined symbols pulled in by src/os/kernel/security/sandbox_boot_apply.spl
+ * and string .to_upper() callers within the RV64 --entry-closure link.
+ * ======================================================================== */
+
+extern char __simple_sandbox_start[] __attribute__((weak));
+extern char __simple_sandbox_end[] __attribute__((weak));
+
+/* rt_simple_sandbox_section_start/end: linker-provided .simple.sandbox bounds.
+ * Weak symbols: return 0 when the active linker script omits the section, so
+ * the validation gate in sandbox_boot_apply.spl short-circuits safely. */
+spl_u64 rt_simple_sandbox_section_start(void) {
+    if (!__simple_sandbox_start) {
+        return 0;
+    }
+    return (spl_u64)__simple_sandbox_start;
+}
+
+spl_u64 rt_simple_sandbox_section_end(void) {
+    if (!__simple_sandbox_end) {
+        return 0;
+    }
+    return (spl_u64)__simple_sandbox_end;
+}
+
+/* rt_bytes_from_raw(ptr, len) -> [u8]: read `len` raw bytes from absolute
+ * address `ptr` into a freestanding byte array. Each element is boxed as a
+ * tagged int (byte << 3) so rt_bytes_to_text / rt_string_from_byte_array
+ * recover it via rt_index_arg. */
+spl_i64 rt_bytes_from_raw(spl_i64 ptr_value, spl_i64 len_value) {
+    const spl_u8 *src = (const spl_u8 *)(spl_u64)ptr_value;
+    spl_i64 len = len_value < 0 ? 0 : len_value;
+    spl_i64 out = rt_array_new(len);
+    if (!src) {
+        return out;
+    }
+    for (spl_i64 i = 0; i < len; i = i + 1) {
+        rt_array_push(out, rt_int((spl_i64)src[i]));
+    }
+    return out;
+}
+
+/* rt_bytes_to_text(bytes) -> text: convert a freestanding byte array handle
+ * into a string handle. Identical contract to rt_string_from_byte_array. */
+spl_i64 rt_bytes_to_text(spl_i64 array_value) {
+    return rt_string_from_byte_array(array_value);
+}
+
+/* rt_string_to_upper(str) -> str: ASCII-uppercase copy of the input string. */
+spl_i64 rt_string_to_upper(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    spl_i64 out_value;
+    RtString *out;
+    if (!s) {
+        return rt_string_new((spl_i64)(spl_u64)"", 0);
+    }
+    out_value = rt_string_new((spl_i64)(spl_u64)s->data, (spl_i64)s->len);
+    out = rt_as_string(out_value);
+    if (!out) {
+        return out_value;
+    }
+    for (spl_u64 i = 0; i < out->len; i = i + 1) {
+        char c = out->data[i];
+        if (c >= 'a' && c <= 'z') {
+            out->data[i] = (char)(c - ('a' - 'A'));
+        }
+    }
+    return out_value;
 }

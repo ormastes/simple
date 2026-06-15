@@ -1,18 +1,27 @@
-# C NVMe Block Adapter — development C bridge only
+# Vestigial VFS boot block adapter — link-clean stub.
 #
-# MDSOC: feature dimension, vfs layer, C bridge adapter boundary
+# MDSOC: feature dimension, vfs layer, block adapter boundary
 #
-# Keeps simpleos_nvme_* and simpleos_fat32_* externs out of the pure
-# NvmeBlockAdapter module so production pure-Simple imports do not pull the
-# C bridge surface into the same module.
+# Historically wrapped a baremetal C NVMe bridge (simpleos_nvme_*). Those C
+# symbols were phantom externs with NO definition on any target and broke the
+# riscv64 link (and the arm64 closure). The boot_fs NVFS/DBFS probe path that
+# uses this adapter has therefore never functioned on rv64.
+#
+# Real rv64 storage is served by the freestanding virtio-blk PCI driver
+# (rt_storage_*) in src/os/kernel/arch/riscv64/boot/freestanding_runtime.c,
+# driven by riscv_services.spl — a path independent of this adapter. This
+# adapter is reduced to an honest, extern-free stub: it reports the C bridge as
+# unavailable rather than faking sector I/O, which makes simpleos_nvme_* vanish
+# from the closure on every target without introducing any new undefined
+# symbol. The class name and two-field constructor are preserved so out-of-tree
+# importers compile unchanged.
+#
+# The simpleos_fat32_* externs/exports below are a separate (unrelated) FAT32
+# path-read bridge surface still re-exported by vfs_boot_init; they are left in
+# place (unused → DCE) and are not part of the NVMe link error this change fixes.
 
 use os.services.block_device.{BlockDevice}
-use os.kernel.boot.mmio.{mmio_read8, mmio_write8}
-use os.kernel.log.klog_api.{log_raw_println}
 
-extern fn simpleos_nvme_init() -> i64
-extern fn simpleos_nvme_read_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
-extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
 extern fn simpleos_fat32_path_read_buffer_addr() -> u64
 extern fn simpleos_fat32_read_path(path: text) -> i64
 extern fn simpleos_fat32_read_path_size(path: text) -> i64
@@ -21,7 +30,7 @@ extern fn simpleos_fat32_read_path_array(path: text) -> [u8]
 val FAT32_PATH_READ_BUFFER_MAX: u64 = 4194304
 
 class CNvmeBlockAdapter:
-    """Wraps C NVMe bridge as BlockDevice for FAT32."""
+    """Vestigial block adapter; C NVMe bridge is unavailable (link-clean stub)."""
     sector_buf_addr: u64
     ready: bool
 
@@ -33,60 +42,20 @@ impl CNvmeBlockAdapter:
         )
 
     me init_c_bridge() -> bool:
-        """Initialize the baremetal C NVMe/FAT32 bridge with primitive status."""
-        val init_result = simpleos_nvme_init()
-        if init_result < 0:
-            return false
-
-        val buf = simpleos_fat32_path_read_buffer_addr()
-        if buf == 0:
-            return false
-        self.sector_buf_addr = buf
-        self.ready = true
-        log_raw_println("[c-nvme-adapter] Ready, sector buffer at 0x{self.sector_buf_addr}")
-        true
+        """C NVMe bridge has no backing on any target; report unavailable."""
+        false
 
     me init() -> Result<bool, text>:
-        """Initialize: call the C NVMe bridge and allocate a sector buffer."""
-        if not self.init_c_bridge():
-            return Result.Err("CNvmeBlockAdapter: C NVMe init failed")
-        Result.Ok(true)
+        """C NVMe bridge has no backing on any target; report unavailable."""
+        Result.Err("CNvmeBlockAdapter: C NVMe bridge unavailable")
 
 impl BlockDevice for CNvmeBlockAdapter:
     me read_sector(lba: u64) -> Result<[u8], text>:
-        """Read one sector from NVMe via the C bridge."""
-        if not self.ready:
-            return Result.Err("CNvmeBlockAdapter: not initialized")
-
-        val result = simpleos_nvme_read_sector(0, lba, self.sector_buf_addr)
-        if result < 0:
-            return Result.Err("CNvmeBlockAdapter: read_sector failed")
-
-        var buffer: [u8] = []
-        var i: u64 = 0
-        val ss: u64 = 512
-        while i < ss:
-            buffer.push(mmio_read8(self.sector_buf_addr + i))
-            i = i + 1
-        Result.Ok(buffer)
+        Result.Err("CNvmeBlockAdapter: C NVMe bridge unavailable")
 
     me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
-        """Write one sector to NVMe via the C bridge."""
-        if not self.ready:
-            return Result.Err("CNvmeBlockAdapter: not initialized")
-
-        var i: u64 = 0
-        val ss: u64 = 512
-        while i < ss:
-            val byte_val: u8 = if i.to_i32() < data.len(): data[i.to_i32()] else: 0
-            mmio_write8(self.sector_buf_addr + i, byte_val)
-            i = i + 1
-
-        val result = simpleos_nvme_write_sector(0, lba, self.sector_buf_addr)
-        if result < 0:
-            return Result.Err("CNvmeBlockAdapter: write_sector failed")
-        Result.Ok(true)
+        Result.Err("CNvmeBlockAdapter: C NVMe bridge unavailable")
 
     me fn sector_size() -> u32:
-        val nvme_sector_size: u32 = 512
-        nvme_sector_size
+        val default_sector_size: u32 = 512
+        default_sector_size

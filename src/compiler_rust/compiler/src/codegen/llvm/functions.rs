@@ -2318,11 +2318,7 @@ impl LlvmBackend {
                         let mut int_val = casted.into_int_value();
                         if native_c_process_run && i == 1 {
                             int_val = builder
-                                .build_and(
-                                    int_val,
-                                    i64_type.const_int(!0x7_u64, false),
-                                    "process_args_raw_ptr",
-                                )
+                                .build_and(int_val, i64_type.const_int(!0x7_u64, false), "process_args_raw_ptr")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("process args untag", &e))?;
                         }
                         raw_arg_vals.push(int_val);
@@ -2373,7 +2369,11 @@ impl LlvmBackend {
                             }
                         }
                     } else {
-                        arg_vals.extend(raw_arg_vals.iter().map(|v| (*v).into()));
+                        arg_vals.extend(
+                            raw_arg_vals
+                                .iter()
+                                .map(|v| inkwell::values::BasicMetadataValueEnum::from(*v)),
+                        );
                     }
                     let declared_params = func.get_type().get_param_types().len();
                     let call_site = if declared_params != arg_vals.len() {

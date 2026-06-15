@@ -91,8 +91,8 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_file_write_bytes" => Some(&[0]),
 
         // Directory operations
-        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir"
-        | "rt_dir_exists" => Some(&[0]),
+        "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob" | "rt_dir_walk"
+        | "rt_set_current_dir" | "rt_dir_exists" => Some(&[0]),
         "rt_file_find" => Some(&[0, 1]),
 
         // Async I/O driver text arguments
@@ -2243,6 +2243,9 @@ impl LlvmBackend {
                 None
             })
             .unwrap_or_else(|| {
+                let context = self.context_ref();
+                let i8_type = context.i8_type();
+                let i32_type = context.i32_type();
                 if let Some(spec) = crate::codegen::runtime_sffi::RUNTIME_FUNCS
                     .iter()
                     .find(|spec| spec.name == sffi_name)
@@ -2262,12 +2265,8 @@ impl LlvmBackend {
                         .collect();
                     let fn_type = match spec.returns {
                         [] => context.void_type().fn_type(&param_types, false),
-                        [ret] if *ret == cranelift_codegen::ir::types::I8 => {
-                            i8_type.fn_type(&param_types, false)
-                        }
-                        [ret] if *ret == cranelift_codegen::ir::types::I32 => {
-                            i32_type.fn_type(&param_types, false)
-                        }
+                        [ret] if *ret == cranelift_codegen::ir::types::I8 => i8_type.fn_type(&param_types, false),
+                        [ret] if *ret == cranelift_codegen::ir::types::I32 => i32_type.fn_type(&param_types, false),
                         _ => i64_type.fn_type(&param_types, false),
                     };
                     module.add_function(sffi_name, fn_type, None)
