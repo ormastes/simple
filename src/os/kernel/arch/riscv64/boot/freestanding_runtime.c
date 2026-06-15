@@ -2433,6 +2433,9 @@ spl_i64 rt_boot_tcp_accept_timeout(spl_i64 fd, spl_i64 ms) {
     if (fd != 100 || !g_boot_tcp_bound) {
         return -1;
     }
+    /* Reset per-connection so the path classification for THIS request does not
+     * leak from a previous connection (response_kind is global). */
+    g_boot_tcp_response_kind = 0;
     for (spl_u64 polls = 0; polls < poll_limit; polls = polls + 1) {
         rt_poll_rx_once();
         if (g_boot_tcp_client_ready) {
@@ -2483,6 +2486,23 @@ spl_i64 rt_boot_tcp_write_text(spl_i64 fd, spl_i64 data) {
     rt_send_tcp_packet(0x18U, fallback_json_response, (spl_u16)(sizeof(fallback_json_response) - 1ULL));
     rt_send_tcp_packet(0x11U, (const spl_u8 *)0, 0);
     return (spl_i64)(sizeof(fallback_json_response) - 1ULL);
+}
+
+spl_i64 rt_boot_tcp_write_auto(spl_i64 fd) {
+    /* Path-aware response: pass nil data so rt_boot_tcp_write_text selects the
+     * HTML fallback for "GET / " (g_boot_tcp_response_kind == 2) and the JSON
+     * fallback otherwise. Lets the launcher serve the right Content-Type per
+     * path without parsing the request in Simple.
+     *
+     * accept may return on connection-open before the request line arrives, so
+     * poll RX until the request is classified (response_kind != 0) — reset to 0
+     * per-connection in rt_boot_tcp_accept_timeout — before choosing the body. */
+    spl_u64 polls = 0;
+    while (g_boot_tcp_response_kind == 0 && g_boot_tcp_client_open && polls < 50000ULL) {
+        rt_poll_rx_once();
+        polls = polls + 1;
+    }
+    return rt_boot_tcp_write_text(fd, rt_special(RT_VALUE_SPECIAL_NIL));
 }
 
 spl_i64 rt_boot_tcp_send_ssh_banner(spl_i64 fd) {
