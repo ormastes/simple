@@ -112,8 +112,52 @@ regression — only a clean riscv64 rebuild (blocker 1) can disambiguate.
 - `build/rv64_cranelift_build.log` (link failure)
 - `build/rv64_gate_prebuilt.log` / `build/qemu-rv64-serial.log` (storage rc=-83)
 
-## Out of scope
+## Blocker 0 — the gate REQUIRES the LLVM backend, which won't compile (foundational)
 
-`cargo build --features llvm` failure (LLVM 18.1.8, undefined `i8_type`/`i32_type`
-in `codegen/llvm/functions/calls.rs:2255`) — separate rabbit hole; this lane runs
-on cranelift.
+`scripts/qemu/qemu_rv64_http_test.shs` (lines 98-100) accepts a from-source build
+ONLY if `${ELF}.build_stamp` contains all of:
+`backend=llvm`, `target=riscv64-unknown-none`, `entry=src/os/kernel/arch/riscv64/boot.spl`.
+
+So the cranelift `rv64-base` build (what the diagnosis used, and where the arm64
+leak was fixed) can **never** satisfy the gate — it stamps `backend=cranelift`.
+The gate insists on the LLVM backend compiling the `boot.spl` lane.
+
+But **no `simple` binary has LLVM** (all report "native backend 'llvm' is not
+available"), and `cargo build --features llvm` fails (LLVM 18.1.8 present):
+undefined `i8_type`/`i32_type`/`context` at
+`compiler/src/codegen/llvm/functions/calls.rs:2255-2269`, E0283 at
+`functions.rs:2376` (`build/rv64_llvm_cargo.log`). This is a **Rust seed** bug and
+the foundational blocker: without an LLVM-capable compiler, the gate fails at the
+stamp check regardless of the link/runtime fixes below.
+
+Good news: the gate's required `entry=boot.spl` is the SAME lane the arm64 fix was
+made on, and the agent confirmed the arm64 leak "breaks LLVM identically"
+(reachability is resolved pre-codegen). So the arm64 fix is on the correct lane and
+helps the LLVM build once it compiles.
+
+Note: `simpleos_nvme_write_sector` has **no C definition anywhere in `src/`** (only
+`extern fn` declarations in `c_nvme_adapter.spl`, `c_nvme_block_adapter.spl`,
+`q35_pure_nvme_perf_boot.spl`, `vfs_boot_init.spl`) — a phantom extern. This is
+why storage fails `rc=-83`: there is no NVMe write driver to link.
+
+## Feature requests (non-pure-Simple follow-ups required to green the web gate)
+
+Per scope decision (pure-Simple fixes preferred; C/seed only as fallback, tracked):
+these all require Rust-seed or C-runtime/driver work and are filed as requests:
+
+- **FR-1 (Rust seed, foundational):** repair the LLVM backend build —
+  `codegen/llvm/functions/calls.rs:2255` undefined `i8_type`/`i32_type`/`context`,
+  E0283 at `functions.rs:2376` (inkwell API usage). Needs `cargo build` +
+  bootstrap redeploy + post-deploy smoke (the `--deploy` stage4 has no smoke gate).
+- **FR-2 (C runtime / boot-path):** `sandbox_boot_apply.spl` calls hosted
+  `rt_bytes_from_raw` / `rt_bytes_to_text` (+ `rt_string_to_upper`) that have no
+  baremetal backing; either add baremetal-safe primitives or redesign the
+  `.simple.sandbox` raw-section reader to avoid hosted runtime on baremetal.
+- **FR-3 (C runtime link):** ensure `runtime_minimal.c` (`rt_simple_sandbox_section_*`)
+  is in the riscv64 `--entry-closure` link set.
+- **FR-4 (driver):** provide a real `simpleos_nvme_write_sector` (and the
+  read/init siblings) implementation, or route the riscv64 storage boot to the
+  pure-Simple NVMe path; without it NVFS storage cannot come up (`rc=-83`).
+- **FR-5 (codegen):** `os__apps__sshd__ssh_session__log_raw_println` is defined and
+  used within `ssh_session.spl` yet dropped from native emission — investigate the
+  local-fn emission gap for the baremetal closure.
