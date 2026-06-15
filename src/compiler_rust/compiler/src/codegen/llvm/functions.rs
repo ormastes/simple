@@ -921,6 +921,7 @@ impl LlvmBackend {
                 capture_offsets,
                 capture_types,
                 captures,
+                capture_local_indices: _,
                 lambda_params: _,
                 body_block: _,
             } => {

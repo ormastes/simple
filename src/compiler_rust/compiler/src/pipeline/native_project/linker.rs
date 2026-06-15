@@ -62,7 +62,14 @@ impl NativeProjectBuilder {
         let mut simple_strong_defined = HashSet::new();
         for obj in object_paths {
             for (kind, name) in Self::read_global_symbol_types(obj)? {
-                if !matches!(kind.as_str(), "W" | "w" | "V" | "v" | "U") {
+                // Undefined references (`U`, and weak-undefined `w`/`v`) are NOT
+                // definitions: aliasing a boot-weak symbol onto an undefined name
+                // produces a `--defsym: symbol not found` link error. Only count
+                // genuinely defined symbols here.
+                if matches!(kind.as_str(), "U" | "w" | "v") {
+                    continue;
+                }
+                if !matches!(kind.as_str(), "W" | "V") {
                     simple_strong_defined.insert(name.clone());
                 }
                 simple_defined.insert(name);
@@ -94,6 +101,113 @@ impl NativeProjectBuilder {
                 .min()
             {
                 aliases.insert(raw.clone(), target.clone());
+            }
+        }
+        Ok(aliases.into_iter().collect())
+    }
+
+    /// Bridge fully module-qualified cross-module references to the bare symbol
+    /// names that `@export("C")` and ambiguous-name functions actually emit.
+    ///
+    /// A caller that imports e.g. `use os.kernel.boot.tcp_baremetal_min` resolves
+    /// the call `rt_io_tcp_bind(...)` through the import map to the prefixed symbol
+    /// `os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind`. The *defining* module,
+    /// however, emits that function under its bare C-ABI / weak name
+    /// (`rt_io_tcp_bind`) because it carries `@export` or because the name is
+    /// defined in multiple modules. The result is an undefined-symbol link error.
+    ///
+    /// For every undefined `PREFIX__SUFFIX` reference for which no object defines
+    /// `PREFIX__SUFFIX` but some object *does* define the bare `SUFFIX`, emit a
+    /// `--defsym=PREFIX__SUFFIX=SUFFIX` alias. This canonicalizes the reference
+    /// onto the definition without changing any definition mangling, so targets
+    /// that already link cleanly (no such dangling references) are unaffected.
+    pub(crate) fn freestanding_qualified_to_bare_defsyms(
+        object_paths: &[PathBuf],
+        boot_objects: &[PathBuf],
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut defined = HashSet::new();
+        let mut undefined = HashSet::new();
+        for obj in object_paths.iter().chain(boot_objects.iter()) {
+            for (kind, name) in Self::read_global_symbol_types(obj)? {
+                if kind == "U" {
+                    undefined.insert(name);
+                } else {
+                    defined.insert(name);
+                }
+            }
+        }
+
+        let mut aliases = BTreeMap::new();
+        for reference in &undefined {
+            // Only consider module-qualified references (contain the `__` joiner)
+            // that are still undefined after collecting every object's symbols.
+            if defined.contains(reference) {
+                continue;
+            }
+            let Some((_, suffix)) = reference.rsplit_once("__") else {
+                continue;
+            };
+            if suffix.is_empty() || suffix == reference.as_str() {
+                continue;
+            }
+            // The bare definition must exist and differ from the reference.
+            if suffix != reference.as_str() && defined.contains(suffix) {
+                aliases.insert(reference.clone(), suffix.to_string());
+            }
+        }
+        Ok(aliases.into_iter().collect())
+    }
+
+    /// Reverse of `freestanding_qualified_to_bare_defsyms`: bridge an undefined
+    /// *bare* reference onto a defined *module-qualified* symbol when EXACTLY ONE
+    /// qualified definition has that bare name as its `__`-joined suffix. This
+    /// covers codegen that emits a bare call (e.g. `char_from_code`) while the
+    /// only definition in the closure is the mangled
+    /// `lib__common__string_core__char_from_code`. Ambiguous (multiple qualified
+    /// definitions with the same suffix) is left alone — auto-aliasing could
+    /// route the call to the wrong implementation.
+    pub(crate) fn freestanding_bare_to_qualified_defsyms(
+        object_paths: &[PathBuf],
+        boot_objects: &[PathBuf],
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut defined = HashSet::new();
+        let mut undefined = HashSet::new();
+        for obj in object_paths.iter().chain(boot_objects.iter()) {
+            for (kind, name) in Self::read_global_symbol_types(obj)? {
+                if kind == "U" {
+                    undefined.insert(name);
+                } else {
+                    defined.insert(name);
+                }
+            }
+        }
+
+        // Map each bare suffix -> the set of qualified definitions sharing it.
+        let mut suffix_to_qualified: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for def in &defined {
+            if let Some((prefix, suffix)) = def.rsplit_once("__") {
+                if prefix.is_empty() || suffix.is_empty() || suffix == def.as_str() {
+                    continue;
+                }
+                suffix_to_qualified
+                    .entry(suffix.to_string())
+                    .or_default()
+                    .push(def.clone());
+            }
+        }
+
+        let mut aliases = BTreeMap::new();
+        for reference in &undefined {
+            // Only bare references (no `__` joiner) that have no bare definition.
+            if reference.contains("__") || defined.contains(reference) {
+                continue;
+            }
+            if let Some(candidates) = suffix_to_qualified.get(reference) {
+                // Only auto-alias when there is exactly one qualified definition;
+                // ambiguity is investigated by hand, never silently routed.
+                if candidates.len() == 1 {
+                    aliases.insert(reference.clone(), candidates[0].clone());
+                }
             }
         }
         Ok(aliases.into_iter().collect())
@@ -1403,6 +1517,27 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                 weak_boot_defsyms.len()
             );
         }
+        // Bridge module-qualified cross-module references onto the bare symbol
+        // names that `@export`/ambiguous definitions actually emit.
+        let qualified_bare_defsyms =
+            Self::freestanding_qualified_to_bare_defsyms(object_paths, &boot_objects)?;
+        if !qualified_bare_defsyms.is_empty() {
+            eprintln!(
+                "Freestanding qualified->bare alias bridge: {} symbol(s)",
+                qualified_bare_defsyms.len()
+            );
+        }
+        // Reverse bridge: an undefined bare reference onto a unique qualified
+        // definition sharing its suffix (e.g. `char_from_code` ->
+        // `lib__common__string_core__char_from_code`).
+        let bare_qualified_defsyms =
+            Self::freestanding_bare_to_qualified_defsyms(object_paths, &boot_objects)?;
+        if !bare_qualified_defsyms.is_empty() {
+            eprintln!(
+                "Freestanding bare->qualified alias bridge: {} symbol(s)",
+                bare_qualified_defsyms.len()
+            );
+        }
 
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);
@@ -1411,6 +1546,12 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                 c.arg(format!("-T{}", ls.display()));
             }
             for (raw, target) in &weak_boot_defsyms {
+                c.arg(format!("--defsym={}={}", raw, target));
+            }
+            for (raw, target) in &qualified_bare_defsyms {
+                c.arg(format!("--defsym={}={}", raw, target));
+            }
+            for (raw, target) in &bare_qualified_defsyms {
                 c.arg(format!("--defsym={}={}", raw, target));
             }
             c.arg("-o").arg(&self.output);
@@ -1444,6 +1585,12 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                 c.arg(format!("-T{}", ls.display()));
             }
             for (raw, target) in &weak_boot_defsyms {
+                c.arg(format!("-Wl,--defsym={}={}", raw, target));
+            }
+            for (raw, target) in &qualified_bare_defsyms {
+                c.arg(format!("-Wl,--defsym={}={}", raw, target));
+            }
+            for (raw, target) in &bare_qualified_defsyms {
                 c.arg(format!("-Wl,--defsym={}={}", raw, target));
             }
             c.arg("-o").arg(&self.output);

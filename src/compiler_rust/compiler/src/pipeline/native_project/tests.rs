@@ -2230,3 +2230,58 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         )]
     );
 }
+
+#[test]
+fn test_freestanding_qualified_to_bare_alias_bridges_export_symbol() {
+    // Mirror the rv64 kernel failure: a caller object references the fully
+    // module-qualified `os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind`,
+    // while the defining object emits the bare C-ABI symbol `rt_io_tcp_bind`
+    // (because the function carries `@export`). The bridge must alias the
+    // qualified reference onto the bare definition.
+    let temp = tempfile::tempdir().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let def_c = temp.path().join("def.c");
+    let caller_c = temp.path().join("caller.c");
+    let def_o = temp.path().join("def.o");
+    let caller_o = temp.path().join("caller.o");
+
+    // Definition object: emits the bare exported symbol only.
+    std::fs::write(
+        &def_c,
+        r#"
+        long rt_io_tcp_bind(long addr) { return addr + 1; }
+        "#,
+    )
+    .unwrap();
+    // Caller object: references the fully module-qualified name (undefined here).
+    std::fs::write(
+        &caller_c,
+        r#"
+        extern long os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind(long addr);
+        long caller_use(long x) { return os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind(x); }
+        "#,
+    )
+    .unwrap();
+
+    for (src, obj) in [(&def_c, &def_o), (&caller_c, &caller_o)] {
+        assert!(std::process::Command::new(&cc)
+            .args(["-c", "-ffunction-sections", "-fdata-sections"])
+            .arg(src)
+            .arg("-o")
+            .arg(obj)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    let aliases =
+        NativeProjectBuilder::freestanding_qualified_to_bare_defsyms(&[def_o, caller_o], &[]).unwrap();
+
+    assert_eq!(
+        aliases,
+        vec![(
+            "os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind".to_string(),
+            "rt_io_tcp_bind".to_string()
+        )]
+    );
+}

@@ -95,6 +95,7 @@ impl MirInst {
             | MirInst::ResultErr { dest, .. }
             | MirInst::InterpEval { dest, .. }
             | MirInst::ContractOldCapture { dest, .. }
+            | MirInst::GlobalLoad { dest, .. }
             | MirInst::PointerNew { dest, .. }
             | MirInst::PointerRef { dest, .. }
             | MirInst::PointerDeref { dest, .. }
