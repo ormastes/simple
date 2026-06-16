@@ -86,3 +86,9 @@ verification / requirement-selection pending
   gates. The lane is not `done` because final feature/NFR option selection,
   trace-ID backfill, and native macOS Metal / AMD ROCm host evidence remain
   open.
+- fix: Kept `WebServer.serve_loop` on the live instance instead of routing each
+  accepted connection through a value-copy helper, so normal `run_web`
+  preserves login burst counters across TCP requests.
+- fix: Added `429 Too Many Requests` status text in plain, TLS, and async web
+  response helpers.
+- verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 240` passes with 3 live endpoint scenarios covering fail-closed `/ui/login`, `/api/state`, `/api/widgets`, bare `/ui/ws`, query-token `/ui/ws`, positive subprotocol bearer upgrade, and live login burst rate limiting.

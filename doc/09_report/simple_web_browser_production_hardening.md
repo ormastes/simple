@@ -2,13 +2,14 @@
 
 ## Current Evidence
 
-- Auth/parser check: focused `bin/simple check` passed
-  for `auth_params.spl`, `ui_routes.spl`, `server.spl`, `ws_handler.spl`,
+- Auth/parser check: focused `bin/simple check` passed for `server.spl`,
+  `tls_serve_loop.spl`, `async_server.spl`,
+  `simple_web_browser_production_hardening_spec.spl`,
   `web_auth_hardening_spec.spl`, and `ws_handler_spec.spl`.
 - Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 13 scenarios.
 - Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 10 scenarios.
-- Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180` passed with 2 scenarios.
-- Spec docgen: `bin/simple spipe-docgen test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and stub-style unit manuals.
+- Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 240` passed with 3 scenarios.
+- Spec docgen: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and regenerated the 3-scenario manual.
 - Production renderer parity: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` passed.
 - Layout guard: `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 
@@ -26,6 +27,9 @@
   `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1`.
 - `/ui/login` is bounded by a fixed-window burst gate in both normal and shared
   WM server paths.
+- The normal `run_web` accept loop preserves per-server state across
+  connections, so the login burst gate is enforced across repeated TCP
+  requests.
 - Production renderer parity wrapper now passes locally with surface fail counts
   `0`.
 
