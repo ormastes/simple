@@ -695,21 +695,60 @@ fn lsp_handle_code_action(id: text, body: text) -> text:
             actions.push(action)
     make_json_result(id=id, result=SB_L() + actions.join(",") + SB_R())
 
+# Extract the emitted LSP Range object value from a code-action JSON. query_code_actions
+# emits {..,"edit":{"changes":{<path>:[{"range":{...},"newText":".."}]}}}, so the Range
+# value is the text between `"range":` and the following `,"newText":`. Returns "" if absent.
+# (Manual scan — avoids text.index_of/Option ambiguity in this module.)
+fn _extract_emitted_range(json: text) -> text:
+    val m = "\"range\":"
+    val mlen = m.len()
+    var s = -1
+    var p = 0
+    while p <= json.len() - mlen:
+        if json.substring(p, p + mlen) == m:
+            s = p + mlen
+            break
+        p = p + 1
+    if s < 0:
+        return ""
+    val nt = ",\"newText\":"
+    val ntlen = nt.len()
+    var e = -1
+    var q = s
+    while q <= json.len() - ntlen:
+        if json.substring(q, q + ntlen) == nt:
+            e = q
+            break
+        q = q + 1
+    if e < 0:
+        return ""
+    json.substring(s, e)
+
 fn _parse_code_action(line: text, uri: text) -> text:
-    # JSON format: {"title":"...","kind":"quickfix|refactor","edit":{...}}
+    # JSON format: {"title":"...","kind":"quickfix|refactor","edit":{"changes":{...}}}
     if line.starts_with("{"):
         val title = extract_field(json=line, key="title")
         val kind = extract_field(json=line, key="kind")
         val new_text = extract_field(json=line, key="newText")
-        val edit_line = extract_field(json=line, key="editLine")
-        val edit_col = extract_field(json=line, key="editCol")
-        val edit_end_line = extract_field(json=line, key="editEndLine")
-        val edit_end_col = extract_field(json=line, key="editEndCol")
         if title == "":
             return ""
         var action_kind = "quickfix"
         if kind != "":
             action_kind = kind
+        # Preferred: forward the standard nested edit emitted by query_code_actions. The
+        # emitted Range object is already LSP-shaped; reuse it and rebuild the workspace
+        # edit with the request URI (the emitted changes key is a file path, not a URI).
+        val range_obj = _extract_emitted_range(line)
+        if range_obj != "" and new_text != "":
+            val nested_edit = jo2(jp("range", range_obj), jp("newText", js(new_text)))
+            val nested_doc = jo2(jp("textDocument", jo2(jp("uri", js(uri)), jp("version", "null"))), jp("edits", SB_L() + nested_edit + SB_R()))
+            val nested_ws = jo1(jp("documentChanges", SB_L() + nested_doc + SB_R()))
+            return jo3(jp("title", js(title)), jp("kind", js(action_kind)), jp("edit", nested_ws))
+        # Fallback: legacy flat-key emitters (editLine/editCol/...).
+        val edit_line = extract_field(json=line, key="editLine")
+        val edit_col = extract_field(json=line, key="editCol")
+        val edit_end_line = extract_field(json=line, key="editEndLine")
+        val edit_end_col = extract_field(json=line, key="editEndCol")
         # Build workspace edit if edit details are present
         if new_text != "" and edit_line != "":
             var start_ln = 0
