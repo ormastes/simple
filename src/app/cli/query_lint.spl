@@ -4,9 +4,13 @@
 # AST lint passes, deprecated patterns, unused variables, unreachable code.
 
 use app.cli.query_helpers.{_count_indent}
-use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name, query_file_read_rich, query_file_exists, _DIAG_COLLECT_MODE, _DIAG_COLLECTED}
+use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name, query_file_read_rich, query_file_exists, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE}
 use app.cli.query_lint_checks.{_check_match_exhaustiveness_text, _check_closure_capture_text, _check_ignored_return_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text, _check_print_to_log_text}
 use app.cli.query_lint_scan.{lint_scan_line}
+# Strictness-tier severity routing: resolve the LintConfig (sdn profile= + @lint_profile)
+# and translate per-code Allow/Deny into the diagnostic severity override map, so the
+# LSP/build lint path honors the strictness tier — matching `simple lint`.
+use compiler.tools.lint.main_part1.{LintConfig, LintLevel, map_lint_code_to_config_name, find_project_sdn}
 
 # AST-based lint pass imports
 use compiler.core.ast.{ast_reset, module_get_decls}
@@ -20,6 +24,59 @@ use compiler.semantics.lint.critical_file_guard.{check_all_critical_files}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
 use compiler.semantics.gc_boundary_check.{FamilyImportWarning, check_gc_boundary_imports, format_family_warnings}
 use compiler.semantics.lint.param_tag.{ParamTagWarning, check_param_tag}
+
+# --- Strictness-tier severity routing (reliable-mode plan, P1 / R1 step 3) ---
+
+# Lint codes emitted by this path that have a LintConfig config-name mapping.
+fn _governed_lint_codes() -> [text]:
+    ["primitive_api", "bare_bool", "simple_script_required",
+     "T001", "T002", "T003", "T004", "ARG001", "ARG002", "ACC001", "NAME001",
+     "STUB001", "STUB002", "STUB003",
+     "SPIPE001", "SPIPE002", "SPIPE003", "SPIPE004", "SPIPE005", "SPIPE006", "SPIPE007",
+     "I001", "I002", "I003", "C002",
+     "MEXH001", "MEXH002", "MEXH003", "MEXH004", "MEXH005",
+     "REQC001", "REQC002", "REQC003", "REQC004",
+     "UI001", "UI002", "UI003", "DIAG001",
+     "W001", "W002", "W003", "ST001", "ST002", "ST003",
+     "S001", "S002", "S003", "CC001", "CC002",
+     "CLOS001", "RET001", "BOOL001", "SAFE001", "SAFE003",
+     "W0401", "W0402", "W0403", "D001", "TRK001"]
+
+# Translate the resolved config into _DIAG_SEVERITY_OVERRIDE: Allow -> -1 (suppress),
+# Deny -> 1 (LSP error). Warn / unconfigurable codes stay unmapped (severity kept).
+fn _apply_lint_config_overrides(cfg: LintConfig):
+    _DIAG_SEVERITY_OVERRIDE = {}
+    for code in _governed_lint_codes():
+        val config_name = map_lint_code_to_config_name(code)
+        if config_name == "":
+            continue
+        val level = cfg.get_level(config_name)
+        match level:
+            case Allow:
+                _DIAG_SEVERITY_OVERRIDE[code] = -1
+            case Deny:
+                _DIAG_SEVERITY_OVERRIDE[code] = 1
+            case Warn:
+                val _ = 0
+
+# Resolve the LintConfig for file+source (sdn [lints] profile= + @lint_profile attr)
+# and load its severity overrides.
+fn _load_lint_config_for(file: text, source: text):
+    var cfg = LintConfig.new()
+    val sdn = find_project_sdn(file)
+    if sdn != "":
+        cfg = LintConfig.from_sdn_file(sdn)
+    cfg.apply_file_attributes(source)
+    # Only override emitted severities when a strictness tier or explicit [lints]/
+    # @allow/@deny config is present; with neither, leave the legacy LSP severities
+    # untouched (nil profile == today's exact behavior — zero default change).
+    if cfg.profile.? or cfg.levels.len() > 0:
+        _apply_lint_config_overrides(cfg)
+    else:
+        _DIAG_SEVERITY_OVERRIDE = {}
+
+fn _clear_lint_config_overrides():
+    _DIAG_SEVERITY_OVERRIDE = {}
 
 fn _emit_lint_if_readable(file: text, format: text):
     """Emit lint diagnostics if the file is readable."""
@@ -62,6 +119,7 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
 
     Returns the number of diagnostics emitted.
     """
+    _load_lint_config_for(file, source)
     val lines = source.split("\n")
     var count = 0
     if format == "json":
@@ -70,6 +128,7 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     else:
         count = count + _emit_basic_line_lints(lines, file, format)
         count = count + _emit_text_heuristic_lints(lines, file, format)
+    _clear_lint_config_overrides()
     count
 
 fn _emit_basic_line_lints(lines: [text], file: text, format: text) -> i64:

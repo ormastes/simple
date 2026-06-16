@@ -33,16 +33,61 @@ fn query_cli_get_args() -> [text]:
 var _DIAG_COLLECT_MODE = false
 var _DIAG_COLLECTED: [text] = []
 
-export _DIAG_COLLECT_MODE, _DIAG_COLLECTED
+# Per-lint severity override, keyed by lint code. Populated by query_lint from the
+# resolved LintConfig (strictness tier + sdn + @lint_profile). Value -1 suppresses
+# the diagnostic (Allow); a positive value rewrites the LSP severity (Deny -> 1).
+# Codes absent from the map keep their emitted severity (Warn / unconfigurable).
+var _DIAG_SEVERITY_OVERRIDE: Dict<text, i64> = {}
+
+export _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _DIAG_SEVERITY_OVERRIDE
 export _diag_emit_or_collect, query_file_read_rich
 export _find_in_line, _find_in_line_from, _parse_error_location, _extract_decl_name
 
+fn _diag_is_digit(c: text) -> bool:
+    (c == "0" or c == "1" or c == "2" or c == "3" or c == "4"
+     or c == "5" or c == "6" or c == "7" or c == "8" or c == "9")
+
+fn _diag_code_of(json_str: text) -> text:
+    """Extract the "code":"XXX" value from a diagnostic JSON string ("" if absent)."""
+    val marker = "\"code\":\""
+    val start = _find_in_line_from(json_str, marker, 0)
+    if start < 0:
+        return ""
+    val vstart = start + marker.len()
+    val vend = _find_in_line_from(json_str, "\"", vstart)
+    if vend < 0:
+        return ""
+    json_str.substring(vstart, vend)
+
+fn _diag_rewrite_severity(json_str: text, sev: i64) -> text:
+    """Rewrite the "severity":N field of a diagnostic JSON to sev."""
+    val marker = "\"severity\":"
+    val start = _find_in_line_from(json_str, marker, 0)
+    if start < 0:
+        return json_str
+    val vstart = start + marker.len()
+    var vend = vstart
+    while vend < json_str.len() and _diag_is_digit(json_str.substring(vend, vend + 1)):
+        vend = vend + 1
+    json_str.substring(0, vstart) + sev.to_string() + json_str.substring(vend)
+
 fn _diag_emit_or_collect(json_str: text):
-    """Either print or collect a JSON diagnostic string depending on mode."""
+    """Either print or collect a JSON diagnostic string depending on mode.
+
+    Applies the LintConfig-derived severity override (suppress / elevate) so the
+    LSP/build diagnostic path honors the strictness tier, matching `simple lint`.
+    """
+    var out = json_str
+    val code = _diag_code_of(json_str)
+    if code != "" and _DIAG_SEVERITY_OVERRIDE.has(code):
+        val ov = _DIAG_SEVERITY_OVERRIDE[code]
+        if ov < 0:
+            return  # suppressed (Allow)
+        out = _diag_rewrite_severity(json_str, ov)
     if _DIAG_COLLECT_MODE:
-        _DIAG_COLLECTED.push(json_str)
+        _DIAG_COLLECTED.push(out)
     else:
-        print json_str
+        print out
 
 fn query_file_read_rich(path: text) -> text:
     rt_file_read_text(path) ?? ""
