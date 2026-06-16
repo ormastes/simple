@@ -60,7 +60,7 @@ tokens, wrong origins, and oversized unauthenticated bodies.
 
 Pros:
 - Stronger production evidence for the actual browser boundary.
-- Directly addresses the highest remaining test gap.
+- Directly addresses the live endpoint evidence gate.
 - Keeps renderer parity as a separately measured gate.
 
 Cons:
