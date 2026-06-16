@@ -49,6 +49,34 @@ Before starting any step, **check if prerequisite artifacts exist**:
 
 ---
 
+## Termination & Runaway Guard (MANDATORY)
+
+"Self-sufficient" means *do the missing work*, **not** *loop forever*. A session
+with no stop criterion will re-run already-green checks until its context grows
+unbounded (observed: sessions reaching 99M–179M input tokens by re-running the
+same passing `bin/simple test`/`check` 30–40× each). That is the #1 cause of a
+"crashed" Codex session. Obey every rule below:
+
+- **Verify each acceptance criterion at most once per session.** If a spec or
+  `bin/simple check` already passed this session, do **not** re-run it. Trust the
+  prior PASS; re-running green checks is the runaway signature.
+- **Convergence = stop.** When the requested step's artifacts exist and its
+  checks pass, the step is **done**. Report and stop — do not "double-check",
+  re-scan the repo, or re-count files (`find … | wc -l`, `jj status`) on a loop.
+- **Hard iteration cap:** no more than **3** verify/fix cycles for one feature.
+  After the 3rd, stop and report the remaining failure to the user instead of
+  retrying — escalate, don't spin.
+- **Repeated-identical-command = abort.** If you are about to issue a command you
+  already ran this session with the same result, that is a loop. Stop.
+- **Budget ceiling:** if context approaches large size or wall-clock runs long
+  with no new progress, **summarize state and stop**. A partial, reported result
+  beats an unbounded session that gets killed and loses everything.
+- **Never resume a runaway rollout with `--dangerously-bypass-approvals-and-sandbox`
+  / `--yolo`.** Reloading a multi-million-token poisoned rollout re-triggers the
+  same loop. Start a fresh, scoped session instead.
+
+---
+
 ## Concurrent LLM Work
 
 Multiple Codex, Claude, or Gemini sessions may be active in this repository at
