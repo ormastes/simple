@@ -27,6 +27,8 @@
 - Authorized `/ui/resume` rejects missing or malformed `session_id`,
   `snapshot_revision`, or `last_sequence` with `400 Bad Request`, and accepts
   strict valid body fields in the normal TCP server path.
+- Authorized `/ui/resume` rejects oversized JSON bodies with `413 Payload Too
+  Large` before parsing route fields.
 - `/ui/ws` and legacy `/ws` reject non-GET WebSocket upgrade attempts with
   `405 Method Not Allowed` before the socket can be upgraded, even when the
   request carries a valid origin-bound bearer token.

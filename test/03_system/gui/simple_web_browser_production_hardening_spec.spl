@@ -5,7 +5,7 @@
 
 use std.spec.*
 use std.nogc_sync_mut.io.tcp.{TcpStream}
-use app.ui.web.auth_params.{UI_WEB_LOGIN_RATE_MAX_ATTEMPTS}
+use app.ui.web.auth_params.{UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_MAX_AUTH_JSON_BYTES}
 
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
@@ -144,6 +144,10 @@ fn resume_unauthorized_request(port: i32) -> text:
 
 fn resume_authorized_request(port: i32, token: text, body: text) -> text:
     return "POST /ui/resume HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
+
+fn resume_authorized_oversized_request(port: i32, token: text) -> text:
+    val body = "x".repeat(UI_WEB_MAX_AUTH_JSON_BYTES + 1)
+    return resume_authorized_request(port, token, body)
 
 fn websocket_unauthorized_request(port: i32) -> text:
     var request = "GET /ui/ws HTTP/1.1\r\n"
@@ -295,6 +299,7 @@ describe "Simple web browser production hardening live endpoints":
         val valid_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":42,\"last_sequence\":7}"
         val valid_resume_response = raw_http_request(port, resume_authorized_request(port, token, valid_resume_body))
         val valid_resume = "{http_status_line(valid_resume_response)}|{http_marker(valid_resume_response, "\"session_id\": \"session-1\"")}"
+        val oversized_resume = raw_http_summary(port, resume_authorized_oversized_request(port, token), "request_body_too_large")
         val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
         val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
@@ -316,6 +321,7 @@ describe "Simple web browser production hardening live endpoints":
         expect(token.len()).to_be_greater_than(20)
         expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
         expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
+        expect(oversized_resume).to_equal("HTTP/1.1 413 Payload Too Large|present")
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
         expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
         expect(lowercase_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")

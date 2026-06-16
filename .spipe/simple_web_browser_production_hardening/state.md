@@ -138,3 +138,13 @@ verification / requirement-selection pending
   browser-hardening command timeout of `--timeout 360`.
 - verify: Added live coverage that token-bearing `/ui/login` JSON responses set
   no-store/no-cache and anti-sniff headers.
+- fix: Added explicit oversized-body classification for authorized
+  `/ui/resume`, returning `413 Payload Too Large` before route-field parsing in
+  normal, shared-WM, and shared `/ui/*` route handlers.
+- verify: `bin/simple check src/app/ui.web/server.spl src/app/ui.web/ui_routes.spl
+  test/01_unit/app/ui/web_auth_hardening_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl`,
+  `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl
+  --mode=interpreter --clean`, and `bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` pass.

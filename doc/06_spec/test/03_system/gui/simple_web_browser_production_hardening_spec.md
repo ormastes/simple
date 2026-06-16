@@ -110,6 +110,7 @@ expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
    - Expected: malformed_resume equals `HTTP/1.1 400 Bad Request|present`
    - Expected: valid_resume equals `HTTP/1.1 200 OK|present`
+   - Expected: oversized_resume equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: websocket equals `HTTP/1.1 101 Switching Protocols|present`
    - Expected: legacy_websocket equals `HTTP/1.1 101 Switching Protocols|present`
    - Expected: lowercase_websocket equals `HTTP/1.1 101 Switching Protocols|present`
@@ -120,7 +121,7 @@ expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -139,6 +140,7 @@ val malformed_resume = "{http_status_line(malformed_resume_response)}|{http_mark
 val valid_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":42,\"last_sequence\":7}"
 val valid_resume_response = raw_http_request(port, resume_authorized_request(port, token, valid_resume_body))
 val valid_resume = "{http_status_line(valid_resume_response)}|{http_marker(valid_resume_response, "\"session_id\": \"session-1\"")}"
+val oversized_resume = raw_http_summary(port, resume_authorized_oversized_request(port, token), "request_body_too_large")
 val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
 val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
@@ -160,6 +162,7 @@ expect(login_response).to_contain("X-Content-Type-Options: nosniff")
 expect(token.len()).to_be_greater_than(20)
 expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
 expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
+expect(oversized_resume).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 expect(lowercase_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")

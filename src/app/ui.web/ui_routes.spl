@@ -12,7 +12,7 @@ use app.ui.web.tls_serve_loop.{ConnStream}
 use nogc_sync_mut.ui.session.{UISession}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
 use app.ui.web.session_token.{verify, load_secret, random_hex}
-use app.ui.web.auth_params.{ui_web_extract_bearer, ui_web_query_param, ui_web_percent_decode_query_component, ui_web_ws_response_protocol, ui_web_auth_json_field}
+use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, ui_web_extract_bearer, ui_web_query_param, ui_web_percent_decode_query_component, ui_web_ws_response_protocol, ui_web_auth_json_field}
 use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
 use app.ui.web.async_ws.{extract_field}
 use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
@@ -69,6 +69,8 @@ fn ui_web_request_authorized(headers: text, path: text, guard: OriginGuard, secr
     return ui_web_authorization_status(headers, path, guard, secret, now_ms) == "ok"
 
 fn ui_web_resume_body_status(body: text) -> text:
+    if body.len() > UI_WEB_MAX_AUTH_JSON_BYTES:
+        return "body_too_large"
     val session_id = ui_web_auth_json_field(body, "session_id")
     val rev_str = ui_web_auth_json_field(body, "snapshot_revision")
     val seq_str = ui_web_auth_json_field(body, "last_sequence")
@@ -276,7 +278,18 @@ fn _handle_resume_route(stream: ConnStream, path: text, headers: text, body: tex
     val session_id = ui_web_auth_json_field(body, "session_id")
     val rev_str = ui_web_auth_json_field(body, "snapshot_revision")
     val seq_str = ui_web_auth_json_field(body, "last_sequence")
-    if ui_web_resume_body_status(body) != "ok":
+    val resume_status = ui_web_resume_body_status(body)
+    if resume_status == "body_too_large":
+        val too_large = "{\"error\": \"request_body_too_large\"}"
+        var too_large_resp = "HTTP/1.1 413 Payload Too Large\r\n"
+        too_large_resp = "{too_large_resp}Content-Type: application/json\r\n"
+        too_large_resp = "{too_large_resp}Content-Length: {too_large.len()}\r\n"
+        too_large_resp = "{too_large_resp}Connection: close\r\n"
+        too_large_resp = "{too_large_resp}\r\n"
+        too_large_resp = "{too_large_resp}{too_large}"
+        stream.write_all(too_large_resp)
+        return
+    if resume_status != "ok":
         val bad = "{\"error\": \"invalid_resume_body\"}"
         var bad_resp = "HTTP/1.1 400 Bad Request\r\n"
         bad_resp = "{bad_resp}Content-Type: application/json\r\n"
