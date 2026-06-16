@@ -39,17 +39,17 @@ trailing unbalanced `}`. Expected element: `{"range":{"start":{..},"end":{..}},"
 capture attempt in the originating session returned no rows — invocation/trigger needs
 re-checking: `bin/simple run src/app/cli/query.spl code-actions <file> <line>`).
 
-## Defect 3 — interpreter substring/loop off-by-one blocked the fix (NEEDS ISOLATION)
-The attempted fix added `_extract_emitted_range` to forward the emitted Range (rebuilt
-with the request URI). Two extraction strategies both mis-extracted by exactly one `}` on
-input verified by hand to be well-formed:
-- a brace-depth counter over-ran (returned the Range **plus** the sibling `newText`);
-- a between-markers scan (`substring` from after `"range":` to the next `,"newText":`)
-  under-ran by one `}` (dropped the Range's closing brace).
-Both point at a `text.substring`/while-loop-index subtlety in the interpreter, not a logic
-error. Reproduce in isolation with a minimal `substring`-scan over a fixed string and
-compare interpreter vs native. The fix was **reverted** rather than ship a malformed
-`range`.
+## Defect 3 — ROOT CAUSE (corrected): `}}` collapses in string literals
+The attempted parser fix `_extract_emitted_range` appeared to mis-extract by one `}`. That
+was a **red herring**: the bug is **`string_literal_double_brace_collapse_2026-06-16`** —
+`{{`/`}}` inside ANY string literal collapse to a single brace. The probe inputs (built with
+`}}` literals) were silently corrupted, so substring/loops operated on mangled data.
+`text.substring` is NOT buggy. Crucially, the EMITTER has the same disease: `query_navigation`
+builds the edit JSON with `}}` string literals, so Defect 2's "brace imbalance" is really this
+collapse — the emitted JSON is genuinely missing closing braces and is malformed on the wire.
+
+See [[string_literal_double_brace_collapse_2026-06-16]] for the minimal repro and the
+build-via-concatenation workaround.
 
 ## Proposed fix (next session)
 1. Fix Defect 2 (one brace in `query_navigation.spl` push3) and empirically confirm valid JSON.
