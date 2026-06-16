@@ -15,7 +15,7 @@ host operating systems, and anyone picking between `ui.cli`, `ui.tui`,
 
 For the architecture diagram and the four drawing-layer variations
 (SimpleOS / host OS / Chromium / Electron), see
-[`doc/04_architecture/platform/cross_platform_wm.md`](../04_architecture/cross_platform_wm.md).
+[`doc/04_architecture/platform/cross_platform_wm.md`](../../04_architecture/platform/cross_platform_wm.md).
 
 ## 1. The model: UISession
 
@@ -72,7 +72,7 @@ the pixels (or characters) go.
 | `ui.tui` | termios + cells | interactive terminal UI | stable |
 | `ui.tui_web` | browser-hosted TUI | debugging TUI over a webpage | experimental |
 | `ui.browser` | HTMLCanvas in a browser | V3 drawing stack (pure Simple in browser) | experimental |
-| `ui.web` | DOM via widget→HTML mapping | static-site export | experimental |
+| `ui.web` | DOM via widget→HTML mapping, served browser runtime, WebSocket bridge | production web boundary and export | experimental |
 | `ui.electron` | Electron BrowserWindow | V4 drawing stack | advisory/dev-preview |
 | `ui.tauri` | Tauri webview | alt-desktop shell | experimental |
 
@@ -245,7 +245,7 @@ protocol, another webview), it needs:
 4. Capability declaration: advertise at `start`.
 5. A `wm_compare` scene registration that can run against this backend.
 6. A row in the Platform Support Matrix
-   ([arch doc](../04_architecture/cross_platform_wm.md#platform-support-matrix)).
+   ([arch doc](../../04_architecture/platform/cross_platform_wm.md#platform-support-matrix)).
 7. A row in this guide's backend inventory (section 2 above).
 
 If the new renderer is below the compositor (pure Simple on a novel
@@ -350,7 +350,7 @@ Notes:
   `scripts/check/`; using `dirname/..` resolves repo-root to `scripts/` and breaks
   every GUI launch ("no GUI-enabled driver found").
 - Full root cause + recipe:
-  [`doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md`](../08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md).
+  [`doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md`](../../08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md).
 
 ## 10. Pointers
 
@@ -364,8 +364,8 @@ Notes:
 - Capabilities: `src/lib/common/ui/capability.spl`,
   `capability_policy.spl`
 - Profiles + viewport: `src/lib/common/ui/profile.spl`, `viewport.spl`
-- Architecture: [`doc/04_architecture/platform/cross_platform_wm.md`](../04_architecture/cross_platform_wm.md)
-- GUI/WM restart plan: [`doc/03_plan/simple_gui_wm_restart_2026-05-28.md`](../03_plan/simple_gui_wm_restart_2026-05-28.md)
+- Architecture: [`doc/04_architecture/platform/cross_platform_wm.md`](../../04_architecture/platform/cross_platform_wm.md)
+- GUI/WM restart plan: [`doc/03_plan/os/wm/simple_gui_wm_restart_2026-05-28.md`](../../03_plan/os/wm/simple_gui_wm_restart_2026-05-28.md)
 - Cross-backend parity harness: `src/app/wm_compare/`
-- Semantic UI access surface: [tooling/ui_access.md](tooling/ui_access.md)
+- Semantic UI access surface: [`doc/07_guide/app/ui/ui_access.md`](../app/ui/ui_access.md)
 - macOS on-screen GUI launcher: `scripts/gui/macos-gui-run.shs` (see §9)

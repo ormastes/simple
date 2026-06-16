@@ -135,6 +135,34 @@ is walked right-to-left and the first non-proxy hop is taken as the client.
 
 ---
 
+## Simple Web Browser Production Boundary
+
+`src/app/ui.web` is the served Simple Web/browser boundary, so production mode
+must fail closed before it mints tokens or upgrades WebSockets:
+
+- `SIMPLE_UI_WEB_TOKEN_SECRET` is required for production token signing.
+- `SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1` is only for explicit non-TLS local
+  development fallback.
+- TLS serving must never use the insecure dev secret fallback.
+- `/ui/login` requires an allowed `Origin` and is bounded by body-size and
+  fixed-window burst gates.
+- `/ui/ws`, legacy `/ws`, `/ui/resume`, and sensitive `/api/*` routes require an
+  origin-bound bearer token.
+- Browser clients should carry bearer tokens in `Sec-WebSocket-Protocol`;
+  query-string bearer extraction is disabled by default and only enabled with
+  `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` for explicit compatibility tests.
+
+Focused evidence:
+
+```bash
+bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180
+```
+
+The implementation report is
+`doc/09_report/simple_web_browser_production_hardening.md`.
+
+---
+
 ## IDOR Prevention
 
 Always verify resource ownership before allowing access:

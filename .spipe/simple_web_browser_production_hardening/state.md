@@ -33,7 +33,7 @@ Harden the Simple Web/browser production boundary so renderer parity, browser br
 
 ## Phase
 
-implementation
+verification / requirement-selection pending
 
 ## Log
 
@@ -81,3 +81,8 @@ implementation
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180` passes with 2 live endpoint scenarios after query-token fallback was disabled by default.
 - verify: `bin/simple spipe-docgen test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl --output doc/06_spec` completes with existing docgen warnings and stub-style manuals.
 - verify: `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`.
+- docs: Added a `current` feature tracking row and refreshed UI guide links for
+  the canonical production renderer parity and live web endpoint hardening
+  gates. The lane is not `done` because final feature/NFR option selection,
+  trace-ID backfill, and native macOS Metal / AMD ROCm host evidence remain
+  open.

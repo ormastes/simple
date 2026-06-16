@@ -149,11 +149,10 @@ for explicit compatibility testing.
 |-----------|------|--------|
 | M1-M12 | 132/132 corpus, Acid2, 30/30 design effects | Complete |
 | M13 | Float layout, CSS quick wins, 132-corpus regression | Complete (AC-7 WPT waived) |
-| M14+ | See `doc/03_plan/simple_browser_chrome_class_roadmap.md` | Planned |
+| M14+ | See `doc/03_plan/ui/web_browser/simple_browser_chrome_class_roadmap.md` | Planned |
 
 ## References
 
-- [Chrome-class roadmap M13-M24](../03_plan/simple_browser_chrome_class_roadmap.md)
-- [ADR-002: Canonical Browser Engine](../04_architecture/adr/ADR-002-canonical-browser-engine.md)
+- [Chrome-class roadmap M13-M24](../../03_plan/ui/web_browser/simple_browser_chrome_class_roadmap.md)
+- [ADR-002: Canonical Browser Engine](../../04_architecture/adr/ADR-002-canonical-browser-engine.md)
 - [CSS 2.1 Float Specification](https://www.w3.org/TR/CSS2/visuren.html#floats)
-- [M13 SStack state](.sstack/m13-float-css-quickwins/state.md)

@@ -2,8 +2,9 @@
 
 ## Status
 
-Current plan maps the implemented hardening behavior to executable evidence.
-Final `REQ-*` and `NFR-*` trace IDs remain pending requirement selection.
+Snapshot: 2026-06-16. Current plan maps the implemented hardening behavior to
+executable evidence. Final `REQ-*` and `NFR-*` trace IDs remain pending
+requirement selection.
 
 ## Executable Coverage
 
@@ -11,10 +12,10 @@ Final `REQ-*` and `NFR-*` trace IDs remain pending requirement selection.
 |---------|----------|----------------|
 | Secret policy, origin guard, login burst gate | `test/01_unit/app/ui/web_auth_hardening_spec.spl` | passing |
 | Bearer extraction and query-token compatibility gate | `test/01_unit/app/ui/ws_handler_spec.spl` | passing |
-| Live `/ui/login`, `/api/state`, `/ui/ws` fail-closed behavior | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing in prior state |
-| Positive token mint and WebSocket upgrade | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing in prior state |
+| Live `/ui/login`, `/api/state`, `/ui/ws` fail-closed behavior | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
+| Positive token mint and WebSocket upgrade | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Renderer parity gate | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | passing |
-| GPU environment matrix | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | Linux Vulkan/CUDA/OpenCL pass; Metal/ROCm host-unavailable |
+| GPU environment matrix | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | Linux Vulkan/CUDA/OpenCL pass; Metal/ROCm host-unavailable; host-GPU queue first-render budget remains a follow-up |
 
 ## Required Commands
 
