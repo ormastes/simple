@@ -28,7 +28,7 @@ md_wysiwyg_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -190,6 +190,34 @@ expect(narrow_ink * 10).to_be_greater_than(wide_ink * 9)
 
 </details>
 
+#### preserves leading indentation in fenced code blocks
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# Inside a ``` fence, lines render as preformatted monospace and keep their
+# indentation (web_render_preformatted_whitespace_not_preserved). Oracle:
+# an indented code line's first black glyph sits well to the right of an
+# unindented code line's first glyph. (The ``` delimiters are hidden and a
+# leading # stays code, not a heading.)
+val indented = _render_markdown("```\n        code_x()\n```", 300, 80)
+val plain = _render_markdown("```\ncode_x()\n```", 300, 80)
+expect(indented.len()).to_equal(300 * 80)
+val indented_col = _min_color_col(indented, 0xFF000000u32, 300)
+val plain_col = _min_color_col(plain, 0xFF000000u32, 300)
+# both code lines actually paint glyph ink
+expect(plain_col).to_be_less_than(300)
+expect(indented_col).to_be_less_than(300)
+# the 8-space indent shifts the first glyph far to the right
+expect(indented_col).to_be_greater_than(plain_col + 30)
+```
+
+</details>
+
 #### reserves wrapped-text height so a following block does not overlap
 
 <details>
@@ -243,8 +271,8 @@ expect(_count_non_bg(b, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
