@@ -32,8 +32,11 @@ gated offload + CPU fallback), built via parallel agent teams and differential-v
   **DONE for routing+gating** (backend_dispatch.spl; 9/9). **Per-backend kernel EMISSION now
   DONE** (gpu_compute_algorithm_kernels.spl; 8/8) — real CUDA/HIP/OpenCL/Metal/WebGPU source
   for transform-scale + saxpy, verified by backend markers, consistent w/ gpu_portable_compute.
-  Remaining: runtime GPU EXECUTION on hardware (compile PTX/SPIR-V/metallib + launch + readback)
-  needs a device; CPU reference runs meanwhile (no masquerade).
+  **End-to-end RUNTIME PIPELINE now wired** (compute_run.spl; 5/5): builds 1D launch plan,
+  gates on gpu_device_count(), real gpu_ops GPU sequence (alloc/upload/load-module/launch/
+  sync/download/free) on-device, else CPU oracle. Remaining true gap: GPU silicon execution
+  (needs CUDA device + nvcc to compile PTX + validate the kernel-arg ABI); without a device
+  it falls back to the verified CPU reference (no masquerade).
 - AC-6 no gpu-named fn silently on CPU (ComputeStats.ran_on_cpu honest) — **DONE**.
 - AC-7 built via parallel agent teams; co-goal bugs tracked — **DONE** (3 agents; bug filed).
 
@@ -48,11 +51,15 @@ gated offload + CPU fallback), built via parallel agent teams and differential-v
   `doc/08_tracking/bug/interp_generic_eq_callback_2026-06-16.md`. Worked around via `less`.
 - B-claim2 (REJECTED): "expect(bool).to_be() non-discriminating" — empirically FALSE
   (probe: false.to_be(true) fails, true/false.to_be(matching) pass). Not filed.
+- B-new3 (REAL, filed): `block`/`grid` as identifier names trip the parser (E0002 at a later
+  named-field construction) → `doc/08_tracking/bug/interp_block_grid_identifier_parser_2026-06-16.md`.
+  Worked around via `grid_dim`/`block_dim`.
 
 ## Open / next
-- Real GPU-kernel emission per backend (cuda/metal/vulkan) via gpu_portable_compute/@gpu_kernel.
+- GPU silicon execution: nvcc-compile emitted kernels → PTX, validate kernel-arg ABI on a CUDA
+  device (compute_pack_scale_args), then differential-verify GPU result == CPU oracle.
 - `std.compute` __init__ namespace export wiring (currently import via full tier path).
-- Atomics/Bitset/Complex container parity (B4) — deferred.
+- Atomics/Bitset/Complex container parity (B4); reduce/scan cooperative GPU kernels — deferred.
 
 ## Phase
 dev-done → impl landed (foundation + surface + dispatch); GPU-kernel execution open.
