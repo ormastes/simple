@@ -64,3 +64,9 @@ implementation
 - plan: Added `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` for local NVIDIA Vulkan/CUDA/OpenCL, Linux Vulkan CPU emulation, macOS Metal, Linux AMD ROCm/HIP, and QEMU/emulation lanes.
 - verify: Local GPU environment probes show Vulkan Engine2D readback `pass`; Metal generated readback host-unavailable with `missing-primary-tool`; ROCm generated readback host-unavailable with `missing-primary-tool`.
 - verify: Aggregate host GPU queue wrapper reports Vulkan/CUDA/OpenCL readback `pass`, Metal/ROCm host-unavailable, and aggregate queue integration `fail` due `browser-frame-first-render-budget-not-met`.
+- impl: Rewrote UI route auth gates and WM login origin handling to avoid early `return` inside value-producing `match` expressions on fail-closed paths.
+- impl: Added explicit `/ui/resume` and `/ui/ws` authorization coverage proving missing bearer, disallowed origin, malformed token, and valid origin-bound bearer outcomes.
+- verify: `bin/simple check src/app/ui.web/ui_routes.spl src/app/ui.web/server.spl test/01_unit/app/ui/web_auth_hardening_spec.spl` passes.
+- verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 12 scenarios.
+- verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 9 scenarios.
+- verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180` passes with 2 live endpoint scenarios.

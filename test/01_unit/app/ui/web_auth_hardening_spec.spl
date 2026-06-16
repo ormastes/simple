@@ -53,6 +53,19 @@ describe "ui.web production auth hardening":
         expect(ui_web_authorization_status("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_equal("invalid_bearer")
         expect(ui_web_request_authorized("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_be(false)
 
+    it "requires origin-bound bearer tokens for websocket and resume routes":
+        val guard = OriginGuard(allowed: ["https://localhost"])
+        val secret = "unit-test-secret"
+        val token = SessionToken.issue("resume-grant", "https://localhost", 3600000u64, secret).serialize()
+        val headers = "Origin: https://localhost\nAuthorization: Bearer {token}\n"
+        val ws_headers = "Origin: https://localhost\nSec-WebSocket-Protocol: simple-ui, bearer.{token}\n"
+
+        expect(ui_web_authorization_status("Origin: https://localhost\n", "/ui/resume", guard, secret, 1000u64)).to_equal("missing_bearer")
+        expect(ui_web_authorization_status("Origin: https://evil.example\nAuthorization: Bearer {token}\n", "/ui/resume", guard, secret, 1000u64)).to_equal("forbidden_origin")
+        expect(ui_web_authorization_status("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/ui/resume", guard, secret, 1000u64)).to_equal("invalid_bearer")
+        expect(ui_web_authorization_status(headers, "/ui/resume", guard, secret, 1000u64)).to_equal("ok")
+        expect(ui_web_authorization_status(ws_headers, "/ui/ws", guard, secret, 1000u64)).to_equal("ok")
+
     it "rejects malformed, expired, and wrong-origin serialized tokens before authorization succeeds":
         val expired = SessionToken(token_id: "tok", grant_id: "grant", origin: "https://localhost", expires_at_ms: 100u64, signature: "sig").serialize()
         val wrong_origin = SessionToken(token_id: "tok", grant_id: "grant", origin: "https://localhost", expires_at_ms: 5000u64, signature: "sig").serialize()

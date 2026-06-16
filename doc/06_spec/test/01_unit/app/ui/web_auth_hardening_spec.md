@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -158,6 +158,30 @@ expect(ui_web_request_authorized("Origin: https://localhost\nAuthorization: Bear
 
 </details>
 
+#### requires origin-bound bearer tokens for websocket and resume routes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val guard = OriginGuard(allowed: ["https://localhost"])
+val secret = "unit-test-secret"
+val token = SessionToken.issue("resume-grant", "https://localhost", 3600000u64, secret).serialize()
+val headers = "Origin: https://localhost\nAuthorization: Bearer {token}\n"
+val ws_headers = "Origin: https://localhost\nSec-WebSocket-Protocol: simple-ui, bearer.{token}\n"
+
+expect(ui_web_authorization_status("Origin: https://localhost\n", "/ui/resume", guard, secret, 1000u64)).to_equal("missing_bearer")
+expect(ui_web_authorization_status("Origin: https://evil.example\nAuthorization: Bearer {token}\n", "/ui/resume", guard, secret, 1000u64)).to_equal("forbidden_origin")
+expect(ui_web_authorization_status("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/ui/resume", guard, secret, 1000u64)).to_equal("invalid_bearer")
+expect(ui_web_authorization_status(headers, "/ui/resume", guard, secret, 1000u64)).to_equal("ok")
+expect(ui_web_authorization_status(ws_headers, "/ui/ws", guard, secret, 1000u64)).to_equal("ok")
+```
+
+</details>
+
 #### rejects malformed, expired, and wrong-origin serialized tokens before authorization succeeds
 
 <details>
@@ -269,8 +293,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
