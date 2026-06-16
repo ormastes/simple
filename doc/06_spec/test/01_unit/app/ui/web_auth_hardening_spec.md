@@ -143,7 +143,7 @@ expect(guard.check("Origin: http://localhost:9090\n").is_err()).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -151,6 +151,8 @@ val guard = OriginGuard(allowed: ["https://localhost"])
 val secret = "unit-test-secret"
 val now = 1000u64
 expect(ui_web_authorization_status("Origin: https://localhost\n", "/api/state", guard, secret, now)).to_equal("missing_bearer")
+expect(ui_web_authorization_status("Origin: https://localhost\n", "/api/widgets", guard, secret, now)).to_equal("missing_bearer")
+expect(ui_web_authorization_status("Origin: https://localhost\n", "/api/clients", guard, secret, now)).to_equal("missing_bearer")
 expect(ui_web_authorization_status("Origin: https://evil.example\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_equal("forbidden_origin")
 expect(ui_web_authorization_status("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_equal("invalid_bearer")
 expect(ui_web_request_authorized("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_be(false)

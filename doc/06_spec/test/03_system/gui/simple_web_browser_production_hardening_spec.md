@@ -120,7 +120,7 @@ expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,6 +154,9 @@ hardening_stop_web_server(pid)
 
 step("Verify login succeeds, GET upgrades are accepted, and POST upgrades are rejected")
 expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
+expect(login_response).to_contain("Cache-Control: no-store")
+expect(login_response).to_contain("Pragma: no-cache")
+expect(login_response).to_contain("X-Content-Type-Options: nosniff")
 expect(token.len()).to_be_greater_than(20)
 expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
 expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")

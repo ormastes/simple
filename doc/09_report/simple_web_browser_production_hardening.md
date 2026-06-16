@@ -20,7 +20,10 @@
 - TLS mode never uses the insecure dev secret.
 - Login origin checks fail closed before token minting.
 - `/ui/ws`, legacy `/ws`, `/ui/resume`, and sensitive `/api/*` require
-  origin-bound bearer authorization.
+  origin-bound bearer authorization, including `/api/state`, `/api/widgets`,
+  and the async `/api/clients` route.
+- Token-bearing JSON responses set `Cache-Control: no-store`, `Pragma:
+  no-cache`, and `X-Content-Type-Options: nosniff`.
 - Authorized `/ui/resume` rejects missing or malformed `session_id`,
   `snapshot_revision`, or `last_sequence` with `400 Bad Request`, and accepts
   strict valid body fields in the normal TCP server path.

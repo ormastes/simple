@@ -132,3 +132,9 @@ verification / requirement-selection pending
 - docs: Aligned GPU/browser release blockers across architecture, plan, and
   report so Metal, AMD ROCm, DirectX, and browser WebGPU native proof all remain
   explicit external-host evidence requirements.
+- verify: Extended sensitive API auth policy unit coverage to name
+  `/api/widgets` and async `/api/clients` alongside `/api/state`.
+- docs: Aligned `doc/07_guide/app/ui/ui_render.md` with the current live
+  browser-hardening command timeout of `--timeout 360`.
+- verify: Added live coverage that token-bearing `/ui/login` JSON responses set
+  no-store/no-cache and anti-sniff headers.
