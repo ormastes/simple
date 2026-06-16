@@ -75,7 +75,7 @@ capabilities: 5
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
-  check: slides: app.office.slides count=2 thumb=Slide 2: (Content) canvas=2 outline=2 designs=2 css=true transform=true
+  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   gui: gui-backend: theme=dark size=1200x800 md=true ppt=true sheet=true config=true
@@ -96,11 +96,11 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
 
 #### prints the complete TUI feature-check manual through the app entrypoint
 
-1. Run the IDE feature-check command in TUI mode
+- Run the IDE feature-check command in TUI mode
    - Expected: code equals `0`
-2. Review the feature-check header and TUI mode
-3. Confirm every Office plugin capability is visible
-4. Capture the TUI report so the manual shows the CLI surface
+- Review the feature-check header and TUI mode
+- Confirm every Office plugin capability is visible
+- Capture the TUI report so the manual shows the CLI surface
    - Expected: _write_tui_capture(out) equals `0`
    - Expected: _capture_file_state(out) equals `matched`
 
@@ -138,10 +138,10 @@ expect(_capture_file_state(out)).to_equal("matched")
 
 #### prints the complete GUI feature-check manual through the app entrypoint
 
-1. Run the IDE feature-check command in GUI mode
+- Run the IDE feature-check command in GUI mode
    - Expected: code equals `0`
-2. Review the feature-check header and GUI mode
-3. Confirm GUI launch and panel summaries are visible
+- Review the feature-check header and GUI mode
+- Confirm GUI launch and panel summaries are visible
 
 
 <details>
@@ -169,9 +169,9 @@ expect(out).to_contain("launch: launch: tui=tui gui=gui sdl=gui-sdl")
 
 #### keeps normal IDE help and unknown option behavior intact
 
-1. Open IDE help through the production entrypoint
+- Open IDE help through the production entrypoint
    - Expected: help_code equals `0`
-2. Submit an unknown IDE option
+- Submit an unknown IDE option
    - Expected: bad_code equals `1`
 
 
@@ -191,7 +191,7 @@ expect(help_out).to_contain("--feature-check")
 step("Submit an unknown IDE option")
 val (bad_out, bad_err, bad_code) = _run_ide(["--bad-mode"])
 expect(bad_code).to_equal(1)
-expect(bad_out).to_contain("Unknown option: --bad-mode")
+expect(bad_out).to_contain("Error: unknown option '--bad-mode'")
 ```
 
 </details>

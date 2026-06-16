@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -157,7 +157,7 @@ expect(run_office(["unknown"])).to_equal(1)
 
 #### builds launcher ui
 
-1. RecentFile
+- RecentFile
    - Expected: ui.root_id equals `root`
 
 
@@ -173,6 +173,28 @@ val recent = [
 ]
 val ui = build_launcher_ui(recent)
 expect(ui.root_id).to_equal("root")
+```
+
+</details>
+
+#### keeps launcher actions allowlisted and rejects counter actions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(launcher_action_allowlist().len()).to_equal(5)
+expect(launcher_open_action("word")).to_equal("open_word")
+expect(is_valid_launcher_action("open_word")).to_equal(true)
+expect(is_valid_launcher_action("open_counter")).to_equal(false)
+val slides = launcher_action_to_component("open_slides")
+expect(slides.is_some()).to_equal(true)
+expect(slides.unwrap()).to_equal("slides")
+val counter = launcher_action_to_component("open_counter")
+expect(counter.is_none()).to_equal(true)
 ```
 
 </details>
@@ -264,10 +286,10 @@ expect(ui.root_id).to_equal("root")
 
 #### adds slides image element without fake asset path
 
-1. var app = SlidesApp new
-2. app handle event
+- var app = SlidesApp new
+- app handle event
    - Expected: slide.elements.len() equals `2`
-3. SlideElementKind ImageEl
+- SlideElementKind ImageEl
    - Expected: src equals ``
    - Expected: alt equals `Image Frame`
    - Expected: false is true
@@ -345,8 +367,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
