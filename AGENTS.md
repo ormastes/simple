@@ -75,6 +75,13 @@ same passing `bin/simple test`/`check` 30–40× each). That is the #1 cause of 
   / `--yolo`.** Reloading a multi-million-token poisoned rollout re-triggers the
   same loop. Start a fresh, scoped session instead.
 
+**Operational backstop:** launch codex via `bin/codex …` (or put repo `bin/`
+ahead of `~/.npm-global/bin` on `PATH`), which routes through
+`scripts/check/codex-run-guard.shs`. The guard refuses to resume a rollout that
+already exceeded `CODEX_GUARD_MAX_RESUME_TOKENS` (default 20M) and applies
+wall-clock / RSS caps to unattended `--yolo` runs. It fires even when an agent
+ignores the rules above. Override a refusal with `CODEX_GUARD_FORCE=1`.
+
 ---
 
 ## Concurrent LLM Work

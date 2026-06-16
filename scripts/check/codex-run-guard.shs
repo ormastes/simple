@@ -1,0 +1,176 @@
+#!/bin/sh
+# codex-run-guard.shs — operational backstop around `codex` launches.
+#
+# Wraps the real `codex` binary and enforces three caps that the AGENTS.md
+# "Termination & Runaway Guard" rules ask agents to self-enforce — here as a
+# process-level backstop that fires even when an agent ignores those rules:
+#
+#   1. Pre-flight poison-rollout refusal: refuse `codex resume <id>` when the
+#      target rollout already accumulated more than CODEX_GUARD_MAX_RESUME_TOKENS
+#      input tokens. Reloading a 99M-179M-token rollout re-triggers the same
+#      runaway loop that abnormally ended past sessions — so we block it.
+#   2. Wall-clock cap: kill the codex process tree after CODEX_GUARD_MAX_SECONDS.
+#   3. RSS cap: kill the codex process tree if its total RSS exceeds
+#      CODEX_GUARD_MAX_RSS_MB.
+#
+# Caps 2 and 3 default OFF for interactive runs (a human is present) and switch
+# to generous defaults automatically when an unattended bypass flag
+# (--dangerously-bypass-approvals-and-sandbox / --yolo) is passed. Cap 1 always
+# runs. All thresholds are env-overridable; CODEX_GUARD_FORCE=1 bypasses cap 1.
+#
+# codex runs in the FOREGROUND (keeps the controlling terminal, so the TUI works
+# and no SIGTTIN); a sibling watchdog monitors and kills the tree on breach.
+set -eu
+
+log() { echo "[codex-run-guard] $*" >&2; }
+
+# --- resolve the real codex, skipping this wrapper / bin/codex ------------------
+SELF_REAL=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
+REAL_CODEX="${CODEX_REAL_BIN:-}"
+if [ -z "$REAL_CODEX" ]; then
+    _ifs=$IFS; IFS=:
+    for _d in $PATH; do
+        _c="$_d/codex"
+        [ -x "$_c" ] || continue
+        case "$(cd "$_d" 2>/dev/null && pwd)/codex" in
+            "$SELF_REAL") ;;                       # never recurse into ourselves
+            */bin/codex)  ;;                       # skip the repo bin/codex launcher
+            *) REAL_CODEX="$_c"; break ;;
+        esac
+    done
+    IFS=$_ifs
+fi
+if [ -z "$REAL_CODEX" ] || [ ! -x "$REAL_CODEX" ]; then
+    log "FATAL: could not locate the real 'codex' binary (set CODEX_REAL_BIN)."
+    exit 127
+fi
+
+# --- thresholds -----------------------------------------------------------------
+MAX_RESUME_TOKENS="${CODEX_GUARD_MAX_RESUME_TOKENS:-20000000}"   # 20M input tokens
+POLL_INTERVAL="${CODEX_GUARD_POLL_SECONDS:-15}"
+
+# --- scan args: detect resume <id> and unattended bypass ------------------------
+BYPASS=0
+RESUME=0
+SID=""
+_prev=""
+for _a in "$@"; do
+    case "$_a" in
+        --dangerously-bypass-approvals-and-sandbox|--yolo) BYPASS=1 ;;
+        resume) RESUME=1 ;;
+    esac
+    if [ "$RESUME" = 1 ] && [ -z "$SID" ] && [ "$_a" != "resume" ]; then
+        case "$_a" in
+            -*) : ;;                                # a flag, not the session id
+            *)  SID="$_a" ;;                        # first positional after resume
+        esac
+    fi
+    _prev="$_a"
+done
+
+# Wall-clock / RSS caps: off unless set; auto-enable generous defaults for bypass.
+if [ "$BYPASS" = 1 ]; then
+    MAX_SECONDS="${CODEX_GUARD_MAX_SECONDS:-14400}"     # 4h
+    MAX_RSS_MB="${CODEX_GUARD_MAX_RSS_MB:-49152}"       # 48 GiB tree RSS
+else
+    MAX_SECONDS="${CODEX_GUARD_MAX_SECONDS:-0}"
+    MAX_RSS_MB="${CODEX_GUARD_MAX_RSS_MB:-0}"
+fi
+
+# --- cap 1: pre-flight poison-rollout refusal -----------------------------------
+if [ "$RESUME" = 1 ] && [ -n "$SID" ] && [ "$MAX_RESUME_TOKENS" -gt 0 ] 2>/dev/null; then
+    ROLLOUT=$(find "$HOME/.codex/sessions" -name "rollout-*$SID*.jsonl" 2>/dev/null | head -1 || true)
+    if [ -n "$ROLLOUT" ]; then
+        PEAK=$(grep -o '"input_tokens":[0-9]\{1,\}' "$ROLLOUT" 2>/dev/null \
+               | grep -o '[0-9]\{1,\}' | sort -n | tail -1 || true)
+        [ -z "$PEAK" ] && PEAK=0
+        if [ "$PEAK" -gt "$MAX_RESUME_TOKENS" ] 2>/dev/null; then
+            log "REFUSING resume of $SID: rollout peaked at ${PEAK} input tokens"
+            log "  (> CODEX_GUARD_MAX_RESUME_TOKENS=${MAX_RESUME_TOKENS}). This is a runaway/"
+            log "  poison rollout — reloading it re-triggers the loop. Start a fresh session,"
+            log "  or set CODEX_GUARD_FORCE=1 to override."
+            [ "${CODEX_GUARD_FORCE:-0}" = 1 ] || exit 3
+            log "  CODEX_GUARD_FORCE=1 set — proceeding against advice."
+        fi
+    fi
+fi
+
+# --- launch codex (foreground) + sibling watchdog -------------------------------
+if [ "$MAX_SECONDS" -le 0 ] 2>/dev/null && [ "$MAX_RSS_MB" -le 0 ] 2>/dev/null; then
+    exec "$REAL_CODEX" "$@"            # no runtime caps active: hand off cleanly
+fi
+
+GUARD_PID=$$
+
+# sum RSS (KiB) of GUARD_PID's descendants — the codex tree (codex + simple/electron)
+tree_rss_kb() {
+    _all=$1
+    _frontier=$1
+    while [ -n "$_frontier" ]; do
+        _next=""
+        for _p in $_frontier; do
+            _kids=$(ps -o pid= --ppid "$_p" 2>/dev/null || true)
+            _next="$_next $_kids"
+        done
+        _frontier=$_next
+        _all="$_all $_next"
+    done
+    _total=0
+    for _p in $_all; do
+        _r=$(ps -o rss= -p "$_p" 2>/dev/null | tr -d ' ' || true)
+        [ -n "$_r" ] && _total=$((_total + _r))
+    done
+    echo "$_total"
+}
+
+kill_tree() {
+    _all=$1; _frontier=$1
+    while [ -n "$_frontier" ]; do
+        _next=""
+        for _p in $_frontier; do
+            _kids=$(ps -o pid= --ppid "$_p" 2>/dev/null || true)
+            _next="$_next $_kids"
+        done
+        _frontier=$_next; _all="$_all $_next"
+    done
+    for _p in $_all; do kill -TERM "$_p" 2>/dev/null || true; done
+    sleep 3
+    for _p in $_all; do kill -KILL "$_p" 2>/dev/null || true; done
+}
+
+watchdog() {
+    _elapsed=0
+    while :; do
+        sleep "$POLL_INTERVAL"
+        _elapsed=$((_elapsed + POLL_INTERVAL))
+        # find the codex child of the guard (by command, excluding this guard and
+        # the watchdog itself); exit once it's gone.
+        _codex=$(ps -o pid=,args= --ppid "$GUARD_PID" 2>/dev/null \
+                 | grep -i codex | grep -v codex-run-guard \
+                 | awk '{print $1; exit}' || true)
+        [ -z "$_codex" ] && return 0
+        if [ "$MAX_SECONDS" -gt 0 ] 2>/dev/null && [ "$_elapsed" -ge "$MAX_SECONDS" ]; then
+            log "WALL-CLOCK CAP: ${_elapsed}s >= ${MAX_SECONDS}s — killing codex tree."
+            kill_tree "$_codex"; return 0
+        fi
+        if [ "$MAX_RSS_MB" -gt 0 ] 2>/dev/null; then
+            _rss_kb=$(tree_rss_kb "$_codex")
+            _rss_mb=$((_rss_kb / 1024))
+            if [ "$_rss_mb" -ge "$MAX_RSS_MB" ]; then
+                log "RSS CAP: tree ${_rss_mb}MiB >= ${MAX_RSS_MB}MiB — killing codex tree."
+                kill_tree "$_codex"; return 0
+            fi
+        fi
+    done
+}
+
+log "guard active (bypass=$BYPASS max_seconds=$MAX_SECONDS max_rss_mb=$MAX_RSS_MB) -> $REAL_CODEX"
+watchdog &
+WD=$!
+trap 'kill "$WD" 2>/dev/null || true' EXIT INT TERM
+# codex runs in the FOREGROUND so the TUI keeps the controlling terminal (no
+# SIGTTIN); the backgrounded watchdog kills the tree on a wall-clock/RSS breach.
+RC=0
+"$REAL_CODEX" "$@" || RC=$?
+kill "$WD" 2>/dev/null || true
+exit $RC
