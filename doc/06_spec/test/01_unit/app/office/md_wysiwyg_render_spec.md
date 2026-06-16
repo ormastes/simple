@@ -28,7 +28,7 @@ md_wysiwyg_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -135,6 +135,32 @@ expect(_pixels_equal(pixels, body_only)).to_be(false)
 
 </details>
 
+#### decodes HTML entities so escaped chars paint as single glyphs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# Markdown body escaping turns `&` into `&amp;` inside the preview HTML.
+# The renderer must DECODE that back to a single `&` glyph, not paint the
+# literal 5-char `&amp;`. Oracle: 8 ampersands and 8 reference glyphs
+# decode to the same glyph COUNT, so their ink is the same order of
+# magnitude. If entities leaked through undecoded, `&amp;`x8 = 40 painted
+# chars would produce several times the ink of 8 glyphs.
+val esc = _render_markdown("&&&&&&&&", 240, 40)
+val plain = _render_markdown("oooooooo", 240, 40)
+expect(esc.len()).to_equal(240 * 40)
+val esc_ink = _count_non_bg(esc, 0xFFFFFFFFu32)
+val plain_ink = _count_non_bg(plain, 0xFFFFFFFFu32)
+expect(esc_ink).to_be_greater_than(0)
+expect(esc_ink).to_be_less_than(plain_ink * 3)
+```
+
+</details>
+
 #### renders different markdown to different framebuffers
 
 <details>
@@ -160,8 +186,8 @@ expect(_count_non_bg(b, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
