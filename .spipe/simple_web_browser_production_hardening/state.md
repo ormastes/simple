@@ -226,3 +226,14 @@ verification / requirement-selection pending
   --mode=interpreter --clean`, and `bin/simple test
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl
   --mode=interpreter --clean --timeout 360` pass.
+- fix: Centralized WebSocket upgrade method policy in
+  `ui_web_ws_upgrade_method_allowed` and reused it in normal, async, and TLS
+  transports so non-GET upgrade-shaped requests return `405 Method Not
+  Allowed` before any WebSocket handshake.
+- verify: `/home/ormastes/dev/pub/simple/bin/simple check
+  src/app/ui.web/ws_handler.spl src/app/ui.web/__init__.spl
+  src/app/ui.web/server.spl src/app/ui.web/async_server.spl
+  src/app/ui.web/tls_serve_loop.spl test/01_unit/app/ui/ws_handler_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl` and
+  `/home/ormastes/dev/pub/simple/bin/simple test
+  test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` pass.

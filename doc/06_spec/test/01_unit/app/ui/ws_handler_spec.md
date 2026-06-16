@@ -28,7 +28,7 @@ ws_handler_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -55,6 +55,22 @@ val lowercase = "Host: localhost\nupgrade: websocket\nconnection: keep-alive, Up
 expect(is_ws_upgrade_request(lowercase)).to_be(true)
 val missing_connection_upgrade = "Host: localhost\nUpgrade: websocket\nConnection: keep-alive\n"
 expect(is_ws_upgrade_request(missing_connection_upgrade)).to_be(false)
+```
+
+</details>
+
+#### allows websocket upgrades only for GET
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_ws_upgrade_method_allowed("GET")).to_be(true)
+expect(ui_web_ws_upgrade_method_allowed("POST")).to_be(false)
+expect(ui_web_ws_upgrade_method_allowed("get")).to_be(false)
 ```
 
 </details>
@@ -242,8 +258,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

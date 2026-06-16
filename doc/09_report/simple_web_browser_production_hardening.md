@@ -8,7 +8,7 @@
   `web_auth_hardening_spec.spl`, and `ws_handler_spec.spl`.
 - Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 17 scenarios.
 - Unit async web spec: `bin/simple test test/01_unit/app/ui/async_web_spec.spl --mode=interpreter --clean` passed with 26 scenarios.
-- Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 10 scenarios.
+- Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 12 scenarios.
 - Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 6 scenarios.
 - Spec docgen: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and regenerated the 6-scenario manual.
 - Production renderer parity: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` passed.
@@ -37,9 +37,9 @@
   production cap before allocating payload buffers.
 - The normal, shared-WM, async, and TLS HTTP entrypoints reject oversized
   request heads, request lines, and header lines before route dispatch.
-- `/ui/ws` and legacy `/ws` reject non-GET WebSocket upgrade attempts with
-  `405 Method Not Allowed` before the socket can be upgraded, even when the
-  request carries a valid origin-bound bearer token.
+- `/ui/ws`, legacy `/ws`, async, and TLS WebSocket upgrade paths reject non-GET
+  upgrade attempts with `405 Method Not Allowed` before the socket can be
+  upgraded, even when the request carries a valid origin-bound bearer token.
 - WebSocket upgrade detection and key extraction honor case-insensitive HTTP
   header names and require a `Connection` token of `Upgrade`; live endpoint
   evidence covers lowercase/mixed-case successful upgrade headers.

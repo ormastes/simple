@@ -22,7 +22,7 @@ user selection.
 | Positive token mint plus `/ui/ws` and legacy `/ws` WebSocket upgrades | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Case-insensitive WebSocket upgrade headers and comma-token `Connection` parsing | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | Inbound WebSocket frame payload length cap before allocation | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` regression run | passing |
-| Non-GET WebSocket upgrade rejection for `/ui/ws` and legacy `/ws` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
+| Non-GET WebSocket upgrade rejection for `/ui/ws`, legacy `/ws`, async, and TLS upgrade paths | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 for normal/shared live paths and shared async/TLS predicate coverage |
 | Warm login plus authenticated WebSocket upgrade latency | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | measured locally with a 10s ceiling |
 | Live `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Live shared-WM `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
@@ -69,7 +69,7 @@ current evidence artifact without promoting unselected scope.
 | `REQ-WEB-HARD-009` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | `REQ-WEB-HARD-010` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` child-process cleanup path | passing |
 | `REQ-WEB-HARD-011` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` normal and shared-WM burst scenarios | passing |
-| `REQ-WEB-HARD-012` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `REQ-WEB-HARD-012` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; `src/app/ui.web/async_server.spl`; `src/app/ui.web/tls_serve_loop.spl` | passing |
 | `REQ-WEB-HARD-013` | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`; `doc/09_report/simple_web_browser_production_hardening.md` | passing locally |
 | `REQ-WEB-HARD-014` | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | partial: Linux local evidence recorded; Metal/ROCm/DirectX/WebGPU native device-readback requires external hosts |
 | `NFR-WEB-HARD-001` | `test/01_unit/app/ui/web_auth_hardening_spec.spl` | passing |
