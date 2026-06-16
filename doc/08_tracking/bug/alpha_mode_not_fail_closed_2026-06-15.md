@@ -2,8 +2,34 @@
 
 **ID:** alpha_mode_not_fail_closed_2026-06-15
 **Filed:** 2026-06-15
+**Status:** RESOLVED 2026-06-16
 **Severity:** P1 — security contract violation (name promises halt; impl only logs)
 **Component:** src/os/crypto/dual_backend.spl
+
+## Resolution (2026-06-16)
+
+`_dual_backend_alpha_halt` now calls `rt_exit(70)` (EX_SOFTWARE) after logging,
+so a genuine runtime/pure mismatch aborts the process — true fail-closed. Because
+all four comparison paths (`dual_backend_choose_bytes/bool/u64/text`) route their
+alpha mismatch through this one function, the fix covers every type uniformly; the
+`return []/false/0/""` lines after the halt are now unreachable but kept for the
+type checker.
+
+The fix is deliberately narrow: it only fires on a TRUE mismatch (both backends
+produced output and they differ). The one-side-empty *absent-oracle degradation*
+in `dual_backend_choose_bytes` (lines ~187-190) is preserved — many alpha callers
+have no real runtime oracle (e.g. the typed hash layer) and rely on degrading to
+the present side rather than aborting.
+
+Verification:
+- `rt_exit` confirmed to halt under the seed interpreter (probe → `rc=42`).
+- True alpha mismatch out-of-process → process exits `70`, execution does not
+  continue past the mismatch (the test runner spawns one child process per spec
+  file, so this cannot be asserted in-process without crashing the file).
+- In-process specs restructured to assert alpha AGREEMENT (no halt) + the
+  absent-oracle degradation path + BETA-mode mismatch (logs, returns preferred):
+  `test/01_unit/lib/common/crypto/typed/seam_spec.spl` (4 pass),
+  `test/01_unit/os/crypto/dual_backend_alpha_spec.spl` (4 pass, rewritten).
 
 ## Summary
 

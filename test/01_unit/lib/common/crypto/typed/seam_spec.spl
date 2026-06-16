@@ -6,8 +6,16 @@ use std.common.crypto.typed.ctypes.{Digest}
 # NOTE: Digest.hex() returns garbage when seam.spl and ctypes are both imported
 # in fn main() context (double-import interpreter corruption).
 # Filed: doc/08_tracking/bug/digest_hex_double_import_corruption_2026-06-15.md
-# Workaround: assert agreement via ct_eq and byte-level ByteSpan.get(); assert
-# mismatch via .len() == 0.  ct_eq and get() are proven correct in this context.
+# Workaround: assert agreement via ct_eq and byte-level ByteSpan.get().
+#
+# Alpha is now fail-CLOSED (alpha_mode_not_fail_closed_2026-06-15 fixed): a true
+# runtime/pure mismatch (both sides non-empty and differing) calls rt_exit(70) and
+# aborts the process. That behavior CANNOT be asserted in-process — it would crash
+# this spec file's child process — so it is verified out-of-process by a
+# bin/simple run probe that triggers a mismatch and checks the non-zero exit code.
+# Here we assert (a) agreement returns the value and (b) the absent-oracle
+# degradation path (one backend empty) still returns the other side WITHOUT halting
+# — the load-bearing path for callers that have no real runtime oracle.
 
 describe "alpha_run_span":
     it "agreement: two closures returning the same ByteSpan yield that value":
@@ -25,18 +33,21 @@ describe "alpha_run_span":
         expect(s.get(2).to_i64()).to_equal(3)
         expect(s.get(3).to_i64()).to_equal(4)
 
-    it "mismatch: two closures returning different ByteSpans yield empty (alpha logs, not abort)":
-        # Alpha mode on mismatch: _dual_backend_alpha_halt logs then returns [].
-        # The seam wraps [] as ByteSpan.new([]) — len == 0.
-        val a: [u8] = [1u8, 2u8, 3u8]
-        val b: [u8] = [4u8, 5u8, 6u8]
+    it "absent-oracle degradation: runtime empty, pure present -> returns pure, no halt":
+        # When one backend is absent (returns []), alpha must NOT halt — it
+        # degrades to the present side. This guards the path every stubbed-runtime
+        # caller relies on; a regression here would abort real crypto calls.
+        val empty: [u8] = []
+        val known: [u8] = [1u8, 2u8, 3u8, 4u8]
         val s = alpha_run_span(
             "test",
-            "mismatch",
-            fn(): ByteSpan.new(a),
-            fn(): ByteSpan.new(b)
+            "degrade",
+            fn(): ByteSpan.new(empty),
+            fn(): ByteSpan.new(known)
         )
-        expect(s.len()).to_equal(0)
+        expect(s.len()).to_equal(4)
+        expect(s.get(0).to_i64()).to_equal(1)
+        expect(s.get(3).to_i64()).to_equal(4)
 
 describe "alpha_run_digest":
     it "agreement: two closures returning the same ByteSpan yield that digest (ct_eq check)":
@@ -53,17 +64,17 @@ describe "alpha_run_digest":
         expect(d.len()).to_equal(3)
         expect(d.ct_eq(expected)).to_equal(true)
 
-    it "mismatch: two different closures yield empty Digest (alpha not-fail-closed contract)":
-        # Bug alpha_mode_not_fail_closed_2026-06-15: alpha logs, returns [].
-        # Digest.new([]).len() == 0, ct_eq(Digest.new([])) == true.
-        val a: [u8] = [170u8]
-        val b: [u8] = [187u8]
+    it "absent-oracle degradation: runtime empty, pure present -> returns pure digest, no halt":
+        # Same degradation guard for the digest seam: a missing runtime backend
+        # must yield the pure digest, never an abort.
+        val empty: [u8] = []
+        val known: [u8] = [1u8, 2u8, 3u8]
         val d = alpha_run_digest(
             "test",
-            "digest_mismatch",
-            fn(): ByteSpan.new(a),
-            fn(): ByteSpan.new(b)
+            "digest_degrade",
+            fn(): ByteSpan.new(empty),
+            fn(): ByteSpan.new(known)
         )
-        val empty = Digest.new([])
-        expect(d.len()).to_equal(0)
-        expect(d.ct_eq(empty)).to_equal(true)
+        val expected = Digest.new(known)
+        expect(d.len()).to_equal(3)
+        expect(d.ct_eq(expected)).to_equal(true)
