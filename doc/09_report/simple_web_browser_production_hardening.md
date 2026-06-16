@@ -35,8 +35,8 @@
   Large` before parsing route fields.
 - Inbound WebSocket frame readers reject declared payload lengths above the
   production cap before allocating payload buffers.
-- The normal and shared-WM HTTP entrypoints reject oversized request heads,
-  request lines, and header lines before route dispatch.
+- The normal, shared-WM, async, and TLS HTTP entrypoints reject oversized
+  request heads, request lines, and header lines before route dispatch.
 - `/ui/ws` and legacy `/ws` reject non-GET WebSocket upgrade attempts with
   `405 Method Not Allowed` before the socket can be upgraded, even when the
   request carries a valid origin-bound bearer token.
@@ -97,6 +97,10 @@ Snapshot from 2026-06-16:
 
 - User selection of final feature and NFR options is still required before
   writing final `REQ-*` and `NFR-*` files.
+- Live async-server request-head evidence is blocked by an existing
+  `rt_sqlite_open` extern failure in the async server interpreter launch path;
+  the parser guard itself is covered by shared unit predicates and compile
+  checks for `async_server.spl` and `tls_serve_loop.spl`.
 - Requirement trace IDs need to be added to executable specs after final
   requirements exist. Until then,
   `doc/03_plan/sys_test/simple_web_browser_production_hardening.md` contains a

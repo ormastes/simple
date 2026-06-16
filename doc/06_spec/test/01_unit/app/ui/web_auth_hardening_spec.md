@@ -342,7 +342,7 @@ expect(ui_web_body_exceeds_unauth_limit(headers)).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -352,6 +352,13 @@ expect(ui_web_request_line_allowed(UI_WEB_MAX_REQUEST_LINE_BYTES)).to_be(true)
 expect(ui_web_request_line_allowed(UI_WEB_MAX_REQUEST_LINE_BYTES + 1)).to_be(false)
 expect(ui_web_header_line_allowed(UI_WEB_MAX_HEADER_LINE_BYTES)).to_be(true)
 expect(ui_web_header_line_allowed(UI_WEB_MAX_HEADER_LINE_BYTES + 1)).to_be(false)
+expect(ui_web_request_head_status("GET / HTTP/1.1", "Host: localhost\n")).to_equal("ok")
+val oversized_request_path = "x".repeat(UI_WEB_MAX_REQUEST_LINE_BYTES + 1)
+val oversized_header_value = "x".repeat(UI_WEB_MAX_HEADER_LINE_BYTES + 1)
+val oversized_head_value = "x".repeat(UI_WEB_MAX_REQUEST_HEAD_BYTES + 1)
+expect(ui_web_request_head_status("GET /{oversized_request_path} HTTP/1.1", "Host: localhost\n")).to_equal("request_head_too_large")
+expect(ui_web_request_head_status("GET / HTTP/1.1", "X-Pad: {oversized_header_value}\n")).to_equal("request_head_too_large")
+expect(ui_web_request_head_status("GET / HTTP/1.1", "X-Pad: {oversized_head_value}\n")).to_equal("request_head_too_large")
 ```
 
 </details>

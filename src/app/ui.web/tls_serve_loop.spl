@@ -28,7 +28,7 @@ use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
 use app.ui.web.ws_handler.{handle_ws_upgrade, send_ws_text, is_ws_upgrade_request}
 use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_json_security_headers}
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_json_security_headers, ui_web_request_head_allowed, ui_web_request_head_status}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -95,6 +95,9 @@ class ConnStream:
                     self.open = false
                     return Err("connection closed")
                 self.buffer = self.buffer + chunk
+                if not ui_web_request_head_allowed(self.buffer.len()):
+                    self.open = false
+                    return Err("request_head_too_large")
 
     me read_exact(n: i64) -> Result<text, text>:
         """Read exactly n bytes (as text) from the stream."""
@@ -276,6 +279,9 @@ class TlsWebServer:
                 conn.close()
                 return
             Ok(request_line):
+                if ui_web_request_head_status(request_line, "") != "ok":
+                    conn.write_all(_tls_http_response(413, "application/json", "{\"error\": \"request_head_too_large\"}"))
+                    return
                 val parts = request_line.split(" ")
                 if parts.len() < 2:
                     conn.close()
@@ -293,6 +299,9 @@ class TlsWebServer:
                             if header_line.trim() == "":
                                 break
                             headers = "{headers}{header_line}\n"
+                            if ui_web_request_head_status(request_line, headers) != "ok":
+                                conn.write_all(_tls_http_response(413, "application/json", "{\"error\": \"request_head_too_large\"}"))
+                                return
                             if is_ws_upgrade_request(headers):
                                 is_ws_upgrade = true
                         Err(_):

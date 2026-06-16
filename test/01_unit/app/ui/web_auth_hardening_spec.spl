@@ -2,7 +2,7 @@ use std.spec.{describe, it, expect}
 use app.ui.web.origin_guard.{OriginGuard, _is_loopback_origin}
 use app.ui.web.session_token.{SessionToken, _allow_insecure_dev_secret_flag, _missing_secret_fatal, verify}
 use app.ui.web.ui_routes.{ui_web_authorization_status, ui_web_request_authorized, ui_web_query_percent_decode, ui_web_resume_body_status}
-use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, UI_WEB_MAX_REQUEST_HEAD_BYTES, UI_WEB_MAX_REQUEST_LINE_BYTES, UI_WEB_MAX_HEADER_LINE_BYTES, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_LOGIN_RATE_WINDOW_MS, ui_web_auth_json_field, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_request_id, ui_web_sanitize_request_id, ui_web_request_head_allowed, ui_web_request_line_allowed, ui_web_header_line_allowed, ui_web_json_security_headers}
+use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, UI_WEB_MAX_REQUEST_HEAD_BYTES, UI_WEB_MAX_REQUEST_LINE_BYTES, UI_WEB_MAX_HEADER_LINE_BYTES, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_LOGIN_RATE_WINDOW_MS, ui_web_auth_json_field, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_request_id, ui_web_sanitize_request_id, ui_web_request_head_allowed, ui_web_request_line_allowed, ui_web_header_line_allowed, ui_web_request_head_status, ui_web_json_security_headers}
 use app.ui.web.html.{generate_js, generate_wm_js}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -142,6 +142,13 @@ describe "ui.web production auth hardening":
         expect(ui_web_request_line_allowed(UI_WEB_MAX_REQUEST_LINE_BYTES + 1)).to_be(false)
         expect(ui_web_header_line_allowed(UI_WEB_MAX_HEADER_LINE_BYTES)).to_be(true)
         expect(ui_web_header_line_allowed(UI_WEB_MAX_HEADER_LINE_BYTES + 1)).to_be(false)
+        expect(ui_web_request_head_status("GET / HTTP/1.1", "Host: localhost\n")).to_equal("ok")
+        val oversized_request_path = "x".repeat(UI_WEB_MAX_REQUEST_LINE_BYTES + 1)
+        val oversized_header_value = "x".repeat(UI_WEB_MAX_HEADER_LINE_BYTES + 1)
+        val oversized_head_value = "x".repeat(UI_WEB_MAX_REQUEST_HEAD_BYTES + 1)
+        expect(ui_web_request_head_status("GET /{oversized_request_path} HTTP/1.1", "Host: localhost\n")).to_equal("request_head_too_large")
+        expect(ui_web_request_head_status("GET / HTTP/1.1", "X-Pad: {oversized_header_value}\n")).to_equal("request_head_too_large")
+        expect(ui_web_request_head_status("GET / HTTP/1.1", "X-Pad: {oversized_head_value}\n")).to_equal("request_head_too_large")
 
     it "bounds login attempts with a fixed burst window":
         val first = ui_web_login_rate_decision(0u64, 0, 1000u64)

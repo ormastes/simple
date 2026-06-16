@@ -148,6 +148,24 @@ verification / requirement-selection pending
   --mode=interpreter --clean`, and `bin/simple test
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl
   --mode=interpreter --clean --timeout 360` pass.
+- fix: Routed async and TLS request-head parsing through the shared
+  `ui_web_request_head_status` helper so request-line, header-line, and total
+  head limits match normal and shared-WM server behavior. TLS `ConnStream`
+  line buffering also fails closed if buffered data exceeds the shared head cap.
+- verify: `/home/ormastes/dev/pub/simple/bin/simple check
+  src/app/ui.web/auth_params.spl src/app/ui.web/async_server.spl
+  src/app/ui.web/tls_serve_loop.spl
+  test/01_unit/app/ui/web_auth_hardening_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl`,
+  `/home/ormastes/dev/pub/simple/bin/simple test
+  test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean`,
+  and `bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` pass.
+- blocker: A live async-server launcher was attempted but the interpreter path
+  fails before serving with existing `unknown extern function: rt_sqlite_open`;
+  keep async live request-head evidence pending that separate launch/runtime
+  issue.
 - fix: Centralized browser JSON response security headers in
   `ui_web_json_security_headers` and reused them across normal, async, TLS,
   and shared `/ui/*` JSON response builders.

@@ -12,16 +12,16 @@
 
 ---
 
-## Other (1 features)
-
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Simple Web Browser Production Hardening Specification](test/03_system/gui/simple_web_browser_production_hardening_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
-
 ## Application (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [Web Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Auto-generated | N/A | 17 | 0% | 0 lines |
 | [Async Web Specification](test/01_unit/app/ui/async_web_spec.md) | Auto-generated | N/A | 26 | 0% | 0 lines |
+
+## Other (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Simple Web Browser Production Hardening Specification](test/03_system/gui/simple_web_browser_production_hardening_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
 
