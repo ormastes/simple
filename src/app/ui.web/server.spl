@@ -25,7 +25,7 @@ use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized, ui_web_resume_body_status}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol}
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol, ui_web_ws_frame_payload_allowed}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_hides_desktop, host_taskbar_runtime_hides_taskbar, host_taskbar_runtime_mode_name, host_taskbar_runtime_native_window_html}
 use app.ui.web.json.{state_to_json, widgets_to_json}
 use os.compositor.host_compositor_entry.{HostBackendKind}
@@ -109,12 +109,12 @@ fn ws_read_text_frame(stream: TcpStream) -> text?:
         return nil
     val opcode = hh[0] & 0x0F
     val masked = (hh[1] & 0x80) != 0
-    var plen = hh[1] & 0x7F
+    var plen: i64 = (hh[1] & 0x7F) as i64
     if plen == 126:
         val e = ws_read_exact(stream, 2)
         if e.len() < 2:
             return nil
-        plen = (e[0] * 256) + e[1]
+        plen = ((e[0] as i64) * 256) + (e[1] as i64)
     elif plen == 127:
         val e = ws_read_exact(stream, 8)
         if e.len() < 8:
@@ -124,6 +124,8 @@ fn ws_read_text_frame(stream: TcpStream) -> text?:
         while bi < 8:
             plen = (plen * 256) + e[bi]
             bi = bi + 1
+    if not ui_web_ws_frame_payload_allowed(plen):
+        return nil
     var maskkey: [u8] = []
     if masked:
         maskkey = ws_read_exact(stream, 4)

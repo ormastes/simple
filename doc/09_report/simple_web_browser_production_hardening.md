@@ -29,6 +29,8 @@
   strict valid body fields in the normal TCP server path.
 - Authorized `/ui/resume` rejects oversized JSON bodies with `413 Payload Too
   Large` before parsing route fields.
+- Inbound WebSocket frame readers reject declared payload lengths above the
+  production cap before allocating payload buffers.
 - `/ui/ws` and legacy `/ws` reject non-GET WebSocket upgrade attempts with
   `405 Method Not Allowed` before the socket can be upgraded, even when the
   request carries a valid origin-bound bearer token.

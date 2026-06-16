@@ -28,7 +28,7 @@ ws_handler_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -207,6 +207,22 @@ expect(ui_web_body_exceeds_unauth_limit("Content-Length: {too_large}\n")).to_be(
 
 </details>
 
+#### bounds inbound websocket frame payload lengths before allocation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_ws_frame_payload_allowed(0)).to_be(true)
+expect(ui_web_ws_frame_payload_allowed(UI_WEB_MAX_WS_FRAME_BYTES)).to_be(true)
+expect(ui_web_ws_frame_payload_allowed(UI_WEB_MAX_WS_FRAME_BYTES + 1)).to_be(false)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -226,8 +242,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

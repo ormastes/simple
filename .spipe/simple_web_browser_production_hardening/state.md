@@ -148,3 +148,13 @@ verification / requirement-selection pending
   --mode=interpreter --clean`, and `bin/simple test
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl
   --mode=interpreter --clean --timeout 360` pass.
+- fix: Added `UI_WEB_MAX_WS_FRAME_BYTES` and shared
+  `ui_web_ws_frame_payload_allowed` so normal TCP and shared `/ui/ws`
+  WebSocket frame readers reject oversized declared payloads before allocation.
+- verify: `bin/simple check src/app/ui.web/auth_params.spl
+  src/app/ui.web/server.spl src/app/ui.web/ui_routes.spl
+  test/01_unit/app/ui/ws_handler_spec.spl`,
+  `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl
+  --mode=interpreter --clean`, and `bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` pass.

@@ -19,6 +19,7 @@ user selection.
 | Authorized `/ui/resume` oversized-body rejection | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | Positive token mint plus `/ui/ws` and legacy `/ws` WebSocket upgrades | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Case-insensitive WebSocket upgrade headers and comma-token `Connection` parsing | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| Inbound WebSocket frame payload length cap before allocation | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` regression run | passing |
 | Non-GET WebSocket upgrade rejection for `/ui/ws` and legacy `/ws` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Warm login plus authenticated WebSocket upgrade latency | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | measured locally with a 10s ceiling |
 | Live `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
@@ -73,7 +74,7 @@ current evidence artifact without promoting unselected scope.
 | `NFR-WEB-HARD-002` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; TLS server check | passing |
 | `NFR-WEB-HARD-003` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; token-bearing JSON no-store/nosniff assertions | passing |
 | `NFR-WEB-HARD-004` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
-| `NFR-WEB-HARD-005` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; body-size guards in `src/app/ui.web/server.spl` and `src/app/ui.web/ui_routes.spl` | passing |
+| `NFR-WEB-HARD-005` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; body/frame-size guards in `src/app/ui.web/server.spl`, `src/app/ui.web/ui_routes.spl`, and `src/app/ui.web/auth_params.spl` | passing |
 | `NFR-WEB-HARD-006` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` process start/kill helpers | passing |
 | `NFR-WEB-HARD-007` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` warm auth latency scenario | measured locally with a 10s ceiling; final target still requires selection |
 | `NFR-WEB-HARD-008` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; generated manual | passing |
