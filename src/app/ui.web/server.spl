@@ -25,7 +25,7 @@ use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized, ui_web_resume_body_status}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol, ui_web_ws_frame_payload_allowed, ui_web_request_id}
+use app.ui.web.auth_params.{UI_WEB_MAX_REQUEST_HEAD_BYTES, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol, ui_web_ws_frame_payload_allowed, ui_web_request_id, ui_web_request_head_allowed, ui_web_request_line_allowed, ui_web_header_line_allowed}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_hides_desktop, host_taskbar_runtime_hides_taskbar, host_taskbar_runtime_mode_name, host_taskbar_runtime_native_window_html}
 use app.ui.web.json.{state_to_json, widgets_to_json}
 use os.compositor.host_compositor_entry.{HostBackendKind}
@@ -760,27 +760,22 @@ fn _wm_serve_loop(listener: TcpListener, session: UISession, guard: OriginGuard,
 
 fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGuard, secret: text):
     """Handle one HTTP connection in the shared WM server."""
-    match stream.read_line():
-        Err(_): return
-        Ok(request_line):
-            val parts = request_line.split(" ")
-            if parts.len() < 2:
+    match _wm_read_head(stream):
+        Err(e):
+            if e == "request_head_too_large":
+                val too_large = _simple_response(413, "application/json", "{\"error\": \"request_head_too_large\"}")
+                stream.write_text(too_large)
+            return
+        Ok(parsed):
+            val method = parsed.0
+            val path = parsed.1
+            val headers = parsed.2
+            val initial_body = parsed.3
+            if method == "" or path == "":
                 return
-            val method = parts[0]
-            val path = parts[1]
-
-            var headers = ""
-            loop:
-                match stream.read_line():
-                    Ok(header_line):
-                        if header_line.trim() == "":
-                            break
-                        headers = "{headers}{header_line}\n"
-                    Err(_):
-                        break
 
             if path == "/ui/login" and method == "POST":
-                _wm_handle_login(stream, headers, guard, secret)
+                _wm_handle_login(stream, headers, initial_body, guard, secret)
                 return
 
             if path == "/" or path == "/index.html":
@@ -804,13 +799,13 @@ fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGua
                 return
 
             if path.starts_with("/ui/"):
-                var body = ""
+                var body = initial_body
                 if method == "POST":
                     if ui_web_body_exceeds_unauth_limit(headers):
                         val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
                         stream.write_text(too_large)
                         return
-                    body = _wm_read_body(stream, headers)
+                    body = _wm_read_remaining_body(stream, headers, body)
                 if path == "/ui/resume" and method == "POST":
                     _wm_handle_resume(stream, path, headers, body, guard, secret)
                     return
@@ -822,7 +817,46 @@ fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGua
             val not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found"
             stream.write_text(not_found)
 
-fn _wm_handle_login(stream: TcpStream, headers: text, guard: OriginGuard, secret: text):
+fn _wm_read_head(stream: TcpStream) -> Result<(text, text, text, text), text>:
+    var raw = ""
+    var attempts = 0
+    while attempts < 16:
+        attempts = attempts + 1
+        match stream.read(4096):
+            Ok(chunk):
+                if chunk.len() == 0:
+                    break
+                raw = "{raw}{rt_bytes_to_text(chunk)}"
+                if not ui_web_request_head_allowed(raw.len()):
+                    return Err("request_head_too_large")
+                if raw.contains("\r\n\r\n"):
+                    break
+            Err(_):
+                break
+    if raw == "":
+        return Err("empty_request")
+    val sep = raw.index_of("\r\n\r\n")
+    if sep < 0:
+        if raw.len() >= UI_WEB_MAX_REQUEST_HEAD_BYTES:
+            return Err("request_head_too_large")
+        return Err("incomplete_request_head")
+    val head = raw.slice(0, sep)
+    val initial_body = raw.slice(sep + 4, raw.len())
+    val head_lines = head.split("\r\n")
+    val request_line = if head_lines.len() > 0: head_lines[0] else: ""
+    if not ui_web_request_line_allowed(request_line.len()):
+        return Err("request_head_too_large")
+    val request = parse_request_line(request_line)
+    var headers = ""
+    var hi = 1
+    while hi < head_lines.len():
+        if not ui_web_header_line_allowed(head_lines[hi].len()):
+            return Err("request_head_too_large")
+        headers = "{headers}{head_lines[hi]}\n"
+        hi = hi + 1
+    return Ok((request.0, request.1, headers, initial_body))
+
+fn _wm_handle_login(stream: TcpStream, headers: text, initial_body: text, guard: OriginGuard, secret: text):
     """POST /ui/login in shared WM mode."""
     var origin = ""
     match guard.check(headers):
@@ -835,6 +869,7 @@ fn _wm_handle_login(stream: TcpStream, headers: text, guard: OriginGuard, secret
         val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
         stream.write_text(too_large)
         return
+    val _body = _wm_read_remaining_body(stream, headers, initial_body)
     val rate = ui_web_login_rate_decision(_wm_login_rate_window_start_ms, _wm_login_rate_attempt_count, rt_time_ms())
     _wm_login_rate_window_start_ms = rate.1
     _wm_login_rate_attempt_count = rate.2
@@ -876,6 +911,14 @@ fn _wm_read_body(stream: TcpStream, headers: text) -> text:
     match stream.read_exact(content_length):
         Ok(b): return b
         Err(_): return ""
+
+fn _wm_read_remaining_body(stream: TcpStream, headers: text, initial_body: text) -> text:
+    val content_length = ui_web_content_length(headers)
+    if content_length <= initial_body.len():
+        return initial_body
+    match stream.read_exact(content_length - initial_body.len()):
+        Ok(b): return "{initial_body}{b}"
+        Err(_): return initial_body
 
 fn _native_window_html(path: text) -> text:
     val app_id = _query_value(path, "app_id")

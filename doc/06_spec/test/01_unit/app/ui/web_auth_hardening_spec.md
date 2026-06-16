@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -319,6 +319,25 @@ expect(ui_web_body_exceeds_unauth_limit(headers)).to_be(true)
 
 </details>
 
+#### bounds request heads before shared wm route dispatch
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_request_head_allowed(UI_WEB_MAX_REQUEST_HEAD_BYTES)).to_be(true)
+expect(ui_web_request_head_allowed(UI_WEB_MAX_REQUEST_HEAD_BYTES + 1)).to_be(false)
+expect(ui_web_request_line_allowed(UI_WEB_MAX_REQUEST_LINE_BYTES)).to_be(true)
+expect(ui_web_request_line_allowed(UI_WEB_MAX_REQUEST_LINE_BYTES + 1)).to_be(false)
+expect(ui_web_header_line_allowed(UI_WEB_MAX_HEADER_LINE_BYTES)).to_be(true)
+expect(ui_web_header_line_allowed(UI_WEB_MAX_HEADER_LINE_BYTES + 1)).to_be(false)
+```
+
+</details>
+
 #### bounds login attempts with a fixed burst window
 
 <details>
@@ -368,8 +387,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -5,7 +5,7 @@
 
 use std.spec.*
 use std.nogc_sync_mut.io.tcp.{TcpStream}
-use app.ui.web.auth_params.{UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_MAX_AUTH_JSON_BYTES}
+use app.ui.web.auth_params.{UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_MAX_AUTH_JSON_BYTES, UI_WEB_MAX_REQUEST_HEAD_BYTES, UI_WEB_MAX_REQUEST_LINE_BYTES, UI_WEB_MAX_HEADER_LINE_BYTES}
 
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
@@ -127,6 +127,18 @@ fn login_missing_origin_request(port: i32) -> text:
 
 fn login_oversized_request(port: i32) -> text:
     return "POST /ui/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: 8193\r\nConnection: close\r\n\r\n"
+
+fn shared_wm_oversized_head_request(port: i32) -> text:
+    val pad = "x".repeat(UI_WEB_MAX_REQUEST_HEAD_BYTES + 1)
+    return "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Pad: {pad}\r\nConnection: close\r\n\r\n"
+
+fn shared_wm_oversized_request_line_request(port: i32) -> text:
+    val pad = "x".repeat(UI_WEB_MAX_REQUEST_LINE_BYTES + 1)
+    return "GET /{pad} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+
+fn shared_wm_oversized_header_line_request(port: i32) -> text:
+    val pad = "x".repeat(UI_WEB_MAX_HEADER_LINE_BYTES + 1)
+    return "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Pad: {pad}\r\nConnection: close\r\n\r\n"
 
 fn login_allowed_request(port: i32) -> text:
     val body = "{\"capability_grant\":\"legacy\"}"
@@ -400,6 +412,12 @@ describe "Simple web browser production hardening live endpoints":
         step("Start a shared-WM Simple Web server with a real token secret")
         val pid = hardening_start_shared_wm_server(port)
 
+        step("Reject an oversized shared-WM request head before route dispatch")
+        val oversized_head = raw_http_summary(port, shared_wm_oversized_head_request(port), "request_head_too_large")
+        val oversized_request_line = raw_http_summary(port, shared_wm_oversized_request_line_request(port), "request_head_too_large")
+        val oversized_header_line = raw_http_summary(port, shared_wm_oversized_header_line_request(port), "request_head_too_large")
+        val oversized_login_body = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
+
         step("Spend the shared-WM login burst budget from an allowed loopback origin")
         var attempts = 0
         var last_allowed = ""
@@ -412,6 +430,10 @@ describe "Simple web browser production hardening live endpoints":
 
         hardening_stop_web_server(pid)
 
-        step("Verify the shared-WM burst budget allows the configured count and rejects the next request")
+        step("Verify the shared-WM request-head cap and burst budget")
+        expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
+        expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
+        expect(oversized_header_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
+        expect(oversized_login_body).to_equal("HTTP/1.1 413 Payload Too Large|present")
         expect(last_allowed).to_equal("HTTP/1.1 200 OK|present")
         expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")

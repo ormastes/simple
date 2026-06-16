@@ -322,11 +322,16 @@ expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 #### rate limits shared wm login bursts _(slow)_
 
 - Start a shared-WM Simple Web server with a real token secret
+- Reject an oversized shared-WM request head before route dispatch
 - Spend the shared-WM login burst budget from an allowed loopback origin
 - last allowed = raw http summary
 - Send one more shared-WM login request in the same fixed window
 - hardening stop web server
-- Verify the shared-WM burst budget allows the configured count and rejects the next request
+- Verify the shared-WM request-head cap and burst budget
+   - Expected: oversized_head equals `HTTP/1.1 413 Payload Too Large|present`
+   - Expected: oversized_request_line equals `HTTP/1.1 413 Payload Too Large|present`
+   - Expected: oversized_header_line equals `HTTP/1.1 413 Payload Too Large|present`
+   - Expected: oversized_login_body equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: last_allowed equals `HTTP/1.1 200 OK|present`
    - Expected: limited equals `HTTP/1.1 429 Too Many Requests|present`
 
@@ -334,13 +339,19 @@ expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val port = hardening_free_port(400)
 step("Start a shared-WM Simple Web server with a real token secret")
 val pid = hardening_start_shared_wm_server(port)
+
+step("Reject an oversized shared-WM request head before route dispatch")
+val oversized_head = raw_http_summary(port, shared_wm_oversized_head_request(port), "request_head_too_large")
+val oversized_request_line = raw_http_summary(port, shared_wm_oversized_request_line_request(port), "request_head_too_large")
+val oversized_header_line = raw_http_summary(port, shared_wm_oversized_header_line_request(port), "request_head_too_large")
+val oversized_login_body = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
 
 step("Spend the shared-WM login burst budget from an allowed loopback origin")
 var attempts = 0
@@ -354,7 +365,11 @@ val limited = raw_http_summary(port, login_allowed_request(port), "login_rate_li
 
 hardening_stop_web_server(pid)
 
-step("Verify the shared-WM burst budget allows the configured count and rejects the next request")
+step("Verify the shared-WM request-head cap and burst budget")
+expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
+expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
+expect(oversized_header_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
+expect(oversized_login_body).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(last_allowed).to_equal("HTTP/1.1 200 OK|present")
 expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 ```

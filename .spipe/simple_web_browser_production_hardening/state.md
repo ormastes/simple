@@ -148,6 +148,21 @@ verification / requirement-selection pending
   --mode=interpreter --clean`, and `bin/simple test
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl
   --mode=interpreter --clean --timeout 360` pass.
+- fix: Replaced shared-WM `read_line` request-head accumulation with a bounded
+  chunked parser using `UI_WEB_MAX_REQUEST_HEAD_BYTES`; oversized heads,
+  request lines, and header lines return `413 Payload Too Large` before route
+  dispatch.
+- fix: Shared-WM `/ui/login` now consumes already-read request body bytes
+  through the same bounded body helper used by other shared-WM POST routes.
+- verify: `/home/ormastes/dev/pub/simple/bin/simple check
+  src/app/ui.web/auth_params.spl src/app/ui.web/server.spl
+  test/01_unit/app/ui/web_auth_hardening_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl`,
+  `/home/ormastes/dev/pub/simple/bin/simple test
+  test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean`,
+  and `bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` pass.
 - fix: Added `UI_WEB_MAX_WS_FRAME_BYTES` and shared
   `ui_web_ws_frame_payload_allowed` so normal TCP and shared `/ui/ws`
   WebSocket frame readers reject oversized declared payloads before allocation.

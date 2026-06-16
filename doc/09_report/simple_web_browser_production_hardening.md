@@ -6,7 +6,7 @@
   `tls_serve_loop.spl`, `async_server.spl`,
   `simple_web_browser_production_hardening_spec.spl`,
   `web_auth_hardening_spec.spl`, and `ws_handler_spec.spl`.
-- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 14 scenarios.
+- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 16 scenarios.
 - Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 10 scenarios.
 - Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 6 scenarios.
 - Spec docgen: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and regenerated the 6-scenario manual.
@@ -33,6 +33,9 @@
   Large` before parsing route fields.
 - Inbound WebSocket frame readers reject declared payload lengths above the
   production cap before allocating payload buffers.
+- The shared-WM HTTP entrypoint rejects oversized request heads, request lines,
+  and header lines before route dispatch, closing a parser-boundary gap with
+  the normal server path.
 - `/ui/ws` and legacy `/ws` reject non-GET WebSocket upgrade attempts with
   `405 Method Not Allowed` before the socket can be upgraded, even when the
   request carries a valid origin-bound bearer token.
