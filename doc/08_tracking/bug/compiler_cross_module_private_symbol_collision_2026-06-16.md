@@ -6,6 +6,40 @@
   (per-file mangle) deferred as a deliberately-scoped effort given measured surface.
 - **Area:** compiler — import loader / module flattening / symbol resolution
 
+## Live crash evidence + dormancy status (2026-06-16)
+This bug was **actively crashing**, not theoretical. Kernel log (`journalctl -k`,
+Jun 15 11:05 → Jun 16 04:26) recorded **18 `simple-main` segfaults**:
+
+| fault addr | count | meaning |
+|------------|-------|---------|
+| `0x8`  | 14 | NULL+8 field deref (`nil.len()` on a lost return) — JIT-compiled code, no `in simple[...]` module |
+| `0x0`  | 2  | NULL deref |
+| `0x40` | 2  | small-offset deref in the AOT `simple` binary |
+
+The `0x8` cluster is the exact signature of this bug: a private helper whose
+return value was silently dropped → `nil` → NULL-deref under Cranelift JIT.
+
+**Now dormant, not live.** The only confirmed live trigger — `quic_aead_encrypt`
+(its module co-imported `aes_gcm._append_bytes(->[u8])` + `hkdf._append_bytes(void)`)
+— was fixed the same day by renaming the aes_gcm helper (see
+`quic_aead_encrypt_fails_interp_segfaults_jit_2026-06-16`) and the detection
+diagnostic below. A **bounded `bin/simple check` sweep (2026-06-16)** over
+representative high-fan-in entry points across the crypto / http / compress / tls /
+quic namespaces produced **0 live co-import collision warnings**: no current
+top-level compilation co-imports an incompatible same-named pair. The 267-name
+surface remains **LATENT** — it bites only if a future import graph pulls two
+incompatible defs into one compilation.
+
+**Why the structural fix is not landed here.** The full fix (per-file mangle /
+file-identity threading in the seed) requires a seed rebuild + full-suite
+regression + redeploy and is high-blast-radius (every call in every program), with
+`E∩H` non-empty (mangling a genuinely-shared helper like `_hex_digit` orphans its
+17 callers). Attempting it speculatively — especially in a shared repo with
+parallel agents force-pushing `main` — risks breaking the seed everything depends
+on, for a bug whose live trigger is already fixed. It stays a deliberately-scoped
+follow-up; the crash path is closed by the rename + detection + (separately) the
+codex runaway guard that contains any blast radius.
+
 ## Fix landed 2026-06-16 (detection diagnostic)
 `warn_duplicate_private_signatures()` in `pipeline/module_loader.rs` runs on every
 top-level `load_module_with_imports`: when 2+ co-compiled top-level free functions
