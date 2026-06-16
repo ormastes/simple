@@ -83,7 +83,7 @@ Client                                     Server
 
 1. Client POSTs credentials to `/ui/login`. The server issues a 32-byte random token HMAC-signed over `(grant_id, origin, expiry_ms)` using the `CapabilityPolicy` grant id from `src/lib/common/security/enforcement/capability.spl`. The token is produced and verified by `src/app/ui.web/session_token.spl` (Phase 2 — new file): `issue(grant) -> Token` / `verify(token, origin) -> Result<Grant, AuthError>`.
 
-2. Client opens WSS at `/ui/ws` carrying the bearer token either in the `Authorization` header or in the `token` query parameter and a valid `Origin`. The query parameter exists for browser `WebSocket` clients; if both are present, the `Authorization` header takes precedence.
+2. Client opens WSS at `/ui/ws` carrying the bearer token in the `Authorization` header or `Sec-WebSocket-Protocol` bearer subprotocol with a valid `Origin`. The `token` query parameter is disabled by default and exists only as explicit compatibility mode when `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1`; if multiple sources are present, the header/subprotocol path takes precedence.
 
 3. Server calls `origin_guard.check(headers)` (from `src/app/ui.web/origin_guard.spl`, Phase 2 — new file) against the `SIMPLE_UI_WEB_ALLOWED_ORIGINS` environment variable. If the origin is not allowlisted, the server returns HTTP 403 and closes — the RFC-6455 handshake (`compute_ws_accept`) is never reached.
 
