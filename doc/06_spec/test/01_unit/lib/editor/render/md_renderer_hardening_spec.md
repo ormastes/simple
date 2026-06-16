@@ -27,7 +27,7 @@ md_renderer_hardening_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 38 | 38 | 0 | 0 |
+| 41 | 41 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -577,6 +577,75 @@ expect(result.len() >= 0).to_equal(true)
 
 </details>
 
+#### md_render_blocks_for_tui returns exactly a viewport window
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val model = BlockModel.from_markdown("# H\n\npara\n\n```rust\nx\n```")
+val rendered = md_render_blocks(model)
+val window = md_render_blocks_for_tui(model, 1, 2)
+expect(window.len()).to_equal(2)
+expect(window[0]).to_equal(rendered[1])
+expect(window[1]).to_equal(rendered[2])
+```
+
+</details>
+
+#### md_render_blocks_for_tui_with_wiki returns exactly a viewport window
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val model = BlockModel.from_markdown("# H\n\npara\n\n```rust\nx\n```")
+val index = md_wiki_index_documents([])
+val rendered = md_render_blocks_with_wiki(model, index)
+val window = md_render_blocks_for_tui_with_wiki(model, index, 1, 2)
+expect(window.len()).to_equal(2)
+expect(window[0]).to_equal(rendered[1])
+expect(window[1]).to_equal(rendered[2])
+```
+
+</details>
+
+#### active wiki block renders raw source in tui viewport
+
+- md wiki document
+- var model = BlockModel from markdown
+- model activate block
+   - Expected: window.len() equals `rendered.len()`
+   - Expected: window[0] equals `rendered[0]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val docs = [
+    md_wiki_document("note.md", "# Note\n\nmore")
+]
+val index = md_wiki_index_documents(docs)
+var model = BlockModel.from_markdown("![[note.md]]")
+model.activate_block(0)
+val rendered = md_render_blocks_with_wiki(model, index)
+val window = md_render_blocks_for_tui_with_wiki(model, index, 0, 4)
+expect(window.len()).to_equal(rendered.len())
+expect(window[0]).to_equal(rendered[0])
+```
+
+</details>
+
 ### BlockModel.from_markdown edge inputs
 
 #### empty string produces zero blocks
@@ -729,8 +798,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 38 |
-| Active scenarios | 38 |
+| Total scenarios | 41 |
+| Active scenarios | 41 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

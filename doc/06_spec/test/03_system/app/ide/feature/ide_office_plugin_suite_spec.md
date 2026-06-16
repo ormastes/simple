@@ -77,7 +77,7 @@ capabilities: 5
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
-  check: slides: app.office.slides count=2 thumb=Slide 2: (Content) canvas=2 outline=2 designs=2 css=true transform=true
+  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   gui: gui-backend: theme=dark size=1200x800 md=true ppt=true sheet=true config=true

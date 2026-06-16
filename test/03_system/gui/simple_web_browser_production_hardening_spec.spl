@@ -1,0 +1,121 @@
+# @cover src/app/ui.web/server.spl 80%
+# @cover src/app/ui.web/auth_params.spl 80%
+# @gui: headless
+# @tag:system, slow
+
+use std.spec.*
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_thread_sleep(ms: i64)
+extern fn rt_getpid() -> i64
+
+fn hardening_free_port() -> i32:
+    val base = 21000
+    val offset = rt_getpid() % 10000
+    return base + offset as i32
+
+fn hardening_start_web_server(port: i32) -> i64:
+    rt_env_set("SIMPLE_UI_WEB_TOKEN_SECRET", "simple-web-hardening-test-secret")
+    rt_env_set("SIMPLE_WEB_HARDENING_PORT", "{port}")
+    val args = ["test/03_system/gui/ui_browser/simple_web_hardening_server.spl"]
+    val pid = rt_process_spawn_async("bin/simple", args)
+    hardening_wait_for_server(port)
+    return pid
+
+fn hardening_wait_for_server(port: i32):
+    val addr = "127.0.0.1:{port}"
+    var attempts = 0
+    while attempts < 30:
+        match TcpStream.connect_timeout(addr, 300):
+            Ok(stream):
+                stream.close()
+                return
+            Err(_):
+                rt_thread_sleep(500)
+        attempts = attempts + 1
+
+fn hardening_stop_web_server(pid: i64):
+    if pid > 0:
+        rt_process_kill(pid)
+
+fn raw_http_request(port: i32, request: text) -> text:
+    val addr = "127.0.0.1:{port}"
+    match TcpStream.connect_timeout(addr, 2000):
+        Err(e):
+            return "CONNECT_FAILED: {e}"
+        Ok(stream):
+            stream.set_read_timeout(2000)
+            match stream.write_text(request):
+                Err(e):
+                    stream.close()
+                    return "WRITE_FAILED: {e}"
+                Ok(()):
+                    stream.flush()
+                    match stream.read(4096):
+                        Err(e):
+                            stream.close()
+                            return "READ_FAILED: {e}"
+                        Ok(bytes):
+                            stream.close()
+                            return bytes
+
+fn http_status_line(response: text) -> text:
+    val idx = response.find("\r\n")
+    if idx < 0:
+        return response
+    response[0:idx]
+
+fn http_marker(response: text, marker: text) -> text:
+    if response.contains(marker):
+        return "present"
+    "missing"
+
+fn raw_http_summary(port: i32, request: text, marker: text) -> text:
+    val response = raw_http_request(port, request)
+    return "{http_status_line(response)}|{http_marker(response, marker)}"
+
+fn login_missing_origin_request(port: i32) -> text:
+    val body = "{\"capability_grant\":\"legacy\"}"
+    return "POST /ui/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
+
+fn login_oversized_request(port: i32) -> text:
+    return "POST /ui/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: 8193\r\nConnection: close\r\n\r\n"
+
+fn api_state_unauthorized_request(port: i32) -> text:
+    return "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nConnection: close\r\n\r\n"
+
+fn websocket_unauthorized_request(port: i32) -> text:
+    var request = "GET /ui/ws HTTP/1.1\r\n"
+    request = "{request}Host: 127.0.0.1:{port}\r\n"
+    request = "{request}Origin: http://localhost:{port}\r\n"
+    request = "{request}Upgrade: websocket\r\n"
+    request = "{request}Connection: Upgrade\r\n"
+    request = "{request}Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    request = "{request}Sec-WebSocket-Version: 13\r\n"
+    request = "{request}\r\n"
+    return request
+
+describe "Simple web browser production hardening live endpoints":
+    slow_it "fails closed on unauthenticated browser HTTP and WebSocket routes":
+        val port = hardening_free_port()
+        val pid = hardening_start_web_server(port)
+
+        val missing_origin = raw_http_summary(port, login_missing_origin_request(port), "forbidden_origin")
+        val oversized_login = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
+        val api_state = raw_http_summary(port, api_state_unauthorized_request(port), "\"error\": \"forbidden\"")
+        val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
+
+        hardening_stop_web_server(pid)
+
+        print "missing_origin={missing_origin}"
+        print "oversized_login={oversized_login}"
+        print "api_state={api_state}"
+        print "websocket={websocket}"
+
+        expect(missing_origin).to_equal("HTTP/1.1 403 Forbidden|present")
+        expect(oversized_login).to_equal("HTTP/1.1 413 Payload Too Large|present")
+        expect(api_state).to_equal("HTTP/1.1 403 Forbidden|present")
+        expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")

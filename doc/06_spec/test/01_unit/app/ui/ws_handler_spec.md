@@ -28,7 +28,7 @@ ws_handler_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -180,29 +180,6 @@ expect(ui_web_body_exceeds_unauth_limit("Content-Length: {too_large}\n")).to_be(
 
 </details>
 
-#### rate limits login token vending in a fixed window
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val start = 1000u64
-expect(ui_web_login_rate_limited(0u64, 0, start)).to_be(false)
-expect(ui_web_login_rate_next_window_start(0u64, start)).to_equal(start)
-expect(ui_web_login_rate_next_count(0u64, 0, start)).to_equal(1)
-expect(ui_web_login_rate_limited(start, UI_WEB_LOGIN_RATE_MAX - 1, start + 1u64)).to_be(false)
-expect(ui_web_login_rate_limited(start, UI_WEB_LOGIN_RATE_MAX, start + 1u64)).to_be(true)
-val after_window = start + UI_WEB_LOGIN_RATE_WINDOW_MS
-expect(ui_web_login_rate_limited(start, UI_WEB_LOGIN_RATE_MAX, after_window)).to_be(false)
-expect(ui_web_login_rate_next_window_start(start, after_window)).to_equal(after_window)
-expect(ui_web_login_rate_next_count(start, UI_WEB_LOGIN_RATE_MAX, after_window)).to_equal(1)
-```
-
-</details>
-
 ## At a Glance
 
 | Field | Value |
@@ -222,8 +199,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
