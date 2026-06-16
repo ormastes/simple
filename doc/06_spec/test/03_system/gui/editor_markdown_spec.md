@@ -802,9 +802,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = read_text("src/lib/editor/buffer/syntax_highlight.spl")
-expect(src.contains("ch == \"#\"")).to_equal(true)
-expect(src.contains("ch == \"\\\"\"")).to_equal(true)
-expect(src.contains("_hl_is_digit")).to_equal(true)
+expect(src).to_contain("ch == \"#\"")
+expect(src).to_contain("ch == \"\\\"\"")
+expect(src).to_contain("_hl_is_digit")
 ```
 
 </details>
@@ -881,7 +881,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = read_text("src/lib/editor/render/block_model.spl")
-expect(src.contains("current != model.active_block")).to_equal(true)
+expect(src).to_contain("current != model.active_block")
 ```
 
 </details>
@@ -928,9 +928,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = read_text("src/lib/editor/render/md_renderer.spl")
-expect(src.contains("if viewport_height <= 0")).to_equal(true)
-expect(src.contains("viewport_start < 0")).to_equal(true)
-expect(src.contains("val end = viewport_start + viewport_height")).to_equal(true)
+expect(src).to_contain("if viewport_height <= 0")
+expect(src).to_contain("viewport_start < 0")
+expect(src).to_contain("val end = viewport_start + viewport_height")
 ```
 
 </details>
@@ -962,8 +962,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = read_text("src/lib/editor/buffer/syntax_highlight.spl")
-expect(src.contains("language_id == \"simple\"")).to_equal(true)
-expect(src.contains("highlight_render(hl)")).to_equal(true)
+expect(src).to_contain("language_id == \"simple\"")
+expect(src).to_contain("highlight_render(hl)")
 ```
 
 </details>

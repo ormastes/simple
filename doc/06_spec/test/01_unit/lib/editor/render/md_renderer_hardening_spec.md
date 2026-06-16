@@ -48,7 +48,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = md_render_inline("hello **world")
-expect(result.len() > 0).to_equal(true)
+expect(result.len()).to_be_greater_than(0)
 expect(result.contains("hello")).to_equal(true)
 expect(result.contains("world")).to_equal(true)
 ```
@@ -65,7 +65,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = md_render_inline("hello *world")
-expect(result.len() > 0).to_equal(true)
+expect(result.len()).to_be_greater_than(0)
 expect(result.contains("hello")).to_equal(true)
 expect(result.contains("world")).to_equal(true)
 ```
@@ -82,7 +82,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = md_render_inline("hello `world")
-expect(result.len() > 0).to_equal(true)
+expect(result.len()).to_be_greater_than(0)
 expect(result.contains("hello")).to_equal(true)
 expect(result.contains("world")).to_equal(true)
 ```
@@ -124,7 +124,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = md_render_inline("****")
-expect(result.len() >= 0).to_equal(true)
+expect(result).to_equal("\x1b[1m\x1b[0m")
 ```
 
 </details>
@@ -187,9 +187,9 @@ Reproduction: this block contains the complete executable scenario source.
 val r1 = md_render_inline("**")
 val r2 = md_render_inline("*")
 val r3 = md_render_inline("`")
-expect(r1.len() >= 0).to_equal(true)
-expect(r2.len() >= 0).to_equal(true)
-expect(r3.len() >= 0).to_equal(true)
+expect(r1).to_equal("\x1b[3m\x1b[0m")
+expect(r2).to_equal("*")
+expect(r3).to_equal("`")
 ```
 
 </details>
@@ -206,7 +206,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val model = BlockModel.from_markdown("# Title\n\n```rust\nfn foo() {}")
-expect(model.block_count() >= 1).to_equal(true)
+expect(model.block_count()).to_be_greater_than(0)
 ```
 
 </details>
@@ -269,7 +269,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val model = BlockModel.from_markdown("```\nhello\nworld\n```\nafter")
-expect(model.block_count() >= 1).to_equal(true)
+expect(model.block_count()).to_be_greater_than(0)
 val code_block = model.block_at(0)
 expect(code_block.kind).to_equal("code")
 ```
@@ -292,7 +292,7 @@ val model = BlockModel.from_markdown(src)
 expect(model.block_count()).to_equal(1)
 expect(model.block_at(0).kind).to_equal("table")
 val rendered = md_render_block(model.block_at(0))
-expect(rendered.len() >= 1).to_equal(true)
+expect(rendered.len()).to_be_greater_than(0)
 ```
 
 </details>
@@ -309,7 +309,7 @@ Reproduction: this block contains the complete executable scenario source.
 val src = "| A |  | C |\n| --- | --- | --- |\n|  | 2 |  |"
 val model = BlockModel.from_markdown(src)
 val rendered = md_render_block(model.block_at(0))
-expect(rendered.len() >= 1).to_equal(true)
+expect(rendered.len()).to_be_greater_than(0)
 ```
 
 </details>
@@ -325,9 +325,9 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val src = "| code | result |\n| --- | --- |\n| `a | b` | ok |"
 val model = BlockModel.from_markdown(src)
-expect(model.block_count() >= 1).to_equal(true)
+expect(model.block_count()).to_be_greater_than(0)
 val rendered = md_render_block(model.block_at(0))
-expect(rendered.len() >= 1).to_equal(true)
+expect(rendered.len()).to_be_greater_than(0)
 ```
 
 </details>
@@ -367,7 +367,7 @@ expect(block.kind).to_equal("embed")
 # Verifying the depth guard: calling with depth=4 must return empty
 # (no wiki index supplied so this is safe without a real wiki)
 # We test the guard by inspecting that from_markdown handles embed blocks
-expect(block.rendered_lines.len() >= 1).to_equal(true)
+expect(block.rendered_lines.len()).to_be_greater_than(0)
 ```
 
 </details>
@@ -440,7 +440,7 @@ val model = BlockModel.from_markdown(src)
 expect(model.block_count()).to_equal(1)
 expect(model.block_at(0).kind).to_equal("callout")
 val rendered = md_render_block(model.block_at(0))
-expect(rendered.len() >= 1).to_equal(true)
+expect(rendered.len()).to_be_greater_than(0)
 expect(rendered[0].contains("XYZUNKNOWN")).to_equal(true)
 ```
 
@@ -475,7 +475,7 @@ Reproduction: this block contains the complete executable scenario source.
 val src = "> [!NOTE]"
 val model = BlockModel.from_markdown(src)
 val rendered = md_render_block(model.block_at(0))
-expect(rendered.len() >= 1).to_equal(true)
+expect(rendered.len()).to_be_greater_than(0)
 ```
 
 </details>
@@ -492,7 +492,7 @@ Reproduction: this block contains the complete executable scenario source.
 val src = "> [!NOTE]\n> > nested line"
 val model = BlockModel.from_markdown(src)
 val rendered = md_render_block(model.block_at(0))
-expect(rendered.len() >= 2).to_equal(true)
+expect(rendered.len()).to_be_greater_than(1)
 ```
 
 </details>
@@ -572,7 +572,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val model = BlockModel.from_markdown("hello")
 val result = md_render_blocks_for_tui(model, -5, 3)
-expect(result.len() >= 0).to_equal(true)
+expect(result.len()).to_equal(0)
 ```
 
 </details>
@@ -741,8 +741,8 @@ expect(cnt).to_equal(3)
 var idx = 0
 while idx < cnt:
     val blk = model.block_at(idx)
-    expect(blk.from_line >= 0).to_equal(true)
-    expect(blk.to_line >= blk.from_line).to_equal(true)
+    expect(blk.from_line).to_be_greater_than(-1)
+    expect(blk.to_line).to_be_greater_than(blk.from_line - 1)
     idx = idx + 1
 ```
 

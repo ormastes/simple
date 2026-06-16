@@ -290,15 +290,14 @@ expect(ui.root_id).to_equal("root")
 - app handle event
    - Expected: slide.elements.len() equals `2`
 - SlideElementKind ImageEl
-   - Expected: src equals ``
-   - Expected: alt equals `Image Frame`
-   - Expected: false is true
+   - Expected: image_src equals ``
+   - Expected: image_alt equals `Image Frame`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -306,12 +305,17 @@ var app = SlidesApp.new()
 app.handle_event(UIEvent.Action(name: "add_image"))
 val slide = current_slide(app.presentation)
 expect(slide.elements.len()).to_equal(2)
+var image_src = "<not-image>"
+var image_alt = "<not-image>"
 match slide.elements[slide.elements.len() - 1].kind:
     SlideElementKind.ImageEl(src: src, alt: alt):
-        expect(src).to_equal("")
-        expect(alt).to_equal("Image Frame")
+        image_src = src
+        image_alt = alt
     _:
-        expect(false).to_equal(true)
+        image_src = "<not-image>"
+        image_alt = "<not-image>"
+expect(image_src).to_equal("")
+expect(image_alt).to_equal("Image Frame")
 ```
 
 </details>

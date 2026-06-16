@@ -75,7 +75,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c: StyleCacheSentinel = make_style_cache(10, 2, false)
-expect(c.cache_hit_count >= 0).to_equal(true)
+expect(c.cache_hit_count).to_equal(10)
 ```
 
 </details>
@@ -90,7 +90,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c: StyleCacheSentinel = make_style_cache(10, 2, false)
-expect(c.cache_miss_count >= 0).to_equal(true)
+expect(c.cache_miss_count).to_equal(2)
 ```
 
 </details>
@@ -105,7 +105,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c: StyleCacheSentinel = make_style_cache(10, 2, false)
-expect(c.cache_hit_count > c.cache_miss_count).to_equal(true)
+expect(c.cache_hit_count).to_be_greater_than(c.cache_miss_count)
 ```
 
 </details>
@@ -120,7 +120,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c: StyleCacheSentinel = make_style_cache(10, 2, false)
-expect(c.invalidated).to_equal(false)
+expect(c.invalidated).to_be(false)
 ```
 
 </details>
@@ -135,7 +135,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c: StyleCacheSentinel = make_style_cache(0, 1, true)
-expect(c.invalidated).to_equal(true)
+expect(c.invalidated).to_be(true)
 ```
 
 </details>
@@ -150,7 +150,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val c: StyleCacheSentinel = make_style_cache(0, 1, true)
-expect(c.cache_miss_count > 0).to_equal(true)
+expect(c.cache_miss_count).to_be_greater_than(0)
 ```
 
 </details>
@@ -167,7 +167,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val b: PaintBatchSentinel = make_paint_batch(100, 35)
-expect(b.raw_command_count > 0).to_equal(true)
+expect(b.raw_command_count).to_be_greater_than(0)
 ```
 
 </details>
@@ -182,7 +182,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val b: PaintBatchSentinel = make_paint_batch(100, 35)
-expect(b.batch_command_count < b.raw_command_count).to_equal(true)
+expect(b.batch_command_count).to_be_less_than(b.raw_command_count)
 ```
 
 </details>
@@ -197,7 +197,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val b: PaintBatchSentinel = make_paint_batch(100, 35)
-expect(b.batch_ratio_pct > 0).to_equal(true)
+expect(b.batch_ratio_pct).to_be_greater_than(0)
 ```
 
 </details>
@@ -212,7 +212,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val b: PaintBatchSentinel = make_paint_batch(100, 35)
-expect(b.batch_ratio_pct < 100).to_equal(true)
+expect(b.batch_ratio_pct).to_be_less_than(100)
 ```
 
 </details>
@@ -244,7 +244,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val g: GlyphCacheSentinel = make_glyph_cache(80, 20)
-expect(g.glyph_hits >= 0).to_equal(true)
+expect(g.glyph_hits).to_equal(80)
 ```
 
 </details>
@@ -259,7 +259,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val g: GlyphCacheSentinel = make_glyph_cache(80, 20)
-expect(g.glyph_misses >= 0).to_equal(true)
+expect(g.glyph_misses).to_equal(20)
 ```
 
 </details>
@@ -269,13 +269,12 @@ expect(g.glyph_misses >= 0).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val g: GlyphCacheSentinel = make_glyph_cache(80, 20)
-expect(g.hit_rate_pct >= 0).to_equal(true)
-expect(g.hit_rate_pct <= 100).to_equal(true)
+expect(g.hit_rate_pct).to_equal(80)
 ```
 
 </details>
@@ -290,7 +289,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val g: GlyphCacheSentinel = make_glyph_cache(80, 20)
-expect(g.hit_rate_pct >= GLYPH_CACHE_MIN_HIT_RATE_PCT).to_equal(true)
+expect(g.hit_rate_pct).to_be_greater_than(GLYPH_CACHE_MIN_HIT_RATE_PCT - 1)
 ```
 
 </details>
@@ -338,7 +337,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val sd: ScrollDamageSentinel = make_scroll_damage(115200, 2073600)
-expect(sd.scroll_damage_px >= 0).to_equal(true)
+expect(sd.scroll_damage_px).to_equal(115200)
 ```
 
 </details>
@@ -353,7 +352,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val sd: ScrollDamageSentinel = make_scroll_damage(115200, 2073600)
-expect(sd.full_frame_px > 0).to_equal(true)
+expect(sd.full_frame_px).to_be_greater_than(0)
 ```
 
 </details>
@@ -368,7 +367,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val sd: ScrollDamageSentinel = make_scroll_damage(115200, 2073600)
-expect(sd.is_partial).to_equal(true)
+expect(sd.is_partial).to_be(true)
 ```
 
 </details>
@@ -383,7 +382,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val sd: ScrollDamageSentinel = make_scroll_damage(115200, 2073600)
-expect(sd.scroll_damage_px < sd.full_frame_px).to_equal(true)
+expect(sd.scroll_damage_px).to_be_less_than(sd.full_frame_px)
 ```
 
 </details>
@@ -398,7 +397,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val sd: ScrollDamageSentinel = make_scroll_damage(2073600, 2073600)
-expect(sd.is_partial).to_equal(false)
+expect(sd.is_partial).to_be(false)
 ```
 
 </details>
