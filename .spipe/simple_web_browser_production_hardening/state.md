@@ -70,3 +70,5 @@ implementation
 - verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 12 scenarios.
 - verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 9 scenarios.
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180` passes with 2 live endpoint scenarios.
+- impl: Hardened `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` after local verification exposed a flaky 20s Chrome live-capture budget and a font-offload status variable collision.
+- verify: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` passes. Evidence reports matrix/layout/surface/backend `pass`, Tauri and Chrome surface fail counts `0`, two tracked text raster divergences per surface, font offload `unavailable`, and Metal readback `unavailable` on Linux with `metal-requires-macos`.
