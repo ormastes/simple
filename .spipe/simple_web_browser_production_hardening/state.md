@@ -148,6 +148,16 @@ verification / requirement-selection pending
   --mode=interpreter --clean`, and `bin/simple test
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl
   --mode=interpreter --clean --timeout 360` pass.
+- fix: Applied the same `UI_WEB_MAX_REQUEST_HEAD_BYTES`,
+  `UI_WEB_MAX_REQUEST_LINE_BYTES`, and `UI_WEB_MAX_HEADER_LINE_BYTES` guards to
+  the normal `run_web` request-head parser that shared-WM already used.
+- verify: `/home/ormastes/dev/pub/simple/bin/simple check
+  src/app/ui.web/server.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl` passes,
+  and `bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` passes with normal-server and
+  shared-WM oversized request-head coverage.
 - fix: Replaced shared-WM `read_line` request-head accumulation with a bounded
   chunked parser using `UI_WEB_MAX_REQUEST_HEAD_BYTES`; oversized heads,
   request lines, and header lines return `413 Payload Too Large` before route

@@ -49,6 +49,9 @@ simple_web_browser_production_hardening_spec -> app
 - hardening stop web server
 - Verify every unauthenticated route fails closed with a concrete status and marker
    - Expected: missing_origin equals `HTTP/1.1 403 Forbidden|present`
+   - Expected: oversized_head equals `HTTP/1.1 413 Payload Too Large|present`
+   - Expected: oversized_request_line equals `HTTP/1.1 413 Payload Too Large|present`
+   - Expected: oversized_header_line equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: oversized_login equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: api_state equals `HTTP/1.1 403 Forbidden|present`
    - Expected: api_widgets equals `HTTP/1.1 403 Forbidden|present`
@@ -61,7 +64,7 @@ simple_web_browser_production_hardening_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -71,6 +74,9 @@ val pid = hardening_start_web_server(port)
 
 step("Send unauthenticated requests to login, API, and WebSocket routes")
 val missing_origin = raw_http_summary(port, login_missing_origin_request(port), "forbidden_origin")
+val oversized_head = raw_http_summary(port, oversized_head_request(port), "request_head_too_large")
+val oversized_request_line = raw_http_summary(port, oversized_request_line_request(port), "request_head_too_large")
+val oversized_header_line = raw_http_summary(port, oversized_header_line_request(port), "request_head_too_large")
 val oversized_login = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
 val api_state = raw_http_summary(port, api_state_unauthorized_request(port), "\"error\": \"forbidden\"")
 val api_widgets = raw_http_summary(port, api_widgets_unauthorized_request(port), "\"error\": \"forbidden\"")
@@ -83,6 +89,9 @@ hardening_stop_web_server(pid)
 
 step("Verify every unauthenticated route fails closed with a concrete status and marker")
 expect(missing_origin).to_equal("HTTP/1.1 403 Forbidden|present")
+expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
+expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
+expect(oversized_header_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_login).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(api_state).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(api_widgets).to_equal("HTTP/1.1 403 Forbidden|present")
@@ -348,9 +357,9 @@ step("Start a shared-WM Simple Web server with a real token secret")
 val pid = hardening_start_shared_wm_server(port)
 
 step("Reject an oversized shared-WM request head before route dispatch")
-val oversized_head = raw_http_summary(port, shared_wm_oversized_head_request(port), "request_head_too_large")
-val oversized_request_line = raw_http_summary(port, shared_wm_oversized_request_line_request(port), "request_head_too_large")
-val oversized_header_line = raw_http_summary(port, shared_wm_oversized_header_line_request(port), "request_head_too_large")
+val oversized_head = raw_http_summary(port, oversized_head_request(port), "request_head_too_large")
+val oversized_request_line = raw_http_summary(port, oversized_request_line_request(port), "request_head_too_large")
+val oversized_header_line = raw_http_summary(port, oversized_header_line_request(port), "request_head_too_large")
 val oversized_login_body = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
 
 step("Spend the shared-WM login burst budget from an allowed loopback origin")

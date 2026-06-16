@@ -18,7 +18,7 @@ user selection.
 | Sanitized request-id correlation for token-bearing responses | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | Authorized `/ui/resume` malformed-body rejection and valid-body acceptance | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Authorized `/ui/resume` oversized-body rejection | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
-| Shared-WM oversized request-head, request-line, and header-line rejection before route dispatch | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| Normal and shared-WM oversized request-head, request-line, and header-line rejection before route dispatch | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | Positive token mint plus `/ui/ws` and legacy `/ws` WebSocket upgrades | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Case-insensitive WebSocket upgrade headers and comma-token `Connection` parsing | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | Inbound WebSocket frame payload length cap before allocation | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` regression run | passing |

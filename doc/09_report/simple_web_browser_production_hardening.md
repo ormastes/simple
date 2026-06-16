@@ -33,9 +33,8 @@
   Large` before parsing route fields.
 - Inbound WebSocket frame readers reject declared payload lengths above the
   production cap before allocating payload buffers.
-- The shared-WM HTTP entrypoint rejects oversized request heads, request lines,
-  and header lines before route dispatch, closing a parser-boundary gap with
-  the normal server path.
+- The normal and shared-WM HTTP entrypoints reject oversized request heads,
+  request lines, and header lines before route dispatch.
 - `/ui/ws` and legacy `/ws` reject non-GET WebSocket upgrade attempts with
   `405 Method Not Allowed` before the socket can be upgraded, even when the
   request carries a valid origin-bound bearer token.

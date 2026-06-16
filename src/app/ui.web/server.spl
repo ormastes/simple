@@ -309,6 +309,8 @@ class WebServer:
                         head_done = true
                     else:
                         raw = "{raw}{rt_bytes_to_text(chunk)}"
+                        if not ui_web_request_head_allowed(raw.len()):
+                            return Err("request_head_too_large")
                         if raw.contains("\r\n\r\n"):
                             head_done = true
                 Err(_):
@@ -316,17 +318,23 @@ class WebServer:
         if raw == "":
             return Err("empty request")
         val sep = raw.index_of("\r\n\r\n")
+        if sep < 0 and raw.len() >= UI_WEB_MAX_REQUEST_HEAD_BYTES:
+            return Err("request_head_too_large")
         val head = if sep >= 0: raw[0:sep] else: raw
         val initial_body = if sep >= 0: raw.slice(sep + 4, raw.len()) else: ""
         val head_lines = head.split("\r\n")
         val head_line_count = head_lines.len()
         val request_line = if head_line_count > 0: head_lines[0] else: ""
+        if not ui_web_request_line_allowed(request_line.len()):
+            return Err("request_head_too_large")
         val request = parse_request_line(request_line)
         var headers = ""
         var is_ws = false
         var hi = 1
         while hi < head_line_count:
             val header_line = head_lines[hi]
+            if not ui_web_header_line_allowed(header_line.len()):
+                return Err("request_head_too_large")
             headers = "{headers}{header_line}\n"
             if is_ws_upgrade_request(headers):
                 is_ws = true
@@ -337,6 +345,10 @@ class WebServer:
         """Handle a single HTTP connection."""
         match self.read_head(stream):
             Err(e):
+                if e == "request_head_too_large":
+                    val too_large = _simple_response(413, "application/json", "{\"error\": \"request_head_too_large\"}")
+                    self.send_small_http(stream, too_large)
+                    return
                 print "Error reading request: {e}"
             Ok(parsed):
                 # Check for file changes before each response
