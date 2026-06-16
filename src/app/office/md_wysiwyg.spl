@@ -19,6 +19,16 @@ struct WysiwygLine:
 struct WysiwygView:
     lines: [WysiwygLine]
 
+struct WysiwygEditResult:
+    accepted: bool
+    reason: text
+    line_no: i32
+    expected_source: text
+    actual_source: text
+    new_source: text
+    diff: text
+    view: WysiwygView
+
 fn build_wysiwyg_view(source: text) -> WysiwygView:
     """Split markdown source into lines and pair each with its styled preview."""
     var lines: [WysiwygLine] = []
@@ -57,3 +67,69 @@ fn wysiwyg_update_line(view: WysiwygView, line_no: i32, new_source: text) -> Wys
         else:
             lines.push(l)
     WysiwygView(lines: lines)
+
+fn wysiwyg_edit_diff(line_no: i32, expected_source: text, actual_source: text, new_source: text, accepted: bool) -> text:
+    """A compact, deterministic diff for command/edit automation."""
+    if accepted:
+        return "@@ line {line_no} @@\n- {expected_source}\n+ {new_source}"
+    "@@ line {line_no} @@\nexpected: {expected_source}\nactual: {actual_source}\nrejected: {new_source}"
+
+fn wysiwyg_update_line_checked(view: WysiwygView, line_no: i32, expected_source: text, new_source: text) -> WysiwygEditResult:
+    """Apply an edit only when the caller's expected line matches the current line.
+
+    This is the fail-closed command/edit contract for LLM-driven updates: if the
+    model thinks a line exists but the actual line differs, the update is rejected
+    with both values and a deterministic diff summary.
+    """
+    var lines: [WysiwygLine] = []
+    var found = false
+    var actual_source = ""
+    for l in view.lines:
+        if l.line_no == line_no:
+            found = true
+            actual_source = l.source
+            if l.source == expected_source:
+                lines.push(WysiwygLine(line_no: l.line_no, source: new_source, rendered: render_markdown_line_styled_html(new_source)))
+            else:
+                lines.push(l)
+        else:
+            lines.push(l)
+
+    if not found:
+        val diff = wysiwyg_edit_diff(line_no, expected_source, "<missing>", new_source, false)
+        return WysiwygEditResult(
+            accepted: false,
+            reason: "line-not-found",
+            line_no: line_no,
+            expected_source: expected_source,
+            actual_source: "<missing>",
+            new_source: new_source,
+            diff: diff,
+            view: view,
+        )
+
+    if actual_source != expected_source:
+        val diff = wysiwyg_edit_diff(line_no, expected_source, actual_source, new_source, false)
+        return WysiwygEditResult(
+            accepted: false,
+            reason: "stale-line",
+            line_no: line_no,
+            expected_source: expected_source,
+            actual_source: actual_source,
+            new_source: new_source,
+            diff: diff,
+            view: view,
+        )
+
+    val updated = WysiwygView(lines: lines)
+    val diff = wysiwyg_edit_diff(line_no, expected_source, actual_source, new_source, true)
+    WysiwygEditResult(
+        accepted: true,
+        reason: "updated",
+        line_no: line_no,
+        expected_source: expected_source,
+        actual_source: actual_source,
+        new_source: new_source,
+        diff: diff,
+        view: updated,
+    )

@@ -28,7 +28,7 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -127,6 +127,64 @@ expect(preview).to_contain(">changed</p>")
 
 </details>
 
+#### accepts checked edits only when expected source matches actual source
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val view = build_wysiwyg_view("first\nsecond")
+val result = wysiwyg_update_line_checked(view, 1, "second", "changed")
+expect(result.accepted).to_be(true)
+expect(result.reason).to_equal("updated")
+expect(result.diff).to_equal("@@ line 1 @@\n- second\n+ changed")
+expect(wysiwyg_source_pane(result.view)).to_equal("first\nchanged")
+```
+
+</details>
+
+#### rejects stale checked edits with expected and actual source
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val view = build_wysiwyg_view("first\nactual")
+val result = wysiwyg_update_line_checked(view, 1, "expected", "changed")
+expect(result.accepted).to_be(false)
+expect(result.reason).to_equal("stale-line")
+expect(result.actual_source).to_equal("actual")
+expect(result.diff).to_equal("@@ line 1 @@\nexpected: expected\nactual: actual\nrejected: changed")
+expect(wysiwyg_source_pane(result.view)).to_equal("first\nactual")
+```
+
+</details>
+
+#### rejects checked edits for missing lines
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val view = build_wysiwyg_view("first")
+val result = wysiwyg_update_line_checked(view, 3, "expected", "changed")
+expect(result.accepted).to_be(false)
+expect(result.reason).to_equal("line-not-found")
+expect(result.actual_source).to_equal("<missing>")
+expect(wysiwyg_source_pane(result.view)).to_equal("first")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -147,8 +205,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

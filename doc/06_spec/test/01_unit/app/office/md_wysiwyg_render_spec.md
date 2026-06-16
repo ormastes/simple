@@ -130,7 +130,7 @@ expect(pixels.len()).to_equal(200 * 80)
 expect(_count_non_bg(pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
 # A heading + body paints differently than the body alone.
 val body_only = _render_markdown("body text", 200, 80)
-expect(_pixels_equal(pixels, body_only)).to_equal(false)
+expect(_pixels_equal(pixels, body_only)).to_be(false)
 ```
 
 </details>
@@ -150,7 +150,7 @@ expect(a.len()).to_equal(200 * 60)
 expect(b.len()).to_equal(200 * 60)
 # (4) distinct markdown content yields distinct pixels — the renderer is
 # genuinely consuming the WYSIWYG HTML, not emitting a fixed bitmap.
-expect(_pixels_equal(a, b)).to_equal(false)
+expect(_pixels_equal(a, b)).to_be(false)
 expect(_count_non_bg(b, 0xFFFFFFFFu32)).to_be_greater_than(0)
 ```
 
