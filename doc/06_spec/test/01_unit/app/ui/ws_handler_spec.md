@@ -28,7 +28,7 @@ ws_handler_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -162,6 +162,24 @@ expect(_extract_bearer(headers, path)).to_equal("header-token")
 
 </details>
 
+#### bounds unauthenticated request body sizes before transport reads
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_content_length("Content-Length: 42\n")).to_equal(42)
+expect(ui_web_content_length("content-length: 17\n")).to_equal(17)
+expect(ui_web_body_exceeds_unauth_limit("Content-Length: 8192\n")).to_be(false)
+val too_large = UI_WEB_MAX_UNAUTH_BODY_BYTES + 1
+expect(ui_web_body_exceeds_unauth_limit("Content-Length: {too_large}\n")).to_be(true)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -181,8 +199,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
