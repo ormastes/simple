@@ -61,3 +61,6 @@ implementation
 - verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 9 scenarios after bounded auth JSON parser coverage.
 - verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 9 scenarios.
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 90` passes with 1 live endpoint scenario after the shared parser refactor.
+- plan: Added `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` for local NVIDIA Vulkan/CUDA/OpenCL, Linux Vulkan CPU emulation, macOS Metal, Linux AMD ROCm/HIP, and QEMU/emulation lanes.
+- verify: Local GPU environment probes show Vulkan Engine2D readback `pass`; Metal generated readback host-unavailable with `missing-primary-tool`; ROCm generated readback host-unavailable with `missing-primary-tool`.
+- verify: Aggregate host GPU queue wrapper reports Vulkan/CUDA/OpenCL readback `pass`, Metal/ROCm host-unavailable, and aggregate queue integration `fail` due `browser-frame-first-render-budget-not-met`.
