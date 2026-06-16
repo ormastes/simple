@@ -73,6 +73,71 @@ pub fn rt_http_get(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Synchronous HTTP request with explicit method, headers, and body using ureq.
+///
+/// Callable from Simple as:
+///   `rt_http_request(method: text, url: text, headers: [text], body: text) -> (i64, text, text)`
+/// `headers` is a list of `"Key: Value"` strings. Returns `(status_code, body, error)`.
+///
+/// HTTP error statuses (4xx/5xx) are returned as a normal `(status, body, "")` tuple so
+/// callers can inspect the status and parse the error body (e.g. S3 `NoSuchKey`); only
+/// transport/protocol failures set `status = -1` with a non-empty error string.
+///
+/// Mirrors `rt_http_get` (no `check_effect_violations`, unlike `native_http_send`) so the
+/// `rt_http_*` extern family behaves consistently under the bootstrap interpreter.
+pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
+    fn err_tuple(msg: String) -> Value {
+        Value::Tuple(vec![Value::Int(-1), Value::Str(String::new()), Value::Str(msg)])
+    }
+    let method = match args.first() {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Ok(err_tuple("rt_http_request: missing or invalid method argument".to_string())),
+    };
+    let url = match args.get(1) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Ok(err_tuple("rt_http_request: missing or invalid url argument".to_string())),
+    };
+    // headers: [text] of "Key: Value" (first colon splits; SigV4 Authorization values
+    // contain '/' and ',' but no colon before the first one, so this is safe).
+    let mut header_pairs: Vec<(String, String)> = Vec::new();
+    if let Some(Value::Array(items)) = args.get(2) {
+        for it in items.iter() {
+            if let Value::Str(h) = it {
+                if let Some(idx) = h.find(':') {
+                    let k = h[..idx].trim().to_string();
+                    let v = h[idx + 1..].trim().to_string();
+                    if !k.is_empty() {
+                        header_pairs.push((k, v));
+                    }
+                }
+            }
+        }
+    }
+    let body = match args.get(3) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => String::new(),
+    };
+
+    let mut req = ureq::request(&method, &url);
+    for (k, v) in &header_pairs {
+        req = req.set(k, v);
+    }
+    let send_result = if body.is_empty() { req.call() } else { req.send_string(&body) };
+    match send_result {
+        Ok(response) => {
+            let status = response.status() as i64;
+            let body = response.into_string().unwrap_or_default();
+            Ok(Value::Tuple(vec![Value::Int(status), Value::Str(body), Value::Str(String::new())]))
+        }
+        // ureq surfaces non-2xx/3xx as Err(Status); return the real code + body, not -1.
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            Ok(Value::Tuple(vec![Value::Int(code as i64), Value::Str(body), Value::Str(String::new())]))
+        }
+        Err(e) => Ok(err_tuple(format!("rt_http_request error: {e}"))),
+    }
+}
+
 /// Stub for async WebSocket raw read — not available in interpreter mode.
 ///
 /// Returns empty list (List<i64>).

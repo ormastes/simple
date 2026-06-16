@@ -307,6 +307,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("native_fs_write_string", filesystem::native_fs_write_string);
     insert_simple!("native_get_term_size", terminal::native_get_term_size);
     insert_simple!("native_http_send", network::native_http_send);
+    insert_simple!("rt_http_request", network::rt_http_request);
     insert_simple!("native_is_tty", terminal::native_is_tty);
     insert_simple!("native_stderr", terminal::native_stderr);
     insert_simple!("rt_host_gpu_lane_event", host_gpu_lane::rt_host_gpu_lane_event);
