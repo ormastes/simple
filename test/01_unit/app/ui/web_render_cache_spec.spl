@@ -4,7 +4,7 @@
 extern fn rt_file_exists(path: text) -> bool
 
 use std.common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderRequest, web_render_cache_key}
-use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderPreparedStaticShellPlan, WebRenderStaticArtifactCache, WebRenderStaticCommandCache, WebRenderStaticPlanCache, web_render_binary_cache_path, web_render_cache_path, web_render_cached_static_artifact, web_render_cached_static_plan, web_render_static_cache_lookup_binary, web_render_static_cache_lookup_html, web_render_static_shell_binary_artifact, web_render_static_shell_binary_artifact_with_html, web_render_static_shell_binary_decode, web_render_static_shell_binary_matches_request, web_render_static_shell_binary_to_artifact, web_render_static_shell_command_payload_bytes, web_render_static_shell_commands}
+use app.ui.web.render_cache.{WebRenderPreparedStaticShellArtifact, WebRenderPreparedStaticShellPlan, WebRenderStaticArtifactCache, WebRenderStaticCommandCache, WebRenderStaticPlanCache, web_render_binary_cache_path, web_render_cache_path, web_render_cached_static_artifact, web_render_cached_static_plan, web_render_retained_visibility_decision, web_render_static_cache_lookup_binary, web_render_static_cache_lookup_html, web_render_static_shell_binary_artifact, web_render_static_shell_binary_artifact_with_html, web_render_static_shell_binary_decode, web_render_static_shell_binary_matches_request, web_render_static_shell_binary_to_artifact, web_render_static_shell_command_payload_bytes, web_render_static_shell_commands}
 
 describe "persistent web render static cache":
 
@@ -244,3 +244,58 @@ describe "persistent web render static cache":
         val miss_count = cache.hot_command_count_for_key(key + ":miss")
         expect(miss_count).to_equal(-1)
         expect(cache.memory_hits).to_equal(3)
+
+    it "skips hidden retained static shell plans while keeping cache":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Hidden Retained", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val binary = web_render_static_shell_binary_artifact(req)
+        val plan = WebRenderPreparedStaticShellPlan.prepare(req, binary.encoded)
+        val decision = web_render_retained_visibility_decision(plan, "hidden_keep_cache", false, true)
+        expect(decision.valid).to_equal(true)
+        expect(decision.keep_cache).to_equal(true)
+        expect(decision.skip_layout).to_equal(true)
+        expect(decision.skip_paint).to_equal(true)
+        expect(decision.skip_draw).to_equal(true)
+        expect(decision.reuse_commands).to_equal(false)
+        expect(decision.emitted_command_count).to_equal(0)
+        expect(decision.reason).to_equal("hidden_keep_cache")
+
+    it "skips offscreen auto viewport plans without dropping retained state":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Offscreen Retained", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val binary = web_render_static_shell_binary_artifact(req)
+        val plan = WebRenderPreparedStaticShellPlan.prepare(req, binary.encoded)
+        val decision = web_render_retained_visibility_decision(plan, "auto_viewport", false, true)
+        expect(decision.valid).to_equal(true)
+        expect(decision.keep_cache).to_equal(true)
+        expect(decision.skip_layout).to_equal(true)
+        expect(decision.skip_paint).to_equal(true)
+        expect(decision.skip_draw).to_equal(true)
+        expect(decision.emitted_command_count).to_equal(0)
+        expect(decision.reason).to_equal("offscreen_auto_viewport")
+
+    it "reuses retained commands for visible unchanged plans":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Unchanged Retained", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val binary = web_render_static_shell_binary_artifact(req)
+        val plan = WebRenderPreparedStaticShellPlan.prepare(req, binary.encoded)
+        val decision = web_render_retained_visibility_decision(plan, "visible", true, true)
+        expect(decision.valid).to_equal(true)
+        expect(decision.keep_cache).to_equal(true)
+        expect(decision.skip_layout).to_equal(true)
+        expect(decision.skip_paint).to_equal(true)
+        expect(decision.skip_draw).to_equal(false)
+        expect(decision.reuse_commands).to_equal(true)
+        expect(decision.emitted_command_count).to_equal(plan.commands.len())
+        expect(decision.reason).to_equal("unchanged_reuse_retained_commands")
+
+    it "emits retained commands for visible dirty plans":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Dirty Retained", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+        val binary = web_render_static_shell_binary_artifact(req)
+        val plan = WebRenderPreparedStaticShellPlan.prepare(req, binary.encoded)
+        val decision = web_render_retained_visibility_decision(plan, "visible", true, false)
+        expect(decision.valid).to_equal(true)
+        expect(decision.keep_cache).to_equal(true)
+        expect(decision.skip_layout).to_equal(false)
+        expect(decision.skip_paint).to_equal(false)
+        expect(decision.skip_draw).to_equal(false)
+        expect(decision.reuse_commands).to_equal(false)
+        expect(decision.emitted_command_count).to_equal(plan.commands.len())
+        expect(decision.reason).to_equal("visible_dirty")

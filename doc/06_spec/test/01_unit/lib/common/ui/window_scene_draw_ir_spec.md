@@ -28,7 +28,7 @@ window_scene_draw_ir_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,7 +44,7 @@ window_scene_draw_ir_spec -> common
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -63,12 +63,35 @@ expect(composition.batches[0].source.source_kind).to_equal(DRAW_IR_SOURCE_WM_SCE
 expect(composition.batches[1].source.source_id).to_equal("wm.chrome")
 expect(composition.batches[2].source.source_id).to_equal("wm.window.win1")
 expect(composition.batches[2].source.style_key).to_equal("wm.window")
+expect(composition.batches[2].source.style_revision).to_contain("xy=10,40")
+expect(composition.batches[2].source.style_revision).to_contain("size=300x200")
 expect(composition.batches[2].embedding.x).to_equal(10)
 expect(composition.batches[2].embedding.y).to_equal(40)
 expect(composition.batches[3].embedding.x).to_equal(80)
 expect(composition.batches[3].embedding.y).to_equal(120)
 expect(composition.batches[3].commands[0].kind).to_equal(DRAW_IR_COMMAND_RECT)
 expect(composition.batches[3].commands[3].kind).to_equal(DRAW_IR_COMMAND_TEXT)
+```
+
+</details>
+
+#### keeps Draw IR source revisions stable for unchanged scenes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scene = _scene()
+val first = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+val second = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+
+expect(second.batches[0].source.style_revision).to_equal(first.batches[0].source.style_revision)
+expect(second.batches[1].source.style_revision).to_equal(first.batches[1].source.style_revision)
+expect(second.batches[2].source.style_revision).to_equal(first.batches[2].source.style_revision)
+expect(second.batches[3].source.style_revision).to_equal(first.batches[3].source.style_revision)
 ```
 
 </details>
@@ -127,17 +150,20 @@ expect(plan.fallback_required).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val scene = _scene()
 val first = shared_wm_translate_pointer_event(scene, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, DRAW_IR_BACKEND_GPU)
 val moved = shared_wm_drag_window(scene, "surf2", 100, 0)
+val original_composition = shared_wm_scene_draw_ir_composition(scene, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
 val moved_composition = shared_wm_scene_draw_ir_composition(moved, _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
 val stale_checked = shared_wm_translate_pointer_event_cached(moved, _taskbar(), 90, 125, "left", "down", 1000, "09:41", 2, DRAW_IR_BACKEND_GPU, first.cache)
 
 expect(moved_composition.scene_key == first.translation.scene_key).to_equal(false)
+expect(moved_composition.batches[2].source.style_revision).to_equal(original_composition.batches[2].source.style_revision)
+expect(moved_composition.batches[3].source.style_revision == original_composition.batches[3].source.style_revision).to_equal(false)
 expect(stale_checked.translation.cache_hit).to_equal(false)
 expect(stale_checked.translation.stale_cache_rejected).to_equal(true)
 expect(stale_checked.translation.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
@@ -201,8 +227,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

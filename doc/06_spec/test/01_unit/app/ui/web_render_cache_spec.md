@@ -28,7 +28,7 @@ web_render_cache_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -94,7 +94,7 @@ expect(web_render_static_cache_lookup_html(cache_dir, req)).to_equal("")
 
 #### serves repeated static shells from the in-memory hot layer
 
-1. var cache = WebRenderStaticArtifactCache create
+- var cache = WebRenderStaticArtifactCache create
    - Expected: first.cache_hit is false
    - Expected: first.cache_stored is true
    - Expected: cache.stores equals `1`
@@ -256,7 +256,7 @@ expect(web_render_static_shell_command_payload_bytes(commands)).to_be_less_than(
 
 #### prepares a decoded static shell binary artifact for hot reuse
 
-1. var prepared = WebRenderPreparedStaticShellArtifact prepare
+- var prepared = WebRenderPreparedStaticShellArtifact prepare
    - Expected: prepared.valid is true
    - Expected: prepared.commands.len() equals `binary.command_count`
    - Expected: first.cache_hit is true
@@ -294,7 +294,7 @@ expect(prepared.command_hits).to_equal(1)
 
 #### prepares a decoded static shell command plan without an html artifact
 
-1. var plan = WebRenderPreparedStaticShellPlan prepare
+- var plan = WebRenderPreparedStaticShellPlan prepare
    - Expected: plan.valid is true
    - Expected: plan.commands.len() equals `binary.command_count`
    - Expected: plan.decoded.html_bytes equals `binary.html_bytes`
@@ -378,7 +378,7 @@ expect(web_render_static_cache_lookup_binary(cache_dir, req)).to_equal("")
 
 #### serves repeated static shell command plans from the in-memory hot layer
 
-1. var cache = WebRenderStaticPlanCache create
+- var cache = WebRenderStaticPlanCache create
    - Expected: first.cache_hit is false
    - Expected: first.cache_stored is true
    - Expected: first.plan.valid is true
@@ -431,7 +431,7 @@ expect(cache.memory_hits).to_equal(2)
 
 #### serves retained static shell commands from the in-memory hot layer
 
-1. var cache = WebRenderStaticCommandCache create
+- var cache = WebRenderStaticCommandCache create
    - Expected: first.valid is true
    - Expected: first.cache_hit is false
    - Expected: first.cache_stored is true
@@ -491,6 +491,105 @@ expect(cache.memory_hits).to_equal(3)
 
 </details>
 
+#### skips hidden retained static shell plans while keeping cache
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Hidden Retained", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+val binary = web_render_static_shell_binary_artifact(req)
+val plan = WebRenderPreparedStaticShellPlan.prepare(req, binary.encoded)
+val decision = web_render_retained_visibility_decision(plan, "hidden_keep_cache", false, true)
+expect(decision.valid).to_equal(true)
+expect(decision.keep_cache).to_equal(true)
+expect(decision.skip_layout).to_equal(true)
+expect(decision.skip_paint).to_equal(true)
+expect(decision.skip_draw).to_equal(true)
+expect(decision.reuse_commands).to_equal(false)
+expect(decision.emitted_command_count).to_equal(0)
+expect(decision.reason).to_equal("hidden_keep_cache")
+```
+
+</details>
+
+#### skips offscreen auto viewport plans without dropping retained state
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Offscreen Retained", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+val binary = web_render_static_shell_binary_artifact(req)
+val plan = WebRenderPreparedStaticShellPlan.prepare(req, binary.encoded)
+val decision = web_render_retained_visibility_decision(plan, "auto_viewport", false, true)
+expect(decision.valid).to_equal(true)
+expect(decision.keep_cache).to_equal(true)
+expect(decision.skip_layout).to_equal(true)
+expect(decision.skip_paint).to_equal(true)
+expect(decision.skip_draw).to_equal(true)
+expect(decision.emitted_command_count).to_equal(0)
+expect(decision.reason).to_equal("offscreen_auto_viewport")
+```
+
+</details>
+
+#### reuses retained commands for visible unchanged plans
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Unchanged Retained", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+val binary = web_render_static_shell_binary_artifact(req)
+val plan = WebRenderPreparedStaticShellPlan.prepare(req, binary.encoded)
+val decision = web_render_retained_visibility_decision(plan, "visible", true, true)
+expect(decision.valid).to_equal(true)
+expect(decision.keep_cache).to_equal(true)
+expect(decision.skip_layout).to_equal(true)
+expect(decision.skip_paint).to_equal(true)
+expect(decision.skip_draw).to_equal(false)
+expect(decision.reuse_commands).to_equal(true)
+expect(decision.emitted_command_count).to_equal(plan.commands.len())
+expect(decision.reason).to_equal("unchanged_reuse_retained_commands")
+```
+
+</details>
+
+#### emits retained commands for visible dirty plans
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val req = WebRenderRequest.html(WEB_RENDER_TARGET_PURE_SIMPLE, "Dirty Retained", "<main><section><h1>Title</h1><p>copy</p></section></main>", "main{contain:layout paint style}", "", 320, 200)
+val binary = web_render_static_shell_binary_artifact(req)
+val plan = WebRenderPreparedStaticShellPlan.prepare(req, binary.encoded)
+val decision = web_render_retained_visibility_decision(plan, "visible", true, false)
+expect(decision.valid).to_equal(true)
+expect(decision.keep_cache).to_equal(true)
+expect(decision.skip_layout).to_equal(false)
+expect(decision.skip_paint).to_equal(false)
+expect(decision.skip_draw).to_equal(false)
+expect(decision.reuse_commands).to_equal(false)
+expect(decision.emitted_command_count).to_equal(plan.commands.len())
+expect(decision.reason).to_equal("visible_dirty")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -510,8 +609,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
