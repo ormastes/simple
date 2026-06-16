@@ -222,10 +222,16 @@ backend.shutdown()
 
 #### reports webgpu_available() without crashing
 
+- var backend = WebGpuBackend create
+   - Expected: backend.name() equals `webgpu`
+   - Expected: backend.init(1, 1) is true
+- backend shutdown
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -233,7 +239,10 @@ Reproduction: this block contains the complete executable scenario source.
 # no WebGPU runtime. We only check that the call returns
 # (either true or false) - hermetic CI lacks an adapter.
 val _available = webgpu_available()
-expect(true).to_equal(true)
+var backend = WebGpuBackend.create()
+expect(backend.name()).to_equal("webgpu")
+expect(backend.init(1, 1)).to_equal(true)
+backend.shutdown()
 ```
 
 </details>

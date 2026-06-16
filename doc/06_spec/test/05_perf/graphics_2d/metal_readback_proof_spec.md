@@ -50,7 +50,7 @@ Reproduction: this block contains the complete executable scenario source.
 val mismatches = metal_readback_mismatches()
 print "METAL_READBACK_PROOF mismatches={mismatches}"
 if mismatches == -1:
-    expect(true).to_equal(true)
+    expect(mismatches).to_equal(-1)
 else:
     expect(mismatches).to_equal(0)
 ```
