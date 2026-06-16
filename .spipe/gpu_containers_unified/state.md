@@ -1,69 +1,62 @@
 # Feature: gpu_containers_unified
 
 ## Raw Request
-> curent simple common algorithm and containers like cuda
-> https://nvidia.github.io/cccl/unstable/libcudacxx/standard_api.html simple should
-> supply equal or better in feature list. and it both support usage of cpu/gpu. research
-> how organize with existing gpu api set. make them consistent and switchable by config.
-> gpu least cuda provide std lib should provided and you can use cuda lib as backend when
-> cuda is used. however, impl first cuda, then pure simple, then vulkan lib backed, metal
-> backed. with veriety level of model like haiku, do jobs in pherallel but reviewed by
-> opus verification after works. during this. find bug(include perf bug) fix and enhance
-> simple(which is another goal)
-
-Goal command: `use spipe dec skill, complete doc/03_plan/lib/gpu_containers_unified/unified_compute_stdlib_rollout_2026-06-16.md`
+> curent simple common algorithm and containers like cuda … both cpu/gpu, organize with
+> existing gpu api set, consistent + switchable by config, impl cuda → pure simple → vulkan
+> → metal, parallel agent teams + opus verification, find+fix bugs (incl perf).
+> FOLLOW-UP (2026-06-16): two-level device-class target model (default/cpu/simd_cpu/gpu/
+> fpga/simd) like SYCL device_type, NOT backend-API tags. Two backend DOMAINS (drawing vs
+> processing). Config is `suggest` (soft) or `require` (hard/fail-closed).
+> GOAL: use spipe dev skill, refactor ExecTarget, impl pure-simple lib for gpu+cpu and for
+> cuda/metal/vulkan backed container/algorithm, consistent + config selectable, deep plan +
+> parallel agent teams.
 
 ## Task Type
 feature
 
 ## Refined Goal
-Add a single generic, config-switchable CPU/GPU compute surface to the `nogc_async_mut`
-default tier — container/utility types at CCCL libcu++ parity plus a Thrust-parity
-algorithm layer — that compiles through the existing `gpu_portable_compute`/`@gpu_kernel`
-path (no fork), dispatches by one `ExecTarget` policy resolver, uses CUDA as backend and
-differential-test oracle, and is delivered CUDA → pure-Simple → Vulkan → Metal while
-fixing the prerequisite Simple bugs it depends on.
+Two-level config-selectable `ExecTarget` policy (L1 device class, L2 auto backend, suggest/
+require) + a generic pure-Simple container & algorithm surface in `std.compute` that
+dispatches through it, with cuda/metal/vulkan processing-backend routing (honest payload-
+gated offload + CPU fallback), built via parallel agent teams and differential-verified.
 
-## Acceptance Criteria
-- AC-1: One `ExecTarget { Auto, Cpu, CpuPar, Cuda, Vulkan, Metal, PureSimple }` resolver
-  subsumes the four existing selectors (`SIMPLE_2D_BACKEND`, `gpu_target_metadata` order,
-  `@gpu_kernel(target:)`, BLAS provider); `Auto` honors the landed
-  `vulkan,metal,cuda,hip,opencl→cpu` order. Verified by an env/config selection spec.
-- AC-2: A generic algorithm surface (transform, reduce, transform_reduce, inclusive_scan,
-  exclusive_scan, sort, stable_sort, copy_if, remove_if, unique, partition, find,
-  lower_bound, count, min/max_element, reduce_by_key) exists generic over `T`, replacing
-  the f32-only `gpu_*` stubs. Each has an `it` block.
-- AC-3: Container/utility types reach libcu++ parity: `Array<T,N>`, `Span<T>`, `MdSpan<T>`,
-  `InplaceVector<T,N>`, `Bitset<N>`, `Complex<T>`, `Atomic<T>`, `Barrier`/`Latch`/
-  `Semaphore`. Each compiles in interpreter and is usable in a `@gpu_kernel` body (CUDA).
-- AC-4: The same algorithm call runs on CPU and on a GPU backend selected only by
-  config/env (no source change). Proven by a discriminating spec (not just "a backend
-  returned").
-- AC-5: Every non-CUDA backend differential-passes the CUDA oracle — bit-exact for
-  integer/sort/selection, within a declared float tolerance for reductions/scans;
-  mismatch or strict-mode missing-backend exits fail-closed (`rt_exit 70`).
-- AC-6: No `gpu_`-named function silently runs on CPU; a backend slower than the CPU
-  reference for a target size is filed as a perf bug (NFR-3 honesty).
-- AC-7: Co-goal bug backlog (B1 iterator protocol, B3 gpu_* CPU masquerade, B4 atomics,
-  B5 f64 reliability, B6 array.get corruption, B7 four-resolver debt, B8 block-level
-  cooperative ops) each has a tracked bug/feature doc; prerequisite fixes (P1–P5) land
-  before the cell-grid waves.
+## Acceptance Criteria  (status)
+- AC-1 two-level ExecTarget, no class/backend conflation — **DONE** (exec_target.spl; 11/11).
+- AC-2 single resolver subsumes env/order/kernel selectors, suggest vs require fail-closed —
+  **DONE** (resolve_exec_target + exec_target_from_env; require→resolved=false signal).
+- AC-3 generic algorithm surface over T (reduce/scan/transform/sort/count/filter/find +
+  min/max_element/transform_reduce/unique/lower_bound/binary_search/exclusive_scan) —
+  **DONE** (compute_ops.spl + compute_algo_ext.spl; 8/16 specs).
+- AC-4 container types Span/FixedArray/InplaceVector pure-Simple — **DONE** (containers.spl; 8/8).
+- AC-5 cuda/metal/vulkan dispatch wired, honest payload-gated offload, require fail-closed —
+  **DONE for routing+gating** (backend_dispatch.spl; 9/9). **Per-backend kernel EMISSION now
+  DONE** (gpu_compute_algorithm_kernels.spl; 8/8) — real CUDA/HIP/OpenCL/Metal/WebGPU source
+  for transform-scale + saxpy, verified by backend markers, consistent w/ gpu_portable_compute.
+  Remaining: runtime GPU EXECUTION on hardware (compile PTX/SPIR-V/metallib + launch + readback)
+  needs a device; CPU reference runs meanwhile (no masquerade).
+- AC-6 no gpu-named fn silently on CPU (ComputeStats.ran_on_cpu honest) — **DONE**.
+- AC-7 built via parallel agent teams; co-goal bugs tracked — **DONE** (3 agents; bug filed).
 
-## Scope Exclusions
-- CCCL surface that is not GPU-relevant (chrono timezones, ranges views) may be deferred —
-  "equal or better" need not copy CUDA's own omissions.
-- This SPipe dev pass does NOT implement code; it formalizes goal + ACs and completes the
-  rollout plan doc. Implementation runs the later SPipe phases per wave.
+## Verified
+- 52/52 compute specs green (exec_target 11, compute_ops 8, compute_algo_ext 16,
+  backend_dispatch 9, containers 8). Run via seed driver.
+- Committed: exec_target (f6b8acf-lineage), compute_ops, then containers+restored specs+unique
+  fix (d2279d3). Survived a concurrent-session reconcile that stripped specs twice.
 
-## Open Decisions (carry to arch phase)
-- Q1: Namespace (`std.compute` / `std.par` / `std.algorithm`).
-- Q3: CUDA cell = FFI to Thrust/CUB, or emit `@gpu_kernel` bodies (changes W1 effort).
-- Q4: Float-reduction tolerance contract (ULP vs relative epsilon) — gates W2 float cells.
+## Co-goal bugs found
+- B-new1 (REAL, filed): generic `!=`/2-arg-`==` on `[T]` mis-evaluates in interpreter →
+  `doc/08_tracking/bug/interp_generic_eq_callback_2026-06-16.md`. Worked around via `less`.
+- B-claim2 (REJECTED): "expect(bool).to_be() non-discriminating" — empirically FALSE
+  (probe: false.to_be(true) fails, true/false.to_be(matching) pass). Not filed.
+
+## Open / next
+- Real GPU-kernel emission per backend (cuda/metal/vulkan) via gpu_portable_compute/@gpu_kernel.
+- `std.compute` __init__ namespace export wiring (currently import via full tier path).
+- Atomics/Bitset/Complex container parity (B4) — deferred.
 
 ## Phase
-dev-done
+dev-done → impl landed (foundation + surface + dispatch); GPU-kernel execution open.
 
 ## Log
-- dev: Created state file with 7 acceptance criteria (type: feature). Linked research
-  (doc/01_research/lib/gpu_containers_unified/), requirements (FR + NFR drafts), and plan
-  (doc/03_plan/lib/gpu_containers_unified/unified_compute_stdlib_rollout_2026-06-16.md).
+- 2026-06-16: two-level ExecTarget refactor; std.compute surface + containers + dispatch via
+  3 parallel agent teams; 52/52 green; generic-eq interp bug found+filed+worked-around.

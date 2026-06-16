@@ -141,6 +141,59 @@ Simple uses two codegen backends:
 - LLVM: release/native-focused builds.
 - Cranelift: fast debug/dev path.
 
+## ExecTarget (Compute Target Mode)
+The config/env-selectable execution-target policy for the GPU/CPU stdlib. Modeled on SYCL
+`device_type` (tag the **device class**, runtime picks the backend) — NOT on backend-API-named
+tags.
+
+### Two backend DOMAINS (independent, each auto-selected)
+GPU work splits into two separate backend domains; each resolves its own best backend
+independently (you can draw on Metal while computing on CUDA):
+
+- **Drawing backend** — GPU *rendering* (engine2d/3d, web renderer, GUI). The
+  `GraphicsSession` / `SIMPLE_2D_BACKEND` world: `cuda · vulkan · metal · webgpu · cpu_simd`.
+- **Processing backend** — GPU *compute* for the container/algorithm stdlib
+  (`std.compute`, `src/lib/nogc_async_mut/compute/`): `cuda · vulkan(compute) · metal(compute)
+  · opencl · hip · pure-simple`.
+
+**Auto-selection = best performer available** for that domain on the machine, unless config
+constrains it (below).
+
+### Level 1 — device class (what you tag / configure)
+
+| Mode | Meaning | SYCL analogue |
+|------|---------|---------------|
+| `default` | auto-pick best available (honors landed preference order) | `default_selector` / `device_type::automatic` |
+| `cpu` | scalar CPU | `cpu_selector` / `device_type::cpu` |
+| `simd_cpu` | vectorized CPU (NEON/SVE2/RVV lanes) | `device_type::cpu` + sub-group/`vec` |
+| `gpu` | any GPU | `gpu_selector` / `device_type::gpu` |
+| `fpga` | FPGA (VHDL/RTL lane) | `accelerator_selector` / `device_type::accelerator` |
+| `simd` | **umbrella**: portable data-parallel that lowers to whichever of gpu / fpga / simd_cpu is present (the SYCL *sub-group* idea promoted to a selectable target) | sub-group exec model |
+
+### Level 2 — concrete backend (auto-resolved, never tagged directly)
+`cuda · hip · opencl · vulkan · metal · webgpu` (for `gpu`), `vhdl` (for `fpga`),
+`neon · sve2 · rvv` (for `simd_cpu`), `scalar` (for `cpu`). Resolution unifies the prior
+selectors (`SIMPLE_2D_BACKEND` env, `gpu_target_metadata` default order,
+`@gpu_kernel(target:)`).
+
+### Config enforcement — `suggest` vs `require`
+A config selection (device class and/or concrete backend, per domain) carries an enforcement
+mode:
+
+- **`suggest`** (soft) — preference/hint. Use it if available and viable; otherwise fall back
+  to the auto-selected best. Never errors. (SYCL: a positive selector score that loses to a
+  better device.)
+- **`require`** (hard / "must meet") — constraint. If the requested class/backend is
+  unavailable, **fail-closed** (`rt_exit 70`) — never silently downgrade. (SYCL: required
+  `aspect_selector` that throws when unmet.)
+
+**Rule:** no enum value may mix a device class with a backend-API name (the earlier
+`{Cpu, CpuPar, Cuda, Vulkan, Metal}` draft conflated the two axes — rejected). Selectable per
+domain via env (`SIMPLE_COMPUTE_TARGET` / `SIMPLE_2D_BACKEND`) or `simple.sdn` config, each with
+a `suggest`/`require` mode; `default` honors `vulkan,metal,cuda,hip,opencl → cpu`. See
+`doc/03_plan/lib/gpu_containers_unified/` and the SYCL comparison in
+`doc/01_research/language/gpu_fpga/`.
+
 ## Graphics Session
 A `GraphicsSession` is the persistent backend lifetime object for rendering and
 GPU/CPU acceleration. It owns or references backend state such as a CPU raster

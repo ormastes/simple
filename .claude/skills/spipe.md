@@ -158,6 +158,22 @@ observe a pass:
   the backend initializes AND ignored (auto-probe, value changes) when it cannot —
   never just that some backend is returned. See
   `engine2d_env_backend_select_spec.spl`.
+- **ExecTarget (std.compute) two-level + suggest/require.** The compute stdlib
+  (`src/lib/nogc_async_mut/compute/`, guide
+  `doc/07_guide/lib/compute/exec_target_compute_stdlib.md`) tags a device CLASS
+  (`default/cpu/simd_cpu/gpu/fpga/simd`) and auto-resolves the BACKEND. Specs must
+  prove BOTH enforcement modes: `suggest` falls back to the best available
+  (`resolved=true`), `require` of an absent class/backend fails closed
+  (`resolved=false` → caller `rt_exit 70`) — never a silent downgrade. Dispatch
+  honesty is payload-gated like font offload: a device target with NO payload runs
+  the CPU reference (`ran_on_cpu=true`, no masquerade); the value must equal the CPU
+  oracle in both branches. Avoid generic `!=`/2-arg `==` on `[T]` in comparators
+  (interp bug; use `less` + derive equality).
+- **Per-backend kernel EMISSION (no GPU needed).** "cuda/metal/vulkan backed" is
+  verified at emission level like `gpu_portable_compute_spec`: assert backend markers
+  on the emitted source — CUDA `__global__ void`, OpenCL `__kernel void`, Metal
+  `kernel void` + `[[thread_position_in_grid]]`, WebGPU `@compute @workgroup_size`.
+  See `gpu_compute_algorithm_kernels_spec.spl`.
 
 ## Startup-Sensitive Specs
 
