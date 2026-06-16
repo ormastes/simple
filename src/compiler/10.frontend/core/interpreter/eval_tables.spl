@@ -121,11 +121,56 @@ fn func_table_reset():
     mu_nexts = []
     must_use_critical_mode = false
 
+# Co-compiled private-helper signature-collision detection.
+#
+# The interpreter func_table is a bare-name namespace, and the import loader
+# flattens all files into it, so two files that each define the same
+# `_`-prefixed helper with differing signatures silently mis-dispatch: the
+# second registration clobbers the first (last-write-wins), and a call to the
+# clobbered version dispatches to the wrong body — silent wrong-result or crash.
+# This is a non-breaking diagnostic only; the fix is to rename one helper.
+# See bug `compiler_cross_module_private_symbol_collision_2026-06-16`.
+var _ftr_collision_warned: [text] = []
+
+fn _ftr_sig_differs(a_did: i64, b_did: i64) -> bool:
+    if decl_get_ret_type(a_did) != decl_get_ret_type(b_did):
+        return true
+    val ap = decl_get_param_types(a_did)
+    val bp = decl_get_param_types(b_did)
+    if ap.len() != bp.len():
+        return true
+    var i = 0
+    while i < ap.len():
+        if ap[i] != bp[i]:
+            return true
+        i = i + 1
+    false
+
+fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
+    # Only the private (`_`-prefixed) free-function convention; skip method
+    # registrations (mangled as `Type__method`) which can't collide on a bare name.
+    if not name.starts_with("_"):
+        return
+    if name.contains("__"):
+        return
+    if existing_did == new_did:
+        return
+    if not _ftr_sig_differs(existing_did, new_did):
+        return
+    var j = 0
+    while j < _ftr_collision_warned.len():
+        if _ftr_collision_warned[j] == name:
+            return
+        j = j + 1
+    _ftr_collision_warned.push(name)
+    print "[WARN] private helper '{name}' has co-compiled definitions with differing signatures; calls resolve by bare name (last-write-wins) and may dispatch to the wrong one — silent wrong-result or crash. Rename the conflicting helper(s). [compiler_cross_module_private_symbol_collision]"
+
 fn func_table_register(name: text, decl_id: i64):
     val bucket = hm_hash_text(name) % HM_SIZE
     var idx = ft_buckets[bucket]
     while idx != -1:
         if ft_keys[idx] == name:
+            _ftr_warn_collision(name, ft_vals[idx], decl_id)
             ft_vals[idx] = decl_id
             return
         idx = ft_nexts[idx]
