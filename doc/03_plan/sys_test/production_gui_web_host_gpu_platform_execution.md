@@ -16,9 +16,9 @@ the current Linux host.
   `same_frame_gpu_backend_readback_status=pass`.
 - Current partial matrix:
   Vulkan GUI/web same-frame `device_readback` passes; CUDA/OpenCL child
-  readback wrappers pass; WebGPU real `device_readback` passes; WebGPU
-  `surface_upload` remains provenance-only; Metal and ROCm/HIP are
-  host-unavailable; DirectX remains native-pending.
+  readback wrappers pass; WebGPU real `device_readback` is unavailable on the
+  latest local proof and WebGPU `surface_upload` remains provenance-only; Metal
+  and ROCm/HIP are host-unavailable; DirectX remains native-pending.
 
 ## Promotion Rules
 

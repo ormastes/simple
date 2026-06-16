@@ -3,26 +3,26 @@
 Owner: normal-LLM/Spark lane
 Date: 2026-06-14
 Status: current local focused specs pass, and the production wrapper now reports
-the platform matrix explicitly as partial unless Metal/ROCm/DirectX same-frame
-device-readback proof is present. WebGPU real device readback now passes with a
-positive handle/checksum. The Linux joined GUI/web frame proof is Vulkan-backed;
-CUDA/OpenCL are child backend readback fixtures. Synthetic handles remain
-isolated probe evidence.
+the platform matrix explicitly as partial unless Metal/ROCm/DirectX/WebGPU
+same-frame device-readback proof is present. WebGPU `surface_upload` is
+provenance-only and WebGPU real device readback is currently unavailable. The
+Linux joined GUI/web frame proof is Vulkan-backed; CUDA/OpenCL are child
+backend readback fixtures. Synthetic handles remain isolated probe evidence.
 
 ## Context
 
 - This lane owns the final chain from 2D draw scheduling -> host/GPU queue emit/drain ->
   BrowserBackend frame evidence -> same-frame GPU readback receipt.
 - Canonical source of truth: `sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`.
-- Latest report (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-15.md`) is expected to pass on this Linux host when regenerated:
+- Latest report (`doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`) is expected to pass on this Linux host when regenerated:
   `browser_frame_queue_status=pass`, `same_frame_gpu_backend_readback_status=pass`,
   `readback_vulkan_verdict=pass`, `readback_cuda_verdict=pass`,
   `readback_opencl_verdict=pass`,
   positive `browser_first_backend_handle`, and
   `linux_gui_web_queue_integration_status=pass`. The full platform matrix is
   still expected to report `full_host_gpu_platform_matrix_status=partial` and
-  `missing_device_readback_platforms=metal,rocm,directx` until those native
-  host lanes pass.
+  `missing_device_readback_platforms=metal,rocm,directx,webgpu` until those
+  native host lanes pass.
 - After the Engine2D runtime queue bridge changed from evidence-only validation
   to `DrawIrBatch -> runtime queue -> drain -> dispatch/render`, regenerate the
   production report on a Vulkan/CUDA/OpenCL-capable host before treating stored
@@ -114,7 +114,7 @@ isolated probe evidence.
 
 ## Commands to run
 
-- `sed -n '1,220p' doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-15.md`
+- `sed -n '1,220p' doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`
 - `SIMPLE_BIN=bin/simple SIMPLE_LIB=src timeout 420 sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
 - `SIMPLE_LIB=src timeout 180 ./bin/simple test test/01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl --mode=interpreter`
 - `SIMPLE_LIB=src timeout 180 ./bin/simple test test/01_unit/app/ui/browser_backend_runtime_queue_spec.spl --mode=interpreter`

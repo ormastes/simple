@@ -62,7 +62,7 @@ plan, and aggregate wrapper evidence keys.
 **Requirements:** doc/02_requirements/feature/host_gpu_lane.md
 **Design:** doc/05_design/host_gpu_lane.md
 **Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
-**Report:** doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-15.md
+**Report:** doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md
 
 ## Syntax
 
@@ -72,7 +72,7 @@ until every missing native device-readback platform has a `pass` verdict.
 ## Examples
 
 ```text
-missing_device_readback_platforms=metal,rocm,directx
+missing_device_readback_platforms=metal,rocm,directx,webgpu
 readback_directx_native_verdict=unavailable
 ```
 
@@ -83,8 +83,8 @@ readback_directx_native_verdict=unavailable
   submit/readback evidence.
 - DirectX requires native same-frame `device_readback`; structured
   `swapchain_present` or provenance-only evidence is not enough.
-- WebGPU real readback may pass separately, but `surface_upload` remains
-  provenance-only.
+- WebGPU `surface_upload` remains provenance-only; WebGPU real readback must
+  provide separate `device_readback` proof before it leaves the missing matrix.
 
 ## Scenarios
 
@@ -102,11 +102,11 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val report = rt_file_read_text("doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-15.md")
+val report = rt_file_read_text("doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md")
 expect(report).to_contain("- full host-GPU platform matrix status: partial")
-expect(report).to_contain("- missing device-readback platforms: metal,rocm,directx")
+expect(report).to_contain("- missing device-readback platforms: metal,rocm,directx,webgpu")
 expect(report).to_contain("- full_host_gpu_platform_matrix_status=partial")
-expect(report).to_contain("- missing_device_readback_platforms=metal,rocm,directx")
+expect(report).to_contain("- missing_device_readback_platforms=metal,rocm,directx,webgpu")
 ```
 
 </details>
@@ -161,9 +161,9 @@ Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val metal = rt_file_read_text("doc/09_report/metal_generated_2d_readback_2026-06-15.md")
-val rocm = rt_file_read_text("doc/09_report/rocm_generated_2d_readback_2026-06-15.md")
-val directx = rt_file_read_text("doc/09_report/directx_native_readback_2026-06-15.md")
+val metal = rt_file_read_text("doc/09_report/metal_generated_2d_readback_2026-06-16.md")
+val rocm = rt_file_read_text("doc/09_report/rocm_generated_2d_readback_2026-06-16.md")
+val directx = rt_file_read_text("doc/09_report/directx_native_readback_2026-06-16.md")
 expect(metal).to_contain("| metal_generated_2d_readback_status | unavailable |")
 expect(metal).to_contain("| metal_generated_2d_readback_submit_attempted | false |")
 expect(metal).to_contain("| metal_generated_2d_readback_readback_available | false |")
@@ -187,7 +187,7 @@ Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val report = rt_file_read_text("doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-15.md")
+val report = rt_file_read_text("doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md")
 val script = rt_file_read_text("scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs")
 expect(report).to_contain("| Backend | Child status | Production subcheck | Submit attempted | Readback available |")
 expect(report).to_contain("| vulkan | pass | pass | n/a | n/a | false | 240 | pass |")
@@ -219,14 +219,15 @@ expect(script).to_contain("child_readback=\"$(field_of")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val report = rt_file_read_text("doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-15.md")
+val report = rt_file_read_text("doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md")
 val tasks = rt_file_read_text("doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md")
 expect(report).to_contain("| linux_gui_web | pass | pass | same-frame Vulkan BrowserBackend device_readback plus event/queue correlation | event=browser-input-1; packet=1; source=device_readback; checksum=782290402 |")
 expect(report).to_contain("| directx | structured-readback-contract | structured-readback-contract-pass-native-pending | same-frame DirectX device_readback | structured=structured_readback_contract/not_device_readback; native=unavailable/unavailable; gate=unavailable; child_gate=unavailable; reason=directx-native-readback-requires-windows-win32-real |")
+expect(report).to_contain("| webgpu | provenance-only | provenance-only-guard-pass | same-frame WebGPU device_readback | source=surface_upload; real=unavailable/not_device_readback; reason=webgpu-real-probe-run-failed |")
 expect(tasks).to_contain("Metal Spark Card")
 expect(tasks).to_contain("Normal-LLM verification")
 expect(tasks).to_contain("Safe non-HW guidance")

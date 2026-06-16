@@ -62,7 +62,7 @@ matrix status are separate evidence dimensions.
 **Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
 **Architecture:** doc/04_architecture/ui/simple_gui_stack.md
 **Design:** doc/05_design/host_gpu_lane.md
-**Report:** doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-15.md
+**Report:** doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md
 
 ## Syntax
 
@@ -76,7 +76,7 @@ Full platform readiness must be read from the separate matrix key:
 
 ```text
 full_host_gpu_platform_matrix_status=partial
-missing_device_readback_platforms=metal,rocm,directx
+missing_device_readback_platforms=metal,rocm,directx,webgpu
 ```
 
 ## Examples
@@ -88,7 +88,7 @@ as:
 linux_gui_web_queue_integration_status=pass
 production_gui_web_host_gpu_queue_readback_status=pass
 full_host_gpu_platform_matrix_status=partial
-missing_device_readback_platforms=metal,rocm,directx
+missing_device_readback_platforms=metal,rocm,directx,webgpu
 ```
 
 A full platform pass would require:
@@ -122,18 +122,15 @@ missing_device_readback_platforms=
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val report = rt_file_read_text("doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-15.md")
+val report = rt_file_read_text("doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md")
+expect(report).to_contain("Date: 2026-06-16")
 expect(report).to_contain("- linux GUI/web queue integration status: pass")
-expect(report).to_contain("- legacy compatibility status key: production_gui_web_host_gpu_queue_readback_status=pass")
 expect(report).to_contain("- full host-GPU platform matrix status: partial")
-expect(report).to_contain("- missing device-readback platforms: metal,rocm,directx")
-expect(report).to_contain("- full_host_gpu_platform_matrix_status=partial")
-expect(report).to_contain("- linux_gui_web_queue_integration_status=pass")
-expect(report).to_contain("- production_gui_web_host_gpu_queue_readback_status=pass")
+expect(report).to_contain("- missing device-readback platforms: metal,rocm,directx,webgpu")
 ```
 
 </details>
@@ -214,11 +211,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val backend = rt_file_read_text("src/app/ui.browser/backend.spl")
 expect(backend).to_contain("nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue")
-expect(backend).to_contain("nogc_async_mut.gpu.engine2d.host_gpu_event_queue")
 expect(backend).to_contain("nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow")
 expect(backend).to_contain("engine2d_draw_ir_payload_summary")
-expect(backend).to_contain("engine2d_draw_ir_runtime_queue_dispatch")
-expect(backend).to_contain("engine2d_host_gpu_runtime_queue_with_backend_handle")
+expect(backend).to_contain("engine2d_host_gpu_draw_ir_event_flow")
+expect(backend).to_contain("last_artifact_queue_dispatch_status")
+expect(backend).to_contain("last_artifact_queue_backend_handle")
 ```
 
 </details>

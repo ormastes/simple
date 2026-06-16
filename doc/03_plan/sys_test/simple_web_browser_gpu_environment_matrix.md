@@ -21,8 +21,8 @@
 - `sh scripts/check/check-rocm-generated-2d-readback.shs`:
   `status=unavailable`, `reason=missing-primary-tool`.
 - `sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`:
-  Vulkan/CUDA/OpenCL readback `pass`; Metal/ROCm host-unavailable; aggregate
-  fails on `browser-frame-first-render-budget-not-met`.
+  Linux GUI/web queue integration `pass`; Vulkan/CUDA/OpenCL readback `pass`;
+  Metal/ROCm/DirectX/WebGPU remain missing native `device_readback` platforms.
 
 ## Environment Plans
 
@@ -41,9 +41,9 @@ sh scripts/check/check-vulkan-engine2d-readback.shs
 Pass condition: Vulkan strict status and Engine2D CPU/Vulkan parity pass with
 readback exercised and mismatches `0`.
 
-Next local work: investigate the aggregate queue integration budget failure in
-`scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
-without weakening Vulkan readback requirements.
+Next local work: keep Vulkan readback requirements strict while treating the
+full host-GPU matrix as partial until Metal, ROCm, DirectX, and WebGPU native
+device-readback evidence exists.
 
 ### Linux NVIDIA CUDA/OpenCL
 
@@ -139,10 +139,10 @@ only.
 
 ## Follow-Up Queue
 
-1. Fix or split the aggregate host GPU queue failure
-   `browser-frame-first-render-budget-not-met`.
-2. Add a macOS Metal run to replace host-unavailable evidence with native Metal
+1. Add a macOS Metal run to replace host-unavailable evidence with native Metal
    proof.
-3. Add an AMD ROCm host run to replace host-unavailable evidence with HIP/ROCm
+2. Add an AMD ROCm host run to replace host-unavailable evidence with HIP/ROCm
    submit/readback proof.
+3. Add native DirectX and real WebGPU device-readback runs; provenance-only
+   `swapchain_present` and `surface_upload` rows are not production proof.
 4. Keep local NVIDIA Vulkan/CUDA/OpenCL as current passing Linux evidence.
