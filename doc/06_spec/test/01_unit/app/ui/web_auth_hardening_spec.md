@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -278,6 +278,27 @@ expect(ui_web_json_security_headers("text/html")).to_equal("")
 
 </details>
 
+#### adds browser document security headers to html responses
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val headers = ui_web_html_security_headers("text/html")
+expect(headers).to_contain("X-Content-Type-Options: nosniff")
+expect(headers).to_contain("X-Frame-Options: DENY")
+expect(headers).to_contain("Referrer-Policy: no-referrer")
+expect(headers).to_contain("Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()")
+expect(headers).to_contain("Content-Security-Policy: default-src 'self'")
+expect(headers).to_contain("frame-ancestors 'none'")
+expect(ui_web_html_security_headers("application/json")).to_equal("")
+```
+
+</details>
+
 #### uses bounded shared json field extraction for auth path bodies
 
 <details>
@@ -412,8 +433,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

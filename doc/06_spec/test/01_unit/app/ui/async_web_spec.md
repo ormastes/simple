@@ -29,7 +29,7 @@ async_web_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 27 | 27 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -101,6 +101,23 @@ val resp = http_response(200, "application/json", "{}")
 expect resp to_contain "Cache-Control: no-store"
 expect resp to_contain "Pragma: no-cache"
 expect resp to_contain "X-Content-Type-Options: nosniff"
+```
+
+</details>
+
+#### adds browser document security headers to html responses
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val resp = http_response(200, "text/html", "<h1>Hi</h1>")
+expect resp to_contain "X-Frame-Options: DENY"
+expect resp to_contain "Referrer-Policy: no-referrer"
+expect resp to_contain "Content-Security-Policy: default-src 'self'"
 ```
 
 </details>
@@ -539,8 +556,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 27 |
+| Active scenarios | 27 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

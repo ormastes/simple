@@ -140,6 +140,9 @@ fn oversized_header_line_request(port: i32) -> text:
     val pad = "x".repeat(UI_WEB_MAX_HEADER_LINE_BYTES + 1)
     return "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Pad: {pad}\r\nConnection: close\r\n\r\n"
 
+fn root_page_request(port: i32) -> text:
+    return "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+
 fn login_allowed_request(port: i32) -> text:
     val body = "{\"capability_grant\":\"legacy\"}"
     return "POST /ui/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nX-Request-Id: browser-hardening-login\r\nContent-Type: application/json\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
@@ -284,10 +287,11 @@ describe "Simple web browser production hardening live endpoints":
         val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
         val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
         val websocket_query = raw_http_summary(port, websocket_query_token_request(port), "\"error\": \"forbidden\"")
+        val root_page = raw_http_request(port, root_page_request(port))
 
         hardening_stop_web_server(pid)
 
-        step("Verify every unauthenticated route fails closed with a concrete status and marker")
+        step("Verify every unauthenticated route fails closed and the root document has browser security headers")
         expect(missing_origin).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
         expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
@@ -299,6 +303,9 @@ describe "Simple web browser production hardening live endpoints":
         expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(legacy_websocket).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
+        expect(root_page).to_contain("X-Frame-Options: DENY")
+        expect(root_page).to_contain("Referrer-Policy: no-referrer")
+        expect(root_page).to_contain("Content-Security-Policy: default-src 'self'")
 
     slow_it "mints an origin-bound token and redeems it for a websocket upgrade":
         """The positive production path must mint a token for the request origin and accept that token during WebSocket upgrade."""

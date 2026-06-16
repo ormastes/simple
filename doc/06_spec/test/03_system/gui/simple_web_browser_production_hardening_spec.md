@@ -47,7 +47,7 @@ simple_web_browser_production_hardening_spec -> app
 - Start a production-configured Simple Web server with a real token secret
 - Send unauthenticated requests to login, API, and WebSocket routes
 - hardening stop web server
-- Verify every unauthenticated route fails closed with a concrete status and marker
+- Verify every unauthenticated route fails closed and the root document has browser security headers
    - Expected: missing_origin equals `HTTP/1.1 403 Forbidden|present`
    - Expected: oversized_head equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: oversized_request_line equals `HTTP/1.1 413 Payload Too Large|present`
@@ -64,7 +64,7 @@ simple_web_browser_production_hardening_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -84,10 +84,11 @@ val resume = raw_http_summary(port, resume_unauthorized_request(port), "\"error\
 val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
 val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
 val websocket_query = raw_http_summary(port, websocket_query_token_request(port), "\"error\": \"forbidden\"")
+val root_page = raw_http_request(port, root_page_request(port))
 
 hardening_stop_web_server(pid)
 
-step("Verify every unauthenticated route fails closed with a concrete status and marker")
+step("Verify every unauthenticated route fails closed and the root document has browser security headers")
 expect(missing_origin).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
@@ -99,6 +100,9 @@ expect(resume).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(legacy_websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
+expect(root_page).to_contain("X-Frame-Options: DENY")
+expect(root_page).to_contain("Referrer-Policy: no-referrer")
+expect(root_page).to_contain("Content-Security-Policy: default-src 'self'")
 ```
 
 </details>

@@ -237,3 +237,21 @@ verification / requirement-selection pending
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl` and
   `/home/ormastes/dev/pub/simple/bin/simple test
   test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` pass.
+- fix: Added shared `ui_web_html_security_headers` and reused it in normal,
+  async, and TLS HTML response builders so browser documents carry anti-sniff,
+  frame-deny, no-referrer, permissions, and restrictive CSP headers. Also fixed
+  the normal root response's interpreter-visible `headers` const collision by
+  renaming the mutable response header accumulator.
+- verify: `/home/ormastes/dev/pub/simple/bin/simple check
+  src/app/ui.web/auth_params.spl src/app/ui.web/server.spl
+  src/app/ui.web/async_server.spl src/app/ui.web/tls_serve_loop.spl
+  test/01_unit/app/ui/web_auth_hardening_spec.spl
+  test/01_unit/app/ui/async_web_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl`,
+  `/home/ormastes/dev/pub/simple/bin/simple test
+  test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean`,
+  `/home/ormastes/dev/pub/simple/bin/simple test
+  test/01_unit/app/ui/async_web_spec.spl --mode=interpreter --clean`, and
+  `/home/ormastes/dev/pub/simple/bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` pass.

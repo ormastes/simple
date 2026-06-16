@@ -4,21 +4,20 @@
 
 ## Quick Stats
 
-- **Total Features:** 4
+- **Total Features:** 3
 - **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 4
+- **Stubs Remaining:** 3
 - **Total Lines:** 0
-- **Warnings:** 4
+- **Warnings:** 3
 
 ---
 
-## Application (3 features)
+## Application (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Ws Handler Specification](test/01_unit/app/ui/ws_handler_spec.md) | Auto-generated | N/A | 12 | 0% | 0 lines |
-| [Web Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Auto-generated | N/A | 17 | 0% | 0 lines |
-| [Async Web Specification](test/01_unit/app/ui/async_web_spec.md) | Auto-generated | N/A | 26 | 0% | 0 lines |
+| [Web Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Auto-generated | N/A | 18 | 0% | 0 lines |
+| [Async Web Specification](test/01_unit/app/ui/async_web_spec.md) | Auto-generated | N/A | 27 | 0% | 0 lines |
 
 ## Other (1 features)
 
