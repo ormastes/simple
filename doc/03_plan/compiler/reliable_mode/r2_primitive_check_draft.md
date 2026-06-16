@@ -94,3 +94,20 @@ fn _emit_primitive_api_tier(source: text, file: text) -> i64:
     _emit_primitive_api_arena(decls, lines, file)
 ```
 Severity is then governed by the R1-step-3 override map (moderate→suppress, lib/reliable→deny on `primitive_api`).
+
+## Bootstrap attempt result (2026-06-16) — BOTH integration paths blocked by infrastructure
+The CLI-engine route was attempted under explicit authorization: wired
+`check_primitive_api_arena` into the **compiled** `90.tools/lint/main_part2.spl` (tier-gated,
+before the config filter) and ran `bin/simple build bootstrap`. **Stage 1 failed** (`native-build
+--source src/app … exit 248`): because `query_lint` is script-run, the parser was never in the
+compiled binary's closure; importing `compiler.core.parser` + AST into the compiled lint engine
+pulled the whole parser into the CLI native-build closure for the first time, bloating it past
+the build timeout. `bin/simple` was unharmed (stage1 builds to `bootstrap/stage1/`, never
+deployed; md5 identical to pre-attempt backup). Reverted.
+
+**Conclusion:** R2's arena check (landed, correct) cannot be integrated into *either* lint
+engine this session without infrastructure work outside pure-Simple lint code:
+- LSP/`query_lint` (script-run) → interpreter `parse_module` crash (`interp_parse_module_arena_visibility_crash_2026-06-16`).
+- CLI/`main_part2` (compiled) → importing the parser bloats the bootstrap native-build → fails.
+Real next step is one of: fix the interpreter crash (unblocks the LSP path cleanly), or give the
+arena lint a parser-free way to obtain decls / raise the native-build timeout/closure budget.
