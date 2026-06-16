@@ -21,6 +21,7 @@
 use std.common.crypto.hkdf.{hkdf_extract_sha256, hkdf_expand_sha256}
 use std.common.crypto.sha256.{sha256_bytes}
 use std.common.crypto.hmac.{hmac_sha256_bytes}
+use std.common.crypto.aes_gcm.{aes128_key_expansion, aes128_encrypt_block, aes128_gcm_encrypt, aes128_gcm_decrypt, AesGcmResult}
 
 # ============================================================================
 # AEAD externs — AES-128-GCM via runtime (hex domain)
@@ -426,12 +427,19 @@ fn quic_aead_encrypt(keys: QuicPacketKeys, pn: i64, header: [u8], payload: [u8])
     """
     val nonce = quic_compute_nonce(keys.iv, pn)
 
-    val key_hex = _bytes_to_hex_i64(keys.aead_key)
-    val nonce_hex = _bytes_to_hex_i64(nonce)
-    val payload_hex = _bytes_to_hex_u8(payload)
-    val header_hex = _bytes_to_hex_u8(header)
+    var key_u8: [u8] = []
+    var ki: i64 = 0
+    while ki < keys.aead_key.len():
+        key_u8.push((keys.aead_key[ki] & 0xFF).to_u8())
+        ki = ki + 1
+    var nonce_u8: [u8] = []
+    var ni: i64 = 0
+    while ni < nonce.len():
+        nonce_u8.push((nonce[ni] & 0xFF).to_u8())
+        ni = ni + 1
 
-    return rt_aes_gcm_encrypt_hex(key_hex, nonce_hex, payload_hex, header_hex)
+    val ct_tag = aes128_gcm_encrypt(key_u8, nonce_u8, payload, header)
+    return _bytes_to_hex_u8(ct_tag)
 
 fn quic_aead_decrypt(keys: QuicPacketKeys, pn: i64, header: [u8], ciphertext: [u8]) -> text:
     """Decrypt a QUIC packet payload with AES-128-GCM.
@@ -445,12 +453,34 @@ fn quic_aead_decrypt(keys: QuicPacketKeys, pn: i64, header: [u8], ciphertext: [u
     """
     val nonce = quic_compute_nonce(keys.iv, pn)
 
-    val key_hex = _bytes_to_hex_i64(keys.aead_key)
-    val nonce_hex = _bytes_to_hex_i64(nonce)
-    val ct_hex = _bytes_to_hex_u8(ciphertext)
-    val header_hex = _bytes_to_hex_u8(header)
+    var key_u8: [u8] = []
+    var ki: i64 = 0
+    while ki < keys.aead_key.len():
+        key_u8.push((keys.aead_key[ki] & 0xFF).to_u8())
+        ki = ki + 1
+    var nonce_u8: [u8] = []
+    var ni: i64 = 0
+    while ni < nonce.len():
+        nonce_u8.push((nonce[ni] & 0xFF).to_u8())
+        ni = ni + 1
 
-    return rt_aes_gcm_decrypt_hex(key_hex, nonce_hex, ct_hex, header_hex)
+    val n = ciphertext.len()
+    if n < 16:
+        return ""
+    var ct: [u8] = []
+    var tag: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        if i < n - 16:
+            ct.push(ciphertext[i])
+        else:
+            tag.push(ciphertext[i])
+        i = i + 1
+
+    val res = aes128_gcm_decrypt(key_u8, nonce_u8, ct, header, tag)
+    match res:
+        case Ok(data): _bytes_to_hex_u8(data)
+        case Err(e): ""
 
 # ============================================================================
 # Header Protection — RFC 9001 §5.4
@@ -477,9 +507,20 @@ fn quic_header_protect_mask(hp_key: [i64], sample: [u8]) -> [u8]:
         sample: 16-byte ciphertext sample
     Returns: 5-byte mask (stubbed as zeros until AES-ECB is available)
     """
-    # Stub: return zero mask (no header protection applied)
-    # Real implementation: mask = AES_ECB_encrypt(hp_key, sample)[0..4]
-    return [0, 0, 0, 0, 0]
+    # RFC 9001 §5.4.3: mask = AES-ECB(hp_key, sample)[0..4] via pure-Simple AES.
+    var key_u8: [u8] = []
+    var i: i64 = 0
+    while i < 16:
+        key_u8.push((hp_key[i] & 0xFF).to_u8())
+        i = i + 1
+    val round_keys = aes128_key_expansion(key_u8)
+    val block = aes128_encrypt_block(sample, round_keys)
+    var mask: [u8] = []
+    var j: i64 = 0
+    while j < 5:
+        mask.push(block[j])
+        j = j + 1
+    return mask
 
 fn quic_apply_header_protection(header: [u8], mask: [u8], pn_offset: i64, pn_len: i64) -> [u8]:
     """Apply header protection by XORing mask into header bytes.
