@@ -28,13 +28,15 @@ static END_COUNT: AtomicI64 = AtomicI64::new(0);
 static LAST_LANE: AtomicI64 = AtomicI64::new(0);
 static LAST_PHASE: AtomicI64 = AtomicI64::new(0);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostGpuQueuePacket {
     pub id: i64,
     pub lane_code: i64,
     pub kind_code: i64,
     pub payload_size: i64,
     pub backend_handle: i64,
+    pub payload_hash: i64,
+    pub payload_text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,9 @@ struct HostGpuQueueState {
     completed_count: i64,
     last_status: i64,
     last_backend_handle: i64,
+    last_payload_size: i64,
+    last_payload_hash: i64,
+    last_payload_text: String,
 }
 
 impl HostGpuQueueState {
@@ -72,6 +77,9 @@ impl HostGpuQueueState {
             completed_count: 0,
             last_status: RT_HOST_GPU_QUEUE_STATUS_EMPTY,
             last_backend_handle: 0,
+            last_payload_size: 0,
+            last_payload_hash: 0,
+            last_payload_text: String::new(),
         }
     }
 
@@ -166,6 +174,34 @@ pub extern "C" fn rt_host_gpu_queue_emit(
     payload_size: i64,
     backend_handle: i64,
 ) -> i64 {
+    rt_host_gpu_queue_emit_payload_text(lane_code, kind_code, payload_size, backend_handle, 0, "")
+}
+
+pub fn rt_host_gpu_queue_emit_payload(
+    lane_code: i64,
+    kind_code: i64,
+    payload_size: i64,
+    backend_handle: i64,
+    payload_hash: i64,
+) -> i64 {
+    rt_host_gpu_queue_emit_payload_text(
+        lane_code,
+        kind_code,
+        payload_size,
+        backend_handle,
+        payload_hash,
+        "",
+    )
+}
+
+pub fn rt_host_gpu_queue_emit_payload_text(
+    lane_code: i64,
+    kind_code: i64,
+    payload_size: i64,
+    backend_handle: i64,
+    payload_hash: i64,
+    payload_text: &str,
+) -> i64 {
     if !valid_lane(lane_code) || kind_code < 0 || payload_size < 0 || backend_handle < 0 {
         return 0;
     }
@@ -186,6 +222,8 @@ pub extern "C" fn rt_host_gpu_queue_emit(
         kind_code,
         payload_size,
         backend_handle,
+        payload_hash,
+        payload_text: payload_text.to_string(),
     });
     packet_id
 }
@@ -216,6 +254,9 @@ pub extern "C" fn rt_host_gpu_queue_submit(max_packets: i64) -> i64 {
 fn complete_packet(state: &mut HostGpuQueueState, packet: HostGpuQueuePacket) {
     state.completed_count += 1;
     state.last_backend_handle = packet.backend_handle;
+    state.last_payload_size = packet.payload_size;
+    state.last_payload_hash = packet.payload_hash;
+    state.last_payload_text = packet.payload_text.clone();
     state.last_status = if packet.lane_code == RT_HOST_GPU_LANE_GPU && packet.backend_handle == 0 {
         RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE
     } else {
@@ -304,6 +345,21 @@ pub extern "C" fn rt_host_gpu_queue_last_status() -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_host_gpu_queue_last_backend_handle() -> i64 {
     queue_state().lock().map(|state| state.last_backend_handle).unwrap_or(0)
+}
+
+pub fn rt_host_gpu_queue_last_payload_size() -> i64 {
+    queue_state().lock().map(|state| state.last_payload_size).unwrap_or(0)
+}
+
+pub fn rt_host_gpu_queue_last_payload_hash() -> i64 {
+    queue_state().lock().map(|state| state.last_payload_hash).unwrap_or(0)
+}
+
+pub fn rt_host_gpu_queue_last_payload_text() -> String {
+    queue_state()
+        .lock()
+        .map(|state| state.last_payload_text.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

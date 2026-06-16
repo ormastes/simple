@@ -1741,7 +1741,7 @@ mod host_gpu_lane_statement_tests {
     #[test]
     fn lowers_statement_position_gpu_lane_to_queue_wrapped_body() {
         let module = lower_source(
-            "class Target:\n    fn later(max_packet: i64):\n        pass\n\nfn run() -> i64:\n    val target = Target()\n    target.later(max_packet: 4096) gpu \\:\n        val draw_ir_batch = 1\n    return 0\n",
+            "class Target:\n    fn later(max_packet: i64):\n        pass\n\nfn run() -> i64:\n    val target = Target()\n    gpu(target.later(max_packet: 4096), \\:\n        val draw_ir_batch = 1\n    )\n    return 0\n",
         )
         .unwrap();
 
@@ -1771,7 +1771,7 @@ mod host_gpu_lane_statement_tests {
     #[test]
     fn lowers_statement_position_host_lane_without_queue_emit() {
         let module = lower_source(
-            "class Target:\n    fn later():\n        pass\n\nfn run() -> i64:\n    val target = Target()\n    target.later() host \\:\n        val semantic_owner = 1\n    return 0\n",
+            "class Target:\n    fn later():\n        pass\n\nfn run() -> i64:\n    val target = Target()\n    host(target.later(), \\:\n        val semantic_owner = 1\n    )\n    return 0\n",
         )
         .unwrap();
 
