@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -234,6 +234,22 @@ expect(ui_web_auth_json_field(oversized, "capability_grant")).to_equal("")
 
 </details>
 
+#### fails oversized unauthenticated login bodies from content length alone
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val headers = "Host: 127.0.0.1\nOrigin: http://localhost:8080\nContent-Length: 8193\n"
+expect(ui_web_content_length(headers)).to_equal(8193)
+expect(ui_web_body_exceeds_unauth_limit(headers)).to_be(true)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -253,8 +269,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

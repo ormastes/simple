@@ -3,7 +3,7 @@
 # Token format (URL-safe, dot-separated):
 #   <token_id>.<grant_id>.<origin_b64>.<expires_at_ms>.<signature_hex>
 #
-# HMAC primitive: common.crypto.hmac::hmac_sha256(key: text, message: text) -> list
+# HMAC primitive: common.crypto.hmac::hmac_sha256_bytes(key, message)
 #   Path: src/lib/common/crypto/hmac.spl
 #   hex encoding: common.crypto.types::bytes_to_hex
 #
@@ -12,8 +12,8 @@
 #   and a warning is logged).
 
 use app.ui.web.origin_guard.{AuthError}
-use common.crypto.hmac.{hmac_sha256}
-use common.crypto.types.{bytes_to_hex}
+use common.crypto.hmac.{hmac_sha256_bytes}
+use common.crypto.types.{bytes_to_hex, text_to_bytes}
 use common.crypto.constant_time.{constant_time_compare}
 
 extern fn rt_env_get(key: text) -> text
@@ -44,7 +44,7 @@ class SessionToken:
         val token_id = random_hex(32)
         val exp = rt_time_ms() + ttl_ms
         val payload = _token_payload(token_id, grant_id, origin, exp)
-        val sig = bytes_to_hex(hmac_sha256(secret, payload))
+        val sig = _sign_payload(secret, payload)
         return SessionToken(
             token_id: token_id,
             grant_id: grant_id,
@@ -115,7 +115,7 @@ fn verify(serialized: text, origin: text, secret: text, now_ms: u64) -> Result<S
             if tok.origin != origin:
                 return Err(AuthError.OriginMismatch)
             val payload = _token_payload(tok.token_id, tok.grant_id, tok.origin, tok.expires_at_ms)
-            val expected_sig = bytes_to_hex(hmac_sha256(secret, payload))
+            val expected_sig = _sign_payload(secret, payload)
             if expected_sig != tok.signature and not constant_time_compare(expected_sig, tok.signature):
                 return Err(AuthError.InvalidToken)
             return Ok(tok)
@@ -154,6 +154,9 @@ fn load_secret(tls_mode: bool) -> text:
 
 fn _token_payload(token_id: text, grant_id: text, origin: text, exp: u64) -> text:
     return "{token_id}.{grant_id}.{origin}.{exp}"
+
+fn _sign_payload(secret: text, payload: text) -> text:
+    return bytes_to_hex(hmac_sha256_bytes(text_to_bytes(secret), text_to_bytes(payload)))
 
 fn _url_encode(s: text) -> text:
     """Minimal percent-encode: replace '.' with '%2E' so origin dots don't split."""

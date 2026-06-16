@@ -19,24 +19,13 @@ fn hardening_free_port(extra: i32) -> i32:
     return base + pid_offset as i32 + extra
 
 fn hardening_start_web_server(port: i32) -> i64:
-    rt_env_set("SIMPLE_UI_WEB_TOKEN_SECRET", "simple-web-hardening-test-secret")
-    rt_env_set("SIMPLE_WEB_HARDENING_PORT", "{port}")
-    val args = ["test/03_system/gui/ui_browser/simple_web_hardening_server.spl"]
-    val pid = rt_process_spawn_async("bin/simple", args)
+    val cmd = "exec env SIMPLE_LIB=src SIMPLE_UI_WEB_TOKEN_SECRET=simple-web-hardening-test-secret SIMPLE_WEB_HARDENING_PORT={port} src/compiler_rust/target/release/simple run test/03_system/gui/ui_browser/simple_web_hardening_server.spl --mode=interpreter >/tmp/simple_web_hardening_{port}.log 2>&1"
+    val pid = rt_process_spawn_async("sh", ["-c", cmd])
     hardening_wait_for_server(port)
     return pid
 
 fn hardening_wait_for_server(port: i32):
-    val addr = "127.0.0.1:{port}"
-    var attempts = 0
-    while attempts < 120:
-        match TcpStream.connect_timeout(addr, 300):
-            Ok(stream):
-                stream.close()
-                return
-            Err(_):
-                rt_thread_sleep(500)
-        attempts = attempts + 1
+    rt_thread_sleep(3500)
 
 fn hardening_stop_web_server(pid: i64):
     if pid > 0:
@@ -145,9 +134,12 @@ fn websocket_authorized_request(port: i32, token: text) -> text:
 
 describe "Simple web browser production hardening live endpoints":
     slow_it "fails closed on unauthenticated browser HTTP and WebSocket routes":
+        """A production server must reject unauthenticated browser entrypoints before exposing state or upgrading sockets."""
         val port = hardening_free_port(0)
+        step("Start a production-configured Simple Web server with a real token secret")
         val pid = hardening_start_web_server(port)
 
+        step("Send unauthenticated requests to login, API, and WebSocket routes")
         val missing_origin = raw_http_summary(port, login_missing_origin_request(port), "forbidden_origin")
         val oversized_login = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
         val api_state = raw_http_summary(port, api_state_unauthorized_request(port), "\"error\": \"forbidden\"")
@@ -155,22 +147,29 @@ describe "Simple web browser production hardening live endpoints":
 
         hardening_stop_web_server(pid)
 
+        step("Verify every unauthenticated route fails closed with a concrete status and marker")
         expect(missing_origin).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(oversized_login).to_equal("HTTP/1.1 413 Payload Too Large|present")
         expect(api_state).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 
     slow_it "mints an origin-bound token and redeems it for a websocket upgrade":
+        """The positive production path must mint a token for the request origin and accept that token during WebSocket upgrade."""
         val port = hardening_free_port(100)
+        step("Start a fresh production-configured Simple Web server")
         val pid = hardening_start_web_server(port)
 
+        step("Request a login token from an allowed loopback origin")
         val login_response = raw_http_request(port, login_allowed_request(port))
         val token = http_json_string_field(login_response, "token")
+
+        step("Redeem the minted bearer token through the WebSocket subprotocol list")
         val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 
         hardening_stop_web_server(pid)
 
+        step("Verify login succeeds and the WebSocket upgrade echoes only the safe simple-ui protocol")
         expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
         expect(token.len()).to_be_greater_than(20)
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")

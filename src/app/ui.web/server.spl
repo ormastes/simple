@@ -25,7 +25,7 @@ use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_auth_json_field}
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_auth_json_field, ui_web_ws_response_protocol}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_hides_desktop, host_taskbar_runtime_hides_taskbar, host_taskbar_runtime_mode_name, host_taskbar_runtime_native_window_html}
 use app.ui.web.json.{state_to_json, widgets_to_json}
 use os.compositor.host_compositor_entry.{HostBackendKind}
@@ -263,6 +263,17 @@ class WebServer:
                     pass_dn
             off = end
 
+    fn send_small_http(stream: TcpStream, response: text):
+        match stream.write_all(rt_text_to_bytes(response)):
+            Err(e):
+                print "HTTP write error: {e}"
+            Ok(()):
+                match stream.flush():
+                    Err(e):
+                        print "HTTP flush error: {e}"
+                    Ok(()):
+                        pass_dn
+
     fn read_head(stream: TcpStream) -> Result<(text, text, text, bool, text), text>:
         """Read the HTTP request head (request line + headers) in chunks up to
         the blank line, returning (method, path, headers, is_ws, initial_body).
@@ -388,11 +399,7 @@ class WebServer:
                     "/api/state":
                         if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
                             val response = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
-                            match stream.write_text(response):
-                                Err(e):
-                                    print "HTTP write error: {e}"
-                                Ok(()):
-                                    pass_dn
+                            self.send_small_http(stream, response)
                             return
                         val payload = state_to_json(self.state)
                         val payload_text = "{payload}"
@@ -410,11 +417,7 @@ class WebServer:
                     "/api/widgets":
                         if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
                             val response = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
-                            match stream.write_text(response):
-                                Err(e):
-                                    print "HTTP write error: {e}"
-                                Ok(()):
-                                    pass_dn
+                            self.send_small_http(stream, response)
                             return
                         val payload = widgets_to_json(self.state)
                         val payload_text = "{payload}"
@@ -458,7 +461,7 @@ class WebServer:
         `/ui/ws`, while preserving the legacy render-frame protocol."""
         if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
             val forbidden = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
-            stream.write_text(forbidden)
+            self.send_small_http(stream, forbidden)
             return
         val key = extract_ws_key(headers)
         if key == "":
@@ -468,6 +471,9 @@ class WebServer:
         response = "{response}Upgrade: websocket\r\n"
         response = "{response}Connection: Upgrade\r\n"
         response = "{response}Sec-WebSocket-Accept: {accept}\r\n"
+        val protocol = ui_web_ws_response_protocol(headers)
+        if protocol != "":
+            response = "{response}Sec-WebSocket-Protocol: {protocol}\r\n"
         response = "{response}\r\n"
         match stream.write_text(response):
             Err(_):
@@ -504,36 +510,35 @@ class WebServer:
         """POST /ui/login — issue a bearer token for a pre-minted capability grant.
         Body JSON must contain a 'capability_grant' field.
         Returns: { "token": "...", "expires_at": N }"""
-        val origin_result = self.origin_guard.check(headers)
-        val origin = match origin_result:
-            Ok(o): o
+        match self.origin_guard.check(headers):
             Err(_):
                 val resp = _simple_response(403, "application/json", "{\"error\": \"forbidden_origin\"}")
-                stream.write_text(resp)
+                self.send_small_http(stream, resp)
                 return
-        if ui_web_body_exceeds_unauth_limit(headers):
-            val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
-            stream.write_text(too_large)
-            return
-        var body = initial_body
-        val content_length = ui_web_content_length(headers)
-        if content_length > body.len():
-            match stream.read_exact(content_length - body.len()):
-                Ok(b): body = "{body}{b}"
-                Err(_): body = body
+            Ok(origin):
+                if ui_web_body_exceeds_unauth_limit(headers):
+                    val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
+                    self.send_small_http(stream, too_large)
+                    return
+                var body = initial_body
+                val content_length = ui_web_content_length(headers)
+                if content_length > body.len():
+                    match stream.read_exact(content_length - body.len()):
+                        Ok(b): body = "{body}{b}"
+                        Err(_): body = body
 
-        # Extract capability_grant from JSON body
-        val grant_id = ui_web_auth_json_field(body, "capability_grant")
-        if grant_id == "":
-            val resp = _simple_response(400, "application/json", "{\"error\": \"missing capability_grant\"}")
-            stream.write_text(resp)
-            return
+                # Extract capability_grant from JSON body
+                val grant_id = ui_web_auth_json_field(body, "capability_grant")
+                if grant_id == "":
+                    val resp = _simple_response(400, "application/json", "{\"error\": \"missing capability_grant\"}")
+                    self.send_small_http(stream, resp)
+                    return
 
-        val tok = SessionToken.issue(grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
-        val serialized = tok.serialize()
-        val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
-        val resp = _simple_response(200, "application/json", body_json)
-        stream.write_text(resp)
+                val tok = SessionToken.issue(grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
+                val serialized = tok.serialize()
+                val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
+                val resp = _simple_response(200, "application/json", body_json)
+                self.send_small_http(stream, resp)
 
     fn check_file_changes():
         """Check if the .ui.sdn file has changed."""
