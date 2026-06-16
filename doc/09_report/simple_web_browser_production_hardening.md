@@ -6,7 +6,7 @@
   `tls_serve_loop.spl`, `async_server.spl`,
   `simple_web_browser_production_hardening_spec.spl`,
   `web_auth_hardening_spec.spl`, and `ws_handler_spec.spl`.
-- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 13 scenarios.
+- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 14 scenarios.
 - Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 10 scenarios.
 - Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 5 scenarios.
 - Spec docgen: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and regenerated the 5-scenario manual.
@@ -21,6 +21,9 @@
 - Login origin checks fail closed before token minting.
 - `/ui/ws`, legacy `/ws`, `/ui/resume`, and sensitive `/api/*` require
   origin-bound bearer authorization.
+- Authorized `/ui/resume` rejects missing or malformed `session_id`,
+  `snapshot_revision`, or `last_sequence` with `400 Bad Request`, and accepts
+  strict valid body fields in the normal TCP server path.
 - Generated browser clients and static `wm.js` use WebSocket subprotocol bearer
   tokens instead of query-string tokens.
 - Query-string bearer compatibility is disabled by default behind

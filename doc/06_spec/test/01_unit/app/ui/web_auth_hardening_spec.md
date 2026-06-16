@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -261,6 +261,27 @@ expect(ui_web_auth_json_field(oversized, "capability_grant")).to_equal("")
 
 </details>
 
+#### rejects malformed resume bodies after authorization
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val valid = "{\"session_id\":\"session-1\",\"snapshot_revision\":42,\"last_sequence\":7}"
+val missing_session = "{\"snapshot_revision\":42,\"last_sequence\":7}"
+val invalid_revision = "{\"session_id\":\"session-1\",\"snapshot_revision\":\"4x\",\"last_sequence\":7}"
+val invalid_sequence = "{\"session_id\":\"session-1\",\"snapshot_revision\":42,\"last_sequence\":\"7x\"}"
+expect(ui_web_resume_body_status(valid)).to_equal("ok")
+expect(ui_web_resume_body_status(missing_session)).to_equal("missing_session_id")
+expect(ui_web_resume_body_status(invalid_revision)).to_equal("invalid_snapshot_revision")
+expect(ui_web_resume_body_status(invalid_sequence)).to_equal("invalid_last_sequence")
+```
+
+</details>
+
 #### fails oversized unauthenticated login bodies from content length alone
 
 <details>
@@ -326,8 +347,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

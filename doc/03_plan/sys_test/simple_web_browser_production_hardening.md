@@ -3,8 +3,9 @@
 ## Status
 
 Snapshot: 2026-06-16. Current plan maps the implemented hardening behavior to
-executable evidence. Final `REQ-*` and `NFR-*` trace IDs remain pending
-requirement selection.
+executable evidence. Candidate `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` IDs are
+predeclared in the option docs; final trace backfill remains pending explicit
+user selection.
 
 ## Executable Coverage
 
@@ -13,6 +14,7 @@ requirement selection.
 | Secret policy, origin guard, login burst gate | `test/01_unit/app/ui/web_auth_hardening_spec.spl` | passing |
 | Bearer extraction and query-token compatibility gate | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing, including live opt-in query-token upgrade |
 | Live `/ui/login`, `/api/state`, `/api/widgets`, `/ui/resume`, `/ui/ws`, legacy `/ws`, and query-token `/ui/ws` fail-closed behavior | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
+| Authorized `/ui/resume` malformed-body rejection and valid-body acceptance | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Positive token mint plus `/ui/ws` and legacy `/ws` WebSocket upgrades | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Live `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Live shared-WM `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
@@ -32,7 +34,8 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 
 ## Traceability Work
 
-After final requirement selection, add `REQ-*` and `NFR-*` tags to:
+After final requirement selection, add the selected `REQ-WEB-HARD-*` and
+`NFR-WEB-HARD-*` tags to:
 
 - `test/01_unit/app/ui/web_auth_hardening_spec.spl`
 - `test/01_unit/app/ui/ws_handler_spec.spl`

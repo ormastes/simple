@@ -23,7 +23,7 @@ use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{init_state}
 use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
-use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
+use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized, ui_web_resume_body_status}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
 use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_hides_desktop, host_taskbar_runtime_hides_taskbar, host_taskbar_runtime_mode_name, host_taskbar_runtime_native_window_html}
@@ -165,6 +165,7 @@ class WebServer:
     file_path: text
     port: i32
     state: UIState
+    session: UISession
     last_file_content: text
     wm_mode: bool
     origin_guard: OriginGuard
@@ -192,6 +193,8 @@ class WebServer:
                 return Err(e)
             Ok(tree):
                 val state = WebServer.build_state(tree)
+                var session = UISession.new(tree)
+                session.set_active_backend("web")
                 val content = if rt_file_exists(file_path):
                     rt_file_read_text(file_path)
                 else:
@@ -203,6 +206,7 @@ class WebServer:
                     file_path: file_path,
                     port: port,
                     state: state,
+                    session: session,
                     last_file_content: content,
                     wm_mode: wm_mode,
                     origin_guard: OriginGuard.from_env(),
@@ -365,6 +369,20 @@ class WebServer:
                             pass_dn
                     return
 
+                if path == "/ui/resume" and method == "POST":
+                    var ui_body = initial_body
+                    if ui_web_body_exceeds_unauth_limit(headers):
+                        val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
+                        self.send_small_http(stream, too_large)
+                        return
+                    val ui_content_length = ui_web_content_length(headers)
+                    if ui_content_length > ui_body.len():
+                        match stream.read_exact(ui_content_length - ui_body.len()):
+                            Ok(b): ui_body = "{ui_body}{b}"
+                            Err(_): ui_body = ui_body
+                    self.handle_resume(stream, path, headers, ui_body)
+                    return
+
                 match path:
                     "/wm.js":
                         val wm_js = rt_file_read_text("src/app/ui.web/wm.js")
@@ -441,13 +459,6 @@ class WebServer:
                                 print "HTTP write error: {e}"
                             Ok(()):
                                 pass_dn
-                    "/ui/resume":
-                        if method == "POST" and not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
-                            val response = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
-                            self.send_small_http(stream, response)
-                            return
-                        val response = _simple_response(404, "application/json", "{\"error\": \"not_found\"}")
-                        self.send_small_http(stream, response)
                     _:
                         val payload = "Not Found"
                         val payload_text = "{payload}"
@@ -563,6 +574,22 @@ class WebServer:
                 val resp = _simple_response(200, "application/json", body_json)
                 self.send_small_http(stream, resp)
 
+    fn handle_resume(stream: TcpStream, path: text, headers: text, body: text):
+        if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
+            val forbidden = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
+            self.send_small_http(stream, forbidden)
+            return
+        if ui_web_resume_body_status(body) != "ok":
+            val bad = _simple_response(400, "application/json", "{\"error\": \"invalid_resume_body\"}")
+            self.send_small_http(stream, bad)
+            return
+        val session_id = ui_web_auth_json_field(body, "session_id")
+        val rev_str = ui_web_auth_json_field(body, "snapshot_revision")
+        val seq_str = ui_web_auth_json_field(body, "last_sequence")
+        val body_json = "{\"session_id\": \"{session_id}\", \"snapshot_revision\": {rev_str}, \"last_sequence\": {seq_str}}"
+        val resp = _simple_response(200, "application/json", body_json)
+        self.send_small_http(stream, resp)
+
     fn check_file_changes():
         """Check if the .ui.sdn file has changed."""
         if not rt_file_exists(self.file_path):
@@ -575,6 +602,8 @@ class WebServer:
             match tree_result:
                 Ok(new_tree):
                     self.state = WebServer.build_state(new_tree)
+                    self.session = UISession.new(new_tree)
+                    self.session.set_active_backend("web")
                 Err(e):
                     # Keep old state on parse error
                     print "Warning: UI parse error: {e}"
@@ -758,7 +787,10 @@ fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGua
                         stream.write_text(too_large)
                         return
                     body = _wm_read_body(stream, headers)
-                val handled = dispatch_ui_route(path, method, headers, body, stream, session, guard, secret)
+                if path == "/ui/resume" and method == "POST":
+                    _wm_handle_resume(stream, path, headers, body, guard, secret)
+                    return
+                val handled = dispatch_ui_route(path, method, headers, body, ConnStream.from_tcp(stream), session, guard, secret)
                 if handled:
                     return
 
@@ -791,6 +823,22 @@ fn _wm_handle_login(stream: TcpStream, headers: text, guard: OriginGuard, secret
     val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
     val resp = _simple_response(200, "application/json", body_json)
     stream.write_text(resp)
+
+fn _wm_handle_resume(stream: TcpStream, path: text, headers: text, body: text, guard: OriginGuard, secret: text):
+    if not ui_web_request_authorized(headers, path, guard, secret, rt_time_ms()):
+        val forbidden = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
+        stream.write_text(forbidden)
+        return
+    if ui_web_resume_body_status(body) != "ok":
+        val bad = _simple_response(400, "application/json", "{\"error\": \"invalid_resume_body\"}")
+        stream.write_text(bad)
+        return
+    val session_id = ui_web_auth_json_field(body, "session_id")
+    val rev_str = ui_web_auth_json_field(body, "snapshot_revision")
+    val seq_str = ui_web_auth_json_field(body, "last_sequence")
+    val body_json = "{\"session_id\": \"{session_id}\", \"snapshot_revision\": {rev_str}, \"last_sequence\": {seq_str}}"
+    val response = _simple_response(200, "application/json", body_json)
+    stream.write_text(response)
 
 fn _wm_read_body(stream: TcpStream, headers: text) -> text:
     val content_length = ui_web_content_length(headers)

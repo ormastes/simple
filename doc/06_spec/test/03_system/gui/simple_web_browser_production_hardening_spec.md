@@ -104,10 +104,12 @@ expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
 
 - Start a fresh production-configured Simple Web server
 - Request a login token from an allowed loopback origin
-- Redeem the minted bearer token through the WebSocket subprotocol list
+- Redeem the minted bearer token through resume and WebSocket routes
 - hardening stop web server
 - Verify login succeeds and the WebSocket upgrade echoes only the safe simple-ui protocol
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
+   - Expected: malformed_resume equals `HTTP/1.1 400 Bad Request|present`
+   - Expected: valid_resume equals `HTTP/1.1 200 OK|present`
    - Expected: websocket equals `HTTP/1.1 101 Switching Protocols|present`
    - Expected: legacy_websocket equals `HTTP/1.1 101 Switching Protocols|present`
 
@@ -115,7 +117,7 @@ expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -127,7 +129,13 @@ step("Request a login token from an allowed loopback origin")
 val login_response = raw_http_request(port, login_allowed_request(port))
 val token = http_json_string_field(login_response, "token")
 
-step("Redeem the minted bearer token through the WebSocket subprotocol list")
+step("Redeem the minted bearer token through resume and WebSocket routes")
+val malformed_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":\"bad\",\"last_sequence\":0}"
+val malformed_resume_response = raw_http_request(port, resume_authorized_request(port, token, malformed_resume_body))
+val malformed_resume = "{http_status_line(malformed_resume_response)}|{http_marker(malformed_resume_response, "invalid_resume_body")}"
+val valid_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":42,\"last_sequence\":7}"
+val valid_resume_response = raw_http_request(port, resume_authorized_request(port, token, valid_resume_body))
+val valid_resume = "{http_status_line(valid_resume_response)}|{http_marker(valid_resume_response, "\"session_id\": \"session-1\"")}"
 val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
 val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
@@ -138,6 +146,8 @@ hardening_stop_web_server(pid)
 step("Verify login succeeds and the WebSocket upgrade echoes only the safe simple-ui protocol")
 expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
 expect(token.len()).to_be_greater_than(20)
+expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
+expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
 expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 ```
@@ -293,7 +303,7 @@ expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` |
-| Updated | 2026-06-16 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

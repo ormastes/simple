@@ -76,7 +76,7 @@ verification / requirement-selection pending
 - impl: Added fixed-window `/ui/login` burst gating to both normal and shared WM server login paths.
 - design: Added implementation-aligned architecture, detail design, system-test plan, and report artifacts for the production hardening lane while leaving final `REQ-*`/`NFR-*` documents pending explicit option selection.
 - verify: `bin/simple check src/app/ui.web/auth_params.spl src/app/ui.web/ui_routes.spl src/app/ui.web/server.spl src/app/ui.web/ws_handler.spl test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl` passes.
-- verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 13 scenarios.
+- verify: Previously, `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 13 scenarios before authorized resume body-contract coverage was added.
 - verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 10 scenarios.
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180` passes with 2 live endpoint scenarios after query-token fallback was disabled by default.
 - verify: `bin/simple spipe-docgen test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl --output doc/06_spec` completes with existing docgen warnings and stub-style manuals.
@@ -101,3 +101,11 @@ verification / requirement-selection pending
   instead of formatting the optional parse result into the socket address.
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios, adding shared-WM login burst rate-limit evidence to the normal `run_web` endpoint coverage.
 - plan: Refined `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` with fresh local Vulkan/Metal/ROCm/WebGPU evidence fields plus explicit Windows DirectX native and browser WebGPU real-device readback plans. Local Vulkan remains `pass`; Metal/ROCm/WebGPU remain host-unavailable/not-device-readback on this Linux host.
+- requirements: Made feature and NFR option docs selection-ready by adding
+  cumulative candidate `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` IDs plus final-file
+  instructions, without selecting an option or writing final requirement files.
+- fix: Hardened authorized `/ui/resume` handling so missing or malformed
+  `session_id`, `snapshot_revision`, or `last_sequence` fields return `400`
+  instead of defaulting to zero-like values, and normalized normal/shared-WM TCP
+  resume responses without relying on interpreter-unsafe `ConnStream` downcasts.
+- verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 14 scenarios, and `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios including malformed and valid authorized `/ui/resume`.

@@ -78,6 +78,8 @@ fn http_status_line(response: text) -> text:
         return "HTTP/1.1 413 Payload Too Large"
     if response.starts_with("HTTP/1.1 429 Too Many Requests"):
         return "HTTP/1.1 429 Too Many Requests"
+    if response.starts_with("HTTP/1.1 400 Bad Request"):
+        return "HTTP/1.1 400 Bad Request"
     if response.starts_with("HTTP/1.1 101 Switching Protocols"):
         return "HTTP/1.1 101 Switching Protocols"
     if response.starts_with("HTTP/1.1 200 OK"):
@@ -136,6 +138,9 @@ fn api_widgets_unauthorized_request(port: i32) -> text:
 fn resume_unauthorized_request(port: i32) -> text:
     val body = "{\"session_id\":\"session-1\",\"snapshot_revision\":0,\"last_sequence\":0}"
     return "POST /ui/resume HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
+
+fn resume_authorized_request(port: i32, token: text, body: text) -> text:
+    return "POST /ui/resume HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
 
 fn websocket_unauthorized_request(port: i32) -> text:
     var request = "GET /ui/ws HTTP/1.1\r\n"
@@ -244,7 +249,13 @@ describe "Simple web browser production hardening live endpoints":
         val login_response = raw_http_request(port, login_allowed_request(port))
         val token = http_json_string_field(login_response, "token")
 
-        step("Redeem the minted bearer token through the WebSocket subprotocol list")
+        step("Redeem the minted bearer token through resume and WebSocket routes")
+        val malformed_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":\"bad\",\"last_sequence\":0}"
+        val malformed_resume_response = raw_http_request(port, resume_authorized_request(port, token, malformed_resume_body))
+        val malformed_resume = "{http_status_line(malformed_resume_response)}|{http_marker(malformed_resume_response, "invalid_resume_body")}"
+        val valid_resume_body = "{\"session_id\":\"session-1\",\"snapshot_revision\":42,\"last_sequence\":7}"
+        val valid_resume_response = raw_http_request(port, resume_authorized_request(port, token, valid_resume_body))
+        val valid_resume = "{http_status_line(valid_resume_response)}|{http_marker(valid_resume_response, "\"session_id\": \"session-1\"")}"
         val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
         val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
@@ -255,6 +266,8 @@ describe "Simple web browser production hardening live endpoints":
         step("Verify login succeeds and the WebSocket upgrade echoes only the safe simple-ui protocol")
         expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
         expect(token.len()).to_be_greater_than(20)
+        expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
+        expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
         expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 
