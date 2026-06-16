@@ -23,6 +23,7 @@ use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
 use app.ui.web.tls_serve_loop.{ConnStream}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -174,6 +175,9 @@ class AsyncWebServer:
                     val method = parts[0]
                     var body = ""
                     if method == "POST":
+                        if ui_web_body_exceeds_unauth_limit(headers):
+                            stream.write_all(http_response(413, "application/json", "{\"error\": \"request_body_too_large\"}"))
+                            return
                         body = _read_request_body(stream, headers)
                     var conn_stream = ConnStream.from_tcp(stream)
                     val handled = dispatch_ui_route(path, method, headers, body, conn_stream, self.session, self.origin_guard, self.token_secret)
@@ -191,6 +195,9 @@ class AsyncWebServer:
                     val method = parts[0]
                     var body = ""
                     if method == "POST":
+                        if ui_web_body_exceeds_unauth_limit(headers):
+                            stream.write_all(http_response(413, "application/json", "{\"error\": \"request_body_too_large\"}"))
+                            return
                         body = _read_request_body(stream, headers)
                     val event_ch = self.event_channel
                     val inject_event_fn = \event:
@@ -416,14 +423,7 @@ fn file_watcher_loop(file_path: Any, event_channel: Any):
 
 fn _read_request_body(stream: TcpStream, headers: text) -> text:
     """Read the request body based on Content-Length header."""
-    var content_length = 0
-    val header_lines = headers.split("\n")
-    for line in header_lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("Content-Length:"):
-            val len_str = trimmed.slice(15, trimmed.len())
-            val len_trimmed = len_str.trim()
-            content_length = len_trimmed.to_int()
+    val content_length = ui_web_content_length(headers)
     if content_length <= 0:
         return ""
     match stream.read_exact(content_length):
@@ -442,6 +442,7 @@ fn http_response(status: i32, content_type: text, body: text) -> text:
         400: "Bad Request"
         404: "Not Found"
         405: "Method Not Allowed"
+        413: "Payload Too Large"
         410: "Gone"
         500: "Internal Server Error"
         _: "OK"
