@@ -2,8 +2,30 @@
 
 - **Date:** 2026-06-15
 - **Area:** `app/office` (`md_wysiwyg`) + `lib/common/markdown` + `examples/06_io/ui` (web render)
-- **Status:** open
+- **Status:** DONE (2026-06-16)
 - **Priority:** medium
+
+## Resolution (2026-06-16)
+
+The glue shipped and the path was hardened end-to-end:
+
+- **Apps:** `src/app/office/md_wysiwyg_ppm.spl` (headless `.md` → PPM) and
+  `md_wysiwyg_gui.spl` (windowed via winit, headless no-op without `SIMPLE_GUI=1`)
+  build a `WysiwygView`, wrap it via `wysiwyg_preview_pane`, and render through
+  `simple_web_render_html_to_pixels_with_engine2d_backend`.
+- **Spec:** `test/01_unit/app/office/md_wysiwyg_render_spec.spl` — absolute pixel
+  oracle (exact `w*h`, non-bg ink, absolute black-glyph color, distinct-md →
+  distinct-framebuffer), 8 cases.
+- **Guide:** `doc/07_guide/ui/md_wysiwyg_graphical_render.md` (+ `_tldr.md`).
+- **Fidelity bugs found by rendering a real `.md` and fixed** (all RESOLVED):
+  HTML entities decoded (`web_render_html_entities_not_decoded`), long lines wrap
+  within the surface (`web_render_no_line_wrapping_right_edge_clip`), wrapped text
+  reserves N-line height so blocks don't overlap
+  (`web_render_line_height_overlap_at_bottom`), and fenced code blocks render
+  monospace/preformatted with indentation preserved
+  (`web_render_preformatted_whitespace_not_preserved`).
+
+Original request retained below for context.
 
 ## Context
 

@@ -29,13 +29,30 @@ Both build a `WysiwygView` from the markdown, wrap it via `wysiwyg_preview_pane`
 ```
 .md text
   └─ build_wysiwyg_view            (app/office/md_wysiwyg.spl)
-       └─ render_markdown_line_styled_html  (lib/common/markdown/render.spl)
+       ├─ inside ``` fences → render_markdown_code_line_styled_html
+       │     (<pre>, monospace, white-space:pre — indentation preserved)
+       └─ otherwise → render_markdown_line_styled_html  (lib/common/markdown/render.spl)
             └─ resolve_style + style_to_css_text  (office_style_resolver.spl)
   └─ wysiwyg_preview_pane → HTML
        └─ simple_web_render_html_to_pixels_with_engine2d_backend
             └─ HTML parse → CSS cascade → block layout → paint
                  └─ Engine2D backend (lane chosen by SIMPLE_2D_BACKEND or auto)
 ```
+
+## Rendering fidelity
+
+The web lane handles the cases markdown commonly hits (each covered by a case in
+the render spec):
+
+- **HTML entities** (`&amp; &lt; &gt; &quot; &#39;`) are decoded, so escaped
+  characters paint as the real glyph, not a literal `&quot;`.
+- **Long lines wrap** within the surface width instead of overflowing and
+  clipping at the right edge.
+- **Wrapped text reserves its full N-line height**, so a following block is
+  placed below it (no overlap).
+- **Fenced code blocks** render monospace and preformatted (`white-space: pre`)
+  with leading indentation preserved; a leading `#` inside a fence stays code,
+  not a heading.
 
 ## One 2D API, lane chosen by config/environment
 
