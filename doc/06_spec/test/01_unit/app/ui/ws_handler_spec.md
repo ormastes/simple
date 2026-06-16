@@ -28,7 +28,7 @@ ws_handler_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -99,22 +99,24 @@ expect(_extract_bearer(headers, "/ui/ws")).to_equal("secret-token")
 
 </details>
 
-#### extracts bearer tokens from the websocket query string
+#### rejects websocket query bearer tokens unless compatibility is enabled
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val path = "/ui/ws?token=query-token&client=wm"
-expect(_extract_bearer("", path)).to_equal("query-token")
+expect(_extract_bearer("", path)).to_equal("")
+expect(ui_web_extract_bearer_with_query_policy("", path, false)).to_equal("")
+expect(ui_web_extract_bearer_with_query_policy("", path, true)).to_equal("query-token")
 ```
 
 </details>
 
-#### extracts and decodes bearer tokens from any query position
+#### extracts and decodes compatibility query bearer tokens from any query position
 
 <details>
 <summary>Executable SSpec</summary>
@@ -124,7 +126,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val path = "/ui/ws?client=wm&token=abc%252Edef%253Aghi"
-expect(_extract_bearer("", path)).to_equal("abc%2Edef%3Aghi")
+expect(ui_web_extract_bearer_with_query_policy("", path, true)).to_equal("abc%2Edef%3Aghi")
 ```
 
 </details>
@@ -158,6 +160,25 @@ Reproduction: this block contains the complete executable scenario source.
 val headers = "Authorization: Bearer header-token\n"
 val path = "/ui/ws?token=query-token"
 expect(_extract_bearer(headers, path)).to_equal("header-token")
+```
+
+</details>
+
+#### requires explicit env opt-in for query bearer compatibility
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_query_token_allowed_from_env_value("")).to_be(false)
+expect(ui_web_query_token_allowed_from_env_value("0")).to_be(false)
+expect(ui_web_query_token_allowed_from_env_value("false")).to_be(false)
+expect(ui_web_query_token_allowed_from_env_value("1")).to_be(true)
+expect(ui_web_query_token_allowed_from_env_value("true")).to_be(true)
+expect(ui_web_query_token_allowed_from_env_value(" yes ")).to_be(true)
 ```
 
 </details>
@@ -199,8 +220,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

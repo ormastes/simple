@@ -32,7 +32,7 @@ This document specifies the wire-level protocol spoken between the Simple `ui.we
 | Endpoint       | Method / Upgrade | Handler (existing or forthcoming)                          | Notes |
 |----------------|------------------|------------------------------------------------------------|-------|
 | `/ui/login`    | POST             | `src/app/ui.web/server.spl` (`POST /ui/login` handler)    | Issues a signed 32-byte bearer token. Body: `{ "capability_grant": "<grant-id>" }` (v1 dev stub — full auth UX deferred). |
-| `/ui/ws`       | WebSocket upgrade | `src/app/ui.web/ui_routes.spl`                            | Bearer-gated. Carries `Authorization: Bearer <token>` or `?token=<token>` for browser WebSocket clients that cannot set headers. |
+| `/ui/ws`       | WebSocket upgrade | `src/app/ui.web/ui_routes.spl`                            | Bearer-gated. Browser clients carry `Sec-WebSocket-Protocol: simple-ui, bearer.<url-encoded-token>`; non-browser clients may use `Authorization: Bearer <token>`. Query-token compatibility requires explicit `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1`. |
 | `/ui/resume`   | POST             | `src/app/ui.web/ui_routes.spl`                             | Resume semantics equivalent to `resume_session` message; returns `{ "session_id": "..." }`. |
 | `/api/test/*`  | (unchanged)      | `src/app/ui.test_api/handler.spl`, `PROTOCOL_VERSION=1`   | **DO NOT TOUCH.** All 18 routes remain bit-identical. |
 
@@ -48,7 +48,9 @@ Client                                     Server
   |  200 OK  { "token": "<bearer>" }          |
   |<------------------------------------------|
   |                                           |
-  |  GET /ui/ws?token=<token>                 |
+  |  GET /ui/ws                               |
+  |  Sec-WebSocket-Protocol: simple-ui,       |
+  |    bearer.<url-encoded-token>             |
   |  OR Authorization: Bearer <token>         |
   |  Origin: https://allowed.example.com      |
   |  Upgrade: websocket                       |

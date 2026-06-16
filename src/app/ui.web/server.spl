@@ -25,7 +25,7 @@ use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_auth_json_field, ui_web_ws_response_protocol}
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_hides_desktop, host_taskbar_runtime_hides_taskbar, host_taskbar_runtime_mode_name, host_taskbar_runtime_native_window_html}
 use app.ui.web.json.{state_to_json, widgets_to_json}
 use os.compositor.host_compositor_entry.{HostBackendKind}
@@ -39,6 +39,9 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_time_ms() -> u64
+
+var _wm_login_rate_window_start_ms: u64 = 0u64
+var _wm_login_rate_attempt_count: i64 = 0
 
 fn send_ws_tcp_frame(stream: TcpStream, message: text) -> bool:
     """Send a text message as one unmasked RFC6455 frame over a raw TcpStream
@@ -166,6 +169,8 @@ class WebServer:
     wm_mode: bool
     origin_guard: OriginGuard
     token_secret: text
+    login_rate_window_start_ms: u64
+    login_rate_attempt_count: i64
 
     static fn build_state(tree: UITree) -> UIState:
         val ids = tree.all_widget_ids()
@@ -201,7 +206,9 @@ class WebServer:
                     last_file_content: content,
                     wm_mode: wm_mode,
                     origin_guard: OriginGuard.from_env(),
-                    token_secret: secret
+                    token_secret: secret,
+                    login_rate_window_start_ms: 0u64,
+                    login_rate_attempt_count: 0
                 ))
 
     fn start():
@@ -520,6 +527,13 @@ class WebServer:
                     val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
                     self.send_small_http(stream, too_large)
                     return
+                val rate = ui_web_login_rate_decision(self.login_rate_window_start_ms, self.login_rate_attempt_count, rt_time_ms())
+                self.login_rate_window_start_ms = rate.1
+                self.login_rate_attempt_count = rate.2
+                if not rate.0:
+                    val limited = _simple_response(429, "application/json", "{\"error\": \"login_rate_limited\"}")
+                    self.send_small_http(stream, limited)
+                    return
                 var body = initial_body
                 val content_length = ui_web_content_length(headers)
                 if content_length > body.len():
@@ -751,6 +765,17 @@ fn _wm_handle_login(stream: TcpStream, headers: text, guard: OriginGuard, secret
             val resp = _simple_response(403, "application/json", "{\"error\": \"forbidden_origin\"}")
             stream.write_text(resp)
             return
+    if ui_web_body_exceeds_unauth_limit(headers):
+        val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
+        stream.write_text(too_large)
+        return
+    val rate = ui_web_login_rate_decision(_wm_login_rate_window_start_ms, _wm_login_rate_attempt_count, rt_time_ms())
+    _wm_login_rate_window_start_ms = rate.1
+    _wm_login_rate_attempt_count = rate.2
+    if not rate.0:
+        val limited = _simple_response(429, "application/json", "{\"error\": \"login_rate_limited\"}")
+        stream.write_text(limited)
+        return
     val tok = SessionToken.issue("wm-default", origin, TOKEN_TTL_DEFAULT_MS, secret)
     val serialized = tok.serialize()
     val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"

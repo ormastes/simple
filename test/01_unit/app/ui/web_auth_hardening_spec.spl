@@ -2,8 +2,10 @@ use std.spec.{describe, it, expect}
 use app.ui.web.origin_guard.{OriginGuard, _is_loopback_origin}
 use app.ui.web.session_token.{SessionToken, _allow_insecure_dev_secret_flag, _missing_secret_fatal, verify}
 use app.ui.web.ui_routes.{ui_web_authorization_status, ui_web_request_authorized, ui_web_query_percent_decode}
-use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, ui_web_auth_json_field, ui_web_content_length, ui_web_body_exceeds_unauth_limit}
+use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_LOGIN_RATE_WINDOW_MS, ui_web_auth_json_field, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision}
 use app.ui.web.html.{generate_js, generate_wm_js}
+
+extern fn rt_file_read_text(path: text) -> text
 
 describe "ui.web production auth hardening":
     it "requires explicit opt-in before using an insecure dev token secret":
@@ -84,6 +86,9 @@ describe "ui.web production auth hardening":
         expect(wm_js).to_contain("fetch('/ui/login'")
         expect(wm_js).to_contain("new WebSocket(wsProto + '://' + wsHost + '/ui/ws', ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
         expect(wm_js.contains("/ui/ws?token=")).to_be(false)
+        val static_wm_js = rt_file_read_text("src/app/ui.web/wm.js")
+        expect(static_wm_js).to_contain("new WebSocket(url, ['simple-ui', 'bearer.' + encodeURIComponent(this.token)])")
+        expect(static_wm_js.contains("/ui/ws?token=")).to_be(false)
 
     it "decodes browser-encoded query bearer tokens once before verification":
         expect(ui_web_query_percent_decode("abc%252Edef%253Aghi")).to_equal("abc%2Edef%3Aghi")
@@ -102,3 +107,22 @@ describe "ui.web production auth hardening":
         val headers = "Host: 127.0.0.1\nOrigin: http://localhost:8080\nContent-Length: 8193\n"
         expect(ui_web_content_length(headers)).to_equal(8193)
         expect(ui_web_body_exceeds_unauth_limit(headers)).to_be(true)
+
+    it "bounds login attempts with a fixed burst window":
+        val first = ui_web_login_rate_decision(0u64, 0, 1000u64)
+        expect(first.0).to_be(true)
+        expect(first.1).to_equal(1000u64)
+        expect(first.2).to_equal(1)
+
+        val last_allowed = ui_web_login_rate_decision(1000u64, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS - 1, 2000u64)
+        expect(last_allowed.0).to_be(true)
+        expect(last_allowed.2).to_equal(UI_WEB_LOGIN_RATE_MAX_ATTEMPTS)
+
+        val limited = ui_web_login_rate_decision(1000u64, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, 3000u64)
+        expect(limited.0).to_be(false)
+        expect(limited.1).to_equal(1000u64)
+        expect(limited.2).to_equal(UI_WEB_LOGIN_RATE_MAX_ATTEMPTS)
+
+        val reset = ui_web_login_rate_decision(1000u64, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, 1000u64 + UI_WEB_LOGIN_RATE_WINDOW_MS)
+        expect(reset.0).to_be(true)
+        expect(reset.2).to_equal(1)

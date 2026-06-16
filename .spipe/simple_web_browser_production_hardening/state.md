@@ -72,3 +72,12 @@ implementation
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180` passes with 2 live endpoint scenarios.
 - impl: Hardened `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` after local verification exposed a flaky 20s Chrome live-capture budget and a font-offload status variable collision.
 - verify: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` passes. Evidence reports matrix/layout/surface/backend `pass`, Tauri and Chrome surface fail counts `0`, two tracked text raster divergences per surface, font offload `unavailable`, and Metal readback `unavailable` on Linux with `metal-requires-macos`.
+- impl: Disabled query-string bearer token extraction by default behind `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` and migrated the static `src/app/ui.web/wm.js` production client to WebSocket subprotocol bearer auth.
+- impl: Added fixed-window `/ui/login` burst gating to both normal and shared WM server login paths.
+- design: Added implementation-aligned architecture, detail design, system-test plan, and report artifacts for the production hardening lane while leaving final `REQ-*`/`NFR-*` documents pending explicit option selection.
+- verify: `bin/simple check src/app/ui.web/auth_params.spl src/app/ui.web/ui_routes.spl src/app/ui.web/server.spl src/app/ui.web/ws_handler.spl test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl` passes.
+- verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 13 scenarios.
+- verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 10 scenarios.
+- verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180` passes with 2 live endpoint scenarios after query-token fallback was disabled by default.
+- verify: `bin/simple spipe-docgen test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl --output doc/06_spec` completes with existing docgen warnings and stub-style manuals.
+- verify: `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`.

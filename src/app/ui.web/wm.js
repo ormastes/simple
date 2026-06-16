@@ -3,7 +3,7 @@
 // The server is the sole authority over window state (position, z-order,
 // focus, visibility). This client:
 //   1. Authenticates via POST /ui/login → bearer token.
-//   2. Opens WebSocket at /ui/ws?token=<token>.
+//   2. Opens WebSocket at /ui/ws with a bearer subprotocol token.
 //   3. Sends hello → open_session (or resume_session on reconnect).
 //   4. Forwards raw input events to the server.
 //   5. Applies server-sent snapshot / patch_batch via RetainedRenderer.
@@ -1015,8 +1015,8 @@ class SimpleWindowManager {
 
   _connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url   = `${proto}://${location.host}/ui/ws?token=${encodeURIComponent(this.token)}`;
-    this.ws = new WebSocket(url);
+    const url   = `${proto}://${location.host}/ui/ws`;
+    this.ws = new WebSocket(url, ['simple-ui', 'bearer.' + encodeURIComponent(this.token)]);
 
     this.ws.onopen = () => {
       this.reconnectDelay = RECONNECT_BASE_MS;
@@ -1063,8 +1063,8 @@ class SimpleWindowManager {
     const seq = this.renderer ? this.renderer.lastSequence : -1;
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url   = `${proto}://${location.host}/ui/ws?token=${encodeURIComponent(this.token)}`;
-    this.ws = new WebSocket(url);
+    const url   = `${proto}://${location.host}/ui/ws`;
+    this.ws = new WebSocket(url, ['simple-ui', 'bearer.' + encodeURIComponent(this.token)]);
 
     this.ws.onopen = () => {
       this.reconnectDelay = RECONNECT_BASE_MS;

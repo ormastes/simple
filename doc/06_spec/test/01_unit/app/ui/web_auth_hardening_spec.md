@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -206,7 +206,7 @@ expect(verify(wrong_origin, "https://other.example", "unit-test-secret", 1000u64
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -219,6 +219,9 @@ val wm_js = generate_wm_js(8080)
 expect(wm_js).to_contain("fetch('/ui/login'")
 expect(wm_js).to_contain("new WebSocket(wsProto + '://' + wsHost + '/ui/ws', ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
 expect(wm_js.contains("/ui/ws?token=")).to_be(false)
+val static_wm_js = rt_file_read_text("src/app/ui.web/wm.js")
+expect(static_wm_js).to_contain("new WebSocket(url, ['simple-ui', 'bearer.' + encodeURIComponent(this.token)])")
+expect(static_wm_js.contains("/ui/ws?token=")).to_be(false)
 ```
 
 </details>
@@ -274,6 +277,36 @@ expect(ui_web_body_exceeds_unauth_limit(headers)).to_be(true)
 
 </details>
 
+#### bounds login attempts with a fixed burst window
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val first = ui_web_login_rate_decision(0u64, 0, 1000u64)
+expect(first.0).to_be(true)
+expect(first.1).to_equal(1000u64)
+expect(first.2).to_equal(1)
+
+val last_allowed = ui_web_login_rate_decision(1000u64, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS - 1, 2000u64)
+expect(last_allowed.0).to_be(true)
+expect(last_allowed.2).to_equal(UI_WEB_LOGIN_RATE_MAX_ATTEMPTS)
+
+val limited = ui_web_login_rate_decision(1000u64, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, 3000u64)
+expect(limited.0).to_be(false)
+expect(limited.1).to_equal(1000u64)
+expect(limited.2).to_equal(UI_WEB_LOGIN_RATE_MAX_ATTEMPTS)
+
+val reset = ui_web_login_rate_decision(1000u64, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, 1000u64 + UI_WEB_LOGIN_RATE_WINDOW_MS)
+expect(reset.0).to_be(true)
+expect(reset.2).to_equal(1)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -293,8 +326,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

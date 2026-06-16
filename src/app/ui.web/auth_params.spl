@@ -1,9 +1,17 @@
 # Shared auth-path parameter helpers for Simple Web.
 
+extern fn rt_env_get(key: text) -> text
+
 val UI_WEB_MAX_UNAUTH_BODY_BYTES: i64 = 8192
 val UI_WEB_MAX_AUTH_JSON_BYTES: i64 = 8192
+val UI_WEB_LOGIN_RATE_WINDOW_MS: u64 = 60000u64
+val UI_WEB_LOGIN_RATE_MAX_ATTEMPTS: i64 = 20
 
 fn ui_web_extract_bearer(headers: text, path: text) -> text:
+    val allow_query = ui_web_query_token_allowed_from_env_value(rt_env_get("SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN") ?? "")
+    return ui_web_extract_bearer_with_query_policy(headers, path, allow_query)
+
+fn ui_web_extract_bearer_with_query_policy(headers: text, path: text, allow_query_token: bool) -> text:
     for line in headers.split("\n"):
         val trimmed = line.trim()
         if trimmed.lower().starts_with("authorization:"):
@@ -15,7 +23,13 @@ fn ui_web_extract_bearer(headers: text, path: text) -> text:
             val bearer = ui_web_bearer_from_ws_protocols(value)
             if bearer != "":
                 return bearer
+    if not allow_query_token:
+        return ""
     return ui_web_query_param(path, "token")
+
+fn ui_web_query_token_allowed_from_env_value(raw: text) -> bool:
+    val v = raw.trim().lower()
+    return v == "1" or v == "true" or v == "yes"
 
 fn ui_web_bearer_from_ws_protocols(protocols: text) -> text:
     for part in protocols.split(","):
@@ -60,6 +74,13 @@ fn ui_web_content_length(headers: text) -> i64:
 
 fn ui_web_body_exceeds_unauth_limit(headers: text) -> bool:
     return ui_web_content_length(headers) > UI_WEB_MAX_UNAUTH_BODY_BYTES
+
+fn ui_web_login_rate_decision(window_start_ms: u64, attempt_count: i64, now_ms: u64) -> (bool, u64, i64):
+    if window_start_ms == 0u64 or now_ms >= window_start_ms + UI_WEB_LOGIN_RATE_WINDOW_MS:
+        return (true, now_ms, 1)
+    if attempt_count >= UI_WEB_LOGIN_RATE_MAX_ATTEMPTS:
+        return (false, window_start_ms, attempt_count)
+    return (true, window_start_ms, attempt_count + 1)
 
 fn ui_web_auth_json_field(json: text, field: text) -> text:
     """Bounded JSON field extraction for unauth/login and resume auth paths.
@@ -144,12 +165,17 @@ fn ui_web_percent_decode_query_component(value: text) -> text:
     return out
 
 export ui_web_extract_bearer
+export ui_web_extract_bearer_with_query_policy
 export ui_web_bearer_from_ws_protocols
+export ui_web_query_token_allowed_from_env_value
 export ui_web_ws_response_protocol
 export ui_web_query_param
 export ui_web_content_length
 export ui_web_body_exceeds_unauth_limit
+export ui_web_login_rate_decision
 export ui_web_auth_json_field
 export ui_web_percent_decode_query_component
 export UI_WEB_MAX_UNAUTH_BODY_BYTES
 export UI_WEB_MAX_AUTH_JSON_BYTES
+export UI_WEB_LOGIN_RATE_WINDOW_MS
+export UI_WEB_LOGIN_RATE_MAX_ATTEMPTS

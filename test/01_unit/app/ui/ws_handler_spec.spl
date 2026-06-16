@@ -1,6 +1,6 @@
 use std.spec
 use app.ui.web.ws_handler.{is_ws_upgrade_request, extract_ws_key, compute_ws_accept, _extract_bearer}
-use app.ui.web.auth_params.{UI_WEB_MAX_UNAUTH_BODY_BYTES, ui_web_ws_response_protocol, ui_web_content_length, ui_web_body_exceeds_unauth_limit}
+use app.ui.web.auth_params.{UI_WEB_MAX_UNAUTH_BODY_BYTES, ui_web_ws_response_protocol, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_extract_bearer_with_query_policy, ui_web_query_token_allowed_from_env_value}
 
 describe "ui.web.ws_handler":
     it "recognizes websocket upgrade headers":
@@ -19,13 +19,15 @@ describe "ui.web.ws_handler":
         val headers = "Authorization: Bearer secret-token\n"
         expect(_extract_bearer(headers, "/ui/ws")).to_equal("secret-token")
 
-    it "extracts bearer tokens from the websocket query string":
+    it "rejects websocket query bearer tokens unless compatibility is enabled":
         val path = "/ui/ws?token=query-token&client=wm"
-        expect(_extract_bearer("", path)).to_equal("query-token")
+        expect(_extract_bearer("", path)).to_equal("")
+        expect(ui_web_extract_bearer_with_query_policy("", path, false)).to_equal("")
+        expect(ui_web_extract_bearer_with_query_policy("", path, true)).to_equal("query-token")
 
-    it "extracts and decodes bearer tokens from any query position":
+    it "extracts and decodes compatibility query bearer tokens from any query position":
         val path = "/ui/ws?client=wm&token=abc%252Edef%253Aghi"
-        expect(_extract_bearer("", path)).to_equal("abc%2Edef%3Aghi")
+        expect(ui_web_extract_bearer_with_query_policy("", path, true)).to_equal("abc%2Edef%3Aghi")
 
     it "extracts bearer tokens from websocket subprotocols before query fallback":
         val headers = "Sec-WebSocket-Protocol: simple-ui, bearer.abc%252Edef%253Aghi\n"
@@ -37,6 +39,14 @@ describe "ui.web.ws_handler":
         val headers = "Authorization: Bearer header-token\n"
         val path = "/ui/ws?token=query-token"
         expect(_extract_bearer(headers, path)).to_equal("header-token")
+
+    it "requires explicit env opt-in for query bearer compatibility":
+        expect(ui_web_query_token_allowed_from_env_value("")).to_be(false)
+        expect(ui_web_query_token_allowed_from_env_value("0")).to_be(false)
+        expect(ui_web_query_token_allowed_from_env_value("false")).to_be(false)
+        expect(ui_web_query_token_allowed_from_env_value("1")).to_be(true)
+        expect(ui_web_query_token_allowed_from_env_value("true")).to_be(true)
+        expect(ui_web_query_token_allowed_from_env_value(" yes ")).to_be(true)
 
     it "bounds unauthenticated request body sizes before transport reads":
         expect(ui_web_content_length("Content-Length: 42\n")).to_equal(42)
