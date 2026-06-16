@@ -42,10 +42,13 @@ available in that closure, and the interpreter fallback then faults on an empty 
   the failure is specific to the *interpreted* invocation the LSP/query path uses.
 
 ## Impact
-- Reliable-mode R2: the primitive check module (`compiler.semantics.lint.primitive_api_arena`,
-  landed) cannot be wired into the LSP/build diagnostic path until this is fixed.
-- The existing `_run_ast_lint_passes` in `query_lint` is already dead (zero callers); this bug is
-  why it cannot simply be activated for the LSP path either.
+- Reliable-mode R2 is **no longer blocked by this bug** — it was integrated text-based instead
+  (`query_lint._emit_primitive_api_text`, reusing `param_tag`'s signature parsers; no
+  `parse_module`). The arena module that hit this crash (`primitive_api_arena.spl`) was removed.
+- Still real for any **arena-AST** lint driven from interpreted app code: the dead
+  `_run_ast_lint_passes` in `query_lint` (zero callers) cannot be activated for the LSP path until
+  this is fixed, and any future high-fidelity (typed-Node / arena) primitive or semantic lint on
+  the LSP path is gated on it.
 
 ## Fix direction
 Make `convert_decl_visibility` / `decl_get_visibility_text` (and the arena decl accessors)
@@ -55,5 +58,6 @@ without triggering visibility lowering. Until then, wire arena lints only on the
 (verify via a bootstrap-built `bin/simple`, not `bin/simple run`).
 
 ## Related
-- [[r2_primitive_check_draft]] / `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md` (R2)
-- `src/compiler/35.semantics/lint/primitive_api_arena.spl` (the blocked-on-wiring check)
+- [[r2_primitive_check_draft]] / `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md` (R2 —
+  resolved text-based; this bug no longer blocks it)
+- `src/app/cli/query_lint.spl` → `_run_ast_lint_passes` (the still-dead arena-AST suite this bug blocks)

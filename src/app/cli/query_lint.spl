@@ -23,7 +23,7 @@ use compiler.semantics.lint.star_import.{StarWildcardWarning, check_star_import_
 use compiler.semantics.lint.critical_file_guard.{check_all_critical_files}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
 use compiler.semantics.gc_boundary_check.{FamilyImportWarning, check_gc_boundary_imports, format_family_warnings}
-use compiler.semantics.lint.param_tag.{ParamTagWarning, check_param_tag}
+use compiler.semantics.lint.param_tag.{ParamTagWarning, check_param_tag, extract_param_names_from_sig, extract_param_types_from_sig}
 
 # --- Strictness-tier severity routing (reliable-mode plan, P1 / R1 step 3) ---
 
@@ -59,6 +59,10 @@ fn _apply_lint_config_overrides(cfg: LintConfig):
             case Warn:
                 val _ = 0
 
+# True while a strictness tier (or explicit [lints] config) governs this file, so
+# tier-only lints (e.g. primitive_api) emit; the override map then routes severity.
+var _LINT_TIER_ACTIVE = false
+
 # Resolve the LintConfig for file+source (sdn [lints] profile= + @lint_profile attr)
 # and load its severity overrides.
 fn _load_lint_config_for(file: text, source: text):
@@ -71,12 +75,91 @@ fn _load_lint_config_for(file: text, source: text):
     # @allow/@deny config is present; with neither, leave the legacy LSP severities
     # untouched (nil profile == today's exact behavior — zero default change).
     if cfg.profile.? or cfg.levels.len() > 0:
+        _LINT_TIER_ACTIVE = true
         _apply_lint_config_overrides(cfg)
     else:
+        _LINT_TIER_ACTIVE = false
         _DIAG_SEVERITY_OVERRIDE = {}
 
 fn _clear_lint_config_overrides():
+    _LINT_TIER_ACTIVE = false
     _DIAG_SEVERITY_OVERRIDE = {}
+
+# Reliable-mode R2: surface bare-primitive public-API usage on the LSP/build path.
+# Mirrors the canonical compiled-engine check in
+# `compiler.tools.fix.rules.impl_.lint_primitive_api` (pub fns, params + return,
+# pure-math exemption; excludes bool, which has its own `bare_bool` lint). Reuses
+# `param_tag`'s text signature parsers so the parsing logic is not duplicated. Tier-
+# gated: emits only when a strictness tier / [lints] config is active, and the
+# `_DIAG_SEVERITY_OVERRIDE` map (governed code "primitive_api") then routes severity
+# per tier — moderate suppresses, lib warns, reliable denies.
+fn _pa_is_primitive(t: text) -> bool:
+    (t == "i8" or t == "i16" or t == "i32" or t == "i64"
+     or t == "u8" or t == "u16" or t == "u32" or t == "u64"
+     or t == "f32" or t == "f64")
+
+fn _pa_ret_type(sig: text) -> text:
+    val cp = sig.index_of(")") ?? -1
+    if cp < 0:
+        return ""
+    val rest = sig.slice(cp + 1)
+    val arrow = rest.index_of("->") ?? -1
+    if arrow < 0:
+        return ""
+    var after = rest.slice(arrow + 2)
+    val colon = after.index_of(":") ?? -1
+    if colon >= 0:
+        after = after.slice(0, colon)
+    after = after.trim()
+    if (after == "" or after.contains("<") or after.contains("[")
+        or after.contains("(") or after.contains("{")):
+        return ""
+    after
+
+fn _emit_primitive_api_text(lines: [text], file: text, format: text) -> i64:
+    if not _LINT_TIER_ACTIVE:
+        return 0
+    var count = 0
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        val line_num = i + 1
+        val is_extern = trimmed.starts_with("extern fn ")
+        val is_pub = (trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me ")
+                      or trimmed.starts_with("pub static fn "))
+        if is_pub and not is_extern:
+            val ptypes = extract_param_types_from_sig(trimmed)
+            val pnames = extract_param_names_from_sig(trimmed)
+            val rtype = _pa_ret_type(trimmed)
+            # Pure-math exemption: every param and the return are one shared primitive.
+            var all_same = _pa_is_primitive(rtype)
+            var k = 0
+            while k < ptypes.len():
+                if ptypes[k] != rtype or not _pa_is_primitive(ptypes[k]):
+                    all_same = false
+                k = k + 1
+            if not (all_same and ptypes.len() > 0):
+                var pi = 0
+                while pi < ptypes.len():
+                    val tn = ptypes[pi]
+                    var pname = "?"
+                    if pi < pnames.len():
+                        pname = pnames[pi]
+                    if _pa_is_primitive(tn):
+                        if format == "json":
+                            _diag_emit_or_collect("{\"severity\":2,\"code\":\"primitive_api\",\"message\":\"public API parameter '{pname}' uses bare primitive type '{tn}' — wrap in a domain type\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+                        else:
+                            print "{file}:{line_num}: warning[primitive_api]: public API parameter '{pname}' uses bare primitive type '{tn}'"
+                        count = count + 1
+                    pi = pi + 1
+                if _pa_is_primitive(rtype):
+                    if format == "json":
+                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"primitive_api\",\"message\":\"public API return type uses bare primitive type '{rtype}' — wrap in a domain type\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+                    else:
+                        print "{file}:{line_num}: warning[primitive_api]: public API return type uses bare primitive type '{rtype}'"
+                    count = count + 1
+        i = i + 1
+    count
 
 fn _emit_lint_if_readable(file: text, format: text):
     """Emit lint diagnostics if the file is readable."""
@@ -125,9 +208,11 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     if format == "json":
         count = count + _emit_basic_line_lints(lines, file, format)
         count = count + _emit_text_heuristic_lints(lines, file, format)
+        count = count + _emit_primitive_api_text(lines, file, format)
     else:
         count = count + _emit_basic_line_lints(lines, file, format)
         count = count + _emit_text_heuristic_lints(lines, file, format)
+        count = count + _emit_primitive_api_text(lines, file, format)
     _clear_lint_config_overrides()
     count
 

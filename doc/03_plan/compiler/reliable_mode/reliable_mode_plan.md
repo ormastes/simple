@@ -89,7 +89,17 @@ A forward-pointer addendum should be added next to line 31: *"Superseded by: rel
 
 ## R2 — reliable = current lint level: internal-primitive use as a WARNING + verified auto-fix
 
-**Current state.** Two parallel primitive lints exist. The **text-scanning** rule `src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl` (`check_primitive_api`) scans `pub fn/pub me/pub static fn`, flags bare numerics `{i64,i32,…,f32}` in public params/returns, exempts pure-math (`_all_same_primitive`), and emits an **`EasyFix` with `FixConfidence.Uncertain` whose `new_text == the original line` (a no-op placeholder)**. The **AST twin** `src/compiler/35.semantics/lint/primitive_api.spl` is higher fidelity (fields + all visibility + `@allow`) but is **exported and never invoked** in the live pipeline. `primitive_classification.spl` (convertible/blocked/intentional/exempt + 12-entry `DomainWrapperCatalog`) is pure data, wired to neither.
+**✅ DONE (public-API surface) 2026-06-16.** The deny/warn split (step 1) and the LSP-path WARNING
+(step 5) are resolved without any arena rewrite or bootstrap. `primitive_api` now surfaces on the
+LSP/build path (`src/app/cli/query_lint.spl` → `_emit_primitive_api_text`), tier-gated and
+severity-routed by the P0 profile (`reliable`/`lib` → deny/sev1, `moderate` → warn/sev2, no profile
+→ silent), reusing `param_tag`'s text signature parsers (no parser/arena → dodges both the
+interpreter `parse_module` crash and the bootstrap closure-bloat). Verified end-to-end through
+`query.spl check … --format json` (pure-math exemption + `text`-exclusion confirmed). See
+[[r2_primitive_check_draft]]. **Remaining:** step 3 (extend pub-only → **internal** fns under
+reliable) — needs the canonical compiled-path lint changed + a bootstrap; tracked, not blocking.
+
+**Current state (historical, pre-fix).** Two parallel primitive lints exist. The **text-scanning** rule `src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl` (`check_primitive_api`) scans `pub fn/pub me/pub static fn`, flags bare numerics `{i64,i32,…,f32}` in public params/returns, exempts pure-math (`_all_same_primitive`), and emits an **`EasyFix` with `FixConfidence.Uncertain` whose `new_text == the original line` (a no-op placeholder)**. The **AST twin** `src/compiler/35.semantics/lint/primitive_api.spl` is higher fidelity (fields + all visibility + `@allow`) but is **exported and never invoked** in the live pipeline. `primitive_classification.spl` (convertible/blocked/intentional/exempt + 12-entry `DomainWrapperCatalog`) is pure data, wired to neither.
 
 **Severity contradiction (concrete code fact):** `build_default_levels()` sets `levels["primitive_api"]="deny"` (`main_part1.spl:62`), but the `Lint` is constructed `LintLevel.Warn` (`main_part2.spl:227`). Effective severity depends on path. R2 wants WARN.
 

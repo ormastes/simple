@@ -1,4 +1,37 @@
-# R2 primitive-use check — implementation draft (written + reverted 2026-06-16)
+# R2 primitive-use check — implementation draft
+
+## ✅ RESOLVED 2026-06-16 — text-based, integrated on the LSP/build path
+
+R2 is **done**. The arena approach below was abandoned (it hit two infrastructure walls — see
+"Bootstrap attempt result"). The breakthrough: the `primitive_api` check already existed as a
+**text-based** lint on the compiled CLI engine
+(`compiler.tools.fix.rules.impl_.lint_primitive_api.check_primitive_api`, wired in
+`90.tools/lint/main_part2.spl:225`, with easyfix wrapper suggestions = the auto-fix feature).
+The only gap was the **LSP/build path** (`query_lint`), which never surfaced it.
+
+Fix (landed in `src/app/cli/query_lint.spl`): a tier-gated text emitter `_emit_primitive_api_text`
+that reuses `param_tag`'s exported signature parsers (no parser, no `parse_module`, no arena — so
+it dodges BOTH walls). It mirrors the canonical lint exactly (pub fns, params + return, pure-math
+exemption, excludes `bool`). `primitive_api` was already in `_governed_lint_codes()`, so the
+existing `_DIAG_SEVERITY_OVERRIDE` map routes severity by tier.
+
+**Verified end-to-end** through the real `bin/simple run src/app/cli/query.spl check <file> --format json`:
+
+| tier | result |
+|------|--------|
+| `@lint_profile(reliable)` | `primitive_api` severity **1** (deny) on `x:i64` param + `f64` return; `label:text` NOT flagged |
+| `@lint_profile(lib)` | severity **1** (deny) |
+| `@lint_profile(moderate)` | severity **2** (warn — P0 downgrades deny→warn) |
+| no profile | **silent** (legacy LSP behavior unchanged — zero default-path change) |
+| pure-math `add(a:i64,b:i64)->i64` | **silent** (exemption); mixed `mix(i64,f64)->i64` flagged |
+
+Remaining R2 nice-to-have (separate, needs a compiled-path change + bootstrap): extend coverage
+from pub-only to **internal** fns under the reliable tier — change the canonical
+`lint_primitive_api` + `query_lint` emitter to also scan non-pub `fn`/`me` when reliable.
+
+---
+
+## Original arena draft (superseded — kept for history)
 
 Implemented the reliable-tier arena-AST primitive check in `src/app/cli/query_lint.spl`,
 verified the logic, then **reverted from the live file** because end-to-end verification hit a
