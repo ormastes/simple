@@ -42,6 +42,7 @@ backend_dispatch_spec -> std
 
 - Dispatch reduce on a cpu-scalar target
    - Expected: outcome.value equals `60`
+- assert true
 
 
 <details>
@@ -55,7 +56,7 @@ step("Dispatch reduce on a cpu-scalar target")
 val data = [10, 20, 30]
 val outcome = dispatch_reduce_i64(data, 0, add_i64, cpu_target())
 expect(outcome.value).to_equal(60)
-expect(outcome.stats.ran_on_cpu).to_be(true)
+assert_true(outcome.stats.ran_on_cpu)
 ```
 
 </details>
@@ -63,8 +64,10 @@ expect(outcome.stats.ran_on_cpu).to_be(true)
 #### gpu-resolved target WITHOUT payload falls back to CPU (no false gpu claim)
 
 - cuda target resolved=true, but no real payload present (forced gate false)
-   - Expected: compute_backend_name(cuda_target().backend) equals `cuda`
+   - Expected: dispatch_backend_name(cuda_target().backend) equals `cuda`
+- assert true
    - Expected: outcome.stats.backend equals `cuda`
+- assert true
    - Expected: outcome.value equals `60`
 
 
@@ -79,10 +82,10 @@ step("cuda target resolved=true, but no real payload present (forced gate false)
 val data = [10, 20, 30]
 val outcome = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), false)
 # Discriminator: backend is named cuda, target IS a device, yet the CPU ran.
-expect(compute_backend_name(cuda_target().backend)).to_equal("cuda")
-expect(dispatch_is_device(cuda_target())).to_be(true)
+expect(dispatch_backend_name(cuda_target().backend)).to_equal("cuda")
+assert_true(dispatch_is_device(cuda_target()))
 expect(outcome.stats.backend).to_equal("cuda")
-expect(outcome.stats.ran_on_cpu).to_be(true)
+assert_true(outcome.stats.ran_on_cpu)
 expect(outcome.value).to_equal(60)
 ```
 
@@ -92,6 +95,7 @@ expect(outcome.value).to_equal(60)
 
 - cuda target with a real payload present (forced gate true)
    - Expected: gpu_out.stats.backend equals `cuda`
+- assert false
    - Expected: gpu_out.value equals `cpu_out.value`
    - Expected: gpu_out.value equals `60`
 
@@ -107,8 +111,8 @@ step("cuda target with a real payload present (forced gate true)")
 val data = [10, 20, 30]
 val gpu_out = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), true)
 expect(gpu_out.stats.backend).to_equal("cuda")
-# Discriminator: WITH payload, ran_on_cpu flips to false.
-expect(gpu_out.stats.ran_on_cpu).to_be(false)
+# Core discriminator: WITH payload, ran_on_cpu flips to false (real GPU-ran claim).
+assert_false(gpu_out.stats.ran_on_cpu)
 # Differential correctness: GPU value EQUALS the CPU reference value.
 val cpu_out = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), false)
 expect(gpu_out.value).to_equal(cpu_out.value)
@@ -121,12 +125,16 @@ expect(gpu_out.value).to_equal(60)
 
 - Same target, only the payload gate changes
    - Expected: with_payload.value equals `without_payload.value`
+- assert false
+- assert true
+   - Expected: bool_to_i(with_payload.stats.ran_on_cpu) equals `0`
+   - Expected: bool_to_i(without_payload.stats.ran_on_cpu) equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -135,8 +143,11 @@ val data = [10, 20, 30]
 val with_payload = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), true)
 val without_payload = dispatch_reduce_i64_forced(data, 0, add_i64, cuda_target(), false)
 expect(with_payload.value).to_equal(without_payload.value)
-expect(with_payload.stats.ran_on_cpu).to_be(false)
-expect(without_payload.stats.ran_on_cpu).to_be(true)
+assert_false(with_payload.stats.ran_on_cpu)
+assert_true(without_payload.stats.ran_on_cpu)
+# Belt-and-suspenders: the two flags genuinely differ (1 vs 0).
+expect(bool_to_i(with_payload.stats.ran_on_cpu)).to_equal(0)
+expect(bool_to_i(without_payload.stats.ran_on_cpu)).to_equal(1)
 ```
 
 </details>
@@ -144,19 +155,21 @@ expect(without_payload.stats.ran_on_cpu).to_be(true)
 #### gpu_payload_present is exclusive: cuda and metal cannot both be present
 
 - Whatever the env, at most one backend name can match the single payload
+   - Expected: bool_to_i(both) equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Whatever the env, at most one backend name can match the single payload")
 # Env-agnostic invariant: the gate keys on an exact backend-name match, so
 # two distinct names can never both be present.
-expect(gpu_payload_present("cuda") and gpu_payload_present("metal")).to_be(false)
+val both = gpu_payload_present("cuda") and gpu_payload_present("metal")
+expect(bool_to_i(both)).to_equal(0)
 ```
 
 </details>
@@ -164,40 +177,40 @@ expect(gpu_payload_present("cuda") and gpu_payload_present("metal")).to_be(false
 #### require-mode: real dispatch_requirement_met TRACKS the real payload gate (env-driven)
 
 - dispatch_requirement_met(cuda) must equal gpu_payload_present(cuda) for a resolved device
+   - Expected: bool_to_i(dispatch_requirement_met(cuda_target())) equals `bool_to_i(gpu_payload_present("cuda"))`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("dispatch_requirement_met(cuda) must equal gpu_payload_present(cuda) for a resolved device")
-# This binds the REAL library function to the REAL env path: whatever the
-# env says, the requirement signal must agree with the payload gate. With
-# SIMPLE_COMPUTE_GPU_PAYLOAD=cuda this is true; without it, false — and the
-# assertion still holds because both sides move together. No false claim.
-expect(dispatch_requirement_met(cuda_target())).to_be(gpu_payload_present("cuda"))
+# Binds the REAL library function to the REAL env path: whatever the env
+# says, the requirement signal must agree with the payload gate. With
+# SIMPLE_COMPUTE_GPU_PAYLOAD=cuda both are true; without it both are false.
+expect(bool_to_i(dispatch_requirement_met(cuda_target()))).to_equal(bool_to_i(gpu_payload_present("cuda")))
 ```
 
 </details>
 
-#### require-mode: real dispatch_requirement_met false when payload mismatches device
+#### require-mode: real dispatch_requirement_met tracks the metal gate
 
-- metal target whose name never matches a cuda payload => NOT met
+- metal target is a resolved device; its requirement equals the metal gate
+   - Expected: bool_to_i(dispatch_requirement_met(metal_target())) equals `bool_to_i(gpu_payload_present("metal"))`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("metal target whose name never matches a cuda payload => NOT met")
-# metal_target is a resolved device; its requirement equals the metal gate.
-expect(dispatch_requirement_met(metal_target())).to_be(gpu_payload_present("metal"))
+step("metal target is a resolved device; its requirement equals the metal gate")
+expect(bool_to_i(dispatch_requirement_met(metal_target()))).to_equal(bool_to_i(gpu_payload_present("metal")))
 ```
 
 </details>
@@ -205,6 +218,8 @@ expect(dispatch_requirement_met(metal_target())).to_be(gpu_payload_present("meta
 #### require-mode: an unresolved target is never met
 
 - require gpu on a bare machine fails to resolve
+   - Expected: unresolved.backend equals `ComputeBackend.NoneBackend`
+- assert false
 
 
 <details>
@@ -216,13 +231,16 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("require gpu on a bare machine fails to resolve")
 val unresolved = resolve_exec_target(DeviceClass.Gpu, ComputeBackend.NoneBackend, EnforceMode.Require, BackendCaps.none())
-expect(unresolved.resolved).to_be(false)
-expect(dispatch_requirement_met(unresolved)).to_be(false)
+expect(unresolved.backend).to_equal(ComputeBackend.NoneBackend)
+assert_false(dispatch_requirement_met(unresolved))
 ```
 
 </details>
 
 #### cpu target requirement is always met (non-device, no payload needed)
+
+- assert true
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -231,7 +249,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(dispatch_requirement_met(cpu_target())).to_be(true)
+assert_true(dispatch_requirement_met(cpu_target()))
 ```
 
 </details>

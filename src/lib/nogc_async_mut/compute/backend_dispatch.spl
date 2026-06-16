@@ -12,10 +12,29 @@
 # is simulated by an env var (SIMPLE_COMPUTE_GPU_PAYLOAD == backend name). Absent
 # the payload, the CPU did the work — and we record that honestly (no masquerade).
 
-use std.nogc_async_mut.compute.exec_target.{ExecTarget, ComputeBackend, compute_backend_name}
+use std.nogc_async_mut.compute.exec_target.{ExecTarget, ComputeBackend}
 use std.nogc_async_mut.compute.compute_ops.{ComputeStats, compute_reduce}
 
 extern fn rt_env_get(key: text) -> text
+
+fn dispatch_backend_name(b: ComputeBackend) -> text:
+    if b == ComputeBackend.Cuda:
+        return "cuda"
+    if b == ComputeBackend.Hip:
+        return "hip"
+    if b == ComputeBackend.OpenCl:
+        return "opencl"
+    if b == ComputeBackend.Vulkan:
+        return "vulkan"
+    if b == ComputeBackend.Metal:
+        return "metal"
+    if b == ComputeBackend.WebGpu:
+        return "webgpu"
+    if b == ComputeBackend.Scalar:
+        return "scalar"
+    if b == ComputeBackend.PureSimple:
+        return "pure_simple"
+    return "none"
 
 # True iff a real backend payload (kernel+data) is present for `backend_name`.
 # Simulated by env: SIMPLE_COMPUTE_GPU_PAYLOAD must equal the backend name.
@@ -41,7 +60,7 @@ class DispatchOutcome:
 # reference. Otherwise the CPU fallback ran (ran_on_cpu=true) — even if the target
 # said gpu, because no real payload means the CPU did the work.
 fn dispatch_reduce_i64(data: [i64], init: i64, op: fn(i64, i64) -> i64, target: ExecTarget) -> DispatchOutcome:
-    val name = compute_backend_name(target.backend)
+    val name = dispatch_backend_name(target.backend)
     val present = gpu_payload_present(name)
     return dispatch_reduce_i64_forced(data, init, op, target, present)
 
@@ -50,7 +69,7 @@ fn dispatch_reduce_i64(data: [i64], init: i64, op: fn(i64, i64) -> i64, target: 
 fn dispatch_reduce_i64_forced(data: [i64], init: i64, op: fn(i64, i64) -> i64, target: ExecTarget, payload_present: bool) -> DispatchOutcome:
     # CPU reference — always computed, the differential-correctness oracle.
     val reference = compute_reduce(data, init, op, target)
-    val name = compute_backend_name(target.backend)
+    val name = dispatch_backend_name(target.backend)
     if dispatch_is_device(target) and payload_present:
         # Real backend payload present: the GPU ran. Value matches the reference.
         val gpu_stats = ComputeStats(backend: name, ran_on_cpu: false)
@@ -62,12 +81,12 @@ fn dispatch_reduce_i64_forced(data: [i64], init: i64, op: fn(i64, i64) -> i64, t
 # whether to rt_exit 70 (the lib never calls rt_exit itself). True only when the
 # target resolved AND, for a device backend, a real payload is present.
 fn dispatch_requirement_met(target: ExecTarget) -> bool:
-    if target.resolved == false:
+    if target.backend == ComputeBackend.NoneBackend:
         return false
     if dispatch_is_device(target):
-        return gpu_payload_present(compute_backend_name(target.backend))
+        return gpu_payload_present(dispatch_backend_name(target.backend))
     return true
 
 export DispatchOutcome
-export gpu_payload_present, dispatch_is_device
+export gpu_payload_present, dispatch_is_device, dispatch_backend_name
 export dispatch_reduce_i64, dispatch_reduce_i64_forced, dispatch_requirement_met
