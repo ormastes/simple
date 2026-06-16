@@ -23,6 +23,27 @@
 - `sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`:
   Linux GUI/web queue integration `pass`; Vulkan/CUDA/OpenCL readback `pass`;
   Metal/ROCm/DirectX/WebGPU remain missing native `device_readback` platforms.
+- `sh scripts/check/check-webgpu-real-readback.shs`:
+  `status=unavailable`, `reason=webgpu-real-probe-run-failed`,
+  `source=not_device_readback`, `backend_handle=0`.
+
+Fresh local evidence from 2026-06-16 follow-up:
+
+- `build/vulkan-engine2d-readback/evidence.env` reports
+  `vulkan_engine2d_readback_status=pass`, `backend_name=vulkan`,
+  clear/rect mismatches `0`, and `blur_or_tolerance_used=false`.
+- `build/metal_generated_2d_readback/evidence.env` reports
+  `metal_generated_2d_readback_status=unavailable`,
+  `reason=missing-primary-tool`, no Metal runtime/tools, no submit, and no
+  readback.
+- `build/rocm_generated_2d_readback/evidence.env` reports
+  `rocm_generated_2d_readback_status=unavailable`,
+  `reason=missing-primary-tool`, ROCm probe tool absent, no submit, and no
+  readback.
+- `build/webgpu-real-readback/evidence.env` reports
+  `webgpu_real_readback_status=unavailable`,
+  `reason=webgpu-real-probe-run-failed`, `source=not_device_readback`,
+  `backend_handle=0`, and checksum mismatch by absence (`0` vs `-1`).
 
 ## Environment Plans
 
@@ -120,6 +141,57 @@ per-op checksums match for fill/copy/alpha/scroll.
 
 Local status: host-unavailable; no AMD GPU is visible and `rocminfo` is absent.
 
+### Windows DirectX Native
+
+Goal: replace structured DirectX provenance with native DirectX device readback
+for Simple Web/Engine2D on a Windows host.
+
+Required host: Windows with a DirectX-capable GPU, working native Simple
+runtime, and Direct3D staging/readback support. Linux DXVK/vkd3d setup can
+validate local-prefix dependency wiring, but it is not native Windows
+device-readback proof.
+
+Commands:
+
+```sh
+sh scripts/check/check-directx-native-readback.shs
+sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
+```
+
+Pass condition: `directx_native_readback_status=pass`, native wrapper gate
+`pass`, positive backend/device handle, readback source `device_readback`, and
+matching expected/actual checksum. The aggregate wrapper must no longer report
+DirectX as only `structured_readback_contract` or `not_device_readback`.
+
+Local status: not proven on this Linux host. Existing structured DirectX specs
+are useful contract coverage only; production proof remains native-pending.
+
+### Browser WebGPU Real Device
+
+Goal: prove browser/WebGPU real device readback rather than surface-upload or
+provenance-only evidence.
+
+Required host: browser/runtime stack with real WebGPU enabled, cargo build of
+`src/runtime/hosted` with `webgpu-real`, GPU adapter access, and a readback path
+that emits `device_readback`.
+
+Commands:
+
+```sh
+SIMPLE_WEBGPU_REAL_TIMEOUT_SECS=180 sh scripts/check/check-webgpu-real-readback.shs
+sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
+```
+
+Pass condition: `webgpu_real_readback_status=pass`,
+`webgpu_real_readback_source=device_readback`, positive
+`webgpu_real_readback_backend_handle`, and matching expected/actual checksum.
+`surface_upload` remains provenance-only and does not satisfy production
+device-readback proof.
+
+Local status: unavailable on the current host;
+`webgpu-real-probe-run-failed`, `source=not_device_readback`,
+`backend_handle=0`.
+
 ### QEMU / Other Emulation
 
 Goal: use emulation only for platform boot/build coverage and software fallback
@@ -143,6 +215,6 @@ only.
    proof.
 2. Add an AMD ROCm host run to replace host-unavailable evidence with HIP/ROCm
    submit/readback proof.
-3. Add native DirectX and real WebGPU device-readback runs; provenance-only
-   `swapchain_present` and `surface_upload` rows are not production proof.
+3. Add native DirectX and real WebGPU device-readback runs; structured DirectX
+   contracts and WebGPU `surface_upload` rows are not production proof.
 4. Keep local NVIDIA Vulkan/CUDA/OpenCL as current passing Linux evidence.

@@ -100,3 +100,4 @@ verification / requirement-selection pending
 - fix: Parsed `SIMPLE_UI_WEB_PORT` as a concrete integer in shared-WM web mode
   instead of formatting the optional parse result into the socket address.
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios, adding shared-WM login burst rate-limit evidence to the normal `run_web` endpoint coverage.
+- plan: Refined `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` with fresh local Vulkan/Metal/ROCm/WebGPU evidence fields plus explicit Windows DirectX native and browser WebGPU real-device readback plans. Local Vulkan remains `pass`; Metal/ROCm/WebGPU remain host-unavailable/not-device-readback on this Linux host.
