@@ -1,11 +1,11 @@
 ---
 name: minio
-description: MinIO / S3 object-storage CLI - wraps the mc CLI for ls/get/put/share/stat/setup. Falls back to the pure-Simple SigV4 adapter when mc is not installed.
+description: MinIO / S3 object-storage CLI - `bin/itf minio` (ls/get/put/stat/presign/health) runs on the pure-Simple SigV4 adapter; raw `mc` is used only for the explicit prefix/recursive escape hatches.
 ---
 
 # MinIO Skill - Dispatcher
 
-Shell-based MinIO/S3 client mirroring the mc CLI surface. Preferred backend: the official mc binary (delegates via adapter_minio_mc.spl); fallback when mc is absent: the pure-Simple SigV4 adapter (adapter_minio.spl).
+MinIO/S3 client. The `bin/itf minio` subcommands (ls/get/put/stat/presign/health) are served by the pure-Simple SigV4 REST adapter (`adapter_minio.spl`) — **no `mc` binary is invoked** by the command. `adapter_minio_mc.spl` (mc-CLI delegation) exists but is **not wired into dispatch** — nothing imports it, so no command selects it at runtime. Raw `mc` is invoked only where a sub-doc explicitly says to "drop to `mc` directly" (recursive/prefix operations the SigV4 adapter's single-object forms don't cover).
 
 ## Usage
 
@@ -46,13 +46,12 @@ Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio/minio_put.md.
 Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio/minio_share.md.
 
 **stat <path>:**
-Run `bin/itf minio stat <path>` (delegates to `mc --json stat <alias>/<path>`).
+Run `bin/itf minio stat <bucket> <key>` (SigV4 HEAD via `adapter_minio.spl::_minio_stat` — returns size/etag/last-modified).
 
 ## Prerequisite Checks
 
-- `mc --version` - preferred backend available
-- `mc alias list` - at least one alias configured (run /minio setup if empty)
-- If mc is absent: pure-Simple SigV4 backend kicks in via adapter_minio.spl; requires `[minio]` section in `~/.config/itf/config.sdn`
+- `bin/itf minio` requires a `[minio]` section in `~/.config/itf/config.sdn` (endpoint + access/secret keys) — the SigV4 adapter reads these. This is the only prerequisite for the built-in subcommands.
+- `mc --version` / `mc alias list` - needed **only** for the explicit "drop to `mc`" escape hatches (recursive/prefix ls/get/put/share); the `bin/itf minio` subcommands do not call `mc`.
 
 ## Integration
 
