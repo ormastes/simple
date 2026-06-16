@@ -275,6 +275,18 @@ SPipe verify and implementation phases enforce these quality gates:
 - **Naming**: files use descriptive names, never numbered copies (`_1`, `_v2`)
 - **Docs**: every new doc produces a `xxxx_tldr.md` (≤30 lines + diagram)
 
+### Strictness Tiers (lint-tier axis)
+
+Code-strictness is a `moderate | lib | reliable` tier, **orthogonal** to the
+stdlib memory tiers (`nogc_sync_mut`, ...) — never conflate the two. `reliable`
+is the strict-lint + (planned) primitive-use + proof-coverage ladder that
+supersedes the rejected "High-robustness mode". Select via `simple.sdn [lints]
+profile=`, `simple lint --profile=<tier>`, or a `@lint_profile(<tier>)` file
+header (most-local-wins; distinct from the R9 `@profile(critical)` must-use
+annotation). Unset = legacy defaults. Every lint code is configurable via
+`[lints]` / `@allow`/`@warn`/`@deny`. Guide: `doc/07_guide/language/strictness_tiers.md`
+(tldr alongside); plan: `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md`.
+
 ## Feature Module Packaging (`.sfm`)
 
 When a feature ships a runnable module, package it as a **Simple Feature Module**
