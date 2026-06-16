@@ -1,6 +1,6 @@
 use std.spec.{describe, it, expect}
 use app.ui.web.origin_guard.{OriginGuard, _is_loopback_origin}
-use app.ui.web.session_token.{_allow_insecure_dev_secret_flag, _missing_secret_fatal}
+use app.ui.web.session_token.{SessionToken, _allow_insecure_dev_secret_flag, _missing_secret_fatal, verify}
 use app.ui.web.ui_routes.{ui_web_authorization_status, ui_web_request_authorized, ui_web_query_percent_decode}
 use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, ui_web_auth_json_field}
 use app.ui.web.html.{generate_js, generate_wm_js}
@@ -52,6 +52,14 @@ describe "ui.web production auth hardening":
         expect(ui_web_authorization_status("Origin: https://evil.example\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_equal("forbidden_origin")
         expect(ui_web_authorization_status("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_equal("invalid_bearer")
         expect(ui_web_request_authorized("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_be(false)
+
+    it "rejects malformed, expired, and wrong-origin serialized tokens before authorization succeeds":
+        val expired = SessionToken(token_id: "tok", grant_id: "grant", origin: "https://localhost", expires_at_ms: 100u64, signature: "sig").serialize()
+        val wrong_origin = SessionToken(token_id: "tok", grant_id: "grant", origin: "https://localhost", expires_at_ms: 5000u64, signature: "sig").serialize()
+
+        expect(SessionToken.parse("not-a-complete-token").is_err()).to_be(true)
+        expect(verify(expired, "https://localhost", "unit-test-secret", 101u64).is_err()).to_be(true)
+        expect(verify(wrong_origin, "https://other.example", "unit-test-secret", 1000u64).is_err()).to_be(true)
 
     it "generates token-authenticated websocket clients for legacy and wm browser paths":
         val legacy_js = generate_js(8080)

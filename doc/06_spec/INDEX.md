@@ -12,9 +12,9 @@
 
 ---
 
-## Application (1 features)
+## Standard Library (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Ws Handler Specification](test/01_unit/app/ui/ws_handler_spec.md) | Auto-generated | N/A | 9 | 0% | 0 lines |
+| [Gpu Web Db Offload Specification](test/03_system/lib/web_db_offload/feature/gpu_web_db_offload_spec.md) | Auto-generated | N/A | 7 | 0% | 0 lines |
 

@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -158,6 +158,25 @@ expect(ui_web_request_authorized("Origin: https://localhost\nAuthorization: Bear
 
 </details>
 
+#### rejects malformed, expired, and wrong-origin serialized tokens before authorization succeeds
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val expired = SessionToken(token_id: "tok", grant_id: "grant", origin: "https://localhost", expires_at_ms: 100u64, signature: "sig").serialize()
+val wrong_origin = SessionToken(token_id: "tok", grant_id: "grant", origin: "https://localhost", expires_at_ms: 5000u64, signature: "sig").serialize()
+
+expect(SessionToken.parse("not-a-complete-token").is_err()).to_be(true)
+expect(verify(expired, "https://localhost", "unit-test-secret", 101u64).is_err()).to_be(true)
+expect(verify(wrong_origin, "https://other.example", "unit-test-secret", 1000u64).is_err()).to_be(true)
+```
+
+</details>
+
 #### generates token-authenticated websocket clients for legacy and wm browser paths
 
 <details>
@@ -234,8 +253,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -263,13 +263,15 @@ class WebServer:
                     pass_dn
             off = end
 
-    fn read_head(stream: TcpStream) -> Result<(text, text, text, bool), text>:
+    fn read_head(stream: TcpStream) -> Result<(text, text, text, bool, text), text>:
         """Read the HTTP request head (request line + headers) in chunks up to
-        the blank line, returning (method, path, headers, is_ws).
+        the blank line, returning (method, path, headers, is_ws, initial_body).
 
         Uses read() rather than read_line: the interpreter's peek-based
         read_line breaks subsequent socket writes after a multi-line read loop,
-        so reading the head in one shot keeps responses deliverable."""
+        so reading the head in one shot keeps responses deliverable. The same
+        read may include part or all of a small POST body; callers must consume
+        that initial body before trying to read more from the socket."""
         var raw = ""
         var attempts = 0
         var head_done = false
@@ -289,6 +291,7 @@ class WebServer:
             return Err("empty request")
         val sep = raw.index_of("\r\n\r\n")
         val head = if sep >= 0: raw[0:sep] else: raw
+        val initial_body = if sep >= 0: raw.slice(sep + 4, raw.len()) else: ""
         val head_lines = head.split("\r\n")
         val head_line_count = head_lines.len()
         val request_line = if head_line_count > 0: head_lines[0] else: ""
@@ -302,7 +305,7 @@ class WebServer:
             if header_line.contains("Upgrade: websocket"):
                 is_ws = true
             hi = hi + 1
-        return Ok((request.0, request.1, headers, is_ws))
+        return Ok((request.0, request.1, headers, is_ws, initial_body))
 
     me handle_connection(stream: TcpStream):
         """Handle a single HTTP connection."""
@@ -317,11 +320,12 @@ class WebServer:
                 val path = parsed.1
                 val headers = parsed.2
                 val is_ws = parsed.3
+                val initial_body = parsed.4
                 if method == "" or path == "":
                     return
 
                 if path == "/ui/login" and method == "POST":
-                    self.handle_login(stream, headers)
+                    self.handle_login(stream, headers, initial_body)
                     return
 
                 if is_ws:
@@ -496,7 +500,7 @@ class WebServer:
         val msg = "{\"type\":\"render\",\"target\":\"" + escape_json(WEB_RENDER_TARGET_SIMPLE_WEB) + "\",\"surface_id\":\"\",\"html\":\"" + escape_json(render_body) + "\"}"
         send_ws_tcp_frame(stream, msg)
 
-    fn handle_login(stream: TcpStream, headers: text):
+    fn handle_login(stream: TcpStream, headers: text, initial_body: text):
         """POST /ui/login — issue a bearer token for a pre-minted capability grant.
         Body JSON must contain a 'capability_grant' field.
         Returns: { "token": "...", "expires_at": N }"""
@@ -511,12 +515,12 @@ class WebServer:
             val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
             stream.write_text(too_large)
             return
-        var body = ""
+        var body = initial_body
         val content_length = ui_web_content_length(headers)
-        if content_length > 0:
-            match stream.read_exact(content_length):
-                Ok(b): body = b
-                Err(_): body = ""
+        if content_length > body.len():
+            match stream.read_exact(content_length - body.len()):
+                Ok(b): body = "{body}{b}"
+                Err(_): body = body
 
         # Extract capability_grant from JSON body
         val grant_id = ui_web_auth_json_field(body, "capability_grant")

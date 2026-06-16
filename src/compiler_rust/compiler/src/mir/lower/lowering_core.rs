@@ -1082,6 +1082,9 @@ impl<'a> MirLowerer<'a> {
         self.di_resolution_stack.clear(); // Clear DI resolution stack per module
 
         for func in &hir.functions {
+            if func.name == "_append_bytes" {
+                eprintln!("PROBE_MODPATH name={} module_path={:?}", func.name, func.module_path);
+            }
             self.available_functions.insert(func.name.clone());
             self.function_param_types.insert(
                 func.name.clone(),
