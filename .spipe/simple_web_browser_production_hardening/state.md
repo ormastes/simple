@@ -56,3 +56,8 @@ implementation
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 90` passes with 1 live endpoint scenario covering missing-origin `/ui/login`, oversized unauthenticated `/ui/login`, unauthenticated `/api/state`, and unauthenticated `/ui/ws`.
 - verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 8 scenarios.
 - verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 9 scenarios.
+- impl: Moved login and resume auth-path JSON body field extraction to bounded shared `ui_web_auth_json_field` in `src/app/ui.web/auth_params.spl`, replacing duplicate ad hoc auth parsers in `server.spl` and `ui_routes.spl`.
+- verify: `bin/simple check src/app/ui.web/auth_params.spl src/app/ui.web/server.spl src/app/ui.web/ui_routes.spl test/01_unit/app/ui/web_auth_hardening_spec.spl` passes.
+- verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 9 scenarios after bounded auth JSON parser coverage.
+- verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 9 scenarios.
+- verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 90` passes with 1 live endpoint scenario after the shared parser refactor.
