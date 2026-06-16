@@ -1,7 +1,7 @@
 # Bug: web renderer does not soft-wrap long lines (right-edge clipping)
 
 - **Id:** web_render_no_line_wrapping_right_edge_clip_2026-06-16
-- **Status:** open
+- **Status:** RESOLVED (2026-06-16)
 - **Priority:** P2
 - **Area:** `lib/gc_async_mut/gpu/browser_engine` (web HTML layout renderer)
 - **Found via:** rendering `md_wysiwyg_graphical_render_tldr.md` to a 480-wide PPM
@@ -19,16 +19,30 @@ A block-flow inline run wider than its containing block should soft-wrap at word
 boundaries (CSS normal white-space) onto additional line boxes, advancing the
 block height — matching browser behavior the renderer otherwise mirrors.
 
-## Notes
+## Root cause (confirmed)
 
-- The renderer derives layout geometry from `glyph_scale()` and already computes
-  per-glyph advance (`char_w`), so the wrap point is computable; what is missing
-  is breaking the inline run into multiple line boxes when the accumulated
-  advance exceeds the content width.
-- Reproduce: `bin/simple run src/app/office/md_wysiwyg_ppm.spl <any long-line .md>
-  /tmp/out.ppm` at a width narrower than the longest line.
+The renderer *did* wrap, but at the wrong width. In the block-flow inline-run
+path of `layout()`, an inline `#text` child was laid out at its full INTRINSIC
+(unwrapped) width, not the available content width. Measured live (480-wide
+surface): the `<p>` block was `w=480` but its text child was `w=690`, so
+`cpl = 690 / char_w = 57` chars/line — the first wrapped line was ~684 px wide
+and clipped against the 480 px surface, then the remainder wrapped to line 2.
 
-## Impact
+## Fix
 
-Markdown/HTML with prose lines wider than the viewport loses trailing content in
-the raster output. Workaround today: render at a width ≥ the longest line.
+Bound the inline `#text` layout width to the available content width
+(`iw - inline_x`) before laying it out, unless `white-space: nowrap`. Short
+inline pieces (intrinsic ≤ available) are unaffected. After the fix the text
+child is `w=480` and wraps within the surface. Ink-preservation oracle (same
+text at 240×400 vs 960×120): both render 3720 ink px with the fix (no glyph
+lost); without it the narrow render drops to 2060 (~45% clipped). Regression
+suite `test/01_unit/browser_engine/` unchanged (34 pass / 45 pre-existing fail).
+
+Note: per-line *break-on-overflow within a single inline run mixing multiple
+pieces* is still simplistic, but single-text-child blocks (paragraphs, headings,
+list items) now wrap correctly within the surface.
+
+## Reproduce
+
+`bin/simple run src/app/office/md_wysiwyg_ppm.spl <any long-line .md> /tmp/out.ppm`
+at a width narrower than the longest line.

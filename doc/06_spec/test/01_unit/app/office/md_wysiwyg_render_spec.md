@@ -28,7 +28,7 @@ md_wysiwyg_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -161,6 +161,35 @@ expect(esc_ink).to_be_less_than(plain_ink * 3)
 
 </details>
 
+#### wraps a long line inside the surface instead of clipping the right edge
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# A long line at a narrow width must WRAP so every glyph paints; it must
+# not run off the right edge and clip (web_render_no_line_wrapping_right_edge_clip).
+# Oracle: the same text rendered on a narrow-but-tall surface preserves its
+# ink (all glyphs survive the wrap), matching a wide surface that fits it
+# on fewer lines. A right-edge clip would drop glyphs and lower the ink.
+val long_md = "Render markdown to pixels through the shared web 2D lane painted via Engine2D backend now"
+val narrow = _render_markdown(long_md, 240, 400)
+val wide = _render_markdown(long_md, 960, 120)
+expect(narrow.len()).to_equal(240 * 400)
+val narrow_ink = _count_non_bg(narrow, 0xFFFFFFFFu32)
+val wide_ink = _count_non_bg(wide, 0xFFFFFFFFu32)
+expect(wide_ink).to_be_greater_than(0)
+# every glyph survives the wrap: narrow ink is within ~10% of the wide ink
+# (identical glyph set, just laid out on more lines). A clip would drop a
+# large fraction of the glyphs.
+expect(narrow_ink * 10).to_be_greater_than(wide_ink * 9)
+```
+
+</details>
+
 #### reserves wrapped-text height so a following block does not overlap
 
 <details>
@@ -214,8 +243,8 @@ expect(_count_non_bg(b, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
