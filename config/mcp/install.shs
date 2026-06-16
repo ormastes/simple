@@ -28,28 +28,32 @@ esac
 if [ "$EXT" = "" ]; then
     SIMPLE_MCP_CMD="$PROJECT_ROOT/bin/simple_mcp_server"
     SIMPLE_LSP_MCP_CMD="$PROJECT_ROOT/bin/simple_lsp_mcp_server"
-    SIMPLE_MCP_NATIVE_CMD="$PROJECT_ROOT/build/bootstrap/mcp-package/simple_mcp_server"
-    # Resolve the LSP MCP native binary from the canonical deploy dir first.
-    # bootstrap-from-scratch.sh deploys to bin/release/<platform-triple>/; the
-    # legacy bin/release/linux-x86_64/ alias and the mcp-package copy are only
-    # fallbacks. Pinning the alias directly (as before) left .mcp.json pointing
-    # at a stale hand-copied binary after every rebuild.
+    # Resolve native MCP binaries from the canonical deploy dir first.
+    # bootstrap-from-scratch.sh deploys both simple_mcp_server and
+    # simple_lsp_mcp_server to bin/release/<platform-triple>/; the legacy
+    # bin/release/linux-x86_64/ alias and the build/bootstrap/mcp-package copy
+    # are only fallbacks. Pinning a fixed path (as simple-mcp did before) left
+    # .mcp.json pointing at a stale hand-copied binary after every rebuild.
     # See doc/07_guide/app/mcp/lsp_mcp_deploy_path_fix.md
     . "$PROJECT_ROOT/scripts/setup/platform-detect.shs"
-    SIMPLE_LSP_MCP_NATIVE_CMD=""
-    for _cand in \
-        "$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}/simple_lsp_mcp_server" \
-        "$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}-macho/simple_lsp_mcp_server" \
-        "$PROJECT_ROOT/bin/release/linux-x86_64/simple_lsp_mcp_server" \
-        "$PROJECT_ROOT/build/bootstrap/mcp-package/simple_lsp_mcp_server"; do
-        if [ -x "$_cand" ]; then
-            SIMPLE_LSP_MCP_NATIVE_CMD="$_cand"
-            break
-        fi
-    done
-    if [ -z "$SIMPLE_LSP_MCP_NATIVE_CMD" ]; then
-        SIMPLE_LSP_MCP_NATIVE_CMD="$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}/simple_lsp_mcp_server"
-    fi
+    resolve_native_mcp() {
+        # $1 = binary base name. Echoes the first existing candidate, or the
+        # canonical deploy path if none exist yet (so a later rebuild lands there).
+        _name="$1"
+        for _cand in \
+            "$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}/${_name}" \
+            "$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}-macho/${_name}" \
+            "$PROJECT_ROOT/bin/release/linux-x86_64/${_name}" \
+            "$PROJECT_ROOT/build/bootstrap/mcp-package/${_name}"; do
+            if [ -x "$_cand" ]; then
+                printf '%s' "$_cand"
+                return 0
+            fi
+        done
+        printf '%s' "$PROJECT_ROOT/bin/release/${PLATFORM_TRIPLE}/${_name}"
+    }
+    SIMPLE_MCP_NATIVE_CMD="$(resolve_native_mcp simple_mcp_server)"
+    SIMPLE_LSP_MCP_NATIVE_CMD="$(resolve_native_mcp simple_lsp_mcp_server)"
     BRIDGE_CMD="$PROJECT_ROOT/bin/mcp_stdio_bridge.js"
     STITCH_CMD="$PROJECT_ROOT/bin/codex_stitch_mcp.js"
     SIMPLE_MCP_LAUNCH="cd $(shell_quote "$PROJECT_ROOT") && exec node $(shell_quote "$BRIDGE_CMD") -- $(shell_quote "$SIMPLE_MCP_NATIVE_CMD")"
