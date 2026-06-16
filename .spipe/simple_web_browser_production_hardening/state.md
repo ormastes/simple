@@ -51,3 +51,8 @@ implementation
 - verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter` passes with 7 scenarios, including decoded query bearer extraction from non-leading query positions.
 - verify: `bin/simple check src/app/ui.web/origin_guard.spl test/01_unit/app/ui/web_auth_hardening_spec.spl` passes.
 - verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter` passes with 8 scenarios after explicit allowlist parser coverage.
+- impl: Added live system-level raw HTTP/WebSocket endpoint evidence in `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`, using the test-only launcher `test/03_system/gui/ui_browser/simple_web_hardening_server.spl` to call production `app.ui.web.server.run_web` directly while avoiding the current unstable `simple ui` command dispatcher.
+- verify: `bin/simple check test/03_system/gui/simple_web_browser_production_hardening_spec.spl test/03_system/gui/ui_browser/simple_web_hardening_server.spl` passes.
+- verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 90` passes with 1 live endpoint scenario covering missing-origin `/ui/login`, oversized unauthenticated `/ui/login`, unauthenticated `/api/state`, and unauthenticated `/ui/ws`.
+- verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 8 scenarios.
+- verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 9 scenarios.

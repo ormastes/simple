@@ -11,6 +11,7 @@ extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_thread_sleep(ms: i64)
 extern fn rt_getpid() -> i64
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 fn hardening_free_port() -> i32:
     val base = 21000
@@ -28,7 +29,7 @@ fn hardening_start_web_server(port: i32) -> i64:
 fn hardening_wait_for_server(port: i32):
     val addr = "127.0.0.1:{port}"
     var attempts = 0
-    while attempts < 30:
+    while attempts < 60:
         match TcpStream.connect_timeout(addr, 300):
             Ok(stream):
                 stream.close()
@@ -60,13 +61,18 @@ fn raw_http_request(port: i32, request: text) -> text:
                             return "READ_FAILED: {e}"
                         Ok(bytes):
                             stream.close()
-                            return bytes
+                            return rt_bytes_to_text(bytes)
 
 fn http_status_line(response: text) -> text:
-    val idx = response.find("\r\n")
-    if idx < 0:
-        return response
-    response[0:idx]
+    if response.starts_with("HTTP/1.1 403 Forbidden"):
+        return "HTTP/1.1 403 Forbidden"
+    if response.starts_with("HTTP/1.1 413 Payload Too Large"):
+        return "HTTP/1.1 413 Payload Too Large"
+    if response.starts_with("HTTP/1.1 101 Switching Protocols"):
+        return "HTTP/1.1 101 Switching Protocols"
+    if response.starts_with("HTTP/1.1 200 OK"):
+        return "HTTP/1.1 200 OK"
+    "unexpected"
 
 fn http_marker(response: text, marker: text) -> text:
     if response.contains(marker):
@@ -109,11 +115,6 @@ describe "Simple web browser production hardening live endpoints":
         val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
 
         hardening_stop_web_server(pid)
-
-        print "missing_origin={missing_origin}"
-        print "oversized_login={oversized_login}"
-        print "api_state={api_state}"
-        print "websocket={websocket}"
 
         expect(missing_origin).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(oversized_login).to_equal("HTTP/1.1 413 Payload Too Large|present")

@@ -626,3 +626,21 @@ An `impl ClassName:` block defined in a file OTHER than where the class is decla
 ## Cross-Module Mutation Loss (Interpreter Bug)
 
 Interpreter bug where a free function `fn foo(self: MyClass, ...)` called across module boundaries loses field mutations on `self`. The caller sees stale values even though class instances are reference types. Same function body defined as a `me` method propagates correctly. Workaround: use extension impl blocks to define `me` methods. TODO filed in `collection_opt.spl`.
+
+## Strictness Tiers (Script Modes)
+
+A SECOND classification axis, **orthogonal to the Stdlib Memory Tiers (`src/lib/` — `nogc_sync_mut`/`nogc_async_mut`/`gc_async_mut`/`nogc_async_mut_noalloc`; see `.claude/rules/structure.md`)** (`nogc_sync_mut`, etc.). The memory tiers control the runtime/allocation model; strictness tiers control **code-quality strictness** — which lints fire, at what severity, and whether formal-verification coverage is gated. A build target picks one value on each axis; "reliable" is **not** a memory tier.
+
+Three tiers, increasing strictness:
+
+- **moderate** — relaxed/casual scripting strictness: lint advisory only, no primitive-use or proof gates. For scripts, prototypes, examples. (Default.)
+- **lib** — library-code strictness: full current lint at error severity + minimal-public-surface / export-boundary checks (`wide_public` W0404, `star_export`); no formal-verification gate.
+- **reliable** — strictest, a **ladder**: rung 1 = current lint level (run at compile **and** link, configurable severity); rung 2 = local/internal-primitive-use check, surfaced as a WARNING with verified auto-fix; rung 3 = formal-verification COVERAGE gate — each feature-level public class, and each main-class-of-file, HAS a discharged proof (a coverage meta-check, **distinct from running proofs**).
+
+**Orthogonality:** any strictness tier composes with any memory tier — e.g. a `nogc_async_mut_noalloc` baremetal module can be built under `reliable`.
+
+**Selection:** `simple.sdn [lints] profile=`, a CLI flag, or a `@profile()` file-header attribute; every check is overridable via `[lints]` / `@allow`/`@deny`.
+
+**Supersedes** the rejected "High-robustness mode" (`simple_language_comparison.md:31`): instead of an unprovable monolithic guarantee, `reliable` is the configurable strict-lint + `@deny(non_exhaustive_match)` + proof-coverage realization that doc prescribed, dialed by context.
+
+See also: Stdlib Memory Tiers (`src/lib/` — `nogc_sync_mut`/`nogc_async_mut`/`gc_async_mut`/`nogc_async_mut_noalloc`; see `.claude/rules/structure.md`) (the memory/runtime axis — do not conflate).

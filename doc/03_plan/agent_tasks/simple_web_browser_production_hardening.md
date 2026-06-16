@@ -14,12 +14,18 @@ Owns these files:
 - `src/app/ui.web/tls_serve_loop.spl`
 - `src/app/ui.web/ui_routes.spl`
 - `test/01_unit/app/ui/web_auth_hardening_spec.spl`
+- `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`
+- `doc/06_spec/test/03_system/gui/simple_web_browser_production_hardening_spec.md`
 
 Do not absorb unrelated GPU, crypto, compiler, or renderer-parity dirty files in this checkout.
 
+## Latest Evidence
+
+- Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 90`
+- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean`
+- Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean`
+
 ## Remaining Work
 
-- Add auth gates for sensitive `/api/*` browser/web introspection routes.
 - Replace auth-path ad hoc JSON/query parsing with bounded structured helpers.
-- Generate the mirrored scenario manual for the new hardening spec if it becomes a system-level SPipe spec.
 - Run the full production GUI/Web renderer parity wrapper after the unresolved `jj` conflict is cleared.
