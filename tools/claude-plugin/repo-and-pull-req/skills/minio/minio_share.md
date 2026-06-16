@@ -1,61 +1,51 @@
 # MinIO Share Skill
 
-Generate a presigned download URL via `mc share download --json`.
+Generate a presigned download URL. The `/minio share` verb maps to `bin/itf minio presign` (pure-Simple SigV4 — `adapter_minio.spl::minio_presign_get`, no `mc`).
 
 ## Prerequisites
 
-- Configured alias (see `/minio setup`).
-- Object exists; alias has `s3:GetObject` on the resource.
+- `[minio]` section in `~/.config/itf/auth.sdn` (see `/minio setup`).
+- Object exists; credentials have `s3:GetObject` on the resource.
+
+Signature: `presign <bucket> <key> [--expires SECONDS]`. Bucket and key are **separate** positional args.
 
 ## Procedure
 
-### Default (7-Day) Expiry
+### Default (1-Day) Expiry
 
 ```bash
-bin/itf minio share firmware-images/zynq/v1/fw.bin
-# delegates to: mc --json share download <alias>/firmware-images/zynq/v1/fw.bin
+bin/itf minio presign firmware-images zynq/v1/fw.bin
+# → minio_presign_get(cfg, "firmware-images", "zynq/v1/fw.bin", 86400); prints the URL
 ```
 
-`mc share download` defaults to `168h` (7 days) when `--expire` is omitted.
+The built-in default is `--expires 86400` (1 day) when the flag is omitted.
 
 ### Custom Expiry
 
-Expiry is supplied in seconds; the adapter formats it as `mc`'s `##h##m##s` string:
+Expiry is supplied in seconds via `--expires`:
 
 ```bash
-bin/itf minio share firmware-images/zynq/v1/fw.bin 3600
-# delegates to: mc --json share download --expire 1h <alias>/firmware-images/zynq/v1/fw.bin
-
-bin/itf minio share firmware-images/zynq/v1/fw.bin 5400
-# --expire 1h30m
-
-bin/itf minio share firmware-images/zynq/v1/fw.bin 45
-# --expire 45s
+bin/itf minio presign firmware-images zynq/v1/fw.bin --expires 3600     # 1 hour
+bin/itf minio presign firmware-images zynq/v1/fw.bin --expires 5400     # 90 minutes
 ```
-
-(Reference: `mc-share-download-2026` `--expire` accepts `##h##m##s`.)
 
 ### Limitations
 
-- `mc share download` requires `--recursive` when the path points at a bucket or prefix; the adapter's single-object form does NOT pass `--recursive`. For prefix shares, drop to `mc` directly:
+- The built-in `presign` is single-object only. For prefix/recursive shares, drop to `mc` directly:
   ```bash
   mc --json share download --recursive --expire 1h <alias>/firmware-images/zynq/
   ```
-- Maximum lifetime is enforced by the server (typically 7 days for SigV4 presigned URLs).
+  (Separate raw-`mc` escape hatch, not the built-in path.)
+- Maximum lifetime is enforced by the server (typically 7 days for SigV4 presigned URLs); the `presign` help caps `--expires` at 604800.
 
 ## Output
 
-Each NDJSON line contains:
-```json
-{"status":"success","share":"https://minio.corp:9000/firmware-images/...?X-Amz-Signature=..."}
-```
-
-`mc_share_download` returns the `share` field as `presigned_url`.
+`presign` prints the presigned URL to stdout (one line) — not NDJSON. The `mc` JSON-Lines `share` shape applies only to the raw-`mc` escape hatch above.
 
 ## Error Handling
 
-- HTTP 403 / `AccessDenied`: alias lacks `s3:GetObject`.
-- HTTP 404 / `NoSuchKey`: object missing; run `/minio ls` first.
+- `AccessDenied`: credentials lack `s3:GetObject`.
+- `NoSuchKey`: object missing; run `/minio ls` first.
 - Expiry out of range: server rejects presigns longer than 7 days for SigV4.
 
 ## Integration
