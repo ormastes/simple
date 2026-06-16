@@ -120,6 +120,63 @@ fn email_sanitize_body(body: text) -> text:
     var result2 = result.replace("\r\n.\r\n", "\r\n..\r\n")
     return result2
 
+fn smtp_dot_stuff(body: text) -> text:
+    """RFC 5321 §4.5.2 dot-stuffing: prefix every line beginning with '.' with
+    an extra '.'.  Also appends the DATA terminator <CRLF>.<CRLF>.
+
+    Works on CRLF-normalised input.  A line beginning with '.' is any line
+    where the first character after the preceding CRLF is '.'.
+    """
+    # Normalise bare LF to CRLF first
+    var normalised = body.replace("\r\n", "\n")
+    var normalised2 = normalised.replace("\n", "\r\n")
+
+    val lines = normalised2.split("\r\n")
+    var stuffed: [text] = []
+    var i = 0
+    var line_count = lines.length()
+    while i < line_count:
+        val line = lines[i]
+        if line.length() > 0:
+            val first = line.char_at(0)
+            if first == ".":
+                stuffed.push("." + line)
+            else:
+                stuffed.push(line)
+        else:
+            stuffed.push(line)
+        i = i + 1
+    stuffed.join("\r\n") + "\r\n.\r\n"
+
+fn smtp_undot_stuff(stuffed_body: text) -> text:
+    """Reverse dot-stuffing: remove the leading extra '.' from doubled-dot
+    lines.  Strips the trailing <CRLF>.<CRLF> terminator if present.
+    """
+    var body = stuffed_body
+    # Strip DATA terminator
+    if body.ends_with("\r\n.\r\n"):
+        val end = body.length() - 5
+        body = body.substring(0, end)
+
+    val lines = body.split("\r\n")
+    var out: [text] = []
+    var i = 0
+    var out_count = lines.length()
+    while i < out_count:
+        val line = lines[i]
+        if line.length() >= 2:
+            val first  = line.char_at(0)
+            val second = line.char_at(1)
+            if first == "." and second == ".":
+                val rest = line.substring(1, line.length())
+                out.push(rest)
+            else:
+                out.push(line)
+        else:
+            out.push(line)
+        i = i + 1
+    out.join("\r\n")
+
 # Email Headers
 # RFC 5322
 
