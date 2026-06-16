@@ -49,8 +49,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val headers = "Host: localhost\nUpgrade: websocket\nConnection: Upgrade\n"
-expect(is_ws_upgrade_request(headers)).to_equal(true)
-expect(is_ws_upgrade_request("Host: localhost\nConnection: keep-alive\n")).to_equal(false)
+expect(is_ws_upgrade_request(headers)).to_be(true)
+expect(is_ws_upgrade_request("Host: localhost\nConnection: keep-alive\n")).to_be(false)
 ```
 
 </details>
