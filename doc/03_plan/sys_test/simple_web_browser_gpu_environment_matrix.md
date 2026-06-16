@@ -32,6 +32,11 @@ Fresh local evidence from 2026-06-16 follow-up:
 - `build/vulkan-engine2d-readback/evidence.env` reports
   `vulkan_engine2d_readback_status=pass`, `backend_name=vulkan`,
   clear/rect mismatches `0`, and `blur_or_tolerance_used=false`.
+- `doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md`
+  reports `production_gui_web_host_gpu_queue_readback_status=pass`,
+  Linux GUI/web queue integration `pass`, same-frame Vulkan/BrowserBackend
+  `device_readback`, and platform matrix `partial` because Metal, ROCm,
+  DirectX, and WebGPU still require native external host proof.
 - `build/metal_generated_2d_readback/evidence.env` reports
   `metal_generated_2d_readback_status=unavailable`,
   `reason=missing-primary-tool`, no Metal runtime/tools, no submit, and no

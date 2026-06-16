@@ -36,10 +36,10 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 
 ## Run Environment
 
-- root: /home/ormastes/dev/pub/simple
+- root: /tmp/simple-browser-next
 - build_dir: build/production_gui_web_host_gpu_queue_readback
 - report_path: doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md
-- simple_bin: src/compiler_rust/target/release/simple
+- simple_bin: /home/ormastes/dev/pub/simple/bin/simple
 - simple_lib: src
 - uname_s: Linux
 - uname_m: x86_64
@@ -121,7 +121,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - Runtime payload metadata roundtrip: pass (payload_size 512, payload_hash 98765).
 - Runtime payload text roundtrip: pass (queue probe payload command=draw_ir_rect id=runtime-backend).
 - BrowserBackend host event roundtrip: pass (source browser_backend_event_queue, exit 0, reason browser-backend-event-ingress-contract-pass).
-- BrowserBackend runtime queue handle/payload/perf: pass (backend vulkan, first_render_us 88469, first_under_budget true, second_render_us 183, second_under_budget true, pixels 3072, checksum 772887022, nonuniform 2884, handle 7, packet 1, payload_size 12288, payload_hash 782290402, payload_text web-render-frame;backend=vulkan;pixels=3072;checksum=782290402, dispatch dispatched, dispatch_payload_size 512, dispatch_layout_commands 8, dispatch_payload_hash 941781836, dispatch_payload_text draw_ir schema=simple-draw-ir-v2, semantic rect/text/image 4/3/1, gui_ast true, widgets root/copy/action/image true/true/true/true, image_uri true, event_context true/browser-frame-16/gui_ast, cache reset not_requested/0).
+- BrowserBackend runtime queue handle/payload/perf: pass (backend vulkan, first_render_us 622803, first_under_budget true, second_render_us 664, second_under_budget true, pixels 3072, checksum 772887022, nonuniform 2884, handle 7, packet 1, payload_size 12288, payload_hash 782290402, payload_text web-render-frame;backend=vulkan;pixels=3072;checksum=782290402, dispatch dispatched, dispatch_payload_size 512, dispatch_layout_commands 8, dispatch_payload_hash 941781836, dispatch_payload_text draw_ir schema=simple-draw-ir-v2, semantic rect/text/image 4/3/1, gui_ast true, widgets root/copy/action/image true/true/true/true, image_uri true, event_context true/browser-frame-16/gui_ast, cache reset not_requested/0).
 - Same-frame GUI/web Engine2D pixel readback receipt: pass (backend vulkan, pixels 3072, checksum 782290402, reason same-frame Engine2D read_pixels, cache reset not_requested).
 - Same-frame Vulkan/BrowserBackend device readback receipt: pass (source device_readback; only device_readback is accepted as device proof. BrowserBackend backend handle 7, same-frame checksum 782290402, Vulkan Engine2D child readback pass).
 - Browser input event to queued frame/readback correlation: pass (status event_frame_readback_correlated, event browser-input-1, summary event=browser-input-1;frame_packet=1;readback_source=device_readback;checksum=782290402, cache reset not_requested).
@@ -142,10 +142,10 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 
 ## Raw Evidence
 
-- run_root_dir=/home/ormastes/dev/pub/simple
+- run_root_dir=/tmp/simple-browser-next
 - run_build_dir=build/production_gui_web_host_gpu_queue_readback
 - run_report_path=doc/09_report/production_gui_web_host_gpu_queue_readback_2026-06-16.md
-- run_simple_bin=src/compiler_rust/target/release/simple
+- run_simple_bin=/home/ormastes/dev/pub/simple/bin/simple
 - run_simple_lib=src
 - run_uname_s=Linux
 - run_uname_m=x86_64
@@ -234,14 +234,14 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - browser_frame_probe_timeout_seconds=180
 - browser_frame_probe_timed_out=false
 - browser_backend=vulkan
-- browser_first_render_us=88469
+- browser_first_render_us=622803
 - browser_first_render_under_budget=true
-- browser_first_render_dom_layout_us=1380
-- browser_first_render_html_us=138
-- browser_first_render_pixel_artifact_us=17684
-- browser_first_render_draw_ir_dispatch_us=2153
-- browser_first_render_framebuffer_copy_us=4309
-- browser_first_render_state_store_us=63
+- browser_first_render_dom_layout_us=11164
+- browser_first_render_html_us=303
+- browser_first_render_pixel_artifact_us=191528
+- browser_first_render_draw_ir_dispatch_us=16566
+- browser_first_render_framebuffer_copy_us=40504
+- browser_first_render_state_store_us=256
 - browser_first_pixel_count=3072
 - browser_first_checksum=772887022
 - browser_first_nonuniform_count=2884
@@ -294,7 +294,7 @@ The queue probe distinguishes emission and drain from backend-capable submit. Ex
 - browser_event_host_gpu_forwarded=true
 - browser_event_host_gpu_backward_completed=true
 - browser_event_host_gpu_summary=event=browser-input-1;requested=gpu;decision=gpu;queued=true;gpu_batched=true;reason=
-- browser_second_render_us=183
+- browser_second_render_us=664
 - browser_second_render_under_budget=true
 - browser_second_fast_hits=1
 - browser_second_submit=not_requested

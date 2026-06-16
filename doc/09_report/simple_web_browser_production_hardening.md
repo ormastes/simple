@@ -76,7 +76,10 @@
 ## Host Environment Evidence
 
 - Linux NVIDIA Vulkan/CUDA/OpenCL evidence exists in
-  `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md`.
+  `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md`; the
+  refreshed 2026-06-16 host-GPU wrapper reports same-frame
+  Vulkan/BrowserBackend device readback and Linux GUI/web queue integration
+  `pass`.
 - macOS Metal is host-unavailable locally and must be proven on macOS.
 - AMD ROCm/HIP is host-unavailable locally and must be proven on an AMD ROCm
   host.

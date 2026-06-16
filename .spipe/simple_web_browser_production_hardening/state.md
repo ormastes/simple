@@ -285,3 +285,9 @@ verification / requirement-selection pending
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl`,
   focused unit/integration specs, live hardening system spec, docgen, and
   `find doc/06_spec -name '*_spec.spl' | wc -l` pass.
+- verify: Refreshed local GPU/environment evidence with absolute
+  `SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple`: Vulkan Engine2D
+  readback `pass`, host-GPU queue/readback aggregate `pass` with same-frame
+  Vulkan/BrowserBackend device readback, Metal and ROCm generated readback
+  `unavailable` due missing host/toolchain, and WebGPU real readback
+  `unavailable` with `source=not_device_readback`.

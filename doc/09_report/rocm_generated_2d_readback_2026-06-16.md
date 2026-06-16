@@ -25,8 +25,8 @@ Generated ROCm/HIP evidence is intentionally fail-closed until a verified HSACO 
 - Verify runtime tooling before running: rocminfo, libamdhip64, libhsa-runtime64.
 - Verify visible AMD GPU runtime before running: rocminfo.
 - Refresh and rebuild generated toolchains for HSACO:
-  - SIMPLE_BIN=bin/simple SIMPLE_LIB=src HIPCC_TOOL=hipcc HIP_ARCH=gfx1100 sh scripts/check/check-portable-compute-toolchains.shs
+  SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=src HIPCC_TOOL=hipcc HIP_ARCH=gfx1100 sh scripts/check/check-portable-compute-toolchains.shs
 - Run proof lane directly:
-  - SIMPLE_BIN=bin/simple SIMPLE_LIB=src HIP_ARCH=gfx1100 sh scripts/check/check-rocm-generated-2d-readback.shs
+  SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=src HIP_ARCH=gfx1100 sh scripts/check/check-rocm-generated-2d-readback.shs
 - Promote through platform aggregate:
-  - SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
+  SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
