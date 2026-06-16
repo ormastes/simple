@@ -28,7 +28,7 @@ md_wysiwyg_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -161,6 +161,34 @@ expect(esc_ink).to_be_less_than(plain_ink * 3)
 
 </details>
 
+#### reserves wrapped-text height so a following block does not overlap
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# A block whose inline text wraps to multiple lines must reserve N lines
+# of height; otherwise the next block is placed over the wrapped tail
+# (web_render_line_height_overlap_at_bottom). Narrow width forces the
+# first block's text to wrap; the second block must sit fully below it.
+val html = "<div id=\"a\" style=\"font-size: 32px;\">one two three four five six seven eight nine ten</div><p id=\"b\" style=\"font-size: 16px;\">next</p>"
+val ya = simple_web_layout_debug_layout_by_id(html, 200, 400, "a", "y").to_i32()
+val ha = simple_web_layout_debug_layout_by_id(html, 200, 400, "a", "h").to_i32()
+val yb = simple_web_layout_debug_layout_by_id(html, 200, 400, "b", "y").to_i32()
+val one_line = 9 * (32 / 8)  # line_h(32) = 9 * glyph_scale(32)
+# the first block actually wrapped (taller than a single line)...
+expect(ha).to_be_greater_than(one_line)
+# ...and reserves at least two lines...
+expect(ha).to_be_greater_than(one_line * 2 - 1)
+# ...so the next block starts at or below the first block's bottom.
+expect(yb).to_be_greater_than(ya + ha - 1)
+```
+
+</details>
+
 #### renders different markdown to different framebuffers
 
 <details>
@@ -186,8 +214,8 @@ expect(_count_non_bg(b, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1,7 +1,7 @@
 # Bug: web renderer overlaps text lines near the bottom of the page
 
 - **Id:** web_render_line_height_overlap_at_bottom_2026-06-16
-- **Status:** open
+- **Status:** RESOLVED (2026-06-16)
 - **Priority:** P3
 - **Area:** `lib/gc_async_mut/gpu/browser_engine` (web HTML layout renderer)
 - **Found via:** rendering `md_wysiwyg_graphical_render_tldr.md` to a 480x600 PPM
@@ -13,13 +13,27 @@ Toward the bottom of the rendered page, two text lines overprint each other:
 unreadable region. The top and middle of the page advance lines cleanly; the
 defect appears only in the lower portion.
 
-## Suspected cause
+## Root cause (confirmed)
 
-Vertical advance (line-height / block-margin accumulation) appears to under-count
-for later blocks — likely a rounding or margin-collapse interaction in the block
-layout pass so successive line boxes are placed with insufficient `y` separation
-as the cumulative offset grows. Heading blocks (larger `font_size`/line-height)
-just above the overlap are a likely contributor.
+The block-flow inline-run path in `simple_web_html_layout_renderer.spl` `layout()`
+overwrote a `#text` child's height with a SINGLE line:
+`out_bh[c] = style_line_h(cst)`, and advanced the block cursor by one
+`inline_line_h`. When that text wrapped to N lines (common for long heading or
+prose lines narrower than the text), the block reserved only one line of height,
+so the next sibling block was placed over the wrapped tail.
+
+Measured live (480-wide) on `<h1>long…</h1><p>…</p>`: the h1 reported `h=36`
+(one line) while its text wrapped to 2 lines and painted to `y≈79`; the `<p>`
+was placed at `y=62` → ~17 px overlap.
+
+## Fix
+
+Reserve the WRAPPED height: `out_bh[c] = max(1, out_wrap_starts[c].len()) *
+style_line_h(cst)`. Single-line text is unchanged (`wrap_lines == 1`); multi-line
+text now reserves N lines, so the inline run height and cursor advance are
+correct. After the fix the same case reports h1 `h=72` and the `<p>` at `y=88`
+(no overlap). Regression suite `test/01_unit/browser_engine/` is unchanged
+(34 pass / 45 pre-existing fail, identical before and after — net-zero).
 
 ## Expected
 
