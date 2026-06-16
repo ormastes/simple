@@ -107,6 +107,26 @@ A forward-pointer addendum should be added next to line 31: *"Superseded by: rel
 
 **Risk & blockers.** The deny-vs-warn ambiguity must be resolved before R2 is cleanly satisfiable. The high-fidelity AST lint is dead in the live pipeline — making it the reliable check requires standing up a semantics-lint invocation that does not exist.
 
+**R2 arena-rewrite recipe (de-risked 2026-06-16 — exact API surface).** Implement option (a)
+as a new arena lint mirroring `35.semantics/lint/argument_count.spl`:
+- Inputs from `compiler.core.ast`: iterate `module_get_decls() -> [i64]`; `decl_tag[idx]`
+  (`== DECL_FN`), `decl_name[idx]`, `decl_get_param_names(idx)`, **`decl_get_param_types(idx) -> [i64]`**,
+  **`decl_get_ret_type(idx) -> i64`**.
+- Resolve a type i64 to a name with **`type_tag_name(t)`** (`compiler.core.types`); named/custom
+  types via `named_type_name`. **OPEN ITEM (confirm first):** whether `decl_get_param_types`
+  returns type *tags* (then `type_tag_name` resolves directly) or type-node indices (needs a
+  node→tag step). The arena module does NOT load in an isolated `bin/simple run /tmp/...` probe
+  (`compiler.core.ast` arena vars fail to resolve), so confirm this **inside** the pipeline.
+- Flag a param/ret type whose name ∈ {i8,i16,i32,i64,u8,u16,u32,u64,f32,f64,bool}; reuse the
+  pure-math exemption idea (all params + ret the same primitive) and `@allow(primitive_api)`.
+- Wire into `query_lint._run_ast_lint_passes` exactly like `check_argument_count`, emit code
+  `primitive_api`. **Gate** emission on an active tier (add `_LINT_TIER_ACTIVE`, set in
+  `_load_lint_config_for`) so there's zero default noise; severity then governed by the R1-step-3
+  override map (moderate→suppress, lib/reliable→deny).
+- **Verify** end-to-end via `_collect_lint_diagnostics_json("@lint_profile(reliable)\n\nfn f(x: i64)->i64:\n  x\n")`
+  → expect a `primitive_api` diagnostic at severity 1; without the tier → none (gated). The
+  isolated arena probe cannot be used (module-load limit above) — verify through this pipeline entry.
+
 ---
 
 ## R3 — LSP check autofix properly wired (diagnostic → code action → apply edit)
