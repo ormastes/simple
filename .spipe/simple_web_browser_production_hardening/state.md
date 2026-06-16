@@ -29,7 +29,7 @@ Harden the Simple Web/browser production boundary so renderer parity, browser br
 3. Security boundary slice: harden token secret policy, TLS secret wiring, login origin behavior, and resume route auth without touching renderer/GPU files.
 4. Evidence slice: add focused unit specs for the security policy and origin fail-closed behavior.
 5. Verification: run focused checks/tests for new files and note pre-existing broad-check blockers separately.
-6. Follow-up production slices: gate sensitive `/api/*` readback/introspection routes, replace brittle ad hoc JSON/query parsing on auth paths, and run the full renderer parity wrapper once the shared checkout conflict is resolved.
+6. Follow-up production slices: finish final requirement/NFR selection, add trace IDs, and run native host evidence for macOS Metal plus AMD ROCm/HIP.
 
 ## Phase
 
@@ -92,3 +92,11 @@ verification / requirement-selection pending
 - fix: Added `429 Too Many Requests` status text in plain, TLS, and async web
   response helpers.
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 240` passes with 3 live endpoint scenarios covering fail-closed `/ui/login`, `/api/state`, `/api/widgets`, bare `/ui/ws`, query-token `/ui/ws`, positive subprotocol bearer upgrade, and live login burst rate limiting.
+- impl: Added normal `run_web` fail-closed handling for unauthenticated
+  `/ui/resume` before the unsupported path can fall through to 404.
+- verify: Superseded 4-scenario live endpoint coverage added `/ui/resume`,
+  legacy `/ws`, and explicit query-token opt-in upgrade evidence before the
+  shared-WM login burst scenario was added.
+- fix: Parsed `SIMPLE_UI_WEB_PORT` as a concrete integer in shared-WM web mode
+  instead of formatting the optional parse result into the socket address.
+- verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios, adding shared-WM login burst rate-limit evidence to the normal `run_web` endpoint coverage.

@@ -20,7 +20,17 @@ fn hardening_free_port(extra: i32) -> i32:
     return base + pid_offset as i32 + extra
 
 fn hardening_start_web_server(port: i32) -> i64:
-    val cmd = "exec env SIMPLE_LIB=src SIMPLE_UI_WEB_TOKEN_SECRET=simple-web-hardening-test-secret SIMPLE_WEB_HARDENING_PORT={port} src/compiler_rust/target/release/simple run test/03_system/gui/ui_browser/simple_web_hardening_server.spl --mode=interpreter >/tmp/simple_web_hardening_{port}.log 2>&1"
+    return hardening_start_web_server_env(port, "")
+
+fn hardening_start_web_server_with_query_tokens(port: i32) -> i64:
+    return hardening_start_web_server_env(port, "SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1")
+
+fn hardening_start_shared_wm_server(port: i32) -> i64:
+    return hardening_start_web_server_env(port, "SIMPLE_UI_WEB_SHARED_WM=1 SIMPLE_UI_WEB_PORT={port}")
+
+fn hardening_start_web_server_env(port: i32, extra_env: text) -> i64:
+    val extra = if extra_env == "": "" else: "{extra_env} "
+    val cmd = "exec env SIMPLE_LIB=src SIMPLE_UI_WEB_TOKEN_SECRET=simple-web-hardening-test-secret SIMPLE_WEB_HARDENING_PORT={port} {extra}src/compiler_rust/target/release/simple run test/03_system/gui/ui_browser/simple_web_hardening_server.spl --mode=interpreter >/tmp/simple_web_hardening_{port}.log 2>&1"
     val pid = rt_process_spawn_async("sh", ["-c", cmd])
     hardening_wait_for_server(port)
     return pid
@@ -123,8 +133,23 @@ fn api_state_unauthorized_request(port: i32) -> text:
 fn api_widgets_unauthorized_request(port: i32) -> text:
     return "GET /api/widgets HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nConnection: close\r\n\r\n"
 
+fn resume_unauthorized_request(port: i32) -> text:
+    val body = "{\"session_id\":\"session-1\",\"snapshot_revision\":0,\"last_sequence\":0}"
+    return "POST /ui/resume HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {body.len()}\r\nConnection: close\r\n\r\n{body}"
+
 fn websocket_unauthorized_request(port: i32) -> text:
     var request = "GET /ui/ws HTTP/1.1\r\n"
+    request = "{request}Host: 127.0.0.1:{port}\r\n"
+    request = "{request}Origin: http://localhost:{port}\r\n"
+    request = "{request}Upgrade: websocket\r\n"
+    request = "{request}Connection: Upgrade\r\n"
+    request = "{request}Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    request = "{request}Sec-WebSocket-Version: 13\r\n"
+    request = "{request}\r\n"
+    return request
+
+fn legacy_websocket_unauthorized_request(port: i32) -> text:
+    var request = "GET /ws HTTP/1.1\r\n"
     request = "{request}Host: 127.0.0.1:{port}\r\n"
     request = "{request}Origin: http://localhost:{port}\r\n"
     request = "{request}Upgrade: websocket\r\n"
@@ -142,6 +167,29 @@ fn websocket_query_token_request(port: i32) -> text:
     request = "{request}Connection: Upgrade\r\n"
     request = "{request}Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
     request = "{request}Sec-WebSocket-Version: 13\r\n"
+    request = "{request}\r\n"
+    return request
+
+fn websocket_query_token_authorized_request(port: i32, token: text) -> text:
+    var request = "GET /ui/ws?token={token} HTTP/1.1\r\n"
+    request = "{request}Host: 127.0.0.1:{port}\r\n"
+    request = "{request}Origin: http://localhost:{port}\r\n"
+    request = "{request}Upgrade: websocket\r\n"
+    request = "{request}Connection: Upgrade\r\n"
+    request = "{request}Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    request = "{request}Sec-WebSocket-Version: 13\r\n"
+    request = "{request}\r\n"
+    return request
+
+fn legacy_websocket_authorized_request(port: i32, token: text) -> text:
+    var request = "GET /ws HTTP/1.1\r\n"
+    request = "{request}Host: 127.0.0.1:{port}\r\n"
+    request = "{request}Origin: http://localhost:{port}\r\n"
+    request = "{request}Upgrade: websocket\r\n"
+    request = "{request}Connection: Upgrade\r\n"
+    request = "{request}Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    request = "{request}Sec-WebSocket-Version: 13\r\n"
+    request = "{request}Sec-WebSocket-Protocol: simple-ui, bearer.{token}\r\n"
     request = "{request}\r\n"
     return request
 
@@ -169,7 +217,9 @@ describe "Simple web browser production hardening live endpoints":
         val oversized_login = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
         val api_state = raw_http_summary(port, api_state_unauthorized_request(port), "\"error\": \"forbidden\"")
         val api_widgets = raw_http_summary(port, api_widgets_unauthorized_request(port), "\"error\": \"forbidden\"")
+        val resume = raw_http_summary(port, resume_unauthorized_request(port), "\"error\": \"forbidden\"")
         val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
+        val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
         val websocket_query = raw_http_summary(port, websocket_query_token_request(port), "\"error\": \"forbidden\"")
 
         hardening_stop_web_server(pid)
@@ -179,7 +229,9 @@ describe "Simple web browser production hardening live endpoints":
         expect(oversized_login).to_equal("HTTP/1.1 413 Payload Too Large|present")
         expect(api_state).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(api_widgets).to_equal("HTTP/1.1 403 Forbidden|present")
+        expect(resume).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
+        expect(legacy_websocket).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
 
     slow_it "mints an origin-bound token and redeems it for a websocket upgrade":
@@ -195,6 +247,8 @@ describe "Simple web browser production hardening live endpoints":
         step("Redeem the minted bearer token through the WebSocket subprotocol list")
         val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+        val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
+        val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 
         hardening_stop_web_server(pid)
 
@@ -202,6 +256,7 @@ describe "Simple web browser production hardening live endpoints":
         expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
         expect(token.len()).to_be_greater_than(20)
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+        expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 
     slow_it "rate limits allowed origin login bursts":
         """The production login endpoint must bound repeated token mint requests even when the Origin is allowed."""
@@ -222,5 +277,46 @@ describe "Simple web browser production hardening live endpoints":
         hardening_stop_web_server(pid)
 
         step("Verify the burst budget allows the configured count and rejects the next request")
+        expect(last_allowed).to_equal("HTTP/1.1 200 OK|present")
+        expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
+
+    slow_it "allows query bearer websocket compatibility only when explicitly enabled":
+        """The default server rejects query bearer tokens; explicit compatibility mode must still redeem a minted origin-bound token."""
+        val port = hardening_free_port(300)
+        step("Start a production-configured Simple Web server with query-token compatibility enabled")
+        val pid = hardening_start_web_server_with_query_tokens(port)
+
+        step("Mint a token and redeem it through the legacy query bearer path")
+        val login_response = raw_http_request(port, login_allowed_request(port))
+        val token = http_json_string_field(login_response, "token")
+        val websocket_response = raw_http_request(port, websocket_query_token_authorized_request(port, token))
+        val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Upgrade: websocket")}"
+
+        hardening_stop_web_server(pid)
+
+        step("Verify compatibility mode accepts the query token without changing the default fail-closed test")
+        expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
+        expect(token.len()).to_be_greater_than(20)
+        expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+
+    slow_it "rate limits shared wm login bursts":
+        """The shared WM web server has a separate login path and must enforce the same burst limit as normal run_web."""
+        val port = hardening_free_port(400)
+        step("Start a shared-WM Simple Web server with a real token secret")
+        val pid = hardening_start_shared_wm_server(port)
+
+        step("Spend the shared-WM login burst budget from an allowed loopback origin")
+        var attempts = 0
+        var last_allowed = ""
+        while attempts < UI_WEB_LOGIN_RATE_MAX_ATTEMPTS:
+            last_allowed = raw_http_summary(port, login_allowed_request(port), "\"token\"")
+            attempts = attempts + 1
+
+        step("Send one more shared-WM login request in the same fixed window")
+        val limited = raw_http_summary(port, login_allowed_request(port), "login_rate_limited")
+
+        hardening_stop_web_server(pid)
+
+        step("Verify the shared-WM burst budget allows the configured count and rejects the next request")
         expect(last_allowed).to_equal("HTTP/1.1 200 OK|present")
         expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
