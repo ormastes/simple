@@ -27,7 +27,7 @@ editor_markdown_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 84 | 84 | 0 | 0 |
+| 83 | 83 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -295,8 +295,8 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = read_text("src/lib/editor/render/md_renderer.spl")
-expect(src.contains("\\x1b[1;33m")).to_equal(true)
-expect(src.contains("\\x1b[1;36m")).to_equal(true)
+expect(src.contains("_mdr_sgr(\"heading_1\", \"33\")")).to_equal(true)
+expect(src.contains("_mdr_sgr(\"heading_2\", \"36\")")).to_equal(true)
 ```
 
 </details>
@@ -335,13 +335,13 @@ expect(src.contains("\\x1b[3m")).to_equal(true)
 
 #### renders inactive markdown blocks while preserving active-block source
 
-1. RenderBlock
-2. RenderBlock
-3. RenderBlock
-4. RenderBlock
+- RenderBlock
+- RenderBlock
+- RenderBlock
+- RenderBlock
    - Expected: rendered[0] contains `Title`
    - Expected: rendered[0] does not contain `#`
-5. model activate block
+- model activate block
    - Expected: active[0] equals `# Title`
 
 
@@ -376,11 +376,11 @@ expect(active[0]).to_equal("# Title")
 
 #### renders live preview with active source cursor and selection fidelity
 
-1. var pane = preview pane create
-2. pane = preview pane update for cursor
-3. var buffer = EditorBuffer from text
-4. buffer move cursor
-5. buffer set selection range
+- var pane = preview pane create
+- pane = preview pane update for cursor
+- var buffer = EditorBuffer from text
+- buffer move cursor
+- buffer set selection range
    - Expected: pane.model.active_block equals `1`
    - Expected: preview_pane_source_line_to_render_line(pane, 2) equals `1`
    - Expected: pane.viewport_start equals `1`
@@ -634,7 +634,7 @@ expect(rendered[0].contains("image: Diagram -> assets/diagram.png")).to_equal(tr
 
 #### renders resolved Obsidian note embeds as transcluded target content
 
-1. md wiki document
+- md wiki document
    - Expected: rendered[0] contains `transclude: Alpha embed`
    - Expected: rendered[1] contains `Project Alpha`
    - Expected: rendered[2] contains `Ship renderer`
@@ -663,8 +663,8 @@ expect(rendered[1].contains("status: active")).to_equal(false)
 
 #### renders nested resolved Obsidian note embeds recursively
 
-1. md wiki document
-2. md wiki document
+- md wiki document
+- md wiki document
    - Expected: rendered[0] contains `transclude: Alpha embed`
    - Expected: rendered[2] contains `transclude: Beta embed`
    - Expected: rendered[3] contains `Project Beta`
@@ -918,17 +918,19 @@ expect(src.contains("fn md_render_blocks_for_tui(model: BlockModel, viewport_sta
 
 </details>
 
-#### md_render_blocks_for_tui reuses md_render_blocks
+#### md_render_blocks_for_tui enforces viewport bounds
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = read_text("src/lib/editor/render/md_renderer.spl")
-expect(src.contains("val all_lines = md_render_blocks(model)")).to_equal(true)
+expect(src.contains("if viewport_height <= 0")).to_equal(true)
+expect(src.contains("viewport_start < 0")).to_equal(true)
+expect(src.contains("val end = viewport_start + viewport_height")).to_equal(true)
 ```
 
 </details>
@@ -968,7 +970,58 @@ expect(src.contains("highlight_render(hl)")).to_equal(true)
 
 ### editor markdown wiring — controller
 
-#### editor_controller has palette_state field
+#### markdown editing owns preview and outline visibility state
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = read_text("src/lib/editor/view/md_editing.spl")
+expect(src.contains("struct MdEditorState:")).to_equal(true)
+expect(src.contains("preview_visible: bool")).to_equal(true)
+expect(src.contains("outline_visible: bool")).to_equal(true)
+```
+
+</details>
+
+#### markdown language extension exposes IDE command routing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = read_text("src/lib/editor/extensions/builtin/md_language.spl")
+expect(src.contains("ExtensionCommand(id: \"md.preview\"")).to_equal(true)
+expect(src.contains("ExtensionCommand(id: \"md.toggleBold\"")).to_equal(true)
+expect(src.contains("ExtensionCommand(id: \"md.toggleItalic\"")).to_equal(true)
+```
+
+</details>
+
+#### editor extension roots discover user and system extension roots
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = read_text("src/lib/editor/extensions/roots.spl")
+expect(src.contains("fn editor_extension_roots_from_inputs(configured_path_list: text, home: text) -> [text]")).to_equal(true)
+expect(src.contains("\".simple/editor/extensions\"")).to_equal(true)
+expect(src.contains("\"/usr/share/simple/editor/extensions\"")).to_equal(true)
+```
+
+</details>
+
+#### markdown editing calls md_assist_on_enter
 
 <details>
 <summary>Executable SSpec</summary>
@@ -977,69 +1030,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_controller.spl")
-expect(src.contains("palette_state: PaletteState")).to_equal(true)
-```
-
-</details>
-
-#### editor_controller owns extension host for IDE command routing
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val src = read_text("src/app/editor/editor_controller.spl")
-expect(src.contains("extension_host: ExtensionHost")).to_equal(true)
-expect(src.contains("extension_host_with_builtins()")).to_equal(true)
-expect(src.contains("me _activate_active_language()")).to_equal(true)
-expect(src.contains("me.extension_host.emit_event(\"onDidOpenTextDocument\", doc.path())")).to_equal(true)
-```
-
-</details>
-
-#### editor_controller discovers workspace user and system extension roots
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ctrl_src = read_text("src/app/editor/editor_controller.spl")
-val app_roots_src = read_text("src/app/editor/editor_extension_roots.spl")
-val lib_roots_src = read_text("src/lib/editor/extensions/roots.spl")
-expect(ctrl_src.contains("host.discover_extensions(editor_extension_roots())")).to_equal(true)
-expect(app_roots_src.contains("fn editor_extension_roots() -> [text]")).to_equal(true)
-expect(app_roots_src.contains("\"SIMPLE_EDITOR_EXTENSION_PATH\"")).to_equal(true)
-expect(app_roots_src.contains("rt_env_get(\"HOME\")")).to_equal(true)
-expect(app_roots_src.contains("editor_extension_roots_from_inputs(configured, home)")).to_equal(true)
-expect(lib_roots_src.contains("\".simple/editor/extensions\"")).to_equal(true)
-expect(lib_roots_src.contains("\"/usr/share/simple/editor/extensions\"")).to_equal(true)
-```
-
-</details>
-
-#### editor_controller calls md_assist_on_enter for markdown
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val src = read_text("src/app/editor/editor_controller.spl")
+val src = read_text("src/lib/editor/view/md_editing.spl")
 expect(src.contains("md_assist_on_enter")).to_equal(true)
 ```
 
 </details>
 
-#### editor_controller calls md_assist_on_tab for markdown
+#### markdown editing calls md_assist_on_tab
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1048,28 +1045,30 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_controller.spl")
+val src = read_text("src/lib/editor/view/md_editing.spl")
 expect(src.contains("md_assist_on_tab")).to_equal(true)
 ```
 
 </details>
 
-#### editor_controller has _dispatch_palette_key method
+#### command palette has selectable filtered entries
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_controller.spl")
-expect(src.contains("me _dispatch_palette_key(key: text)")).to_equal(true)
+val src = read_text("src/lib/editor/services/command_palette.spl")
+expect(src.contains("struct PaletteState:")).to_equal(true)
+expect(src.contains("fn palette_show(state: PaletteState) -> PaletteState")).to_equal(true)
+expect(src.contains("fn palette_select_next(state: PaletteState) -> PaletteState")).to_equal(true)
 ```
 
 </details>
 
-#### editor_controller has _open_palette method
+#### markdown commands expose palette entries
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1078,28 +1077,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_controller.spl")
-expect(src.contains("me _open_palette()")).to_equal(true)
-```
-
-</details>
-
-#### editor_controller merges md_commands_palette_entries
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val src = read_text("src/app/editor/editor_ctrl_core.spl")
+val src = read_text("src/lib/editor/extensions/builtin/md_commands.spl")
 expect(src.contains("md_commands_palette_entries")).to_equal(true)
 ```
 
 </details>
 
-#### editor_controller has _toggle_md_preview method
+#### editor document toggles markdown preview
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1108,13 +1092,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_controller.spl")
-expect(src.contains("me _toggle_md_preview()")).to_equal(true)
+val src = read_text("src/lib/editor/core/document.spl")
+expect(src.contains("me toggle_markdown_preview(content: text) -> bool")).to_equal(true)
 ```
 
 </details>
 
-#### editor_controller has _toggle_md_outline method
+#### editor document toggles markdown outline
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1123,13 +1107,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_controller.spl")
-expect(src.contains("me _toggle_md_outline()")).to_equal(true)
+val src = read_text("src/lib/editor/core/document.spl")
+expect(src.contains("me toggle_markdown_outline(content: text) -> bool")).to_equal(true)
 ```
 
 </details>
 
-#### editor_controller handles vim motion prefixes for markdown
+#### markdown editing handles vim motion prefixes
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1138,13 +1122,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_ctrl_core.spl")
+val src = read_text("src/lib/editor/view/md_editing.spl")
 expect(src.contains("md_dispatch_motion")).to_equal(true)
 ```
 
 </details>
 
-#### editor_controller handles gx for opening links
+#### markdown editing handles gx for opening links
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1153,7 +1137,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_controller.spl")
+val src = read_text("src/lib/editor/view/md_editing.spl")
 expect(src.contains("md_vim_open_link_under_cursor")).to_equal(true)
 ```
 
@@ -1201,7 +1185,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val src = read_text("src/lib/editor/core/document.spl")
-expect(src.contains("MarkdownState.new()")).to_equal(true)
+expect(src.contains("md_state: nil")).to_equal(true)
 expect(src.contains("md_compute_stats(content)")).to_equal(true)
 ```
 
@@ -1209,7 +1193,7 @@ expect(src.contains("md_compute_stats(content)")).to_equal(true)
 
 ### editor markdown wiring — commands
 
-#### commands.spl runs diagnostics on save for markdown
+#### markdown commands run diagnostics
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1218,13 +1202,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/commands.spl")
+val src = read_text("src/lib/editor/extensions/builtin/md_commands.spl")
 expect(src.contains("md_diagnose")).to_equal(true)
 ```
 
 </details>
 
-#### commands.spl has palette command alias
+#### command palette supports filtered commands
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1233,13 +1217,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/commands.spl")
-expect(src.contains("\"palette\"")).to_equal(true)
+val src = read_text("src/lib/editor/services/command_palette.spl")
+expect(src.contains("fn palette_update_query(state: PaletteState, query: text) -> PaletteState")).to_equal(true)
 ```
 
 </details>
 
-#### commands.spl has preview command alias
+#### markdown commands have preview command alias
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1248,13 +1232,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/commands.spl")
-expect(src.contains("\"preview\"")).to_equal(true)
+val src = read_text("src/lib/editor/extensions/builtin/md_commands.spl")
+expect(src.contains("markdown.togglePreview")).to_equal(true)
 ```
 
 </details>
 
-#### commands.spl has outline command alias
+#### markdown commands have outline command alias
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1263,15 +1247,15 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/commands.spl")
-expect(src.contains("\"outline\"")).to_equal(true)
+val src = read_text("src/lib/editor/extensions/builtin/md_commands.spl")
+expect(src.contains("markdown.toggleOutline")).to_equal(true)
 ```
 
 </details>
 
 ### editor markdown wiring — tui shell
 
-#### tui_shell renders preview pane
+#### IDE TUI sanity renders preview pane
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1280,13 +1264,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/tui_shell_panels.spl")
-expect(src.contains("_tui_render_preview_pane")).to_equal(true)
+val src = read_text("src/app/ide/tui_sanity.spl")
+expect(src.contains("preview_pane_render")).to_equal(true)
 ```
 
 </details>
 
-#### tui_shell renders outline pane
+#### IDE TUI sanity renders outline pane
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1295,13 +1279,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/tui_shell_panels.spl")
-expect(src.contains("_tui_render_outline_pane")).to_equal(true)
+val src = read_text("src/app/ide/tui_sanity.spl")
+expect(src.contains("outline_panel_render")).to_equal(true)
 ```
 
 </details>
 
-#### tui_shell renders palette overlay
+#### command palette owns visible overlay state
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1310,13 +1294,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/tui_shell.spl")
-expect(src.contains("_tui_render_palette")).to_equal(true)
+val src = read_text("src/lib/editor/services/command_palette.spl")
+expect(src.contains("visible: bool")).to_equal(true)
 ```
 
 </details>
 
-#### tui_shell shows markdown stats in status bar
+#### markdown stats expose status bar text
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1325,7 +1309,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/tui_shell.spl")
+val src = read_text("src/lib/editor/services/md_doc_stats.spl")
 expect(src.contains("md_stats_to_status_bar")).to_equal(true)
 ```
 
@@ -1333,7 +1317,7 @@ expect(src.contains("md_stats_to_status_bar")).to_equal(true)
 
 ### editor markdown wiring — md_dispatch glue
 
-#### md_dispatch.spl exists with md_apply_result
+#### markdown editing defines command results
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1342,13 +1326,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/md_dispatch.spl")
-expect(src.contains("fn md_apply_result(buffer: EditorBuffer, result: MdCommandResult)")).to_equal(true)
+val src = read_text("src/lib/editor/view/md_editing.spl")
+expect(src.contains("struct MdCommandResult:")).to_equal(true)
 ```
 
 </details>
 
-#### md_dispatch.spl has md_buffer_content
+#### markdown commands have md_buffer_content
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1357,13 +1341,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/md_dispatch.spl")
+val src = read_text("src/lib/editor/extensions/builtin/md_commands.spl")
 expect(src.contains("fn md_buffer_content(buffer: EditorBuffer) -> text")).to_equal(true)
 ```
 
 </details>
 
-#### md_dispatch.spl has md_dispatch_motion
+#### markdown editing has md_dispatch_motion
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1372,13 +1356,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/md_dispatch.spl")
+val src = read_text("src/lib/editor/view/md_editing.spl")
 expect(src.contains("fn md_dispatch_motion")).to_equal(true)
 ```
 
 </details>
 
-#### md_dispatch.spl routes all vim motions
+#### markdown editing routes all vim motions
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1387,7 +1371,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/md_dispatch.spl")
+val src = read_text("src/lib/editor/view/md_editing.spl")
 expect(src.contains("md_vim_next_heading")).to_equal(true)
 expect(src.contains("md_vim_prev_heading")).to_equal(true)
 expect(src.contains("md_vim_next_sibling_heading")).to_equal(true)
@@ -1397,24 +1381,7 @@ expect(src.contains("md_vim_next_code_block")).to_equal(true)
 
 </details>
 
-#### md_dispatch.spl has md_update_preview
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val src = read_text("src/app/editor/md_dispatch.spl")
-expect(src.contains("fn md_update_preview")).to_equal(true)
-expect(src.contains("fn md_update_preview_with_wiki")).to_equal(true)
-expect(src.contains("preview_pane_update_with_wiki")).to_equal(true)
-```
-
-</details>
-
-#### editor_controller refreshes markdown preview with the open-note wiki index
+#### preview pane supports wiki-aware preview updates
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1423,16 +1390,32 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/editor_ctrl_core.spl")
-expect(src.contains("me _update_markdown_preview")).to_equal(true)
-expect(src.contains("md_update_preview_with_wiki(doc, buffer, index)")).to_equal(true)
+val src = read_text("src/lib/editor/view/preview_pane.spl")
+expect(src.contains("fn preview_pane_update_with_wiki")).to_equal(true)
+expect(src.contains("preview_pane_update_with_wiki")).to_equal(true)
+```
+
+</details>
+
+#### preview pane refreshes markdown preview with the open-note wiki index
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = read_text("src/lib/editor/view/preview_pane.spl")
+expect(src.contains("preview_pane_update_with_wiki_for_cursor")).to_equal(true)
+expect(src.contains("_preview_pane_model_for_cursor")).to_equal(true)
 ```
 
 </details>
 
 ### editor markdown wiring — gui shell
 
-#### gui_shell wires Ctrl+P to _open_palette
+#### GUI backend renders markdown callout preview HTML
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1441,13 +1424,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/gui_shell_core.spl")
-expect(src.contains("_open_palette")).to_equal(true)
+val src = read_text("src/lib/editor/70.backend/gui_backend.spl")
+expect(src.contains("md-callout")).to_equal(true)
 ```
 
 </details>
 
-#### gui_shell wires Ctrl+Shift+V to _toggle_md_preview
+#### GUI backend renders markdown embed previews
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1456,13 +1439,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/gui_shell_core.spl")
-expect(src.contains("_toggle_md_preview")).to_equal(true)
+val src = read_text("src/lib/editor/70.backend/gui_backend.spl")
+expect(src.contains("md-embed-image-preview")).to_equal(true)
 ```
 
 </details>
 
-#### gui_shell renders preview pane HTML
+#### IDE markdown render probe uses preview pane render
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1471,13 +1454,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/gui_shell_render.spl")
+val src = read_text("src/app/ide/markdown_render.spl")
 expect(src.contains("preview_pane_render")).to_equal(true)
 ```
 
 </details>
 
-#### gui_shell shows md stats in status bar
+#### markdown stats are available for GUI status bars
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1486,7 +1469,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val src = read_text("src/app/editor/gui_shell_render.spl")
+val src = read_text("src/lib/editor/services/md_doc_stats.spl")
 expect(src.contains("md_stats_to_status_bar")).to_equal(true)
 ```
 
@@ -1496,8 +1479,8 @@ expect(src.contains("md_stats_to_status_bar")).to_equal(true)
 
 #### validates required and allowed frontmatter properties
 
-1. md property schema rule
-2. md property schema rule
+- md property schema rule
+- md property schema rule
    - Expected: diags.len() equals `3`
    - Expected: diags[0].message equals `Duplicate frontmatter property: status`
    - Expected: diags[1].message equals `Invalid frontmatter value for status: review`
@@ -1526,7 +1509,7 @@ expect(diags[2].message).to_equal("Frontmatter property requires a value: owner"
 
 #### reports missing required frontmatter properties
 
-1. md property schema rule
+- md property schema rule
    - Expected: diags.len() equals `1`
    - Expected: diags[0].message equals `Missing required frontmatter property: status`
 
@@ -1580,8 +1563,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 84 |
-| Active scenarios | 84 |
+| Total scenarios | 83 |
+| Active scenarios | 83 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

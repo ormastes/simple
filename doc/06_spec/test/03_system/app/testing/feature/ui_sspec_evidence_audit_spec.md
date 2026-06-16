@@ -101,20 +101,20 @@ tui-captures: embedded
 
 #### keeps UI-facing app specs mirrored into generated manuals
 
-1. Confirm the browser session UI access controls manual mirrors its executable SSpec
-2. Confirm the WebGPU JavaScript/WASM Simple manual mirrors its executable SSpec
-3. Confirm the graphics 3D managed backend manual mirrors its executable SSpec
-4. Confirm the IDE office plugin suite manual mirrors its executable SSpec
-5. Confirm the OS UI access protocol manual mirrors its executable SSpec
-6. Confirm the test runner debug TUI SGTTI manual mirrors its executable SSpec
-7. Confirm the HTML/CSS binary caching manual mirrors its executable SSpec
-8. Confirm the shared WM renderer manual mirrors its executable SSpec
-9. Confirm the Draw IR inspection manual mirrors its executable SSpec
-10. Confirm the Draw IR protocol evidence manual mirrors its executable SSpec
-11. Confirm the SGTTI shared surface manual mirrors its executable SSpec
-12. Confirm the VS Code math editor panel manual mirrors its executable SSpec
-13. Confirm the VS Code rich editor manual mirrors its executable SSpec
-14. Confirm the WM text access MCP manual mirrors its executable SSpec
+- Confirm the browser session UI access controls manual mirrors its executable SSpec
+- Confirm the WebGPU JavaScript/WASM Simple manual mirrors its executable SSpec
+- Confirm the graphics 3D managed backend manual mirrors its executable SSpec
+- Confirm the IDE office plugin suite manual mirrors its executable SSpec
+- Confirm the OS UI access protocol manual mirrors its executable SSpec
+- Confirm the test runner debug TUI SGTTI manual mirrors its executable SSpec
+- Confirm the HTML/CSS binary caching manual mirrors its executable SSpec
+- Confirm the shared WM renderer manual mirrors its executable SSpec
+- Confirm the Draw IR inspection manual mirrors its executable SSpec
+- Confirm the Draw IR protocol evidence manual mirrors its executable SSpec
+- Confirm the SGTTI shared surface manual mirrors its executable SSpec
+- Confirm the VS Code math editor panel manual mirrors its executable SSpec
+- Confirm the VS Code rich editor manual mirrors its executable SSpec
+- Confirm the WM text access MCP manual mirrors its executable SSpec
 
 
 <details>
@@ -200,14 +200,14 @@ expect(_manual_pair_state(
 
 #### keeps concrete UI evidence markers in the authoritative behavior specs
 
-1. Check browser UI access snapshots are captured in the behavior spec
-2. Check browser UI actions are captured in the behavior spec
-3. Check Draw IR inspection keeps its API evidence marker
-4. Check Draw IR protocol keeps its JSON evidence marker
-5. Check SGTTI specs keep their shared test driver marker
-6. Check IDE office plugin suite embeds TUI evidence
-7. Check the test runner debug TUI spec declares TUI captures
-8. Check the test runner debug TUI spec uses the SGTTI driver
+- Check browser UI access snapshots are captured in the behavior spec
+- Check browser UI actions are captured in the behavior spec
+- Check Draw IR inspection keeps its API evidence marker
+- Check Draw IR protocol keeps its JSON evidence marker
+- Check SGTTI specs keep their shared test driver marker
+- Check IDE office plugin suite embeds TUI evidence
+- Check the test runner debug TUI spec declares TUI captures
+- Check the test runner debug TUI spec uses the SGTTI driver
 
 
 <details>
@@ -263,23 +263,23 @@ expect(_marker_state(
 
 #### keeps generated UI manuals useful instead of stub-only
 
-1. Write a TUI capture for the UI evidence audit manual
+- Write a TUI capture for the UI evidence audit manual
    - Expected: _write_audit_capture() equals `0`
-2. Check the audit TUI capture was written with manual evidence state
+- Check the audit TUI capture was written with manual evidence state
    - Expected: _capture_state("step-manual: enabled") equals `present`
-3. Check the generated audit manual exposes embedded TUI captures
-4. Check the generated audit manual includes readable operator steps
-5. Check the test runner debug TUI manual exposes embedded TUI captures
-6. Check the IDE office plugin suite manual links the feature-check TUI capture
-7. Check browser UI access manual keeps action evidence text
-8. Check browser UI access manual links the snapshot capture
-9. Check Draw IR inspection manual keeps endpoint evidence text
-10. Check Draw IR protocol manual links the JSON evidence file
-11. Check SGTTI shared surface manual names the test driver
-12. Check VS Code rich editor manual links the contract capture
-13. Check VS Code rich editor manual keeps provider implementation evidence
-14. Check VS Code math editor panel manual links the contract capture
-15. Check VS Code math editor panel manual keeps panel-state evidence
+- Check the generated audit manual exposes embedded TUI captures
+- Check the generated audit manual includes readable operator steps
+- Check the test runner debug TUI manual exposes embedded TUI captures
+- Check the IDE office plugin suite manual links the feature-check TUI capture
+- Check browser UI access manual keeps action evidence text
+- Check browser UI access manual links the snapshot capture
+- Check Draw IR inspection manual keeps endpoint evidence text
+- Check Draw IR protocol manual links the JSON evidence file
+- Check SGTTI shared surface manual names the test driver
+- Check VS Code rich editor manual links the contract capture
+- Check VS Code rich editor manual keeps provider implementation evidence
+- Check VS Code math editor panel manual links the contract capture
+- Check VS Code math editor panel manual keeps panel-state evidence
 
 
 <details>
