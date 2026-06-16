@@ -158,3 +158,12 @@ verification / requirement-selection pending
   --mode=interpreter --clean`, and `bin/simple test
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl
   --mode=interpreter --clean --timeout 360` pass.
+- fix: Added sanitized `X-Request-Id` extraction for Simple Web auth paths and
+  echoed it on login/resume JSON responses without accepting bearer-like values.
+- verify: `bin/simple check src/app/ui.web/auth_params.spl
+  src/app/ui.web/server.spl test/01_unit/app/ui/web_auth_hardening_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl`,
+  `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl
+  --mode=interpreter --clean`, and `bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` pass.

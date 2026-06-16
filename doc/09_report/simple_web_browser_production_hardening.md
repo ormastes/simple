@@ -24,6 +24,8 @@
   and the async `/api/clients` route.
 - Token-bearing JSON responses set `Cache-Control: no-store`, `Pragma:
   no-cache`, and `X-Content-Type-Options: nosniff`.
+- Login and resume JSON responses echo only sanitized `X-Request-Id` values,
+  rejecting bearer-like or otherwise unsafe correlation strings.
 - Authorized `/ui/resume` rejects missing or malformed `session_id`,
   `snapshot_revision`, or `last_sequence` with `400 Bad Request`, and accepts
   strict valid body fields in the normal TCP server path.

@@ -5,6 +5,7 @@ extern fn rt_env_get(key: text) -> text
 val UI_WEB_MAX_UNAUTH_BODY_BYTES: i64 = 8192
 val UI_WEB_MAX_AUTH_JSON_BYTES: i64 = 8192
 val UI_WEB_MAX_WS_FRAME_BYTES: i64 = 65536
+val UI_WEB_MAX_REQUEST_ID_BYTES: i64 = 64
 val UI_WEB_LOGIN_RATE_WINDOW_MS: u64 = 60000u64
 val UI_WEB_LOGIN_RATE_MAX_ATTEMPTS: i64 = 20
 
@@ -78,6 +79,33 @@ fn ui_web_body_exceeds_unauth_limit(headers: text) -> bool:
 
 fn ui_web_ws_frame_payload_allowed(payload_len: i64) -> bool:
     return payload_len >= 0 and payload_len <= UI_WEB_MAX_WS_FRAME_BYTES
+
+fn ui_web_request_id(headers: text, fallback: text) -> text:
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with("x-request-id:"):
+            val candidate = ui_web_sanitize_request_id(trimmed[13:].trim())
+            if candidate != "":
+                return candidate
+    return ui_web_sanitize_request_id(fallback)
+
+fn ui_web_sanitize_request_id(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed == "" or trimmed.len() > UI_WEB_MAX_REQUEST_ID_BYTES:
+        return ""
+    var out = ""
+    var pos = 0
+    while pos < trimmed.len():
+        val ch = trimmed.slice(pos, pos + 1)
+        if _ui_web_request_id_char_allowed(ch):
+            out = "{out}{ch}"
+        else:
+            return ""
+        pos = pos + 1
+    return out
+
+fn _ui_web_request_id_char_allowed(ch: text) -> bool:
+    return (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == "."
 
 fn ui_web_login_rate_decision(window_start_ms: u64, attempt_count: i64, now_ms: u64) -> (bool, u64, i64):
     if window_start_ms == 0u64 or now_ms >= window_start_ms + UI_WEB_LOGIN_RATE_WINDOW_MS:
@@ -177,11 +205,14 @@ export ui_web_query_param
 export ui_web_content_length
 export ui_web_body_exceeds_unauth_limit
 export ui_web_ws_frame_payload_allowed
+export ui_web_request_id
+export ui_web_sanitize_request_id
 export ui_web_login_rate_decision
 export ui_web_auth_json_field
 export ui_web_percent_decode_query_component
 export UI_WEB_MAX_UNAUTH_BODY_BYTES
 export UI_WEB_MAX_AUTH_JSON_BYTES
 export UI_WEB_MAX_WS_FRAME_BYTES
+export UI_WEB_MAX_REQUEST_ID_BYTES
 export UI_WEB_LOGIN_RATE_WINDOW_MS
 export UI_WEB_LOGIN_RATE_MAX_ATTEMPTS

@@ -4,17 +4,23 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
+- **Total Features:** 2
 - **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 1
+- **Stubs Remaining:** 2
 - **Total Lines:** 0
-- **Warnings:** 1
+- **Warnings:** 2
 
 ---
 
-## Standard Library (1 features)
+## Application (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Gpu Web Db Offload Specification](test/03_system/lib/web_db_offload/feature/gpu_web_db_offload_spec.md) | Auto-generated | N/A | 7 | 0% | 0 lines |
+| [Web Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Auto-generated | N/A | 15 | 0% | 0 lines |
+
+## Other (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Simple Web Browser Production Hardening Specification](test/03_system/gui/simple_web_browser_production_hardening_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
 

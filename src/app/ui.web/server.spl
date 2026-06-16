@@ -25,7 +25,7 @@ use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized, ui_web_resume_body_status}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol, ui_web_ws_frame_payload_allowed}
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol, ui_web_ws_frame_payload_allowed, ui_web_request_id}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_hides_desktop, host_taskbar_runtime_hides_taskbar, host_taskbar_runtime_mode_name, host_taskbar_runtime_native_window_html}
 use app.ui.web.json.{state_to_json, widgets_to_json}
 use os.compositor.host_compositor_entry.{HostBackendKind}
@@ -545,19 +545,19 @@ class WebServer:
         Returns: { "token": "...", "expires_at": N }"""
         match self.origin_guard.check(headers):
             Err(_):
-                val resp = _simple_response(403, "application/json", "{\"error\": \"forbidden_origin\"}")
+                val resp = _simple_response_for_request(403, "application/json", "{\"error\": \"forbidden_origin\"}", headers)
                 self.send_small_http(stream, resp)
                 return
             Ok(origin):
                 if ui_web_body_exceeds_unauth_limit(headers):
-                    val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
+                    val too_large = _simple_response_for_request(413, "application/json", "{\"error\": \"request_body_too_large\"}", headers)
                     self.send_small_http(stream, too_large)
                     return
                 val rate = ui_web_login_rate_decision(self.login_rate_window_start_ms, self.login_rate_attempt_count, rt_time_ms())
                 self.login_rate_window_start_ms = rate.1
                 self.login_rate_attempt_count = rate.2
                 if not rate.0:
-                    val limited = _simple_response(429, "application/json", "{\"error\": \"login_rate_limited\"}")
+                    val limited = _simple_response_for_request(429, "application/json", "{\"error\": \"login_rate_limited\"}", headers)
                     self.send_small_http(stream, limited)
                     return
                 var body = initial_body
@@ -570,35 +570,35 @@ class WebServer:
                 # Extract capability_grant from JSON body
                 val grant_id = ui_web_auth_json_field(body, "capability_grant")
                 if grant_id == "":
-                    val resp = _simple_response(400, "application/json", "{\"error\": \"missing capability_grant\"}")
+                    val resp = _simple_response_for_request(400, "application/json", "{\"error\": \"missing capability_grant\"}", headers)
                     self.send_small_http(stream, resp)
                     return
 
                 val tok = SessionToken.issue(grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
                 val serialized = tok.serialize()
                 val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
-                val resp = _simple_response(200, "application/json", body_json)
+                val resp = _simple_response_for_request(200, "application/json", body_json, headers)
                 self.send_small_http(stream, resp)
 
     fn handle_resume(stream: TcpStream, path: text, headers: text, body: text):
         if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
-            val forbidden = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
+            val forbidden = _simple_response_for_request(403, "application/json", "{\"error\": \"forbidden\"}", headers)
             self.send_small_http(stream, forbidden)
             return
         val resume_status = ui_web_resume_body_status(body)
         if resume_status == "body_too_large":
-            val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
+            val too_large = _simple_response_for_request(413, "application/json", "{\"error\": \"request_body_too_large\"}", headers)
             self.send_small_http(stream, too_large)
             return
         if resume_status != "ok":
-            val bad = _simple_response(400, "application/json", "{\"error\": \"invalid_resume_body\"}")
+            val bad = _simple_response_for_request(400, "application/json", "{\"error\": \"invalid_resume_body\"}", headers)
             self.send_small_http(stream, bad)
             return
         val session_id = ui_web_auth_json_field(body, "session_id")
         val rev_str = ui_web_auth_json_field(body, "snapshot_revision")
         val seq_str = ui_web_auth_json_field(body, "last_sequence")
         val body_json = "{\"session_id\": \"{session_id}\", \"snapshot_revision\": {rev_str}, \"last_sequence\": {seq_str}}"
-        val resp = _simple_response(200, "application/json", body_json)
+        val resp = _simple_response_for_request(200, "application/json", body_json, headers)
         self.send_small_http(stream, resp)
 
     fn check_file_changes():
@@ -624,6 +624,12 @@ class WebServer:
 # =========================================================================
 
 fn _simple_response(status: i32, content_type: text, body: text) -> text:
+    return _simple_response_with_request_id(status, content_type, body, "")
+
+fn _simple_response_for_request(status: i32, content_type: text, body: text, headers: text) -> text:
+    return _simple_response_with_request_id(status, content_type, body, ui_web_request_id(headers, "uiweb"))
+
+fn _simple_response_with_request_id(status: i32, content_type: text, body: text, request_id: text) -> text:
     val status_text = match status:
         200: "OK"
         400: "Bad Request"
@@ -635,6 +641,8 @@ fn _simple_response(status: i32, content_type: text, body: text) -> text:
         _: "OK"
     var r = "HTTP/1.1 {status} {status_text}\r\n"
     r = "{r}Content-Type: {content_type}\r\n"
+    if request_id != "":
+        r = "{r}X-Request-Id: {request_id}\r\n"
     if content_type == "application/json":
         r = "{r}Cache-Control: no-store\r\n"
         r = "{r}Pragma: no-cache\r\n"

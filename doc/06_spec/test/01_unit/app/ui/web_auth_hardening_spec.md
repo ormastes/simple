@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -243,6 +243,23 @@ expect(ui_web_query_percent_decode("a%2Eb%2Fc%20d%2Be")).to_equal("a.b/c d+e")
 
 </details>
 
+#### sanitizes request ids without echoing bearer-like values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_sanitize_request_id("browser-req_01.2")).to_equal("browser-req_01.2")
+expect(ui_web_sanitize_request_id("Bearer secret-token")).to_equal("")
+expect(ui_web_request_id("X-Request-Id: browser-req-7\nAuthorization: Bearer secret-token\n", "fallback")).to_equal("browser-req-7")
+expect(ui_web_request_id("X-Request-Id: Bearer secret-token\n", "fallback")).to_equal("fallback")
+```
+
+</details>
+
 #### uses bounded shared json field extraction for auth path bodies
 
 <details>
@@ -351,8 +368,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
