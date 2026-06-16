@@ -97,6 +97,28 @@ speedup.
 
 See also: [`web_render_backend_tldr.md`](web_render_backend_tldr.md).
 
+## Production Browser Hardening
+
+Simple Web production checks combine renderer parity with web-boundary auth
+evidence. The canonical live renderer parity gate is:
+
+```bash
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+```
+
+The focused production web endpoint gate is:
+
+```bash
+bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180
+```
+
+Production clients should pass bearer tokens through the WebSocket subprotocol
+instead of `/ui/ws?token=...`. Query-string bearer extraction is rejected by
+default; `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is an explicit compatibility
+switch, not a production default. macOS Metal and AMD ROCm/HIP rows require
+native host evidence. Linux-only runs may record deterministic
+`host-unavailable` verdicts but must not translate them into native pass claims.
+
 ## Chrome WebGPU Evidence Helpers
 
 `std.gc_async_mut.gpu.browser_engine.chrome_webgpu_draw_evidence` is the

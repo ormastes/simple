@@ -126,6 +126,23 @@ bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/
 SIMPLE_DEBUG_LAYOUT=1 bin/simple run <script.spl>
 ```
 
+## Production Web Boundary Checks
+
+Browser-engine changes that affect Simple Web production behavior must preserve
+both the renderer parity gate and the web endpoint hardening gate:
+
+```bash
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180
+```
+
+The endpoint gate covers fail-closed auth behavior at the browser bridge:
+allowed-origin login only, bounded login requests, sensitive API denial without
+an origin-bound bearer token, and WebSocket denial without authorization.
+Browser clients should use WebSocket subprotocol bearer auth; query-string
+bearer fallback is disabled unless `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is set
+for explicit compatibility testing.
+
 ## Milestone History
 
 | Milestone | Gate | Status |

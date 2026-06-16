@@ -197,6 +197,20 @@ dimensions, `mismatch_count=0`, `blur_or_tolerance=false`, and
 lane; on headless Linux the wrapper expects the Tauri shell to run under Xvfb
 and `dbus-run-session`.
 
+For the Simple Web/browser production-hardening lane, pair that renderer gate
+with the focused live endpoint check:
+
+```bash
+bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180
+```
+
+That spec exercises the production web boundary for fail-closed login origin
+handling, bounded login bodies, unauthenticated sensitive API denial, and
+unauthenticated WebSocket denial. Keep browser clients on WebSocket subprotocol
+bearer tokens; query-string bearer compatibility is disabled by default and may
+only be re-enabled with `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` for explicit
+compatibility testing.
+
 ---
 
 ## Environment Variables

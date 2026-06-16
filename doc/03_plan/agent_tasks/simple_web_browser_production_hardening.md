@@ -29,4 +29,11 @@ Do not absorb unrelated GPU, crypto, compiler, or renderer-parity dirty files in
 
 ## Remaining Work
 
-- Run the full production GUI/Web renderer parity wrapper after the unresolved `jj` conflict is cleared.
+- Get explicit user selection for final feature and NFR options, then write
+  `doc/02_requirements/feature/simple_web_browser_production_hardening.md` and
+  `doc/02_requirements/nfr/simple_web_browser_production_hardening.md`.
+- Add final `REQ-*` / `NFR-*` trace IDs to executable specs and generated
+  manuals after the final requirements exist.
+- Run native Metal evidence on macOS and native ROCm/HIP evidence on an AMD
+  ROCm host; the local Linux host can only record host-unavailable verdicts for
+  those environments.

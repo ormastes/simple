@@ -43,5 +43,6 @@
   writing final `REQ-*` and `NFR-*` files.
 - Requirement trace IDs need to be added to executable specs after final
   requirements exist.
-- `doc/08_tracking/feature/feature_db.sdn` needs a completed row before the
-  lane can be marked done.
+- `doc/08_tracking/feature/feature_db.sdn` has a `current` row for this lane;
+  do not mark it `done` until final requirements, trace IDs, and macOS
+  Metal/AMD ROCm host evidence are complete.
