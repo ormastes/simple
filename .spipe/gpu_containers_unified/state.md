@@ -28,6 +28,8 @@ gated offload + CPU fallback), built via parallel agent teams and differential-v
   min/max_element/transform_reduce/unique/lower_bound/binary_search/exclusive_scan) —
   **DONE** (compute_ops.spl + compute_algo_ext.spl; 8/16 specs).
 - AC-4 container types Span/FixedArray/InplaceVector pure-Simple — **DONE** (containers.spl; 8/8).
+  **Bitset (libcu++ `<bitset>` parity) now DONE** (bitset.spl; 9/9) — i64-word packed,
+  set/clear/flip/set_to/test/count/any/all/none, sign-bit-63 safe, multi-word (>64 bit) verified.
 - AC-5 cuda/metal/vulkan dispatch wired, honest payload-gated offload, require fail-closed —
   **DONE for routing+gating** (backend_dispatch.spl; 9/9). **Per-backend kernel EMISSION now
   DONE** (gpu_compute_algorithm_kernels.spl; 8/8) — real CUDA/HIP/OpenCL/Metal/WebGPU source
@@ -59,7 +61,12 @@ gated offload + CPU fallback), built via parallel agent teams and differential-v
 - GPU silicon execution: nvcc-compile emitted kernels → PTX, validate kernel-arg ABI on a CUDA
   device (compute_pack_scale_args), then differential-verify GPU result == CPU oracle.
 - `std.compute` __init__ namespace export wiring (currently import via full tier path).
-- Atomics/Bitset/Complex container parity (B4); reduce/scan cooperative GPU kernels — deferred.
+- Bitset parity LANDED (see AC-4). Complex<f64> parity is BLOCKED by interp bug
+  `interp_f64_nested_struct_payload_zero` (re-probed 2026-06-16: `Cx(re:3,im:4).mag2()`→0.0
+  while fields read 3.0/4.0) — a Complex type its own specs can't trust; deferred until the
+  f64 struct-field arithmetic bug is fixed, not worked around. Atomics deferred (no real
+  concurrency primitive to back honest atomic semantics in interpreter).
+- reduce/scan cooperative GPU kernels — deferred.
 
 ## Phase
 dev-done → impl landed (foundation + surface + dispatch); GPU-kernel execution open.
