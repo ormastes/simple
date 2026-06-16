@@ -27,7 +27,7 @@ Candidate IDs are cumulative by option:
 | `NFR-WEB-HARD-007` | Warm browser authentication path latency is measured and reported when selected as a release target. | B |
 | `NFR-WEB-HARD-008` | Live HTTP/WebSocket evidence records concrete status lines rather than placeholder passes. | B |
 | `NFR-WEB-HARD-009` | Renderer parity evidence requires matching checksums, `mismatch_count=0`, and no blur/tolerance fallback. | C |
-| `NFR-WEB-HARD-010` | Query-token bearer compatibility is opt-in only and absent from generated production clients by default. | C |
+| `NFR-WEB-HARD-010` | Query-token bearer compatibility is non-authorizing in production and absent from generated production clients by default. | C |
 | `NFR-WEB-HARD-011` | Login burst/rate behavior is bounded in normal and shared-WM server modes. | C |
 | `NFR-WEB-HARD-012` | Platform GPU/browser evidence explicitly reports native pass, emulated pass, host-unavailable, structured-contract-only, or provenance-only status. | C |
 
@@ -72,8 +72,8 @@ Targets:
 - Option B targets.
 - Full production GUI/Web renderer parity wrapper passes with
   `mismatch_count=0`, matching checksums, and no blur/tolerance fallback.
-- Query-token bearer fallback is disabled by default or proven unavailable in
-  generated production clients.
+- Query-token bearer fallback is non-authorizing in production and proven
+  unavailable in generated production clients.
 - `/ui/login` has bounded burst/rate behavior.
 
 Pros:

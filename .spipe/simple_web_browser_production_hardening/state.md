@@ -95,8 +95,9 @@ verification / requirement-selection pending
 - impl: Added normal `run_web` fail-closed handling for unauthenticated
   `/ui/resume` before the unsupported path can fall through to 404.
 - verify: Superseded 4-scenario live endpoint coverage added `/ui/resume`,
-  legacy `/ws`, and explicit query-token opt-in upgrade evidence before the
-  shared-WM login burst scenario was added.
+  legacy `/ws`, and query-token compatibility evidence before the shared-WM
+  login burst scenario and later production route-hiding/query-token
+  non-authorization changes replaced that compatibility behavior.
 - fix: Parsed `SIMPLE_UI_WEB_PORT` as a concrete integer in shared-WM web mode
   instead of formatting the optional parse result into the socket address.
 - verify: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios, adding shared-WM login burst rate-limit evidence to the normal `run_web` endpoint coverage.
@@ -291,3 +292,7 @@ verification / requirement-selection pending
   Vulkan/BrowserBackend device readback, Metal and ROCm generated readback
   `unavailable` due missing host/toolchain, and WebGPU real readback
   `unavailable` with `source=not_device_readback`.
+- docs: Corrected final feature/NFR option candidates so user selection matches
+  current production behavior: canonical `/ui/ws` upgrades are bearer-gated,
+  legacy `/ws` is hidden, and deprecated query-token env opt-in is
+  non-authorizing.
