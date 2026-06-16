@@ -34,6 +34,15 @@ An aliasing probe (`val f=free_ret(); val g=other_ret(); f`) shows `f` becomes *
 
 **Also reproduces in `bin/release/simple native-build`** → the self-hosted native codegen has a parallel f64-call-return defect (classic "f64 return read from the integer return slot" ABI shape). Seed paths are clean. So a full fix is two-front: (a) the tree-walking interpreter's call-return/env value handling, (b) stage4 codegen's f64-return ABI. Both are pure-Simple (`src/compiler/...`) → `--pure-simple` rebuild, verified against the seed oracle. **Next step:** instrument `env.define/lookup` + `call_hir_function`'s return path, `--pure-simple` rebuild, and trace the float `Value` across the intervening call to pin the exact line.
 
+## VERIFICATION BLOCKER (2026-06-16) — LIM-010 self-host build is broken
+
+Attempting to fix-and-verify hit a hard infrastructure wall; **the fix cannot currently be verified in this repo state**:
+
+1. **No working instrumented stage4.** `scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple` completes but stage3 self-host fails (LIM-010: LLVM symbol conflicts) → stage4 falls back to seed-native-build, which **stubs 535 unresolved symbols, including `backend__backend__interpreter__ParserModule` and `backend__backend__env__ParserModule`**. The resulting `build/bootstrap/full/.../simple` (16.6 MB) is a **silent no-op** (`-c "print(1+1)"` prints nothing). The only *working* self-hosted binary, `bin/release/.../simple` (461 MB), was built **2026-06-15** and predates the current tree — its recipe is not reproducible by `--pure-simple` today. So an instrumented or fixed interpreter cannot be built into a runnable CLI.
+2. **Seed-driving the `.spl` interpreter is not cleanly observable.** Running `interpret_file(...)` (which drives `InterpreterBackendImpl`) under the correct Rust seed via `test/03_system/compiler/compiler_interpret_pipeline_spec.spl` works for simple programs, but: guest `print` stdout is captured/hidden by the runner; guest `extern` calls (e.g. `rt_file_write_text`) are **not bridged** by the tree-walking interpreter (no file channel out); `/tmp`-located specs fail `compiler.*` import resolution; each run is ~48 s. A float-returning guest made the probe `it` fail `is_success()`, but the failure detail was not surfaceable, so logic-vs-codegen could **not** be cleanly confirmed this way.
+
+**Consequence:** a real fix requires first resolving **LIM-010** (stage3 self-host / LLVM symbol conflicts) so a working self-hosted compiler can be built and the fix differential-verified against the seed oracle — OR building a seed-runnable harness that exposes the `InterpreterBackendImpl` computed value (not just `is_success()`) for a float-return-survives-call case. Per the no-coverup rule, **no interpreter/codegen edit was landed**, since it could not be verified. The corrected diagnosis above stands as the durable deliverable.
+
 ## Summary
 
 `f64` values are **correct in simple/direct code** but collapse to `0.0` once they
