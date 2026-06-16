@@ -75,6 +75,8 @@ fn raw_http_request(port: i32, request: text) -> text:
 fn http_status_line(response: text) -> text:
     if response.starts_with("HTTP/1.1 403 Forbidden"):
         return "HTTP/1.1 403 Forbidden"
+    if response.starts_with("HTTP/1.1 404 Not Found"):
+        return "HTTP/1.1 404 Not Found"
     if response.starts_with("HTTP/1.1 405 Method Not Allowed"):
         return "HTTP/1.1 405 Method Not Allowed"
     if response.starts_with("HTTP/1.1 413 Payload Too Large"):
@@ -290,7 +292,7 @@ describe "Simple web browser production hardening live endpoints":
         val api_widgets = raw_http_summary(port, api_widgets_unauthorized_request(port), "\"error\": \"forbidden\"")
         val resume = raw_http_summary(port, resume_unauthorized_request(port), "\"error\": \"forbidden\"")
         val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
-        val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
+        val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"not_found\"")
         val websocket_query = raw_http_summary(port, websocket_query_token_request(port), "\"error\": \"forbidden\"")
         val root_page = raw_http_request(port, root_page_request(port))
 
@@ -307,7 +309,7 @@ describe "Simple web browser production hardening live endpoints":
         expect(api_widgets).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(resume).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
-        expect(legacy_websocket).to_equal("HTTP/1.1 403 Forbidden|present")
+        expect(legacy_websocket).to_equal("HTTP/1.1 404 Not Found|present")
         expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
         expect(root_page).to_contain("X-Frame-Options: DENY")
         expect(root_page).to_contain("Referrer-Policy: no-referrer")
@@ -334,17 +336,17 @@ describe "Simple web browser production hardening live endpoints":
         val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
         val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
-        val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+        val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "not_found")}"
         val lowercase_websocket_response = raw_http_request(port, websocket_lowercase_authorized_request(port, token))
         val lowercase_websocket = "{http_status_line(lowercase_websocket_response)}|{http_marker(lowercase_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
         val websocket_post_response = raw_http_request(port, websocket_post_authorized_request(port, token))
         val websocket_post = "{http_status_line(websocket_post_response)}|{http_marker(websocket_post_response, "method_not_allowed")}"
         val legacy_websocket_post_response = raw_http_request(port, legacy_websocket_post_authorized_request(port, token))
-        val legacy_websocket_post = "{http_status_line(legacy_websocket_post_response)}|{http_marker(legacy_websocket_post_response, "method_not_allowed")}"
+        val legacy_websocket_post = "{http_status_line(legacy_websocket_post_response)}|{http_marker(legacy_websocket_post_response, "not_found")}"
 
         hardening_stop_web_server(pid)
 
-        step("Verify login succeeds, GET upgrades are accepted, and POST upgrades are rejected")
+        step("Verify login succeeds, canonical GET upgrades are accepted, legacy routes are hidden, and POST upgrades are rejected")
         expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
         expect(login_response).to_contain("Cache-Control: no-store")
         expect(login_response).to_contain("Pragma: no-cache")
@@ -358,10 +360,10 @@ describe "Simple web browser production hardening live endpoints":
         expect(valid_resume_response).to_contain("X-Content-Type-Options: nosniff")
         expect(oversized_resume).to_equal("HTTP/1.1 413 Payload Too Large|present")
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
-        expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+        expect(legacy_websocket).to_equal("HTTP/1.1 404 Not Found|present")
         expect(lowercase_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
         expect(websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
-        expect(legacy_websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
+        expect(legacy_websocket_post).to_equal("HTTP/1.1 404 Not Found|present")
 
     slow_it "rate limits allowed origin login bursts":
         """The production login endpoint must bound repeated token mint requests even when the Origin is allowed."""
@@ -409,24 +411,24 @@ describe "Simple web browser production hardening live endpoints":
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
         expect(elapsed_ms).to_be_less_than(10000u64)
 
-    slow_it "allows query bearer websocket compatibility only when explicitly enabled":
-        """The default server rejects query bearer tokens; explicit compatibility mode must still redeem a minted origin-bound token."""
+    slow_it "rejects query bearer websocket compatibility even when deprecated env is set":
+        """Production auth must reject query bearer tokens even when the old compatibility environment variable is present."""
         val port = hardening_free_port(300)
         step("Start a production-configured Simple Web server with query-token compatibility enabled")
         val pid = hardening_start_web_server_with_query_tokens(port)
 
-        step("Mint a token and redeem it through the legacy query bearer path")
+        step("Mint a token and try to redeem it through the query bearer path")
         val login_response = raw_http_request(port, login_allowed_request(port))
         val token = http_json_string_field(login_response, "token")
         val websocket_response = raw_http_request(port, websocket_query_token_authorized_request(port, token))
-        val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Upgrade: websocket")}"
+        val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "forbidden")}"
 
         hardening_stop_web_server(pid)
 
-        step("Verify compatibility mode accepts the query token without changing the default fail-closed test")
+        step("Verify the deprecated compatibility environment variable is non-authorizing")
         expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
         expect(token.len()).to_be_greater_than(20)
-        expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+        expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 
     slow_it "rate limits shared wm login bursts":
         """The shared WM web server has a separate login path and must enforce the same burst limit as normal run_web."""

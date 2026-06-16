@@ -20,9 +20,11 @@
   non-TLS dev fallback.
 - TLS mode never uses the insecure dev secret.
 - Login origin checks fail closed before token minting.
-- `/ui/ws`, legacy `/ws`, `/ui/resume`, and sensitive `/api/*` require
-  origin-bound bearer authorization, including `/api/state`, `/api/widgets`,
-  and the async `/api/clients` route.
+- `/ui/ws`, `/ui/resume`, and sensitive `/api/*` require origin-bound bearer
+  authorization, including `/api/state`, `/api/widgets`, and the async
+  `/api/clients` route.
+- Legacy `/ws` and arbitrary WebSocket upgrade paths are hidden with
+  `404 Not Found` before authorization or upgrade handling.
 - Browser JSON response helpers across normal, async, TLS, and shared `/ui/*`
   paths set `Cache-Control: no-store`, `Pragma: no-cache`, and
   `X-Content-Type-Options: nosniff`.
@@ -46,17 +48,17 @@
   production cap before allocating payload buffers.
 - The normal, shared-WM, async, and TLS HTTP entrypoints reject oversized
   request heads, request lines, and header lines before route dispatch.
-- `/ui/ws`, legacy `/ws`, async, and TLS WebSocket upgrade paths reject non-GET
-  upgrade attempts with `405 Method Not Allowed` before the socket can be
-  upgraded, even when the request carries a valid origin-bound bearer token.
+- `/ui/ws`, async, and TLS WebSocket upgrade paths reject non-GET upgrade
+  attempts with `405 Method Not Allowed` before the socket can be upgraded,
+  even when the request carries a valid origin-bound bearer token.
 - WebSocket upgrade detection and key extraction honor case-insensitive HTTP
   header names and require a `Connection` token of `Upgrade`; live endpoint
   evidence covers lowercase/mixed-case successful upgrade headers.
 - Generated browser clients and static `wm.js` use WebSocket subprotocol bearer
   tokens instead of query-string tokens.
-- Query-string bearer compatibility is disabled by default behind
-  `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1`, and the live endpoint spec proves the
-  opt-in path can redeem a minted origin-bound token.
+- Query-string bearer compatibility is non-authorizing in production; the
+  deprecated `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` flag no longer enables token
+  redemption.
 - `/ui/login` is bounded by a fixed-window burst gate in both normal and shared
   WM server paths.
 - Warm production browser authentication latency is measured by the live

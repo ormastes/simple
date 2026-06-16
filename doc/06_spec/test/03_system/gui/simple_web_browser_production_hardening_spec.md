@@ -58,7 +58,7 @@ simple_web_browser_production_hardening_spec -> app
    - Expected: api_widgets equals `HTTP/1.1 403 Forbidden|present`
    - Expected: resume equals `HTTP/1.1 403 Forbidden|present`
    - Expected: websocket equals `HTTP/1.1 403 Forbidden|present`
-   - Expected: legacy_websocket equals `HTTP/1.1 403 Forbidden|present`
+   - Expected: legacy_websocket equals `HTTP/1.1 404 Not Found|present`
    - Expected: websocket_query equals `HTTP/1.1 403 Forbidden|present`
 
 
@@ -84,7 +84,7 @@ val api_state = raw_http_summary(port, api_state_unauthorized_request(port), "\"
 val api_widgets = raw_http_summary(port, api_widgets_unauthorized_request(port), "\"error\": \"forbidden\"")
 val resume = raw_http_summary(port, resume_unauthorized_request(port), "\"error\": \"forbidden\"")
 val websocket = raw_http_summary(port, websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
-val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"forbidden\"")
+val legacy_websocket = raw_http_summary(port, legacy_websocket_unauthorized_request(port), "\"error\": \"not_found\"")
 val websocket_query = raw_http_summary(port, websocket_query_token_request(port), "\"error\": \"forbidden\"")
 val root_page = raw_http_request(port, root_page_request(port))
 
@@ -101,7 +101,7 @@ expect(api_state).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(api_widgets).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(resume).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
-expect(legacy_websocket).to_equal("HTTP/1.1 403 Forbidden|present")
+expect(legacy_websocket).to_equal("HTTP/1.1 404 Not Found|present")
 expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(root_page).to_contain("X-Frame-Options: DENY")
 expect(root_page).to_contain("Referrer-Policy: no-referrer")
@@ -122,16 +122,16 @@ expect(root_page).to_contain("Content-Security-Policy: default-src 'self'")
 - Request a login token from an allowed loopback origin
 - Redeem the minted bearer token through resume and WebSocket routes
 - hardening stop web server
-- Verify login succeeds, GET upgrades are accepted, and POST upgrades are rejected
+- Verify login succeeds, canonical GET upgrades are accepted, legacy routes are hidden, and POST upgrades are rejected
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
    - Expected: malformed_resume equals `HTTP/1.1 400 Bad Request|present`
    - Expected: valid_resume equals `HTTP/1.1 200 OK|present`
    - Expected: oversized_resume equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: websocket equals `HTTP/1.1 101 Switching Protocols|present`
-   - Expected: legacy_websocket equals `HTTP/1.1 101 Switching Protocols|present`
+   - Expected: legacy_websocket equals `HTTP/1.1 404 Not Found|present`
    - Expected: lowercase_websocket equals `HTTP/1.1 101 Switching Protocols|present`
    - Expected: websocket_post equals `HTTP/1.1 405 Method Not Allowed|present`
-   - Expected: legacy_websocket_post equals `HTTP/1.1 405 Method Not Allowed|present`
+   - Expected: legacy_websocket_post equals `HTTP/1.1 404 Not Found|present`
 
 
 <details>
@@ -160,17 +160,17 @@ val oversized_resume = raw_http_summary(port, resume_authorized_oversized_reques
 val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
 val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
-val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "not_found")}"
 val lowercase_websocket_response = raw_http_request(port, websocket_lowercase_authorized_request(port, token))
 val lowercase_websocket = "{http_status_line(lowercase_websocket_response)}|{http_marker(lowercase_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 val websocket_post_response = raw_http_request(port, websocket_post_authorized_request(port, token))
 val websocket_post = "{http_status_line(websocket_post_response)}|{http_marker(websocket_post_response, "method_not_allowed")}"
 val legacy_websocket_post_response = raw_http_request(port, legacy_websocket_post_authorized_request(port, token))
-val legacy_websocket_post = "{http_status_line(legacy_websocket_post_response)}|{http_marker(legacy_websocket_post_response, "method_not_allowed")}"
+val legacy_websocket_post = "{http_status_line(legacy_websocket_post_response)}|{http_marker(legacy_websocket_post_response, "not_found")}"
 
 hardening_stop_web_server(pid)
 
-step("Verify login succeeds, GET upgrades are accepted, and POST upgrades are rejected")
+step("Verify login succeeds, canonical GET upgrades are accepted, legacy routes are hidden, and POST upgrades are rejected")
 expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
 expect(login_response).to_contain("Cache-Control: no-store")
 expect(login_response).to_contain("Pragma: no-cache")
@@ -184,10 +184,10 @@ expect(valid_resume_response).to_contain("Pragma: no-cache")
 expect(valid_resume_response).to_contain("X-Content-Type-Options: nosniff")
 expect(oversized_resume).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
-expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+expect(legacy_websocket).to_equal("HTTP/1.1 404 Not Found|present")
 expect(lowercase_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 expect(websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
-expect(legacy_websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
+expect(legacy_websocket_post).to_equal("HTTP/1.1 404 Not Found|present")
 ```
 
 </details>
@@ -293,16 +293,16 @@ expect(elapsed_ms).to_be_less_than(10000u64)
 </details>
 
 <details>
-<summary>Advanced: allows query bearer websocket compatibility only when explicitly enabled</summary>
+<summary>Advanced: rejects query bearer websocket compatibility even when deprecated env is set</summary>
 
-#### allows query bearer websocket compatibility only when explicitly enabled _(slow)_
+#### rejects query bearer websocket compatibility even when deprecated env is set _(slow)_
 
 - Start a production-configured Simple Web server with query-token compatibility enabled
-- Mint a token and redeem it through the legacy query bearer path
+- Mint a token and try to redeem it through the query bearer path
 - hardening stop web server
-- Verify compatibility mode accepts the query token without changing the default fail-closed test
+- Verify the deprecated compatibility environment variable is non-authorizing
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
-   - Expected: websocket equals `HTTP/1.1 101 Switching Protocols|present`
+   - Expected: websocket equals `HTTP/1.1 403 Forbidden|present`
 
 
 <details>
@@ -316,18 +316,18 @@ val port = hardening_free_port(300)
 step("Start a production-configured Simple Web server with query-token compatibility enabled")
 val pid = hardening_start_web_server_with_query_tokens(port)
 
-step("Mint a token and redeem it through the legacy query bearer path")
+step("Mint a token and try to redeem it through the query bearer path")
 val login_response = raw_http_request(port, login_allowed_request(port))
 val token = http_json_string_field(login_response, "token")
 val websocket_response = raw_http_request(port, websocket_query_token_authorized_request(port, token))
-val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Upgrade: websocket")}"
+val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "forbidden")}"
 
 hardening_stop_web_server(pid)
 
-step("Verify compatibility mode accepts the query token without changing the default fail-closed test")
+step("Verify the deprecated compatibility environment variable is non-authorizing")
 expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
 expect(token.len()).to_be_greater_than(20)
-expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+expect(websocket).to_equal("HTTP/1.1 403 Forbidden|present")
 ```
 
 </details>

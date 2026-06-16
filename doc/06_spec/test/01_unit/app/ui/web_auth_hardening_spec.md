@@ -203,20 +203,22 @@ expect(verify(wrong_origin, "https://other.example", "unit-test-secret", 1000u64
 
 </details>
 
-#### generates token-authenticated websocket clients for legacy and wm browser paths
+#### generates token-authenticated websocket clients for browser and wm paths
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val legacy_js = generate_js(8080)
 expect(legacy_js).to_contain("fetch('/ui/login'")
-expect(legacy_js).to_contain("new WebSocket(legacyWsUrl(), ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
+expect(legacy_js).to_contain("new WebSocket(browserWsUrl(), ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
+expect(legacy_js).to_contain("return wsProto + '://' + wsHost + '/ui/ws'")
+expect(legacy_js.contains("legacyWsUrl")).to_be(false)
 expect(legacy_js.contains("/ws?token=")).to_be(false)
-expect(legacy_js.contains("const wsUrl = wsProto + '://' + wsHost + '/ws';")).to_be(false)
+expect(legacy_js.contains("'/ws'")).to_be(false)
 val wm_js = generate_wm_js(8080)
 expect(wm_js).to_contain("fetch('/ui/login'")
 expect(wm_js).to_contain("new WebSocket(wsProto + '://' + wsHost + '/ui/ws', ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")

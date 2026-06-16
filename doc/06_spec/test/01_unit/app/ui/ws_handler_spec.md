@@ -28,7 +28,7 @@ ws_handler_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -71,6 +71,23 @@ Reproduction: this block contains the complete executable scenario source.
 expect(ui_web_ws_upgrade_method_allowed("GET")).to_be(true)
 expect(ui_web_ws_upgrade_method_allowed("POST")).to_be(false)
 expect(ui_web_ws_upgrade_method_allowed("get")).to_be(false)
+```
+
+</details>
+
+#### allows websocket upgrades only on the canonical ui route
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_ws_upgrade_path_allowed("/ui/ws")).to_be(true)
+expect(ui_web_ws_upgrade_path_allowed("/ui/ws?client=wm")).to_be(true)
+expect(ui_web_ws_upgrade_path_allowed("/ws")).to_be(false)
+expect(ui_web_ws_upgrade_path_allowed("/api/state")).to_be(false)
 ```
 
 </details>
@@ -186,7 +203,7 @@ expect(_extract_bearer(headers, path)).to_equal("header-token")
 
 </details>
 
-#### requires explicit env opt-in for query bearer compatibility
+#### keeps query bearer compatibility disabled from production env values
 
 <details>
 <summary>Executable SSpec</summary>
@@ -198,9 +215,9 @@ Reproduction: this block contains the complete executable scenario source.
 expect(ui_web_query_token_allowed_from_env_value("")).to_be(false)
 expect(ui_web_query_token_allowed_from_env_value("0")).to_be(false)
 expect(ui_web_query_token_allowed_from_env_value("false")).to_be(false)
-expect(ui_web_query_token_allowed_from_env_value("1")).to_be(true)
-expect(ui_web_query_token_allowed_from_env_value("true")).to_be(true)
-expect(ui_web_query_token_allowed_from_env_value(" yes ")).to_be(true)
+expect(ui_web_query_token_allowed_from_env_value("1")).to_be(false)
+expect(ui_web_query_token_allowed_from_env_value("true")).to_be(false)
+expect(ui_web_query_token_allowed_from_env_value(" yes ")).to_be(false)
 ```
 
 </details>
@@ -258,8 +275,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

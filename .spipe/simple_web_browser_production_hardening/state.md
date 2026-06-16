@@ -270,3 +270,18 @@ verification / requirement-selection pending
   and `/home/ormastes/dev/pub/simple/bin/simple test
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl
   --mode=interpreter --clean --timeout 360` pass.
+- fix: Retired legacy WebSocket compatibility in production by allowing upgrade
+  routing only for `/ui/ws`, returning `404 Not Found` for `/ws` and arbitrary
+  upgrade-shaped routes across normal, async, and TLS transports, switching
+  generated browser JS to the canonical `/ui/ws` URL, and making deprecated
+  query-token env opt-in non-authorizing.
+- verify: `/home/ormastes/dev/pub/simple/bin/simple check
+  src/app/ui.web/auth_params.spl src/app/ui.web/ws_handler.spl
+  src/app/ui.web/__init__.spl src/app/ui.web/server.spl
+  src/app/ui.web/async_server.spl src/app/ui.web/tls_serve_loop.spl
+  src/app/ui.web/html.spl test/01_unit/app/ui/ws_handler_spec.spl
+  test/01_unit/app/ui/web_auth_hardening_spec.spl
+  test/02_integration/app/ui.web/ws_e2e_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl`,
+  focused unit/integration specs, live hardening system spec, docgen, and
+  `find doc/06_spec -name '*_spec.spl' | wc -l` pass.

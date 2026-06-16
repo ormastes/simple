@@ -638,7 +638,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val s = src(WS_HANDLER_PATH)
 expect(s).to_contain("fn extract_ws_key(headers: text) -> text")
-expect(s).to_contain("Sec-WebSocket-Key:")
+expect(s).to_contain("_header_value(headers, \"sec-websocket-key\")")
 ```
 
 </details>
@@ -850,20 +850,22 @@ expect(s).to_contain("guard.check(headers)")
 
 </details>
 
-#### extracts bearer token from Authorization header or query param
+#### extracts bearer token from Authorization header or subprotocol
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val s = src(WS_HANDLER_PATH)
+val auth = src("src/app/ui.web/auth_params.spl")
 expect(s).to_contain("fn _extract_bearer(headers: text, path: text) -> text")
-expect(s).to_contain("authorization:")
-expect(s).to_contain("bearer ")
-expect(s).to_contain("?token=")
+expect(s).to_contain("ui_web_extract_bearer(headers, path)")
+expect(auth).to_contain("authorization:")
+expect(auth).to_contain("bearer ")
+expect(auth).to_contain("sec-websocket-protocol:")
 ```
 
 </details>
