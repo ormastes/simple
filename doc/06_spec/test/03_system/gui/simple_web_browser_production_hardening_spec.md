@@ -53,6 +53,7 @@ simple_web_browser_production_hardening_spec -> app
    - Expected: oversized_request_line equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: oversized_header_line equals `HTTP/1.1 413 Payload Too Large|present`
    - Expected: oversized_login equals `HTTP/1.1 413 Payload Too Large|present`
+   - Expected: malformed_login equals `HTTP/1.1 400 Bad Request|present`
    - Expected: api_state equals `HTTP/1.1 403 Forbidden|present`
    - Expected: api_widgets equals `HTTP/1.1 403 Forbidden|present`
    - Expected: resume equals `HTTP/1.1 403 Forbidden|present`
@@ -64,7 +65,7 @@ simple_web_browser_production_hardening_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -78,6 +79,7 @@ val oversized_head = raw_http_summary(port, oversized_head_request(port), "reque
 val oversized_request_line = raw_http_summary(port, oversized_request_line_request(port), "request_head_too_large")
 val oversized_header_line = raw_http_summary(port, oversized_header_line_request(port), "request_head_too_large")
 val oversized_login = raw_http_summary(port, login_oversized_request(port), "request_body_too_large")
+val malformed_login = raw_http_summary(port, login_malformed_framing_request(port), "invalid_request_framing")
 val api_state = raw_http_summary(port, api_state_unauthorized_request(port), "\"error\": \"forbidden\"")
 val api_widgets = raw_http_summary(port, api_widgets_unauthorized_request(port), "\"error\": \"forbidden\"")
 val resume = raw_http_summary(port, resume_unauthorized_request(port), "\"error\": \"forbidden\"")
@@ -94,6 +96,7 @@ expect(oversized_head).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_request_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_header_line).to_equal("HTTP/1.1 413 Payload Too Large|present")
 expect(oversized_login).to_equal("HTTP/1.1 413 Payload Too Large|present")
+expect(malformed_login).to_equal("HTTP/1.1 400 Bad Request|present")
 expect(api_state).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(api_widgets).to_equal("HTTP/1.1 403 Forbidden|present")
 expect(resume).to_equal("HTTP/1.1 403 Forbidden|present")

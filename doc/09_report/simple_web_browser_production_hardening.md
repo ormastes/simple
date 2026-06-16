@@ -6,7 +6,7 @@
   `tls_serve_loop.spl`, `async_server.spl`,
   `simple_web_browser_production_hardening_spec.spl`,
   `web_auth_hardening_spec.spl`, and `ws_handler_spec.spl`.
-- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 18 scenarios.
+- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 19 scenarios.
 - Unit async web spec: `bin/simple test test/01_unit/app/ui/async_web_spec.spl --mode=interpreter --clean` passed with 27 scenarios.
 - Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 12 scenarios.
 - Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 6 scenarios.
@@ -38,6 +38,10 @@
   strict valid body fields in the normal TCP server path.
 - Authorized `/ui/resume` rejects oversized JSON bodies with `413 Payload Too
   Large` before parsing route fields.
+- Browser POST body readers across normal, shared-WM, async, and TLS paths
+  reject malformed or ambiguous request framing with `400 Bad Request`,
+  including duplicate `Content-Length` and unsupported `Transfer-Encoding`,
+  before reading body bytes.
 - Inbound WebSocket frame readers reject declared payload lengths above the
   production cap before allocating payload buffers.
 - The normal, shared-WM, async, and TLS HTTP entrypoints reject oversized

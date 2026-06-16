@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -347,13 +347,34 @@ expect(ui_web_resume_body_status(invalid_sequence)).to_equal("invalid_last_seque
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val headers = "Host: 127.0.0.1\nOrigin: http://localhost:8080\nContent-Length: 8193\n"
 expect(ui_web_content_length(headers)).to_equal(8193)
 expect(ui_web_body_exceeds_unauth_limit(headers)).to_be(true)
+expect(ui_web_request_body_status(headers)).to_equal("request_body_too_large")
+```
+
+</details>
+
+#### rejects malformed or ambiguous request body framing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_request_body_status("Content-Length: 42\n")).to_equal("ok")
+expect(ui_web_request_body_status("Content-Length: -1\n")).to_equal("invalid_request_framing")
+expect(ui_web_request_body_status("Content-Length: nope\n")).to_equal("invalid_request_framing")
+expect(ui_web_request_body_status("Content-Length: 4\nContent-Length: 4\n")).to_equal("invalid_request_framing")
+expect(ui_web_request_body_status("Transfer-Encoding: chunked\n")).to_equal("invalid_request_framing")
+expect(ui_web_request_body_framing_valid("Content-Length: 42\n")).to_be(true)
+expect(ui_web_request_body_framing_valid("Transfer-Encoding: chunked\n")).to_be(false)
 ```
 
 </details>
@@ -433,8 +454,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

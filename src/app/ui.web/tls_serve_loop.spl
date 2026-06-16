@@ -28,7 +28,7 @@ use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
 use app.ui.web.ws_handler.{handle_ws_upgrade, send_ws_text, is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed}
 use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_json_security_headers, ui_web_html_security_headers, ui_web_request_head_allowed, ui_web_request_head_status}
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_json_security_headers, ui_web_html_security_headers, ui_web_request_head_allowed, ui_web_request_head_status}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -314,7 +314,11 @@ class TlsWebServer:
                 if path.starts_with("/ui/"):
                     var body = ""
                     if method == "POST":
-                        if ui_web_body_exceeds_unauth_limit(headers):
+                        val body_status = ui_web_request_body_status(headers)
+                        if body_status == "invalid_request_framing":
+                            conn.write_all(_tls_http_response(400, "application/json", "{\"error\": \"invalid_request_framing\"}"))
+                            return
+                        if body_status == "request_body_too_large":
                             conn.write_all(_tls_http_response(413, "application/json", "{\"error\": \"request_body_too_large\"}"))
                             return
                         body = _tls_read_body(conn, headers)
@@ -336,7 +340,11 @@ class TlsWebServer:
                 # Read body if POST
                 var body = ""
                 if method == "POST":
-                    if ui_web_body_exceeds_unauth_limit(headers):
+                    val body_status = ui_web_request_body_status(headers)
+                    if body_status == "invalid_request_framing":
+                        conn.write_all(_tls_http_response(400, "application/json", "{\"error\": \"invalid_request_framing\"}"))
+                        return
+                    if body_status == "request_body_too_large":
                         conn.write_all(_tls_http_response(413, "application/json", "{\"error\": \"request_body_too_large\"}"))
                         return
                     body = _tls_read_body(conn, headers)

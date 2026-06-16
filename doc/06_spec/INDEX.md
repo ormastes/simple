@@ -16,7 +16,7 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Web Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Auto-generated | N/A | 18 | 0% | 0 lines |
+| [Web Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Auto-generated | N/A | 19 | 0% | 0 lines |
 | [Async Web Specification](test/01_unit/app/ui/async_web_spec.md) | Auto-generated | N/A | 27 | 0% | 0 lines |
 
 ## Other (1 features)

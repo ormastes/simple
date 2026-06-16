@@ -2,7 +2,7 @@ use std.spec.{describe, it, expect}
 use app.ui.web.origin_guard.{OriginGuard, _is_loopback_origin}
 use app.ui.web.session_token.{SessionToken, _allow_insecure_dev_secret_flag, _missing_secret_fatal, verify}
 use app.ui.web.ui_routes.{ui_web_authorization_status, ui_web_request_authorized, ui_web_query_percent_decode, ui_web_resume_body_status}
-use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, UI_WEB_MAX_REQUEST_HEAD_BYTES, UI_WEB_MAX_REQUEST_LINE_BYTES, UI_WEB_MAX_HEADER_LINE_BYTES, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_LOGIN_RATE_WINDOW_MS, ui_web_auth_json_field, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_login_rate_decision, ui_web_request_id, ui_web_sanitize_request_id, ui_web_request_head_allowed, ui_web_request_line_allowed, ui_web_header_line_allowed, ui_web_request_head_status, ui_web_json_security_headers, ui_web_html_security_headers}
+use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, UI_WEB_MAX_REQUEST_HEAD_BYTES, UI_WEB_MAX_REQUEST_LINE_BYTES, UI_WEB_MAX_HEADER_LINE_BYTES, UI_WEB_LOGIN_RATE_MAX_ATTEMPTS, UI_WEB_LOGIN_RATE_WINDOW_MS, ui_web_auth_json_field, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_request_body_framing_valid, ui_web_login_rate_decision, ui_web_request_id, ui_web_sanitize_request_id, ui_web_request_head_allowed, ui_web_request_line_allowed, ui_web_header_line_allowed, ui_web_request_head_status, ui_web_json_security_headers, ui_web_html_security_headers}
 use app.ui.web.html.{generate_js, generate_wm_js}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -144,6 +144,16 @@ describe "ui.web production auth hardening":
         val headers = "Host: 127.0.0.1\nOrigin: http://localhost:8080\nContent-Length: 8193\n"
         expect(ui_web_content_length(headers)).to_equal(8193)
         expect(ui_web_body_exceeds_unauth_limit(headers)).to_be(true)
+        expect(ui_web_request_body_status(headers)).to_equal("request_body_too_large")
+
+    it "rejects malformed or ambiguous request body framing":
+        expect(ui_web_request_body_status("Content-Length: 42\n")).to_equal("ok")
+        expect(ui_web_request_body_status("Content-Length: -1\n")).to_equal("invalid_request_framing")
+        expect(ui_web_request_body_status("Content-Length: nope\n")).to_equal("invalid_request_framing")
+        expect(ui_web_request_body_status("Content-Length: 4\nContent-Length: 4\n")).to_equal("invalid_request_framing")
+        expect(ui_web_request_body_status("Transfer-Encoding: chunked\n")).to_equal("invalid_request_framing")
+        expect(ui_web_request_body_framing_valid("Content-Length: 42\n")).to_be(true)
+        expect(ui_web_request_body_framing_valid("Transfer-Encoding: chunked\n")).to_be(false)
 
     it "bounds request heads before shared wm route dispatch":
         expect(ui_web_request_head_allowed(UI_WEB_MAX_REQUEST_HEAD_BYTES)).to_be(true)

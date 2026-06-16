@@ -73,12 +73,59 @@ fn ui_web_content_length(headers: text) -> i64:
         if trimmed.lower().starts_with("content-length:"):
             val raw = trimmed[15:].trim()
             if raw == "":
-                return 0
+                return -1
+            if not _ui_web_decimal_i64(raw):
+                return -1
             return raw.parse_i64()
     return 0
 
+fn _ui_web_decimal_i64(raw: text) -> bool:
+    if raw == "":
+        return false
+    var rest = raw
+    rest = rest.replace("0", "")
+    rest = rest.replace("1", "")
+    rest = rest.replace("2", "")
+    rest = rest.replace("3", "")
+    rest = rest.replace("4", "")
+    rest = rest.replace("5", "")
+    rest = rest.replace("6", "")
+    rest = rest.replace("7", "")
+    rest = rest.replace("8", "")
+    rest = rest.replace("9", "")
+    return rest == ""
+
+fn ui_web_request_body_status(headers: text) -> text:
+    if _ui_web_request_body_framing_problem(headers):
+        return "invalid_request_framing"
+    val content_length = ui_web_content_length(headers)
+    if content_length < 0:
+        return "invalid_request_framing"
+    if content_length > UI_WEB_MAX_UNAUTH_BODY_BYTES:
+        return "request_body_too_large"
+    return "ok"
+
+fn _ui_web_request_body_framing_problem(headers: text) -> bool:
+    var saw_content_length = false
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        val lower = trimmed.lower()
+        if lower.starts_with("transfer-encoding:"):
+            return true
+        if lower.starts_with("content-length:"):
+            if saw_content_length:
+                return true
+            saw_content_length = true
+            val raw = trimmed[15:].trim()
+            if raw == "" or not _ui_web_decimal_i64(raw):
+                return true
+    return false
+
 fn ui_web_body_exceeds_unauth_limit(headers: text) -> bool:
-    return ui_web_content_length(headers) > UI_WEB_MAX_UNAUTH_BODY_BYTES
+    return ui_web_request_body_status(headers) == "request_body_too_large"
+
+fn ui_web_request_body_framing_valid(headers: text) -> bool:
+    return ui_web_request_body_status(headers) != "invalid_request_framing"
 
 fn ui_web_ws_frame_payload_allowed(payload_len: i64) -> bool:
     return payload_len >= 0 and payload_len <= UI_WEB_MAX_WS_FRAME_BYTES
@@ -245,6 +292,8 @@ export ui_web_ws_response_protocol
 export ui_web_query_param
 export ui_web_content_length
 export ui_web_body_exceeds_unauth_limit
+export ui_web_request_body_status
+export ui_web_request_body_framing_valid
 export ui_web_ws_frame_payload_allowed
 export ui_web_request_head_allowed
 export ui_web_request_line_allowed
