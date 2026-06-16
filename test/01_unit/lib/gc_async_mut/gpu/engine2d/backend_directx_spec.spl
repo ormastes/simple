@@ -1,23 +1,69 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl
 # @tag: unit, engine2d, directx
 
-"""DirectX 2D Engine backend spec.
+"""
+# DirectX 2D Engine backend contract
 
-Runnable on BOTH Linux (via DXVK/vkd3d -> Vulkan) and Windows (native D3D11).
-The platform probe drives expected evidence strings — Windows-only branches
-assert probe evidence on Linux so no skip() is needed anywhere.
+## Overview
 
-Evidence contract:
-  - leaf=dlopen  : a real Vulkan/DXVK/VKD3D lib was found at probe time
-  - leaf=structured : no loadable library; structured-handle fallback
+Pins the Engine2D DirectX backend surface for both Linux DXVK/vkd3d routing and
+native Windows D3D11 routing. The platform probe drives expected evidence
+strings, so Windows-only behavior still has structured evidence on Linux.
 
-All asserts use concrete values — no boolean-wrapper asserts, no skip().
+**Requirements:** doc/02_requirements/feature/host_gpu_lane.md
+**Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
+**Plan:** doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md
+**Architecture:** doc/04_architecture/ui/simple_gui_stack.md
+**Design:** doc/05_design/host_gpu_lane.md
+
+## Syntax
+
+CPU mirror fallback before device init:
+
+```simple
+val readback = b.read_pixels_with_source()
+expect(readback.source).to_equal("cpu_mirror")
+expect(readback.backend_handle).to_equal(0)
+```
+
+Initialized swapchain presentation provenance:
+
+```simple
+b.initialized = true
+b.swapchain_handle = 77
+val readback = b.read_pixels_with_source()
+expect(readback.source).to_equal("swapchain_present")
+expect(readback.backend_handle).to_equal(77)
+```
+
+Initialized readback target after present:
+
+```simple
+b.clear(0xFF224466)
+b.present()
+val readback = b.read_pixels_with_source()
+expect(readback.source).to_equal("device_readback")
+expect(readback.backend_handle).to_be_greater_than(0)
+expect(readback.pixel_count).to_equal(16)
+```
+
+## Acceptance
+
+- `leaf=dlopen` means a real Vulkan/DXVK/VKD3D library was found at probe time.
+- `leaf=structured` means no loadable library was found and the structured
+  handle fallback is active.
+- `swapchain_present` is presentation provenance, not backend
+  `device_readback` proof.
+- DirectX may report `device_readback` only after an initialized readback
+  target has uploaded and read back the expected pixel count with a positive
+  readback handle. Checksum is evidence, not the validity gate, because an
+  all-zero frame is valid and may checksum to zero.
 """
 
 use std.spec
-use std.gpu.engine2d.backend_directx.{DirectXBackend, DxPlatformProbe, dx_platform_probe, probe_directx}
-use std.gpu.engine2d.backend_probe.{BackendStatus}
-use std.gpu.engine2d.backend.{RenderBackend}
+use std.gc_async_mut.gpu.engine2d.backend_directx.{DirectXBackend, DxPlatformProbe, dx_platform_probe, probe_directx}
+use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
+use std.nogc_async_mut.gpu.engine2d.backend.{RenderBackend}
 
 describe "DirectX 2D backend — platform probe":
 
@@ -57,12 +103,68 @@ describe "DirectX 2D backend — platform probe":
         val result = probe_directx()
         expect(result.api_name).to_equal("directx")
 
+    it "probe_directx can repeat without leaking the probe device":
+        val first = probe_directx()
+        val second = probe_directx()
+        expect(first.api_name).to_equal("directx")
+        expect(second.api_name).to_equal("directx")
+        expect(first.reason.contains("leaf=")).to_be(true)
+        expect(second.reason.contains("leaf=")).to_be(true)
+
 
 describe "DirectX 2D backend — init and name":
 
     it "backend name is directx":
         val b = DirectXBackend.create()
         expect(b.name()).to_equal("directx")
+
+    it "readback defaults to CPU mirror provenance before device init":
+        val b = DirectXBackend.create()
+        val readback = b.read_pixels_with_source()
+        expect(readback.source).to_equal("cpu_mirror")
+        expect(readback.backend_handle).to_equal(0)
+
+    it "reports swapchain presentation provenance without claiming device readback":
+        var b = DirectXBackend.create()
+        b.initialized = true
+        b.swapchain_handle = 77
+
+        val readback = b.read_pixels_with_source()
+
+        expect(readback.source).to_equal("swapchain_present")
+        expect(readback.backend_handle).to_equal(77)
+
+    it "reports device readback only after present populates a readback target":
+        var b = DirectXBackend.create()
+        val ok = b.init(4, 4)
+        if ok:
+            b.clear(0xFF224466)
+            b.present()
+            val readback = b.read_pixels_with_source()
+            expect(readback.source).to_equal("device_readback")
+            expect(readback.backend_handle).to_be_greater_than(0)
+            expect(readback.pixel_count).to_equal(16)
+            expect(readback.checksum).to_be_greater_than(0)
+            expect(readback.pixels[0]).to_equal(0xFF224466)
+        else:
+            val probe = dx_platform_probe()
+            expect(probe.leaf).to_contain("leaf=")
+
+    it "accepts all-zero device readback frames after present":
+        var b = DirectXBackend.create()
+        val ok = b.init(4, 4)
+        if ok:
+            b.clear(0)
+            b.present()
+            val readback = b.read_pixels_with_source()
+            expect(readback.source).to_equal("device_readback")
+            expect(readback.backend_handle).to_be_greater_than(0)
+            expect(readback.pixel_count).to_equal(16)
+            expect(readback.checksum).to_equal(0)
+            expect(readback.pixels[0]).to_equal(0)
+        else:
+            val probe = dx_platform_probe()
+            expect(probe.leaf).to_contain("leaf=")
 
     it "init returns a bool (true or false — device available or not)":
         var b = DirectXBackend.create()

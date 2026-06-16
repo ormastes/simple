@@ -1,10 +1,11 @@
 <!-- codex-architecture -->
 # Simple UI, GUI, Web, and 2D Stack Architecture
 
-Status: draft-v3 (2026-06-05)
+Status: draft-v3 (2026-06-15)
 Owners: `src/app/ui.web`, `src/app/ui.electron`, `src/lib/common/ui`,
 `src/lib/gc_async_mut/gpu/browser_engine`,
-`src/lib/gc_async_mut/gpu/engine2d`, `src/lib/nogc_sync_mut/gpu/engine2d`
+`src/lib/gc_async_mut/gpu/engine2d`, `src/lib/nogc_async_mut/gpu/engine2d`,
+`src/lib/nogc_sync_mut/gpu/engine2d`
 
 Related:
 - `doc/04_architecture/ui/ui_web_protocol.md`
@@ -284,7 +285,7 @@ framebuffer-visible primitive rendering, present, and readback. The processing
 lane owns generated kernels, filter/layout compute, vector/font offload, and
 SIMD/GPU preparation work. A backend may implement both lanes on one device, but
 that is a `combined` lane plan rather than an implicit assumption. The current
-contract is in `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`.
+contract is in `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
 Font offload evidence is intentionally split by font class:
 `src/lib/gc_async_mut/gpu/engine2d/vector_font_offload.spl` proves when vector
 glyph pixels have actually returned from a GPU path, while
@@ -336,65 +337,87 @@ Draw processing may use CPU scalar, CPU SIMD, OpenCL, CUDA, HIP, Vulkan, Metal,
 or WebGPU, but GUI code sees only the typed Simple 2D and plugin contracts.
 Host/GPU event ownership is explicit: `host_gpu_event_queue.spl` records the
 event decision, submit, and receipt evidence, and
-`host_gpu_draw_ir_event_flow.spl` keeps unresolved targets, stale target-cache
-events, and host-semantic mutation on the host while allowing coarse Draw IR
-render/effect batches to queue to the GPU lane.
+`host_gpu_draw_ir_event_flow.spl` records derived Pure Simple forward/backward
+phase evidence around that decision. Unresolved targets, stale target-cache
+events, and host-semantic mutation stay on the host; coarse Draw IR
+render/effect batches can forward from host to the GPU lane and report a
+completed GPU-to-host backward receipt.
 
 Production status is deliberately split by proof type:
 
 | Layer | Current evidence | Production meaning |
 |---|---|---|
-| Evidence adapter | `src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` and `host_gpu_draw_ir_event_flow.spl` produce deterministic decision, submit, receipt, and Draw IR routing summaries. | Proves host-vs-GPU routing policy and packet-size/fallback classification. It is not by itself proof that a GUI/web frame was drained through a backend. |
-| Runtime queue emission | `target.later(...) gpu` interpreter handling and `engine2d_host_gpu_event_submit_to_runtime` can emit queue packets and expose queue counters/drain status through runtime externs. | Proves packets can enter the host/GPU runtime queue. Native lowering and full Draw IR payload serialization are still required for production parity. |
-| Web artifact diagnostics | `src/lib/common/ui/web_render_api.spl` stores `WebRenderArtifact.queue_*`, backend handle, and readback-source metadata; `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl` attaches runtime queue evidence for GPU-selected artifacts; `src/app/ui.browser/backend.spl` mirrors it as `last_artifact_queue_*` and `last_artifact_gpu_readback_source`. | Proves queue evidence and backend readback provenance can be carried through the web-render artifact contract and a focused `BrowserBackend.render_frame` GPU frame. |
-| Backend readback | Generated/native reports under `doc/09_report/` prove backend-specific readback when the backend is available: Vulkan Engine2D readback is `pass`, CUDA generated 2D readback is `pass`, and Linux Metal/ROCm generated readback is typed `unavailable`. | Proves backend submit/sync/readback for the reported backend fixtures and is consumed by the production GUI/web queue-readback wrapper. |
-| GUI/web integration | `src/app/ui.browser/backend.spl` owns a local UI event queue, an Engine2D pixel artifact path, and queue diagnostic fields. Generated widget HTML uses the deterministic widget raster path, then presents through Engine2D for bounded backend readback. Focused `BrowserBackend.render_frame` specs expose queue diagnostics, backend handle `7` on Vulkan, Engine2D readback source, and cache-hit reset. | `scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs` is the canonical production gate for GUI/web event queue -> runtime packet -> backend handle -> drain/readback receipt on this lane. |
+| Evidence adapter | `src/lib/nogc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` and `host_gpu_draw_ir_event_flow.spl` produce deterministic decision, submit, receipt, forward, backward, Pure Simple queue-state, and Draw IR routing summaries. GC Engine2D paths keep export-only compatibility shims. | Proves host-vs-GPU routing policy, packet-size/fallback classification, explicit forward/backward phase evidence, and an in-language emit -> submit -> complete -> drain lifecycle model. It is not by itself proof that a GUI/web frame was drained through a backend. |
+| Runtime queue emission | `target.later(...) gpu` interpreter handling and `engine2d_host_gpu_event_submit_to_runtime` can emit queue packets and expose queue counters, submit/complete lifecycle state, and drain status through runtime externs. `Engine2dHostGpuPureQueueState` mirrors the same lifecycle in Pure Simple without depending on runtime extern counters. `Engine2dDrawIrPayloadSummary` carries a deterministic descriptor with schema, batch/source/surface identity, command count, packet bytes, command checksum, serialized SDN byte count, and one-batch `draw_ir_to_sdn` text; `Engine2dHostGpuRuntimeSubmitResult.payload_summary` carries that serialized SDN payload for Draw IR submits. Low-level runtime queue packets preserve payload byte size, hash, and bounded UTF-8 text through completion/drain receipts. | Proves packets can enter the host/GPU runtime queue, that HostGpuLaneBegin/End now drive forward submit and backward completion receipts, and that the Draw IR bridge carries serialized payload evidence beyond numeric counters. Broader backend/session command-buffer receipts are still required for production parity. |
+| Web artifact diagnostics | `src/lib/common/ui/web_render_api.spl` stores `WebRenderArtifact.queue_*`, backend handle, and readback backend/source/pixel-count/checksum/reason metadata; `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl` attaches runtime queue evidence for GPU-selected artifacts; `src/app/ui.browser/backend.spl` mirrors it as `last_artifact_queue_*` and `last_artifact_gpu_readback_*`. | Proves queue evidence and backend readback provenance can be carried through the web-render artifact contract and a focused `BrowserBackend.render_frame` GPU frame. |
+| Backend readback | Generated/native reports under `doc/09_report/` prove backend-specific readback when the backend is available: Vulkan Engine2D readback is `pass`, CUDA generated 2D readback is `pass` with `submit_attempted=true` and `readback_available=true`, OpenCL generated 2D readback is `pass` with the same booleans, and Linux Metal/ROCm generated readback is typed `unavailable` with submit/readback false. | Proves backend submit/sync/readback for the reported backend fixtures and is consumed by the production GUI/web queue-readback wrapper. The wrapper's Readback Matrix must expose submit/readback columns so Spark and normal-LLM reviews can reject verdict-only or upload-only evidence. |
+| GUI/web integration | `src/app/ui.browser/backend.spl` owns a local UI event queue, host event roundtrip telemetry, scheduling-only host/GPU event-flow summary fields for dispatched input events, an Engine2D pixel artifact path, and queue diagnostic fields. Generated widget HTML uses the deterministic widget raster path, then presents through Engine2D for bounded backend readback. Focused `BrowserBackend.render_frame` specs expose queue diagnostics, frame payload size/hash/text receipts, a widget-semantic Draw IR dispatch receipt with dispatch payload size/hash/text, GUI AST source evidence, widget-id rect commands, text command-count evidence, image command/URI evidence, queued-command event-target context resolution, conservative in-process render timing, a positive Vulkan backend handle propagated from `Engine2DReadback.backend_handle`, Engine2D readback source/pixel-count/checksum/reason metadata, and cache-hit reset; host event roundtrip specs separately prove BrowserBackend ingress/dispatch/render telemetry. Synthetic handle `7` is limited to isolated runtime queue roundtrip tests. CUDA, OpenCL, Metal, OpenGL, ROCm, and Vulkan device-readback branches preserve concrete device-readback handles when their initialized device path is used; WebGPU preserves positive `surface_upload` provenance handles when an initialized surface accepts upload; DirectX preserves positive `swapchain_present` provenance handles when an initialized swapchain accepts presentation; CPU/cache/not-requested fallbacks remain handle `0`. BrowserBackend input-event host/GPU fields are scheduling evidence until tied to a live runtime packet/readback receipt for that input event. Image URI Draw IR command evidence is not the same as decoded-image rendering; the Engine2D advanced Draw IR path can render caller-provided resolved ARGB pixel buffers keyed by `image_uri`, while unresolved, invalid, PNG, JPEG, and WebP image sources still fail closed as skipped image commands until the asset resolver and decode pipeline feed valid pixels. | `scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs` is the canonical production gate for GUI/web event roundtrip -> runtime packet -> payload text receipt -> widget-semantic Draw IR dispatch payload receipt -> queued-command event context -> positive backend-handle receipt -> same-frame backend device readback on this lane. Its Platform Spark/Normal-LLM table must expose the compact `linux_gui_web` row (`event=browser-input-1; packet=1; source=device_readback; checksum=...`) and DirectX native verdict/gate/child-gate fields. DirectX/WebGPU presentation/upload provenance is guarded so it cannot count as `device_readback`. |
 
 The current production posture is evidence-gated and fail-closed. Adapter
 summaries, runtime queue emit/drain receipts, BrowserBackend frame receipts,
-and Vulkan/CUDA readback reports remain separate layers. The canonical wrapper
+and Vulkan/CUDA/OpenCL readback reports remain separate layers. The canonical wrapper
 must be the source of truth for whether the joined GUI/web run currently proves
-event queue -> runtime packet -> backend handle -> drain/readback receipt.
+event queue -> runtime packet -> positive backend-handle receipt -> backend device readback receipt.
 Linux Metal and ROCm/HIP remain typed host-unavailable unless those runtimes are
 present.
+The wrapper report must keep high-signal proof fields table-visible: the
+Readback Matrix includes submit/readback availability for generated 2D child
+backends, and the Platform Spark/Normal-LLM table includes a `linux_gui_web`
+event/readback row plus a DirectX native verdict/gate row.
 
 Known runtime/production gaps:
 
-- Interpreter GPU queue packets currently emit `backend_code=0` and drain as
-  `UNAVAILABLE`, not as a real backend handle submission.
+- Compiler/interpreter GPU lane queue packets now consume
+  `rt_host_gpu_active_backend_handle()`, submit at lane begin, and complete after
+  lane end; they still complete as typed `UNAVAILABLE` when no backend registers
+  a positive active handle.
 - Rust and C runtime queues now share a `1024` pending-packet capacity, with
   Rust runtime coverage for overflow rejection and post-drain reuse. A typed
   overflow/backpressure status remains a follow-up if callers need to
   distinguish capacity rejection from invalid arguments.
 - A two-phase runtime submit/complete path now exposes observable in-flight
   `SUBMITTED` before terminal `COMPLETED` or `UNAVAILABLE` status.
-- Interpreter lane `END` accounting is exception-safe for lane body errors, with
-  Rust interpreter regression coverage.
+- Interpreter lane `END` accounting is exception-safe for lane body errors in
+  the Rust builtin interpreter and the Pure Simple backend interpreter. The
+  statement-lowered Rust HIR path now injects lane-local cleanup before body
+  `return` statements and still needs compiler-level cleanup/finally support
+  before claiming arbitrary body-error cleanup.
 - Runtime packets can now expose a submitted backend-handle value through
-  `rt_host_gpu_queue_last_backend_handle()`, and BrowserBackend frames mirror
-  that value from the WebRenderArtifact. The production wrapper ties that
-  frame-local handle to same-frame Engine2D readback provenance.
+  `rt_host_gpu_queue_last_backend_handle()`. BrowserBackend Vulkan frames
+  mirror the positive `Engine2DReadback.backend_handle` plus readback
+  pixel-count/checksum/reason metadata from the same-frame device readback, and
+  CUDA/OpenCL/Metal/OpenGL/ROCM/Vulkan device-readback
+  implementations preserve their concrete handle when initialized. WebGPU
+  preserves `surface_upload` handles for upload provenance, and DirectX
+  preserves `swapchain_present` handles for presentation provenance; neither is
+  backend device-readback proof. Cache, CPU mirror, and not-requested paths
+  reset the handle to `0`.
 - `BrowserBackend.render_frame` now completes for generated widget frames and
-  has focused queue/readback coverage, including real Vulkan backend-handle
-  propagation and cache-hit reset.
+  has focused queue/readback coverage, including real Vulkan readback
+  provenance and cache-hit reset.
 
-Until the GUI/web queue-drain bridge exists, documentation and test reports must
-say "adapter evidence", "runtime queue emission", or "backend readback" instead
-of "production GUI/web GPU rendering" unless a single run proves all four
-stages in order.
+Documentation and test reports must distinguish the current Linux production
+gate from stronger all-platform backend-native handle proof. The joined GUI/web
+frame proof is currently Vulkan-backed: a single Linux run proves GUI/web event
+queue -> runtime packet -> positive backend-handle receipt -> backend device
+readback for that path. CUDA and OpenCL are child backend readback fixtures in
+the same production wrapper, Metal and ROCm/HIP may be host-unavailable, and
+DirectX/WebGPU remain presentation/upload provenance until they have positive
+same-frame device-readback evidence.
 
 Backend preference has two layers. `backend_full_preference_order()` records the
 stable user-visible order, with explicit native surfaces first:
 `baremetal`, `virtio_gpu`, Metal, CUDA, ROCm/HIP, Qualcomm, Vulkan, DirectX,
-OpenCL, OpenGL, Intel, WebGPU, software, CPU SIMD, and CPU. DirectX is a
+OpenCL, OpenGL, Intel, WebGPU, CPU SIMD, software, and CPU. DirectX is a
 drawing backend with D3D11 semantics: native d3d11 on Windows, DXVK/vkd3d over
 Vulkan on Linux, with `leaf=dlopen|structured` evidence from the ICD shim
 chain (`src/lib/nogc_async_mut/gpu/vulkan_icd_sffi.spl`). The automatic
 width/height-only probe remains `backend_default_priority_order()` and starts at
 Metal because `baremetal` and `virtio_gpu` require a caller-owned platform or
 VirtIO framebuffer. Diagnostics and reports should use
-`backend_preference_summary()` so guides, tests, and startup evidence describe
-the same order.
+`backend_preference_summary()` from
+`src/lib/nogc_async_mut/gpu/engine2d/helpers_availability.spl` so guides,
+tests, and startup evidence describe the same order.
 
 Text fallback helpers must keep glyph-pixel loops separate from layout advance
 padding. The buffer is prefilled with background pixels, so anti-aliased glyph
@@ -433,7 +456,7 @@ Hot redraw paths must avoid:
 Capability probes run at startup or explicit re-probe time. Plugin cache keys
 must include backend id, device capability version, shader/kernel artifact
 version, Draw IR schema version, source kind/id, style revision,
-style/font/image cache versions, and fallback reason metadata.
+style/font/resolved-image cache versions, and fallback reason metadata.
 
 ## Migration Order
 
@@ -473,9 +496,9 @@ dispatch commands and forwards them to the web adapter protocol.
 | WM → Draw IR | `src/lib/common/ui/window_scene_draw_ir.spl` | WM scene composition into ordered Draw IR batches (desktop, chrome, windows by z-order) |
 | WM dispatch | `src/lib/common/ui/wm_runtime_dispatch.spl` | `WmRuntimeDispatchCommand`, `WmRuntimeShellState`, backend-neutral WM command adapter |
 | Engine2D Draw IR | `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` | `Engine2dDrawIrAdvResult`, first Simple2D-facing Draw IR executor (rect/text, CPU fallback, pixel readback) |
-| Backend lane | `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split contract |
-| Host/GPU event queue | `src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` | Host event decision, queue submit, and queue receipt evidence |
-| Host/GPU Draw IR flow | `src/lib/gc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl` | Draw IR event routing into host or GPU queue lanes |
+| Backend lane | `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl` | Drawing vs processing lane split contract |
+| Host/GPU event queue | `src/lib/nogc_async_mut/gpu/engine2d/host_gpu_event_queue.spl` | Host event decision, queue submit, queue receipt evidence, and Pure Simple queue lifecycle state |
+| Host/GPU Draw IR flow | `src/lib/nogc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl` | Draw IR event routing into host or GPU queue lanes with explicit forward/backward phase evidence |
 | DirectX drawing backend | `src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl` | D3D11 drawing backend; native on Windows, DXVK/vkd3d→Vulkan on Linux, platform probe + leaf evidence |
 | DXVK/vkd3d ICD shims | `src/lib/nogc_async_mut/gpu/vulkan_icd_sffi.spl` (+ `dxvk_d3d9/10/11.spl`, `vkd3d_d3d12.spl`) | D3D→Vulkan dispatch chain with `leaf=dlopen\|structured` evidence; Linux setup via `scripts/setup/setup-directx-linux.shs` |
 | Renderer capability | `src/app/ui.render/capability.spl` | Implementation-free HTML/CSS/TUI renderer capability metadata |

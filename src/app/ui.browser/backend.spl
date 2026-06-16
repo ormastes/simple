@@ -13,15 +13,20 @@ use common.ui.widget.{UIMode}
 use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
 use common.ui.semantic_contract.{SEMANTIC_UI_STAGE_RENDERER, SEMANTIC_UI_STATUS_AVAILABLE, SemanticUiSnapshot, semantic_ui_snapshot_from_state_with_capabilities, semantic_ui_snapshot_to_json}
 use common.ui.semantic_contract.{semantic_ui_snapshot_transport_json}
-use common.ui.web_render_api.{WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED, WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED, WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderHostWindowCommand, WebRenderPatchEnvelope, WebRenderSnapshotEnvelope, web_render_adapter_request, web_render_body_html, web_render_full_html, web_render_capabilities_for_target, web_render_host_window_command_to_json, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_ipc_json_with_html_and_semantic, web_render_patch_envelope_to_json, web_render_snapshot_envelope_to_json, web_render_optimization_profile}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DrawIrCommand, DrawIrStyleProp, draw_ir_batch_with_source, draw_ir_embedding_config, draw_ir_image_command, draw_ir_rect, draw_ir_rect_bounds, draw_ir_source_gui_ast, draw_ir_style_prop, draw_ir_text, draw_ir_box_with_style}
+use common.ui.web_render_api.{WEB_RENDER_ENGINE2D_STATUS_NOT_REQUESTED, WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED, WEB_RENDER_TARGET_PURE_SIMPLE, WebRenderArtifact, WebRenderHostWindowCommand, WebRenderPatchEnvelope, WebRenderSnapshotEnvelope, web_render_adapter_request, web_render_artifact_with_runtime_dispatch_payload, web_render_body_html, web_render_full_html, web_render_capabilities_for_target, web_render_host_window_command_to_json, web_render_input_envelope_from_event, web_render_input_envelope_to_json, web_render_ipc_json_with_html_and_semantic, web_render_patch_envelope_to_json, web_render_snapshot_envelope_to_json, web_render_optimization_profile}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache, web_render_resolved_engine2d_backend_name}
+use std.nogc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{engine2d_draw_ir_payload_summary, engine2d_draw_ir_runtime_queue_dispatch}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue_with_backend_handle}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
 
 # Runtime SFFI for snapshot writing (P3 ASCII PPM)
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
 
 fn browser_semantic_render_ipc_json(state: UIState, viewport_w: i32, viewport_h: i32) -> text:
     val theme = state.tree.theme_name()
@@ -29,6 +34,148 @@ fn browser_semantic_render_ipc_json(state: UIState, viewport_w: i32, viewport_h:
     val body_html = render_html_tree(state.tree.root_node(), state)
     val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body_html, css, "", viewport_w, viewport_h)
     web_render_ipc_json_with_html_and_semantic(req, web_render_full_html(req), semantic_ui_snapshot_to_json(browser_semantic_snapshot(state)))
+
+fn browser_backend_layout_draw_ir_color(layout: LayoutBox) -> u32:
+    match layout.kind:
+        BoxKind.Inline => 0xffe0e0e0u32
+        BoxKind.Block => 0xff2d2d2du32
+        _ => 0xff20262du32
+
+fn browser_backend_i32_at_least_one(value: i32) -> i32:
+    if value <= 0:
+        return 1
+    value
+
+fn browser_backend_collect_layout_draw_ir_commands(layout: LayoutBox, commands: [DrawIrCommand], max_commands: i32) -> [DrawIrCommand]:
+    if commands.len() >= max_commands:
+        return commands
+    val command_index = commands.len()
+    val x = layout.x.to_i32()
+    val y = layout.y.to_i32()
+    val w = browser_backend_i32_at_least_one(layout.width.to_i32())
+    val h = browser_backend_i32_at_least_one(layout.height.to_i32())
+    var next = commands.push(draw_ir_rect("browser-layout-{command_index}-{layout.node_id}", x, y, w, h, browser_backend_layout_draw_ir_color(layout)))
+    for child in layout.children:
+        if next.len() < max_commands:
+            next = browser_backend_collect_layout_draw_ir_commands(child, next, max_commands)
+    next
+
+fn browser_backend_widget_text_value(node: WidgetNode) -> text:
+    var text_val = node.get_prop("text")
+    if text_val == "":
+        text_val = node.get_prop("content")
+    if text_val == "":
+        text_val = node.get_prop("label")
+    if text_val == "":
+        text_val = node.get_prop("value")
+    if text_val == "":
+        val left = node.get_prop("left")
+        val right = node.get_prop("right")
+        if left != "" or right != "":
+            text_val = "{left} {right}".strip()
+    if text_val == "":
+        text_val = node.get_prop("title")
+    text_val
+
+fn browser_backend_widget_image_uri(node: WidgetNode) -> text:
+    var image_uri = node.get_prop("src")
+    if image_uri == "":
+        image_uri = node.get_prop("url")
+    if image_uri == "":
+        image_uri = node.get_prop("image_uri")
+    if image_uri == "":
+        image_uri = node.get_prop("asset")
+    image_uri
+
+fn browser_backend_widget_draw_ir_color(kind: text) -> u32:
+    match kind:
+        "panel" => 0xff3a3a3au32
+        "button" => 0xff4b6f9fu32
+        "text" => 0xffe0e0e0u32
+        "label" => 0xffe0e0e0u32
+        "heading" => 0xffd8e8ffu32
+        "image" => 0xff303844u32
+        "statusbar" => 0xff202a33u32
+        "progress" => 0xff66cc88u32
+        _ => 0xff2d2d2du32
+
+fn browser_backend_widget_text_color(kind: text) -> u32:
+    match kind:
+        "text" => 0xff303030u32
+        "label" => 0xff303030u32
+        _ => 0xfff2f2f2u32
+
+fn browser_backend_widget_draw_ir_style(node: WidgetNode, kind: text) -> [DrawIrStyleProp]:
+    var style: [DrawIrStyleProp] = []
+    style = style.push(draw_ir_style_prop("widget_id", node.id))
+    style = style.push(draw_ir_style_prop("widget_kind", kind))
+    style
+
+fn browser_backend_widget_command_height(kind: text, text_value: text) -> i32:
+    if kind == "panel":
+        return 14
+    if kind == "button":
+        return 14
+    if kind == "image":
+        return 24
+    if text_value != "":
+        return 12
+    10
+
+fn browser_backend_collect_widget_draw_ir_commands(node: WidgetNode, x: i32, y: i32, width: i32, depth: i32, commands: [DrawIrCommand], max_commands: i32) -> ([DrawIrCommand], i32):
+    if commands.len() >= max_commands:
+        return (commands, y)
+    val kind = node.kind_name()
+    val indent = depth * 4
+    val left = x + indent
+    var usable_width = width - indent
+    if usable_width < 12:
+        usable_width = 12
+    val text_value = browser_backend_widget_text_value(node)
+    val height = browser_backend_widget_command_height(kind, text_value)
+    val hit = draw_ir_rect_bounds(left, y, usable_width, height)
+    val style = browser_backend_widget_draw_ir_style(node, kind)
+    var next = commands
+    if kind == "image":
+        val image_uri = browser_backend_widget_image_uri(node)
+        if image_uri != "":
+            next = next.push(draw_ir_image_command(node.id, left, y, usable_width, height, image_uri, style))
+        else:
+            next = next.push(draw_ir_box_with_style(node.id, left, y, usable_width, height, browser_backend_widget_draw_ir_color(kind), hit, hit, hit, hit, style))
+    else:
+        next = next.push(draw_ir_box_with_style(node.id, left, y, usable_width, height, browser_backend_widget_draw_ir_color(kind), hit, hit, hit, hit, style))
+    if text_value != "" and next.len() < max_commands:
+        next = next.push(draw_ir_text("{node.id}:text", left + 3, y + 3, text_value, browser_backend_widget_text_color(kind)))
+    var cursor = y + height + 2
+    for child in node.children():
+        if next.len() < max_commands:
+            val child_result = browser_backend_collect_widget_draw_ir_commands(child, x, cursor, width, depth + 1, next, max_commands)
+            next = child_result.0
+            cursor = child_result.1
+    (next, cursor)
+
+fn browser_backend_layout_draw_ir_commands(root_node: WidgetNode, layout: LayoutBox) -> [DrawIrCommand]:
+    val background = draw_ir_rect("browser-frame-root-{layout.node_id}", 0, 0, browser_backend_i32_at_least_one(layout.width.to_i32()), browser_backend_i32_at_least_one(layout.height.to_i32()), 0xff20262du32)
+    val semantic = browser_backend_collect_widget_draw_ir_commands(root_node, 0, 0, browser_backend_i32_at_least_one(layout.width.to_i32()), 0, [background], 32)
+    val commands = semantic.0
+    if commands.len() == 0:
+        return [draw_ir_rect("browser-layout-empty", 0, 0, 1, 1, 0xff20262du32)]
+    commands
+
+fn browser_backend_dispatch_prepared_draw_ir(artifact: WebRenderArtifact, root_node: WidgetNode, layout: LayoutBox, width: i32, height: i32, revision: i64) -> WebRenderArtifact:
+    if artifact.queue_backend_handle <= 0:
+        return artifact
+    if artifact.queue_submit_status != "submitted" or artifact.queue_drain_status != "drained":
+        return artifact
+    val source = draw_ir_source_gui_ast("browser-frame", "browser-frame", "{revision}")
+    val embedding = draw_ir_embedding_config("browser-frame", "browser-frame", 0, 0, width, height, 0, 1000, true)
+    val commands = browser_backend_layout_draw_ir_commands(root_node, layout)
+    val batch = draw_ir_batch_with_source("browser-frame-{revision}", DRAW_IR_BACKEND_GPU, embedding, commands, source)
+    val queue = engine2d_host_gpu_runtime_queue_with_backend_handle(artifact.engine2d_backend, 1, artifact.queue_backend_handle, true, 4096)
+    val packet_bytes = commands.len().to_i64() * 64
+    val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
+    val result = engine2d_draw_ir_runtime_queue_dispatch(batch, DRAW_IR_BACKEND_GPU, commands.len().to_i64(), packet_bytes, payload, queue)
+    web_render_artifact_with_runtime_dispatch_payload(artifact, result.runtime_dispatch.status, result.runtime_dispatch.diagnostic, result.runtime_dispatch.payload_size, result.runtime_dispatch.payload_hash, result.runtime_dispatch.payload_text)
 
 # =========================================================================
 # Framebuffer — CPU-side pixel buffer for software and GPU readback
@@ -135,13 +282,40 @@ class BrowserBackend:
     last_artifact_queue_drained: i64
     last_artifact_queue_backend_handle: i64
     last_artifact_queue_reason: text
+    last_artifact_queue_payload_size: i64
+    last_artifact_queue_payload_hash: i64
+    last_artifact_queue_payload_text: text
+    last_artifact_queue_dispatch_status: text
+    last_artifact_queue_dispatch_reason: text
+    last_artifact_queue_dispatch_payload_size: i64
+    last_artifact_queue_dispatch_payload_hash: i64
+    last_artifact_queue_dispatch_payload_text: text
     last_artifact_readback_status: text
     last_artifact_readback_backend: text
     last_artifact_readback_pixel_count: i64
     last_artifact_readback_checksum: i64
     last_artifact_readback_reason: text
     last_artifact_gpu_readback_source: text
+    last_artifact_event_correlation_status: text
+    last_artifact_event_correlation_id: text
+    last_artifact_event_correlation_summary: text
+    last_artifact_event_correlation_queue_packet: i64
+    last_artifact_event_correlation_readback_source: text
+    last_artifact_event_correlation_readback_checksum: i64
     last_input_envelope_json: text
+    last_input_event_correlation_id: text
+    input_event_enqueued_count: i64
+    input_event_polled_count: i64
+    input_event_dispatched_count: i64
+    input_event_pending_depth: i64
+    last_input_event_ingress_us: i64
+    last_input_event_dispatch_us: i64
+    last_input_event_to_render_us: i64
+    last_input_event_roundtrip_status: text
+    last_input_event_host_gpu_target_lane: text
+    last_input_event_host_gpu_forwarded: bool
+    last_input_event_host_gpu_backward_completed: bool
+    last_input_event_host_gpu_summary: text
     last_semantic_snapshot_json: text
     static_shell_cache_key: text
     static_shell_full_html: text
@@ -164,6 +338,12 @@ class BrowserBackend:
     present_pixels_cache_hits: i32
     present_pixels_cache_stores: i32
     web_render_pixel_cache: WebRenderPixelArtifactCache
+    last_render_dom_layout_us: i64
+    last_render_html_us: i64
+    last_render_pixel_artifact_us: i64
+    last_render_draw_ir_dispatch_us: i64
+    last_render_framebuffer_copy_us: i64
+    last_render_state_store_us: i64
 
     static fn create(w: i32, h: i32, backend: text) -> Result<BrowserBackend, text>:
         """Create a BrowserBackend with the specified GPU backend.
@@ -194,13 +374,40 @@ class BrowserBackend:
             last_artifact_queue_drained: 0,
             last_artifact_queue_backend_handle: 0,
             last_artifact_queue_reason: "runtime queue not requested",
+            last_artifact_queue_payload_size: 0,
+            last_artifact_queue_payload_hash: 0,
+            last_artifact_queue_payload_text: "",
+            last_artifact_queue_dispatch_status: WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED,
+            last_artifact_queue_dispatch_reason: "runtime dispatch not requested",
+            last_artifact_queue_dispatch_payload_size: 0,
+            last_artifact_queue_dispatch_payload_hash: 0,
+            last_artifact_queue_dispatch_payload_text: "",
             last_artifact_readback_status: "not_requested",
             last_artifact_readback_backend: "",
             last_artifact_readback_pixel_count: 0,
             last_artifact_readback_checksum: 0,
             last_artifact_readback_reason: "backend readback not requested",
             last_artifact_gpu_readback_source: "not_requested",
+            last_artifact_event_correlation_status: "not_requested",
+            last_artifact_event_correlation_id: "",
+            last_artifact_event_correlation_summary: "",
+            last_artifact_event_correlation_queue_packet: 0,
+            last_artifact_event_correlation_readback_source: "not_requested",
+            last_artifact_event_correlation_readback_checksum: 0,
             last_input_envelope_json: "",
+            last_input_event_correlation_id: "",
+            input_event_enqueued_count: 0,
+            input_event_polled_count: 0,
+            input_event_dispatched_count: 0,
+            input_event_pending_depth: 0,
+            last_input_event_ingress_us: 0,
+            last_input_event_dispatch_us: 0,
+            last_input_event_to_render_us: 0,
+            last_input_event_roundtrip_status: "not_requested",
+            last_input_event_host_gpu_target_lane: "",
+            last_input_event_host_gpu_forwarded: false,
+            last_input_event_host_gpu_backward_completed: false,
+            last_input_event_host_gpu_summary: "",
             last_semantic_snapshot_json: "",
             static_shell_cache_key: "",
             static_shell_full_html: "",
@@ -222,7 +429,13 @@ class BrowserBackend:
             present_pixels_cache_valid: false,
             present_pixels_cache_hits: 0,
             present_pixels_cache_stores: 0,
-            web_render_pixel_cache: web_render_pixel_artifact_cache(w, h, resolved)
+            web_render_pixel_cache: web_render_pixel_artifact_cache(w, h, resolved),
+            last_render_dom_layout_us: 0,
+            last_render_html_us: 0,
+            last_render_pixel_artifact_us: 0,
+            last_render_draw_ir_dispatch_us: 0,
+            last_render_framebuffer_copy_us: 0,
+            last_render_state_store_us: 0
         ))
 
     fn render_html(state: UIState) -> text:
@@ -244,12 +457,32 @@ class BrowserBackend:
         self.last_artifact_queue_drained = 0
         self.last_artifact_queue_backend_handle = 0
         self.last_artifact_queue_reason = "runtime queue not requested"
+        self.last_artifact_queue_payload_size = 0
+        self.last_artifact_queue_payload_hash = 0
+        self.last_artifact_queue_payload_text = ""
+        self.last_artifact_queue_dispatch_status = WEB_RENDER_QUEUE_STATUS_NOT_REQUESTED
+        self.last_artifact_queue_dispatch_reason = "runtime dispatch not requested"
+        self.last_artifact_queue_dispatch_payload_size = 0
+        self.last_artifact_queue_dispatch_payload_hash = 0
+        self.last_artifact_queue_dispatch_payload_text = ""
         self.last_artifact_readback_status = "not_requested"
         self.last_artifact_readback_backend = ""
         self.last_artifact_readback_pixel_count = 0
         self.last_artifact_readback_checksum = 0
         self.last_artifact_readback_reason = "backend readback not requested"
         self.last_artifact_gpu_readback_source = "not_requested"
+        self.last_artifact_event_correlation_status = "not_requested"
+        self.last_artifact_event_correlation_id = ""
+        self.last_artifact_event_correlation_summary = ""
+        self.last_artifact_event_correlation_queue_packet = 0
+        self.last_artifact_event_correlation_readback_source = "not_requested"
+        self.last_artifact_event_correlation_readback_checksum = 0
+
+    me finish_event_render_roundtrip():
+        if self.last_input_event_dispatch_us > 0:
+            val elapsed = rt_time_now_unix_micros() - self.last_input_event_dispatch_us
+            self.last_input_event_to_render_us = if elapsed >= 0: elapsed else: 0
+            self.last_input_event_roundtrip_status = "rendered"
 
     fn static_frame_matches(tree: UITree, state: UIState, revision: i64) -> bool:
         self.static_frame_state_valid
@@ -277,6 +510,7 @@ class BrowserBackend:
         if self.static_frame_matches(tree, state, revision) and self.render_cached_static_frame():
             self.static_frame_fast_hits = self.static_frame_fast_hits + 1
             self.reset_runtime_queue_diagnostics()
+            self.finish_event_render_roundtrip()
             return
 
         val body = render_html_tree(tree.root_node(), state)
@@ -285,9 +519,11 @@ class BrowserBackend:
         val profile = web_render_optimization_profile(req)
         if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.render_cached_static_frame():
             self.reset_runtime_queue_diagnostics()
+            self.finish_event_render_roundtrip()
             return
 
         # Step 1: Build DOM from widget tree
+        val dom_layout_start_us = rt_time_now_unix_micros()
         val root_node = tree.root_node()
         val dom = widget_to_dom(root_node)
 
@@ -296,10 +532,12 @@ class BrowserBackend:
 
         # Step 3: Cache layout for hit testing
         self.layout_cache = collect_layout_entries(layout, [])
+        self.last_render_dom_layout_us = rt_time_now_unix_micros() - dom_layout_start_us
 
         # Step 4: Render the generated UI HTML through the shared SimpleWeb
         # Engine2D pixel path, then mirror those pixels into this backend's
         # legacy framebuffer for host-window present and snapshots.
+        val html_start_us = rt_time_now_unix_micros()
         var full_html = ""
         if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.static_shell_full_html != "":
             self.static_shell_html_hits = self.static_shell_html_hits + 1
@@ -310,9 +548,17 @@ class BrowserBackend:
                 self.static_shell_cache_key = profile.cache_key
                 self.static_shell_full_html = full_html
                 self.static_shell_html_stores = self.static_shell_html_stores + 1
-        val artifact = self.web_render_pixel_cache.html_request_to_pixel_artifact(req, full_html)
+        self.last_render_html_us = rt_time_now_unix_micros() - html_start_us
+        val pixel_start_us = rt_time_now_unix_micros()
+        var artifact = self.web_render_pixel_cache.html_request_to_pixel_artifact(req, full_html)
+        self.last_render_pixel_artifact_us = rt_time_now_unix_micros() - pixel_start_us
+        val dispatch_start_us = rt_time_now_unix_micros()
+        artifact = browser_backend_dispatch_prepared_draw_ir(artifact, root_node, layout, self.width, self.height, revision)
+        self.last_render_draw_ir_dispatch_us = rt_time_now_unix_micros() - dispatch_start_us
+        val framebuffer_start_us = rt_time_now_unix_micros()
         self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, artifact.pixels)
         self.present_pixels_cache_valid = false
+        self.last_render_framebuffer_copy_us = rt_time_now_unix_micros() - framebuffer_start_us
         self.web_render_target = artifact.target
         self.last_artifact_html = artifact.html
         self.last_artifact_capabilities = artifact.capability_summary
@@ -326,21 +572,44 @@ class BrowserBackend:
         self.last_artifact_queue_drained = artifact.queue_drained
         self.last_artifact_queue_backend_handle = artifact.queue_backend_handle
         self.last_artifact_queue_reason = artifact.queue_reason
+        self.last_artifact_queue_payload_size = artifact.queue_payload_size
+        self.last_artifact_queue_payload_hash = artifact.queue_payload_hash
+        self.last_artifact_queue_payload_text = artifact.queue_payload_text
+        self.last_artifact_queue_dispatch_status = artifact.queue_dispatch_status
+        self.last_artifact_queue_dispatch_reason = artifact.queue_dispatch_reason
+        self.last_artifact_queue_dispatch_payload_size = artifact.queue_dispatch_payload_size
+        self.last_artifact_queue_dispatch_payload_hash = artifact.queue_dispatch_payload_hash
+        self.last_artifact_queue_dispatch_payload_text = artifact.queue_dispatch_payload_text
         self.last_artifact_readback_status = artifact.readback_status
         self.last_artifact_readback_backend = artifact.readback_backend
         self.last_artifact_readback_pixel_count = artifact.readback_pixel_count
         self.last_artifact_readback_checksum = artifact.readback_checksum
         self.last_artifact_readback_reason = artifact.readback_reason
         self.last_artifact_gpu_readback_source = artifact.gpu_readback_source
+        if self.last_input_event_roundtrip_status == "dispatched" and self.last_input_event_correlation_id != "":
+            self.last_artifact_event_correlation_id = self.last_input_event_correlation_id
+            self.last_artifact_event_correlation_queue_packet = artifact.queue_packet_id
+            self.last_artifact_event_correlation_readback_source = artifact.gpu_readback_source
+            self.last_artifact_event_correlation_readback_checksum = artifact.readback_checksum
+            if artifact.queue_packet_id > 0 and artifact.gpu_readback_source == "device_readback":
+                self.last_artifact_event_correlation_status = "event_frame_readback_correlated"
+            else:
+                self.last_artifact_event_correlation_status = "event_frame_without_device_readback"
+            self.last_artifact_event_correlation_summary = "event=" + self.last_artifact_event_correlation_id + ";frame_packet=" + artifact.queue_packet_id.to_text() + ";readback_source=" + artifact.gpu_readback_source + ";checksum=" + artifact.readback_checksum.to_text()
+        val state_store_start_us = rt_time_now_unix_micros()
         if profile.cacheable_static_shell:
             self.store_static_frame_state(tree, state, revision)
             self.static_frame_fast_stores = self.static_frame_fast_stores + 1
             self.static_frame_stores = self.static_frame_stores + 1
+        self.last_render_state_store_us = rt_time_now_unix_micros() - state_store_start_us
+        self.finish_event_render_roundtrip()
 
     me poll_events() -> [UIEvent]:
         """Return queued events and clear the queue."""
         val events = self.event_queue
         self.event_queue = []
+        self.input_event_polled_count = self.input_event_polled_count + events.len().to_i64()
+        self.input_event_pending_depth = 0
         return events
 
     me push_event(event: UIEvent):
@@ -348,6 +617,29 @@ class BrowserBackend:
         val input_env = web_render_input_envelope_from_event(WEB_RENDER_TARGET_PURE_SIMPLE, "browser", event)
         self.last_input_envelope_json = web_render_input_envelope_to_json(input_env)
         self.event_queue = self.event_queue.push(event)
+        self.input_event_enqueued_count = self.input_event_enqueued_count + 1
+        self.input_event_pending_depth = self.event_queue.len().to_i64()
+        self.last_input_event_ingress_us = rt_time_now_unix_micros()
+        self.last_input_event_roundtrip_status = "queued"
+        self.last_input_event_host_gpu_target_lane = ""
+        self.last_input_event_host_gpu_forwarded = false
+        self.last_input_event_host_gpu_backward_completed = false
+        self.last_input_event_host_gpu_summary = "queued local browser event"
+        self.last_input_event_correlation_id = ""
+
+    me record_event_dispatch(event: UIEvent):
+        val input_env = web_render_input_envelope_from_event(WEB_RENDER_TARGET_PURE_SIMPLE, "browser", event)
+        val envelope_json = web_render_input_envelope_to_json(input_env)
+        self.last_input_envelope_json = envelope_json
+        self.input_event_dispatched_count = self.input_event_dispatched_count + 1
+        self.last_input_event_dispatch_us = rt_time_now_unix_micros()
+        self.last_input_event_roundtrip_status = "dispatched"
+        self.last_input_event_correlation_id = "browser-input-{self.input_event_dispatched_count}"
+        val flow = engine2d_host_gpu_draw_ir_event_flow(self.last_input_event_correlation_id, "frame_batch", envelope_json.len().to_i64(), 4096, true, false, false, false, true, 16)
+        self.last_input_event_host_gpu_target_lane = flow.decision.target_lane
+        self.last_input_event_host_gpu_forwarded = flow.forward.forwarded
+        self.last_input_event_host_gpu_backward_completed = flow.backward.completed
+        self.last_input_event_host_gpu_summary = engine2d_host_gpu_draw_ir_event_flow_summary(flow)
 
     fn input_envelope_json(surface_id: text, event: UIEvent) -> text:
         val env = web_render_input_envelope_from_event(WEB_RENDER_TARGET_PURE_SIMPLE, surface_id, event)

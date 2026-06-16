@@ -1,0 +1,90 @@
+# Shared auth-path parameter helpers for Simple Web.
+
+val UI_WEB_MAX_UNAUTH_BODY_BYTES: i64 = 8192
+
+fn ui_web_extract_bearer(headers: text, path: text) -> text:
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with("authorization:"):
+            val value = trimmed[14:].trim()
+            if value.lower().starts_with("bearer "):
+                return value[7:].trim()
+        if trimmed.lower().starts_with("sec-websocket-protocol:"):
+            val value = trimmed[23:].trim()
+            val bearer = ui_web_bearer_from_ws_protocols(value)
+            if bearer != "":
+                return bearer
+    return ui_web_query_param(path, "token")
+
+fn ui_web_bearer_from_ws_protocols(protocols: text) -> text:
+    for part in protocols.split(","):
+        val protocol = part.trim()
+        if protocol.starts_with("bearer."):
+            return ui_web_percent_decode_query_component(protocol.slice(7, protocol.len()))
+    return ""
+
+fn ui_web_ws_response_protocol(headers: text) -> text:
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with("sec-websocket-protocol:"):
+            val value = trimmed[23:].trim()
+            for part in value.split(","):
+                val protocol = part.trim()
+                if protocol == "simple-ui":
+                    return "simple-ui"
+    return ""
+
+fn ui_web_query_param(path: text, key: text) -> text:
+    val idx = path.find("?")
+    if idx < 0:
+        return ""
+    val query = path.slice(idx + 1, path.len())
+    for part in query.split("&"):
+        val eq = part.find("=")
+        if eq >= 0:
+            val k = part.slice(0, eq)
+            if k == key:
+                return ui_web_percent_decode_query_component(part.slice(eq + 1, part.len()))
+    return ""
+
+fn ui_web_content_length(headers: text) -> i64:
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with("content-length:"):
+            val raw = trimmed[15:].trim()
+            if raw == "":
+                return 0
+            return raw.parse_i64()
+    return 0
+
+fn ui_web_body_exceeds_unauth_limit(headers: text) -> bool:
+    return ui_web_content_length(headers) > UI_WEB_MAX_UNAUTH_BODY_BYTES
+
+fn ui_web_percent_decode_query_component(value: text) -> text:
+    var out = value
+    out = out.replace("%2E", ".")
+    out = out.replace("%2e", ".")
+    out = out.replace("%2F", "/")
+    out = out.replace("%2f", "/")
+    out = out.replace("%3A", ":")
+    out = out.replace("%3a", ":")
+    out = out.replace("%20", " ")
+    out = out.replace("+", " ")
+    out = out.replace("%2B", "+")
+    out = out.replace("%2b", "+")
+    out = out.replace("%26", "&")
+    out = out.replace("%3D", "=")
+    out = out.replace("%3d", "=")
+    out = out.replace("%3F", "?")
+    out = out.replace("%3f", "?")
+    out = out.replace("%25", "%")
+    return out
+
+export ui_web_extract_bearer
+export ui_web_bearer_from_ws_protocols
+export ui_web_ws_response_protocol
+export ui_web_query_param
+export ui_web_content_length
+export ui_web_body_exceeds_unauth_limit
+export ui_web_percent_decode_query_component
+export UI_WEB_MAX_UNAUTH_BODY_BYTES

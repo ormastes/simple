@@ -5,6 +5,7 @@
 
 use app.ui.web.tls_serve_loop.{ConnStream}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
+use app.ui.web.auth_params.{ui_web_extract_bearer, ui_web_ws_response_protocol}
 use app.ui.web.session_token.{verify}
 # Use runtime SHA-1/base64 directly to avoid as_bytes() interpreter limitation
 extern fn rt_sha1_new() -> i64
@@ -63,6 +64,9 @@ fn handle_ws_upgrade(stream: ConnStream, path: text, headers: text, guard: Origi
     response = "{response}Upgrade: websocket\r\n"
     response = "{response}Connection: Upgrade\r\n"
     response = "{response}Sec-WebSocket-Accept: {accept}\r\n"
+    val protocol = ui_web_ws_response_protocol(headers)
+    if protocol != "":
+        response = "{response}Sec-WebSocket-Protocol: {protocol}\r\n"
     response = "{response}\r\n"
     stream.write_all(response)
     # The WebRuntimeAdapter sends the initial snapshot via send_snapshot()
@@ -160,17 +164,4 @@ fn send_ws_close(stream: ConnStream, code: i64, reason: text) -> bool:
 
 fn _extract_bearer(headers: text, path: text) -> text:
     """Extract bearer token from Authorization header or ?token= query param."""
-    for line in headers.split("\n"):
-        val trimmed = line.trim()
-        if trimmed.lower().starts_with("authorization:"):
-            val value = trimmed[14:].trim()
-            if value.lower().starts_with("bearer "):
-                return value[7:].trim()
-    val idx = path.find("?token=")
-    if idx >= 0:
-        val after = path.slice(idx + 7, path.len())
-        val amp = after.find("&")
-        if amp >= 0:
-            return after.slice(0, amp)
-        return after
-    return ""
+    return ui_web_extract_bearer(headers, path)

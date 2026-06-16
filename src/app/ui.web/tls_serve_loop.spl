@@ -27,11 +27,12 @@ use app.ui.web.html.{generate_html_page}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
 use app.ui.web.ws_handler.{handle_ws_upgrade, send_ws_text}
-use app.ui.web.ui_routes.{dispatch_ui_route}
+use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_tls_server_write_bytes(handle: i64, data: [u8]) -> i64
+extern fn rt_time_ms() -> u64
 
 # =========================================================================
 # ConnStream — thin adapter wrapping either a TLS connection handle or a
@@ -225,7 +226,7 @@ class TlsWebServer:
                     last_file_content: content,
                     running: true,
                     origin_guard: OriginGuard.from_env(),
-                    token_secret: load_secret(false),
+                    token_secret: load_secret(true),
                     ws_clients: []
                 ))
 
@@ -327,8 +328,11 @@ class TlsWebServer:
                         val html = generate_html_page(self.session.current_state(), self.port)
                         _tls_http_response(200, "text/html", html)
                     "/api/state":
-                        val state_json = _tls_state_to_json(self.session.current_state())
-                        _tls_http_response(200, "application/json", state_json)
+                        if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
+                            _tls_http_response(403, "application/json", "{\"error\": \"forbidden\"}")
+                        else:
+                            val state_json = _tls_state_to_json(self.session.current_state())
+                            _tls_http_response(200, "application/json", state_json)
                     _:
                         _tls_http_response(404, "text/plain", "Not Found")
 

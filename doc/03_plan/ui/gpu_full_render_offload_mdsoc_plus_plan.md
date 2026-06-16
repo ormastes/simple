@@ -56,7 +56,7 @@ External systems are references, not replacement architectures:
 - Draw/processing lane sketch:
   `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl`
 - Minimal draw core:
-  `src/lib/gc_async_mut/gpu/engine2d/backend_core.spl`
+  `src/lib/nogc_async_mut/gpu/engine2d/backend_core.spl`
 - Compute session contract:
   `src/lib/gc_async_mut/gpu/engine2d/backend_session.spl`
 - Vulkan backend/runtime:
@@ -262,6 +262,25 @@ Performance targets:
 - Readback-heavy tests: allowed slower, but must report readback cost.
 
 ## Phase 2: Metal Mirror, Then Other Backends
+
+Current queue/readback baseline (2026-06-15):
+
+- `scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
+  is the fail-closed production gate for GUI/web queue and readback evidence.
+- BrowserBackend currently proves `simple-draw-ir-v2` widget-semantic dispatch
+  through the runtime queue, including widget rect/text commands, one image URI
+  command, and event-target context resolution back to the queued GUI AST batch.
+- This is command-payload evidence, not full decoded-image rendering. Image
+  rendering remains blocked until an asset resolver plus PNG/JPEG/WebP decode
+  path feeds Engine2D pixels. Until then, Engine2D must report image commands
+  as skipped unsupported Draw IR commands rather than silently implying render
+  support.
+- Platform matrix remains partial: Vulkan/CUDA/OpenCL fixture evidence passes
+  on the current Linux host, and WebGPU real device readback passes with a
+  positive handle/checksum. Metal requires native Darwin Metal readback, ROCm
+  requires AMD ROCm runtime/device/verified HSACO, and DirectX remains a
+  structured readback contract until native Windows D3D11 staging readback
+  proves `device_readback`.
 
 ### Phase 2A: Metal Parity
 

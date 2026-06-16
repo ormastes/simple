@@ -17,7 +17,7 @@ Architecture:
   - readback: read_pixels() returns the host-side pixel buffer.
 
 Usage:
-    use std.gpu.engine2d.backend_directx.{DirectXBackend, dx_platform_probe}
+    use std.gc_async_mut.gpu.engine2d.backend_directx.{DirectXBackend, dx_platform_probe}
     var b = DirectXBackend.create()
     val ok = b.init(800, 600)
     b.clear(0xFFFFFFFF)
@@ -25,14 +25,18 @@ Usage:
     val pixels = b.read_pixels()
 """
 
-use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback}
-use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_handle}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.platform.{get_host_os}
-use std.gpu.engine2d.backend_probe.{BackendStatus, BackendProbeResult}
+use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus, BackendProbeResult}
 use std.nogc_async_mut.gpu.dxvk_d3d11.{
     dxvk_d3d11_create_device,
+    dxvk_d3d11_probe_device,
     dxvk_d3d11_create_swapchain,
-    dxvk_d3d11_present,
+    dxvk_d3d11_create_readback_target,
+    dxvk_d3d11_present_readback,
+    dxvk_d3d11_readback_pixels,
+    dxvk_d3d11_destroy_readback_target,
     dxvk_d3d11_destroy_device
 }
 use std.nogc_async_mut.gpu.vulkan_icd_sffi.{vk_icd_probe_leaf}
@@ -69,7 +73,7 @@ pub fn dx_platform_probe() -> DxPlatformProbe:
         DxPlatformProbe with platform, leaf evidence string, and device_ok.
     """
     val leaf = vk_icd_probe_leaf()
-    val dev_result = dxvk_d3d11_create_device()
+    val dev_result = dxvk_d3d11_probe_device()
     val dev_ok = dev_result.is_ok
     var plat = "linux-dxvk"
     if get_host_os() == "windows":
@@ -86,6 +90,10 @@ class DirectXBackend:
     sw:              SoftwareBackend
     device_handle:   i64
     swapchain_handle: i64
+    readback_handle: i64
+    last_readback_ok: bool
+    last_readback_pixel_count: i64
+    last_readback_checksum: i64
     initialized:     bool
     last_error:      text
     leaf:            text
@@ -97,6 +105,10 @@ impl DirectXBackend:
             sw: SoftwareBackend.create(),
             device_handle: 0,
             swapchain_handle: 0,
+            readback_handle: 0,
+            last_readback_ok: false,
+            last_readback_pixel_count: 0,
+            last_readback_checksum: 0,
             initialized: false,
             last_error: "",
             leaf: "structured"
@@ -111,6 +123,12 @@ impl RenderBackend for DirectXBackend:
 
     me init(width: i32, height: i32) -> bool:
         self.last_error = ""
+        self.device_handle = 0
+        self.swapchain_handle = 0
+        self.readback_handle = 0
+        self.last_readback_ok = false
+        self.last_readback_pixel_count = 0
+        self.last_readback_checksum = 0
 
         # Probe leaf first
         val probed = vk_icd_probe_leaf()
@@ -129,15 +147,36 @@ impl RenderBackend for DirectXBackend:
         val sc_result = dxvk_d3d11_create_swapchain(dev_result.device_handle, width, height)
         if sc_result.is_ok == false:
             self.last_error = "dxvk_d3d11_create_swapchain failed"
+            if self.device_handle > 0:
+                dxvk_d3d11_destroy_device(self.device_handle)
+            self.device_handle = 0
             self.initialized = false
             return false
 
         self.swapchain_handle = sc_result.swapchain_handle
 
+        val rb_handle = dxvk_d3d11_create_readback_target(dev_result.device_handle, width.to_i64(), height.to_i64())
+        if rb_handle <= 0:
+            self.last_error = "dxvk_d3d11_create_readback_target failed"
+            if self.device_handle > 0:
+                dxvk_d3d11_destroy_device(self.device_handle)
+            self.device_handle = 0
+            self.swapchain_handle = 0
+            self.initialized = false
+            return false
+        self.readback_handle = rb_handle
+
         # Initialize software framebuffer for pixel-level operations
         val sw_ok = self.sw.init(width, height)
         if sw_ok == false:
             self.last_error = "software framebuffer init failed"
+            if self.readback_handle > 0:
+                dxvk_d3d11_destroy_readback_target(self.readback_handle)
+            if self.device_handle > 0:
+                dxvk_d3d11_destroy_device(self.device_handle)
+            self.device_handle = 0
+            self.swapchain_handle = 0
+            self.readback_handle = 0
             self.initialized = false
             return false
 
@@ -149,8 +188,14 @@ impl RenderBackend for DirectXBackend:
             self.sw.shutdown()
             if self.device_handle > 0:
                 dxvk_d3d11_destroy_device(self.device_handle)
+            if self.readback_handle > 0:
+                dxvk_d3d11_destroy_readback_target(self.readback_handle)
             self.device_handle = 0
             self.swapchain_handle = 0
+            self.readback_handle = 0
+            self.last_readback_ok = false
+            self.last_readback_pixel_count = 0
+            self.last_readback_checksum = 0
             self.initialized = false
 
     me clear(color: u32):
@@ -199,15 +244,28 @@ impl RenderBackend for DirectXBackend:
         self.sw.clear_mask()
 
     me present():
-        # Route through the D3D11 dispatch chain (evidence: chain intact)
-        if self.swapchain_handle > 0:
-            dxvk_d3d11_present(self.swapchain_handle)
+        if self.readback_handle > 0:
+            val pixels = self.sw.read_pixels()
+            val readback = dxvk_d3d11_present_readback(self.swapchain_handle, self.readback_handle, pixels, self.width().to_i64(), self.height().to_i64())
+            self.last_readback_ok = readback.readback_ok
+            self.last_readback_pixel_count = readback.pixel_count
+            self.last_readback_checksum = readback.checksum
         # Software backend present flushes the host pixel buffer
         self.sw.present()
 
     fn read_pixels() -> [u32]:
+        if self.last_readback_ok:
+            val readback = dxvk_d3d11_readback_pixels(self.readback_handle)
+            if readback.is_ok and readback.pixel_count == self.last_readback_pixel_count:
+                return readback.pixels
         self.sw.read_pixels()
     fn read_pixels_with_source() -> Engine2DReadback:
+        if self.initialized and self.last_readback_ok and self.readback_handle > 0:
+            val readback = dxvk_d3d11_readback_pixels(self.readback_handle)
+            if readback.is_ok and readback.pixel_count == self.last_readback_pixel_count:
+                return engine2d_readback_with_handle(readback.pixels, "device_readback", self.readback_handle)
+        if self.initialized and self.swapchain_handle > 0:
+            return engine2d_readback_with_handle(self.sw.read_pixels(), "swapchain_present", self.swapchain_handle)
         engine2d_readback(self.sw.read_pixels(), "cpu_mirror")
 
     fn width() -> i32:
@@ -234,7 +292,7 @@ pub fn probe_directx() -> BackendProbeResult:
         BackendProbeResult with status=Initialized on success, or
         status=Unavailable with reason on failure.
     """
-    val dev_result = dxvk_d3d11_create_device()
+    val dev_result = dxvk_d3d11_probe_device()
     val leaf = vk_icd_probe_leaf()
     if dev_result.is_ok:
         BackendProbeResult.success("directx", "dxvk-d3d11 device created " + leaf)

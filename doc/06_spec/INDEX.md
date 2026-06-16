@@ -5,16 +5,16 @@
 ## Quick Stats
 
 - **Total Features:** 1
-- **Complete Documentation:** 0 (0%)
-- **Stubs Remaining:** 1
-- **Total Lines:** 0
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 37
 - **Warnings:** 1
 
 ---
 
-## Hardware & OS (1 features)
+## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Ed25519 Scalar Muladd Specification](test/01_unit/os/crypto/ed25519_scalar_muladd_spec.md) | Auto-generated | N/A | 3 | 0% | 0 lines |
+| [Production GUI/Web host-GPU platform matrix follow-up](test/03_system/check/production_gui_web_host_gpu_platform_matrix_followup_spec.md) | Minimal | N/A | 7 | 20% | 37 lines |
 

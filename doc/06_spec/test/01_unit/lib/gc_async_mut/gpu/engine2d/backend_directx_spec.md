@@ -1,6 +1,6 @@
-# Backend Directx Specification
+# DirectX 2D Engine backend contract
 
-> <details>
+> Pins the Engine2D DirectX backend surface for both Linux DXVK/vkd3d routing and native Windows D3D11 routing. The platform probe drives expected evidence strings, so Windows-only behavior still has structured evidence on Linux.
 
 <!-- sdn-diagram:id=backend_directx_spec.arch -->
 <details class="sdn-source">
@@ -27,12 +27,83 @@ backend_directx_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Backend Directx Specification
+# DirectX 2D Engine backend contract
+
+Pins the Engine2D DirectX backend surface for both Linux DXVK/vkd3d routing and native Windows D3D11 routing. The platform probe drives expected evidence strings, so Windows-only behavior still has structured evidence on Linux.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/host_gpu_lane.md |
+| Plan | doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md |
+| Design | doc/05_design/host_gpu_lane.md |
+| Research | doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md |
+| Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_directx_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Pins the Engine2D DirectX backend surface for both Linux DXVK/vkd3d routing and
+native Windows D3D11 routing. The platform probe drives expected evidence
+strings, so Windows-only behavior still has structured evidence on Linux.
+
+**Requirements:** doc/02_requirements/feature/host_gpu_lane.md
+**Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
+**Plan:** doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md
+**Architecture:** doc/04_architecture/ui/simple_gui_stack.md
+**Design:** doc/05_design/host_gpu_lane.md
+
+## Syntax
+
+CPU mirror fallback before device init:
+
+```simple
+val readback = b.read_pixels_with_source()
+expect(readback.source).to_equal("cpu_mirror")
+expect(readback.backend_handle).to_equal(0)
+```
+
+Initialized swapchain presentation provenance:
+
+```simple
+b.initialized = true
+b.swapchain_handle = 77
+val readback = b.read_pixels_with_source()
+expect(readback.source).to_equal("swapchain_present")
+expect(readback.backend_handle).to_equal(77)
+```
+
+Initialized readback target after present:
+
+```simple
+b.clear(0xFF224466)
+b.present()
+val readback = b.read_pixels_with_source()
+expect(readback.source).to_equal("device_readback")
+expect(readback.backend_handle).to_be_greater_than(0)
+expect(readback.pixel_count).to_equal(16)
+```
+
+## Acceptance
+
+- `leaf=dlopen` means a real Vulkan/DXVK/VKD3D library was found at probe time.
+- `leaf=structured` means no loadable library was found and the structured
+  handle fallback is active.
+- `swapchain_present` is presentation provenance, not backend
+  `device_readback` proof.
+- DirectX may report `device_readback` only after an initialized readback
+  target has uploaded and read back the expected pixel count with a positive
+  readback handle. Checksum is evidence, not the validity gate, because an
+  all-zero frame is valid and may checksum to zero.
 
 ## Scenarios
 
@@ -140,6 +211,25 @@ expect(result.api_name).to_equal("directx")
 
 </details>
 
+#### probe_directx can repeat without leaking the probe device
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val first = probe_directx()
+val second = probe_directx()
+expect(first.api_name).to_equal("directx")
+expect(second.api_name).to_equal("directx")
+expect(first.reason.contains("leaf=")).to_be(true)
+expect(second.reason.contains("leaf=")).to_be(true)
+```
+
+</details>
+
 ### DirectX 2D backend — init and name
 
 #### backend name is directx
@@ -153,6 +243,120 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val b = DirectXBackend.create()
 expect(b.name()).to_equal("directx")
+```
+
+</details>
+
+#### readback defaults to CPU mirror provenance before device init
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val b = DirectXBackend.create()
+val readback = b.read_pixels_with_source()
+expect(readback.source).to_equal("cpu_mirror")
+expect(readback.backend_handle).to_equal(0)
+```
+
+</details>
+
+#### reports swapchain presentation provenance without claiming device readback
+
+- var b = DirectXBackend create
+   - Expected: readback.source equals `swapchain_present`
+   - Expected: readback.backend_handle equals `77`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = DirectXBackend.create()
+b.initialized = true
+b.swapchain_handle = 77
+
+val readback = b.read_pixels_with_source()
+
+expect(readback.source).to_equal("swapchain_present")
+expect(readback.backend_handle).to_equal(77)
+```
+
+</details>
+
+#### reports device readback only after present populates a readback target
+
+- var b = DirectXBackend create
+- b clear
+- b present
+   - Expected: readback.source equals `device_readback`
+   - Expected: readback.pixel_count equals `16`
+   - Expected: readback.pixels[0] equals `0xFF224466`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = DirectXBackend.create()
+val ok = b.init(4, 4)
+if ok:
+    b.clear(0xFF224466)
+    b.present()
+    val readback = b.read_pixels_with_source()
+    expect(readback.source).to_equal("device_readback")
+    expect(readback.backend_handle).to_be_greater_than(0)
+    expect(readback.pixel_count).to_equal(16)
+    expect(readback.checksum).to_be_greater_than(0)
+    expect(readback.pixels[0]).to_equal(0xFF224466)
+else:
+    val probe = dx_platform_probe()
+    expect(probe.leaf).to_contain("leaf=")
+```
+
+</details>
+
+#### accepts all-zero device readback frames after present
+
+- var b = DirectXBackend create
+- b clear
+- b present
+   - Expected: readback.source equals `device_readback`
+   - Expected: readback.pixel_count equals `16`
+   - Expected: readback.checksum equals `0`
+   - Expected: readback.pixels[0] equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = DirectXBackend.create()
+val ok = b.init(4, 4)
+if ok:
+    b.clear(0)
+    b.present()
+    val readback = b.read_pixels_with_source()
+    expect(readback.source).to_equal("device_readback")
+    expect(readback.backend_handle).to_be_greater_than(0)
+    expect(readback.pixel_count).to_equal(16)
+    expect(readback.checksum).to_equal(0)
+    expect(readback.pixels[0]).to_equal(0)
+else:
+    val probe = dx_platform_probe()
+    expect(probe.leaf).to_contain("leaf=")
 ```
 
 </details>
@@ -426,33 +630,23 @@ expect(has_dxvk).to_equal(true)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_directx_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- DirectX 2D backend — platform probe
-- DirectX 2D backend — init and name
-- DirectX 2D backend — drawing (init required, CPU parity)
-- DirectX 2D backend — dispatch chain evidence
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/feature/host_gpu_lane.md](doc/02_requirements/feature/host_gpu_lane.md)
+- **Plan:** [doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md](doc/03_plan/agent_tasks/gui_web_gpu_host_platform_matrix.md)
+- **Design:** [doc/05_design/host_gpu_lane.md](doc/05_design/host_gpu_lane.md)
+- **Research:** [doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md](doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md)
 
 
 </details>

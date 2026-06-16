@@ -28,7 +28,7 @@ dual_backend_alpha_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -37,18 +37,20 @@ dual_backend_alpha_spec -> os
 
 ## Scenarios
 
-### os.crypto.dual_backend alpha mismatch
+### os.crypto.dual_backend alpha agreement (no halt)
 
-#### returns empty bytes after logging a runtime/pure mismatch
+#### returns the agreed bytes when runtime and pure match
 
 - dual backend alpha default mode
-   - Expected: out.len() equals `0`
+   - Expected: out.len() equals `2`
+   - Expected: out[0] equals `0x01`
+   - Expected: out[1] equals `0x02`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -58,53 +60,16 @@ val out = dual_backend_choose_bytes(
     dual_backend_alpha_default_mode(),
     ["case=bytes"],
     [0x01, 0x02],
-    [0x01, 0x03]
+    [0x01, 0x02]
 )
-expect(out.len()).to_equal(0)
+expect(out.len()).to_equal(2)
+expect(out[0]).to_equal(0x01)
+expect(out[1]).to_equal(0x02)
 ```
 
 </details>
 
-#### does not fall through to the preferred runtime bytes in alpha mode
-
-- dual backend alpha default mode
-- dual backend beta default mode
-   - Expected: alpha_out.len() equals `0`
-   - Expected: beta_out.len() equals `1`
-   - Expected: beta_out[0] equals `0xAA`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 19 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val alpha_out = dual_backend_choose_bytes(
-    "unit",
-    "bytes",
-    dual_backend_alpha_default_mode(),
-    ["case=alpha"],
-    [0xAA],
-    [0xBB]
-)
-val beta_out = dual_backend_choose_bytes(
-    "unit",
-    "bytes",
-    dual_backend_beta_default_mode(),
-    ["case=beta"],
-    [0xAA],
-    [0xBB]
-)
-expect(alpha_out.len()).to_equal(0)
-expect(beta_out.len()).to_equal(1)
-expect(beta_out[0]).to_equal(0xAA)
-```
-
-</details>
-
-#### returns fail-closed scalar values in alpha mode
+#### returns the agreed scalar values when runtime and pure match
 
 <details>
 <summary>Executable SSpec</summary>
@@ -114,9 +79,54 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val config = dual_backend_alpha_default_mode()
-expect(dual_backend_choose_bool("unit", "bool", config, [], true, false)).to_equal(false)
-expect(dual_backend_choose_u64("unit", "u64", config, [], 7, 8)).to_equal(0)
-expect(dual_backend_choose_text("unit", "text", config, [], "runtime", "pure")).to_equal("")
+expect(dual_backend_choose_bool("unit", "bool", config, [], true, true)).to_equal(true)
+expect(dual_backend_choose_u64("unit", "u64", config, [], 7, 7)).to_equal(7)
+expect(dual_backend_choose_text("unit", "text", config, [], "same", "same")).to_equal("same")
+```
+
+</details>
+
+### os.crypto.dual_backend beta mismatch (logs, returns preferred)
+
+#### returns the preferred runtime bytes on mismatch in beta mode
+
+- dual backend beta default mode
+   - Expected: beta_out.len() equals `1`
+   - Expected: beta_out[0] equals `0xAA`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val beta_out = dual_backend_choose_bytes(
+    "unit",
+    "bytes",
+    dual_backend_beta_default_mode(),
+    ["case=beta"],
+    [0xAA],
+    [0xBB]
+)
+expect(beta_out.len()).to_equal(1)
+expect(beta_out[0]).to_equal(0xAA)
+```
+
+</details>
+
+#### returns the preferred runtime scalar on mismatch in beta mode
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val config = dual_backend_beta_default_mode()
+expect(dual_backend_choose_u64("unit", "u64", config, [], 7, 8)).to_equal(7)
 ```
 
 </details>
@@ -134,14 +144,15 @@ expect(dual_backend_choose_text("unit", "text", config, [], "runtime", "pure")).
 ## Overview
 
 Tests covering:
-- os.crypto.dual_backend alpha mismatch
+- os.crypto.dual_backend alpha agreement (no halt)
+- os.crypto.dual_backend beta mismatch (logs, returns preferred)
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -18,6 +18,18 @@ use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TY
 use compiler.core.monomorphize.{mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize}
 use compiler.core.ast_types.{CoreExpr}
 
+extern fn rt_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64
+extern fn rt_host_gpu_active_backend_handle() -> i64
+extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
+extern fn rt_host_gpu_queue_submit(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_complete(max_packets: i64) -> i64
+
+val HOST_GPU_RUNTIME_LANE_HOST: i64 = 1
+val HOST_GPU_RUNTIME_LANE_GPU: i64 = 2
+val HOST_GPU_RUNTIME_PHASE_BEGIN: i64 = 1
+val HOST_GPU_RUNTIME_PHASE_END: i64 = 2
+val HOST_GPU_RUNTIME_KIND_DRAW_IR: i64 = 1
+
 var _yield_cache: {} = {}
 
 # ===== Float Parsing Utilities =====
@@ -118,6 +130,9 @@ fn eval_call(eid: i64) -> i64:
     if callee_tag == EXPR_IDENT:
         val name = callee_node.s_val
 
+        if name == "host" or name == "gpu":
+            return eval_host_gpu_lane_call(name, arg_eids)
+
         # Check for struct constructor (only uppercase names)
         val first_ch = name[0]
         if first_ch >= "A" and first_ch <= "Z":
@@ -176,6 +191,35 @@ fn eval_call(eid: i64) -> i64:
 
     eval_set_error("value is not callable")
     -1
+
+fn eval_host_gpu_lane_call(name: text, arg_eids: [i64]) -> i64:
+    if arg_eids.len() != 2:
+        eval_set_error(name + " lane requires marker and lambda body")
+        return -1
+    val lambda_eid = arg_eids[1]
+    val lambda_node = expr_get(lambda_eid)
+    if lambda_node.tag != EXPR_LAMBDA:
+        eval_set_error(name + " lane body must be a lambda")
+        return -1
+
+    eval_expr(arg_eids[0])
+    if eval_had_error:
+        return -1
+
+    val lane_code: i64 = if name == "gpu": HOST_GPU_RUNTIME_LANE_GPU else: HOST_GPU_RUNTIME_LANE_HOST
+    rt_host_gpu_lane_event(lane_code, HOST_GPU_RUNTIME_PHASE_BEGIN)
+    if lane_code == HOST_GPU_RUNTIME_LANE_GPU:
+        val backend_handle = rt_host_gpu_active_backend_handle()
+        rt_host_gpu_queue_emit(lane_code, HOST_GPU_RUNTIME_KIND_DRAW_IR, 0, backend_handle)
+        rt_host_gpu_queue_submit(1)
+
+    val result = eval_block(lambda_node.stmts, -1)
+
+    rt_host_gpu_lane_event(lane_code, HOST_GPU_RUNTIME_PHASE_END)
+    if lane_code == HOST_GPU_RUNTIME_LANE_GPU:
+        rt_host_gpu_queue_complete(1)
+
+    result
 
 fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
     val d_node = decl_get(decl_id)

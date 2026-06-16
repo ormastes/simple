@@ -1,0 +1,68 @@
+use std.spec.{describe, it, expect}
+use app.ui.web.origin_guard.{OriginGuard, _is_loopback_origin}
+use app.ui.web.session_token.{_allow_insecure_dev_secret_flag, _missing_secret_fatal}
+use app.ui.web.ui_routes.{ui_web_authorization_status, ui_web_request_authorized, ui_web_query_percent_decode}
+use app.ui.web.html.{generate_js, generate_wm_js}
+
+describe "ui.web production auth hardening":
+    it "requires explicit opt-in before using an insecure dev token secret":
+        expect(_allow_insecure_dev_secret_flag("")).to_be(false)
+        expect(_allow_insecure_dev_secret_flag("0")).to_be(false)
+        expect(_allow_insecure_dev_secret_flag("1")).to_be(true)
+        expect(_allow_insecure_dev_secret_flag("true")).to_be(true)
+
+    it "keeps missing secrets fatal in TLS and production non-TLS modes":
+        expect(_missing_secret_fatal(true, false)).to_be(true)
+        expect(_missing_secret_fatal(true, true)).to_be(true)
+        expect(_missing_secret_fatal(false, false)).to_be(true)
+        expect(_missing_secret_fatal(false, true)).to_be(false)
+
+    it "fails closed when login origin headers are missing or disallowed":
+        val guard = OriginGuard(allowed: ["https://localhost"])
+        val missing = guard.check("Host: localhost\n")
+        val disallowed = guard.check("Origin: https://evil.example\n")
+        val allowed = guard.check("Origin: https://localhost\n")
+        expect(missing.is_err()).to_be(true)
+        expect(disallowed.is_err()).to_be(true)
+        expect(allowed.is_ok()).to_be(true)
+
+    it "allows loopback browser origins with ports only under the default policy":
+        val default_guard = OriginGuard(allowed: ["https://localhost", "http://localhost"])
+        expect(_is_loopback_origin("http://localhost:8080")).to_be(true)
+        expect(_is_loopback_origin("https://127.0.0.1:8443")).to_be(true)
+        expect(_is_loopback_origin("http://[::1]:8080")).to_be(true)
+        expect(_is_loopback_origin("http://localhost:bad")).to_be(false)
+        expect(_is_loopback_origin("https://evil.example:8443")).to_be(false)
+        expect(default_guard.check("Origin: http://localhost:8080\n").is_ok()).to_be(true)
+        val strict_guard = OriginGuard(allowed: ["https://localhost"])
+        expect(strict_guard.check("Origin: http://localhost:8080\n").is_err()).to_be(true)
+
+    it "parses explicit origin allowlists as trimmed exact entries":
+        val guard = OriginGuard.from_env_value(" https://app.example , http://localhost:8080, ")
+        expect(guard.check("Origin: https://app.example\n").is_ok()).to_be(true)
+        expect(guard.check("Origin: http://localhost:8080\n").is_ok()).to_be(true)
+        expect(guard.check("Origin: http://localhost:9090\n").is_err()).to_be(true)
+
+    it "requires origin-bound bearer tokens for sensitive api routes":
+        val guard = OriginGuard(allowed: ["https://localhost"])
+        val secret = "unit-test-secret"
+        val now = 1000u64
+        expect(ui_web_authorization_status("Origin: https://localhost\n", "/api/state", guard, secret, now)).to_equal("missing_bearer")
+        expect(ui_web_authorization_status("Origin: https://evil.example\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_equal("forbidden_origin")
+        expect(ui_web_authorization_status("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_equal("invalid_bearer")
+        expect(ui_web_request_authorized("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now)).to_be(false)
+
+    it "generates token-authenticated websocket clients for legacy and wm browser paths":
+        val legacy_js = generate_js(8080)
+        expect(legacy_js).to_contain("fetch('/ui/login'")
+        expect(legacy_js).to_contain("new WebSocket(legacyWsUrl(), ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
+        expect(legacy_js.contains("/ws?token=")).to_be(false)
+        expect(legacy_js.contains("const wsUrl = wsProto + '://' + wsHost + '/ws';")).to_be(false)
+        val wm_js = generate_wm_js(8080)
+        expect(wm_js).to_contain("fetch('/ui/login'")
+        expect(wm_js).to_contain("new WebSocket(wsProto + '://' + wsHost + '/ui/ws', ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
+        expect(wm_js.contains("/ui/ws?token=")).to_be(false)
+
+    it "decodes browser-encoded query bearer tokens once before verification":
+        expect(ui_web_query_percent_decode("abc%252Edef%253Aghi")).to_equal("abc%2Edef%3Aghi")
+        expect(ui_web_query_percent_decode("a%2Eb%2Fc%20d%2Be")).to_equal("a.b/c d+e")

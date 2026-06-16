@@ -28,7 +28,7 @@ ws_handler_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -114,6 +114,38 @@ expect(_extract_bearer("", path)).to_equal("query-token")
 
 </details>
 
+#### extracts and decodes bearer tokens from any query position
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val path = "/ui/ws?client=wm&token=abc%252Edef%253Aghi"
+expect(_extract_bearer("", path)).to_equal("abc%2Edef%3Aghi")
+```
+
+</details>
+
+#### extracts bearer tokens from websocket subprotocols before query fallback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val headers = "Sec-WebSocket-Protocol: simple-ui, bearer.abc%252Edef%253Aghi\n"
+val path = "/ui/ws?token=query-token"
+expect(_extract_bearer(headers, path)).to_equal("abc%2Edef%3Aghi")
+expect(ui_web_ws_response_protocol(headers)).to_equal("simple-ui")
+```
+
+</details>
+
 #### prefers authorization headers over query parameters
 
 <details>
@@ -149,8 +181,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -30,6 +30,7 @@ fn random_hex(len: i64) -> text:
 # =========================================================================
 
 val TOKEN_TTL_DEFAULT_MS: u64 = 3600000u64  # 1 hour
+export TOKEN_TTL_DEFAULT_MS
 
 class SessionToken:
     token_id: text       # opaque 32-byte random, hex-encoded (64 hex chars)
@@ -123,19 +124,29 @@ fn verify(serialized: text, origin: text, secret: text, now_ms: u64) -> Result<S
 # load_secret — read HMAC secret from env; dev-mode fallback
 # =========================================================================
 
-fn load_secret(tls_mode: bool) -> text:
+fn _allow_insecure_dev_secret_flag(raw: text) -> bool:
+    val v = raw.trim().lower()
+    return v == "1" or v == "true" or v == "yes"
+
+fn _missing_secret_fatal(tls_mode: bool, allow_insecure_dev_secret: bool) -> bool:
+    return tls_mode or not allow_insecure_dev_secret
+
+fn load_secret_with_policy(tls_mode: bool, allow_insecure_dev_secret: bool) -> text:
     """Read SIMPLE_UI_WEB_TOKEN_SECRET from env.
-    In TLS mode the variable is required — panics if missing.
-    In plain-TCP dev mode a deterministic fallback is used and a warning is printed."""
+    Missing secrets fail closed unless SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET
+    explicitly opts a non-TLS local dev server into an ephemeral fallback."""
     val s = rt_env_get("SIMPLE_UI_WEB_TOKEN_SECRET") ?? ""
     if s != "":
         return s
-    if tls_mode:
-        print "FATAL: SIMPLE_UI_WEB_TOKEN_SECRET env var is required in --tls mode"
-        # We cannot panic; return empty — caller must check
+    if _missing_secret_fatal(tls_mode, allow_insecure_dev_secret):
+        print "FATAL: SIMPLE_UI_WEB_TOKEN_SECRET env var is required; set SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 only for local non-TLS development"
         return ""
     print "WARNING: SIMPLE_UI_WEB_TOKEN_SECRET unset; using insecure dev secret. Do not use in production."
     return "dev-insecure-secret-" + random_hex(8)
+
+fn load_secret(tls_mode: bool) -> text:
+    val allow_raw = rt_env_get("SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET") ?? ""
+    return load_secret_with_policy(tls_mode, _allow_insecure_dev_secret_flag(allow_raw))
 
 # =========================================================================
 # Private helpers

@@ -12,6 +12,7 @@ use app.ui.web.tls_serve_loop.{ConnStream}
 use nogc_sync_mut.ui.session.{UISession}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
 use app.ui.web.session_token.{verify, load_secret, random_hex}
+use app.ui.web.auth_params.{ui_web_extract_bearer, ui_web_query_param, ui_web_percent_decode_query_component, ui_web_ws_response_protocol}
 use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
 use app.ui.web.async_ws.{extract_field}
 use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
@@ -38,13 +39,32 @@ fn dispatch_ui_route(path: text, method: text, headers: text, body: text, stream
         return true
 
     if route == "/ui/resume" and method == "POST":
-        _handle_resume_route(stream, body, session)
+        _handle_resume_route(stream, path, headers, body, session, guard, secret)
         return true
 
     # Unknown /ui/ path
     val resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found"
     stream.write_all(resp)
     return true
+
+fn ui_web_authorization_status(headers: text, path: text, guard: OriginGuard, secret: text, now_ms: u64) -> text:
+    val origin_result = guard.check(headers)
+    val origin = match origin_result:
+        Err(_): return "forbidden_origin"
+        Ok(o): o
+    val bearer = _extract_bearer(headers, path)
+    if bearer == "":
+        return "missing_bearer"
+    val tok_result = verify(bearer, origin, secret, now_ms)
+    match tok_result:
+        Err(_): return "invalid_bearer"
+        Ok(_): return "ok"
+
+fn ui_web_request_authorized(headers: text, path: text, guard: OriginGuard, secret: text, now_ms: u64) -> bool:
+    return ui_web_authorization_status(headers, path, guard, secret, now_ms) == "ok"
+
+export ui_web_authorization_status
+export ui_web_request_authorized
 
 # =========================================================================
 # /ui/ws — WebSocket upgrade + adapter loop
@@ -83,6 +103,9 @@ fn _handle_ws_route(stream: ConnStream, path: text, headers: text, session: UISe
     ws_response = "{ws_response}Upgrade: websocket\r\n"
     ws_response = "{ws_response}Connection: Upgrade\r\n"
     ws_response = "{ws_response}Sec-WebSocket-Accept: {accept}\r\n"
+    val protocol = ui_web_ws_response_protocol(headers)
+    if protocol != "":
+        ws_response = "{ws_response}Sec-WebSocket-Protocol: {protocol}\r\n"
     ws_response = "{ws_response}\r\n"
     stream.write_all(ws_response)
 
@@ -213,7 +236,24 @@ fn _handle_host_wm_pointer(frame: text, session: UISession, session_id: text, ou
 # /ui/resume — HTTP POST resume
 # =========================================================================
 
-fn _handle_resume_route(stream: ConnStream, body: text, session: UISession):
+fn _handle_resume_route(stream: ConnStream, path: text, headers: text, body: text, session: UISession, guard: OriginGuard, secret: text):
+    val origin_result = guard.check(headers)
+    val origin = match origin_result:
+        Err(_):
+            stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            return
+        Ok(o): o
+    val bearer = _extract_bearer(headers, path)
+    if bearer == "":
+        stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        return
+    val tok_result = verify(bearer, origin, secret, rt_time_ms())
+    match tok_result:
+        Err(_):
+            stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            return
+        Ok(_):
+            pass_dn
     val session_id = _json_field(body, "session_id")
     val rev_str = _json_field(body, "snapshot_revision")
     val seq_str = _json_field(body, "last_sequence")
@@ -333,16 +373,7 @@ fn _send_error(out_ch: BoundedChannel<text>, session_id: text, code: text, messa
     out_ch.send(frame)
 
 fn _extract_bearer(headers: text, path: text) -> text:
-    for line in headers.split("\n"):
-        val trimmed = line.trim()
-        if trimmed.lower().starts_with("authorization:"):
-            val value = trimmed[14:].trim()
-            if value.lower().starts_with("bearer "):
-                return value[7:].trim()
-    val query_token = _query_param(path, "token")
-    if query_token != "":
-        return query_token
-    return ""
+    return ui_web_extract_bearer(headers, path)
 
 fn _strip_query(path: text) -> text:
     val idx = path.find("?")
@@ -351,19 +382,12 @@ fn _strip_query(path: text) -> text:
     return path.slice(0, idx)
 
 fn _query_param(path: text, key: text) -> text:
-    val idx = path.find("?")
-    if idx < 0:
-        return ""
-    val query = path.slice(idx + 1, path.len())
-    for part in query.split("&"):
-        val eq = part.find("=")
-        if eq < 0:
-            pass_do_nothing
-        else:
-            val k = part.slice(0, eq)
-            if k == key:
-                return part.slice(eq + 1, part.len())
-    return ""
+    return ui_web_query_param(path, key)
+
+fn ui_web_query_percent_decode(value: text) -> text:
+    return ui_web_percent_decode_query_component(value)
+
+export ui_web_query_percent_decode
 
 fn _json_field(json: text, field: text) -> text:
     val key = "\"{field}\":"

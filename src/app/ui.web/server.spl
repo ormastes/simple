@@ -23,7 +23,7 @@ use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{init_state}
 use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
-use app.ui.web.ui_routes.{dispatch_ui_route}
+use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_hides_desktop, host_taskbar_runtime_hides_taskbar, host_taskbar_runtime_mode_name, host_taskbar_runtime_native_window_html}
 use app.ui.web.json.{state_to_json, widgets_to_json}
@@ -37,6 +37,7 @@ extern fn rt_cli_get_args() -> [text]
 extern fn rt_env_get(key: text) -> text
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_time_ms() -> u64
 
 fn send_ws_tcp_frame(stream: TcpStream, message: text) -> bool:
     """Send a text message as one unmasked RFC6455 frame over a raw TcpStream
@@ -189,6 +190,9 @@ class WebServer:
                     rt_file_read_text(file_path)
                 else:
                     ""
+                val secret = load_secret(false)
+                if secret == "":
+                    return Err("SIMPLE_UI_WEB_TOKEN_SECRET is required unless SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 is set for local development")
                 return Ok(WebServer(
                     file_path: file_path,
                     port: port,
@@ -196,7 +200,7 @@ class WebServer:
                     last_file_content: content,
                     wm_mode: wm_mode,
                     origin_guard: OriginGuard.from_env(),
-                    token_secret: load_secret(false)
+                    token_secret: secret
                 ))
 
     fn start():
@@ -323,7 +327,7 @@ class WebServer:
                     if self.wm_mode:
                         handle_ws_wm_upgrade(ConnStream.from_tcp(stream), path, headers, self.origin_guard, self.token_secret)
                     else:
-                        self.serve_ws_tcp(stream, headers)
+                        self.serve_ws_tcp(stream, path, headers)
                     return
 
                 if path.starts_with("/wm/native_window"):
@@ -377,6 +381,14 @@ class WebServer:
                         val response = "{headers}{payload_text}"
                         self.send_http(stream, response)
                     "/api/state":
+                        if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
+                            val response = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
+                            match stream.write_text(response):
+                                Err(e):
+                                    print "HTTP write error: {e}"
+                                Ok(()):
+                                    pass_dn
+                            return
                         val payload = state_to_json(self.state)
                         val payload_text = "{payload}"
                         var headers = "HTTP/1.1 200 OK\r\n"
@@ -391,6 +403,14 @@ class WebServer:
                             Ok(()):
                                 pass_dn
                     "/api/widgets":
+                        if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
+                            val response = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
+                            match stream.write_text(response):
+                                Err(e):
+                                    print "HTTP write error: {e}"
+                                Ok(()):
+                                    pass_dn
+                            return
                         val payload = widgets_to_json(self.state)
                         val payload_text = "{payload}"
                         var headers = "HTTP/1.1 200 OK\r\n"
@@ -425,12 +445,16 @@ class WebServer:
                     Ok(()):
                         pass_dn
 
-    me serve_ws_tcp(stream: TcpStream, headers: text):
+    me serve_ws_tcp(stream: TcpStream, path: text, headers: text):
         """Complete the WebSocket handshake on the raw TcpStream, then run the
         interactive loop: read client action frames, apply them via update_state,
         and push the re-rendered widget tree back. Operates on TcpStream directly
-        (not ConnStream) and skips token auth: this is the localhost dev server
-        and the served page connects to /ws without a token."""
+        (not ConnStream) and requires the same origin-bound bearer policy as
+        `/ui/ws`, while preserving the legacy render-frame protocol."""
+        if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
+            val forbidden = _simple_response(403, "application/json", "{\"error\": \"forbidden\"}")
+            stream.write_text(forbidden)
+            return
         val key = extract_ws_key(headers)
         if key == "":
             return
@@ -498,7 +522,10 @@ class WebServer:
         val origin_result = self.origin_guard.check(headers)
         val origin = match origin_result:
             Ok(o): o
-            Err(_): "unknown"
+            Err(_):
+                val resp = _simple_response(403, "application/json", "{\"error\": \"forbidden_origin\"}")
+                stream.write_text(resp)
+                return
 
         val tok = SessionToken.issue(grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
         val serialized = tok.serialize()
@@ -582,6 +609,9 @@ fn run_shared_wm_web(title: text) -> i64:
 
     val guard = OriginGuard.from_env()
     val secret = load_secret(false)
+    if secret == "":
+        print "Error: SIMPLE_UI_WEB_TOKEN_SECRET is required unless SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 is set for local development"
+        return 1
     val mode_name = rt_env_get("SIMPLE_UI_WEB_SHELL_MODE") ?? "embedded"
     val backend_name = rt_env_get("SIMPLE_UI_BACKEND") ?? ""
     val electron_env = rt_env_get("SIMPLE_HOST_ELECTRON_AVAILABLE") ?? ""
@@ -720,7 +750,10 @@ fn _wm_handle_login(stream: TcpStream, headers: text, guard: OriginGuard, secret
     val origin_result = guard.check(headers)
     val origin = match origin_result:
         Ok(o): o
-        Err(_): "unknown"
+        Err(_):
+            val resp = _simple_response(403, "application/json", "{\"error\": \"forbidden_origin\"}")
+            stream.write_text(resp)
+            return
     val tok = SessionToken.issue("wm-default", origin, TOKEN_TTL_DEFAULT_MS, secret)
     val serialized = tok.serialize()
     val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"

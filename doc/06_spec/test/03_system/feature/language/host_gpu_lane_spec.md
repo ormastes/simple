@@ -27,7 +27,7 @@ host_gpu_lane_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -77,7 +77,8 @@ target.later(max_packet: 512) host \:
 
 The host/GPU lane feature has two current evidence surfaces:
 
-1. Parser acceptance through `bin/simple check` for canonical syntax.
+1. Parser acceptance through `bin/simple check` for canonical syntax, or through
+   `SIMPLE_BIN` when the spec must exercise a freshly built driver.
 2. Engine2D lane-contract validation for event-flow and performance semantics.
 
 Parser acceptance verifies that the compact grammar remains a small extension
@@ -113,7 +114,7 @@ WebGPU, CUDA, or DirectX evidence is required.
 
 HGL-001 canonical grammar:
 `target.later() gpu \:` and `target.later() host \:` must parse through
-`bin/simple check`.
+`bin/simple check` or the configured `SIMPLE_BIN` child process.
 
 HGL-002 host semantic mutation:
 host lane code may mutate `state.checked` or focus/session state.
@@ -131,10 +132,12 @@ requires a batch.
 
 ## Out Of Scope
 
-This spec proves parser acceptance, statement-position runtime marker lowering,
-backend_code=0 unavailable drain evidence, and nonzero backend-code
-submit/complete queue state. It still does not prove expression-position lane
-markers, real backend device submission, or GPU readback.
+This spec proves parser acceptance plus statement-position runtime marker
+lowering for interpreter and native execution. It does not prove expression
+position lane markers, backend device submission, or GPU readback. Those are
+tracked by the implementation plan and perf report. Queue packets consume the
+active backend handle when one is registered, and drain as typed unavailable
+when the active handle remains `0`.
 
 ## Generated Manual Policy
 
@@ -148,7 +151,9 @@ The generated manual should show the primary flow first:
 
 Executable SSpec remains folded below the manual scenarios. No screenshot,
 HTML, or raster evidence is needed because this is a compiler/contract system
-test, not a visual UI test.
+test, not a visual UI test. Lowered GPU lanes now enqueue, submit, and complete
+one runtime packet so the host can observe a backward completion receipt without
+manual drain.
 
 ## Scenarios
 
@@ -187,21 +192,28 @@ expect(combined_output(stdout, stderr)).to_contain("All checks passed")
 
 #### should emit runtime begin and end events around an interpreted GPU lane
 
-- Run a GPU lane and inspect the runtime marker counters
+- Run a GPU lane and inspect marker counters plus backend-handle queue emission
 - "extern fn rt host gpu lane reset
+- "extern fn rt host gpu active backend handle set
 - "extern fn rt host gpu lane event count
 - "extern fn rt host gpu lane begin count
 - "extern fn rt host gpu lane end count
 - "extern fn rt host gpu lane last lane
 - "extern fn rt host gpu lane last phase
 - "extern fn rt host gpu queue packet count
+- "extern fn rt host gpu queue submitted count
+- "extern fn rt host gpu queue completed count
+- "extern fn rt host gpu queue in flight count
 - "extern fn rt host gpu queue last status
-- "extern fn rt host gpu queue drain
+- "extern fn rt host gpu queue last backend handle
 - "    fn later
 - "        pass do nothing
 - "rt host gpu lane reset
+- "rt host gpu active backend handle set
 - "val target = Target
 - "target later
+- "print
+- "print
 - "print
 - "print
 - "print
@@ -218,25 +230,30 @@ expect(combined_output(stdout, stderr)).to_contain("All checks passed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Run a GPU lane and inspect the runtime marker counters")
+step("Run a GPU lane and inspect marker counters plus backend-handle queue emission")
 val source =
     "extern fn rt_host_gpu_lane_reset()\n" +
+    "extern fn rt_host_gpu_active_backend_handle_set(backend_handle: i64) -> i64\n" +
     "extern fn rt_host_gpu_lane_event_count() -> i64\n" +
     "extern fn rt_host_gpu_lane_begin_count() -> i64\n" +
     "extern fn rt_host_gpu_lane_end_count() -> i64\n" +
     "extern fn rt_host_gpu_lane_last_lane() -> i64\n" +
     "extern fn rt_host_gpu_lane_last_phase() -> i64\n" +
     "extern fn rt_host_gpu_queue_packet_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_submitted_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_completed_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_in_flight_count() -> i64\n" +
     "extern fn rt_host_gpu_queue_last_status() -> i64\n" +
-    "extern fn rt_host_gpu_queue_drain(max_packets: i64) -> i64\n\n" +
+    "extern fn rt_host_gpu_queue_last_backend_handle() -> i64\n\n" +
     "class Target:\n" +
     "    fn later():\n" +
     "        pass_do_nothing(\"lane runtime probe\")\n\n" +
     "rt_host_gpu_lane_reset()\n" +
+    "rt_host_gpu_active_backend_handle_set(7)\n" +
     "val target = Target()\n" +
     "var body_ran = false\n" +
     "target.later() gpu \\:\n" +
@@ -248,9 +265,11 @@ val source =
     "print(\"lane=\" + str(rt_host_gpu_lane_last_lane()))\n" +
     "print(\"phase=\" + str(rt_host_gpu_lane_last_phase()))\n" +
     "print(\"queue=\" + str(rt_host_gpu_queue_packet_count()))\n" +
-    "print(\"queue_status=\" + str(rt_host_gpu_queue_last_status()))\n" +
-    "print(\"drain=\" + str(rt_host_gpu_queue_drain(1)))\n" +
-    "print(\"drain_status=\" + str(rt_host_gpu_queue_last_status()))\n"
+    "print(\"submitted=\" + str(rt_host_gpu_queue_submitted_count()))\n" +
+    "print(\"completed=\" + str(rt_host_gpu_queue_completed_count()))\n" +
+    "print(\"in_flight=\" + str(rt_host_gpu_queue_in_flight_count()))\n" +
+    "print(\"complete_status=\" + str(rt_host_gpu_queue_last_status()))\n" +
+    "print(\"complete_backend_handle=\" + str(rt_host_gpu_queue_last_backend_handle()))\n"
 
 val (stdout, stderr, code) = run_source("gpu_lane_runtime_markers", source)
 val output = combined_output(stdout, stderr)
@@ -263,29 +282,39 @@ expect(output).to_contain("end=1")
 expect(output).to_contain("lane=2")
 expect(output).to_contain("phase=2")
 expect(output).to_contain("queue=1")
-expect(output).to_contain("queue_status=1")
-expect(output).to_contain("drain=1")
-expect(output).to_contain("drain_status=4")
+expect(output).to_contain("submitted=1")
+expect(output).to_contain("completed=1")
+expect(output).to_contain("in_flight=0")
+expect(output).to_contain("complete_status=3")
+expect(output).to_contain("complete_backend_handle=7")
 ```
 
 </details>
 
 #### should emit native runtime queue evidence for a GPU lane
 
-- Force native execution and inspect host/GPU lane queue counters
+- Force native execution and inspect backend-handle queue counters
 - "extern fn rt host gpu lane reset
+- "extern fn rt host gpu active backend handle set
 - "extern fn rt host gpu lane event count
 - "extern fn rt host gpu lane begin count
 - "extern fn rt host gpu lane end count
 - "extern fn rt host gpu queue reset
 - "extern fn rt host gpu queue packet count
-- "extern fn rt host gpu queue drain
+- "extern fn rt host gpu queue submitted count
+- "extern fn rt host gpu queue completed count
+- "extern fn rt host gpu queue in flight count
 - "extern fn rt host gpu queue last status
+- "extern fn rt host gpu queue last backend handle
 - "    fn later
 - "rt host gpu lane reset
 - "rt host gpu queue reset
+- "rt host gpu active backend handle set
 - "val target = Target
 - "target later
+- "print
+- "print
+- "print
 - "print
 - "print
 - "print
@@ -298,25 +327,30 @@ expect(output).to_contain("drain_status=4")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Force native execution and inspect host/GPU lane queue counters")
+step("Force native execution and inspect backend-handle queue counters")
 val source =
     "extern fn rt_host_gpu_lane_reset()\n" +
+    "extern fn rt_host_gpu_active_backend_handle_set(backend_handle: i64) -> i64\n" +
     "extern fn rt_host_gpu_lane_event_count() -> i64\n" +
     "extern fn rt_host_gpu_lane_begin_count() -> i64\n" +
     "extern fn rt_host_gpu_lane_end_count() -> i64\n" +
     "extern fn rt_host_gpu_queue_reset()\n" +
     "extern fn rt_host_gpu_queue_packet_count() -> i64\n" +
-    "extern fn rt_host_gpu_queue_drain(max_packets: i64) -> i64\n" +
-    "extern fn rt_host_gpu_queue_last_status() -> i64\n\n" +
+    "extern fn rt_host_gpu_queue_submitted_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_completed_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_in_flight_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_last_status() -> i64\n" +
+    "extern fn rt_host_gpu_queue_last_backend_handle() -> i64\n\n" +
     "class Target:\n" +
     "    fn later():\n" +
     "        val marker = 1\n\n" +
     "rt_host_gpu_lane_reset()\n" +
     "rt_host_gpu_queue_reset()\n" +
+    "rt_host_gpu_active_backend_handle_set(7)\n" +
     "val target = Target()\n" +
     "target.later() gpu \\:\n" +
     "    val draw_ir_batch = \"DisplayGraphIR batch\"\n" +
@@ -324,8 +358,11 @@ val source =
     "print(\"begin=\" + str(rt_host_gpu_lane_begin_count()))\n" +
     "print(\"end=\" + str(rt_host_gpu_lane_end_count()))\n" +
     "print(\"queue=\" + str(rt_host_gpu_queue_packet_count()))\n" +
-    "print(\"drain=\" + str(rt_host_gpu_queue_drain(1)))\n" +
-    "print(\"drain_status=\" + str(rt_host_gpu_queue_last_status()))\n"
+    "print(\"submitted=\" + str(rt_host_gpu_queue_submitted_count()))\n" +
+    "print(\"completed=\" + str(rt_host_gpu_queue_completed_count()))\n" +
+    "print(\"in_flight=\" + str(rt_host_gpu_queue_in_flight_count()))\n" +
+    "print(\"complete_status=\" + str(rt_host_gpu_queue_last_status()))\n" +
+    "print(\"complete_backend_handle=\" + str(rt_host_gpu_queue_last_backend_handle()))\n"
 
 val (stdout, stderr, code) = run_source_native("gpu_lane_native_runtime_queue", source)
 val output = combined_output(stdout, stderr)
@@ -335,8 +372,103 @@ expect(output).to_contain("events=2")
 expect(output).to_contain("begin=1")
 expect(output).to_contain("end=1")
 expect(output).to_contain("queue=1")
-expect(output).to_contain("drain=1")
-expect(output).to_contain("drain_status=4")
+expect(output).to_contain("submitted=1")
+expect(output).to_contain("completed=1")
+expect(output).to_contain("in_flight=0")
+expect(output).to_contain("complete_status=3")
+expect(output).to_contain("complete_backend_handle=7")
+```
+
+</details>
+
+#### should complete native GPU lane queue state before an early return
+
+- Return from inside a native GPU lane and inspect balanced cleanup counters
+- "extern fn rt host gpu lane reset
+- "extern fn rt host gpu active backend handle set
+- "extern fn rt host gpu lane event count
+- "extern fn rt host gpu lane begin count
+- "extern fn rt host gpu lane end count
+- "extern fn rt host gpu queue reset
+- "extern fn rt host gpu queue packet count
+- "extern fn rt host gpu queue submitted count
+- "extern fn rt host gpu queue completed count
+- "extern fn rt host gpu queue in flight count
+- "extern fn rt host gpu queue last status
+- "    fn later
+- "        pass do nothing
+- "fn early gpu return
+- "    val target = Target
+- "    target later
+- "rt host gpu lane reset
+- "rt host gpu queue reset
+- "rt host gpu active backend handle set
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+- "print
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 47 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Return from inside a native GPU lane and inspect balanced cleanup counters")
+val source =
+    "extern fn rt_host_gpu_lane_reset()\n" +
+    "extern fn rt_host_gpu_active_backend_handle_set(backend_handle: i64) -> i64\n" +
+    "extern fn rt_host_gpu_lane_event_count() -> i64\n" +
+    "extern fn rt_host_gpu_lane_begin_count() -> i64\n" +
+    "extern fn rt_host_gpu_lane_end_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_reset()\n" +
+    "extern fn rt_host_gpu_queue_packet_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_submitted_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_completed_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_in_flight_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_last_status() -> i64\n\n" +
+    "class Target:\n" +
+    "    fn later():\n" +
+    "        pass_do_nothing(\"lane runtime probe\")\n\n" +
+    "fn early_gpu_return() -> i64:\n" +
+    "    val target = Target()\n" +
+    "    target.later() gpu \\:\n" +
+    "        return 42\n" +
+    "    return 0\n\n" +
+    "rt_host_gpu_lane_reset()\n" +
+    "rt_host_gpu_queue_reset()\n" +
+    "rt_host_gpu_active_backend_handle_set(7)\n" +
+    "print(\"result=\" + str(early_gpu_return()))\n" +
+    "print(\"events=\" + str(rt_host_gpu_lane_event_count()))\n" +
+    "print(\"begin=\" + str(rt_host_gpu_lane_begin_count()))\n" +
+    "print(\"end=\" + str(rt_host_gpu_lane_end_count()))\n" +
+    "print(\"queue=\" + str(rt_host_gpu_queue_packet_count()))\n" +
+    "print(\"submitted=\" + str(rt_host_gpu_queue_submitted_count()))\n" +
+    "print(\"completed=\" + str(rt_host_gpu_queue_completed_count()))\n" +
+    "print(\"in_flight=\" + str(rt_host_gpu_queue_in_flight_count()))\n" +
+    "print(\"complete_status=\" + str(rt_host_gpu_queue_last_status()))\n"
+
+val (stdout, stderr, code) = run_source_native("gpu_lane_native_early_return_cleanup", source)
+val output = combined_output(stdout, stderr)
+
+expect(code).to_equal(0)
+expect(output).to_contain("result=42")
+expect(output).to_contain("events=2")
+expect(output).to_contain("begin=1")
+expect(output).to_contain("end=1")
+expect(output).to_contain("queue=1")
+expect(output).to_contain("submitted=1")
+expect(output).to_contain("completed=1")
+expect(output).to_contain("in_flight=0")
+expect(output).to_contain("complete_status=3")
 ```
 
 </details>
@@ -508,13 +640,25 @@ expect(output).to_contain("status=1")
 - "extern fn rt host gpu lane end count
 - "extern fn rt host gpu lane last lane
 - "extern fn rt host gpu lane last phase
+- "extern fn rt host gpu active backend handle set
+- "extern fn rt host gpu queue packet count
+- "extern fn rt host gpu queue submitted count
+- "extern fn rt host gpu queue completed count
+- "extern fn rt host gpu queue in flight count
+- "extern fn rt host gpu queue last backend handle
 - "    fn later
 - "        pass do nothing
 - "rt host gpu lane reset
+- "rt host gpu active backend handle set
 - "val target = Target
 - "target later
 - "target later
 - "target later
+- "print
+- "print
+- "print
+- "print
+- "print
 - "print
 - "print
 - "print
@@ -527,7 +671,7 @@ expect(output).to_contain("status=1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -538,11 +682,18 @@ val source =
     "extern fn rt_host_gpu_lane_begin_count() -> i64\n" +
     "extern fn rt_host_gpu_lane_end_count() -> i64\n" +
     "extern fn rt_host_gpu_lane_last_lane() -> i64\n" +
-    "extern fn rt_host_gpu_lane_last_phase() -> i64\n\n" +
+    "extern fn rt_host_gpu_lane_last_phase() -> i64\n" +
+    "extern fn rt_host_gpu_active_backend_handle_set(backend_handle: i64) -> i64\n" +
+    "extern fn rt_host_gpu_queue_packet_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_submitted_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_completed_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_in_flight_count() -> i64\n" +
+    "extern fn rt_host_gpu_queue_last_backend_handle() -> i64\n\n" +
     "class Target:\n" +
     "    fn later():\n" +
     "        pass_do_nothing(\"lane callback sequence\")\n\n" +
     "rt_host_gpu_lane_reset()\n" +
+    "rt_host_gpu_active_backend_handle_set(9)\n" +
     "val target = Target()\n" +
     "var callbacks = 0\n" +
     "target.later() host \\:\n" +
@@ -556,7 +707,12 @@ val source =
     "print(\"begin=\" + str(rt_host_gpu_lane_begin_count()))\n" +
     "print(\"end=\" + str(rt_host_gpu_lane_end_count()))\n" +
     "print(\"lane=\" + str(rt_host_gpu_lane_last_lane()))\n" +
-    "print(\"phase=\" + str(rt_host_gpu_lane_last_phase()))\n"
+    "print(\"phase=\" + str(rt_host_gpu_lane_last_phase()))\n" +
+    "print(\"queue=\" + str(rt_host_gpu_queue_packet_count()))\n" +
+    "print(\"submitted=\" + str(rt_host_gpu_queue_submitted_count()))\n" +
+    "print(\"completed=\" + str(rt_host_gpu_queue_completed_count()))\n" +
+    "print(\"in_flight=\" + str(rt_host_gpu_queue_in_flight_count()))\n" +
+    "print(\"backend=\" + str(rt_host_gpu_queue_last_backend_handle()))\n"
 
 val (stdout, stderr, code) = run_source("host_gpu_host_runtime_markers", source)
 val output = combined_output(stdout, stderr)
@@ -568,6 +724,11 @@ expect(output).to_contain("begin=3")
 expect(output).to_contain("end=3")
 expect(output).to_contain("lane=1")
 expect(output).to_contain("phase=2")
+expect(output).to_contain("queue=1")
+expect(output).to_contain("submitted=1")
+expect(output).to_contain("completed=1")
+expect(output).to_contain("in_flight=0")
+expect(output).to_contain("backend=9")
 ```
 
 </details>
@@ -712,8 +873,8 @@ expect(result.diagnostic).to_contain("per-widget GPU dispatch")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
