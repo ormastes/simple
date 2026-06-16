@@ -86,33 +86,34 @@ expect(libreoffice_app_name("math")).to_equal("Math")
 
 </details>
 
-#### fails closed for unknown components and counter routes
+#### fails closed for unknown components and accepts counter routes
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(is_office_component("word")).to_equal(true)
 expect(is_office_component("sheets")).to_equal(true)
-expect(is_office_component("counter")).to_equal(false)
-expect(libreoffice_app_name_checked("counter")).to_equal("error: unknown LibreOffice component: counter")
+expect(is_office_component("counter")).to_equal(true)
+expect(libreoffice_app_name_checked("counter")).to_equal("Counter")
+expect(libreoffice_app_name_checked("unknown")).to_equal("error: unknown LibreOffice component: unknown")
 val route = lookup_office_component("counter")
-expect(route.valid).to_equal(false)
-expect(route.status).to_equal("unsupported")
-expect(route.component).to_equal("")
+expect(route.valid).to_equal(true)
+expect(route.status).to_equal("component")
+expect(route.component).to_equal("counter")
 ```
 
 </details>
 
-#### resolves launcher actions without accepting unknown counter actions
+#### resolves launcher actions including counter actions
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -120,7 +121,8 @@ val sheets = office_component_for_action("open_sheets")
 expect(sheets.is_some()).to_equal(true)
 expect(sheets.unwrap()).to_equal("sheets")
 val counter = office_component_for_action("open_counter")
-expect(counter.is_none()).to_equal(true)
+expect(counter.is_some()).to_equal(true)
+expect(counter.unwrap()).to_equal("counter")
 ```
 
 </details>

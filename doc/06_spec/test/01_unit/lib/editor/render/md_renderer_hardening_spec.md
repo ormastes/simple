@@ -27,7 +27,7 @@ md_renderer_hardening_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 41 | 41 | 0 | 0 |
+| 42 | 42 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -577,6 +577,42 @@ expect(result.len()).to_equal(0)
 
 </details>
 
+### oversized markdown bounds
+
+#### renders only the requested viewport for a large markdown document
+
+- content = content + "- item " + i to string
+   - Expected: model.block_count() equals `1`
+   - Expected: viewport.len() equals `7`
+   - Expected: viewport[0] equals `- item 10`
+   - Expected: viewport[6] equals `- item 16`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var content = ""
+var i = 0
+while i < 600:
+    if i > 0:
+        content = content + "\n"
+    content = content + "- item " + i.to_string()
+    i = i + 1
+
+val model = BlockModel.from_markdown(content)
+expect(model.block_count()).to_equal(1)
+val viewport = md_render_blocks_for_tui(model, 10, 7)
+expect(viewport.len()).to_equal(7)
+expect(viewport[0]).to_equal("- item 10")
+expect(viewport[6]).to_equal("- item 16")
+```
+
+</details>
+
 #### md_render_blocks_for_tui returns exactly a viewport window
 
 <details>
@@ -792,14 +828,15 @@ Tests covering:
 - embed transclusion depth limit
 - callout rendering robustness
 - empty and edge inputs
+- oversized markdown bounds
 - BlockModel.from_markdown edge inputs
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 41 |
-| Active scenarios | 41 |
+| Total scenarios | 42 |
+| Active scenarios | 42 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

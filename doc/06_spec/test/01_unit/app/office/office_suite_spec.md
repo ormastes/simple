@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -139,6 +139,20 @@ expect(run_office(["planner"])).to_equal(0)
 
 </details>
 
+#### loads counter
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["counter"])).to_equal(0)
+```
+
+</details>
+
 #### rejects unknown app
 
 <details>
@@ -177,24 +191,25 @@ expect(ui.root_id).to_equal("root")
 
 </details>
 
-#### keeps launcher actions allowlisted and rejects counter actions
+#### keeps launcher actions allowlisted and resolves counter actions
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(launcher_action_allowlist().len()).to_equal(5)
+expect(launcher_action_allowlist().len()).to_equal(6)
 expect(launcher_open_action("word")).to_equal("open_word")
 expect(is_valid_launcher_action("open_word")).to_equal(true)
-expect(is_valid_launcher_action("open_counter")).to_equal(false)
+expect(is_valid_launcher_action("open_counter")).to_equal(true)
 val slides = launcher_action_to_component("open_slides")
 expect(slides.is_some()).to_equal(true)
 expect(slides.unwrap()).to_equal("slides")
 val counter = launcher_action_to_component("open_counter")
-expect(counter.is_none()).to_equal(true)
+expect(counter.is_some()).to_equal(true)
+expect(counter.unwrap()).to_equal("counter")
 ```
 
 </details>
@@ -278,6 +293,35 @@ Reproduction: this block contains the complete executable scenario source.
 val app = PlannerApp.new()
 val ui = app.build_ui()
 expect(ui.root_id).to_equal("root")
+```
+
+</details>
+
+#### builds counter ui and applies deterministic transitions
+
+- var app = CounterApp new
+   - Expected: ui.root_id equals `root`
+   - Expected: inc.value equals `1`
+   - Expected: inc.status equals `incremented`
+- app handle event
+   - Expected: app.value equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var app = CounterApp.new()
+val ui = app.build_ui()
+expect(ui.root_id).to_equal("root")
+val inc = counter_apply_action(app.value, "counter_increment")
+expect(inc.value).to_equal(1)
+expect(inc.status).to_equal("incremented")
+app.handle_event(UIEvent.Action(name: "counter_increment"))
+expect(app.value).to_equal(1)
 ```
 
 </details>
@@ -371,8 +415,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
