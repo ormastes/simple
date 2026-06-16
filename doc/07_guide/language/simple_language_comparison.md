@@ -28,7 +28,7 @@ The strongest required edits are precision edits, not a rewrite:
 | `unit` / `newunit` | Supported | README/parser evidence exists. |
 | No null | Qualified | Better: no user-level `null`; absence uses `nil`/`Option`. |
 | Exhaustive match | Qualified | Exhaustiveness lint exists and can be denied; default is not always error. |
-| High-robustness mode | Not proven | Replace with strict lint or `@deny(non_exhaustive_match)` wording. |
+| High-robustness mode | Superseded | Realized as the `reliable` strictness tier (lint-tier axis: `moderate`/`lib`/`reliable`) — configurable strict lint + `@deny(non_exhaustive_match)` + proof-coverage, not a monolithic guarantee. See `glossary.md` ("Strictness Tiers") and `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md`. (Original verdict: "Not proven — replace with strict lint or `@deny(non_exhaustive_match)`.") |
 | Minimal public surface | Qualified | `__init__.spl` and structured export boundaries exist; universal "no `*` export" was not fully proven. |
 | Lean workflow | Supported with bounded scope | Deterministic generation/inventory/checking/state reporting is the supported claim. |
 | Runtime families | Bounded | Documented, but evidence is strongest for declared matrix subsets. |
