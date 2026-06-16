@@ -73,6 +73,18 @@ Before `--daily-debug` runs:
 | `/mail` | Step 2 (inbox list) and step 7 (notify) |
 | `/bug_review` | Triaged bugs in the digest are linked back to `/bug_review view <id>` |
 
+## Test Coverage
+
+- Step 2's adapter (`run_daily_debug` imports `app.itf.adapter_outlook_curl`)
+  has execution-verified unit coverage in
+  `test/01_unit/app/itf/adapter_outlook_curl_spec.spl` — 12 passing tests over
+  client construction, token-cache freshness, render/parse roundtrip, curl argv
+  builders, and HTTP status mapping.
+- URL-builder functions (`outlook_curl_folder_list_url` / `_messages_url`) are
+  NOT yet covered: they call `url_encode`, which is unresolvable in the
+  interpreter (bug
+  `doc/08_tracking/bug/interp_http_url_encode_utilities_unresolved_2026-06-14.md`).
+
 ## Notes
 
 - The default (continuous-check) mode is a stub here. TODO: Agent A/B will
