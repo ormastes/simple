@@ -392,6 +392,37 @@ References:
 - Lazy parsing prior art: `doc/01_research/compiler/parser/lazy_parsing_prior_art.md`
 - Tier defaults ADR: `doc/04_architecture/lib/runtime_family_tier_defaults.md`
 
+## Network types & algorithms (fully-typed layer)
+
+When a task touches networking, protocols, wire codecs, or crypto/compression
+algorithms, follow the typed-layer map — do not invent a parallel type or
+reimplement an existing algorithm:
+
+- **General network custom types** → `src/lib/common/net/` (`byte_cursor`
+  big-endian `ByteReader`/`ByteWriter`, `addr`, `oid`, `ber`, `net_time`,
+  `routing`, `anti_replay`). A type used by ≥2 protocols is promoted here.
+- **App protocols** → `src/lib/nogc_sync_mut/<proto>/` (+ `<proto>/secure.spl`
+  for the X-over-TLS wrapper). **L3/L4** → `src/os/services/netstack/`.
+- **Algorithms** (reuse, never reimplement) → `src/lib/common/{crypto,compress,
+  hash,base64,base_encoding,huffman,rsa,signature,jwt,...}`; verify against
+  RFC/NIST known-answer vectors (never self-comparison — see false-green guard).
+- **Custom-typed algorithm layers** (additive, wrap the primitive cores — never
+  rewrite them): `src/lib/common/search/` (types + exact/prefilter/inverted
+  index + BM25/TF-IDF + IVF/kNN ANN + roaring, fixed-point not f64),
+  `src/lib/common/crypto/typed/` (`Digest`/`MacTag`/`Nonce`/`AuthTag`/
+  `Plaintext`/`Ciphertext`/`SecretKey`/`PublicKey`/`Signature`/`SharedSecret`
+  on `ByteSpan`, constant-time `ct_eq`; hashes/aead/asym + alpha `seam`),
+  `src/lib/common/compress/typed/` (`LzToken`/`SymbolFreqs`/`HuffTable` + lz4/
+  deflate/zstd/lzma2). Shared byte foundation = `src/lib/common/bytes/`. These
+  ride the **alpha dual-backend** fail-closed seam (`src/os/crypto/
+  dual_backend.spl`, guide `doc/07_guide/os/crypto_dual_backend.md`).
+- **Conventions:** integer `val` constant dispatch (not payload enums); wire
+  codecs on `ByteReader`/`ByteWriter`; parse loops offset-based/inline (never a
+  free fn taking a reader by value); cross-module array helpers must return.
+- Full guides: [`doc/07_guide/lib/networking/typed_network_and_algorithms.md`](../../doc/07_guide/lib/networking/typed_network_and_algorithms.md)
+  (tldr alongside) and, for the search/crypto/compress custom-typed layers,
+  [`doc/07_guide/lib/algorithms/typed_alpha_algorithm_layers.md`](../../doc/07_guide/lib/algorithms/typed_alpha_algorithm_layers.md).
+
 ## Run
 
 ```

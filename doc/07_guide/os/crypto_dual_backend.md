@@ -11,14 +11,26 @@ Implementation entrypoint:
 
 ### `alpha`
 
-Current default mode.
+Current default mode. **Fail-closed.**
 
 - Runs both runtime-backed and pure-Simple implementations
 - Compares outputs
-- Stops immediately if outputs differ
+- On a genuine mismatch (both sides produced output and they differ), aborts the
+  process via `rt_exit(70)` (`EX_SOFTWARE`) — it does **not** return to the
+  caller. A divergence means one path is compromised or buggy, and returning a
+  value would be fail-*open*.
+- **Absent-oracle degradation:** if exactly one side is empty (e.g. the runtime
+  oracle is stubbed/unavailable), alpha returns the present side and does **not**
+  abort. Many callers have no real runtime backend yet (e.g. the typed hash
+  layer) and rely on this; only a true both-present divergence halts.
 
 Use this while maturing a pure-Simple implementation and proving parity against
 the existing runtime-backed path.
+
+The halt cannot be asserted in-process (it would crash the spec file's child
+process), so fail-closed behavior is verified out-of-process by a `bin/simple
+run` probe that triggers a mismatch and checks the non-zero exit code. See
+`doc/08_tracking/bug/alpha_mode_not_fail_closed_2026-06-15.md` (RESOLVED).
 
 ### `beta`
 
