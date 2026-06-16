@@ -119,3 +119,16 @@ verification / requirement-selection pending
   `doc/03_plan/sys_test/simple_web_browser_production_hardening.md` mapping
   every candidate `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` ID to current evidence
   while preserving final option selection as a release blocker.
+- verify: Added warm production browser auth latency evidence to
+  `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; the
+  live endpoint spec passes with 6 scenarios and measures warmed token mint plus
+  authenticated WebSocket upgrade under a 10s local ceiling.
+- fix: Hardened WebSocket upgrade parsing so header names are case-insensitive,
+  `Connection` must contain an `Upgrade` token, and `Sec-WebSocket-Key`
+  extraction accepts lowercase/mixed-case clients.
+- verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean`
+  passes with 10 scenarios, and the live endpoint spec covers a lowercase
+  authenticated `/ui/ws` upgrade path.
+- docs: Aligned GPU/browser release blockers across architecture, plan, and
+  report so Metal, AMD ROCm, DirectX, and browser WebGPU native proof all remain
+  explicit external-host evidence requirements.

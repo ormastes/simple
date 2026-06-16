@@ -28,7 +28,7 @@ simple_web_browser_production_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -112,6 +112,7 @@ expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
    - Expected: valid_resume equals `HTTP/1.1 200 OK|present`
    - Expected: websocket equals `HTTP/1.1 101 Switching Protocols|present`
    - Expected: legacy_websocket equals `HTTP/1.1 101 Switching Protocols|present`
+   - Expected: lowercase_websocket equals `HTTP/1.1 101 Switching Protocols|present`
    - Expected: websocket_post equals `HTTP/1.1 405 Method Not Allowed|present`
    - Expected: legacy_websocket_post equals `HTTP/1.1 405 Method Not Allowed|present`
 
@@ -119,7 +120,7 @@ expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -142,6 +143,8 @@ val websocket_response = raw_http_request(port, websocket_authorized_request(por
 val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
 val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+val lowercase_websocket_response = raw_http_request(port, websocket_lowercase_authorized_request(port, token))
+val lowercase_websocket = "{http_status_line(lowercase_websocket_response)}|{http_marker(lowercase_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 val websocket_post_response = raw_http_request(port, websocket_post_authorized_request(port, token))
 val websocket_post = "{http_status_line(websocket_post_response)}|{http_marker(websocket_post_response, "method_not_allowed")}"
 val legacy_websocket_post_response = raw_http_request(port, legacy_websocket_post_authorized_request(port, token))
@@ -156,6 +159,7 @@ expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
 expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
 expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+expect(lowercase_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 expect(websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
 expect(legacy_websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
 ```
@@ -206,6 +210,55 @@ hardening_stop_web_server(pid)
 step("Verify the burst budget allows the configured count and rejects the next request")
 expect(last_allowed).to_equal("HTTP/1.1 200 OK|present")
 expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
+```
+
+</details>
+
+
+</details>
+
+<details>
+<summary>Advanced: measures warm browser auth path latency</summary>
+
+#### measures warm browser auth path latency _(slow)_
+
+- Start and warm a production-configured Simple Web server
+- Measure a warmed login plus authenticated WebSocket upgrade
+- hardening stop web server
+- Verify the warmed browser auth path succeeds inside the local latency budget
+   - Expected: http_status_line(warmup_response) equals `HTTP/1.1 200 OK`
+   - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
+   - Expected: websocket equals `HTTP/1.1 101 Switching Protocols|present`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val port = hardening_free_port(250)
+step("Start and warm a production-configured Simple Web server")
+val pid = hardening_start_web_server(port)
+val warmup_response = raw_http_request(port, login_allowed_request(port))
+
+step("Measure a warmed login plus authenticated WebSocket upgrade")
+val start_ms = rt_time_ms()
+val login_response = raw_http_request(port, login_allowed_request(port))
+val token = http_json_string_field(login_response, "token")
+val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
+val elapsed_ms = rt_time_ms() - start_ms
+val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+
+hardening_stop_web_server(pid)
+
+step("Verify the warmed browser auth path succeeds inside the local latency budget")
+expect(http_status_line(warmup_response)).to_equal("HTTP/1.1 200 OK")
+expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
+expect(token.len()).to_be_greater_than(20)
+expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+expect(elapsed_ms).to_be_less_than(10000u64)
 ```
 
 </details>
@@ -323,9 +376,9 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
-| Slow scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 6 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 

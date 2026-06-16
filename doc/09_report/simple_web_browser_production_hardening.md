@@ -8,8 +8,8 @@
   `web_auth_hardening_spec.spl`, and `ws_handler_spec.spl`.
 - Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 14 scenarios.
 - Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 10 scenarios.
-- Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 5 scenarios.
-- Spec docgen: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and regenerated the 5-scenario manual.
+- Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 6 scenarios.
+- Spec docgen: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and regenerated the 6-scenario manual.
 - Production renderer parity: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` passed.
 - Layout guard: `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
 
@@ -27,6 +27,9 @@
 - `/ui/ws` and legacy `/ws` reject non-GET WebSocket upgrade attempts with
   `405 Method Not Allowed` before the socket can be upgraded, even when the
   request carries a valid origin-bound bearer token.
+- WebSocket upgrade detection and key extraction honor case-insensitive HTTP
+  header names and require a `Connection` token of `Upgrade`; live endpoint
+  evidence covers lowercase/mixed-case successful upgrade headers.
 - Generated browser clients and static `wm.js` use WebSocket subprotocol bearer
   tokens instead of query-string tokens.
 - Query-string bearer compatibility is disabled by default behind
@@ -34,6 +37,9 @@
   opt-in path can redeem a minted origin-bound token.
 - `/ui/login` is bounded by a fixed-window burst gate in both normal and shared
   WM server paths.
+- Warm production browser authentication latency is measured by the live
+  endpoint spec for a warmed token mint plus authenticated WebSocket upgrade
+  path with a 10s local ceiling.
 - The shared-WM web server parses `SIMPLE_UI_WEB_PORT` as a concrete integer,
   so `SIMPLE_UI_WEB_SHARED_WM=1` starts on the requested port and its login
   burst gate has live socket evidence.
@@ -50,6 +56,11 @@
 - macOS Metal is host-unavailable locally and must be proven on macOS.
 - AMD ROCm/HIP is host-unavailable locally and must be proven on an AMD ROCm
   host.
+- Windows DirectX native proof is host-unavailable locally and must be proven
+  on a Windows/DirectX host.
+- Browser WebGPU real-device readback is not proven locally; current evidence
+  is matrix/provenance only and must be replaced by native device-readback
+  evidence on a WebGPU-capable browser host.
 
 ## Workspace Hygiene Evidence
 
@@ -82,4 +93,4 @@ Snapshot from 2026-06-16:
   files and existing `jj` conflicts are resolved outside this lane.
 - `doc/08_tracking/feature/feature_db.sdn` has a `current` row for this lane;
   do not mark it `done` until final requirements, trace IDs, and macOS
-  Metal/AMD ROCm host evidence are complete.
+  Metal/AMD ROCm/DirectX/WebGPU host evidence are complete.

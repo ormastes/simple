@@ -12,6 +12,7 @@ extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_thread_sleep(ms: i64)
 extern fn rt_getpid() -> i64
+extern fn rt_time_ms() -> u64
 extern fn rt_bytes_to_text(data: [u8]) -> text
 
 fn hardening_free_port(extra: i32) -> i32:
@@ -224,6 +225,18 @@ fn websocket_authorized_request(port: i32, token: text) -> text:
     request = "{request}\r\n"
     return request
 
+fn websocket_lowercase_authorized_request(port: i32, token: text) -> text:
+    var request = "GET /ui/ws HTTP/1.1\r\n"
+    request = "{request}host: 127.0.0.1:{port}\r\n"
+    request = "{request}origin: http://localhost:{port}\r\n"
+    request = "{request}upgrade: websocket\r\n"
+    request = "{request}connection: keep-alive, Upgrade\r\n"
+    request = "{request}sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    request = "{request}sec-websocket-version: 13\r\n"
+    request = "{request}sec-websocket-protocol: simple-ui, bearer.{token}\r\n"
+    request = "{request}\r\n"
+    return request
+
 fn websocket_post_authorized_request(port: i32, token: text) -> text:
     var request = "POST /ui/ws HTTP/1.1\r\n"
     request = "{request}Host: 127.0.0.1:{port}\r\n"
@@ -286,6 +299,8 @@ describe "Simple web browser production hardening live endpoints":
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
         val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
         val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+        val lowercase_websocket_response = raw_http_request(port, websocket_lowercase_authorized_request(port, token))
+        val lowercase_websocket = "{http_status_line(lowercase_websocket_response)}|{http_marker(lowercase_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
         val websocket_post_response = raw_http_request(port, websocket_post_authorized_request(port, token))
         val websocket_post = "{http_status_line(websocket_post_response)}|{http_marker(websocket_post_response, "method_not_allowed")}"
         val legacy_websocket_post_response = raw_http_request(port, legacy_websocket_post_authorized_request(port, token))
@@ -300,6 +315,7 @@ describe "Simple web browser production hardening live endpoints":
         expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
         expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+        expect(lowercase_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
         expect(websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
         expect(legacy_websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
 
@@ -324,6 +340,30 @@ describe "Simple web browser production hardening live endpoints":
         step("Verify the burst budget allows the configured count and rejects the next request")
         expect(last_allowed).to_equal("HTTP/1.1 200 OK|present")
         expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
+
+    slow_it "measures warm browser auth path latency":
+        """A warmed production server must complete token minting and authenticated WebSocket upgrade within a bounded local latency budget."""
+        val port = hardening_free_port(250)
+        step("Start and warm a production-configured Simple Web server")
+        val pid = hardening_start_web_server(port)
+        val warmup_response = raw_http_request(port, login_allowed_request(port))
+
+        step("Measure a warmed login plus authenticated WebSocket upgrade")
+        val start_ms = rt_time_ms()
+        val login_response = raw_http_request(port, login_allowed_request(port))
+        val token = http_json_string_field(login_response, "token")
+        val websocket_response = raw_http_request(port, websocket_authorized_request(port, token))
+        val elapsed_ms = rt_time_ms() - start_ms
+        val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+
+        hardening_stop_web_server(pid)
+
+        step("Verify the warmed browser auth path succeeds inside the local latency budget")
+        expect(http_status_line(warmup_response)).to_equal("HTTP/1.1 200 OK")
+        expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
+        expect(token.len()).to_be_greater_than(20)
+        expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+        expect(elapsed_ms).to_be_less_than(10000u64)
 
     slow_it "allows query bearer websocket compatibility only when explicitly enabled":
         """The default server rejects query bearer tokens; explicit compatibility mode must still redeem a minted origin-bound token."""

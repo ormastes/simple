@@ -53,8 +53,9 @@ record marker-free, exact renderer parity for the current GUI/Web slice:
 - backend-executed parity pass with no blur/tolerance fallback
 - Metal unavailable on Linux only as `metal-requires-macos`
 
-Linux Metal and AMD ROCm proof remain environment-bound follow-ups, documented
-in `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md`.
+Linux Metal, AMD ROCm, Windows DirectX, and browser WebGPU proof remain
+environment-bound follow-ups, documented in
+`doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md`.
 
 ## Hot Paths
 

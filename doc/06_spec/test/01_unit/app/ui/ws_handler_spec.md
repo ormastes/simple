@@ -44,13 +44,17 @@ ws_handler_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val headers = "Host: localhost\nUpgrade: websocket\nConnection: Upgrade\n"
 expect(is_ws_upgrade_request(headers)).to_be(true)
 expect(is_ws_upgrade_request("Host: localhost\nConnection: keep-alive\n")).to_be(false)
+val lowercase = "Host: localhost\nupgrade: websocket\nconnection: keep-alive, Upgrade\n"
+expect(is_ws_upgrade_request(lowercase)).to_be(true)
+val missing_connection_upgrade = "Host: localhost\nUpgrade: websocket\nConnection: keep-alive\n"
+expect(is_ws_upgrade_request(missing_connection_upgrade)).to_be(false)
 ```
 
 </details>
@@ -60,12 +64,14 @@ expect(is_ws_upgrade_request("Host: localhost\nConnection: keep-alive\n")).to_be
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val headers = "Host: localhost\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n"
 expect(extract_ws_key(headers)).to_equal("dGhlIHNhbXBsZSBub25jZQ==")
+val lowercase = "Host: localhost\nsec-websocket-key: lowercase-key\n"
+expect(extract_ws_key(lowercase)).to_equal("lowercase-key")
 ```
 
 </details>
