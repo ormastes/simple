@@ -6,7 +6,8 @@
   `tls_serve_loop.spl`, `async_server.spl`,
   `simple_web_browser_production_hardening_spec.spl`,
   `web_auth_hardening_spec.spl`, and `ws_handler_spec.spl`.
-- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 16 scenarios.
+- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 17 scenarios.
+- Unit async web spec: `bin/simple test test/01_unit/app/ui/async_web_spec.spl --mode=interpreter --clean` passed with 26 scenarios.
 - Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 10 scenarios.
 - Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 6 scenarios.
 - Spec docgen: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and regenerated the 6-scenario manual.
@@ -22,8 +23,9 @@
 - `/ui/ws`, legacy `/ws`, `/ui/resume`, and sensitive `/api/*` require
   origin-bound bearer authorization, including `/api/state`, `/api/widgets`,
   and the async `/api/clients` route.
-- Token-bearing JSON responses set `Cache-Control: no-store`, `Pragma:
-  no-cache`, and `X-Content-Type-Options: nosniff`.
+- Browser JSON response helpers across normal, async, TLS, and shared `/ui/*`
+  paths set `Cache-Control: no-store`, `Pragma: no-cache`, and
+  `X-Content-Type-Options: nosniff`.
 - Login and resume JSON responses echo only sanitized `X-Request-Id` values,
   rejecting bearer-like or otherwise unsafe correlation strings.
 - Authorized `/ui/resume` rejects missing or malformed `session_id`,

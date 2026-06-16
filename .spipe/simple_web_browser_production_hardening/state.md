@@ -148,6 +148,22 @@ verification / requirement-selection pending
   --mode=interpreter --clean`, and `bin/simple test
   test/03_system/gui/simple_web_browser_production_hardening_spec.spl
   --mode=interpreter --clean --timeout 360` pass.
+- fix: Centralized browser JSON response security headers in
+  `ui_web_json_security_headers` and reused them across normal, async, TLS,
+  and shared `/ui/*` JSON response builders.
+- verify: `/home/ormastes/dev/pub/simple/bin/simple check
+  src/app/ui.web/auth_params.spl src/app/ui.web/server.spl
+  src/app/ui.web/async_server.spl src/app/ui.web/tls_serve_loop.spl
+  src/app/ui.web/ui_routes.spl test/01_unit/app/ui/web_auth_hardening_spec.spl
+  test/01_unit/app/ui/async_web_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl`,
+  `/home/ormastes/dev/pub/simple/bin/simple test
+  test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean`,
+  `/home/ormastes/dev/pub/simple/bin/simple test
+  test/01_unit/app/ui/async_web_spec.spl --mode=interpreter --clean`, and
+  `bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` pass.
 - fix: Applied the same `UI_WEB_MAX_REQUEST_HEAD_BYTES`,
   `UI_WEB_MAX_REQUEST_LINE_BYTES`, and `UI_WEB_MAX_HEADER_LINE_BYTES` guards to
   the normal `run_web` request-head parser that shared-WM already used.

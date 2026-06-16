@@ -12,7 +12,7 @@ use app.ui.web.tls_serve_loop.{ConnStream}
 use nogc_sync_mut.ui.session.{UISession}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
 use app.ui.web.session_token.{verify, load_secret, random_hex}
-use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, ui_web_extract_bearer, ui_web_query_param, ui_web_percent_decode_query_component, ui_web_ws_response_protocol, ui_web_auth_json_field, ui_web_ws_frame_payload_allowed}
+use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, ui_web_extract_bearer, ui_web_query_param, ui_web_percent_decode_query_component, ui_web_ws_response_protocol, ui_web_auth_json_field, ui_web_ws_frame_payload_allowed, ui_web_json_security_headers}
 use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
 use app.ui.web.async_ws.{extract_field}
 use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
@@ -39,7 +39,7 @@ fn dispatch_ui_route(path: text, method: text, headers: text, body: text, stream
         return true
 
     if route == "/ui/ws":
-        val resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: application/json\r\nContent-Length: 30\r\nConnection: close\r\n\r\n{\"error\":\"method_not_allowed\"}"
+        val resp = _ui_json_response(405, "{\"error\":\"method_not_allowed\"}")
         stream.write_all(resp)
         return true
 
@@ -281,38 +281,35 @@ fn _handle_resume_route(stream: ConnStream, path: text, headers: text, body: tex
     val resume_status = ui_web_resume_body_status(body)
     if resume_status == "body_too_large":
         val too_large = "{\"error\": \"request_body_too_large\"}"
-        var too_large_resp = "HTTP/1.1 413 Payload Too Large\r\n"
-        too_large_resp = "{too_large_resp}Content-Type: application/json\r\n"
-        too_large_resp = "{too_large_resp}Content-Length: {too_large.len()}\r\n"
-        too_large_resp = "{too_large_resp}Connection: close\r\n"
-        too_large_resp = "{too_large_resp}\r\n"
-        too_large_resp = "{too_large_resp}{too_large}"
-        stream.write_all(too_large_resp)
+        stream.write_all(_ui_json_response(413, too_large))
         return
     if resume_status != "ok":
         val bad = "{\"error\": \"invalid_resume_body\"}"
-        var bad_resp = "HTTP/1.1 400 Bad Request\r\n"
-        bad_resp = "{bad_resp}Content-Type: application/json\r\n"
-        bad_resp = "{bad_resp}Content-Length: {bad.len()}\r\n"
-        bad_resp = "{bad_resp}Connection: close\r\n"
-        bad_resp = "{bad_resp}\r\n"
-        bad_resp = "{bad_resp}{bad}"
-        stream.write_all(bad_resp)
+        stream.write_all(_ui_json_response(400, bad))
         return
     val rev: u64 = if rev_str == "": 0 else: _parse_u64(rev_str)
     val seq: i64 = if seq_str == "": 0 else: seq_str.parse_i64()
     val resp_json = "{\"session_id\": \"{session_id}\", \"snapshot_revision\": {rev}, \"last_sequence\": {seq}}"
-    var resp = "HTTP/1.1 200 OK\r\n"
-    resp = "{resp}Content-Type: application/json\r\n"
-    resp = "{resp}Content-Length: {resp_json.len()}\r\n"
-    resp = "{resp}Connection: close\r\n"
-    resp = "{resp}\r\n"
-    resp = "{resp}{resp_json}"
-    stream.write_all(resp)
+    stream.write_all(_ui_json_response(200, resp_json))
 
 # =========================================================================
 # Private helpers
 # =========================================================================
+
+fn _ui_json_response(status: i32, body: text) -> text:
+    val status_text = match status:
+        200: "OK"
+        400: "Bad Request"
+        405: "Method Not Allowed"
+        413: "Payload Too Large"
+        _: "OK"
+    var resp = "HTTP/1.1 {status} {status_text}\r\n"
+    resp = "{resp}Content-Type: application/json\r\n"
+    resp = "{resp}{ui_web_json_security_headers(\"application/json\")}"
+    resp = "{resp}Content-Length: {body.len()}\r\n"
+    resp = "{resp}Connection: close\r\n"
+    resp = "{resp}\r\n"
+    return "{resp}{body}"
 
 fn _read_ws_frame_conn(stream: ConnStream) -> text?:
     """Read a single WebSocket text frame from a ConnStream.

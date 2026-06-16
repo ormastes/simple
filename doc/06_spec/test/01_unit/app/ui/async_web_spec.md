@@ -29,7 +29,7 @@ async_web_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -84,6 +84,23 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val resp = http_response(200, "application/json", "{}")
 expect resp to_contain "Access-Control-Allow-Origin: *"
+```
+
+</details>
+
+#### adds cache and sniffing guards to json responses
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val resp = http_response(200, "application/json", "{}")
+expect resp to_contain "Cache-Control: no-store"
+expect resp to_contain "Pragma: no-cache"
+expect resp to_contain "X-Content-Type-Options: nosniff"
 ```
 
 </details>
@@ -165,7 +182,7 @@ expect json to_contain "\"theme\""
 
 #### channel sends and receives UIEvent
 
-1. ch send
+- ch send
 
 
 <details>
@@ -201,9 +218,9 @@ expect received == nil to_equal true
 
 #### channel delivers multiple events in order
 
-1. ch send
-2. ch send
-3. ch send
+- ch send
+- ch send
+- ch send
 
 
 <details>
@@ -229,8 +246,8 @@ expect e3 != nil to_equal true
 
 #### channel is closeable
 
-1. ch close
-2. expect ch is closed
+- ch close
+- expect ch is closed
 
 
 <details>
@@ -330,7 +347,7 @@ expect result to_equal ""
 
 #### FileChanged event can be sent over channel
 
-1. ch send
+- ch send
 
 
 <details>
@@ -350,7 +367,7 @@ expect event != nil to_equal true
 
 #### state update after file change preserves mode
 
-1. expect updated mode name
+- expect updated mode name
 
 
 <details>
@@ -373,7 +390,7 @@ expect updated.mode_name() to_equal state.mode_name()
 
 #### empty client list has zero length
 
-1. expect clients len
+- expect clients len
 
 
 <details>
@@ -391,7 +408,7 @@ expect clients.len() to_equal 0
 
 #### adding clients increases count
 
-1. expect clients len
+- expect clients len
 
 
 <details>
@@ -411,7 +428,7 @@ expect clients.len() to_equal 2
 
 #### pruning removes disconnected entries
 
-1. expect alive len
+- expect alive len
 
 
 <details>
@@ -522,8 +539,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

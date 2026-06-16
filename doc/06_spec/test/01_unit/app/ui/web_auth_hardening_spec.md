@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -260,6 +260,24 @@ expect(ui_web_request_id("X-Request-Id: Bearer secret-token\n", "fallback")).to_
 
 </details>
 
+#### adds cache and sniffing guards to json responses
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val headers = ui_web_json_security_headers("application/json")
+expect(headers).to_contain("Cache-Control: no-store")
+expect(headers).to_contain("Pragma: no-cache")
+expect(headers).to_contain("X-Content-Type-Options: nosniff")
+expect(ui_web_json_security_headers("text/html")).to_equal("")
+```
+
+</details>
+
 #### uses bounded shared json field extraction for auth path bodies
 
 <details>
@@ -387,8 +405,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
