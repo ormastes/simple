@@ -74,6 +74,8 @@ fn raw_http_request(port: i32, request: text) -> text:
 fn http_status_line(response: text) -> text:
     if response.starts_with("HTTP/1.1 403 Forbidden"):
         return "HTTP/1.1 403 Forbidden"
+    if response.starts_with("HTTP/1.1 405 Method Not Allowed"):
+        return "HTTP/1.1 405 Method Not Allowed"
     if response.starts_with("HTTP/1.1 413 Payload Too Large"):
         return "HTTP/1.1 413 Payload Too Large"
     if response.starts_with("HTTP/1.1 429 Too Many Requests"):
@@ -198,8 +200,32 @@ fn legacy_websocket_authorized_request(port: i32, token: text) -> text:
     request = "{request}\r\n"
     return request
 
+fn legacy_websocket_post_authorized_request(port: i32, token: text) -> text:
+    var request = "POST /ws HTTP/1.1\r\n"
+    request = "{request}Host: 127.0.0.1:{port}\r\n"
+    request = "{request}Origin: http://localhost:{port}\r\n"
+    request = "{request}Upgrade: websocket\r\n"
+    request = "{request}Connection: Upgrade\r\n"
+    request = "{request}Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    request = "{request}Sec-WebSocket-Version: 13\r\n"
+    request = "{request}Sec-WebSocket-Protocol: simple-ui, bearer.{token}\r\n"
+    request = "{request}\r\n"
+    return request
+
 fn websocket_authorized_request(port: i32, token: text) -> text:
     var request = "GET /ui/ws HTTP/1.1\r\n"
+    request = "{request}Host: 127.0.0.1:{port}\r\n"
+    request = "{request}Origin: http://localhost:{port}\r\n"
+    request = "{request}Upgrade: websocket\r\n"
+    request = "{request}Connection: Upgrade\r\n"
+    request = "{request}Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    request = "{request}Sec-WebSocket-Version: 13\r\n"
+    request = "{request}Sec-WebSocket-Protocol: simple-ui, bearer.{token}\r\n"
+    request = "{request}\r\n"
+    return request
+
+fn websocket_post_authorized_request(port: i32, token: text) -> text:
+    var request = "POST /ui/ws HTTP/1.1\r\n"
     request = "{request}Host: 127.0.0.1:{port}\r\n"
     request = "{request}Origin: http://localhost:{port}\r\n"
     request = "{request}Upgrade: websocket\r\n"
@@ -260,16 +286,22 @@ describe "Simple web browser production hardening live endpoints":
         val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
         val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
         val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+        val websocket_post_response = raw_http_request(port, websocket_post_authorized_request(port, token))
+        val websocket_post = "{http_status_line(websocket_post_response)}|{http_marker(websocket_post_response, "method_not_allowed")}"
+        val legacy_websocket_post_response = raw_http_request(port, legacy_websocket_post_authorized_request(port, token))
+        val legacy_websocket_post = "{http_status_line(legacy_websocket_post_response)}|{http_marker(legacy_websocket_post_response, "method_not_allowed")}"
 
         hardening_stop_web_server(pid)
 
-        step("Verify login succeeds and the WebSocket upgrade echoes only the safe simple-ui protocol")
+        step("Verify login succeeds, GET upgrades are accepted, and POST upgrades are rejected")
         expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
         expect(token.len()).to_be_greater_than(20)
         expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
         expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
         expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
         expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+        expect(websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
+        expect(legacy_websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
 
     slow_it "rate limits allowed origin login bursts":
         """The production login endpoint must bound repeated token mint requests even when the Origin is allowed."""

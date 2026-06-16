@@ -109,3 +109,9 @@ verification / requirement-selection pending
   instead of defaulting to zero-like values, and normalized normal/shared-WM TCP
   resume responses without relying on interpreter-unsafe `ConnStream` downcasts.
 - verify: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passes with 14 scenarios, and `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios including malformed and valid authorized `/ui/resume`.
+- fix: Rejected non-GET WebSocket upgrade attempts for `/ui/ws` and legacy
+  `/ws` with `405 Method Not Allowed` before either normal or shared-WM paths
+  can upgrade the socket.
+- verify: `bin/simple check src/app/ui.web/server.spl src/app/ui.web/ui_routes.spl test/03_system/gui/simple_web_browser_production_hardening_spec.spl` passes, and `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios including valid-token POST upgrade rejection.
+- verify: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` regenerated the system manual with existing docgen warnings/stub classification.
+- verify: AC-7 hygiene snapshot recorded in `doc/09_report/simple_web_browser_production_hardening.md`: unrelated working copy has 107 tracked changes and 5 untracked example roots, while `jj log -r 'conflicts()'` reports 498 existing conflict commits outside this lane.

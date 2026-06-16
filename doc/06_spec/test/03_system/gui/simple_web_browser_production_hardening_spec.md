@@ -106,18 +106,20 @@ expect(websocket_query).to_equal("HTTP/1.1 403 Forbidden|present")
 - Request a login token from an allowed loopback origin
 - Redeem the minted bearer token through resume and WebSocket routes
 - hardening stop web server
-- Verify login succeeds and the WebSocket upgrade echoes only the safe simple-ui protocol
+- Verify login succeeds, GET upgrades are accepted, and POST upgrades are rejected
    - Expected: http_status_line(login_response) equals `HTTP/1.1 200 OK`
    - Expected: malformed_resume equals `HTTP/1.1 400 Bad Request|present`
    - Expected: valid_resume equals `HTTP/1.1 200 OK|present`
    - Expected: websocket equals `HTTP/1.1 101 Switching Protocols|present`
    - Expected: legacy_websocket equals `HTTP/1.1 101 Switching Protocols|present`
+   - Expected: websocket_post equals `HTTP/1.1 405 Method Not Allowed|present`
+   - Expected: legacy_websocket_post equals `HTTP/1.1 405 Method Not Allowed|present`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -140,16 +142,22 @@ val websocket_response = raw_http_request(port, websocket_authorized_request(por
 val websocket = "{http_status_line(websocket_response)}|{http_marker(websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
 val legacy_websocket_response = raw_http_request(port, legacy_websocket_authorized_request(port, token))
 val legacy_websocket = "{http_status_line(legacy_websocket_response)}|{http_marker(legacy_websocket_response, "Sec-WebSocket-Protocol: simple-ui")}"
+val websocket_post_response = raw_http_request(port, websocket_post_authorized_request(port, token))
+val websocket_post = "{http_status_line(websocket_post_response)}|{http_marker(websocket_post_response, "method_not_allowed")}"
+val legacy_websocket_post_response = raw_http_request(port, legacy_websocket_post_authorized_request(port, token))
+val legacy_websocket_post = "{http_status_line(legacy_websocket_post_response)}|{http_marker(legacy_websocket_post_response, "method_not_allowed")}"
 
 hardening_stop_web_server(pid)
 
-step("Verify login succeeds and the WebSocket upgrade echoes only the safe simple-ui protocol")
+step("Verify login succeeds, GET upgrades are accepted, and POST upgrades are rejected")
 expect(http_status_line(login_response)).to_equal("HTTP/1.1 200 OK")
 expect(token.len()).to_be_greater_than(20)
 expect(malformed_resume).to_equal("HTTP/1.1 400 Bad Request|present")
 expect(valid_resume).to_equal("HTTP/1.1 200 OK|present")
 expect(websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
 expect(legacy_websocket).to_equal("HTTP/1.1 101 Switching Protocols|present")
+expect(websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
+expect(legacy_websocket_post).to_equal("HTTP/1.1 405 Method Not Allowed|present")
 ```
 
 </details>

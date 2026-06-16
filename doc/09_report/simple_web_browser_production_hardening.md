@@ -24,6 +24,9 @@
 - Authorized `/ui/resume` rejects missing or malformed `session_id`,
   `snapshot_revision`, or `last_sequence` with `400 Bad Request`, and accepts
   strict valid body fields in the normal TCP server path.
+- `/ui/ws` and legacy `/ws` reject non-GET WebSocket upgrade attempts with
+  `405 Method Not Allowed` before the socket can be upgraded, even when the
+  request carries a valid origin-bound bearer token.
 - Generated browser clients and static `wm.js` use WebSocket subprotocol bearer
   tokens instead of query-string tokens.
 - Query-string bearer compatibility is disabled by default behind
@@ -48,12 +51,32 @@
 - AMD ROCm/HIP is host-unavailable locally and must be proven on an AMD ROCm
   host.
 
+## Workspace Hygiene Evidence
+
+Snapshot from 2026-06-16:
+
+- `jj --no-pager status` reports unrelated working-copy changes outside this
+  lane: 107 tracked changes (`A=66`, `M=39`, `D=2`) plus 5 untracked example
+  roots. Representative unrelated paths include
+  `.spipe/ide_md_counter_office_hardening/state.md`,
+  `doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md`,
+  `bootstrap/stage1/simple`, and `examples/08_gpu/simple_cuda_example/`.
+- `jj --no-pager log -r 'conflicts()'` reports 498 existing conflict commits.
+  Representative unrelated conflict rows include `wyruwlsklnzt 3af695013cf1
+  docs(compute): add std.compute/ExecTarget guide+tldr; spipe skill testing
+  patterns`, `yoqtkuwktyqr 21828c2b7e72 feat(compute): per-backend
+  compute-kernel emission (cuda/hip/opencl/metal/webgpu)`, and
+  `tmsqprwsruws ba42e2fc8a50 fix(ui.web): share auth query parsing`.
+- These files and conflicts are not part of the browser-hardening commit scope.
+
 ## Remaining Release Work
 
 - User selection of final feature and NFR options is still required before
   writing final `REQ-*` and `NFR-*` files.
 - Requirement trace IDs need to be added to executable specs after final
   requirements exist.
+- AC-7 hygiene evidence must remain separately reported until unrelated dirty
+  files and existing `jj` conflicts are resolved outside this lane.
 - `doc/08_tracking/feature/feature_db.sdn` has a `current` row for this lane;
   do not mark it `done` until final requirements, trace IDs, and macOS
   Metal/AMD ROCm host evidence are complete.
