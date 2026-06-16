@@ -134,6 +134,31 @@ Avoid boolean-wrapper assertions such as `expect(a == b).to_equal(true)` or
 `to_equal`, `to_be_greater_than`, `to_contain`, or `to_be_nil`; use
 `to_be(true/false)` only when the boolean itself is the behavior being tested.
 
+### GPU-offload and effect discriminators
+
+When a feature claims work is offloaded to the GPU (or that an effect like
+transparency/blend is applied), the spec must *discriminate the claim*, not just
+observe a pass:
+
+- **Offload payload-gating.** Font glyph offload is proven via a checksum-verified
+  backend payload (`{CUDA,ROCM,HIP,OPENCL}_{VECTOR,BITMAP}_FONT_*` env transport).
+  A real offload spec asserts BOTH states: with NO payload → CPU fallback
+  (`gpu_returned_glyphs == 0`, `cpu_fallback_hits > 0`, reason
+  `production-gpu-dispatch-not-wired`); with a matching payload → GPU stats
+  (`gpu_returned_glyphs == 1`, `cpu_fallback_hits == 0`). Add a corrupt-checksum
+  case that must be REJECTED (falls back). If the impl reports GPU-offloaded
+  regardless of payload, it is a cover-up and the spec must fail it. See
+  `test/01_unit/lib/common/text_layout/bitmap_font_gpu_offload_spec.spl`.
+- **Effect oracles are absolute, not "non-zero".** Transparency/blend specs assert
+  the exact composited value: full coverage replaces (channel == fg), half
+  coverage hits the midpoint (`(fg*128 + bg*127)/255`), zero coverage leaves bg
+  untouched. See `font_glyph_transparency_spec.spl`.
+- **Config/env backend selection.** When one API selects its lane (SIMD CPU vs
+  GPU) by environment (`SIMPLE_2D_BACKEND`), assert the override is honored when
+  the backend initializes AND ignored (auto-probe, value changes) when it cannot —
+  never just that some backend is returned. See
+  `engine2d_env_backend_select_spec.spl`.
+
 ## Startup-Sensitive Specs
 
 If a SPipe change touches `simple run`, direct file argv parsing,

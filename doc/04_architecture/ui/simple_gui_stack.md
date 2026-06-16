@@ -623,3 +623,33 @@ Caveats:
   living under `scripts/gui/` and `scripts/check/` must use `dirname/../..` (two
   levels), not `dirname/..` — getting this wrong silently resolves repo-root to
   `scripts/` and breaks every GUI launch.
+
+## Realized 2026-06-15 — one API, common/web/text renderers
+
+This iteration moved the stack toward the target above (see design doc
+`doc/05_design/ui/renderer_unification_2026-06-15.md`):
+
+- **One 2D API, env-selected lane.** `Engine2D.detect_best_backend()` now honors
+  `SIMPLE_2D_BACKEND` (e.g. `cpu_simd`, `software`, `cuda`, `vulkan`) when the
+  named lane initializes, else auto-probes. The `RenderBackend` trait was already
+  shared by every SIMD-CPU/GPU lane; selection is now config/environment-driven
+  without per-call-site changes.
+- **Three renderers, shared cheap base.** common renderer
+  (`lib/common/render_scene` cascade + `lib/common/ui/draw_ir`) → web renderer
+  (`browser_engine`) and slim text renderer (`editor/render/md_renderer.spl`).
+  The TUI keeps zero GPU imports by default but derives style from the shared
+  `office_style_resolver` cascade; the opt-in `editor/render/md_draw_ir.spl`
+  projects TUI lines into the same `DrawIrComposition` the GUI dispatches, making
+  the TUI lane GPU-offloadable like the GUI.
+- **Font GPU offload (vector + bitmap) at parity** with checksum-gated backend
+  payloads and a load-bearing CPU fallback; transparency composites through
+  `blit_glyph`. Default unspecified font is Fira Code Nerd (glyph + HTML seams).
+- **MD WYSIWYG wired end-to-end** via `app/office/md_wysiwyg_{ppm,gui}.spl`.
+- **Other 2D APIs share the SIMD-CPU/GPU interface via additive bridges** —
+  `engine2d/bridge_game2d.spl`, `skia/bridge/engine2d_bridge.spl`,
+  `engine2d/bridge_drawing_compositor.spl` dispatch game2d / skia / compositor
+  primitives onto the shared `RenderBackend` `Engine2D` lanes (proven painting
+  through `cpu_simd` and `software`). The rich draw surfaces are kept; only the
+  backend interface is shared. Full primitive coverage is incremental follow-up.
+- **Deliberately NOT done** (over-engineering guard): the ~5100-line web layout
+  engine was not relocated into `common`.

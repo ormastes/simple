@@ -1,0 +1,103 @@
+"""
+# Markdown WYSIWYG Graphical Render Specification
+
+## Overview
+
+This unit spec proves the end-to-end graphical markdown path: raw markdown is
+built into a `WysiwygView`, wrapped as styled preview HTML via
+`wysiwyg_preview_pane`, and rendered to pixels through the EXACT same renderer
+entrypoint the `md_wysiwyg_ppm` / `md_wysiwyg_gui` apps use
+(`simple_web_render_html_to_pixels_with_engine2d_backend`, backend `cpu_simd`).
+
+The oracle is the framebuffer itself — exact pixel count, a non-background ink
+count, and an absolute painted color (`0xFF000000`, the default body glyph ink) —
+not an `expect(true)` placeholder. Markdown must actually paint ink, and two
+different markdown documents must produce two different framebuffers.
+
+Heading lines (`# ...`) are exercised too: the earlier seed crash in
+`markdown_strip_heading_marker` (a chained `.slice` on a text temporary) is fixed,
+so heading markdown now renders to `<h{n}>` and paints to pixels through the same
+path — covering the feature's own `# Title` example and "all variety" of markdown.
+
+**Requirements:** N/A — implementation/architecture evidence for the markdown ->
+graphical glue (feature: markdown_wysiwyg_graphical_render_app_2026-06-15).
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend}
+use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_preview_pane}
+
+fn _count_non_bg(pixels: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] != bg:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var idx: i32 = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            return false
+        idx = idx + 1
+    true
+
+# Mirror the app glue exactly: markdown source -> WYSIWYG view -> preview HTML
+# -> the cpu_simd Engine2D backend pixel renderer.
+fn _render_markdown(md_source: text, w: i32, h: i32) -> [u32]:
+    val html = wysiwyg_preview_pane(build_wysiwyg_view(md_source))
+    simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, "cpu_simd")
+
+describe "markdown WYSIWYG graphical render":
+
+    it "paints markdown through the same cpu_simd renderer the apps use":
+        val pixels = _render_markdown("Hello body paragraph text", 200, 60)
+        # (1) exact framebuffer size
+        expect(pixels.len()).to_equal(200 * 60)
+        # (2) markdown actually paints — non-background ink exists
+        expect(_count_non_bg(pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
+
+    it "paints absolute black glyph ink for styled markdown body text":
+        val pixels = _render_markdown("Hello body paragraph text", 200, 60)
+        expect(pixels.len()).to_equal(200 * 60)
+        # (3) absolute color invariant: the styled paragraph paints opaque black
+        # glyph ink (#000000 -> 0xFF000000) onto the otherwise-white page.
+        expect(_count_color(pixels, 0xFF000000u32)).to_be_greater_than(0)
+        # The white page background still survives around the glyphs.
+        expect(_count_color(pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
+
+    it "paints a heading line to pixels (the formerly-crashing case)":
+        # `# ...` was the crash case and is the feature doc's own example. Prove
+        # it now paints end-to-end through the same app renderer path.
+        val pixels = _render_markdown("# Heading\nbody text", 200, 80)
+        expect(pixels.len()).to_equal(200 * 80)
+        expect(_count_non_bg(pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
+        # A heading + body paints differently than the body alone.
+        val body_only = _render_markdown("body text", 200, 80)
+        expect(_pixels_equal(pixels, body_only)).to_equal(false)
+
+    it "renders different markdown to different framebuffers":
+        val a = _render_markdown("Hello body paragraph text", 200, 60)
+        val b = _render_markdown("A completely different sentence", 200, 60)
+        expect(a.len()).to_equal(200 * 60)
+        expect(b.len()).to_equal(200 * 60)
+        # (4) distinct markdown content yields distinct pixels — the renderer is
+        # genuinely consuming the WYSIWYG HTML, not emitting a fixed bitmap.
+        expect(_pixels_equal(a, b)).to_equal(false)
+        expect(_count_non_bg(b, 0xFFFFFFFFu32)).to_be_greater_than(0)

@@ -35,6 +35,23 @@ use std.gpu.engine2d.compute_dispatch.{ComputeDispatchResult, compute_dispatch_a
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order}
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
 
+extern fn rt_env_get(key: text) -> text?
+
+# ============================================================================
+# Config / environment backend selection
+# ============================================================================
+
+fn engine2d_env_backend_override() -> text:
+    """Config/environment override for the auto-selected 2D backend.
+
+    The 2D API is one surface; which lane runs it — SIMD CPU vs a GPU backend —
+    is selectable by environment without changing any call site. Set
+    `SIMPLE_2D_BACKEND` to a backend key (e.g. `cpu_simd`, `software`, `cuda`,
+    `vulkan`, `metal`, `rocm`). Returns "" when unset.
+    """
+    val raw = rt_env_get("SIMPLE_2D_BACKEND") ?? ""
+    raw.trim()
+
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -339,9 +356,18 @@ class Engine2D:
         Explicit native surfaces such as baremetal and virtio_gpu require a
         preinitialized framebuffer, so they are not probed from width/height.
 
+        A `SIMPLE_2D_BACKEND` config/environment override takes precedence when
+        the named backend actually initializes; otherwise the auto-probe runs.
+
         Returns:
             Backend name string
         """
+        val override_name = engine2d_env_backend_override()
+        if override_name != "":
+            val override_canon = backend_canonical_name(override_name)
+            val override_probe = Engine2D.probe_backend(1, 1, override_canon)
+            if override_probe.status == BackendStatus.Initialized:
+                return override_canon
         val order = backend_default_priority_order()
         var idx = 0
         val order_len = order.len()
