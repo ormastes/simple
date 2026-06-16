@@ -1,6 +1,6 @@
-# Production Gui Web Renderer Parity Hardening Specification
+# Production GUI/Web Renderer Parity Hardening Specification
 
-> <details>
+> Verifies selected Feature C and NFR C renderer parity and GPU/browser evidence taxonomy contracts.
 
 <!-- sdn-diagram:id=production_gui_web_renderer_parity_hardening_spec.arch -->
 <details class="sdn-source">
@@ -33,7 +33,29 @@ production_gui_web_renderer_parity_hardening_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Production Gui Web Renderer Parity Hardening Specification
+# Production GUI/Web Renderer Parity Hardening Specification
+
+Verifies selected Feature C and NFR C renderer parity and GPU/browser evidence taxonomy contracts.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
+| Source | `test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies selected Feature C and NFR C renderer parity and GPU/browser evidence
+taxonomy contracts.
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
+**Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
+**Traceability:** REQ-WEB-HARD-013, REQ-WEB-HARD-014, NFR-WEB-HARD-009, NFR-WEB-HARD-012
 
 ## Scenarios
 
@@ -239,21 +261,6 @@ expect(report.exact_backend_parity).to_equal(true)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Other |
-| Status | Active |
-| Source | `test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- production GUI web renderer parity hardening
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -263,6 +270,11 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
 
 
 </details>

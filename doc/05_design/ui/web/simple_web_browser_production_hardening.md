@@ -2,8 +2,8 @@
 
 ## Status
 
-Implementation-aligned detail design. Final trace IDs are pending requirement
-option selection.
+Implementation-aligned detail design for selected Feature Option C and NFR
+Option C trace IDs.
 
 ## Configuration
 
@@ -13,8 +13,8 @@ option selection.
 - `SIMPLE_UI_WEB_ALLOWED_ORIGINS`: comma-separated exact origins. When unset,
   the development default accepts only loopback HTTP/HTTPS origins with numeric
   ports.
-- `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN`: disabled by default; enables legacy
-  `?token=` bearer extraction only for compatibility.
+- `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN`: deprecated compatibility knob; query
+  `?token=` bearer extraction is non-authorizing.
 
 ## Request Flow
 
@@ -24,8 +24,8 @@ option selection.
 4. Login attempts pass through a fixed-window burst gate before body parsing.
 5. Login body fields are parsed through bounded `ui_web_auth_json_field`.
 6. Successful login returns an origin-bound signed token.
-7. `/ui/ws`, `/ws`, `/ui/resume`, and sensitive `/api/*` call
-   `ui_web_request_authorized`.
+7. `/ui/ws`, `/ui/resume`, and sensitive `/api/*` call
+   `ui_web_request_authorized`; legacy `/ws` is hidden with `404`.
 8. WebSocket upgrade is computed only after origin and token verification pass.
 
 ## Token Transport
@@ -38,7 +38,8 @@ simple-ui, bearer.<url-encoded-token>
 
 The server echoes only `simple-ui`, never the bearer-bearing subprotocol.
 Non-browser clients may use `Authorization: Bearer <token>`. Query transport is
-kept as explicit compatibility via `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1`.
+deprecated and non-authorizing, including when
+`SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is present.
 
 ## Error Contract
 
@@ -65,5 +66,4 @@ Manual/spec evidence:
 
 ## Remaining Design Gaps
 
-- Final requirements and NFR files need explicit option selection.
 - Native macOS Metal and AMD ROCm proof require matching host environments.

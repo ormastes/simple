@@ -2,8 +2,8 @@
 
 ## Status
 
-Implementation-aligned architecture note. Final `REQ-*` and `NFR-*` IDs remain
-pending until the requirement option selection is recorded in
+Implementation-aligned architecture note for the selected Feature Option C and
+NFR Option C scope recorded in
 `doc/02_requirements/feature/simple_web_browser_production_hardening.md` and
 `doc/02_requirements/nfr/simple_web_browser_production_hardening.md`.
 
@@ -33,13 +33,14 @@ TLS mode never accepts the insecure fallback.
 
 `/ui/login` accepts only allowed origins and bounded unauthenticated bodies. It
 issues an HMAC-signed `SessionToken` bound to the request origin. `/ui/ws`,
-legacy `/ws`, `/ui/resume`, and sensitive `/api/*` routes require an allowed
-origin plus a token verified against that exact origin.
+`/ui/resume`, and sensitive `/api/*` routes require an allowed origin plus a
+token verified against that exact origin. Legacy `/ws` is hidden before upgrade
+routing and returns `404`.
 
 Browser WebSocket clients authenticate through
 `Sec-WebSocket-Protocol: simple-ui, bearer.<url-encoded-token>`. Query-string
-bearer compatibility is disabled by default and requires
-`SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1`.
+bearer transport is deprecated and non-authorizing, including when the legacy
+`SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` environment knob is present.
 
 ## Renderer Evidence Gate
 
@@ -73,8 +74,8 @@ configuration changes require server restart.
 ## Targets
 
 - Missing production secret: startup failure unless explicit non-TLS dev opt-in.
-- Unauthorized `/api/*`, `/ui/ws`, `/ws`, `/ui/resume`: `403` before data or
-  upgrade.
+- Unauthorized `/api/*`, `/ui/ws`, `/ui/resume`: `403` before data or upgrade.
+- Legacy `/ws`: `404` before upgrade.
 - Oversized unauthenticated `/ui/login`: `413`.
 - Renderer parity wrapper: exit `0`, `blur_or_tolerance_used=false`, surface
   fail counts `0`.

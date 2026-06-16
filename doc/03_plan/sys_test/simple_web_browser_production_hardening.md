@@ -3,9 +3,9 @@
 ## Status
 
 Snapshot: 2026-06-16. Current plan maps the implemented hardening behavior to
-executable evidence. Candidate `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` IDs are
-predeclared in the option docs; final trace backfill remains pending explicit
-user selection.
+executable evidence. Selected Feature Option C `REQ-WEB-HARD-*` and NFR Option
+C `NFR-WEB-HARD-*` IDs are recorded in the final requirement documents and
+traced below.
 
 ## Executable Coverage
 
@@ -52,11 +52,11 @@ and record the snapshot in `doc/09_report/simple_web_browser_production_hardenin
 The browser-hardening lane must not absorb unrelated dirty files or conflict
 cleanup unless explicitly requested.
 
-## Pre-Selection Traceability Matrix
+## Traceability Matrix
 
-Final `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` files remain pending explicit user
-selection. Until then, use this matrix to keep every candidate ID tied to its
-current evidence artifact without promoting unselected scope.
+Final `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` files exist for the selected
+Feature Option C and NFR Option C scope. Use this matrix to keep every selected
+ID tied to its current evidence artifact.
 
 | Candidate ID | Evidence Artifact | Evidence Status |
 |--------------|-------------------|-----------------|
@@ -80,19 +80,17 @@ current evidence artifact without promoting unselected scope.
 | `NFR-WEB-HARD-004` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | `NFR-WEB-HARD-005` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; body/frame/head-size and request-body-framing guards in `src/app/ui.web/server.spl`, `src/app/ui.web/async_server.spl`, `src/app/ui.web/tls_serve_loop.spl`, `src/app/ui.web/ui_routes.spl`, and `src/app/ui.web/auth_params.spl` | passing |
 | `NFR-WEB-HARD-006` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` process start/kill helpers | passing |
-| `NFR-WEB-HARD-007` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` warm auth latency scenario | measured locally with a 10s ceiling; final target still requires selection |
+| `NFR-WEB-HARD-007` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` warm auth latency scenario | measured locally with a 10s ceiling |
 | `NFR-WEB-HARD-008` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; generated manual | passing |
 | `NFR-WEB-HARD-009` | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | passing locally |
 | `NFR-WEB-HARD-010` | `src/app/ui.web/wm.js`; `test/01_unit/app/ui/ws_handler_spec.spl`; live query-token rejection scenario | passing |
 | `NFR-WEB-HARD-011` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | `NFR-WEB-HARD-012` | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | partial: explicit status rows exist; native Metal/ROCm/DirectX/WebGPU device-readback requires external hosts |
 
-After final requirement selection, add the selected candidate IDs to the
-executable specs and generated manuals, then delete unselected option files.
+Selected trace IDs are carried by the executable specs and regenerated manuals.
 
 ## Release Blockers
 
-- Final requirement and NFR files are not selected/written.
 - Metal, AMD ROCm, DirectX, and WebGPU native proof require external host
   environments.
 - AC-7 hygiene evidence must be current at handoff; unrelated dirty files and

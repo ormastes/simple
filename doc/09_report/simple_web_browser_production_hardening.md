@@ -109,19 +109,18 @@ Snapshot from 2026-06-16:
 
 ## Remaining Release Work
 
-- User selection of final feature and NFR options is still required before
-  writing final `REQ-*` and `NFR-*` files.
+- Selected Feature Option C and NFR Option C are recorded in final requirement
+  files, and trace IDs are carried by the executable specs, generated manuals,
+  and system test plan.
 - Live async-server request-head evidence is blocked by an existing
   `rt_sqlite_open` extern failure in the async server interpreter launch path;
   the parser guard itself is covered by shared unit predicates and compile
   checks for `async_server.spl` and `tls_serve_loop.spl`.
-- Requirement trace IDs need to be added to executable specs after final
-  requirements exist. Until then,
-  `doc/03_plan/sys_test/simple_web_browser_production_hardening.md` contains a
-  pre-selection traceability matrix from every candidate `REQ-WEB-HARD-*` and
-  `NFR-WEB-HARD-*` ID to current evidence artifacts.
+- `doc/03_plan/sys_test/simple_web_browser_production_hardening.md` contains
+  the current traceability matrix from every selected `REQ-WEB-HARD-*` and
+  `NFR-WEB-HARD-*` ID to evidence artifacts.
 - AC-7 hygiene evidence must remain separately reported until unrelated dirty
   files and existing `jj` conflicts are resolved outside this lane.
 - `doc/08_tracking/feature/feature_db.sdn` has a `current` row for this lane;
-  do not mark it `done` until final requirements, trace IDs, and macOS
-  Metal/AMD ROCm/DirectX/WebGPU host evidence are complete.
+  do not mark it `done` until macOS Metal/AMD ROCm/DirectX/WebGPU host
+  evidence is complete.

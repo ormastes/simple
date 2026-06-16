@@ -5,29 +5,24 @@
 ## Quick Stats
 
 - **Total Features:** 4
-- **Complete Documentation:** 1 (25%)
-- **Stubs Remaining:** 3
-- **Total Lines:** 17
-- **Warnings:** 5
+- **Complete Documentation:** 4 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 40
+- **Warnings:** 20
 
 ---
 
-## Infrastructure (1 features)
+## Other (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [WebSocket E2E Protocol Specification](test/02_integration/app/ui.web/ws_e2e_spec.md) | Implemented | 3/5 | 46 | 20% | 17 lines |
-
-## Other (1 features)
-
-| Feature | Status | Difficulty | Tests | Coverage | Details |
-|---------|--------|------------|-------|----------|----------|
-| [Simple Web Browser Production Hardening Specification](test/03_system/gui/simple_web_browser_production_hardening_spec.md) | Auto-generated | N/A | 6 | 0% | 0 lines |
+| [Simple Web Browser Production Hardening Live Endpoint Specification](test/03_system/gui/simple_web_browser_production_hardening_spec.md) | Minimal | N/A | 6 | 20% | 10 lines |
+| [Production GUI/Web Renderer Parity Hardening Specification](test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md) | Minimal | N/A | 8 | 20% | 10 lines |
 
 ## Application (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Ws Handler Specification](test/01_unit/app/ui/ws_handler_spec.md) | Auto-generated | N/A | 13 | 0% | 0 lines |
-| [Web Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Auto-generated | N/A | 19 | 0% | 0 lines |
+| [Simple Web Browser Production Auth Hardening Specification](test/01_unit/app/ui/web_auth_hardening_spec.md) | Minimal | N/A | 19 | 20% | 10 lines |
+| [Simple Web Browser WebSocket Handler Hardening Specification](test/01_unit/app/ui/ws_handler_spec.md) | Minimal | N/A | 13 | 20% | 10 lines |
 

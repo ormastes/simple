@@ -1,6 +1,6 @@
-# Web Auth Hardening Specification
+# Simple Web Browser Production Auth Hardening Specification
 
-> <details>
+> Verifies selected Feature C and NFR C production authentication, origin, request-boundary, generated-client, and login burst behavior.
 
 <!-- sdn-diagram:id=web_auth_hardening_spec.arch -->
 <details class="sdn-source">
@@ -33,7 +33,29 @@ web_auth_hardening_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Web Auth Hardening Specification
+# Simple Web Browser Production Auth Hardening Specification
+
+Verifies selected Feature C and NFR C production authentication, origin, request-boundary, generated-client, and login burst behavior.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
+| Source | `test/01_unit/app/ui/web_auth_hardening_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies selected Feature C and NFR C production authentication, origin,
+request-boundary, generated-client, and login burst behavior.
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
+**Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
+**Traceability:** REQ-WEB-HARD-001, REQ-WEB-HARD-002, REQ-WEB-HARD-003, REQ-WEB-HARD-004, REQ-WEB-HARD-005, REQ-WEB-HARD-008, REQ-WEB-HARD-011, NFR-WEB-HARD-001, NFR-WEB-HARD-002, NFR-WEB-HARD-003, NFR-WEB-HARD-004, NFR-WEB-HARD-005, NFR-WEB-HARD-010, NFR-WEB-HARD-011
 
 ## Scenarios
 
@@ -437,21 +459,6 @@ expect(reset.2).to_equal(1)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/ui/web_auth_hardening_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- ui.web production auth hardening
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -461,6 +468,11 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
 
 
 </details>

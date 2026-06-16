@@ -29,11 +29,11 @@ Harden the Simple Web/browser production boundary so renderer parity, browser br
 3. Security boundary slice: harden token secret policy, TLS secret wiring, login origin behavior, and resume route auth without touching renderer/GPU files.
 4. Evidence slice: add focused unit specs for the security policy and origin fail-closed behavior.
 5. Verification: run focused checks/tests for new files and note pre-existing broad-check blockers separately.
-6. Follow-up production slices: finish final requirement/NFR selection, add trace IDs, and run native host evidence for macOS Metal plus AMD ROCm/HIP.
+6. Follow-up production slices: keep selected Feature Option C/NFR Option C traceability current, and run native host evidence for macOS Metal plus AMD ROCm/HIP.
 
 ## Phase
 
-verification / requirement-selection pending
+verification / external-host evidence pending
 
 ## Log
 
@@ -74,7 +74,7 @@ verification / requirement-selection pending
 - verify: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` passes. Evidence reports matrix/layout/surface/backend `pass`, Tauri and Chrome surface fail counts `0`, two tracked text raster divergences per surface, font offload `unavailable`, and Metal readback `unavailable` on Linux with `metal-requires-macos`.
 - impl: Disabled query-string bearer token extraction by default behind `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` and migrated the static `src/app/ui.web/wm.js` production client to WebSocket subprotocol bearer auth.
 - impl: Added fixed-window `/ui/login` burst gating to both normal and shared WM server login paths.
-- design: Added implementation-aligned architecture, detail design, system-test plan, and report artifacts for the production hardening lane while leaving final `REQ-*`/`NFR-*` documents pending explicit option selection.
+- design: Added implementation-aligned architecture, detail design, system-test plan, and report artifacts for the production hardening lane; at that point final `REQ-*`/`NFR-*` documents had not yet been selected.
 - verify: `bin/simple check src/app/ui.web/auth_params.spl src/app/ui.web/ui_routes.spl src/app/ui.web/server.spl src/app/ui.web/ws_handler.spl test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl` passes.
 - verify: Previously, `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 13 scenarios before authorized resume body-contract coverage was added.
 - verify: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passes with 10 scenarios.
@@ -83,8 +83,8 @@ verification / requirement-selection pending
 - verify: `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`.
 - docs: Added a `current` feature tracking row and refreshed UI guide links for
   the canonical production renderer parity and live web endpoint hardening
-  gates. The lane is not `done` because final feature/NFR option selection,
-  trace-ID backfill, and native macOS Metal / AMD ROCm host evidence remain
+  gates. The lane was not `done` because final feature/NFR option selection,
+  trace-ID backfill, and native macOS Metal / AMD ROCm host evidence were still
   open.
 - fix: Kept `WebServer.serve_loop` on the live instance instead of routing each
   accepted connection through a value-copy helper, so normal `run_web`
@@ -116,10 +116,10 @@ verification / requirement-selection pending
 - verify: `bin/simple check src/app/ui.web/server.spl src/app/ui.web/ui_routes.spl test/03_system/gui/simple_web_browser_production_hardening_spec.spl` passes, and `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios including valid-token POST upgrade rejection.
 - verify: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` regenerated the system manual with existing docgen warnings/stub classification.
 - verify: AC-7 hygiene snapshot recorded in `doc/09_report/simple_web_browser_production_hardening.md`: unrelated working copy has 107 tracked changes and 5 untracked example roots, while `jj log -r 'conflicts()'` reports 498 existing conflict commits outside this lane.
-- docs: Added a pre-selection traceability matrix in
+- docs: Added an initial pre-selection traceability matrix in
   `doc/03_plan/sys_test/simple_web_browser_production_hardening.md` mapping
   every candidate `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` ID to current evidence
-  while preserving final option selection as a release blocker.
+  while preserving final option selection as a then-current release blocker.
 - verify: Added warm production browser auth latency evidence to
   `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; the
   live endpoint spec passes with 6 scenarios and measures warmed token mint plus
@@ -296,3 +296,9 @@ verification / requirement-selection pending
   current production behavior: canonical `/ui/ws` upgrades are bearer-gated,
   legacy `/ws` is hidden, and deprecated query-token env opt-in is
   non-authorizing.
+- docs: Recorded user selection of Feature Option C and NFR Option C, wrote
+  final requirement documents, deleted unselected option files, and backfilled
+  selected `REQ-WEB-HARD-*` / `NFR-WEB-HARD-*` trace IDs into executable specs,
+  generated manuals, the system-test plan, reports, and the feature tracking
+  row. External host proof for macOS Metal, AMD ROCm/HIP, Windows DirectX, and
+  real browser WebGPU device readback remains open.

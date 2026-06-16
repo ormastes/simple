@@ -1,6 +1,6 @@
-# Simple Web Browser Production Hardening Specification
+# Simple Web Browser Production Hardening Live Endpoint Specification
 
-> <details>
+> Verifies selected Feature C and NFR C browser production hardening behavior for the live Simple Web HTTP/WebSocket boundary.
 
 <!-- sdn-diagram:id=simple_web_browser_production_hardening_spec.arch -->
 <details class="sdn-source">
@@ -33,7 +33,29 @@ simple_web_browser_production_hardening_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Simple Web Browser Production Hardening Specification
+# Simple Web Browser Production Hardening Live Endpoint Specification
+
+Verifies selected Feature C and NFR C browser production hardening behavior for the live Simple Web HTTP/WebSocket boundary.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
+| Source | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies selected Feature C and NFR C browser production hardening behavior for
+the live Simple Web HTTP/WebSocket boundary.
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
+**Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
+**Traceability:** REQ-WEB-HARD-003, REQ-WEB-HARD-006, REQ-WEB-HARD-007, REQ-WEB-HARD-008, REQ-WEB-HARD-009, REQ-WEB-HARD-010, REQ-WEB-HARD-011, REQ-WEB-HARD-012, NFR-WEB-HARD-003, NFR-WEB-HARD-004, NFR-WEB-HARD-005, NFR-WEB-HARD-006, NFR-WEB-HARD-007, NFR-WEB-HARD-008, NFR-WEB-HARD-010, NFR-WEB-HARD-011
 
 ## Scenarios
 
@@ -398,21 +420,6 @@ expect(limited).to_equal("HTTP/1.1 429 Too Many Requests|present")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Other |
-| Status | Active |
-| Source | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Simple web browser production hardening live endpoints
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -422,6 +429,11 @@ Tests covering:
 | Slow scenarios | 6 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
 
 
 </details>

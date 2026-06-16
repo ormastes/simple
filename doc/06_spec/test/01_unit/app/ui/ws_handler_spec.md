@@ -1,6 +1,6 @@
-# Ws Handler Specification
+# Simple Web Browser WebSocket Handler Hardening Specification
 
-> <details>
+> Verifies selected Feature C and NFR C WebSocket upgrade parsing, canonical route gating, bearer extraction, query-token non-authorization, and frame bounds.
 
 <!-- sdn-diagram:id=ws_handler_spec.arch -->
 <details class="sdn-source">
@@ -33,7 +33,29 @@ ws_handler_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Ws Handler Specification
+# Simple Web Browser WebSocket Handler Hardening Specification
+
+Verifies selected Feature C and NFR C WebSocket upgrade parsing, canonical route gating, bearer extraction, query-token non-authorization, and frame bounds.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
+| Source | `test/01_unit/app/ui/ws_handler_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies selected Feature C and NFR C WebSocket upgrade parsing, canonical
+route gating, bearer extraction, query-token non-authorization, and frame bounds.
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
+**Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
+**Traceability:** REQ-WEB-HARD-005, REQ-WEB-HARD-007, REQ-WEB-HARD-012, NFR-WEB-HARD-004, NFR-WEB-HARD-005, NFR-WEB-HARD-008, NFR-WEB-HARD-010
 
 ## Scenarios
 
@@ -256,21 +278,6 @@ expect(ui_web_ws_frame_payload_allowed(UI_WEB_MAX_WS_FRAME_BYTES + 1)).to_be(fal
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/ui/ws_handler_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- ui.web.ws_handler
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -280,6 +287,11 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
 
 
 </details>
