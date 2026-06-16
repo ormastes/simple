@@ -3,7 +3,36 @@
 - **ID:** interp_f64_nested_struct_payload_zero_2026-06-14
 - **Severity:** P1 (blocks numeric verification of the whole spreadsheet formula engine)
 - **Discovered:** 2026-06-14, while hardening `src/app/office/sheets/formula.spl`
-- **Status:** OPEN — **root cause REFINED 2026-06-14** (see "Refined root cause" below; the "nested struct" framing was a symptom, not the cause)
+- **Status:** OPEN — **root cause CORRECTED 2026-06-16** (see "Corrected root cause (2026-06-16)" below). The 2026-06-14 "shared frontend type layer / let-binding type from callee return type" conclusion is **REFUTED**: the emitted MIR is byte-identical between the correct Rust seed and the buggy self-hosted stage4, so the frontend is NOT at fault. The defect is in stage4's **post-MIR execution** (the self-hosted tree-walking interpreter) and, separately, its **native codegen**.
+
+## Corrected root cause (2026-06-16 — differential bisection vs the Rust seed oracle)
+
+Re-bisected with the Rust seed as a **confirmed-correct oracle** (`bin/release/x86_64-unknown-linux-gnu/simple_seed run` gives the right answer on every probe below; `bin/release/simple` stage4 gives the wrong one).
+
+**Executor identified by observation** (not source-reading): `bin/release/simple run` uses `CompileMode.Interpret` → `InterpreterBackendImpl.process_module` (the tree-walking HIR interpreter in `src/compiler/70.backend/backend/interpreter.spl` + `interpreter_calls.spl` + `env.spl`), wired in `src/compiler/80.driver/driver_types.spl:52`. (`src/compiler/95.interp/mir_interpreter.spl` is NOT the run executor — it leaves `LocalAddr` unhandled and has a truncating `f64_to_bits = v as i64`; those are separate latent issues, not this bug.)
+
+**The MIR is identical** between seed and stage4 (`compile --emit-mir`, diff empty modulo the filename comment). So the bug is purely in stage4's execution of that MIR.
+
+**Minimal repro** (`bin/release/simple run` → prints `BAD`; seed → `OK`):
+```
+fn free_ret() -> f64: 3.0
+fn noop(): print("pre")
+fn main():
+    val f = free_ret()      # f = 3.0  (correct here)
+    noop()                  # ANY intervening function call
+    if f > 2.5: print("OK") else: print("BAD")   # f now reads as 0 -> BAD
+```
+
+**Discriminators (all verified empirically):** corruption requires the **trifecta** —
+1. the value is a **float** (i64 return values survive an intervening call), AND
+2. it is a **function-call return** (a `val f = 5.5` literal survives), AND
+3. there is a **subsequent function call** before first use (`val f = free_ret(); if f>2.5` with no intervening call → OK).
+
+An aliasing probe (`val f=free_ret(); val g=other_ret(); f`) shows `f` becomes **0**, not `g`'s value.
+
+**T1 — the key behavioral fingerprint:** inserting a *read* of `f` (e.g. an `if f > 2.5` block) **before** `noop()` makes `f` survive the later call (`after:OK`). A copy via arithmetic (`val f2 = f + 0.0`) or a struct field (`Hold(v: f)` ) before the call does **not** protect it. Because an `if`-block read adds an extra scope push/pop, this points at the **scope/environment machinery** (`env.spl`, incl. the D-9 `scope_pool` recycling) being sensitive to the exact push/pop sequence around a float call-return binding — i.e. a value-lifetime/aliasing bug in how a float `Value` from a call is held in the environment across a subsequent call, NOT register clobbering (the value lives in an env `Dict`, not a register).
+
+**Also reproduces in `bin/release/simple native-build`** → the self-hosted native codegen has a parallel f64-call-return defect (classic "f64 return read from the integer return slot" ABI shape). Seed paths are clean. So a full fix is two-front: (a) the tree-walking interpreter's call-return/env value handling, (b) stage4 codegen's f64-return ABI. Both are pure-Simple (`src/compiler/...`) → `--pure-simple` rebuild, verified against the seed oracle. **Next step:** instrument `env.define/lookup` + `call_hir_function`'s return path, `--pure-simple` rebuild, and trace the float `Value` across the intervening call to pin the exact line.
 
 ## Summary
 
