@@ -115,3 +115,7 @@ verification / requirement-selection pending
 - verify: `bin/simple check src/app/ui.web/server.spl src/app/ui.web/ui_routes.spl test/03_system/gui/simple_web_browser_production_hardening_spec.spl` passes, and `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passes with 5 live endpoint scenarios including valid-token POST upgrade rejection.
 - verify: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` regenerated the system manual with existing docgen warnings/stub classification.
 - verify: AC-7 hygiene snapshot recorded in `doc/09_report/simple_web_browser_production_hardening.md`: unrelated working copy has 107 tracked changes and 5 untracked example roots, while `jj log -r 'conflicts()'` reports 498 existing conflict commits outside this lane.
+- docs: Added a pre-selection traceability matrix in
+  `doc/03_plan/sys_test/simple_web_browser_production_hardening.md` mapping
+  every candidate `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` ID to current evidence
+  while preserving final option selection as a release blocker.

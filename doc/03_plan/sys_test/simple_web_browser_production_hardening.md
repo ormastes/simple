@@ -43,15 +43,43 @@ and record the snapshot in `doc/09_report/simple_web_browser_production_hardenin
 The browser-hardening lane must not absorb unrelated dirty files or conflict
 cleanup unless explicitly requested.
 
-## Traceability Work
+## Pre-Selection Traceability Matrix
 
-After final requirement selection, add the selected `REQ-WEB-HARD-*` and
-`NFR-WEB-HARD-*` tags to:
+Final `REQ-WEB-HARD-*` and `NFR-WEB-HARD-*` files remain pending explicit user
+selection. Until then, use this matrix to keep every candidate ID tied to its
+current evidence artifact without promoting unselected scope.
 
-- `test/01_unit/app/ui/web_auth_hardening_spec.spl`
-- `test/01_unit/app/ui/ws_handler_spec.spl`
-- `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`
-- generated manuals under `doc/06_spec/test/...`
+| Candidate ID | Evidence Artifact | Evidence Status |
+|--------------|-------------------|-----------------|
+| `REQ-WEB-HARD-001` | `test/01_unit/app/ui/web_auth_hardening_spec.spl` | passing |
+| `REQ-WEB-HARD-002` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `src/app/ui.web/tls_serve_loop.spl` check | passing |
+| `REQ-WEB-HARD-003` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `REQ-WEB-HARD-004` | `src/app/ui.web/server.spl`; `src/app/ui.web/ui_routes.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `REQ-WEB-HARD-005` | `src/app/ui.web/wm.js`; `test/01_unit/app/ui/ws_handler_spec.spl`; query-token default-off live evidence | passing |
+| `REQ-WEB-HARD-006` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `REQ-WEB-HARD-007` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; generated manual `doc/06_spec/test/03_system/gui/simple_web_browser_production_hardening_spec.md` | passing |
+| `REQ-WEB-HARD-008` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `REQ-WEB-HARD-009` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `REQ-WEB-HARD-010` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` child-process cleanup path | passing |
+| `REQ-WEB-HARD-011` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` normal and shared-WM burst scenarios | passing |
+| `REQ-WEB-HARD-012` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `REQ-WEB-HARD-013` | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`; `doc/09_report/simple_web_browser_production_hardening.md` | passing locally |
+| `REQ-WEB-HARD-014` | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | partial: Linux local evidence recorded; Metal/ROCm/DirectX/WebGPU native device-readback requires external hosts |
+| `NFR-WEB-HARD-001` | `test/01_unit/app/ui/web_auth_hardening_spec.spl` | passing |
+| `NFR-WEB-HARD-002` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; TLS server check | passing |
+| `NFR-WEB-HARD-003` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `NFR-WEB-HARD-004` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `NFR-WEB-HARD-005` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; body-size guards in `src/app/ui.web/server.spl` and `src/app/ui.web/ui_routes.spl` | passing |
+| `NFR-WEB-HARD-006` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` process start/kill helpers | passing |
+| `NFR-WEB-HARD-007` | Warm auth latency measurement | not measured; requires final selection as a release target |
+| `NFR-WEB-HARD-008` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; generated manual | passing |
+| `NFR-WEB-HARD-009` | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | passing locally |
+| `NFR-WEB-HARD-010` | `src/app/ui.web/wm.js`; `test/01_unit/app/ui/ws_handler_spec.spl`; live query-token compatibility scenario | passing |
+| `NFR-WEB-HARD-011` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
+| `NFR-WEB-HARD-012` | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | partial: explicit status rows exist; native Metal/ROCm/DirectX/WebGPU device-readback requires external hosts |
+
+After final requirement selection, add the selected candidate IDs to the
+executable specs and generated manuals, then delete unselected option files.
 
 ## Release Blockers
 

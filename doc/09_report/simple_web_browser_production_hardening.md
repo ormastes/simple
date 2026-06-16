@@ -74,7 +74,10 @@ Snapshot from 2026-06-16:
 - User selection of final feature and NFR options is still required before
   writing final `REQ-*` and `NFR-*` files.
 - Requirement trace IDs need to be added to executable specs after final
-  requirements exist.
+  requirements exist. Until then,
+  `doc/03_plan/sys_test/simple_web_browser_production_hardening.md` contains a
+  pre-selection traceability matrix from every candidate `REQ-WEB-HARD-*` and
+  `NFR-WEB-HARD-*` ID to current evidence artifacts.
 - AC-7 hygiene evidence must remain separately reported until unrelated dirty
   files and existing `jj` conflicts are resolved outside this lane.
 - `doc/08_tracking/feature/feature_db.sdn` has a `current` row for this lane;
