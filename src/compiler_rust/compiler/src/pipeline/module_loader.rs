@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use simple_parser::ast::{Argument, Capability, Effect, Expr, ImportTarget, Module, Node, UseStmt};
+use simple_parser::ast::{Argument, Capability, Effect, Expr, ImportTarget, Module, Node, Type, UseStmt};
 use simple_parser::error_recovery::{ErrorHint, ErrorHintLevel};
 use simple_parser::Parser;
 
@@ -975,7 +975,90 @@ pub fn check_import_compatibility(
 ///
 /// Recursively loads sibling modules and flattens their items into the root module.
 pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Module, CompileError> {
-    load_module_with_imports_internal(path, visited, None, true)
+    let module = load_module_with_imports_internal(path, visited, None, true)?;
+    warn_duplicate_private_signatures(&module);
+    Ok(module)
+}
+
+/// Diagnostic: warn when two or more co-compiled top-level free functions share a
+/// bare name but have differing signatures.
+///
+/// Functions resolve by bare name (interpreter `HashMap<String, FunctionDef>`;
+/// codegen `func_ids`, last-write-wins), so once the import flattening merges two
+/// same-named definitions, a call may silently dispatch to the wrong one — nil /
+/// garbage in the interpreter, NULL-deref SIGSEGV under Cranelift (the
+/// `aes_gcm`/`hkdf` `_append_bytes` case). Methods are qualified (`Type.method`)
+/// and cannot collide on a bare name, so only top-level free functions are checked;
+/// the pattern in practice is the private (`_`-prefixed) per-file helper convention.
+///
+/// Non-breaking diagnostic only. The fix is to rename one of the colliding helpers
+/// to a unique name. See bug `compiler_cross_module_private_symbol_collision_2026-06-16`.
+fn warn_duplicate_private_signatures(module: &Module) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    let mut by_name: HashMap<&str, Vec<String>> = HashMap::new();
+    for item in &module.items {
+        if let Node::Function(f) = item {
+            // bare names only (methods are `Type.method`); private-helper convention
+            if f.name.contains('.') || !f.name.starts_with('_') {
+                continue;
+            }
+            // Render the signature for comparison (Debug is stable within a build);
+            // simplify the common Type Debug forms for readability.
+            let render = |t: &Type| -> String {
+                format!("{t:?}")
+                    .replace("Array { element: ", "[")
+                    .replace(", size: None }", "]")
+                    .replace("Simple(\"", "")
+                    .replace("\")", "")
+            };
+            let params: Vec<String> = f
+                .params
+                .iter()
+                .map(|p| p.ty.as_ref().map(&render).unwrap_or_else(|| "?".to_string()))
+                .collect();
+            let ret = f.return_type.as_ref().map(&render).unwrap_or_else(|| "()".to_string());
+            let sig = format!("({})->{ret}", params.join(","));
+            by_name.entry(f.name.as_str()).or_default().push(sig);
+        }
+    }
+
+    // Warn once per (name, signature-set) per process so a full test/bootstrap run
+    // that re-loads the same stdlib does not repeat the same warning thousands of times.
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+
+    let mut names: Vec<&str> = by_name.keys().copied().collect();
+    names.sort();
+    for name in names {
+        let sigs = &by_name[name];
+        if sigs.len() < 2 {
+            continue;
+        }
+        let mut distinct: Vec<&String> = sigs.iter().collect();
+        distinct.sort();
+        distinct.dedup();
+        if distinct.len() < 2 {
+            continue; // all identical → harmless under last-write-wins
+        }
+        let key = format!("{name}|{}", distinct.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("|"));
+        if let Ok(mut set) = warned.lock() {
+            if !set.insert(key) {
+                continue;
+            }
+        }
+        eprintln!(
+            "warning: private helper `{}` has {} co-compiled definitions with {} differing \
+             signatures ({}); calls resolve by bare name (last-write-wins) and may dispatch to the \
+             wrong one — silent wrong-result or SIGSEGV. Rename the conflicting helper(s) to a \
+             unique name. [compiler_cross_module_private_symbol_collision]",
+            name,
+            sigs.len(),
+            distinct.len(),
+            distinct.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" vs "),
+        );
+    }
 }
 
 /// Load module with imports and validate imported function effects against capabilities.

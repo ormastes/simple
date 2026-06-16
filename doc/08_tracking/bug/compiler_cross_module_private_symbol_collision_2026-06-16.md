@@ -2,8 +2,21 @@
 
 - **ID:** compiler_cross_module_private_symbol_collision_2026-06-16
 - **Severity:** P1 (silent wrong-result + SIGSEGV; broad latent surface)
-- **Status:** OPEN — root cause fully diagnosed; fix is an architectural change (scoped below)
+- **Status:** MITIGATED — detection diagnostic implemented (option 3). Auto-fix
+  (per-file mangle) deferred as a deliberately-scoped effort given measured surface.
 - **Area:** compiler — import loader / module flattening / symbol resolution
+
+## Fix landed 2026-06-16 (detection diagnostic)
+`warn_duplicate_private_signatures()` in `pipeline/module_loader.rs` runs on every
+top-level `load_module_with_imports`: when 2+ co-compiled top-level free functions
+share a bare `_`-prefixed name but have differing signatures, it emits a non-breaking
+`warning:` to stderr naming the conflicting signatures (process-deduped). Fires only
+when an incompatible pair is actually co-imported (low noise), e.g.:
+`warning: private helper '_append_bytes' has 2 co-compiled definitions with 2
+differing signatures (([i64],[i64])->() vs ([u8],[u8])->[u8]); ... Rename ...`.
+Verified: warns on gzip+hkdf `_append_bytes`; quic_aead 3/0 + NIST 12/0 stay green;
+broad cross-section = 0 new failures, 0 panics (read-only). Seed rebuilt + redeployed.
+The aes_gcm/hkdf case that caused the original SIGSEGV would now warn at compile time.
 
 ## Summary
 Private helper functions (conventionally `_`-prefixed, file-local by intent) are not
