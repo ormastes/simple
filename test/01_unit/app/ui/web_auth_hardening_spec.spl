@@ -2,6 +2,7 @@ use std.spec.{describe, it, expect}
 use app.ui.web.origin_guard.{OriginGuard, _is_loopback_origin}
 use app.ui.web.session_token.{_allow_insecure_dev_secret_flag, _missing_secret_fatal}
 use app.ui.web.ui_routes.{ui_web_authorization_status, ui_web_request_authorized, ui_web_query_percent_decode}
+use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, ui_web_auth_json_field}
 use app.ui.web.html.{generate_js, generate_wm_js}
 
 describe "ui.web production auth hardening":
@@ -66,3 +67,12 @@ describe "ui.web production auth hardening":
     it "decodes browser-encoded query bearer tokens once before verification":
         expect(ui_web_query_percent_decode("abc%252Edef%253Aghi")).to_equal("abc%2Edef%3Aghi")
         expect(ui_web_query_percent_decode("a%2Eb%2Fc%20d%2Be")).to_equal("a.b/c d+e")
+
+    it "uses bounded shared json field extraction for auth path bodies":
+        val login_body = "{\"capability_grant\":\"grant\\\"one\",\"snapshot_revision\":42,\"last_sequence\":7}"
+        expect(ui_web_auth_json_field(login_body, "capability_grant")).to_equal("grant\"one")
+        expect(ui_web_auth_json_field(login_body, "snapshot_revision")).to_equal("42")
+        expect(ui_web_auth_json_field(login_body, "last_sequence")).to_equal("7")
+        expect(ui_web_auth_json_field(login_body, "missing")).to_equal("")
+        val oversized = "x".repeat(UI_WEB_MAX_AUTH_JSON_BYTES + 1)
+        expect(ui_web_auth_json_field(oversized, "capability_grant")).to_equal("")

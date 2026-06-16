@@ -28,7 +28,7 @@ web_auth_hardening_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -195,6 +195,26 @@ expect(ui_web_query_percent_decode("a%2Eb%2Fc%20d%2Be")).to_equal("a.b/c d+e")
 
 </details>
 
+#### uses bounded shared json field extraction for auth path bodies
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val login_body = "{\"capability_grant\":\"grant\\\"one\",\"snapshot_revision\":42,\"last_sequence\":7}"
+expect(ui_web_auth_json_field(login_body, "capability_grant")).to_equal("grant\"one")
+expect(ui_web_auth_json_field(login_body, "snapshot_revision")).to_equal("42")
+expect(ui_web_auth_json_field(login_body, "last_sequence")).to_equal("7")
+expect(ui_web_auth_json_field(login_body, "missing")).to_equal("")
+val oversized = "x".repeat(UI_WEB_MAX_AUTH_JSON_BYTES + 1)
+expect(ui_web_auth_json_field(oversized, "capability_grant")).to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -214,8 +234,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

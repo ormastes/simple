@@ -1,6 +1,7 @@
 # Shared auth-path parameter helpers for Simple Web.
 
 val UI_WEB_MAX_UNAUTH_BODY_BYTES: i64 = 8192
+val UI_WEB_MAX_AUTH_JSON_BYTES: i64 = 8192
 
 fn ui_web_extract_bearer(headers: text, path: text) -> text:
     for line in headers.split("\n"):
@@ -60,6 +61,68 @@ fn ui_web_content_length(headers: text) -> i64:
 fn ui_web_body_exceeds_unauth_limit(headers: text) -> bool:
     return ui_web_content_length(headers) > UI_WEB_MAX_UNAUTH_BODY_BYTES
 
+fn ui_web_auth_json_field(json: text, field: text) -> text:
+    """Bounded JSON field extraction for unauth/login and resume auth paths.
+    Supports simple string, number, boolean, and null scalar values. Nested
+    objects/arrays remain handled by route-specific non-auth parsers."""
+    if json.len() > UI_WEB_MAX_AUTH_JSON_BYTES:
+        return ""
+    val key = "\"{field}\""
+    val key_pos = json.find(key)
+    if key_pos < 0:
+        return ""
+    var pos = key_pos + key.len()
+    val json_len = json.len()
+    while pos < json_len and _ui_web_is_json_space(json.slice(pos, pos + 1)):
+        pos = pos + 1
+    if pos >= json_len or json.slice(pos, pos + 1) != ":":
+        return ""
+    pos = pos + 1
+    while pos < json_len and _ui_web_is_json_space(json.slice(pos, pos + 1)):
+        pos = pos + 1
+    if pos >= json_len:
+        return ""
+    if json.slice(pos, pos + 1) == "\"":
+        return _ui_web_json_string_value(json, pos + 1)
+    val start = pos
+    while pos < json_len:
+        val ch = json.slice(pos, pos + 1)
+        if ch == "," or ch == "}" or ch == "]" or _ui_web_is_json_space(ch):
+            return json.slice(start, pos).trim()
+        pos = pos + 1
+    return json.slice(start, json_len).trim()
+
+fn _ui_web_json_string_value(json: text, start: i64) -> text:
+    var out = ""
+    var pos = start
+    val json_len = json.len()
+    while pos < json_len:
+        val ch = json.slice(pos, pos + 1)
+        if ch == "\"":
+            return out
+        if ch == "\\":
+            if pos + 1 >= json_len:
+                return ""
+            val escaped = json.slice(pos + 1, pos + 2)
+            if escaped == "\"" or escaped == "\\" or escaped == "/":
+                out = "{out}{escaped}"
+            elif escaped == "n":
+                out = "{out}\n"
+            elif escaped == "r":
+                out = "{out}\r"
+            elif escaped == "t":
+                out = "{out}\t"
+            else:
+                out = "{out}{escaped}"
+            pos = pos + 2
+        else:
+            out = "{out}{ch}"
+            pos = pos + 1
+    return ""
+
+fn _ui_web_is_json_space(ch: text) -> bool:
+    return ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
 fn ui_web_percent_decode_query_component(value: text) -> text:
     var out = value
     out = out.replace("%2E", ".")
@@ -86,5 +149,7 @@ export ui_web_ws_response_protocol
 export ui_web_query_param
 export ui_web_content_length
 export ui_web_body_exceeds_unauth_limit
+export ui_web_auth_json_field
 export ui_web_percent_decode_query_component
 export UI_WEB_MAX_UNAUTH_BODY_BYTES
+export UI_WEB_MAX_AUTH_JSON_BYTES
