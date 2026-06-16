@@ -146,16 +146,19 @@ must fail closed before it mints tokens or upgrades WebSockets:
 - TLS serving must never use the insecure dev secret fallback.
 - `/ui/login` requires an allowed `Origin` and is bounded by body-size and
   fixed-window burst gates.
-- `/ui/ws`, legacy `/ws`, `/ui/resume`, and sensitive `/api/*` routes require an
-  origin-bound bearer token.
+- `/ui/ws`, `/ui/resume`, and sensitive `/api/*` routes require an
+  origin-bound bearer token; legacy `/ws` is hidden with `404`.
 - Browser clients should carry bearer tokens in `Sec-WebSocket-Protocol`;
-  query-string bearer extraction is disabled by default and only enabled with
-  `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` for explicit compatibility tests.
+  query-string bearer extraction is deprecated and non-authorizing, including
+  when `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is present.
+- The selected production-hardening scope is Feature Option C plus NFR Option C
+  in `doc/02_requirements/feature/simple_web_browser_production_hardening.md`
+  and `doc/02_requirements/nfr/simple_web_browser_production_hardening.md`.
 
 Focused evidence:
 
 ```bash
-bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180
+bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
 ```
 
 The implementation report is

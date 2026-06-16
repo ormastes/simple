@@ -122,6 +122,27 @@ available non-raster oracle. Keep executable specs under `test/...`; generated
 manual docs and evidence assets belong under `doc/06_spec/...`, and
 `doc/06_spec` must never contain executable `.spl` specs.
 
+### Simple Web production hardening
+
+For Simple Web/browser production-boundary work, keep the selected Feature
+Option C and NFR Option C contract current:
+
+- final requirements live at
+  `doc/02_requirements/feature/simple_web_browser_production_hardening.md` and
+  `doc/02_requirements/nfr/simple_web_browser_production_hardening.md`;
+- executable traces belong in `test/01_unit/app/ui/web_auth_hardening_spec.spl`,
+  `test/01_unit/app/ui/ws_handler_spec.spl`,
+  `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`, and
+  `test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl`;
+- regenerate mirrored manuals with `bin/simple spipe-docgen ... --output
+  doc/06_spec` and keep `find doc/06_spec -name '*_spec.spl' | wc -l` at `0`;
+- canonical `/ui/ws` requires an origin-bound bearer token, legacy `/ws` returns
+  `404`, and query-string bearer transport is non-authorizing even if
+  `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is present;
+- local Linux evidence may record deterministic `host-unavailable` rows, but
+  macOS Metal, AMD ROCm/HIP, Windows DirectX, and real browser WebGPU native
+  device-readback remain external-host gates until proven on those hosts.
+
 For compiler cache, formal verification, loader, JIT, or accessor-forwarding
 changes, add semantic invalidation specs. Public ABI changes, field-wrapper
 changes, forwarded getter/setter changes, and generated accessor dependency

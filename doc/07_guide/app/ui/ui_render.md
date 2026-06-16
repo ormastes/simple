@@ -201,15 +201,15 @@ For the Simple Web/browser production-hardening lane, pair that renderer gate
 with the focused live endpoint check:
 
 ```bash
-bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180
+bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
 ```
 
-That spec exercises the production web boundary for fail-closed login origin
-handling, bounded login bodies, unauthenticated sensitive API denial, and
-unauthenticated WebSocket denial. Keep browser clients on WebSocket subprotocol
-bearer tokens; query-string bearer compatibility is disabled by default and may
-only be re-enabled with `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` for explicit
-compatibility testing.
+That spec exercises the selected Feature Option C / NFR Option C production web
+boundary for fail-closed login origin handling, bounded login bodies,
+unauthenticated sensitive API denial, canonical `/ui/ws` bearer authorization,
+and legacy `/ws` hiding. Keep browser clients on WebSocket subprotocol bearer
+tokens; query-string bearer compatibility is deprecated and non-authorizing,
+including when `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is present.
 
 ---
 

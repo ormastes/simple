@@ -109,15 +109,18 @@ sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 The focused production web endpoint gate is:
 
 ```bash
-bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180
+bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
 ```
 
 Production clients should pass bearer tokens through the WebSocket subprotocol
 instead of `/ui/ws?token=...`. Query-string bearer extraction is rejected by
-default; `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is an explicit compatibility
-switch, not a production default. macOS Metal and AMD ROCm/HIP rows require
-native host evidence. Linux-only runs may record deterministic
-`host-unavailable` verdicts but must not translate them into native pass claims.
+default and remains non-authorizing even when
+`SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is present. Legacy `/ws` is hidden with
+`404`; canonical `/ui/ws` requires an origin-bound bearer. The selected release
+scope is Feature Option C plus NFR Option C. macOS Metal, AMD ROCm/HIP, Windows
+DirectX, and real browser WebGPU native device-readback rows require native host
+evidence. Linux-only runs may record deterministic `host-unavailable` verdicts
+but must not translate them into native pass claims.
 
 ## Chrome WebGPU Evidence Helpers
 

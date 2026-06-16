@@ -133,15 +133,16 @@ both the renderer parity gate and the web endpoint hardening gate:
 
 ```bash
 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
-bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 180
+bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
 ```
 
-The endpoint gate covers fail-closed auth behavior at the browser bridge:
-allowed-origin login only, bounded login requests, sensitive API denial without
-an origin-bound bearer token, and WebSocket denial without authorization.
-Browser clients should use WebSocket subprotocol bearer auth; query-string
-bearer fallback is disabled unless `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is set
-for explicit compatibility testing.
+The endpoint gate covers the selected Feature Option C / NFR Option C
+production web boundary: allowed-origin login only, bounded login requests,
+sensitive API denial without an origin-bound bearer token, canonical `/ui/ws`
+bearer authorization, and legacy `/ws` hiding. Browser clients should use
+WebSocket subprotocol bearer auth; query-string bearer fallback is deprecated
+and non-authorizing, including when `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is
+present.
 
 ## Milestone History
 
