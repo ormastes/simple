@@ -59,18 +59,46 @@ RESULT: SERVER ALIVE  # no crash, no "cannot convert array to int"
 ```
 (Deployment to `bin/release/<triple>/simple` is a separate `--deploy` step.)
 
-## Remaining: NATIVE crash — separate, still open
+## Remaining: NATIVE crash — separate, ROOT-CAUSED, fix deferred
 With the interpreter fix, the IDENTICAL source serves correctly end-to-end —
 proving the Simple logic is sound. The natively-built fixture still SIGSEGVs
 (`rsi=nil`, `mov 0x8(%rsi)`), backtrace `Worker.run → handle_completion →
-worker_sendfile_open_path_for_pending → <nil .get>` (the OP_SEND-completion /
-`sendfile_pending.get(fd)` path; the `StaticCompressionCache.get` symbol is again
-a misattribution of `Dict.get`). The native C `rt_event_loop_poll` returns a
-correct count, so this is a **distinct native-codegen bug** (a nil-receiver `.get`
-in the send-completion path), not the event-loop contract bug. The AOT symbol
-table is unreliable for this build (it also fails to compile 2 files —
-`h2_hpack.spl`, `context_propagation.spl`: "cannot infer field type: struct 'ANY'"
-— and stubs 33 symbols), which should be cleaned up to debug it reliably.
+worker_sendfile_open_path_for_pending → StaticCompressionCache.get`.
+
+**Root cause (precise, symbols ARE correct here):** `worker_sendfile_open_path_for_pending`
+calls `pending.get(fd)` where `pending: Dict<i64,(text,i64,i64)>`. `Dict<K,V>`
+resolves to `TypeId::ANY` (type_resolver.rs:421), so the receiver type is lost and
+HIR emits `MethodCall{method:"get", dispatch:Dynamic}`. In MIR
+(`lowering_expr_method.rs`) the Dynamic-dispatch fallback (not a trait method)
+emits `MethodCallStatic{func_name:"get"}` (bare). Codegen
+(`closures_structs.rs::compile_method_call_static`) resolves the bare name `get`
+to a user method by name (`func_ids` last-write-wins) → it bound
+`pending.get(fd)` to **`StaticCompressionCache.get`**, which reads the Dict as a
+cache (`self.entries` at offset 0x10 → nil) → NULL+8 deref. Disasm proof:
+`worker_sendfile_open_path_for_pending+12: lea StaticCompressionCache.get; call`.
+This is the documented **bare-name method-collision** class — the same one the
+`has`/`len` guards in `compile_method_call_static` already work around (their
+comments describe identical segfaults); `get` simply lacks a guard.
+
+**Why the fix is deferred (not landed):** the natural fix — a bare-`get` guard
+routing to the generic `rt_index_get` — is fragile in ways two attempts proved:
+- routing via `try_compile_builtin_method_call` does NOT box the key (it assumes
+  MIR pre-boxed args), so populated `dict.get(k)` / `array.get(i)` returned WRONG
+  values (key never matched);
+- routing via `compile_builtin_method` (which `wrap_value`s the key) panics
+  unless `rt_index_get` is pre-registered (`runtime_funcs` is an immutable ref;
+  the used-fn pass in `common_backend.rs` only adds it for `MirInst::IndexGet`),
+  and after registering it the server served req#1 then crashed on req#2 and a
+  populated-dict probe SIGSEGV'd — the key/result tagging differs between the
+  array-index and dict-key paths.
+A correct fix needs the receiver's collection identity preserved (don't erase
+`Dict<K,V>` to `ANY`) OR a runtime-tag-dispatched get that boxes the key exactly
+once. That is a deliberately-scoped, high-blast-radius codegen change (every
+`.get` call) and was reverted rather than shipped broken.
+
+Also note the AOT build is degraded (fails to compile `h2_hpack.spl` /
+`context_propagation.spl` — "cannot infer field type: struct 'ANY'" — and stubs
+33 symbols); cleaning those would aid further native debugging.
 
 ## Ruled out
 - Private-symbol collision (no `warn_duplicate_private_signatures` warning).
