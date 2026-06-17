@@ -338,6 +338,19 @@ pub(crate) fn compile_method_call_static<M: Module>(
             return Ok(());
         }
     }
+    // Bare `.remove(key)` on a type-erased `Dict<K,V>` receiver: route to the
+    // tag-dispatched rt_dict_remove (no-op for non-dicts) instead of failing
+    // name resolution ("function not found"). Without it `sendfile_pending`/
+    // `sendfile_open_files` entries are never cleared, so a reused fd reads a
+    // stale entry. Receivers with a known static type emit a qualified name.
+    if lookup_name == "remove" && args.len() == 1 {
+        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "remove", args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result);
+            }
+            return Ok(());
+        }
+    }
     let receiver_ty = ctx.vreg_types.get(&receiver).copied();
     let allow_qualified_builtin = matches!(
         receiver_ty,
@@ -1129,6 +1142,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_string" | "to_text" | "str" => "rt_to_string",
         // Dict/collection methods
         "get" => "rt_index_get",
+        "remove" => "rt_dict_remove",
         "set" => {
             if args.len() >= 2 {
                 let key_val = get_vreg_or_default(ctx, builder, &args[0]);
@@ -1185,9 +1199,37 @@ fn try_compile_builtin_method_call<M: Module>(
     // BoxInt instruction handles integer tagging when needed. Do NOT
     // defensively re-box here, as that would double-tag values from function
     // calls, loads, and other sources that already return RuntimeValues.
+    // Dict access routes through these tag-dispatched runtime fns, which hash the
+    // key by its RtCore-tagged value. Bare collection-method args arrive UNBOXED
+    // (raw native int) here, whereas the `d[k]` index path passes the key already
+    // tagged — so a bare `d.get(k)`/`d.remove(k)` would hash a different key than
+    // `d[k] = v` stored and silently miss (~1/4 of int keys: k ≡ 0,1 mod 8). Tag
+    // the int key inline to match: rt_value_int(v) == (v << 3) | INT(0), and the
+    // INT tag is 0, so a left shift by 3 suffices. Done inline, NOT via
+    // wrap_value/rt_box_int, which is not linked into native AOT builds and would
+    // `call 0x0`. String/heap keys are left as-is (matched by content at runtime).
+    let box_dict_key = matches!(runtime_func, "rt_index_get" | "rt_dict_remove");
+    let key_is_int = matches!(
+        ctx.vreg_types.get(args.first().unwrap_or(&receiver)).copied(),
+        Some(
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+        )
+    );
     let mut call_args = vec![receiver_val];
-    for arg in args.iter() {
-        let val = get_vreg_or_default(ctx, builder, arg);
+    for (arg_i, arg) in args.iter().enumerate() {
+        let raw = get_vreg_or_default(ctx, builder, arg);
+        let val = if box_dict_key && arg_i == 0 && key_is_int {
+            builder.ins().ishl_imm(raw, 3)
+        } else {
+            raw
+        };
         if runtime_func == "rt_array_push" && std::env::var("SIMPLE_DEBUG_PUSH").is_ok() {
             let val_ty = builder.func.dfg.value_type(val);
             let val_def = builder.func.dfg.value_def(val);

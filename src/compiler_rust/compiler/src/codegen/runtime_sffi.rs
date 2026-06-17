@@ -225,6 +225,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_byte_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_byte_array_new_len", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_bytes_to_text", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_new_with_cap_u64", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_push", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_get", &[I64, I64], &[I64]),
@@ -258,6 +259,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dict_clear", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_keys", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_dict_values", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_dict_remove", &[I64, I64], &[I8]),
     // =========================================================================
     // Fast DB operations (runtime_db.c)
     // =========================================================================
@@ -838,6 +840,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_host_gpu_queue_in_flight_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_status", &[], &[I64]),
     RuntimeFuncSpec::new("rt_host_gpu_queue_last_backend_handle", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_last_device_time_us", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_size", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_hash", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_host_gpu_queue_last_payload_text", &[], &[I64]),
     // =========================================================================
     // GPU kernel launch
     // =========================================================================
@@ -1054,6 +1060,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_event_loop_register", &[I64, I64, I64, I64, I64], &[I64]),
     // rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> array_ptr: i64
     RuntimeFuncSpec::new("rt_event_loop_poll", &[I64, I64, I64], &[I64]),
+    // rt_event_loop_poll_get_fd(index: i64) -> fd: i64
+    RuntimeFuncSpec::new("rt_event_loop_poll_get_fd", &[I64], &[I64]),
     // =========================================================================
     // UDP networking operations
     // =========================================================================
@@ -1396,7 +1404,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_cuda_init", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_available", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_device_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_device_get", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_device_name", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_device_compute_capability", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_is_available", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_device_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_device_name", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_ctx_create", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_ctx_destroy", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_mem_alloc", &[I64], &[I64]),
