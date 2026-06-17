@@ -2211,6 +2211,33 @@ int64_t rt_dict_values(int64_t dict) {
     return (int64_t)(uintptr_t)arr;
 }
 
+/* Array of (key, value) 2-tuples — the form `for (k, v) in dict` iterates. */
+int64_t rt_dict_entries(int64_t dict) {
+    RtCoreDict* d = rt_core_as_dict(dict);
+    if (!d) return rt_core_nil();
+    SplArray* arr = rt_array_new(d->len);
+    if (!arr) return rt_core_nil();
+    for (int64_t i = 0; i < d->cap; i++) {
+        if (d->entries[i].occupied != 1) continue;
+        int64_t pair = rt_tuple_new(2);
+        if (pair != rt_core_nil()) {
+            rt_tuple_set(pair, 0, d->entries[i].key);
+            rt_tuple_set(pair, 1, d->entries[i].value);
+        }
+        rt_array_push(arr, pair);
+    }
+    return (int64_t)(uintptr_t)arr;
+}
+
+/* Normalize an iterable for index-based for-loops (mirrors the Rust/JIT runtime).
+ * Dicts become an array of (key, value) tuples; everything else passes through.
+ * Native AOT links the C runtime, which previously lacked this symbol entirely,
+ * so `for x in <collection>` called a NULL pointer and SIGSEGV'd. */
+int64_t rt_for_iterable(int64_t collection) {
+    if (rt_core_as_dict(collection)) return rt_dict_entries(collection);
+    return collection;
+}
+
 /* ================================================================
  * File I/O (wrappers around existing rt_/spl_ functions)
  * ================================================================ */
