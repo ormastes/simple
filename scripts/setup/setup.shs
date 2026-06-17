@@ -65,6 +65,34 @@ if [ "${1:-}" = "--json" ]; then
   exit 0
 fi
 
+# The native simple_mcp_server core-dumps on every tools/call (full-program
+# native/cranelift codegen bug — only the initialize/tools/list handshake
+# survives, so `claude mcp list` shows "Connected" while every tool fails).
+# Default to source mode, which is a FULL fallback (arg-taking tools fixed
+# 2026-06-17). Opt back into native with SIMPLE_MCP_PREFER_NATIVE=1, but only
+# after verifying a real tools/call works — not just the handshake. See
+# doc/08_tracking/bug/mcp_full_program_native_codegen_and_arg_extract_2026-06-16.md
+if [ "${SIMPLE_MCP_PREFER_NATIVE:-0}" != "1" ]; then
+  export SIMPLE_LIB="${SIMPLE_LIB:-${repo_root}/src}"
+  export SIMPLE_LOG="${SIMPLE_LOG:-error}"
+  export RUST_LOG="${RUST_LOG:-error}"
+  src_entry="${repo_root}/src/app/mcp/main.spl"
+  for src_runtime in \
+    "${SIMPLE_BINARY:-}" \
+    "${script_dir}/simple" \
+    "${script_dir}/release/simple" \
+    "${script_dir}/release/x86_64-unknown-linux-gnu/simple" \
+    "${script_dir}/release/linux-x86_64/simple"
+  do
+    if [ -n "${src_runtime}" ] && [ -x "${src_runtime}" ] && [ -f "${src_entry}" ]; then
+      printf 'startup wrapper=simple_mcp_server mode=source-default runtime=%s cwd=%s\n' "${src_runtime}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
+      exec "${src_runtime}" "${src_entry}" "$@" 2>>"${log_dir}/simple_mcp_stderr.log"
+    fi
+  done
+  printf '%s\n' "error: simple runtime not found for MCP source mode" >&2
+  exit 127
+fi
+
 _MCP_PROBE_WRAPPER_VERSION="simple_mcp_server:4.0.0"
 
 _mcp_probe_stat() {
