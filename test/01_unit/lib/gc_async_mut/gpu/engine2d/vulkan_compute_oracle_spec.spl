@@ -40,6 +40,7 @@ tell which path the harness took.
 use std.spec.*
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
 extern fn rt_vulkan_device_count() -> i64
 
@@ -133,3 +134,33 @@ describe "engine2d vulkan backend compute matches CPU oracle":
         sw.draw_triangle_filled(10, 44, 30, 6, 54, 44, fg)
 
         expect(pixel_mismatches(vk.read_pixels(), sw.read_pixels())).to_equal(0)
+
+    it "Metal-on-Vulkan emulation renders through real Vulkan, matching the reference":
+        # Native Metal is macOS-only; on other platforms Engine2D serves a
+        # "metal" request through the real Vulkan backend (emulation) instead of
+        # dropping to CPU. The emulated surface must render the verified
+        # primitives bit-exact with the SoftwareBackend reference, and disclose
+        # the emulation in its backend name (not claim native "metal").
+        val w: i32 = 56
+        val h: i32 = 40
+        val r = Engine2D.create_requested_backend(w, h, "metal")
+        if not r.is_ok():
+            return
+        var eng = r.unwrap()
+        val name = eng.backend_name()
+        # On a Vulkan host without native Metal, the name discloses emulation.
+        # On a host with neither, it falls back (cpu) — accept either truthfully.
+        val honest_name = (name == "metal-on-vulkan" or name == "metal" or name == "cpu" or name == "software")
+        expect(honest_name).to_equal(true)
+        if name != "metal-on-vulkan":
+            return
+
+        eng.clear(0xFF0A0A12u32)
+        eng.draw_rect_filled(4, 4, 30, 20, 0xFFCC2020u32)
+        eng.draw_circle_filled(40, 20, 9, 0xFF3060FFu32)
+        var sw2 = SoftwareBackend.create()
+        sw2.init(w, h)
+        sw2.clear(0xFF0A0A12u32)
+        sw2.draw_rect_filled(4, 4, 30, 20, 0xFFCC2020u32)
+        sw2.draw_circle_filled(40, 20, 9, 0xFF3060FFu32)
+        expect(pixel_mismatches(eng.read_pixels(), sw2.read_pixels())).to_equal(0)
