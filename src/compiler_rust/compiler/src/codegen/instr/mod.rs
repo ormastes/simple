@@ -270,6 +270,30 @@ fn looks_like_const_data_name(name: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// Adjust a MIR field byte-offset for the 8-byte vtable pointer that
+/// trait-implementing structs carry at offset 0.
+///
+/// MIR lowering emits raw `field_index * 8` offsets with no vtable header
+/// awareness; the StructInit codegen arm shifts them +8 when the struct type
+/// appears in `vtable_type_ids` (the authoritative set of types that actually
+/// got a vtable data object emitted). Field access must mirror that shift, or
+/// `obj.field0` loads the vtable slot instead of the field. Keyed on the same
+/// `vtable_type_ids` map so constructor writes and field reads can never
+/// disagree. When the receiver's static type is unknown (not in `vreg_types`)
+/// or has no vtable, the offset is returned unchanged.
+fn effective_field_offset<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    object: VReg,
+    byte_offset: u32,
+) -> u32 {
+    if let Some(&type_id) = ctx.vreg_types.get(&object) {
+        if ctx.vtable_type_ids.contains_key(&type_id) {
+            return byte_offset + 8;
+        }
+    }
+    byte_offset
+}
+
 pub fn compile_instruction<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -788,7 +812,14 @@ pub fn compile_instruction<M: Module>(
             byte_offset,
             field_type,
         } => {
-            compile_field_get(ctx, builder, *dest, *object, *byte_offset as usize, *field_type)?;
+            // MIR lowering emits raw `field_index * 8` offsets that do not account
+            // for the 8-byte vtable pointer stored at offset 0 of structs that
+            // implement a trait. The StructInit arm shifts those offsets +8 (keyed
+            // on `vtable_type_ids`); field access must apply the identical shift or
+            // it reads the vtable slot as field 0 (a truncated pointer, not the
+            // field). Keyed on the same authoritative set so the two never disagree.
+            let off = effective_field_offset(ctx, *object, *byte_offset);
+            compile_field_get(ctx, builder, *dest, *object, off as usize, *field_type)?;
         }
 
         MirInst::FieldSet {
@@ -797,7 +828,8 @@ pub fn compile_instruction<M: Module>(
             field_type,
             value,
         } => {
-            compile_field_set(ctx, builder, *object, *byte_offset as usize, *field_type, *value)?;
+            let off = effective_field_offset(ctx, *object, *byte_offset);
+            compile_field_set(ctx, builder, *object, off as usize, *field_type, *value)?;
         }
 
         MirInst::MethodCallStatic {

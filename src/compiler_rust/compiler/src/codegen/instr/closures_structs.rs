@@ -1302,7 +1302,15 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     args: &[VReg],
 ) {
     let recv_ptr = get_vreg_or_default(ctx, builder, &receiver);
-    let vtable_ptr = builder.ins().load(types::I64, MemFlags::new(), recv_ptr, 0);
+    // The receiver is a tagged heap value (objects are 8-byte aligned; the low
+    // 3 bits hold the value tag). Mask the tag off before dereferencing to read
+    // the vtable pointer stored at object[0] — the same untag compile_field_get
+    // applies. Without this the load reads `object | tag` (off by the tag) and
+    // the indirect call jumps to garbage. The tagged `recv_ptr` is still passed
+    // as `self` below; methods untag internally on field access.
+    let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
+    let recv_obj = builder.ins().band(recv_ptr, tag_mask);
+    let vtable_ptr = builder.ins().load(types::I64, MemFlags::new(), recv_obj, 0);
     let slot_offset = (vtable_slot as i32) * 8;
     let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
 
