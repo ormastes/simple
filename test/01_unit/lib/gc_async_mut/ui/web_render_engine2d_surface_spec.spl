@@ -1,36 +1,35 @@
 # @tag: unit, ui, web_render, engine2d, vulkan, oracle
 """
-# Web-Render Engine2D Surface Spec
+# Web-Render Engine2D Surface
 
-Verifies the second API surface (web-render) renders through the real Engine2D
-backends — Vulkan, Metal-on-Vulkan, DirectX-on-Vulkan — with HONEST provenance,
-checked against the Software reference.
+**Category:** Runtime
+**Status:** Implemented
+**Requirements:** N/A
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
 
-The web page scene is composited through `Engine2D.create_requested_backend`, so
-the pixels genuinely come from the named backend and the reported backend name
-is the one that actually rendered (not a fabricated label like the legacy web
-pixel path). Each GPU backend must match the Software reference pixel-for-pixel
+## Overview
+
+The second API surface (web-render) composites a web page scene through the real
+Engine2D backends — Vulkan, Metal-on-Vulkan, DirectX-on-Vulkan — with HONEST
+provenance. The scene is rendered through `Engine2D.create_requested_backend`, so
+the pixels genuinely come from the named backend and the reported backend name is
+the one that actually rendered (not a fabricated label like the legacy web pixel
+path). Each GPU backend must match the `SoftwareBackend` reference pixel-for-pixel
 WHEN it genuinely rendered through that backend; otherwise it must report a name
 that does NOT claim the backend (truthful fallback). No false-greening either way.
 
-Coverage note: under `bin/simple run` (classic interpreter) on this Vulkan host
-the GPU branches genuinely execute and assert bit-exact parity (vulkan,
-metal-on-vulkan, directx-on-vulkan each 0 mismatches vs Software). In the SSpec
-test runner, the indirect Engine2D->Vulkan path falls back to CPU, so the GPU
-its take the truthful-fallback branch there; the underlying Engine2D GPU backends
-are themselves runner-verified directly in vulkan_compute_oracle_spec.spl.
+## Key Concepts
 
-## Requirements
+| Concept | Description |
+|---------|-------------|
+| Vulkan device prime | A direct `VulkanBackend` `it` runs first so the SSpec runner resolves the real device for the later Engine2D-routed steps |
+| Inline render | The Engine2D create+draw must stay inline in each `it` (a helper fn or wrapper module makes the runner fall back to CPU) |
+| Opaque page background | The background is composited opaquely — a deterministic copy on every backend, sidestepping the non-opaque blend-vs-copy divergence |
+| Reference oracle | A direct `SoftwareBackend.create()` rendering of the same scene — never the GPU compared to itself |
 
-**Requirements:** N/A
+## Related Specifications
 
-## Plan
-
-**Plan:** N/A
-
-## Design
-
-**Design:** doc/04_architecture/ui/simple_gui_stack.md
+- [Vulkan Compute Oracle](../engine2d/vulkan_compute_oracle_spec.md) — the same three backends verified directly on the Engine2D API
 """
 
 use std.spec.*
@@ -40,6 +39,10 @@ use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_scene}
 
 extern fn rt_vulkan_device_count() -> i64
+
+# NOTE: avoid CSS `{...}` braces in this literal — Simple treats `{ident}` in
+# string literals as interpolation. Use an inline style attribute instead.
+val HTML: text = "<html><body style='background:#224466'><main><p>web</p></main></body></html>"
 
 # Render the web scene on a fresh SoftwareBackend (the direct reference) — used
 # as the per-it comparison oracle, matching how the oracle spec builds its
@@ -56,31 +59,6 @@ fn software_web_scene() -> [u32]:
         i = i + 1
     sw.read_pixels()
 
-# NOTE: avoid CSS `{...}` braces in this literal — Simple treats `{ident}` in
-# string literals as interpolation. Use an inline style attribute instead.
-val HTML: text = "<html><body style='background:#224466'><main><p>web</p></main></body></html>"
-
-# Composite the web scene through the requested Engine2D backend. The Engine2D is
-# created and drawn entirely within this fn (never passed as a parameter), so the
-# in-place `me` draw mutations take effect, and the call stays in-module so the
-# SSpec runner executes the real GPU path. The page background is composited
-# opaquely (web backgrounds are opaque, and an opaque fill is a deterministic
-# copy on every backend — SoftwareBackend blends non-opaque fills while
-# VulkanBackend copies, a separate divergence). Returns [] on backend fallback.
-fn web_scene_pixels(backend: text) -> [u32]:
-    val scene = simple_web_render_html_to_scene(HTML, 48, 32)
-    val r = Engine2D.create_requested_backend(48, 32, backend)
-    if not r.is_ok():
-        return []
-    var eng = r.unwrap()
-    eng.clear(0xFFFFFFFFu32)
-    var i = 0
-    while i < scene.commands.len():
-        if scene.commands[i].kind == "fill_rect":
-            eng.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
-        i = i + 1
-    eng.read_pixels()
-
 fn pixel_mismatches(a: [u32], b: [u32]) -> i64:
     var m = 0
     var i = 0
@@ -91,27 +69,32 @@ fn pixel_mismatches(a: [u32], b: [u32]) -> i64:
         i = i + 1
     m
 
-describe "web-render surface composited through Engine2D backends":
+describe "Web-render surface composited through Engine2D backends":
 
-    # Prime the real rt_vulkan_* device path with a DIRECT VulkanBackend call in
-    # its own `it`, executed before the Engine2D-routed GPU it below. In the
-    # SSpec runner the indirect Engine2D->Vulkan path only resolves the real
-    # device after a direct VulkanBackend has run in this spec process (the same
-    # priming the oracle spec gets from its direct-Vulkan compute its).
+    # @inline
     it "primes the real Vulkan device for the Engine2D-routed web render":
+        step("Create a direct VulkanBackend (primes rt_vulkan_* for the runner)")
         var vb = VulkanBackend.create()
         val ok = vb.init(32, 32)
+
+        step("If real Vulkan is unavailable, assert the device count is honestly zero")
         if not ok:
             expect(rt_vulkan_device_count()).to_equal(0)
             return
+
+        step("A direct clear+readback returns the exact clear color")
         vb.clear(0xFF112233u32)
         val px = vb.read_pixels()
         expect(px.len()).to_equal(32 * 32)
         expect(px[0]).to_equal(0xFF112233u32)
 
+    # @prev("primes the real Vulkan device for the Engine2D-routed web render")
     it "software reference composites the page background into a uniform opaque surface":
-        val px = web_scene_pixels("software")
+        step("Composite the web scene through the SoftwareBackend reference")
+        val px = software_web_scene()
         expect(px.len()).to_equal(48 * 32)
+
+        step("Every pixel is the same fully-opaque color (a uniform page background)")
         val first = px[0]
         var uniform = true
         var alpha_ok = true
@@ -122,18 +105,12 @@ describe "web-render surface composited through Engine2D backends":
             if (px[i] / 16777216) % 256 != 255:
                 alpha_ok = false
             i = i + 1
-        expect(uniform).to_equal(true)
-        expect(alpha_ok).to_equal(true)
+        expect(uniform).to_be(true)
+        expect(alpha_ok).to_be(true)
 
-    # GPU-backend coverage — one Engine2D-GPU backend per `it`, created+drawn
-    # INLINE (helper fns / wrapper modules make the runner fall back), compared
-    # against a direct SoftwareBackend reference. This mirrors the oracle spec's
-    # working structure: a direct-Vulkan prime it first, then one Engine2D-GPU
-    # per it. Each must match the reference exactly WHEN it genuinely rendered
-    # through that backend; otherwise it reports a name that does NOT claim the
-    # backend (truthful fallback). No false-greening.
-
+    # @prev("primes the real Vulkan device for the Engine2D-routed web render")
     it "Vulkan-backed web render matches the software reference":
+        step("Render the page scene inline through the Vulkan backend, compare to the SoftwareBackend reference")
         val sw = software_web_scene()
         val scene = simple_web_render_html_to_scene(HTML, 48, 32)
         var r = Engine2D.create_requested_backend(48, 32, "vulkan")
@@ -146,10 +123,13 @@ describe "web-render surface composited through Engine2D backends":
                 eng.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
             i = i + 1
         val px = eng.read_pixels()
+        step("When genuinely Vulkan, pixels match the reference; otherwise the name does not claim Vulkan")
         val ok = if name == "vulkan": pixel_mismatches(px, sw) == 0 and px.len() == 48 * 32 else: name != "vulkan"
-        expect(ok).to_equal(true)
+        expect(ok).to_be(true)
 
+    # @prev("primes the real Vulkan device for the Engine2D-routed web render")
     it "Metal-on-Vulkan web render matches the software reference":
+        step("Render the page scene inline through the Metal-on-Vulkan backend, compare to the reference")
         val sw = software_web_scene()
         val scene = simple_web_render_html_to_scene(HTML, 48, 32)
         var r = Engine2D.create_requested_backend(48, 32, "metal")
@@ -162,10 +142,13 @@ describe "web-render surface composited through Engine2D backends":
                 eng.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
             i = i + 1
         val px = eng.read_pixels()
+        step("When genuinely metal-on-vulkan, pixels match the reference; otherwise the name does not claim it")
         val ok = if name == "metal-on-vulkan": pixel_mismatches(px, sw) == 0 and px.len() == 48 * 32 else: name != "metal-on-vulkan"
-        expect(ok).to_equal(true)
+        expect(ok).to_be(true)
 
+    # @prev("primes the real Vulkan device for the Engine2D-routed web render")
     it "DirectX-on-Vulkan web render matches the software reference":
+        step("Render the page scene inline through the DirectX-on-Vulkan backend, compare to the reference")
         val sw = software_web_scene()
         val scene = simple_web_render_html_to_scene(HTML, 48, 32)
         var r = Engine2D.create_requested_backend(48, 32, "directx-on-vulkan")
@@ -178,5 +161,6 @@ describe "web-render surface composited through Engine2D backends":
                 eng.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
             i = i + 1
         val px = eng.read_pixels()
+        step("When genuinely directx-on-vulkan, pixels match the reference; otherwise the name does not claim it")
         val ok = if name == "directx-on-vulkan": pixel_mismatches(px, sw) == 0 and px.len() == 48 * 32 else: name != "directx-on-vulkan"
-        expect(ok).to_equal(true)
+        expect(ok).to_be(true)
