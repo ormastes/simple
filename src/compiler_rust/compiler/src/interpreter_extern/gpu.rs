@@ -3821,3 +3821,134 @@ pub fn rt_wgpu_3d_present_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_wgpu_3d_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
 }
+
+// RenderDoc in-application frame-capture markers. When the process is launched
+// under `renderdoccmd capture`, librenderdoc is already injected (it hooks the
+// Vulkan instance); these externs fetch the RENDERDOC API and call
+// StartFrameCapture / EndFrameCapture so a headless compute workload (which never
+// presents a swapchain frame) still produces a .rdc capture. Indices below match
+// the RENDERDOC_API_1_6_0 struct field order in renderdoc_app.h.
+mod renderdoc_dlopen {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_void};
+    use std::sync::OnceLock;
+
+    type GetApiFn = unsafe extern "C" fn(version: c_int, out: *mut *mut c_void) -> c_int;
+
+    const IDX_GET_NUM_CAPTURES: isize = 13;
+    const IDX_START_FRAME_CAPTURE: isize = 19;
+    const IDX_END_FRAME_CAPTURE: isize = 21;
+    const API_VERSION_1_6_0: c_int = 10600;
+
+    // Store the API table pointer (array of fn pointers) as usize for OnceLock.
+    static API: OnceLock<usize> = OnceLock::new();
+
+    fn api_ptr() -> Option<*const *const c_void> {
+        let p = *API.get_or_init(|| unsafe {
+            // librenderdoc is normally already resident (injected by renderdoccmd).
+            // RTLD_NOLOAD returns the existing handle without loading a new copy;
+            // fall back to loading the repo-local library if not present.
+            let names = [
+                "librenderdoc.so\0",
+                "build/tools/renderdoc/lib/librenderdoc.so\0",
+            ];
+            let mut handle = std::ptr::null_mut();
+            for n in names {
+                handle = libc::dlopen(n.as_ptr() as *const c_char, libc::RTLD_NOW | libc::RTLD_NOLOAD);
+                if !handle.is_null() {
+                    break;
+                }
+            }
+            if handle.is_null() {
+                for n in names {
+                    handle = libc::dlopen(n.as_ptr() as *const c_char, libc::RTLD_NOW);
+                    if !handle.is_null() {
+                        break;
+                    }
+                }
+            }
+            if handle.is_null() {
+                return 0usize;
+            }
+            let sym = CString::new("RENDERDOC_GetAPI").unwrap();
+            let f = libc::dlsym(handle, sym.as_ptr());
+            if f.is_null() {
+                return 0usize;
+            }
+            let get_api: GetApiFn = std::mem::transmute(f);
+            let mut api: *mut c_void = std::ptr::null_mut();
+            let ok = get_api(API_VERSION_1_6_0, &mut api);
+            if ok != 1 || api.is_null() {
+                return 0usize;
+            }
+            api as usize
+        });
+        if p == 0 {
+            None
+        } else {
+            Some(p as *const *const c_void)
+        }
+    }
+
+    pub fn start_capture() -> bool {
+        if let Some(api) = api_ptr() {
+            unsafe {
+                let f = *api.offset(IDX_START_FRAME_CAPTURE);
+                if !f.is_null() {
+                    let func: unsafe extern "C" fn(*const c_void, *const c_void) =
+                        std::mem::transmute(f);
+                    func(std::ptr::null(), std::ptr::null());
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn end_capture() -> u32 {
+        if let Some(api) = api_ptr() {
+            unsafe {
+                let f = *api.offset(IDX_END_FRAME_CAPTURE);
+                if !f.is_null() {
+                    let func: unsafe extern "C" fn(*const c_void, *const c_void) -> u32 =
+                        std::mem::transmute(f);
+                    return func(std::ptr::null(), std::ptr::null());
+                }
+            }
+        }
+        0
+    }
+
+    pub fn num_captures() -> u32 {
+        if let Some(api) = api_ptr() {
+            unsafe {
+                let f = *api.offset(IDX_GET_NUM_CAPTURES);
+                if !f.is_null() {
+                    let func: unsafe extern "C" fn() -> u32 = std::mem::transmute(f);
+                    return func();
+                }
+            }
+        }
+        0
+    }
+}
+
+/// `rt_renderdoc_available() -> i64` (1 if the RENDERDOC API resolved)
+pub fn rt_renderdoc_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(if renderdoc_dlopen::num_captures() != u32::MAX { 1 } else { 0 }))
+}
+
+/// `rt_renderdoc_start_capture() -> i64` (1 if a frame capture was started)
+pub fn rt_renderdoc_start_capture_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(if renderdoc_dlopen::start_capture() { 1 } else { 0 }))
+}
+
+/// `rt_renderdoc_end_capture() -> i64` (1 if the capture was written)
+pub fn rt_renderdoc_end_capture_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(renderdoc_dlopen::end_capture() as i64))
+}
+
+/// `rt_renderdoc_num_captures() -> i64`
+pub fn rt_renderdoc_num_captures_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(renderdoc_dlopen::num_captures() as i64))
+}

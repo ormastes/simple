@@ -1,0 +1,42 @@
+# RenderDoc frame-capture of the Vulkan-backed GUI rendering.
+#
+# Run under `renderdoccmd capture` (which injects librenderdoc and hooks the
+# Vulkan instance). This program marks a frame with the RenderDoc in-application
+# API (StartFrameCapture / EndFrameCapture) around a real Vulkan render, so a
+# headless compute workload (no swapchain present) still produces a .rdc capture.
+# Driven by scripts/check/check-renderdoc-vulkan-capture.shs.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+
+extern fn rt_renderdoc_available() -> i64
+extern fn rt_renderdoc_start_capture() -> i64
+extern fn rt_renderdoc_end_capture() -> i64
+extern fn rt_renderdoc_num_captures() -> i64
+
+fn main():
+    # Prime + create the real Vulkan backend FIRST is fine; RenderDoc (injected by
+    # renderdoccmd) hooks the instance regardless. Mark the frame around the draw.
+    var prime = VulkanBackend.create()
+    val ok = prime.init(64, 48)
+    if not ok:
+        print("renderdoc_capture: VULKAN_UNAVAILABLE\n")
+        return
+
+    val avail = rt_renderdoc_available()
+    print("renderdoc_available=" + avail.to_text() + "\n")
+
+    val started = rt_renderdoc_start_capture()
+    print("renderdoc_start=" + started.to_text() + "\n")
+
+    # The actual Vulkan-backed GUI frame: clear + filled rect + circle.
+    val r = Engine2D.create_requested_backend(64, 48, "vulkan")
+    var eng = r.unwrap()
+    print("backend=" + eng.backend_name() + "\n")
+    eng.clear(0xFF224466u32)
+    eng.draw_rect_filled(8, 8, 40, 24, 0xFFCC2020u32)
+    eng.draw_circle_filled(48, 36, 8, 0xFF30C060u32)
+    val px = eng.read_pixels()
+
+    val ended = rt_renderdoc_end_capture()
+    print("renderdoc_end=" + ended.to_text() + " pixels=" + px.len().to_text() + " num_captures=" + rt_renderdoc_num_captures().to_text() + "\n")

@@ -351,6 +351,26 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_host_gpu_queue_last_status",
         host_gpu_lane::rt_host_gpu_queue_last_status
     );
+    insert_simple!(
+        "rt_host_gpu_queue_last_backend_handle",
+        host_gpu_lane::rt_host_gpu_queue_last_backend_handle
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_last_device_time_us",
+        host_gpu_lane::rt_host_gpu_queue_last_device_time_us
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_last_payload_size",
+        host_gpu_lane::rt_host_gpu_queue_last_payload_size
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_last_payload_hash",
+        host_gpu_lane::rt_host_gpu_queue_last_payload_hash
+    );
+    insert_simple!(
+        "rt_host_gpu_queue_last_payload_text",
+        host_gpu_lane::rt_host_gpu_queue_last_payload_text
+    );
     insert_simple!("native_stdin", terminal::native_stdin);
     insert_simple!("native_stdout", terminal::native_stdout);
     insert_simple!("native_tcp_accept", network::native_tcp_accept);
@@ -1653,6 +1673,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_get_device", gpu::rt_vulkan_get_device_fn);
     insert_simple!("rt_vulkan_get_last_error", gpu::rt_vulkan_get_last_error_fn);
     insert_simple!("rt_vulkan_init", gpu::rt_vulkan_init_fn);
+    insert_simple!("rt_renderdoc_available", gpu::rt_renderdoc_available_fn);
+    insert_simple!("rt_renderdoc_start_capture", gpu::rt_renderdoc_start_capture_fn);
+    insert_simple!("rt_renderdoc_end_capture", gpu::rt_renderdoc_end_capture_fn);
+    insert_simple!("rt_renderdoc_num_captures", gpu::rt_renderdoc_num_captures_fn);
     insert_simple!("rt_vulkan_is_available", gpu::rt_vulkan_is_available_fn);
     insert_simple!("rt_vulkan_push_constants", gpu::rt_vulkan_push_constants_fn);
     insert_simple!("rt_vulkan_select_device", gpu::rt_vulkan_select_device_fn);
@@ -2110,6 +2134,10 @@ pub(crate) fn call_extern_function_with_values(
             "rt_host_gpu_queue_in_flight_count" => host_gpu_lane::rt_host_gpu_queue_in_flight_count(evaluated),
             "rt_host_gpu_queue_last_status" => host_gpu_lane::rt_host_gpu_queue_last_status(evaluated),
             "rt_host_gpu_queue_last_backend_handle" => host_gpu_lane::rt_host_gpu_queue_last_backend_handle(evaluated),
+            "rt_host_gpu_queue_last_device_time_us" => host_gpu_lane::rt_host_gpu_queue_last_device_time_us(evaluated),
+            "rt_host_gpu_queue_last_payload_size" => host_gpu_lane::rt_host_gpu_queue_last_payload_size(evaluated),
+            "rt_host_gpu_queue_last_payload_hash" => host_gpu_lane::rt_host_gpu_queue_last_payload_hash(evaluated),
+            "rt_host_gpu_queue_last_payload_text" => host_gpu_lane::rt_host_gpu_queue_last_payload_text(evaluated),
             _ => Err(common::unknown_function(name)),
         };
     }
