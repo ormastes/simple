@@ -15,7 +15,7 @@ The glue shipped and the path was hardened end-to-end:
   `simple_web_render_html_to_pixels_with_engine2d_backend`.
 - **Spec:** `test/01_unit/app/office/md_wysiwyg_render_spec.spl` — absolute pixel
   oracle (exact `w*h`, non-bg ink, absolute black-glyph color, distinct-md →
-  distinct-framebuffer), 8 cases.
+  distinct-framebuffer), 7 cases.
 - **Guide:** `doc/07_guide/ui/md_wysiwyg_graphical_render.md` (+ `_tldr.md`).
 - **Fidelity bugs found by rendering a real `.md` and fixed** (all RESOLVED):
   HTML entities decoded (`web_render_html_entities_not_decoded`), long lines wrap

@@ -33,10 +33,15 @@ and clipped against the 480 px surface, then the remainder wrapped to line 2.
 Bound the inline `#text` layout width to the available content width
 (`iw - inline_x`) before laying it out, unless `white-space: nowrap`. Short
 inline pieces (intrinsic ≤ available) are unaffected. After the fix the text
-child is `w=480` and wraps within the surface. Ink-preservation oracle (same
-text at 240×400 vs 960×120): both render 3720 ink px with the fix (no glyph
-lost); without it the narrow render drops to 2060 (~45% clipped). Regression
+child is `w=480` and wraps within the surface. Ink-preservation oracle at fix
+time (same text at 240×400 vs 960×120): both render 3720 ink px with the fix (no
+glyph lost); without it the narrow render drops to 2060 (~45% clipped). Regression
 suite `test/01_unit/browser_engine/` unchanged (34 pass / 45 pre-existing fail).
+
+The live regression oracle in `test/01_unit/app/office/md_wysiwyg_render_spec.spl`
+was later resized (narrow 240×100, wide 480×64, shorter text) to fit the
+interpreter-bound web-layout perf budget under the test runner; it still asserts
+narrow-vs-wide ink preservation, just over fewer blank rows.
 
 Note: per-line *break-on-overflow within a single inline run mixing multiple
 pieces* is still simplistic, but single-text-child blocks (paragraphs, headings,
