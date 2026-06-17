@@ -37,14 +37,34 @@ After wiring all eight real kernels and measuring per-primitive:
 | rect_outline    | **fixed** — wired, bit-exact (0)                     |
 | circle_filled   | **fixed** — wired, bit-exact (0)                     |
 | triangle_filled | **fixed** — wired, bit-exact (0)                     |
-| rounded_rect    | **fixed** — wired + SW outline→fill bug fixed (0)    |
-| circle_outline  | **fixed** — wired + SW Bresenham→distance-ring (0)   |
-| line            | **fixed** (thickness-1) — wired; recovered via spirv-dis |
-| gradient_rect   | **fixed** — wired; recovered via spirv-dis (divisor=h) |
+| rounded_rect    | **reverted to no-op** — see "Reverted" below         |
+| circle_outline  | **reverted to no-op** — see "Reverted" below         |
+| line            | **reverted to no-op** — see "Reverted" below         |
+| gradient_rect   | **reverted to no-op** — see "Reverted" below         |
 | blit            | untested — kept no-op (needs source-buffer binding) |
 
-9 of 10 kernels now render bit-exact (line: thickness-1 only) vs the
-SoftwareBackend reference.
+**5 of 10 kernels are wired bit-exact** (clear, rect_filled, rect_outline,
+circle_filled, triangle_filled) vs the SoftwareBackend reference. The other 5
+stay no-op.
+
+## Reverted (2026-06-17): rounded_rect / circle_outline / line / gradient
+
+These four were briefly wired by also changing `SoftwareBackend` to match each
+GPU blob's convention (rounded_rect fill, distance-ring outline, steps+1 DDA
+line, gradient divisor `h`). That was WRONG: `SoftwareBackend` is intentionally
+**bit-exact with Metal** (commit 99af88d) and implements the standard, documented
+behavior — `draw_rounded_rect` is **outline-only** by contract, `draw_line` is a
+Bresenham line that includes its end point, `draw_circle` is a Bresenham midpoint
+outline. The blob conventions differ (fill, a DDA that drops the end pixel,
+distance-ring), so matching them degraded `SoftwareBackend` and **regressed
+`test/02_integration/rendering/engine2d_primitives_spec.spl`** (24/0 → 22/2).
+
+Resolution: `SoftwareBackend` restored to its pristine Metal-bit-exact version;
+the four divergent kernels reverted to the no-op shader; the oracle spec only
+asserts the five that are genuinely bit-exact with the standard SoftwareBackend.
+Reconciling the GPU blobs with the standard backend (or deciding a per-primitive
+canonical convention) is the real remaining work and must NOT be done by
+degrading `SoftwareBackend`.
 
 ### gradient_rect (RESOLVED via spirv-dis)
 The GLSL source uses `mix()`/float (`t = ly/(rh-1)`), but `spirv-dis` of the
