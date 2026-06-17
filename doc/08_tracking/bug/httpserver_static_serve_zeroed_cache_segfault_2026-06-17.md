@@ -134,14 +134,41 @@ array-only. Fix:
    tag-dispatched `rt_index_get` instead of name-suffix-binding it to a wrong
    user `Type.get` (the SIGSEGV).
 
+3. **Key-representation unification (completion).** `d[k] = v` (IndexSet) stores
+   the key TAGGED (rt_value_int), but bare `d.get(k)`/`d.remove(k)` received it
+   UNBOXED (raw native int). canon_key cannot reconcile those (raw 8 is
+   bit-identical to tagged 1), so ~1/4 of int keys (k ≡ 0,1 mod 8) silently
+   missed even though the crash was gone. Fix: tag the int key INLINE in the bare
+   get/remove guard (`rt_value_int(v) == v<<3`, INT tag 0 → a left shift;
+   inline, NOT via rt_box_int which is unlinked in native AOT and would
+   `call 0x0`). canon_key hardened so small ints with heap-tag-colliding low
+   bits canonicalize as integers (heap branch gated on `>= 4096`).
+4. **`.remove` wired** (`rt_dict_remove` + runtime_sffi spec + try_compile
+   mapping + bare guard). Previously a "function not found" no-op, so
+   `sendfile_pending`/`sendfile_open_files` never cleared (reused fd → stale
+   read). Now removes correctly.
+
 ### Verification (by returned value, not "no crash")
-- Native micro-tests: int-key hit/overwrite/miss, string-key hit/miss, `.get`
-  raw value, `.contains`, **array indexing unaffected** (`a[1]=60`→60, `a[2]`→7).
+- Native residue sweep matches the interpreter oracle EXACTLY for
+  k in {1,7,8,9,16,17,4096}: `d.get(k) == d[k] == k*10` for every key (the
+  previously-broken k=1/8/9/16 included); `.remove(9)` clears (d[9]→nil) leaving
+  others intact.
+- `.get`/`.remove` on a **known-type user method** (`Box.get`) is NOT hijacked
+  (returns 42 via the user method) — guard only fires on type-erased receivers.
+- **Array indexing unaffected** (`a[1]=60`→60, `a[2]`→7).
 - Native server's exact pattern (`.get(fd)` → `if not pending.?:` →
   `pending.0/.1/.2`): present→value, absent→nil-branch, fields correct.
 - Real natively-built `httpserver_live_static_fixture`: serves correct bodies
-  (`STATIC-OK-12345`, `hello-from-simple-server`) across 4 requests incl.
-  repeats, server stays alive — the prior "req#1 ok, req#2 crash" is gone.
+  across repeated requests, server stays alive — the prior "req#1 ok, req#2
+  crash" is gone. (Small files use `inline_static_handler` and skip
+  `sendfile_pending`; the sendfile path's get/remove logic is covered by the unit
+  sweep + server-pattern test above.)
+
+### Orthogonal native bug observed (NOT this fix, NOT dict-related)
+`for k in <array>` SIGSEGVs in native (`call 0x0` in the loop's iterator
+machinery) while working in the interpreter — reproduces on a pure array program
+with no dicts, and this dict fix touches neither array iteration nor for-loop
+lowering. Pre-existing / parallel-agent native-codegen issue; track separately.
 
 ### Out of scope / separate pre-existing bug (NOT this fix)
 `if val x = <optional>` and `opt.?` payload extraction are broken in the
