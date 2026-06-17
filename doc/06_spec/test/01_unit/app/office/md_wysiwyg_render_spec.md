@@ -28,7 +28,7 @@ md_wysiwyg_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,35 +76,22 @@ graphical glue (feature: markdown_wysiwyg_graphical_render_app_2026-06-15).
 
 ### markdown WYSIWYG graphical render
 
-#### paints markdown through the same cpu_simd renderer the apps use
+#### paints markdown through the same cpu_simd renderer with absolute black glyph ink
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# One render proves the whole oracle (size + ink + absolute black glyph +
+# surviving white page); T1/T2 previously re-rendered identical content.
 val pixels = _render_markdown("Hello body paragraph text", 200, 60)
 # (1) exact framebuffer size
 expect(pixels.len()).to_equal(200 * 60)
 # (2) markdown actually paints — non-background ink exists
 expect(_count_non_bg(pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
-```
-
-</details>
-
-#### paints absolute black glyph ink for styled markdown body text
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val pixels = _render_markdown("Hello body paragraph text", 200, 60)
-expect(pixels.len()).to_equal(200 * 60)
 # (3) absolute color invariant: the styled paragraph paints opaque black
 # glyph ink (#000000 -> 0xFF000000) onto the otherwise-white page.
 expect(_count_color(pixels, 0xFF000000u32)).to_be_greater_than(0)
@@ -166,7 +153,7 @@ expect(esc_ink).to_be_less_than(plain_ink * 3)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -175,10 +162,13 @@ Reproduction: this block contains the complete executable scenario source.
 # Oracle: the same text rendered on a narrow-but-tall surface preserves its
 # ink (all glyphs survive the wrap), matching a wide surface that fits it
 # on fewer lines. A right-edge clip would drop glyphs and lower the ink.
-val long_md = "Render markdown to pixels through the shared web 2D lane painted via Engine2D backend now"
-val narrow = _render_markdown(long_md, 240, 400)
-val wide = _render_markdown(long_md, 960, 120)
-expect(narrow.len()).to_equal(240 * 400)
+val long_md = "Render markdown to pixels via the shared web Engine2D lane now"
+# Surfaces sit just above the painted ink (narrow wraps to ~84px, wide to
+# ~50px). The web-layout lane is interpreter-bound under the test runner
+# (~0.2 ms/px), so blank rows are pure cost — keep these tight.
+val narrow = _render_markdown(long_md, 240, 100)
+val wide = _render_markdown(long_md, 480, 64)
+expect(narrow.len()).to_equal(240 * 100)
 val narrow_ink = _count_non_bg(narrow, 0xFFFFFFFFu32)
 val wide_ink = _count_non_bg(wide, 0xFFFFFFFFu32)
 expect(wide_ink).to_be_greater_than(0)
@@ -195,7 +185,7 @@ expect(narrow_ink * 10).to_be_greater_than(wide_ink * 9)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -204,14 +194,17 @@ Reproduction: this block contains the complete executable scenario source.
 # an indented code line's first black glyph sits well to the right of an
 # unindented code line's first glyph. (The ``` delimiters are hidden and a
 # leading # stays code, not a heading.)
-val indented = _render_markdown("```\n        code_x()\n```", 300, 80)
-val plain = _render_markdown("```\ncode_x()\n```", 300, 80)
-expect(indented.len()).to_equal(300 * 80)
-val indented_col = _min_color_col(indented, 0xFF000000u32, 300)
-val plain_col = _min_color_col(plain, 0xFF000000u32, 300)
-# both code lines actually paint glyph ink
-expect(plain_col).to_be_less_than(300)
-expect(indented_col).to_be_less_than(300)
+# One code line paints in the top ~17px; height is sized just above it
+# (the renderer is interpreter-bound per-pixel under the test runner).
+val indented = _render_markdown("```\n        code_x()\n```", 200, 32)
+val plain = _render_markdown("```\ncode_x()\n```", 200, 32)
+expect(indented.len()).to_equal(200 * 32)
+val indented_col = _min_color_col(indented, 0xFF000000u32, 200)
+val plain_col = _min_color_col(plain, 0xFF000000u32, 200)
+# both code lines actually paint glyph ink (a missing match would make
+# _min_color_col return the surface width 200, so the bound is < 200).
+expect(plain_col).to_be_less_than(200)
+expect(indented_col).to_be_less_than(200)
 # the 8-space indent shifts the first glyph far to the right
 expect(indented_col).to_be_greater_than(plain_col + 30)
 ```
@@ -271,8 +264,8 @@ expect(_count_non_bg(b, 0xFFFFFFFFu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

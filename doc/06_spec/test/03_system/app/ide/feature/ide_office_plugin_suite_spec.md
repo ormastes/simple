@@ -29,7 +29,7 @@ ide_office_plugin_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -76,13 +76,16 @@ mode: tui
 capabilities: 5
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true
+  edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true
+  edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
+  edit-command: sheet-edit=true stale-reject=true reason=stale-cell
   gui: gui-backend: theme=dark size=1200x800 md=true ppt=true sheet=true config=true
 agent-dashboard: Agent Dashboard [dashboard] -> app.editor.mcp_tools (agent, dashboard, mcp)
-  check: agent-dashboard: app.editor.mcp_tools tools=19 lsp=true wiki=true modes=3
+  check: agent-dashboard: tools=19 lsp=10 wiki=3 modes=3 team=3 blocked=2 status=degraded-review-required
 db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, simple-db, portal-db)
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
@@ -142,7 +145,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,6 +157,11 @@ expect(tui_report).to_contain("Presentation Slides")
 expect(gui_report).to_contain("Database Admin")
 expect(tui_report).to_contain("tui-panels:")
 expect(tui_report).to_contain("slides: app.office.slides")
+expect(tui_report).to_contain("edit-command: md-edit=true stale-reject=true")
+expect(tui_report).to_contain("edit-command: slide-edit=true stale-reject=true")
+expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
+expect(tui_report).to_contain("agent-dashboard: tools=")
+expect(tui_report).to_contain("status=degraded-review-required")
 ```
 
 </details>
@@ -163,21 +171,24 @@ expect(tui_report).to_contain("slides: app.office.slides")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(17)
+expect(lines.len()).to_equal(20)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
 expect(lines[2]).to_equal("capabilities: 5")
 expect(lines[3]).to_start_with("markdown:")
-expect(lines[5]).to_start_with("slides:")
-expect(lines[7]).to_start_with("sheets:")
-expect(lines[10]).to_start_with("agent-dashboard:")
-expect(lines[12]).to_start_with("db-admin:")
-expect(lines[16]).to_start_with("  plugin-manifest:")
+expect(lines[5]).to_start_with("  edit-command:")
+expect(lines[6]).to_start_with("slides:")
+expect(lines[8]).to_start_with("  edit-command:")
+expect(lines[9]).to_start_with("sheets:")
+expect(lines[11]).to_start_with("  edit-command:")
+expect(lines[13]).to_start_with("agent-dashboard:")
+expect(lines[15]).to_start_with("db-admin:")
+expect(lines[19]).to_start_with("  plugin-manifest:")
 ```
 
 </details>
@@ -210,7 +221,7 @@ expect(_capture_file_state(capture)).to_equal("matched")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -221,10 +232,12 @@ expect(tui_lines[0]).to_equal(gui_lines[0])
 expect(tui_lines[2]).to_equal(gui_lines[2])
 expect(tui_lines[3]).to_equal(gui_lines[3])
 expect(tui_lines[5]).to_equal(gui_lines[5])
-expect(tui_lines[7]).to_equal(gui_lines[7])
+expect(tui_lines[6]).to_equal(gui_lines[6])
+expect(tui_lines[8]).to_equal(gui_lines[8])
 expect(tui_lines[10]).to_equal(gui_lines[10])
 expect(tui_lines[12]).to_equal(gui_lines[12])
-expect(tui_lines[16]).to_equal(gui_lines[16])
+expect(tui_lines[14]).to_equal(gui_lines[14])
+expect(tui_lines[18]).to_equal(gui_lines[18])
 ```
 
 </details>
@@ -372,12 +385,28 @@ expect(summary).to_contain("page-size=4096")
 
 - assert true
 - assert true
+   - Expected: surface.lanes.len() equals `3`
+   - Expected: surface.gates.len() equals `6`
+   - Expected: surface.lanes[0].provider equals `spark`
+   - Expected: surface.lanes[0].status equals `unavailable`
+   - Expected: surface.lanes[0].source_module equals `assistant.control_plane`
+   - Expected: surface.lanes[0].review_gate_id equals `spark-output-reviewed`
+   - Expected: surface.lanes[0].degraded_reason equals `spark-unavailable`
+   - Expected: surface.lanes[1].provider equals `normal`
+   - Expected: surface.lanes[2].role equals `review`
+   - Expected: surface.gates[0].gate_id equals `spark-output-reviewed`
+   - Expected: surface.gates[0].status equals `blocked`
+   - Expected: surface.gates[0].reason equals `spark-unavailable`
+   - Expected: surface.gates[3].gate_id equals `mcp-tool-registry-present`
+   - Expected: surface.gates[3].status equals `ready`
+   - Expected: surface.blocked_count equals `2`
+   - Expected: surface.handoff_status equals `degraded-review-required`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -385,10 +414,128 @@ val surface = ide_agent_dashboard_surface()
 val summary = ide_agent_dashboard_summary()
 expect(surface.owner_module).to_equal("app.editor.mcp_tools")
 expect(surface.tool_count).to_be_greater_than(10)
+expect(surface.lsp_tool_count).to_equal(10)
+expect(surface.wiki_tool_count).to_equal(3)
+expect(surface.required_tool_count).to_equal(3)
+expect(surface.source_of_truth).to_equal("assistant.control_plane")
 assert_true(surface.has_lsp_tools)
 assert_true(surface.has_wiki_tools)
 expect(surface.modes.join(",")).to_contain("combined-live")
+expect(surface.lanes.len()).to_equal(3)
+expect(surface.gates.len()).to_equal(6)
+expect(surface.lanes[0].provider).to_equal("spark")
+expect(surface.lanes[0].status).to_equal("unavailable")
+expect(surface.lanes[0].source_module).to_equal("assistant.control_plane")
+expect(surface.lanes[0].review_gate_id).to_equal("spark-output-reviewed")
+expect(surface.lanes[0].degraded_reason).to_equal("spark-unavailable")
+expect(surface.lanes[1].provider).to_equal("normal")
+expect(surface.lanes[2].role).to_equal("review")
+expect(surface.gates[0].gate_id).to_equal("spark-output-reviewed")
+expect(surface.gates[0].status).to_equal("blocked")
+expect(surface.gates[0].required).to_be(true)
+expect(surface.gates[0].reason).to_equal("spark-unavailable")
+expect(surface.gates[3].gate_id).to_equal("mcp-tool-registry-present")
+expect(surface.gates[3].status).to_equal("ready")
+expect(surface.blocked_count).to_equal(2)
+expect(surface.degraded_reasons.join(",")).to_contain("spark-unavailable")
+expect(surface.ready_for_integration).to_be(false)
+expect(surface.handoff_status).to_equal("degraded-review-required")
 expect(summary).to_contain("modes=3")
+expect(summary).to_contain("team=3")
+expect(summary).to_contain("blocked=2")
+```
+
+</details>
+
+#### fails closed when agent dashboard evidence is missing or malformed
+
+- mcp tool
+- mcp tool
+   - Expected: partial_surface.tool_count equals `2`
+   - Expected: partial_surface.required_tool_count equals `3`
+   - Expected: partial_surface.gates[3].status equals `missing`
+   - Expected: partial_surface.gates[3].reason equals `required-tool-count-missing`
+- IdeAgentDashboardLane
+- IdeAgentDashboardLane
+   - Expected: missing_review_surface.gates[1].status equals `missing`
+   - Expected: missing_review_surface.gates[1].reason equals `normal-review-lane-missing`
+- IdeAgentDashboardLane
+- IdeAgentDashboardLane
+   - Expected: missing_spark_surface.gates[0].status equals `missing`
+   - Expected: missing_spark_surface.gates[0].reason equals `spark-lane-missing`
+- IdeAgentDashboardLane
+   - Expected: invalid_surface.gates[2].gate_id equals `lane-status-valid`
+   - Expected: invalid_surface.gates[2].status equals `blocked`
+   - Expected: invalid_surface.gates[2].reason equals `invalid-lane`
+- IdeAgentDashboardLane
+- IdeAgentDashboardLane
+   - Expected: spoofed_surface.gates[1].status equals `missing`
+   - Expected: spoofed_surface.gates[2].status equals `blocked`
+   - Expected: spoofed_surface.gates[2].reason equals `invalid-lane`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 55 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val empty_surface = ide_agent_dashboard_surface_from_tools([], ide_agent_dashboard_default_lanes())
+expect(empty_surface.tool_count).to_equal(0)
+expect(empty_surface.gates[3].status).to_equal("missing")
+expect(empty_surface.gates[4].reason).to_equal("lsp-tools-missing")
+expect(empty_surface.gates[5].reason).to_equal("wiki-tools-missing")
+expect(empty_surface.ready_for_integration).to_be(false)
+expect(empty_surface.degraded_reasons.join(",")).to_contain("mcp-tool-registry-empty")
+
+val partial_tools = [
+    mcp_tool("editor.lsp_probe", "LSP probe"),
+    mcp_tool("editor.wiki_probe", "Wiki probe"),
+]
+val partial_surface = ide_agent_dashboard_surface_from_tools(partial_tools, ide_agent_dashboard_default_lanes())
+expect(partial_surface.tool_count).to_equal(2)
+expect(partial_surface.required_tool_count).to_equal(3)
+expect(partial_surface.gates[3].status).to_equal("missing")
+expect(partial_surface.gates[3].reason).to_equal("required-tool-count-missing")
+expect(partial_surface.ready_for_integration).to_be(false)
+
+val missing_review = [
+    IdeAgentDashboardLane(lane_id: "spark-research", provider: "spark", role: "fast-explorer", status: "reviewed", requires_review: true, source_module: "assistant.control_plane", review_gate_id: "spark-output-reviewed", degraded_reason: ""),
+    IdeAgentDashboardLane(lane_id: "normal-implementation", provider: "normal", role: "implementation", status: "ready", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: ""),
+]
+val missing_review_surface = ide_agent_dashboard_surface_from_tools([], missing_review)
+expect(missing_review_surface.gates[1].status).to_equal("missing")
+expect(missing_review_surface.gates[1].reason).to_equal("normal-review-lane-missing")
+expect(missing_review_surface.ready_for_integration).to_be(false)
+
+val missing_spark = [
+    IdeAgentDashboardLane(lane_id: "normal-implementation", provider: "normal", role: "implementation", status: "ready", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: ""),
+    IdeAgentDashboardLane(lane_id: "normal-review", provider: "normal", role: "review", status: "ready", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: ""),
+]
+val missing_spark_surface = ide_agent_dashboard_surface_from_tools(partial_tools, missing_spark)
+expect(missing_spark_surface.gates[0].status).to_equal("missing")
+expect(missing_spark_surface.gates[0].reason).to_equal("spark-lane-missing")
+expect(missing_spark_surface.ready_for_integration).to_be(false)
+
+val invalid_lane = [
+    IdeAgentDashboardLane(lane_id: "mystery", provider: "unknown", role: "review", status: "maybe", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: "invalid-test-lane"),
+]
+val invalid_surface = ide_agent_dashboard_surface_from_tools([], invalid_lane)
+expect(invalid_surface.gates[2].gate_id).to_equal("lane-status-valid")
+expect(invalid_surface.gates[2].status).to_equal("blocked")
+expect(invalid_surface.gates[2].reason).to_equal("invalid-lane")
+expect(invalid_surface.ready_for_integration).to_be(false)
+
+val spoofed_review = [
+    IdeAgentDashboardLane(lane_id: "spark-research", provider: "spark", role: "fast-explorer", status: "reviewed", requires_review: true, source_module: "assistant.control_plane", review_gate_id: "spark-output-reviewed", degraded_reason: ""),
+    IdeAgentDashboardLane(lane_id: "normal-review", provider: "normal", role: "review", status: "ready", requires_review: false, source_module: "dashboard.local", review_gate_id: "normal-review-available", degraded_reason: "spoofed-review"),
+]
+val spoofed_surface = ide_agent_dashboard_surface_from_tools(partial_tools, spoofed_review)
+expect(spoofed_surface.gates[1].status).to_equal("missing")
+expect(spoofed_surface.gates[2].status).to_equal("blocked")
+expect(spoofed_surface.gates[2].reason).to_equal("invalid-lane")
+expect(spoofed_surface.ready_for_integration).to_be(false)
 ```
 
 </details>
@@ -520,8 +667,8 @@ expect(summary).to_contain("roundtrip=5")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

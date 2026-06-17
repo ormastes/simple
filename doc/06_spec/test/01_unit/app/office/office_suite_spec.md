@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 44 | 44 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -153,6 +153,247 @@ expect(run_office(["counter"])).to_equal(0)
 
 </details>
 
+#### applies markdown edit commands when expected source matches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["md-edit", "1", "second", "changed", "first\\nsecond"])).to_equal(0)
+```
+
+</details>
+
+#### rejects markdown edit commands when actual source differs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["md-edit", "1", "expected", "changed", "first\\nactual"])).to_equal(2)
+```
+
+</details>
+
+#### rejects markdown edit commands with trailing arguments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["md-edit", "1", "second", "changed", "first\\nsecond", "extra"])).to_equal(1)
+```
+
+</details>
+
+#### rejects markdown edit commands with malformed line tokens
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["md-edit", "abc", "first", "changed", "first\\nsecond"])).to_equal(2)
+expect(run_office(["md-edit", "-1", "first", "changed", "first\\nsecond"])).to_equal(2)
+expect(run_office(["md-edit", "", "first", "changed", "first\\nsecond"])).to_equal(2)
+expect(run_office(["md-edit", "9999999999", "first", "changed", "first\\nsecond"])).to_equal(2)
+```
+
+</details>
+
+#### applies sheet edit commands when expected cell display matches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["sheet-edit", "A1", "old", "new", "A1=old;B1=2"])).to_equal(0)
+```
+
+</details>
+
+#### rejects sheet edit commands when actual cell display differs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["sheet-edit", "A1", "expected", "new", "A1=actual;B1=2"])).to_equal(2)
+```
+
+</details>
+
+#### rejects sheet edit commands with malformed target references
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["sheet-edit", "not-a-ref", "", "new", "A1=old"])).to_equal(2)
+```
+
+</details>
+
+#### rejects sheet edit commands for missing target cells
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["sheet-edit", "A1", "", "new", ""])).to_equal(2)
+```
+
+</details>
+
+#### rejects sheet edit commands with malformed source entries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["sheet-edit", "A1", "old", "new", "A1old;B1=2"])).to_equal(2)
+```
+
+</details>
+
+#### rejects sheet edit commands with malformed source references
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["sheet-edit", "A1", "old", "new", "A1=old;not-a-ref=2"])).to_equal(2)
+```
+
+</details>
+
+#### rejects sheet edit commands with trailing arguments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["sheet-edit", "A1", "old", "new", "A1=old", "extra"])).to_equal(1)
+```
+
+</details>
+
+#### applies slide edit commands when expected text matches
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["slide-edit", "title", "old", "new", "title=old;body=second"])).to_equal(0)
+```
+
+</details>
+
+#### rejects slide edit commands when actual text differs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["slide-edit", "title", "expected", "new", "title=actual;body=second"])).to_equal(2)
+```
+
+</details>
+
+#### rejects slide edit commands for missing elements
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["slide-edit", "title", "", "new", "body=second"])).to_equal(2)
+```
+
+</details>
+
+#### rejects slide edit commands with malformed source entries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["slide-edit", "title", "old", "new", "titleold;body=second"])).to_equal(2)
+```
+
+</details>
+
+#### rejects slide edit commands with missing source ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["slide-edit", "title", "old", "new", "=old"])).to_equal(2)
+```
+
+</details>
+
+#### rejects slide edit commands with trailing arguments
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["slide-edit", "title", "old", "new", "title=old", "extra"])).to_equal(1)
+```
+
+</details>
+
 #### rejects unknown app
 
 <details>
@@ -202,13 +443,13 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 expect(launcher_action_allowlist().len()).to_equal(6)
 expect(launcher_open_action("word")).to_equal("open_word")
-expect(is_valid_launcher_action("open_word")).to_equal(true)
-expect(is_valid_launcher_action("open_counter")).to_equal(true)
+expect(is_valid_launcher_action("open_word")).to_be(true)
+expect(is_valid_launcher_action("open_counter")).to_be(true)
 val slides = launcher_action_to_component("open_slides")
-expect(slides.is_some()).to_equal(true)
+expect(slides.is_some()).to_be(true)
 expect(slides.unwrap()).to_equal("slides")
 val counter = launcher_action_to_component("open_counter")
-expect(counter.is_some()).to_equal(true)
+expect(counter.is_some()).to_be(true)
 expect(counter.unwrap()).to_equal("counter")
 ```
 
@@ -379,6 +620,173 @@ expect(formatted).to_equal("1971-01-02")
 
 </details>
 
+#### updates sheets cells only when expected display matches
+
+- sheet set value
+   - Expected: result.reason equals `updated`
+   - Expected: result.diff equals `@@ cell A1 @@\n- old\n+ new`
+   - Expected: cell_display_text(sheet.get_cell("A1")) equals `new`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sheet = Sheet.new("Checked")
+sheet.set_value("A1", "old")
+val result = sheet.update_cell_checked("A1", "old", "new")
+expect(result.accepted).to_be(true)
+expect(result.reason).to_equal("updated")
+expect(result.diff).to_equal("@@ cell A1 @@\n- old\n+ new")
+expect(cell_display_text(sheet.get_cell("A1"))).to_equal("new")
+```
+
+</details>
+
+#### rejects stale sheet cell updates without mutating
+
+- sheet set value
+   - Expected: result.reason equals `stale-cell`
+   - Expected: result.diff equals `@@ cell A1 @@\nexpected: expected\nactual: actual\nrejected: new`
+   - Expected: cell_display_text(sheet.get_cell("A1")) equals `actual`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sheet = Sheet.new("Checked")
+sheet.set_value("A1", "actual")
+val result = sheet.update_cell_checked("A1", "expected", "new")
+expect(result.accepted).to_be(false)
+expect(result.reason).to_equal("stale-cell")
+expect(result.diff).to_equal("@@ cell A1 @@\nexpected: expected\nactual: actual\nrejected: new")
+expect(cell_display_text(sheet.get_cell("A1"))).to_equal("actual")
+```
+
+</details>
+
+#### rejects malformed sheet cell references without mutating
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sheet = Sheet.new("Checked")
+val result = sheet.update_cell_checked("not-a-ref", "", "new")
+expect(result.accepted).to_be(false)
+expect(result.reason).to_equal("invalid-cell-ref")
+expect(result.actual_value).to_equal("<invalid-ref>")
+expect(sheet.cell_count()).to_equal(0)
+```
+
+</details>
+
+#### rejects missing sheet cells without creating them
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val sheet = Sheet.new("Checked")
+val result = sheet.update_cell_checked("A1", "", "new")
+expect(result.accepted).to_be(false)
+expect(result.reason).to_equal("missing-cell")
+expect(result.actual_value).to_equal("<missing-cell>")
+expect(sheet.cell_count()).to_equal(0)
+```
+
+</details>
+
+#### updates slide text elements only when expected text matches
+
+- SlideElementKind TextBox
+   - Expected: actual equals `new`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val slide = add_text_box(blank_slide("checked"), "title", "old", 40, 40, 840, 60)
+val result = slide_update_text_checked(slide, "title", "old", "new")
+expect(result.accepted).to_be(true)
+expect(result.reason).to_equal("updated")
+expect(result.diff).to_equal("@@ slide element title @@\n- old\n+ new")
+var actual = "<missing>"
+match result.slide.elements[0].kind:
+    SlideElementKind.TextBox(content: content):
+        actual = content
+    _:
+        actual = "<not-text>"
+expect(actual).to_equal("new")
+```
+
+</details>
+
+#### rejects stale slide text updates without mutating
+
+- SlideElementKind TextBox
+   - Expected: actual equals `actual`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val slide = add_text_box(blank_slide("checked"), "title", "actual", 40, 40, 840, 60)
+val result = slide_update_text_checked(slide, "title", "expected", "new")
+expect(result.accepted).to_be(false)
+expect(result.reason).to_equal("stale-slide-element")
+expect(result.diff).to_equal("@@ slide element title @@\nexpected: expected\nactual: actual\nrejected: new")
+var actual = "<missing>"
+match result.slide.elements[0].kind:
+    SlideElementKind.TextBox(content: content):
+        actual = content
+    _:
+        actual = "<not-text>"
+expect(actual).to_equal("actual")
+```
+
+</details>
+
+#### rejects missing slide text elements without mutating
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val slide = blank_slide("checked")
+val result = slide_update_text_checked(slide, "title", "", "new")
+expect(result.accepted).to_be(false)
+expect(result.reason).to_equal("missing-element")
+expect(result.actual_value).to_equal("<missing-element>")
+expect(result.slide.elements.len()).to_equal(0)
+```
+
+</details>
+
 #### replaces the first office search match
 
 <details>
@@ -415,8 +823,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 44 |
+| Active scenarios | 44 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

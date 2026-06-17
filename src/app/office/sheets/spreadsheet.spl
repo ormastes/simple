@@ -2,7 +2,7 @@
 #
 # Sheet and Workbook types with cell operations.
 
-use app.office.sheets.cell.{Cell, CellValue, CellStyle, CellRef, empty_cell, text_cell, number_cell, formula_cell, cell_ref_to_string, parse_cell_ref, default_style}
+use app.office.sheets.cell.{Cell, CellValue, CellStyle, CellRef, empty_cell, text_cell, number_cell, formula_cell, cell_display_text, cell_ref_to_string, parse_cell_ref, default_style}
 use common.office.number.{office_parse_signed_decimal_f64}
 
 # =========================================================================
@@ -14,6 +14,15 @@ class Sheet:
     cells: Dict<text, Cell>   # Key: "A1", "B2" etc.
     col_count: i32
     row_count: i32
+
+struct SheetEditResult:
+    accepted: bool
+    reason: text
+    cell_ref: text
+    expected_value: text
+    actual_value: text
+    new_value: text
+    diff: text
 
 impl Sheet:
 
@@ -73,6 +82,62 @@ impl Sheet:
 
         # Default to text
         me.set_cell(ref_str, text_cell(trimmed))
+
+    me update_cell_checked(ref_str: text, expected_display: text, new_value: text) -> SheetEditResult:
+        """Update a cell only when the caller's expected display text matches.
+
+        This is the Calc-like fail-closed edit contract used by automation:
+        stale expected values, missing refs, and malformed refs are rejected
+        without mutating the sheet.
+        """
+        val ref_val = parse_cell_ref(ref_str)
+        if ref_val == nil:
+            return SheetEditResult(
+                accepted: false,
+                reason: "invalid-cell-ref",
+                cell_ref: ref_str.upper(),
+                expected_value: expected_display,
+                actual_value: "<invalid-ref>",
+                new_value: new_value,
+                diff: sheet_edit_diff(ref_str.upper(), expected_display, "<invalid-ref>", new_value, false),
+            )
+
+        val key = cell_ref_to_string(ref_val)
+        val found = me.cells.get(key)
+        if found == nil:
+            return SheetEditResult(
+                accepted: false,
+                reason: "missing-cell",
+                cell_ref: key,
+                expected_value: expected_display,
+                actual_value: "<missing-cell>",
+                new_value: new_value,
+                diff: sheet_edit_diff(key, expected_display, "<missing-cell>", new_value, false),
+            )
+
+        val actual = cell_display_text(me.get_cell(key))
+        if actual != expected_display:
+            return SheetEditResult(
+                accepted: false,
+                reason: "stale-cell",
+                cell_ref: key,
+                expected_value: expected_display,
+                actual_value: actual,
+                new_value: new_value,
+                diff: sheet_edit_diff(key, expected_display, actual, new_value, false),
+            )
+
+        me.set_value(key, new_value)
+        val updated = cell_display_text(me.get_cell(key))
+        SheetEditResult(
+            accepted: true,
+            reason: "updated",
+            cell_ref: key,
+            expected_value: expected_display,
+            actual_value: actual,
+            new_value: updated,
+            diff: sheet_edit_diff(key, expected_display, updated, new_value, true),
+        )
 
     me cell_count() -> i32:
         """Count non-empty cells."""
@@ -207,3 +272,8 @@ fn _is_digit(c: text) -> bool:
 fn _digit_val(c: text) -> i32:
     val code = c.char_code_at(0)
     code - 48
+
+fn sheet_edit_diff(ref_str: text, expected_display: text, actual_display: text, new_value: text, accepted: bool) -> text:
+    if accepted:
+        return "@@ cell {ref_str.upper()} @@\n- {expected_display}\n+ {actual_display}"
+    "@@ cell {ref_str.upper()} @@\nexpected: {expected_display}\nactual: {actual_display}\nrejected: {new_value}"

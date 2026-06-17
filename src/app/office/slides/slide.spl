@@ -43,6 +43,16 @@ struct Presentation:
     active_slide: i32
     theme_name: text
 
+struct SlideEditResult:
+    accepted: bool
+    reason: text
+    slide: Slide
+    element_id: text
+    expected_value: text
+    actual_value: text
+    new_value: text
+    diff: text
+
 # =========================================================================
 # Presentation Helpers
 # =========================================================================
@@ -186,4 +196,88 @@ fn add_slide_element(slide: Slide, el: SlideElement) -> Slide:
         elements: new_elements,
         notes: slide.notes,
         background: slide.background
+    )
+
+fn slide_edit_diff(element_id: text, old_value: text, new_value: text) -> text:
+    "@@ slide element {element_id} @@\n- {old_value}\n+ {new_value}"
+
+fn slide_reject_diff(element_id: text, expected: text, actual: text, replacement: text) -> text:
+    "@@ slide element {element_id} @@\nexpected: {expected}\nactual: {actual}\nrejected: {replacement}"
+
+fn slide_update_text_checked(slide: Slide, element_id: text, expected: text, replacement: text) -> SlideEditResult:
+    """Update a text element only when the current content matches expected."""
+    var found = false
+    var actual = "<missing-element>"
+    var new_elements: [SlideElement] = []
+    for e in slide.elements:
+        if e.id == element_id:
+            found = true
+            match e.kind:
+                SlideElementKind.TextBox(content: content):
+                    actual = content
+                    if content == expected:
+                        new_elements.push(SlideElement(
+                            id: e.id,
+                            kind: SlideElementKind.TextBox(content: replacement),
+                            x: e.x,
+                            y: e.y,
+                            width: e.width,
+                            height: e.height
+                        ))
+                    else:
+                        new_elements.push(e)
+                _:
+                    actual = "<non-text-element>"
+                    new_elements.push(e)
+        else:
+            new_elements.push(e)
+    if not found:
+        return SlideEditResult(
+            accepted: false,
+            reason: "missing-element",
+            slide: slide,
+            element_id: element_id,
+            expected_value: expected,
+            actual_value: actual,
+            new_value: replacement,
+            diff: slide_reject_diff(element_id, expected, actual, replacement)
+        )
+    if actual == "<non-text-element>":
+        return SlideEditResult(
+            accepted: false,
+            reason: "non-text-element",
+            slide: slide,
+            element_id: element_id,
+            expected_value: expected,
+            actual_value: actual,
+            new_value: replacement,
+            diff: slide_reject_diff(element_id, expected, actual, replacement)
+        )
+    if actual != expected:
+        return SlideEditResult(
+            accepted: false,
+            reason: "stale-slide-element",
+            slide: slide,
+            element_id: element_id,
+            expected_value: expected,
+            actual_value: actual,
+            new_value: replacement,
+            diff: slide_reject_diff(element_id, expected, actual, replacement)
+        )
+    val updated = Slide(
+        id: slide.id,
+        layout: slide.layout,
+        elements: new_elements,
+        notes: slide.notes,
+        background: slide.background
+    )
+    SlideEditResult(
+        accepted: true,
+        reason: "updated",
+        slide: updated,
+        element_id: element_id,
+        expected_value: expected,
+        actual_value: actual,
+        new_value: replacement,
+        diff: slide_edit_diff(element_id, actual, replacement)
     )
