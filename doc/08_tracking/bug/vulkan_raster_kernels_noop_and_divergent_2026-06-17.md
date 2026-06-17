@@ -30,18 +30,31 @@ count pixel mismatches (64x48). Before the fix, `draw_circle_filled` produced
 ## Verification matrix (Vulkan vs SoftwareBackend reference, 64x48)
 After wiring all eight real kernels and measuring per-primitive:
 
-| primitive       | mismatches | verdict                      |
-|-----------------|-----------:|------------------------------|
-| clear           | 0          | already real, correct        |
-| rect_filled     | 0          | already real, correct        |
-| rect_outline    | 0          | **fixed** (now wired, exact) |
-| circle_filled   | 0          | **fixed** (now wired, exact) |
-| triangle_filled | 0          | **fixed** (now wired, exact) |
-| circle_outline  | 96/68      | divergent — kept no-op       |
-| rounded_rect    | 1460       | divergent — kept no-op       |
-| gradient_rect   | 1400       | divergent — kept no-op       |
-| line            | untested   | kept no-op                   |
-| blit            | untested   | kept no-op (needs src binding)|
+| primitive       | status                                              |
+|-----------------|-----------------------------------------------------|
+| clear           | already real, correct (0 mismatch)                  |
+| rect_filled     | already real, correct (0)                           |
+| rect_outline    | **fixed** — wired, bit-exact (0)                     |
+| circle_filled   | **fixed** — wired, bit-exact (0)                     |
+| triangle_filled | **fixed** — wired, bit-exact (0)                     |
+| rounded_rect    | **fixed** — wired + SW outline→fill bug fixed (0)    |
+| circle_outline  | **fixed** — wired + SW Bresenham→distance-ring (0)   |
+| line            | investigated, reverted to no-op (see below)         |
+| gradient_rect   | divergent — kept no-op (float interpolation)        |
+| blit            | untested — kept no-op (needs source-buffer binding) |
+
+7 of 10 kernels now render bit-exact vs the SoftwareBackend reference. For
+rounded_rect and circle_outline the SoftwareBackend implementation was itself
+wrong/inconsistent with the canonical GPU/CUDA/Metal kernels and was corrected
+to match (GPU pixels are canonical, per owner decision).
+
+### line (reverted)
+The GLSL `_glsl_line` source uses truncating DDA (`px = x1 + (dx*step)/steps`),
+but the actual hand-assembled SPIR-V blob's output matches neither truncating
+nor round-half-up DDA: aligning SoftwareBackend to truncation left diagonals off
+by ~18px; adding `steps/2` rounding made it worse (steep 0→36). The blob has a
+distinct interpolation that needs SPIR-V disassembly (`spirv-dis`) to recover.
+Kept no-op + SoftwareBackend restored to its Bresenham line.
 
 Important caveat on the divergent rows: parity vs `SoftwareBackend` only
 adjudicates a kernel when both backends implement the *same primitive*.
@@ -56,11 +69,15 @@ mismatch) is likely a thickness/coverage difference between two outlines.
 worth real investigation. None of these were shipped — all kept no-op until each
 is checked against a *first-principles* oracle, not just cross-backend parity.
 
-## Fix applied (this change)
-`backend_vulkan.spl` now wires the three verified-bit-exact kernels
-(`rect_outline`, `circle_filled`, `triangle_filled`) to their real SPIR-V; the
-remaining kernels stay on the no-op shader, explicitly commented, until each is
-fixed and re-verified. Guarded by the cross-backend parity scenario in
+## Fix applied
+`backend_vulkan.spl` now wires five real SPIR-V kernels verified bit-exact vs
+the SoftwareBackend reference: `rect_outline`, `circle_filled`,
+`triangle_filled`, `rounded_rect`, `circle_outline` (plus the already-real
+`clear`/`rect_filled`). For `rounded_rect` and `circle_outline` the
+SoftwareBackend implementation was itself a bug (outline / Bresenham) and was
+corrected to the canonical GPU fill/distance-ring. `line`, `gradient`, `blit`
+remain on the no-op shader. All wired kernels are guarded by the cross-backend
+parity scenario in
 `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`.
 
 ## rounded_rect ground truth (investigated 2026-06-17)
@@ -85,13 +102,13 @@ compiler (`glslangValidator`/`glslc` absent), so fixing a kernel means editing
 SPIR-V assembly, not regenerating from `backend_vulkan_glsl.spl`.
 
 ## Still open (not fixed — deliberately not shipped unverified)
-1. `circle_outline`, `rounded_rect`, `gradient_rect` SPIR-V blobs diverge from
-   `SoftwareBackend`. First decide the intended primitive semantics
-   (`draw_rounded_rect` = fill or outline? — the two backends currently
-   disagree) and build a first-principles oracle, then debug each kernel's
-   GLSL→SPIR-V (`backend_vulkan_glsl.spl`) push-constant layout / predicate,
-   wire, and verify. Do NOT use cross-backend parity alone where the backends
-   implement different primitives.
+1. `line` — SPIR-V blob interpolation matches neither truncate nor round DDA;
+   recover the exact algorithm via `spirv-dis` on the blob, then align
+   SoftwareBackend and wire.
+2. `gradient_rect` — float interpolation (`mix` + `uint()` truncation); CPU/GPU
+   bit-exact match is sensitive to f32-vs-f64 rounding (and this repo's f64 is
+   unreliable on the interpreter). Needs an integer-equivalent oracle or an
+   accepted per-channel tolerance.
 2. `line` and `blit` kernels untested (blit needs a source-buffer binding the
    parity probe doesn't set up).
 3. `vulkan_session.spl` carries the identical no-op wiring; it was left
