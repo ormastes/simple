@@ -257,19 +257,43 @@ impl RenderBackend for SoftwareBackend:
             dy = dy + 1
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
-        var r = radius
-        if r > w / 2: r = w / 2
-        if r > h / 2: r = h / 2
-
-        self.sw_hline(x + r, y, w - 2 * r, color)
-        self.sw_hline(x + r, y + h - 1, w - 2 * r, color)
-        self.sw_vline(x, y + r, h - 2 * r, color)
-        self.sw_vline(x + w - 1, y + r, h - 2 * r, color)
-
-        self.sw_corner_arc(x + r, y + r, r, color, -1, -1)
-        self.sw_corner_arc(x + w - 1 - r, y + r, r, color, 1, -1)
-        self.sw_corner_arc(x + r, y + h - 1 - r, r, color, -1, 1)
-        self.sw_corner_arc(x + w - 1 - r, y + h - 1 - r, r, color, 1, 1)
+        # FILLED rounded rectangle. Replicates the GPU kernel
+        # (backend_vulkan_glsl _glsl_rounded_rect, and the CUDA/Metal kernels)
+        # pixel-for-pixel so CPU and GPU are bit-exact: fill the interior, and
+        # in each corner region exclude pixels whose distance from the inner
+        # corner pixel exceeds the radius. `radius` is used unclamped, matching
+        # the GPU dispatch. Outlines are a separate method (draw_rounded_rect_outline).
+        val r = radius
+        val r_sq = r * r
+        var ly = 0
+        while ly < h:
+            var lx = 0
+            while lx < w:
+                var inside = true
+                if lx < r and ly < r:
+                    val dx = r - lx - 1
+                    val dy = r - ly - 1
+                    if dx * dx + dy * dy > r_sq:
+                        inside = false
+                if lx >= w - r and ly < r:
+                    val dx = lx - (w - r)
+                    val dy = r - ly - 1
+                    if dx * dx + dy * dy > r_sq:
+                        inside = false
+                if lx < r and ly >= h - r:
+                    val dx = r - lx - 1
+                    val dy = ly - (h - r)
+                    if dx * dx + dy * dy > r_sq:
+                        inside = false
+                if lx >= w - r and ly >= h - r:
+                    val dx = lx - (w - r)
+                    val dy = ly - (h - r)
+                    if dx * dx + dy * dy > r_sq:
+                        inside = false
+                if inside:
+                    self.sw_set_pixel(x + lx, y + ly, color)
+                lx = lx + 1
+            ly = ly + 1
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
         # Integer barycentric (edge-function / 2x-area) fill, identical to the
