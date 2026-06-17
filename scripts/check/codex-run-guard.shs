@@ -13,10 +13,11 @@
 #   3. RSS cap: kill the codex process tree if its total RSS exceeds
 #      CODEX_GUARD_MAX_RSS_MB.
 #
-# Caps 2 and 3 default OFF for interactive runs (a human is present) and switch
-# to generous defaults automatically when an unattended bypass flag
-# (--dangerously-bypass-approvals-and-sandbox / --yolo) is passed. Cap 1 always
-# runs. All thresholds are env-overridable; CODEX_GUARD_FORCE=1 bypasses cap 1.
+# Caps 2 and 3 use the tightest generous defaults for an unattended bypass flag
+# (--dangerously-bypass-approvals-and-sandbox / --yolo) and a looser-but-present
+# backstop for interactive runs (a human may walk away mid-session). Cap 1 always
+# runs. All thresholds are env-overridable (set to 0 to disable); CODEX_GUARD_FORCE=1
+# bypasses cap 1.
 #
 # codex runs in the FOREGROUND (keeps the controlling terminal, so the TUI works
 # and no SIGTTIN); a sibling watchdog monitors and kills the tree on breach.
@@ -69,13 +70,17 @@ for _a in "$@"; do
     _prev="$_a"
 done
 
-# Wall-clock / RSS caps: off unless set; auto-enable generous defaults for bypass.
+# Wall-clock / RSS caps. Bypass/--yolo runs get the tightest generous defaults.
+# Interactive runs also get a generous-but-present backstop (was fully off): a
+# human can walk away from a session that then spins into the same runaway loop,
+# and earlyoom is configured to *avoid* killing codex, so this guard is the only
+# RSS backstop. All thresholds stay env-overridable; set to 0 to disable.
 if [ "$BYPASS" = 1 ]; then
     MAX_SECONDS="${CODEX_GUARD_MAX_SECONDS:-14400}"     # 4h
     MAX_RSS_MB="${CODEX_GUARD_MAX_RSS_MB:-49152}"       # 48 GiB tree RSS
 else
-    MAX_SECONDS="${CODEX_GUARD_MAX_SECONDS:-0}"
-    MAX_RSS_MB="${CODEX_GUARD_MAX_RSS_MB:-0}"
+    MAX_SECONDS="${CODEX_GUARD_MAX_SECONDS:-28800}"     # 8h — no interactive session runs this long
+    MAX_RSS_MB="${CODEX_GUARD_MAX_RSS_MB:-32768}"       # 32 GiB tree RSS backstop
 fi
 
 # --- cap 1: pre-flight poison-rollout refusal -----------------------------------

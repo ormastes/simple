@@ -52,28 +52,13 @@ fn jo5(p1: String, p2: String, p3: String, p4: String, p5: String) -> String:
 fn ja(items: [String]) -> String:
     "[" + items.join(",") + "]"
 
-# --- Option unwrap helpers ---
-
-fn unwrap_idx(opt: Option<Int>) -> Int:
-    match opt:
-        case Some(i):
-            return i
-        case nil:
-            return -1
-
 # --- JSON parsing helpers ---
 
 # Extract a string value for a given key from JSON
 fn extract_json_string(json: String, key: String) -> String:
     val quote = "\""
     val search = quote + key + quote + ":"
-    val idx_opt = json.index_of(search)
-
-    var idx = -1
-    match idx_opt:
-        Some(i): idx = i
-        nil: idx = -1
-
+    val idx = find_sub(json, search)
     if idx < 0:
         return ""
 
@@ -84,12 +69,7 @@ fn extract_json_string(json: String, key: String) -> String:
 
     if trimmed.starts_with(quote):
         val rest = trimmed.substring(1)
-        val end_opt = rest.index_of(quote)
-
-        var end = -1
-        match end_opt:
-            Some(i): end = i
-            nil: end = -1
+        val end = find_sub(rest, quote)
         if end >= 0:
             return rest.substring(0, end)
     ""
@@ -97,7 +77,7 @@ fn extract_json_string(json: String, key: String) -> String:
 # Extract a raw value (number, boolean, null) for a given key
 fn extract_json_value(json: String, key: String) -> String:
     val search = Q() + key + Q() + ":"
-    val idx = unwrap_idx(json.index_of(search))
+    val idx = find_sub(json, search)
     if idx < 0:
         return "null"
     val slen = search.len()
@@ -114,7 +94,7 @@ fn extract_json_value(json: String, key: String) -> String:
 # Extract a string from a nested JSON object
 fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> String:
     val search = Q() + outer_key + Q() + ":"
-    val idx = unwrap_idx(json.index_of(search))
+    val idx = find_sub(json, search)
     if idx < 0:
         return ""
     val slen = search.len()
@@ -125,7 +105,7 @@ fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> 
 # Extract arguments dict from MCP request body
 fn extract_arguments_dict(body: String) -> String:
     val params_search = Q() + "params" + Q() + ":"
-    val params_idx = unwrap_idx(body.index_of(params_search))
+    val params_idx = find_sub(body, params_search)
     if params_idx < 0:
         return ""
 
@@ -133,7 +113,7 @@ fn extract_arguments_dict(body: String) -> String:
     val params_section = body.substring(params_start)
 
     val args_search = Q() + "arguments" + Q() + ":"
-    val args_idx = unwrap_idx(params_section.index_of(args_search))
+    val args_idx = find_sub(params_section, args_search)
     if args_idx < 0:
         return ""
 
@@ -182,6 +162,25 @@ fn SB_R() -> text:
     "]"
 
 # --- Robust JSON parsing helpers ---
+
+# Manual substring search. `text.index_of(needle)` returns -1 even when the
+# needle is present (`contains` returns true) once this module is compiled
+# inside the full MCP server module graph — the method-on-var-receiver folds.
+# A literal scan with slice comparison stays correct (same pattern app_find
+# relies on in mcp_sdk/server/app.spl), so all callers go through this.
+fn find_sub(haystack: text, needle: text) -> i64:
+    if not haystack.contains(needle):
+        return -1
+    val nlen = needle.len()
+    val hlen = haystack.len()
+    if nlen == 0:
+        return 0
+    var i = 0
+    while i <= hlen - nlen:
+        if haystack[i:i + nlen] == needle:
+            return i
+        i = i + 1
+    -1
 
 fn char_at(s: text, index: i64) -> text:
     s.substring(index, index + 1)
@@ -236,9 +235,9 @@ fn read_nested_end(s: text, start_index: i64) -> i64:
     return -1
 
 fn find_text(haystack: text, needle: text) -> i64:
-    # Delegate to the native index_of (one rt call, O(n) Rust str::find) instead of
-    # the previous O(n*m) .spl loop with a slice allocation per iteration.
-    haystack.index_of(needle)
+    # `index_of` folds to -1 in the full MCP module graph (see find_sub); use the
+    # literal slice scan so callers get correct offsets.
+    find_sub(haystack, needle)
 
 fn unescape_json_string(s: text) -> text:
     var out = s
@@ -253,11 +252,9 @@ fn unescape_json_string(s: text) -> text:
 # Extract raw JSON value for a given key (handles whitespace around colon, nested objects, escape sequences)
 fn extract_field_raw(json: text, key: text) -> text:
     val search = Q() + key + Q()
-    val idx_result = json.index_of(search)
-    var idx = -1
-    match idx_result:
-        Some(i): idx = i
-        nil: return "null"
+    val idx = find_sub(json, search)
+    if idx < 0:
+        return "null"
     if idx < 0:
         return "null"
     var start = idx + search.len()
