@@ -321,6 +321,23 @@ pub(crate) fn compile_method_call_static<M: Module>(
             return Ok(());
         }
     }
+    // Bare `.get(key)` gets the same treatment as bare `.has`/`.len`: it is the
+    // Dict/Array element-access idiom on a receiver whose static type was lost
+    // (e.g. `Dict<K,V>` erases to TypeId::ANY, so HIR emits a bare MethodCall).
+    // Name-suffix binding would otherwise dispatch it to whatever unique
+    // `Type.get` method is linked in — e.g. `sendfile_pending.get(fd)` bound to
+    // StaticCompressionCache.get and segfaulted the native HTTP server
+    // (2026-06-17). rt_index_get tag-dispatches at runtime (array OR dict),
+    // returning nil for a miss; receivers with a known static type emit a
+    // qualified "Type.get" and never take this path.
+    if lookup_name == "get" && args.len() == 1 {
+        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, "get", args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result);
+            }
+            return Ok(());
+        }
+    }
     let receiver_ty = ctx.vreg_types.get(&receiver).copied();
     let allow_qualified_builtin = matches!(
         receiver_ty,

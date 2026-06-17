@@ -94,6 +94,7 @@ bool rt_dir_create(const char* path, bool recursive) {
 #define RT_VALUE_HEAP_STRING 0x53545231U
 #define RT_VALUE_HEAP_ARRAY 0x02U
 #define RT_VALUE_HEAP_ENUM 0x04U
+#define RT_VALUE_HEAP_DICT 0x06U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
 #define RT_HOST_GPU_LANE_HOST 1
@@ -122,6 +123,7 @@ static int64_t rt_host_gpu_queue_last_status_code = RT_HOST_GPU_QUEUE_STATUS_EMP
 static int64_t rt_host_gpu_queue_last_backend_handle_value = 0;
 static int64_t rt_host_gpu_queue_last_payload_size_value = 0;
 static int64_t rt_host_gpu_queue_last_payload_hash_value = 0;
+static int64_t rt_host_gpu_queue_last_device_time_us_value = 0;
 static char rt_host_gpu_queue_last_payload_text_value[4096];
 static int64_t rt_host_gpu_queue_lane_codes[RT_HOST_GPU_QUEUE_CAPACITY];
 static int64_t rt_host_gpu_queue_backend_handles[RT_HOST_GPU_QUEUE_CAPACITY];
@@ -134,9 +136,30 @@ static int64_t rt_host_gpu_queue_in_flight_lane_codes[RT_HOST_GPU_QUEUE_CAPACITY
 static int64_t rt_host_gpu_queue_in_flight_backend_handles[RT_HOST_GPU_QUEUE_CAPACITY];
 static int64_t rt_host_gpu_queue_in_flight_payload_sizes[RT_HOST_GPU_QUEUE_CAPACITY];
 static int64_t rt_host_gpu_queue_in_flight_payload_hashes[RT_HOST_GPU_QUEUE_CAPACITY];
+static int64_t rt_host_gpu_queue_in_flight_submitted_at_us[RT_HOST_GPU_QUEUE_CAPACITY];
 static char rt_host_gpu_queue_in_flight_payload_texts[RT_HOST_GPU_QUEUE_CAPACITY][4096];
 
 void rt_host_gpu_queue_reset(void);
+
+int64_t rt_cuda_available(void) { return 0; }
+int64_t rt_cuda_device_count(void) { return 0; }
+int32_t rt_vk_available(void) { return 0; }
+int64_t rt_vulkan_is_available(void) { return 0; }
+int64_t rt_vulkan_device_count(void) { return 0; }
+
+static int64_t rt_host_gpu_queue_now_us(void) {
+    struct timespec ts;
+#if defined(_WIN32)
+    if (timespec_get(&ts, TIME_UTC) == 0) {
+        return 0;
+    }
+#else
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+#endif
+    return ((int64_t)ts.tv_sec * 1000000) + ((int64_t)ts.tv_nsec / 1000);
+}
 
 int64_t rt_host_gpu_lane_event(int64_t lane_code, int64_t phase_code) {
     if ((lane_code != RT_HOST_GPU_LANE_HOST && lane_code != RT_HOST_GPU_LANE_GPU) ||
@@ -182,6 +205,7 @@ void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_last_backend_handle_value = 0;
     rt_host_gpu_queue_last_payload_size_value = 0;
     rt_host_gpu_queue_last_payload_hash_value = 0;
+    rt_host_gpu_queue_last_device_time_us_value = 0;
     rt_host_gpu_queue_last_payload_text_value[0] = '\0';
 }
 
@@ -238,6 +262,7 @@ int64_t rt_host_gpu_queue_submit(int64_t max_packets) {
         rt_host_gpu_queue_in_flight_backend_handles[tail] = backend_handle;
         rt_host_gpu_queue_in_flight_payload_sizes[tail] = rt_host_gpu_queue_payload_sizes[source];
         rt_host_gpu_queue_in_flight_payload_hashes[tail] = rt_host_gpu_queue_payload_hashes[source];
+        rt_host_gpu_queue_in_flight_submitted_at_us[tail] = rt_host_gpu_queue_now_us();
         rt_host_gpu_queue_copy_payload_text(rt_host_gpu_queue_in_flight_payload_texts[tail], rt_host_gpu_queue_payload_texts[source]);
         rt_host_gpu_queue_in_flight_depth += 1;
         rt_host_gpu_queue_submitted_total += 1;
@@ -248,11 +273,19 @@ int64_t rt_host_gpu_queue_submit(int64_t max_packets) {
     return submitted;
 }
 
-static void rt_host_gpu_queue_complete_packet(int64_t lane_code, int64_t backend_handle, int64_t payload_size, int64_t payload_hash, const char* payload_text) {
+static void rt_host_gpu_queue_complete_packet(int64_t lane_code, int64_t backend_handle, int64_t payload_size, int64_t payload_hash, const char* payload_text, int64_t submitted_at_us) {
+    int64_t completed_at_us = rt_host_gpu_queue_now_us();
     rt_host_gpu_queue_last_backend_handle_value = backend_handle;
     rt_host_gpu_queue_last_payload_size_value = payload_size;
     rt_host_gpu_queue_last_payload_hash_value = payload_hash;
     rt_host_gpu_queue_copy_payload_text(rt_host_gpu_queue_last_payload_text_value, payload_text);
+    if (lane_code == RT_HOST_GPU_LANE_GPU && backend_handle > 0 && submitted_at_us > 0 && completed_at_us > submitted_at_us) {
+        rt_host_gpu_queue_last_device_time_us_value = completed_at_us - submitted_at_us;
+    } else if (lane_code == RT_HOST_GPU_LANE_GPU && backend_handle > 0) {
+        rt_host_gpu_queue_last_device_time_us_value = 1;
+    } else {
+        rt_host_gpu_queue_last_device_time_us_value = 0;
+    }
     rt_host_gpu_queue_completed_total += 1;
     rt_host_gpu_queue_last_status_code =
         (lane_code == RT_HOST_GPU_LANE_GPU && backend_handle == 0)
@@ -268,10 +301,11 @@ int64_t rt_host_gpu_queue_complete(int64_t max_packets) {
         int64_t backend_handle = rt_host_gpu_queue_in_flight_backend_handles[rt_host_gpu_queue_in_flight_head];
         int64_t payload_size = rt_host_gpu_queue_in_flight_payload_sizes[rt_host_gpu_queue_in_flight_head];
         int64_t payload_hash = rt_host_gpu_queue_in_flight_payload_hashes[rt_host_gpu_queue_in_flight_head];
+        int64_t submitted_at_us = rt_host_gpu_queue_in_flight_submitted_at_us[rt_host_gpu_queue_in_flight_head];
         const char* payload_text = rt_host_gpu_queue_in_flight_payload_texts[rt_host_gpu_queue_in_flight_head];
         rt_host_gpu_queue_in_flight_head = (rt_host_gpu_queue_in_flight_head + 1) % RT_HOST_GPU_QUEUE_CAPACITY;
         rt_host_gpu_queue_in_flight_depth -= 1;
-        rt_host_gpu_queue_complete_packet(lane_code, backend_handle, payload_size, payload_hash, payload_text);
+        rt_host_gpu_queue_complete_packet(lane_code, backend_handle, payload_size, payload_hash, payload_text, submitted_at_us);
         completed += 1;
     }
     return completed;
@@ -286,10 +320,11 @@ int64_t rt_host_gpu_queue_drain(int64_t max_packets) {
             int64_t backend_handle = rt_host_gpu_queue_in_flight_backend_handles[rt_host_gpu_queue_in_flight_head];
             int64_t payload_size = rt_host_gpu_queue_in_flight_payload_sizes[rt_host_gpu_queue_in_flight_head];
             int64_t payload_hash = rt_host_gpu_queue_in_flight_payload_hashes[rt_host_gpu_queue_in_flight_head];
+            int64_t submitted_at_us = rt_host_gpu_queue_in_flight_submitted_at_us[rt_host_gpu_queue_in_flight_head];
             const char* payload_text = rt_host_gpu_queue_in_flight_payload_texts[rt_host_gpu_queue_in_flight_head];
             rt_host_gpu_queue_in_flight_head = (rt_host_gpu_queue_in_flight_head + 1) % RT_HOST_GPU_QUEUE_CAPACITY;
             rt_host_gpu_queue_in_flight_depth -= 1;
-            rt_host_gpu_queue_complete_packet(lane_code, backend_handle, payload_size, payload_hash, payload_text);
+            rt_host_gpu_queue_complete_packet(lane_code, backend_handle, payload_size, payload_hash, payload_text, submitted_at_us);
             drained += 1;
             continue;
         }
@@ -307,6 +342,8 @@ int64_t rt_host_gpu_queue_drain(int64_t max_packets) {
         rt_host_gpu_queue_last_payload_size_value = payload_size;
         rt_host_gpu_queue_last_payload_hash_value = payload_hash;
         rt_host_gpu_queue_copy_payload_text(rt_host_gpu_queue_last_payload_text_value, payload_text);
+        rt_host_gpu_queue_last_device_time_us_value =
+            (lane_code == RT_HOST_GPU_LANE_GPU && backend_handle > 0) ? 1 : 0;
         rt_host_gpu_queue_completed_total += 1;
         rt_host_gpu_queue_last_status_code =
             (lane_code == RT_HOST_GPU_LANE_GPU && backend_handle == 0)
@@ -323,6 +360,7 @@ int64_t rt_host_gpu_queue_completed_count(void) { return rt_host_gpu_queue_compl
 int64_t rt_host_gpu_queue_in_flight_count(void) { return rt_host_gpu_queue_in_flight_depth; }
 int64_t rt_host_gpu_queue_last_status(void) { return rt_host_gpu_queue_last_status_code; }
 int64_t rt_host_gpu_queue_last_backend_handle(void) { return rt_host_gpu_queue_last_backend_handle_value; }
+int64_t rt_host_gpu_queue_last_device_time_us(void) { return rt_host_gpu_queue_last_device_time_us_value; }
 int64_t rt_host_gpu_queue_last_payload_size(void) { return rt_host_gpu_queue_last_payload_size_value; }
 int64_t rt_host_gpu_queue_last_payload_hash(void) { return rt_host_gpu_queue_last_payload_hash_value; }
 const char* rt_host_gpu_queue_last_payload_text(void) { return rt_host_gpu_queue_last_payload_text_value; }
@@ -351,6 +389,34 @@ typedef struct RtCoreEnum {
     uint32_t reserved2;
     int64_t payload;
 } RtCoreEnum;
+
+/* RtCore-native dictionary: open-addressing hash table over the tagged-int64
+ * value representation. Keys and values are stored as tagged RtCore values, so
+ * int keys (e.g. Dict<i64,V>) and string keys both work natively — unlike the
+ * legacy string-only SplDict. Detected via the `kind` first byte (mirrors
+ * RtCoreArray) so rt_index_get/rt_index_set/rt_contains can tag-dispatch. */
+typedef struct RtCoreDictEntry {
+    int64_t key;       /* canonicalized tagged key */
+    int64_t value;     /* tagged value */
+    uint64_t hash;
+    int8_t occupied;   /* 0 = empty, 1 = live, -1 = tombstone */
+} RtCoreDictEntry;
+
+typedef struct RtCoreDict {
+    uint8_t kind;      /* RT_VALUE_HEAP_DICT */
+    uint8_t flags;
+    uint8_t reserved[6];
+    int64_t cap;       /* power of two */
+    int64_t len;       /* live entries */
+    int64_t tombstones;
+    RtCoreDictEntry* entries;
+} RtCoreDict;
+
+static RtCoreDict* rt_core_as_dict(int64_t value);
+static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key);
+static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value);
+static int rt_core_dict_has(RtCoreDict* d, int64_t key);
+static int rt_core_dict_del(RtCoreDict* d, int64_t key);
 
 static RtCoreString** rt_core_string_registry = NULL;
 static size_t rt_core_string_registry_len = 0;
@@ -946,6 +1012,10 @@ int8_t rt_contains(int64_t collection, int64_t value) {
         }
         return 0;
     }
+    RtCoreDict* dct = rt_core_as_dict(collection);
+    if (dct) {
+        return (int8_t)rt_core_dict_has(dct, value);
+    }
     RtCoreString* s = rt_core_as_string(collection);
     RtCoreString* needle = rt_core_as_string(value);
     if (s && needle) {
@@ -1433,6 +1503,26 @@ SplArray* rt_byte_array_new_len(uint64_t len) {
     return a;
 }
 
+int64_t rt_text_to_bytes(int64_t text_value) {
+    RtCoreString* s = rt_core_as_string(text_value);
+    uint64_t len = s ? s->len : 0;
+    SplArray* arr = rt_byte_array_new_len(len);
+    RtCoreArray* array = rt_core_array_ptr(arr);
+    if (!array || !array->data) return (int64_t)(uintptr_t)arr;
+    if (s && len > 0) {
+        memcpy(array->data, s->data, (size_t)len);
+    }
+    return (int64_t)(uintptr_t)arr;
+}
+
+int64_t rt_bytes_to_text(int64_t bytes_value) {
+    RtCoreArray* array = rt_core_as_array(bytes_value);
+    if (!array || !array->data || array->len <= 0) {
+        return rt_string_new(NULL, 0);
+    }
+    return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
+}
+
 int64_t rt_array_len(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? array->len : 0;
@@ -1888,55 +1978,237 @@ SplValue* rt_array_pop(SplArray* a) {
 int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) return rt_array_get((SplArray*)a, idx);
+    RtCoreDict* d = rt_core_as_dict(collection);
+    if (d) return rt_core_dict_lookup(d, idx);
     return 3;
 }
 
 int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
     RtCoreArray* a = rt_core_as_array(collection);
-    if (!a) return 0;
-    rt_array_set((SplArray*)a, idx, val);
-    return 1;
+    if (a) {
+        rt_array_set((SplArray*)a, idx, val);
+        return 1;
+    }
+    RtCoreDict* d = rt_core_as_dict(collection);
+    if (d) return (int8_t)rt_core_dict_put(d, idx, val);
+    return 0;
 }
 
 /* ================================================================
- * Dict Operations
+ * Dict Operations (RtCore tagged-int64 hash table)
  * ================================================================ */
 
-SplDict* rt_dict_new(void) {
-    return spl_dict_new();
+#define RT_CORE_DICT_INIT_CAP 8
+
+static RtCoreDict* rt_core_as_dict(int64_t value) {
+    uintptr_t raw = (uintptr_t)value;
+    if (raw < 4096) return NULL;
+    if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    RtCoreDict* d = (RtCoreDict*)(raw & ~RT_VALUE_TAG_MASK);
+    if (!d || d->kind != RT_VALUE_HEAP_DICT) return NULL;
+    return d;
 }
 
-SplValue* rt_dict_get(SplDict* d, const char* key) {
-    static SplValue tmp;
-    tmp = spl_dict_get(d, key);
-    return &tmp;
+/* Canonicalize a key so that the raw-int form produced by `d[k] = v` (IndexSet,
+ * unboxed) and the tagged form produced by `d.get(k)` (method path, rt_box_int)
+ * collapse to one representation. String/heap keys are kept as-is and matched by
+ * content via rt_native_eq. */
+static int64_t rt_core_dict_canon_key(int64_t k) {
+    if (rt_core_as_string(k)) return k;
+    if (rt_core_is_heap(k)) return k;
+    return rt_value_int(rt_core_numeric_arg(k));
 }
 
-void rt_dict_set(SplDict* d, const char* key, SplValue* val) {
-    if (val) {
-        spl_dict_set(d, key, *val);
+static uint64_t rt_core_dict_hash(int64_t k) {
+    RtCoreString* s = rt_core_as_string(k);
+    if (s) {
+        uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+        for (uint64_t i = 0; i < s->len; i++) {
+            h ^= (uint8_t)s->data[i];
+            h *= 1099511628211ULL;
+        }
+        return h;
+    }
+    uint64_t x = (uint64_t)k;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return x;
+}
+
+static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
+    RtCoreDictEntry* old = d->entries;
+    int64_t old_cap = d->cap;
+    RtCoreDictEntry* fresh = (RtCoreDictEntry*)calloc((size_t)new_cap, sizeof(RtCoreDictEntry));
+    if (!fresh) return;
+    d->entries = fresh;
+    d->cap = new_cap;
+    d->len = 0;
+    d->tombstones = 0;
+    for (int64_t i = 0; i < old_cap; i++) {
+        if (old[i].occupied == 1) {
+            rt_core_dict_put(d, old[i].key, old[i].value);
+        }
+    }
+    free(old);
+}
+
+static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
+    if (!d || !d->entries) return 0;
+    /* Resize at 70% load (live + tombstones). */
+    if ((d->len + d->tombstones + 1) * 10 > d->cap * 7) {
+        rt_core_dict_resize(d, d->cap * 2);
+    }
+    int64_t ck = rt_core_dict_canon_key(key);
+    uint64_t h = rt_core_dict_hash(ck);
+    int64_t mask = d->cap - 1;
+    int64_t idx = (int64_t)(h & (uint64_t)mask);
+    int64_t first_tomb = -1;
+    for (;;) {
+        RtCoreDictEntry* e = &d->entries[idx];
+        if (e->occupied == 0) {
+            if (first_tomb >= 0) {
+                e = &d->entries[first_tomb];
+                d->tombstones--;
+            }
+            e->key = ck;
+            e->value = value;
+            e->hash = h;
+            e->occupied = 1;
+            d->len++;
+            return 1;
+        }
+        if (e->occupied == -1) {
+            if (first_tomb < 0) first_tomb = idx;
+        } else if (e->hash == h && rt_native_eq(e->key, ck)) {
+            e->value = value;
+            return 1;
+        }
+        idx = (idx + 1) & mask;
     }
 }
 
+static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
+    if (!d || !d->entries || d->len == 0) return rt_core_nil();
+    int64_t ck = rt_core_dict_canon_key(key);
+    uint64_t h = rt_core_dict_hash(ck);
+    int64_t mask = d->cap - 1;
+    int64_t idx = (int64_t)(h & (uint64_t)mask);
+    for (;;) {
+        RtCoreDictEntry* e = &d->entries[idx];
+        if (e->occupied == 0) return rt_core_nil();
+        if (e->occupied == 1 && e->hash == h && rt_native_eq(e->key, ck)) return e->value;
+        idx = (idx + 1) & mask;
+    }
+}
+
+static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
+    if (!d || !d->entries || d->len == 0) return 0;
+    int64_t ck = rt_core_dict_canon_key(key);
+    uint64_t h = rt_core_dict_hash(ck);
+    int64_t mask = d->cap - 1;
+    int64_t idx = (int64_t)(h & (uint64_t)mask);
+    for (;;) {
+        RtCoreDictEntry* e = &d->entries[idx];
+        if (e->occupied == 0) return 0;
+        if (e->occupied == 1 && e->hash == h && rt_native_eq(e->key, ck)) return 1;
+        idx = (idx + 1) & mask;
+    }
+}
+
+static int rt_core_dict_del(RtCoreDict* d, int64_t key) {
+    if (!d || !d->entries || d->len == 0) return 0;
+    int64_t ck = rt_core_dict_canon_key(key);
+    uint64_t h = rt_core_dict_hash(ck);
+    int64_t mask = d->cap - 1;
+    int64_t idx = (int64_t)(h & (uint64_t)mask);
+    for (;;) {
+        RtCoreDictEntry* e = &d->entries[idx];
+        if (e->occupied == 0) return 0;
+        if (e->occupied == 1 && e->hash == h && rt_native_eq(e->key, ck)) {
+            e->occupied = -1;
+            d->len--;
+            d->tombstones++;
+            return 1;
+        }
+        idx = (idx + 1) & mask;
+    }
+}
+
+int64_t rt_dict_new(int64_t cap_hint) {
+    (void)cap_hint;
+    RtCoreDict* d = (RtCoreDict*)calloc(1, sizeof(RtCoreDict));
+    if (!d) return rt_core_nil();
+    d->kind = RT_VALUE_HEAP_DICT;
+    d->cap = RT_CORE_DICT_INIT_CAP;
+    d->len = 0;
+    d->tombstones = 0;
+    d->entries = (RtCoreDictEntry*)calloc((size_t)d->cap, sizeof(RtCoreDictEntry));
+    if (!d->entries) {
+        free(d);
+        return rt_core_nil();
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)d) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_dict_get(int64_t dict, int64_t key) {
+    return rt_core_dict_lookup(rt_core_as_dict(dict), key);
+}
+
+int8_t rt_dict_set(int64_t dict, int64_t key, int64_t value) {
+    RtCoreDict* d = rt_core_as_dict(dict);
+    if (!d) return 0;
+    return (int8_t)rt_core_dict_put(d, key, value);
+}
+
 int8_t rt_dict_insert(int64_t dict, int64_t key, int64_t value) {
-    SplDict* d = (SplDict*)(uintptr_t)dict;
-    RtCoreString* key_string = rt_core_as_string(key);
-    if (!d || !key_string) return 0;
-    char* key_buf = (char*)malloc((size_t)key_string->len + 1);
-    if (!key_buf) return 0;
-    if (key_string->len > 0) memcpy(key_buf, key_string->data, (size_t)key_string->len);
-    key_buf[key_string->len] = '\0';
-    spl_dict_set(d, key_buf, spl_int(value));
-    free(key_buf);
+    RtCoreDict* d = rt_core_as_dict(dict);
+    if (!d) return 0;
+    return (int8_t)rt_core_dict_put(d, key, value);
+}
+
+int8_t rt_dict_contains(int64_t dict, int64_t key) {
+    return (int8_t)rt_core_dict_has(rt_core_as_dict(dict), key);
+}
+
+int8_t rt_dict_remove(int64_t dict, int64_t key) {
+    return (int8_t)rt_core_dict_del(rt_core_as_dict(dict), key);
+}
+
+int8_t rt_dict_clear(int64_t dict) {
+    RtCoreDict* d = rt_core_as_dict(dict);
+    if (!d || !d->entries) return 0;
+    for (int64_t i = 0; i < d->cap; i++) d->entries[i].occupied = 0;
+    d->len = 0;
+    d->tombstones = 0;
     return 1;
 }
 
-int rt_dict_contains(SplDict* d, const char* key) {
-    return spl_dict_contains(d, key);
+int64_t rt_dict_len(int64_t dict) {
+    RtCoreDict* d = rt_core_as_dict(dict);
+    return d ? d->len : 0;
 }
 
-int64_t rt_dict_len(SplDict* d) {
-    return spl_dict_len(d);
+int64_t rt_dict_keys(int64_t dict) {
+    RtCoreDict* d = rt_core_as_dict(dict);
+    if (!d) return rt_core_nil();
+    SplArray* arr = rt_array_new(d->len);
+    if (!arr) return rt_core_nil();
+    for (int64_t i = 0; i < d->cap; i++) {
+        if (d->entries[i].occupied == 1) rt_array_push(arr, d->entries[i].key);
+    }
+    return (int64_t)(uintptr_t)arr;
+}
+
+int64_t rt_dict_values(int64_t dict) {
+    RtCoreDict* d = rt_core_as_dict(dict);
+    if (!d) return rt_core_nil();
+    SplArray* arr = rt_array_new(d->len);
+    if (!arr) return rt_core_nil();
+    for (int64_t i = 0; i < d->cap; i++) {
+        if (d->entries[i].occupied == 1) rt_array_push(arr, d->entries[i].value);
+    }
+    return (int64_t)(uintptr_t)arr;
 }
 
 /* ================================================================
@@ -2496,17 +2768,25 @@ int64_t rt_event_loop_create(void) {
     return (int64_t)epoll_create1(0);
 }
 
-int64_t rt_event_loop_register(int64_t epfd, int64_t fd, int64_t mode) {
+int64_t rt_event_loop_register(int64_t epfd, int64_t fd, int64_t mode, int64_t token, int64_t edge) {
+    (void)token;
     struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;
-    if (mode == 1) ev.events = EPOLLOUT | EPOLLET;
-    else if (mode == 2) ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    int edge_flag = edge ? EPOLLET : 0;
+    ev.events = EPOLLIN | edge_flag;
+    if (mode == 1) ev.events = EPOLLOUT | edge_flag;
+    else if (mode == 2) ev.events = EPOLLIN | EPOLLOUT | edge_flag;
     ev.data.fd = (int)fd;
-    return (int64_t)epoll_ctl((int)epfd, EPOLL_CTL_ADD, (int)fd, &ev);
+    int rc = epoll_ctl((int)epfd, EPOLL_CTL_ADD, (int)fd, &ev);
+    if (rc != 0 && errno == EEXIST) {
+        rc = epoll_ctl((int)epfd, EPOLL_CTL_MOD, (int)fd, &ev);
+    }
+    return rc == 0 ? 1 : 0;
 }
 
 int64_t rt_event_loop_deregister(int64_t epfd, int64_t fd) {
-    return (int64_t)epoll_ctl((int)epfd, EPOLL_CTL_DEL, (int)fd, NULL);
+    int rc = epoll_ctl((int)epfd, EPOLL_CTL_DEL, (int)fd, NULL);
+    if (rc != 0 && errno == ENOENT) return 1;
+    return rc == 0 ? 1 : 0;
 }
 
 static int64_t poll_results[256];
@@ -2533,16 +2813,32 @@ int64_t rt_event_loop_create(void) {
     return (int64_t)kqueue();
 }
 
-int64_t rt_event_loop_register(int64_t kqfd, int64_t fd, int64_t mode) {
-    struct kevent ev;
-    EV_SET(&ev, (uintptr_t)fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
-    return (int64_t)kevent((int)kqfd, &ev, 1, NULL, 0, NULL);
+int64_t rt_event_loop_register(int64_t kqfd, int64_t fd, int64_t mode, int64_t token, int64_t edge) {
+    (void)token;
+    struct kevent ev[2];
+    uint16_t flags = EV_ADD;
+    if (edge) flags = flags | EV_CLEAR;
+    int count = 1;
+    if (mode == 1) {
+        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_WRITE, flags, 0, 0, NULL);
+    } else if (mode == 2) {
+        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, flags, 0, 0, NULL);
+        EV_SET(&ev[1], (uintptr_t)fd, EVFILT_WRITE, flags, 0, 0, NULL);
+        count = 2;
+    } else {
+        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, flags, 0, 0, NULL);
+    }
+    int rc = kevent((int)kqfd, ev, count, NULL, 0, NULL);
+    return rc == 0 ? 1 : 0;
 }
 
 int64_t rt_event_loop_deregister(int64_t kqfd, int64_t fd) {
-    struct kevent ev;
-    EV_SET(&ev, (uintptr_t)fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-    return (int64_t)kevent((int)kqfd, &ev, 1, NULL, 0, NULL);
+    struct kevent ev[2];
+    EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    EV_SET(&ev[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    int rc = kevent((int)kqfd, ev, 2, NULL, 0, NULL);
+    if (rc != 0 && errno == ENOENT) return 1;
+    return rc == 0 ? 1 : 0;
 }
 
 static int64_t poll_results[256];
@@ -2568,7 +2864,7 @@ int64_t rt_event_loop_close(int64_t kqfd) {
 #else
 
 int64_t rt_event_loop_create(void) { return -1; }
-int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode) { (void)h; (void)fd; (void)mode; return -1; }
+int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode, int64_t token, int64_t edge) { (void)h; (void)fd; (void)mode; (void)token; (void)edge; return -1; }
 int64_t rt_event_loop_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
 static int64_t poll_results[256];
 int64_t rt_event_loop_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
@@ -2582,7 +2878,7 @@ int64_t rt_event_loop_poll_get_fd(int64_t index) {
 }
 
 int64_t rt_kqueue_create(void) { return rt_event_loop_create(); }
-int64_t rt_kqueue_register(int64_t h, int64_t fd, int64_t m) { return rt_event_loop_register(h, fd, m); }
+int64_t rt_kqueue_register(int64_t h, int64_t fd, int64_t m) { return rt_event_loop_register(h, fd, m, fd, 1); }
 int64_t rt_kqueue_deregister(int64_t h, int64_t fd) { return rt_event_loop_deregister(h, fd); }
 int64_t rt_kqueue_poll(int64_t h, int64_t max, int64_t ms) { return rt_event_loop_poll(h, max, ms); }
 int64_t rt_kqueue_close(int64_t h) { return rt_event_loop_close(h); }

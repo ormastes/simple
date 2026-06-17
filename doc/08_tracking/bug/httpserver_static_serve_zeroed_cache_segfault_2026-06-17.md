@@ -3,8 +3,9 @@
 - **ID:** httpserver_static_serve_zeroed_cache_segfault_2026-06-17
 - **Severity:** P1 (the `nogc_async_mut` HTTP server could not serve a single request)
 - **Area:** compiler interpreter extern (`rt_event_loop_*`) + lib/nogc_async_mut io/driver
-- **Status:** INTERPRETER crash **FIXED + verified**. NATIVE crash is a **separate
-  native-codegen bug, still open** (see below).
+- **Status:** INTERPRETER crash **FIXED + verified**. NATIVE crash **FIXED +
+  verified 2026-06-17** (runtime root-cause fix, option A — see "Real fix landed"
+  below).
 
 ## Live evidence
 Recurring kernel segfaults Jun 16→17 in the natively-built perf fixtures
@@ -59,42 +60,96 @@ RESULT: SERVER ALIVE  # no crash, no "cannot convert array to int"
 ```
 (Deployment to `bin/release/<triple>/simple` is a separate `--deploy` step.)
 
-## Remaining: NATIVE crash — separate, ROOT-CAUSED, fix deferred
+## Remaining: NATIVE crash — RE-DIAGNOSED 2026-06-17, it is a RUNTIME GAP (not a dispatch bug)
 With the interpreter fix, the IDENTICAL source serves correctly end-to-end —
 proving the Simple logic is sound. The natively-built fixture still SIGSEGVs
 (`rsi=nil`, `mov 0x8(%rsi)`), backtrace `Worker.run → handle_completion →
 worker_sendfile_open_path_for_pending → StaticCompressionCache.get`.
 
-**Root cause (precise, symbols ARE correct here):** `worker_sendfile_open_path_for_pending`
-calls `pending.get(fd)` where `pending: Dict<i64,(text,i64,i64)>`. `Dict<K,V>`
-resolves to `TypeId::ANY` (type_resolver.rs:421), so the receiver type is lost and
-HIR emits `MethodCall{method:"get", dispatch:Dynamic}`. In MIR
-(`lowering_expr_method.rs`) the Dynamic-dispatch fallback (not a trait method)
-emits `MethodCallStatic{func_name:"get"}` (bare). Codegen
-(`closures_structs.rs::compile_method_call_static`) resolves the bare name `get`
-to a user method by name (`func_ids` last-write-wins) → it bound
-`pending.get(fd)` to **`StaticCompressionCache.get`**, which reads the Dict as a
-cache (`self.entries` at offset 0x10 → nil) → NULL+8 deref. Disasm proof:
-`worker_sendfile_open_path_for_pending+12: lea StaticCompressionCache.get; call`.
-This is the documented **bare-name method-collision** class — the same one the
-`has`/`len` guards in `compile_method_call_static` already work around (their
-comments describe identical segfaults); `get` simply lacks a guard.
+### Faithful minimal reproducer (settles the root cause)
+`sendfile_pending: Dict<i64,(text,i64,i64)>` (worker.spl:270) is populated via
+**index-assign** `self.sendfile_pending[fd] = (...)` (worker.spl:2378) and read
+via `.get(fd)` (worker.spl:1087). A faithful repro:
+```
+var d: Dict<i64,(text,i64,i64)> = {}
+d[3] = ("file_a.txt", 10, 20)
+print(d[3].0)         # interp: file_a.txt   | native: <empty/nil>
+print(read_via_get(d, 3))  # interp: file_a.txt | native: SIGSEGV
+```
+- **Interp:** correct end-to-end.
+- **Native:** `d[3]` already prints **nil** — the clean MIR `IndexGet` path with
+  NO method-collision *still* fails — and `.get(fd)` then SIGSEGVs.
 
-**Why the fix is deferred (not landed):** the natural fix — a bare-`get` guard
-routing to the generic `rt_index_get` — is fragile in ways two attempts proved:
-- routing via `try_compile_builtin_method_call` does NOT box the key (it assumes
-  MIR pre-boxed args), so populated `dict.get(k)` / `array.get(i)` returned WRONG
-  values (key never matched);
-- routing via `compile_builtin_method` (which `wrap_value`s the key) panics
-  unless `rt_index_get` is pre-registered (`runtime_funcs` is an immutable ref;
-  the used-fn pass in `common_backend.rs` only adds it for `MirInst::IndexGet`),
-  and after registering it the server served req#1 then crashed on req#2 and a
-  populated-dict probe SIGSEGV'd — the key/result tagging differs between the
-  array-index and dict-key paths.
-A correct fix needs the receiver's collection identity preserved (don't erase
-`Dict<K,V>` to `ANY`) OR a runtime-tag-dispatched get that boxes the key exactly
-once. That is a deliberately-scoped, high-blast-radius codegen change (every
-`.get` call) and was reverted rather than shipped broken.
+### Root cause: the native C runtime has NO working dict index path
+The earlier write-up's premise — that `rt_index_get` is a tag-dispatched
+"array/dict/string" get — is **WRONG**. Primary source (`runtime_native.c`):
+- `rt_index_get(coll, idx)` (1945): `rt_core_as_array(coll); if (a) …; return 3;`
+  — **array-only**, returns `3` (nil) for any dict.
+- `rt_index_set(coll, idx, val)` (1951): `rt_core_as_array; if (!a) return 0;`
+  — **array-only**, so `d[fd] = …` **silently no-ops on a dict** (the dict is
+  never populated — that is why `d[3]` reads nil).
+- `rt_dict_get(SplDict*, const char* key)` (1966) and `rt_dict_insert` (1978,
+  `rt_core_as_string(key)`) are **C-string-keyed only** — there is no int-key
+  dict path in the native runtime at all.
+
+So an int-keyed `Dict` cannot be written or read in a native build. Two distinct
+defects stack:
+1. **Runtime gap (primary):** `rt_index_get`/`rt_index_set` are array-only; the
+   native dict accessors are string-keyed. `Dict<i64,V>` has no native get/set.
+2. **Dispatch crash (secondary):** because `Dict<K,V>` erases to `TypeId::ANY`
+   (type_resolver.rs:421), bare `.get` falls through to name-suffix binding and
+   resolves to `StaticCompressionCache.get` (`func_ids` last-write-wins) →
+   reads the dict as that struct (`self.entries` @0x10 → nil) → NULL+8 deref.
+   Disasm: `worker_sendfile_open_path_for_pending+12: lea StaticCompressionCache.get; call`.
+
+### Why a codegen `.get` guard CANNOT fix this
+A bare-`get` guard routing to `rt_index_get` only stops the SIGSEGV by returning
+`3`/nil — the dict was never populated and `rt_index_get` is array-only anyway.
+That is a cover-up (forbidden by `feedback_no_coverups`) and exactly reproduces
+the prior "served req#1, crashed req#2" failure (the bogus nil propagates).
+
+### Real fix landed (option A — runtime root cause)
+The native AOT runtime had **no working dict at all**: it linked
+`runtime_legacy_core.c` (whose `spl_dict_*` are no-op stubs) and `runtime.c`'s
+real `SplDict` was never compiled in; `rt_index_get`/`rt_index_set` were
+array-only. Fix:
+
+1. **`src/runtime/runtime_native.c`** — added a self-contained `RtCoreDict`: an
+   open-addressing hash table (linear probe + tombstones + resize) over the
+   tagged-int64 value representation, with a `kind` first byte
+   (`RT_VALUE_HEAP_DICT 0x06`) and an `rt_core_as_dict()` detector mirroring
+   `rt_core_as_array`. Keys are **canonicalized** (`rt_core_dict_canon_key`) so
+   the unboxed key from `d[k]=v` (IndexSet) and the boxed key from `d.get(k)`
+   (method, `rt_box_int`) collapse to one representation via
+   `rt_core_numeric_arg` — the same normalizer `rt_array_get` already uses, so no
+   codegen key-boxing change was needed (and no array-index regression). Hash is
+   tag-aware (int by value, string by content via FNV-1a); equality uses the
+   existing `rt_native_eq`, so **string-keyed** native dicts (also previously
+   stubbed) now work too. Rewrote `rt_dict_new/get/set/insert/contains/len/
+   clear/keys/values` + new `rt_dict_remove` to the tagged ABI, and added the
+   dict branch to `rt_index_get`, `rt_index_set`, and `rt_contains`.
+2. **`src/compiler_rust/.../codegen/instr/closures_structs.rs`** — added a bare
+   `.get(key)` guard in `compile_method_call_static` (mirrors the existing
+   `has`/`len` guards) routing the type-erased `Dict<K,V>`→`ANY` receiver to the
+   tag-dispatched `rt_index_get` instead of name-suffix-binding it to a wrong
+   user `Type.get` (the SIGSEGV).
+
+### Verification (by returned value, not "no crash")
+- Native micro-tests: int-key hit/overwrite/miss, string-key hit/miss, `.get`
+  raw value, `.contains`, **array indexing unaffected** (`a[1]=60`→60, `a[2]`→7).
+- Native server's exact pattern (`.get(fd)` → `if not pending.?:` →
+  `pending.0/.1/.2`): present→value, absent→nil-branch, fields correct.
+- Real natively-built `httpserver_live_static_fixture`: serves correct bodies
+  (`STATIC-OK-12345`, `hello-from-simple-server`) across 4 requests incl.
+  repeats, server stays alive — the prior "req#1 ok, req#2 crash" is gone.
+
+### Out of scope / separate pre-existing bug (NOT this fix)
+`if val x = <optional>` and `opt.?` payload extraction are broken in the
+**interpreter** (returns the enum / wrong payload) after parallel-agent churn in
+the Option/pattern lowering (commits `c443a66` scope-elif-pattern-bindings,
+`04d72f7` lane-Option-unwrap). This is independent of dicts (reproduces on a
+plain `i64?` from a normal function) and of this native dict fix, which is
+native-codegen + C-runtime only. Track separately.
 
 Also note the AOT build is degraded (fails to compile `h2_hpack.spl` /
 `context_propagation.spl` — "cannot infer field type: struct 'ANY'" — and stubs
