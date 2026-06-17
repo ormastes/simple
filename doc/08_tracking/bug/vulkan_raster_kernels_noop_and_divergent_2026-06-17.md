@@ -63,6 +63,27 @@ remaining kernels stay on the no-op shader, explicitly commented, until each is
 fixed and re-verified. Guarded by the cross-backend parity scenario in
 `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`.
 
+## rounded_rect ground truth (investigated 2026-06-17)
+The intended `draw_rounded_rect` semantics is **fill**, confirmed by three
+independent reference kernels that all fill: the CUDA PTX
+`kernel_draw_rounded_rect` (`backend_cuda_kernels.spl`), the Metal MSL
+`kernel_draw_rounded_rect` (`backend_metal_msl.spl`), and the GPU GLSL
+(`backend_vulkan_glsl.spl`, `bool inside` + corner distance test). Therefore
+**`SoftwareBackend.draw_rounded_rect` (backend_software.spl:259) is the actual
+bug** — it draws only an outline (4 edges + 4 corner arcs). The Vulkan
+`spirv_rounded_rect` blob, tested against a first-principles fill oracle (fill
+interior; round each corner via `dx²+dy² ≤ r²` at corner centers
+(x+r,y+r)/(x+w-1-r,y+r)/…), matches to **60/1728 px (3.5%)** — it fills
+correctly but its corner pixels disagree by ~60 at the four arcs. That residual
+is a corner-convention / edge-inclusivity question (off-by-one in corner center
+or `<` vs `<=`) with no single obviously-correct answer; it needs a pixel-exact
+spec decision before either the kernel or the oracle can be declared canonical.
+Not wired (kept no-op) until that's settled.
+
+Tooling note: this host has `spirv-as`/`spirv-dis` but **no** GLSL→SPIR-V
+compiler (`glslangValidator`/`glslc` absent), so fixing a kernel means editing
+SPIR-V assembly, not regenerating from `backend_vulkan_glsl.spl`.
+
 ## Still open (not fixed — deliberately not shipped unverified)
 1. `circle_outline`, `rounded_rect`, `gradient_rect` SPIR-V blobs diverge from
    `SoftwareBackend`. First decide the intended primitive semantics
