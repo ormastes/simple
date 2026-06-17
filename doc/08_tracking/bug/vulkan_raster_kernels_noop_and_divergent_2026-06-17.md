@@ -40,11 +40,21 @@ After wiring all eight real kernels and measuring per-primitive:
 | rounded_rect    | **fixed** — wired + SW outline→fill bug fixed (0)    |
 | circle_outline  | **fixed** — wired + SW Bresenham→distance-ring (0)   |
 | line            | **fixed** (thickness-1) — wired; recovered via spirv-dis |
-| gradient_rect   | divergent — kept no-op (float interpolation)        |
+| gradient_rect   | **fixed** — wired; recovered via spirv-dis (divisor=h) |
 | blit            | untested — kept no-op (needs source-buffer binding) |
 
-8 of 10 kernels now render bit-exact (line: thickness-1 only) vs the
+9 of 10 kernels now render bit-exact (line: thickness-1 only) vs the
 SoftwareBackend reference.
+
+### gradient_rect (RESOLVED via spirv-dis)
+The GLSL source uses `mix()`/float (`t = ly/(rh-1)`), but `spirv-dis` of the
+`spirv_gradient_rect` blob shows it is fully INTEGER: per ARGB channel,
+`ch = top_ch + (bottom_ch - top_ch) * ly / rh` with truncating OpSDiv, dividing
+by **rh** (the rect height), not rh-1. `SoftwareBackend.draw_gradient_rect`
+already did an integer lerp but divided by `h-1`; changing its divisor to `h`
+makes CPU and GPU bit-exact (0 mismatch across solid/partial gradients). Kernel
+wired. (Note: this is the Vulkan-canonical divisor; the prior code targeted the
+Metal MSL kernel's h-1 — if a host has native Metal, that path may differ by 1.)
 
 ### line (RESOLVED via spirv-dis)
 `spirv-dis` of the `spirv_line` blob revealed the GLSL source was misleading: the
