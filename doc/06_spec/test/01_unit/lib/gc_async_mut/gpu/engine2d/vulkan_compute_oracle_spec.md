@@ -27,7 +27,7 @@ vulkan_compute_oracle_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -169,7 +169,7 @@ expect(mismatches).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -195,11 +195,12 @@ var sw = SoftwareBackend.create()
 sw.init(w, h)
 
 # Only the kernels bit-exact with the (Metal-bit-exact) SoftwareBackend
-# are checked: circle_filled, rect_outline, triangle_filled. circle_outline,
-# line, rounded_rect and gradient stay no-op on Vulkan because their GPU
-# blobs use conventions that diverge from SoftwareBackend's standard
-# algorithms — wiring them required degrading SoftwareBackend, which broke
-# engine2d_primitives_spec (see bug vulkan_raster_kernels_noop_and_divergent).
+# are checked here: circle_filled, rect_outline, triangle_filled. (gradient
+# is wired too and has its own first-principles `it` below.) circle_outline,
+# line, rounded_rect and blit stay no-op on Vulkan because their GPU blobs
+# use algorithm classes that diverge from SoftwareBackend's standard
+# algorithms (distance-ring vs Bresenham, DDA vs Bresenham, fill vs outline)
+# — see bug vulkan_raster_kernels_noop_and_divergent.
 step("circle_filled, rect_outline and triangle_filled match the reference")
 vk.clear(bg)
 sw.clear(bg)
@@ -210,6 +211,84 @@ sw.draw_rect(5, 5, 40, 30, fg)
 vk.draw_triangle_filled(10, 44, 30, 6, 54, 44, fg)
 sw.draw_triangle_filled(10, 44, 30, 6, 54, 44, fg)
 expect(pixel_mismatches(vk.read_pixels(), sw.read_pixels())).to_equal(0)
+```
+
+</details>
+
+#### real GPU vertical gradient matches the endpoint-exact first-principles oracle
+
+- Create the Vulkan backend; if unavailable, assert zero devices honestly
+- var vk = VulkanBackend create
+   - Expected: rt_vulkan_device_count() equals `0`
+- Dispatch the real GPU gradient and read the framebuffer back
+- vk clear
+- vk draw gradient rect
+   - Expected: px.len() equals `w * h`
+- Every pixel equals the independent endpoint-exact integer-lerp oracle
+   - Expected: mismatches equals `0`
+- The top row is exactly the top color and the bottom row reaches the bottom color (the bug that was fixed)
+   - Expected: px[0] equals `top`
+   - Expected: px[(h - 1) * w] equals `bot`
+- Cross-check against the SoftwareBackend reference (same convention)
+- var sw = SoftwareBackend create
+- sw init
+- sw clear
+- sw draw gradient rect
+   - Expected: pixel_mismatches(px, sw.read_pixels()) equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 45 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# Reconciliation guard (bug vulkan_raster_kernels_noop_and_divergent):
+# the gradient SPIR-V blob originally divided its integer lerp by the rect
+# height rh, so the bottom row never reached the bottom color. Its divisor
+# was fixed in SPIR-V to max(rh-1, 1); the kernel is now bit-exact with an
+# independent endpoint-exact integer-lerp oracle AND with SoftwareBackend.
+val w: i32 = 64
+val h: i32 = 48
+val top: u32 = 0xFF204080u32
+val bot: u32 = 0xFFC0E0F0u32
+
+step("Create the Vulkan backend; if unavailable, assert zero devices honestly")
+var vk = VulkanBackend.create()
+if not vk.init(w, h):
+    expect(rt_vulkan_device_count()).to_equal(0)
+    return
+
+step("Dispatch the real GPU gradient and read the framebuffer back")
+vk.clear(0xFF000000u32)
+vk.draw_gradient_rect(0, 0, w, h, top, bot)
+val px = vk.read_pixels()
+expect(px.len()).to_equal(w * h)
+
+step("Every pixel equals the independent endpoint-exact integer-lerp oracle")
+var mismatches = 0
+var y = 0
+while y < h:
+    val expected = gradient_oracle_row(y, h, top, bot)
+    var x = 0
+    while x < w:
+        if px[y * w + x] != expected:
+            mismatches = mismatches + 1
+        x = x + 1
+    y = y + 1
+expect(mismatches).to_equal(0)
+
+step("The top row is exactly the top color and the bottom row reaches the bottom color (the bug that was fixed)")
+expect(px[0]).to_equal(top)
+expect(px[(h - 1) * w]).to_equal(bot)
+
+step("Cross-check against the SoftwareBackend reference (same convention)")
+var sw = SoftwareBackend.create()
+sw.init(w, h)
+sw.clear(0xFF000000u32)
+sw.draw_gradient_rect(0, 0, w, h, top, bot)
+expect(pixel_mismatches(px, sw.read_pixels())).to_equal(0)
 ```
 
 </details>
@@ -326,8 +405,8 @@ expect(pixel_mismatches(eng.read_pixels(), sw3.read_pixels())).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

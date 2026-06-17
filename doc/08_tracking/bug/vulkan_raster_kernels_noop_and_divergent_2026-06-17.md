@@ -1,10 +1,12 @@
 # Vulkan Raster Kernels No-op / Divergent vs CPU Reference - 2026-06-17
 
 ## Severity
-P1 (partially fixed). Several Engine2D Vulkan primitives silently rendered
-nothing (dispatched a no-op SPIR-V shader) despite real validated kernels being
-available; of the ones now wired, two more diverge substantially from the CPU
-reference.
+P1 (partially fixed — 6 of 10 kernels wired and verified as of 2026-06-17).
+Several Engine2D Vulkan primitives silently rendered nothing (dispatched a no-op
+SPIR-V shader) despite real validated kernels being available. `gradient_rect`
+has now been reconciled against a first-principles oracle and wired (see
+"Reconciliation 2026-06-17"); `line`, `circle_outline`, `rounded_rect`, and
+`blit` remain no-op for the documented algorithm-class / semantics reasons.
 
 ## Component
 - `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl` (init, ~line 290)
@@ -27,25 +29,31 @@ Render an identical scene through `VulkanBackend` and `SoftwareBackend` and
 count pixel mismatches (64x48). Before the fix, `draw_circle_filled` produced
 ~197 mismatches (entire circle missing); rects matched (0).
 
-## Verification matrix (Vulkan vs SoftwareBackend reference, 64x48)
-After wiring all eight real kernels and measuring per-primitive:
+## Verification matrix (real GPU blob vs FIRST-PRINCIPLES oracle, 64x48)
+Measured 2026-06-17 by temporarily wiring every real blob, dispatching it on a
+live device (3 Vulkan devices present under the classic interpreter), reading the
+framebuffer back, and comparing against an *independent* oracle (not the GPU
+compared to itself, not cross-backend equality alone). Probe: a clean-room
+Bresenham/DDA/distance-ring/integer-lerp oracle in pure Simple.
 
-| primitive       | status                                              |
-|-----------------|-----------------------------------------------------|
-| clear           | already real, correct (0 mismatch)                  |
-| rect_filled     | already real, correct (0)                           |
-| rect_outline    | **fixed** — wired, bit-exact (0)                     |
-| circle_filled   | **fixed** — wired, bit-exact (0)                     |
-| triangle_filled | **fixed** — wired, bit-exact (0)                     |
-| rounded_rect    | **reverted to no-op** — see "Reverted" below         |
-| circle_outline  | **reverted to no-op** — see "Reverted" below         |
-| line            | **reverted to no-op** — see "Reverted" below         |
-| gradient_rect   | **reverted to no-op** — see "Reverted" below         |
-| blit            | untested — kept no-op (needs source-buffer binding) |
+| primitive       | status                                                        |
+|-----------------|---------------------------------------------------------------|
+| clear           | wired, correct (0 mismatch)                                   |
+| rect_filled     | wired, correct (0)                                            |
+| rect_outline    | wired, bit-exact (0)                                          |
+| circle_filled   | wired, bit-exact (0) — per-pixel distance disk == CPU disk    |
+| triangle_filled | wired, bit-exact (0) — barycentric == CPU                     |
+| **gradient_rect** | **RECONCILED + WIRED** — blob was integer-lerp ÷rh; SPIR-V divisor fixed to max(rh-1,1); now 0 vs the endpoint-exact oracle AND 0 vs SoftwareBackend (full/offset/h=1/h=2) |
+| line            | no-op — blob is exactly truncating DDA ÷(steps+1) (bit-exact to that oracle across all 5 slopes); drops the end point and, even fixed to ÷steps, is DDA not the contract's Bresenham (vsBresenham=31 shallow, 17 steep) |
+| circle_outline  | no-op — distance-ring, 96px off a nearest-int ring oracle; not the contract's Bresenham midpoint |
+| rounded_rect    | no-op — a correct FILL (60px corner residual vs a quarter-disk fill oracle, fills 1504 px) but the API contract is outline-only |
+| blit            | no-op — needs a source-buffer binding the parity probe does not set up |
 
-**5 of 10 kernels are wired bit-exact** (clear, rect_filled, rect_outline,
-circle_filled, triangle_filled) vs the SoftwareBackend reference. The other 5
-stay no-op.
+**6 of 10 kernels are wired and verified** (clear, rect_filled, rect_outline,
+circle_filled, triangle_filled, gradient_rect). The remaining 4 are
+fundamentally algorithm-class divergent from the engine's SoftwareBackend
+(Metal-bit-exact) contract and need a Bresenham-class SPIR-V rewrite or a
+per-primitive semantics decision — NOT a SoftwareBackend change.
 
 ## Reverted (2026-06-17): rounded_rect / circle_outline / line / gradient
 
@@ -66,30 +74,28 @@ Reconciling the GPU blobs with the standard backend (or deciding a per-primitive
 canonical convention) is the real remaining work and must NOT be done by
 degrading `SoftwareBackend`.
 
-### gradient_rect (RESOLVED via spirv-dis)
-The GLSL source uses `mix()`/float (`t = ly/(rh-1)`), but `spirv-dis` of the
-`spirv_gradient_rect` blob shows it is fully INTEGER: per ARGB channel,
+### gradient_rect (SUPERSEDED — see "Reconciliation 2026-06-17" above)
+[Historical note, kept for the spirv-dis finding.] `spirv-dis` of the
+`spirv_gradient_rect` blob showed it is fully INTEGER: per ARGB channel,
 `ch = top_ch + (bottom_ch - top_ch) * ly / rh` with truncating OpSDiv, dividing
-by **rh** (the rect height), not rh-1. `SoftwareBackend.draw_gradient_rect`
-already did an integer lerp but divided by `h-1`; changing its divisor to `h`
-makes CPU and GPU bit-exact (0 mismatch across solid/partial gradients). Kernel
-wired. (Note: this is the Vulkan-canonical divisor; the prior code targeted the
-Metal MSL kernel's h-1 — if a host has native Metal, that path may differ by 1.)
+by **rh** (the rect height). The prior note proposed making the two backends match
+by changing *SoftwareBackend's* divisor to `h` — that was REJECTED: it would
+degrade the Metal-bit-exact CPU contract (endpoint-exact `/(h-1)`) and break
+`engine2d_primitives_spec`. The correct fix (applied 2026-06-17) edits the GPU
+blob's SPIR-V divisor from `rh` to `max(rh-1, 1)` so the GPU matches the
+endpoint-exact CPU contract instead. SoftwareBackend is untouched.
 
-### line (RESOLVED via spirv-dis)
-`spirv-dis` of the `spirv_line` blob revealed the GLSL source was misleading: the
-blob computes `px = x1 + (dx*step)/(steps+1)`, `py = y1 + (dy*step)/(steps+1)`
-with `steps = max(|dx|,|dy|)` and `step` running `0..=steps` inclusive — the
-divisor is **steps+1**, not steps. Reimplementing `SoftwareBackend.draw_line` to
-match made thickness-1 lines bit-exact in all directions (0 mismatch) and the
-kernel is now wired. CAVEAT: the blob does NOT implement thickness (push constant
-5 is never read; no loops) — it draws a single 1px center pixel per step. So GPU
-lines are 1px regardless of requested thickness; SoftwareBackend still renders
-thickness on CPU. Cross-backend parity is asserted for thickness-1 only.
-Follow-up: a thickness-aware line SPIR-V blob. For
-rounded_rect and circle_outline the SoftwareBackend implementation was itself
-wrong/inconsistent with the canonical GPU/CUDA/Metal kernels and was corrected
-to match (GPU pixels are canonical, per owner decision).
+### line (characterized — NOT wired; see "Still open" #1)
+`spirv-dis` + the 2026-06-17 oracle probe confirm the `spirv_line` blob is exactly
+truncating DDA: `px = x1 + (dx*step)/(steps+1)`, `py = y1 + (dy*step)/(steps+1)`
+with `steps = max(|dx|,|dy|)` and `step` running `0..=steps` inclusive — divisor
+**steps+1** (verified bit-exact to a `÷(steps+1)` DDA oracle across
+horizontal/vertical/45°/shallow/steep). It drops the end point (should be ÷steps)
+and the blob ignores thickness (push constant 5 unused). The earlier note here
+claimed `SoftwareBackend.draw_line` was "reimplemented to match and wired" — that
+was REVERTED: matching a truncating DDA degrades the Metal-bit-exact Bresenham CPU
+contract. The blob stays no-op until it implements Bresenham (or a DDA-divergence
+policy is adopted). SoftwareBackend is untouched.
 
 ### line (reverted)
 The GLSL `_glsl_line` source uses truncating DDA (`px = x1 + (dx*step)/steps`),
@@ -112,16 +118,16 @@ mismatch) is likely a thickness/coverage difference between two outlines.
 worth real investigation. None of these were shipped — all kept no-op until each
 is checked against a *first-principles* oracle, not just cross-backend parity.
 
-## Fix applied
-`backend_vulkan.spl` now wires five real SPIR-V kernels verified bit-exact vs
-the SoftwareBackend reference: `rect_outline`, `circle_filled`,
-`triangle_filled`, `rounded_rect`, `circle_outline` (plus the already-real
-`clear`/`rect_filled`). For `rounded_rect` and `circle_outline` the
-SoftwareBackend implementation was itself a bug (outline / Bresenham) and was
-corrected to the canonical GPU fill/distance-ring. `line`, `gradient`, `blit`
-remain on the no-op shader. All wired kernels are guarded by the cross-backend
-parity scenario in
-`test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`.
+## Fix applied (current)
+`backend_vulkan.spl` wires six real SPIR-V kernels: `clear`, `rect_filled`,
+`rect_outline`, `circle_filled`, `triangle_filled`, and `gradient_rect` (the last
+reconciled 2026-06-17 by the SPIR-V divisor fix). `line`, `circle_outline`,
+`rounded_rect`, and `blit` remain on the no-op shader. `SoftwareBackend` is
+NOT modified (an earlier attempt that degraded it to match the divergent blobs was
+reverted — it broke `engine2d_primitives_spec`). Wired kernels are guarded in
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl` by an
+independent first-principles oracle (and a SoftwareBackend cross-check where the
+CPU implements the same algorithm).
 
 ## rounded_rect ground truth (investigated 2026-06-17)
 The intended `draw_rounded_rect` semantics is **fill**, confirmed by three
@@ -144,21 +150,42 @@ Tooling note: this host has `spirv-as`/`spirv-dis` but **no** GLSL→SPIR-V
 compiler (`glslangValidator`/`glslc` absent), so fixing a kernel means editing
 SPIR-V assembly, not regenerating from `backend_vulkan_glsl.spl`.
 
+## Reconciliation 2026-06-17 (first-principles oracle)
+`gradient_rect` is fully reconciled and wired. The blob's only divergence was the
+lerp divisor: it computed `ch = top + (bot-top)*ly/rh` (÷ rect height) so the
+bottom row landed at `top + (bot-top)*(rh-1)/rh`, never the bottom color. The
+fix edits the SPIR-V (spirv-as round-trip, spirv-val clean): inserts
+`t = rh-1; t = max(t,1)` (`OpISub` + `OpSLessThan` + `OpSelect`) and redirects the
+four channel `OpSDiv`s to `t`. Result: 0 mismatch vs the endpoint-exact
+integer-lerp oracle and 0 vs SoftwareBackend across full/offset/h=1/h=2.
+Guarded by a dedicated first-principles `it` in
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`
+(asserts top row == top, bottom row == bottom, plus the per-pixel oracle and a
+SoftwareBackend cross-check). `engine2d_primitives_spec` stays 24/0 (SoftwareBackend
+untouched).
+
 ## Still open (not fixed — deliberately not shipped unverified)
-1. `line` — SPIR-V blob interpolation matches neither truncate nor round DDA;
-   recover the exact algorithm via `spirv-dis` on the blob, then align
-   SoftwareBackend and wire.
-2. `gradient_rect` — float interpolation (`mix` + `uint()` truncation); CPU/GPU
-   bit-exact match is sensitive to f32-vs-f64 rounding (and this repo's f64 is
-   unreliable on the interpreter). Needs an integer-equivalent oracle or an
-   accepted per-channel tolerance.
-2. `line` and `blit` kernels untested (blit needs a source-buffer binding the
-   parity probe doesn't set up).
-3. `vulkan_session.spl` carries the identical no-op wiring; it was left
-   unchanged because its shared-session path fails at `init_with_session`
-   (pre-existing, unrelated to kernel wiring), so the fix could not be verified
-   end-to-end through the session. Apply the same three verified wirings once
-   the `init_with_session` blocker is resolved.
+1. `line` — blob is exactly truncating DDA ÷(steps+1) (verified bit-exact to that
+   oracle across horizontal/vertical/45°/shallow/steep). Two issues: it drops the
+   end point (÷(steps+1) instead of ÷steps), and DDA ≠ the engine's Bresenham
+   contract even with the divisor fixed (matches only axis-aligned + 45°). To wire
+   it, either author a Bresenham-midpoint closed-form line in SPIR-V, or adopt an
+   explicit "Vulkan line is DDA, may differ from CPU Bresenham" divergence policy.
+2. `circle_outline` — distance-ring blob, 96px off a nearest-int distance-ring
+   oracle and not the Bresenham midpoint the CPU uses. Needs `spirv-dis` to pin its
+   exact ring threshold, then either a Bresenham SPIR-V rewrite or a divergence
+   policy.
+3. `rounded_rect` — the blob is a correct FILL (60px corner-convention residual vs
+   a quarter-disk fill oracle), but `SoftwareBackend.draw_rounded_rect` is an
+   OUTLINE. This is a primitive-semantics decision (fill vs outline; CUDA/Metal/GLSL
+   reference kernels all fill), not a bug fix — must be settled by the API owner
+   before wiring either side.
+4. `blit` — needs a source-buffer binding the parity probe does not set up; verify
+   via `draw_image` with a bound source once a binding harness exists.
+5. `vulkan_session.spl` carries the identical no-op wiring; it was left unchanged
+   because its shared-session path fails at `init_with_session` (pre-existing,
+   unrelated to kernel wiring). Apply the same verified gradient wiring once the
+   `init_with_session` blocker is resolved.
 
 ## Related
 - `web_render_gpu_backend_provenance_fabricated_2026-06-17.md`

@@ -30,7 +30,8 @@ use std.gpu.engine2d.backend_vulkan_helpers.{
 }
 use std.gpu.engine2d.backend_vulkan_spirv.{
     spirv_clear, spirv_rect_filled, spirv_noop_storage,
-    spirv_rect_outline, spirv_circle_filled, spirv_triangle_filled
+    spirv_rect_outline, spirv_circle_filled, spirv_triangle_filled,
+    spirv_gradient_rect
 }
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
@@ -287,31 +288,32 @@ impl RenderBackend for VulkanBackend:
         # descriptor-compatible no-op SPIR-V module so init does not depend on
         # the unsupported GLSL compiler path.
         val noop_spirv = spirv_noop_storage()
-        # Kernels wired to real SPIR-V are verified bit-exact against the
-        # SoftwareBackend reference (clear, rect_filled, rect_outline,
-        # circle_filled, triangle_filled). The remaining raster kernels
-        # (circle_outline, line, rounded_rect, gradient, blit) currently diverge
-        # from the CPU reference, so they stay on the descriptor-compatible no-op
-        # shader until each is fixed and re-verified — see bug doc
-        # vulkan_raster_kernels_noop_and_divergent_2026-06-17.
+        # Kernels wired to real SPIR-V are verified bit-exact against an
+        # independent first-principles oracle (and, where the CPU implements the
+        # same algorithm, the SoftwareBackend reference): clear, rect_filled,
+        # rect_outline, circle_filled, triangle_filled, gradient_rect. The
+        # gradient kernel was reconciled by fixing its SPIR-V divisor from rh to
+        # max(rh-1, 1) so its integer lerp reaches the bottom row exactly, making
+        # it bit-exact with the endpoint-exact oracle and SoftwareBackend.
         self.shader_clear = vulkan_sffi_compile_spirv(spirv_clear())
         self.shader_rect_filled = vulkan_sffi_compile_spirv(spirv_rect_filled())
-        # Only the kernels that are bit-exact with the (Metal-bit-exact)
-        # SoftwareBackend reference are wired: rect_outline, circle_filled,
-        # triangle_filled (plus clear/rect_filled above). circle_outline, line,
-        # rounded_rect and gradient stay no-op: their GPU blobs use conventions
-        # (distance-ring outline, steps+1 DDA that drops the end point, fill vs
-        # the documented outline-only rounded_rect, divisor=h) that differ from
-        # SoftwareBackend's standard algorithms. Wiring them would require
-        # degrading SoftwareBackend, which broke engine2d_primitives_spec — see
-        # bug vulkan_raster_kernels_noop_and_divergent_2026-06-17.
+        # The remaining raster kernels (circle_outline, line, rounded_rect, blit)
+        # stay on the descriptor-compatible no-op shader: their GPU blobs use
+        # algorithm classes that fundamentally differ from the engine's
+        # SoftwareBackend (Metal-bit-exact) contract — line is a truncating DDA
+        # (vs Bresenham), circle_outline is a distance-ring (vs Bresenham
+        # midpoint), rounded_rect fills (vs the documented outline), and blit
+        # needs a source-buffer binding. Reconciling them requires a
+        # Bresenham-class SPIR-V rewrite or a per-primitive semantics decision —
+        # NOT degrading SoftwareBackend (which broke engine2d_primitives_spec).
+        # See bug vulkan_raster_kernels_noop_and_divergent_2026-06-17.
         self.shader_rect_outline = vulkan_sffi_compile_spirv(spirv_rect_outline())
         self.shader_circle_filled = vulkan_sffi_compile_spirv(spirv_circle_filled())
         self.shader_circle_outline = vulkan_sffi_compile_spirv(noop_spirv)
         self.shader_line = vulkan_sffi_compile_spirv(noop_spirv)
         self.shader_rounded_rect = vulkan_sffi_compile_spirv(noop_spirv)
         self.shader_triangle = vulkan_sffi_compile_spirv(spirv_triangle_filled())
-        self.shader_gradient = vulkan_sffi_compile_spirv(noop_spirv)
+        self.shader_gradient = vulkan_sffi_compile_spirv(spirv_gradient_rect())
         self.shader_blit = vulkan_sffi_compile_spirv(noop_spirv)
 
         if (self.shader_clear == 0 or self.shader_rect_filled == 0 or
