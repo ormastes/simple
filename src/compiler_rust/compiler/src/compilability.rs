@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use simple_parser::ast::{BinOp, Block, Expr, FunctionDef, Node, UnaryOp};
+use simple_parser::ast::{BinOp, Block, Expr, FunctionDef, Node, Type, UnaryOp};
 
 use crate::value::{ACTOR_BUILTINS, BLOCKING_BUILTINS, GENERATOR_BUILTINS};
 
@@ -111,6 +111,49 @@ pub fn analyze_module(items: &[Node]) -> HashMap<String, CompilabilityStatus> {
     }
 
     results
+}
+
+/// Names of functions/externs whose declared return type marshals to a boxed
+/// heap `RuntimeValue` (tuple or text) that must stay boxed when the call is
+/// routed through the interpreter bridge (`InterpCall`). Unboxing such a value
+/// to a raw i64 strips its NaN-box tag and corrupts downstream `rt_tuple_get` /
+/// `rt_string_*` reads (e.g. `val (status, body, err) = rt_http_request(...)`
+/// under default JIT). Consumed by the hybrid transform; see
+/// `compile_interp_call` in codegen/instr/core.rs.
+pub fn boxed_return_functions(items: &[Node]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for item in items {
+        // `extern fn` declarations (the SFFI runtime calls routed through the
+        // interpreter bridge) parse as `Node::Extern`, not `Node::Function`.
+        let (name, ret) = match item {
+            Node::Function(f) => (&f.name, &f.return_type),
+            Node::Extern(e) => (&e.name, &e.return_type),
+            _ => continue,
+        };
+        if let Some(ret) = ret {
+            if return_type_keeps_boxed(ret) {
+                names.insert(name.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Whether a return type must stay boxed across the interpreter bridge.
+///
+/// Conservative on purpose: only unambiguous heap composites — tuples and
+/// `text` — are flipped to boxed. Named/handle types stay unboxed (some externs
+/// return a raw i64 handle typed as a named struct, and boxing those would
+/// regress them); scalars and floats keep their historical raw-i64 unbox
+/// (f64 remains a separate, pre-existing gap). Arrays, options, and generics are
+/// left as a future extension once each has a verified round-trip.
+fn return_type_keeps_boxed(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => true,
+        Type::Simple(name) => matches!(name.as_str(), "text" | "str" | "string" | "String" | "Str"),
+        Type::Capability { inner, .. } => return_type_keeps_boxed(inner),
+        _ => false,
+    }
 }
 
 /// Analyze a single function for compilability

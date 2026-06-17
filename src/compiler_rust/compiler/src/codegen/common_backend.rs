@@ -2169,6 +2169,7 @@ mod tests {
                 dest: Some(dest),
                 func_name: "fallback_function".to_string(),
                 args: vec![arg],
+            boxed_result: false,
             });
         main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(dest));
 

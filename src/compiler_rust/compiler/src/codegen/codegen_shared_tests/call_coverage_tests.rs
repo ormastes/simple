@@ -22,6 +22,7 @@ cranelift_only_test!(shared_binop_matmul_error, |f: &mut MirFunction| {
         dest: Some(dest),
         func_name: "matmul_stub".to_string(),
         args: vec![a, b],
+        boxed_result: false,
     });
     dest
 });
@@ -35,6 +36,7 @@ cranelift_only_test!(shared_binop_pipeforward_error, |f: &mut MirFunction| {
         dest: Some(dest),
         func_name: "pipe_forward_stub".to_string(),
         args: vec![a],
+        boxed_result: false,
     });
     dest
 });

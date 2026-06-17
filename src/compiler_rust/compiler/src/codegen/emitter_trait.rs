@@ -55,7 +55,13 @@ pub trait CodegenEmitter {
     // Calls
     // =========================================================================
     fn emit_call(&mut self, dest: &Option<VReg>, target: &CallTarget, args: &[VReg]) -> Result<(), Self::Error>;
-    fn emit_interp_call(&mut self, dest: &Option<VReg>, func_name: &str, args: &[VReg]) -> Result<(), Self::Error>;
+    fn emit_interp_call(
+        &mut self,
+        dest: &Option<VReg>,
+        func_name: &str,
+        args: &[VReg],
+        boxed_result: bool,
+    ) -> Result<(), Self::Error>;
     fn emit_interp_eval(&mut self, dest: VReg, expr_index: usize) -> Result<(), Self::Error>;
     fn emit_indirect_call(
         &mut self,

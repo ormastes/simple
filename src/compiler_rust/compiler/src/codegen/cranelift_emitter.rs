@@ -153,8 +153,14 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     fn emit_call(&mut self, dest: &Option<VReg>, target: &CallTarget, args: &[VReg]) -> Result<(), String> {
         super::instr::calls::compile_call(self.ctx, self.builder, dest, target, args)
     }
-    fn emit_interp_call(&mut self, dest: &Option<VReg>, func_name: &str, args: &[VReg]) -> Result<(), String> {
-        super::instr::core::compile_interp_call(self.ctx, self.builder, dest, func_name, args)
+    fn emit_interp_call(
+        &mut self,
+        dest: &Option<VReg>,
+        func_name: &str,
+        args: &[VReg],
+        boxed_result: bool,
+    ) -> Result<(), String> {
+        super::instr::core::compile_interp_call(self.ctx, self.builder, dest, func_name, args, boxed_result)
     }
     fn emit_interp_eval(&mut self, dest: VReg, expr_index: usize) -> Result<(), String> {
         super::instr::interpreter::compile_interp_eval(self.ctx, self.builder, dest, expr_index)

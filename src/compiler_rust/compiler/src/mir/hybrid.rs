@@ -19,17 +19,28 @@ use super::{MirFunction, MirInst, MirModule};
 /// # Arguments
 /// * `module` - The MIR module to transform
 /// * `non_compilable_functions` - Set of function names that require interpreter fallback
+/// * `boxed_return_functions` - Names whose declared return type is a heap/composite
+///   value (tuple/text/array); their `InterpCall` keeps the boxed result instead of
+///   unboxing to a raw i64.
 ///
 /// # Returns
 /// The transformed module
-pub fn apply_hybrid_transform(module: &mut MirModule, non_compilable_functions: &HashSet<String>) {
+pub fn apply_hybrid_transform(
+    module: &mut MirModule,
+    non_compilable_functions: &HashSet<String>,
+    boxed_return_functions: &HashSet<String>,
+) {
     for func in &mut module.functions {
-        transform_function(func, non_compilable_functions);
+        transform_function(func, non_compilable_functions, boxed_return_functions);
     }
 }
 
 /// Transform a single function for hybrid execution.
-fn transform_function(func: &mut MirFunction, non_compilable: &HashSet<String>) {
+fn transform_function(
+    func: &mut MirFunction,
+    non_compilable: &HashSet<String>,
+    boxed_returns: &HashSet<String>,
+) {
     for block in &mut func.blocks {
         let mut new_instructions = Vec::new();
 
@@ -40,6 +51,7 @@ fn transform_function(func: &mut MirFunction, non_compilable: &HashSet<String>) 
                     if non_compilable.contains(func_name) {
                         // Replace with InterpCall
                         new_instructions.push(MirInst::InterpCall {
+                            boxed_result: boxed_returns.contains(func_name),
                             dest,
                             func_name: func_name.to_string(),
                             args,
@@ -161,7 +173,7 @@ mod tests {
         let mut non_compilable = HashSet::new();
         non_compilable.insert("non_compilable_fn".to_string());
 
-        transform_function(&mut func, &non_compilable);
+        transform_function(&mut func, &non_compilable, &HashSet::new());
 
         let instructions = &func.blocks[0].instructions;
         assert_eq!(instructions.len(), 2);

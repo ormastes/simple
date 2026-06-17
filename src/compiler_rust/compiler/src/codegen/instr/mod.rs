@@ -521,8 +521,8 @@ pub fn compile_instruction<M: Module>(
             compile_wait(ctx, builder, *dest, *target)?;
         }
 
-        MirInst::InterpCall { dest, func_name, args } => {
-            compile_interp_call(ctx, builder, dest, func_name, args)?;
+        MirInst::InterpCall { dest, func_name, args, boxed_result } => {
+            compile_interp_call(ctx, builder, dest, func_name, args, *boxed_result)?;
         }
 
         MirInst::InterpEval { dest, expr_index } => {

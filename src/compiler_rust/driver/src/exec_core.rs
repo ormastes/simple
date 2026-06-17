@@ -687,7 +687,12 @@ impl ExecCore {
             );
         }
         if !unresolvable_externs.is_empty() {
-            simple_compiler::mir::apply_hybrid_transform(&mut mir_module, &unresolvable_externs);
+            // Externs whose declared return type is a heap/composite value (tuple,
+            // text) must keep their boxed RuntimeValue across the interpreter
+            // bridge instead of being unboxed to a raw i64 — see
+            // compile_interp_call in codegen/instr/core.rs.
+            let boxed_returns = simple_compiler::compilability::boxed_return_functions(&ast.items);
+            simple_compiler::mir::apply_hybrid_transform(&mut mir_module, &unresolvable_externs, &boxed_returns);
         }
 
         // Check for main function

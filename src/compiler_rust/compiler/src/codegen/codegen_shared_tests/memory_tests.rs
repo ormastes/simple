@@ -216,6 +216,7 @@ shared_test!(shared_interp_call, |f: &mut MirFunction| {
         dest: Some(dest),
         func_name: "test_func".to_string(),
         args: vec![],
+            boxed_result: false,
     });
     dest
 });

@@ -1272,6 +1272,7 @@ fn codegen_interp_call() {
             dest: Some(dest),
             func_name: "test_func".to_string(),
             args: vec![],
+            boxed_result: false,
         });
         dest
     }));

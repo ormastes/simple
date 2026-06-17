@@ -12,7 +12,7 @@ use simple_type::check as type_check;
 use tracing::instrument;
 
 use super::core::CompilerPipeline;
-use crate::compilability::analyze_module;
+use crate::compilability::{analyze_module, boxed_return_functions};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::import_loader::{has_script_statements, load_module_with_imports};
 use crate::interpreter::evaluate_module_with_di_and_aop;
@@ -503,6 +503,7 @@ impl CompilerPipeline {
 
         // 4. Compilability analysis for hybrid execution
         let compilability = analyze_module(&ast_module.items);
+        let boxed_returns = boxed_return_functions(&ast_module.items);
         let non_compilable: HashSet<String> = compilability
             .iter()
             .filter(|(_, status)| !status.is_compilable())
@@ -533,7 +534,7 @@ impl CompilerPipeline {
 
         // 8. Apply hybrid transformation if needed
         if !non_compilable.is_empty() {
-            mir::apply_hybrid_transform(&mut mir_module, &non_compilable);
+            mir::apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns);
             tracing::debug!(
                 "Hybrid execution: {} functions require interpreter fallback",
                 non_compilable.len()
@@ -649,6 +650,7 @@ impl CompilerPipeline {
 
         // 4. Compilability analysis for hybrid execution
         let compilability = analyze_module(&ast_module.items);
+        let boxed_returns = boxed_return_functions(&ast_module.items);
         let non_compilable: HashSet<String> = compilability
             .iter()
             .filter(|(_, status)| !status.is_compilable())
@@ -679,7 +681,7 @@ impl CompilerPipeline {
 
         // 8. Apply hybrid transformation if needed
         if !non_compilable.is_empty() {
-            mir::apply_hybrid_transform(&mut mir_module, &non_compilable);
+            mir::apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns);
             tracing::debug!(
                 "Hybrid execution (target {:?}): {} functions require interpreter fallback",
                 target,
@@ -902,6 +904,7 @@ impl CompilerPipeline {
         // compilation so imported stdlib helpers can keep using interpreter fallback
         // where the direct AOT surface is still incomplete.
         let compilability = analyze_module(&ast_module.items);
+        let boxed_returns = boxed_return_functions(&ast_module.items);
         let non_compilable: HashSet<String> = compilability
             .iter()
             .filter(|(_, status)| !status.is_compilable())
@@ -958,7 +961,7 @@ impl CompilerPipeline {
         }
 
         if !non_compilable.is_empty() {
-            mir::apply_hybrid_transform(&mut mir_module, &non_compilable);
+            mir::apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns);
             tracing::debug!(
                 "Hybrid execution (standalone native): {} functions require interpreter fallback",
                 non_compilable.len()

@@ -1,6 +1,15 @@
 # Plan: JIT/AOT composite extern-return bridge (tuple/text/f64)
 
-- **Status:** Scoped, not started
+- **Status:** Implemented for tuple + text returns; verified live in default JIT.
+  `MirInst::InterpCall` gained a `boxed_result` flag set by the hybrid transform
+  (`compilability::boxed_return_functions` walks `Node::Function`/`Node::Extern`
+  return types); cranelift `compile_interp_call` skips the `rt_value_raw_i64`
+  unbox when set; `value_to_runtime` now marshals `Value::Tuple` as a real
+  `rt_tuple`. Verified: `val (status, body, err) = rt_http_request(...)` against
+  live MinIO returns `(403, <254B>, "")` under default JIT, read correctly by
+  destructuring and `.0`. Arrays/options/generics/f64 remain conservative
+  (unboxed) future extensions. `.N` access on a *text* tuple field is a separate
+  pre-existing bug, unchanged.
 - **Date:** 2026-06-16
 - **Area:** compiler/codegen (cranelift + llvm), mir/hybrid, runtime_bridge
 - **Related bug:** [[itf_minio_sigv4_not_runnable_interp_or_native_2026-06-16]]

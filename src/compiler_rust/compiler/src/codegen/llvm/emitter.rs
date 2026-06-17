@@ -453,7 +453,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_interp_call(&mut self, dest: &Option<VReg>, func_name: &str, args: &[VReg]) -> Result<(), String> {
+    fn emit_interp_call(
+        &mut self,
+        dest: &Option<VReg>,
+        func_name: &str,
+        args: &[VReg],
+        _boxed_result: bool,
+    ) -> Result<(), String> {
         let i64_type = self.backend.runtime_int_type();
         let i8_type = self.backend.context_ref().i8_type();
         let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());

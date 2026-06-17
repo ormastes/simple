@@ -81,6 +81,7 @@ fn direct_interp_call() {
             dest: Some(dest),
             func_name: "test_func".to_string(),
             args: vec![arg],
+            boxed_result: false,
         });
     });
     assert!(func_has_inst(&func, |i| matches!(i, MirInst::InterpCall { .. })));

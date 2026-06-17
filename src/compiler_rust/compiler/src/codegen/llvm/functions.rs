@@ -2060,7 +2060,7 @@ impl LlvmBackend {
                     "sort" => Some("rt_array_sort"),
                     "first" => Some("rt_array_first"),
                     "last" => Some("rt_array_last"),
-                    "find" => Some("rt_string_find"),
+                    "find" | "index_of" | "find_str" => Some("rt_string_find"),
                     "any" => Some("rt_array_any"),
                     "all" => Some("rt_array_all"),
                     "filter" => Some("rt_array_filter"),

@@ -133,6 +133,12 @@ pub enum MirInst {
         dest: Option<VReg>,
         func_name: String,
         args: Vec<VReg>,
+        /// True when the callee's declared return type is a heap/composite value
+        /// (tuple, text, array) whose `RuntimeValue` must stay boxed across the
+        /// `rt_interp_call` bridge. When false (scalar/handle/bool returns, the
+        /// default), codegen unboxes the result to a raw i64. See
+        /// `compile_interp_call` in codegen/instr/core.rs.
+        boxed_result: bool,
     },
 
     /// Evaluate an expression via interpreter fallback.

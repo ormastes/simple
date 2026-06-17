@@ -241,7 +241,13 @@ impl CodegenEmitter for MirInterpreterEmitter {
         }
         Ok(())
     }
-    fn emit_interp_call(&mut self, dest: &Option<VReg>, _func_name: &str, _args: &[VReg]) -> Result<(), Self::Error> {
+    fn emit_interp_call(
+        &mut self,
+        dest: &Option<VReg>,
+        _func_name: &str,
+        _args: &[VReg],
+        _boxed_result: bool,
+    ) -> Result<(), Self::Error> {
         if let Some(d) = dest {
             self.set(*d, 0);
         }

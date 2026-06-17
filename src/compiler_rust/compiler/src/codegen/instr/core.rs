@@ -749,6 +749,7 @@ pub(crate) fn compile_interp_call<M: Module>(
     dest: &Option<VReg>,
     func_name: &str,
     args: &[VReg],
+    boxed_result: bool,
 ) -> InstrResult<()> {
     let argc = builder.ins().iconst(types::I64, args.len() as i64);
     let argv = if args.is_empty() {
@@ -777,11 +778,17 @@ pub(crate) fn compile_interp_call<M: Module>(
         // build) have raw scalar/handle destinations, so unbox — otherwise a
         // NaN-boxed `false` reads as truthy in compiled conditions. Call
         // dests carry no entry in vreg_types, so the SFFI naming convention
-        // is the reliable signal here. Boxed-value flows (interpreted
-        // function fallbacks) keep the boxed result. Known gap: f64/text
-        // extern returns are not representable through this bridge yet.
+        // is the reliable signal here.
+        //
+        // EXCEPTION: when the callee's declared return type is a heap/composite
+        // value (tuple/text/array — `boxed_result`), unboxing to a raw i64
+        // strips the NaN-box tag and corrupts the downstream `rt_tuple_get` /
+        // `rt_string_*` reads. Keep those boxed so compiled consumers (e.g.
+        // `val (a,b,c) = rt_http_request(...)`) read them correctly. Scalar
+        // returns keep the historical unbox unchanged. (f64 remains a separate
+        // gap: it is still unboxed via rt_value_raw_i64 rather than _f64.)
         let is_extern_bridge = func_name.starts_with("rt_") || func_name.starts_with("spl_");
-        let value = if is_extern_bridge || vreg_is_native_equality_scalar(ctx, *d) {
+        let value = if !boxed_result && (is_extern_bridge || vreg_is_native_equality_scalar(ctx, *d)) {
             call_runtime_1(ctx, builder, "rt_value_raw_i64", result)
         } else {
             result

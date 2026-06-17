@@ -71,10 +71,29 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
         Value::Bool(b) => RuntimeValue::from_bool(*b),
         Value::Str(s) | Value::Symbol(s) => simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64),
         Value::Array(items) | Value::FrozenArray(items) => values_to_runtime_array(items.iter()),
-        Value::FixedSizeArray { data, .. } | Value::Tuple(data) => values_to_runtime_array(data.iter()),
+        Value::FixedSizeArray { data, .. } => values_to_runtime_array(data.iter()),
+        // A tuple must marshal to a runtime tuple (not an array) so it is
+        // byte-identical to a natively-constructed tuple and reads correctly via
+        // `rt_tuple_get`/destructuring when an extern's tuple result is kept boxed
+        // across the interpreter bridge (see compile_interp_call).
+        Value::Tuple(data) => values_to_runtime_tuple(data.iter()),
         Value::LabeledTuple { values, .. } => values_to_runtime_array(values.iter()),
         _ => RuntimeValue::NIL,
     }
+}
+
+fn values_to_runtime_tuple<'a>(items: impl IntoIterator<Item = &'a Value>) -> RuntimeValue {
+    let values: Vec<RuntimeValue> = items.into_iter().map(value_to_runtime).collect();
+    let tuple = simple_runtime::value::rt_tuple_new(values.len() as u64);
+    if tuple == RuntimeValue::NIL {
+        return RuntimeValue::NIL;
+    }
+    for (i, value) in values.into_iter().enumerate() {
+        if !simple_runtime::value::rt_tuple_set(tuple, i as u64, value) {
+            return RuntimeValue::NIL;
+        }
+    }
+    tuple
 }
 
 fn values_to_runtime_array<'a>(items: impl IntoIterator<Item = &'a Value>) -> RuntimeValue {
@@ -210,18 +229,18 @@ mod tests {
         let value = Value::array(vec![Value::Int(7), Value::Bool(true)]);
         let runtime = value_to_runtime(&value);
 
-        assert_eq!(simple_runtime::value::rt_array_len(runtime), 2);
-        assert_eq!(simple_runtime::value::rt_array_get(runtime, 0).as_int(), 7);
-        assert_eq!(simple_runtime::value::rt_array_get(runtime, 1), RuntimeValue::TRUE);
+        assert_eq!(simple_runtime::value::rt_tuple_len(runtime), 2);
+        assert_eq!(simple_runtime::value::rt_tuple_get(runtime, 0).as_int(), 7);
+        assert_eq!(simple_runtime::value::rt_tuple_get(runtime, 1), RuntimeValue::TRUE);
     }
 
     #[test]
-    fn test_value_to_runtime_tuple_as_indexable_array() {
+    fn test_value_to_runtime_tuple_is_runtime_tuple() {
         let runtime = value_to_runtime(&Value::Tuple(vec![Value::Int(3), Value::Int(4)]));
 
-        assert_eq!(simple_runtime::value::rt_array_len(runtime), 2);
-        assert_eq!(simple_runtime::value::rt_array_get(runtime, 0).as_int(), 3);
-        assert_eq!(simple_runtime::value::rt_array_get(runtime, 1).as_int(), 4);
+        assert_eq!(simple_runtime::value::rt_tuple_len(runtime), 2);
+        assert_eq!(simple_runtime::value::rt_tuple_get(runtime, 0).as_int(), 3);
+        assert_eq!(simple_runtime::value::rt_tuple_get(runtime, 1).as_int(), 4);
     }
 
     #[test]
