@@ -1,0 +1,94 @@
+# @tag: unit, gpu, engine2d, vulkan, oracle
+"""
+# Vulkan Compute Oracle Spec
+
+## Overview
+
+A *real* reference test for the Engine2D Vulkan backend: it dispatches real
+SPIR-V compute kernels (`spirv_clear`, `spirv_rect_filled`) through
+`VulkanBackend`, reads the framebuffer back from device memory, and compares
+every pixel against an independent CPU reference oracle computed in pure
+Simple. Unlike the sentinel-style `vulkan_spirv_spec.spl` (which only checks
+that the SPIR-V *selection path* is active), this spec verifies that real GPU
+output equals the expected pixels — the honest "with reference" check.
+
+## Execution requirement (IMPORTANT)
+
+The real `rt_vulkan_*` runtime is only registered in the *classic* interpreter
+(`SIMPLE_EXECUTION_MODE=interpret`). Under the default JIT path the externs
+resolve to the native C stub (`rt_vulkan_device_count(){return 0;}`), and the
+optimized interpreter does not register them either — both report zero devices.
+So the GPU assertion only executes under classic interpret on a Vulkan-capable
+host. When Vulkan is unavailable, the test asserts the *unavailability is
+self-consistent* (backend reports unavailable) rather than silently passing as
+if the GPU were verified — the branch that ran is printed so a reviewer can
+tell which path the harness took.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** N/A
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+
+extern fn rt_vulkan_device_count() -> i64
+
+# Pure-Simple CPU reference oracle: a clear to `bg` followed by a filled rect
+# of `fg` covering [rx, rx+rw) x [ry, ry+rh). Returns expected ARGB per pixel.
+fn oracle_pixel(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32, bg: u32, fg: u32) -> u32:
+    val inside = (x >= rx and x < rx + rw and y >= ry and y < ry + rh)
+    if inside:
+        return fg
+    bg
+
+describe "engine2d vulkan backend compute matches CPU oracle":
+
+    it "real GPU clear+rect equals the CPU reference (classic-interpret Vulkan)":
+        val w: i32 = 16
+        val h: i32 = 8
+        val bg: u32 = 0xFF112233u32
+        val fg: u32 = 0xFFAABBCCu32
+        val rx: i32 = 4
+        val ry: i32 = 2
+        val rw: i32 = 6
+        val rh: i32 = 3
+
+        var be = VulkanBackend.create()
+        val available = be.init(w, h)
+
+        if not available:
+            # Honest unavailable branch: do NOT claim GPU verification. Assert the
+            # runtime is self-consistent about having no usable Vulkan device.
+            print("[vulkan_compute_oracle] UNAVAILABLE_BRANCH (no real Vulkan in this execution mode)\n")
+            expect(rt_vulkan_device_count()).to_equal(0)
+            return
+
+        print("[vulkan_compute_oracle] GPU_BRANCH (real Vulkan dispatch + readback)\n")
+        be.clear(bg)
+        be.draw_rect_filled(rx, ry, rw, rh, fg)
+        val px = be.read_pixels()
+
+        expect(px.len()).to_equal(w * h)
+
+        var mismatches = 0
+        var y = 0
+        while y < h:
+            var x = 0
+            while x < w:
+                val idx = y * w + x
+                val expected = oracle_pixel(x, y, rx, ry, rw, rh, bg, fg)
+                if px[idx] != expected:
+                    mismatches = mismatches + 1
+                x = x + 1
+            y = y + 1
+
+        expect(mismatches).to_equal(0)
