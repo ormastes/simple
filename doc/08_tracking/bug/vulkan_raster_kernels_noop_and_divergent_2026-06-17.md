@@ -43,9 +43,18 @@ After wiring all eight real kernels and measuring per-primitive:
 | line            | untested   | kept no-op                   |
 | blit            | untested   | kept no-op (needs src binding)|
 
-Note rounded_rect was *worse* when wired to its "real" blob (1460 mismatches)
-than as a no-op (140), confirming the blob's algorithm/push-constant layout is
-genuinely wrong, not merely antialiasing rounding.
+Important caveat on the divergent rows: parity vs `SoftwareBackend` only
+adjudicates a kernel when both backends implement the *same primitive*.
+`SoftwareBackend.draw_rounded_rect` (backend_software.spl:259) draws an
+**outline** (4 edges + 4 corner arcs), whereas the GPU `spirv_rounded_rect`
+blob appears to **fill** (its no-op mismatch of ~140 ≈ the rounded-rect
+*perimeter*, and the wired mismatch of 1460 ≈ the *fill area*). So that row is a
+primitive-semantics mismatch between the two backends, NOT proof the GPU blob is
+buggy — it cannot be decided by parity. `circle_outline` (small ~68-96
+mismatch) is likely a thickness/coverage difference between two outlines.
+`gradient_rect` (~1400 ≈ fill area; both backends fill) is a genuine divergence
+worth real investigation. None of these were shipped — all kept no-op until each
+is checked against a *first-principles* oracle, not just cross-backend parity.
 
 ## Fix applied (this change)
 `backend_vulkan.spl` now wires the three verified-bit-exact kernels
@@ -55,10 +64,13 @@ fixed and re-verified. Guarded by the cross-backend parity scenario in
 `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`.
 
 ## Still open (not fixed — deliberately not shipped unverified)
-1. `circle_outline`, `rounded_rect`, `gradient_rect` SPIR-V blobs render
-   incorrectly vs the CPU reference — debug each kernel's GLSL→SPIR-V
-   (`backend_vulkan_glsl.spl`) push-constant layout / fill predicate, then wire
-   + verify against `SoftwareBackend`.
+1. `circle_outline`, `rounded_rect`, `gradient_rect` SPIR-V blobs diverge from
+   `SoftwareBackend`. First decide the intended primitive semantics
+   (`draw_rounded_rect` = fill or outline? — the two backends currently
+   disagree) and build a first-principles oracle, then debug each kernel's
+   GLSL→SPIR-V (`backend_vulkan_glsl.spl`) push-constant layout / predicate,
+   wire, and verify. Do NOT use cross-backend parity alone where the backends
+   implement different primitives.
 2. `line` and `blit` kernels untested (blit needs a source-buffer binding the
    parity probe doesn't set up).
 3. `vulkan_session.spl` carries the identical no-op wiring; it was left
