@@ -126,29 +126,28 @@ pub(super) fn exec_if(
                 env.insert(name, val);
             }
             return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
-        } else if let Some(block) = &if_stmt.else_block {
-            // Pattern didn't match - execute else block
-            return exec_block(block, env, functions, classes, enums, impl_methods);
         }
-        return Ok(Control::Next);
-    }
-
-    // Normal if condition
-    // For if~ (is_suspend), await the condition value before checking truthiness
-    let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
-    let cond_val = if if_stmt.is_suspend {
-        await_value(cond_val)?
+        // Pattern didn't match - fall through to elif branches / else below.
+        // (Previously this returned the else block directly, silently skipping
+        // every `elif`/`elif val ...` branch.)
     } else {
-        cond_val
-    };
+        // Normal if condition
+        // For if~ (is_suspend), await the condition value before checking truthiness
+        let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let cond_val = if if_stmt.is_suspend {
+            await_value(cond_val)?
+        } else {
+            cond_val
+        };
 
-    let decision_result = cond_val.truthy();
+        let decision_result = cond_val.truthy();
 
-    // COVERAGE: Record decision for if statement
-    record_decision_coverage_sffi("<source>", if_stmt.span.line, if_stmt.span.column, decision_result);
+        // COVERAGE: Record decision for if statement
+        record_decision_coverage_sffi("<source>", if_stmt.span.line, if_stmt.span.column, decision_result);
 
-    if decision_result {
-        return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+        if decision_result {
+            return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
+        }
     }
 
     for (idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
@@ -4662,30 +4661,26 @@ pub(crate) fn exec_if_core(
                 Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                 other => Ok((other, Value::Nil)),
             };
-        } else if let Some(block) = &if_stmt.else_block {
-            let (flow, last_val) = exec_block_fn(block, env, functions, classes, enums, impl_methods)?;
+        }
+        // Pattern didn't match - fall through to elif branches / else below.
+        // (Previously this returned the else block directly, silently skipping
+        // every `elif`/`elif val ...` branch in if-expression position.)
+    } else {
+        // Normal if condition
+        let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let cond_val = if if_stmt.is_suspend {
+            await_value(cond_val)?
+        } else {
+            cond_val
+        };
+
+        if cond_val.truthy() {
+            let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
             return match flow {
                 Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
                 other => Ok((other, Value::Nil)),
             };
         }
-        return Ok((Control::Next, Value::Nil));
-    }
-
-    // Normal if condition
-    let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
-    let cond_val = if if_stmt.is_suspend {
-        await_value(cond_val)?
-    } else {
-        cond_val
-    };
-
-    if cond_val.truthy() {
-        let (flow, last_val) = exec_block_fn(&if_stmt.then_block, env, functions, classes, enums, impl_methods)?;
-        return match flow {
-            Control::Next => Ok((Control::Next, last_val.unwrap_or(Value::Nil))),
-            other => Ok((other, Value::Nil)),
-        };
     }
 
     for (pattern, cond, block) in if_stmt.elif_branches.iter() {

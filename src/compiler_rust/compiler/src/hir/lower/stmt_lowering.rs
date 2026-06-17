@@ -347,17 +347,126 @@ impl Lowerer {
                     };
 
                     for (elif_pattern, elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
-                        let elif_condition = if let Some(ep) = elif_pattern {
-                            self.lower_pattern_condition_stmt(subject_idx, subject_ty, ep, ctx)?
+                        if let Some(ep) = elif_pattern {
+                            // `elif val Some(x) = elif_cond:` — mirror the first
+                            // branch: each elif has its OWN subject (elif_cond),
+                            // its own pattern condition, and its own bindings.
+                            // (Previously the elif reused the first branch's
+                            // subject and never registered the binding, so the
+                            // body saw `Unknown variable: x` and matched the
+                            // wrong value.)
+                            let elif_subject_hir = self.lower_expr(elif_cond, ctx)?;
+                            let elif_subject_ty = elif_subject_hir.ty;
+                            let elif_subject_idx = ctx.locals.len();
+                            ctx.add_local(
+                                "$if_let_subject_elif".to_string(),
+                                elif_subject_ty,
+                                Mutability::Immutable,
+                            );
+                            let elif_store = HirStmt::Let {
+                                local_index: elif_subject_idx,
+                                ty: elif_subject_ty,
+                                value: Some(elif_subject_hir),
+                            };
+
+                            let elif_condition = self.lower_pattern_condition_stmt(
+                                elif_subject_idx,
+                                elif_subject_ty,
+                                ep,
+                                ctx,
+                            )?;
+
+                            let elif_bindings = self.extract_pattern_bindings(ep, elif_subject_ty);
+                            let elif_mutability = if matches!(ep, Pattern::MutIdentifier(_)) {
+                                Mutability::Mutable
+                            } else {
+                                Mutability::Immutable
+                            };
+                            for (name, ty) in &elif_bindings {
+                                ctx.add_local(name.clone(), *ty, elif_mutability);
+                            }
+
+                            let mut elif_binding_stmts = Vec::new();
+                            if let Pattern::Enum {
+                                payload: Some(payload_patterns),
+                                ..
+                            } = ep
+                            {
+                                let binding_type_map: std::collections::HashMap<String, TypeId> =
+                                    elif_bindings.iter().cloned().collect();
+                                for (i, p) in payload_patterns.iter().enumerate() {
+                                    if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) =
+                                        p
+                                    {
+                                        if let Some(local_idx) = ctx.local_map.get(name) {
+                                            let local_idx = *local_idx;
+                                            let binding_ty = binding_type_map
+                                                .get(name)
+                                                .copied()
+                                                .unwrap_or(TypeId::ANY);
+                                            let payload_expr = HirExpr {
+                                                kind: HirExprKind::BuiltinCall {
+                                                    name: "rt_enum_payload".to_string(),
+                                                    args: vec![HirExpr {
+                                                        kind: HirExprKind::Local(elif_subject_idx),
+                                                        ty: elif_subject_ty,
+                                                    }],
+                                                },
+                                                ty: if payload_patterns.len() == 1 {
+                                                    binding_ty
+                                                } else {
+                                                    TypeId::ANY
+                                                },
+                                            };
+                                            let value = if payload_patterns.len() == 1 {
+                                                payload_expr
+                                            } else {
+                                                HirExpr {
+                                                    kind: HirExprKind::Index {
+                                                        receiver: Box::new(payload_expr),
+                                                        index: Box::new(HirExpr {
+                                                            kind: HirExprKind::Integer(i as i64),
+                                                            ty: TypeId::I64,
+                                                        }),
+                                                    },
+                                                    ty: binding_ty,
+                                                }
+                                            };
+                                            elif_binding_stmts.push(HirStmt::Let {
+                                                local_index: local_idx,
+                                                ty: binding_ty,
+                                                value: Some(value),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+
+                            let mut elif_then = Vec::new();
+                            elif_then.extend(elif_binding_stmts);
+                            elif_then.extend(self.lower_block(elif_body, ctx)?);
+
+                            for (name, _) in &elif_bindings {
+                                ctx.local_map.remove(name);
+                            }
+
+                            else_block = Some(vec![
+                                elif_store,
+                                HirStmt::If {
+                                    condition: elif_condition,
+                                    then_block: elif_then,
+                                    else_block,
+                                },
+                            ]);
                         } else {
-                            self.lower_expr(elif_cond, ctx)?
-                        };
-                        let elif_then = self.lower_block(elif_body, ctx)?;
-                        else_block = Some(vec![HirStmt::If {
-                            condition: elif_condition,
-                            then_block: elif_then,
-                            else_block,
-                        }]);
+                            let elif_condition = self.lower_expr(elif_cond, ctx)?;
+                            let elif_then = self.lower_block(elif_body, ctx)?;
+                            else_block = Some(vec![HirStmt::If {
+                                condition: elif_condition,
+                                then_block: elif_then,
+                                else_block,
+                            }]);
+                        }
                     }
 
                     let mut result = vec![store_stmt];

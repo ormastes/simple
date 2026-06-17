@@ -1,0 +1,70 @@
+"""
+# elif pattern-binding regression
+
+Regression for the silent wrong-branch bug where `elif val Some(x) = expr:`
+was mishandled in BOTH execution modes:
+
+- the interpreter's if-let paths (`exec_if` for statements, `exec_if_core` for
+  if-expressions) returned the `else` block directly when the FIRST pattern
+  failed, skipping every `elif` branch entirely (silent wrong result, no error);
+- the JIT HIR lowerer reused the first branch's subject for elif conditions and
+  never registered the elif binding (`Unknown variable: x`, forcing interpreter
+  fallback for the whole module).
+
+Without the fix these cases return the `else` value (0) instead of the matching
+elif value. Verified to FAIL on the pre-fix compiler and PASS after. Each result
+is bound to an intermediate `val` before `expect` so the assertion actually
+exercises the function under the test runner.
+"""
+
+use std.spec.*
+
+class Box:
+    v: i32
+    fn val_of() -> i32:
+        self.v
+
+# elif pattern as a STATEMENT (interpreter `exec_if` path).
+fn pick_stmt(a: Option<Box>, b: Option<Box>) -> i32:
+    var out: i32 = -1
+    if val Some(x) = a:
+        out = x.val_of()
+    elif val Some(y) = b:
+        out = y.val_of()
+    else:
+        out = 0
+    out
+
+# elif pattern as the implicit-return EXPRESSION (interpreter `exec_if_core` path).
+fn pick_expr(a: Option<Box>, b: Option<Box>) -> i32:
+    if val Some(x) = a:
+        x.val_of()
+    elif val Some(y) = b:
+        y.val_of()
+    else:
+        0
+
+# A later pattern elif in a chain.
+fn pick_third(a: Option<Box>, b: Option<Box>, c: Option<Box>) -> i32:
+    if val Some(x) = a:
+        x.val_of()
+    elif val Some(y) = b:
+        y.val_of()
+    elif val Some(z) = c:
+        z.val_of()
+    else:
+        0
+
+describe "elif pattern binding":
+
+    it "binds the elif value (statement form)":
+        val r = pick_stmt(None, Some(Box(v: 7)))
+        expect(r).to_equal(7)
+
+    it "binds the elif value (expression form)":
+        val r = pick_expr(None, Some(Box(v: 7)))
+        expect(r).to_equal(7)
+
+    it "reaches a later pattern elif in a chain":
+        val r = pick_third(None, None, Some(Box(v: 9)))
+        expect(r).to_equal(9)
