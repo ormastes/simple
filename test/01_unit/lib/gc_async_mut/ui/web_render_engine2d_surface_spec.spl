@@ -35,7 +35,26 @@ are themselves runner-verified directly in vulkan_compute_oracle_spec.spl.
 
 use std.spec.*
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_scene}
+
+extern fn rt_vulkan_device_count() -> i64
+
+# Render the web scene on a fresh SoftwareBackend (the direct reference) — used
+# as the per-it comparison oracle, matching how the oracle spec builds its
+# reference with SoftwareBackend.create() rather than Engine2D("software").
+fn software_web_scene() -> [u32]:
+    val scene = simple_web_render_html_to_scene(HTML, 48, 32)
+    var sw = SoftwareBackend.create()
+    sw.init(48, 32)
+    sw.clear(0xFFFFFFFFu32)
+    var i = 0
+    while i < scene.commands.len():
+        if scene.commands[i].kind == "fill_rect":
+            sw.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
+        i = i + 1
+    sw.read_pixels()
 
 # NOTE: avoid CSS `{...}` braces in this literal — Simple treats `{ident}` in
 # string literals as interpolation. Use an inline style attribute instead.
@@ -74,6 +93,22 @@ fn pixel_mismatches(a: [u32], b: [u32]) -> i64:
 
 describe "web-render surface composited through Engine2D backends":
 
+    # Prime the real rt_vulkan_* device path with a DIRECT VulkanBackend call in
+    # its own `it`, executed before the Engine2D-routed GPU it below. In the
+    # SSpec runner the indirect Engine2D->Vulkan path only resolves the real
+    # device after a direct VulkanBackend has run in this spec process (the same
+    # priming the oracle spec gets from its direct-Vulkan compute its).
+    it "primes the real Vulkan device for the Engine2D-routed web render":
+        var vb = VulkanBackend.create()
+        val ok = vb.init(32, 32)
+        if not ok:
+            expect(rt_vulkan_device_count()).to_equal(0)
+            return
+        vb.clear(0xFF112233u32)
+        val px = vb.read_pixels()
+        expect(px.len()).to_equal(32 * 32)
+        expect(px[0]).to_equal(0xFF112233u32)
+
     it "software reference composites the page background into a uniform opaque surface":
         val px = web_scene_pixels("software")
         expect(px.len()).to_equal(48 * 32)
@@ -90,63 +125,58 @@ describe "web-render surface composited through Engine2D backends":
         expect(uniform).to_equal(true)
         expect(alpha_ok).to_equal(true)
 
-    # GPU-backend coverage. IMPORTANT: the Engine2D create+draw must be INLINE in
-    # this `it` — in the SSpec runner, routing the GPU backend creation through a
-    # helper fn (or the imported wrapper module) makes Engine2D fall back to CPU,
-    # whereas an inline create yields the real GPU backend (same as
-    # vulkan_compute_oracle_spec). All three backends are checked in one `it`
-    # because repeated Vulkan creation across separate `it` blocks is unreliable
-    # in the runner. Each backend must match the Software reference exactly WHEN
-    # it genuinely rendered through that backend; otherwise it must report a name
-    # that does NOT claim the backend (truthful fallback). No false-greening.
-    it "Vulkan / Metal-on-Vulkan / DirectX-on-Vulkan web render match the software reference (inline)":
+    # GPU-backend coverage — one Engine2D-GPU backend per `it`, created+drawn
+    # INLINE (helper fns / wrapper modules make the runner fall back), compared
+    # against a direct SoftwareBackend reference. This mirrors the oracle spec's
+    # working structure: a direct-Vulkan prime it first, then one Engine2D-GPU
+    # per it. Each must match the reference exactly WHEN it genuinely rendered
+    # through that backend; otherwise it reports a name that does NOT claim the
+    # backend (truthful fallback). No false-greening.
+
+    it "Vulkan-backed web render matches the software reference":
+        val sw = software_web_scene()
         val scene = simple_web_render_html_to_scene(HTML, 48, 32)
+        var r = Engine2D.create_requested_backend(48, 32, "vulkan")
+        var eng = r.unwrap()
+        val name = eng.backend_name()
+        eng.clear(0xFFFFFFFFu32)
+        var i = 0
+        while i < scene.commands.len():
+            if scene.commands[i].kind == "fill_rect":
+                eng.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
+            i = i + 1
+        val px = eng.read_pixels()
+        val ok = if name == "vulkan": pixel_mismatches(px, sw) == 0 and px.len() == 48 * 32 else: name != "vulkan"
+        expect(ok).to_equal(true)
 
-        var rsw = Engine2D.create_requested_backend(48, 32, "software")
-        var esw = rsw.unwrap()
-        esw.clear(0xFFFFFFFFu32)
-        var si = 0
-        while si < scene.commands.len():
-            if scene.commands[si].kind == "fill_rect":
-                esw.draw_rect_filled(0, 0, 48, 32, scene.commands[si].color | 0xFF000000u32)
-            si = si + 1
-        val sw = esw.read_pixels()
+    it "Metal-on-Vulkan web render matches the software reference":
+        val sw = software_web_scene()
+        val scene = simple_web_render_html_to_scene(HTML, 48, 32)
+        var r = Engine2D.create_requested_backend(48, 32, "metal")
+        var eng = r.unwrap()
+        val name = eng.backend_name()
+        eng.clear(0xFFFFFFFFu32)
+        var i = 0
+        while i < scene.commands.len():
+            if scene.commands[i].kind == "fill_rect":
+                eng.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
+            i = i + 1
+        val px = eng.read_pixels()
+        val ok = if name == "metal-on-vulkan": pixel_mismatches(px, sw) == 0 and px.len() == 48 * 32 else: name != "metal-on-vulkan"
+        expect(ok).to_equal(true)
 
-        var rvk = Engine2D.create_requested_backend(48, 32, "vulkan")
-        var evk = rvk.unwrap()
-        val vk_name = evk.backend_name()
-        evk.clear(0xFFFFFFFFu32)
-        var vi = 0
-        while vi < scene.commands.len():
-            if scene.commands[vi].kind == "fill_rect":
-                evk.draw_rect_filled(0, 0, 48, 32, scene.commands[vi].color | 0xFF000000u32)
-            vi = vi + 1
-        val vk = evk.read_pixels()
-        val vk_ok = if vk_name == "vulkan": pixel_mismatches(vk, sw) == 0 and vk.len() == 48 * 32 else: vk_name != "vulkan"
-        expect(vk_ok).to_equal(true)
-
-        var rmt = Engine2D.create_requested_backend(48, 32, "metal")
-        var emt = rmt.unwrap()
-        val mt_name = emt.backend_name()
-        emt.clear(0xFFFFFFFFu32)
-        var mi = 0
-        while mi < scene.commands.len():
-            if scene.commands[mi].kind == "fill_rect":
-                emt.draw_rect_filled(0, 0, 48, 32, scene.commands[mi].color | 0xFF000000u32)
-            mi = mi + 1
-        val mt = emt.read_pixels()
-        val mt_ok = if mt_name == "metal-on-vulkan": pixel_mismatches(mt, sw) == 0 and mt.len() == 48 * 32 else: mt_name != "metal-on-vulkan"
-        expect(mt_ok).to_equal(true)
-
-        var rdx = Engine2D.create_requested_backend(48, 32, "directx-on-vulkan")
-        var edx = rdx.unwrap()
-        val dx_name = edx.backend_name()
-        edx.clear(0xFFFFFFFFu32)
-        var di = 0
-        while di < scene.commands.len():
-            if scene.commands[di].kind == "fill_rect":
-                edx.draw_rect_filled(0, 0, 48, 32, scene.commands[di].color | 0xFF000000u32)
-            di = di + 1
-        val dx = edx.read_pixels()
-        val dx_ok = if dx_name == "directx-on-vulkan": pixel_mismatches(dx, sw) == 0 and dx.len() == 48 * 32 else: dx_name != "directx-on-vulkan"
-        expect(dx_ok).to_equal(true)
+    it "DirectX-on-Vulkan web render matches the software reference":
+        val sw = software_web_scene()
+        val scene = simple_web_render_html_to_scene(HTML, 48, 32)
+        var r = Engine2D.create_requested_backend(48, 32, "directx-on-vulkan")
+        var eng = r.unwrap()
+        val name = eng.backend_name()
+        eng.clear(0xFFFFFFFFu32)
+        var i = 0
+        while i < scene.commands.len():
+            if scene.commands[i].kind == "fill_rect":
+                eng.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
+            i = i + 1
+        val px = eng.read_pixels()
+        val ok = if name == "directx-on-vulkan": pixel_mismatches(px, sw) == 0 and px.len() == 48 * 32 else: name != "directx-on-vulkan"
+        expect(ok).to_equal(true)
