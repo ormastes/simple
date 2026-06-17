@@ -47,6 +47,7 @@ val _OP_UDP_BIND: i64 = 14
 val _OP_SEND_BYTES: i64 = 15
 
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_write_bytes(fd: i64, data: [u8]) -> i64
@@ -66,7 +67,8 @@ extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
 extern fn rt_event_loop_create() -> i64
 extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
 extern fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool
-extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
+extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> i64
+extern fn rt_event_loop_poll_get_fd(index: i64) -> i64
 extern fn rt_event_loop_close(loop_fd: i64) -> bool
 
 struct Completion:
@@ -89,27 +91,35 @@ class IoDriver:
     _c_result: [i64]
     _c_flags: [i64]
     _c_data: [text]
+    _c_fd: [i64]
+    _c_recv_byte_data: [[u8]]
     _next_id: i64
     _next_fh: i64
     _fh_ids: [i64]
     _fh_data: [text]
-    _bytes_pending: Dict<i64, [u8]>
-    _recv_bytes: Dict<i64, [u8]>
+    _bytes_pending_ids: [i64]
+    _bytes_pending_data: [[u8]]
+    _recv_byte_ids: [i64]
+    _recv_byte_data: [[u8]]
     _ev_fd: i64
-    _ev_registered: Dict<i64, bool>
+    _ev_registered: [i64]
+    _ev_registered_modes: [i64]
 
     static fn new() -> IoDriver:
         IoDriver(
             _p_id: [], _p_type: [], _p_fd: [], _p_fd2: [],
             _p_data: [], _p_size: [], _p_offset: [], _p_length: [],
             _p_path: [], _p_time: [],
-            _c_id: [], _c_result: [], _c_flags: [], _c_data: [],
+            _c_id: [], _c_result: [], _c_flags: [], _c_data: [], _c_fd: [], _c_recv_byte_data: [],
             _next_id: 1, _next_fh: 10000,
             _fh_ids: [], _fh_data: [],
-            _bytes_pending: {},
-            _recv_bytes: {},
+            _bytes_pending_ids: [],
+            _bytes_pending_data: [],
+            _recv_byte_ids: [],
+            _recv_byte_data: [],
             _ev_fd: -2,
-            _ev_registered: {}
+            _ev_registered: [],
+            _ev_registered_modes: []
         )
 
     static fn with_depth(depth: i64) -> IoDriver:
@@ -135,10 +145,23 @@ class IoDriver:
         id
 
     me _complete(id: i64, result: i64, flags: i64, data: text):
+        self._complete_fd(id, result, flags, data, -1)
+
+    me _complete_fd(id: i64, result: i64, flags: i64, data: text, fd: i64):
         self._c_id.push(id)
         self._c_result.push(result)
         self._c_flags.push(flags)
         self._c_data.push(data)
+        self._c_fd.push(fd)
+        self._c_recv_byte_data.push([])
+
+    me _complete_fd_bytes(id: i64, result: i64, flags: i64, data: text, fd: i64, bytes: [u8]):
+        self._c_id.push(id)
+        self._c_result.push(result)
+        self._c_flags.push(flags)
+        self._c_data.push(data)
+        self._c_fd.push(fd)
+        self._c_recv_byte_data.push(bytes)
 
     fn _now_ms(self) -> i64:
         rt_time_now_unix_micros() / 1000
@@ -167,79 +190,227 @@ class IoDriver:
     # Passing arrays to a helper function and pushing onto them only modifies
     # local copies. All keep-pending logic is now inlined at each call site.
 
-    me _ev_register_read(fd: i64):
+    me _i64_list_without_value(items: [i64], value: i64) -> [i64]:
+        var result: [i64] = []
+        var i = 0
+        while i < items.len():
+            if items[i] != value:
+                result.push(items[i])
+            i = i + 1
+        result
+
+    me _i64_list_without_index(items: [i64], index: i64) -> [i64]:
+        var result: [i64] = []
+        var i = 0
+        while i < items.len():
+            if i != index:
+                result.push(items[i])
+            i = i + 1
+        result
+
+    fn _op_interest_mode(self, op_type: i64) -> i64:
+        if op_type == _OP_ACCEPT or op_type == _OP_RECV or op_type == _OP_UDP_RECV:
+            return 0
+        if op_type == _OP_SEND or op_type == _OP_SEND_BYTES or op_type == _OP_SENDFILE or op_type == _OP_UDP_SEND:
+            return 1
+        -1
+
+    fn _merge_interest_modes(self, current: i64, next: i64) -> i64:
+        if current < 0:
+            return next
+        if next < 0:
+            return current
+        if current == next:
+            return current
+        2
+
+    fn _pending_interest_for_fd(self, fd: i64, excluding_op_id: i64) -> i64:
+        var mode: i64 = -1
+        var i = 0
+        while i < self._p_id.len() and i < self._p_type.len() and i < self._p_fd.len():
+            if self._p_fd[i] == fd and self._p_id[i] != excluding_op_id:
+                mode = self._merge_interest_modes(mode, self._op_interest_mode(self._p_type[i]))
+            i = i + 1
+        mode
+
+    me _ev_register_mode(fd: i64, mode: i64):
+        if fd < 0:
+            return
         if self._ev_fd == -2:
             self._ev_fd = rt_event_loop_create()
         if self._ev_fd < 0:
             return
-        if self._ev_registered.get(fd).?:
-            return
-        rt_event_loop_register(self._ev_fd, fd, 0, fd, false)
-        self._ev_registered[fd] = true
+        var i = 0
+        while i < self._ev_registered.len():
+            if self._ev_registered[i] == fd:
+                var next_mode = mode
+                if i < self._ev_registered_modes.len():
+                    next_mode = self._merge_interest_modes(self._ev_registered_modes[i], mode)
+                if i < self._ev_registered_modes.len() and self._ev_registered_modes[i] == next_mode:
+                    return
+                rt_event_loop_deregister(self._ev_fd, fd)
+                if not rt_event_loop_register(self._ev_fd, fd, next_mode, fd, false):
+                    self._ev_registered = self._i64_list_without_value(self._ev_registered, fd)
+                    if i < self._ev_registered_modes.len():
+                        self._ev_registered_modes = self._i64_list_without_index(self._ev_registered_modes, i)
+                    return
+                if i < self._ev_registered_modes.len():
+                    self._ev_registered_modes[i] = next_mode
+                return
+            i = i + 1
+        if not rt_event_loop_register(self._ev_fd, fd, mode, fd, false):
+            rt_event_loop_deregister(self._ev_fd, fd)
+            if not rt_event_loop_register(self._ev_fd, fd, mode, fd, false):
+                return
+        self._ev_registered.push(fd)
+        self._ev_registered_modes.push(mode)
+
+    me _ev_register_read(fd: i64):
+        self._ev_register_mode(fd, 0)
+
+    me _ev_register_write(fd: i64):
+        self._ev_register_mode(fd, 1)
 
     me _ev_deregister(fd: i64):
         if self._ev_fd < 0:
             return
-        if not self._ev_registered.get(fd).?:
+        var found = false
+        var next_registered: [i64] = []
+        var next_modes: [i64] = []
+        var i = 0
+        while i < self._ev_registered.len():
+            if self._ev_registered[i] == fd:
+                found = true
+            else:
+                next_registered.push(self._ev_registered[i])
+                if i < self._ev_registered_modes.len():
+                    next_modes.push(self._ev_registered_modes[i])
+            i = i + 1
+        if not found:
             return
         rt_event_loop_deregister(self._ev_fd, fd)
-        self._ev_registered.remove(fd)
+        self._ev_registered = next_registered
+        self._ev_registered_modes = next_modes
+
+    me _ev_complete_fd_interest(fd: i64, completed_op_id: i64):
+        val next_mode = self._pending_interest_for_fd(fd, completed_op_id)
+        self._ev_deregister(fd)
+        if next_mode < 0:
+            return
+        if self._ev_fd < 0:
+            return
+        if not rt_event_loop_register(self._ev_fd, fd, next_mode, fd, false):
+            return
+        self._ev_registered.push(fd)
+        self._ev_registered_modes.push(next_mode)
+
+    me _ready_contains(ready_fds: [i64], fd: i64) -> bool:
+        var i = 0
+        while i < ready_fds.len():
+            if ready_fds[i] == fd:
+                return true
+            i = i + 1
+        false
+
+    me _store_recv_bytes(op_id: i64, data: [u8]):
+        var i = 0
+        while i < self._recv_byte_ids.len() and i < self._recv_byte_data.len():
+            if self._recv_byte_ids[i] == op_id:
+                self._recv_byte_data[i] = data
+                return
+            i = i + 1
+        self._recv_byte_ids.push(op_id)
+        self._recv_byte_data.push(data)
+
+    me _load_recv_bytes(op_id: i64) -> [u8]:
+        var i = 0
+        while i < self._recv_byte_ids.len() and i < self._recv_byte_data.len():
+            if self._recv_byte_ids[i] == op_id:
+                return self._recv_byte_data[i]
+            i = i + 1
+        []
+
+    me _store_send_bytes(op_id: i64, data: [u8]):
+        var i = 0
+        while i < self._bytes_pending_ids.len() and i < self._bytes_pending_data.len():
+            if self._bytes_pending_ids[i] == op_id:
+                self._bytes_pending_data[i] = data
+                return
+            i = i + 1
+        self._bytes_pending_ids.push(op_id)
+        self._bytes_pending_data.push(data)
+
+    me _load_send_bytes(op_id: i64) -> [u8]:
+        var i = 0
+        while i < self._bytes_pending_ids.len() and i < self._bytes_pending_data.len():
+            if self._bytes_pending_ids[i] == op_id:
+                return self._bytes_pending_data[i]
+            i = i + 1
+        []
 
     # ---- Network Operations ----
 
     me submit_accept(listen_fd: i64) -> i64:
         self._ev_register_read(listen_fd)
-        self._push_op(_OP_ACCEPT, listen_fd, 0, "", 0, 0, 0, "", 0)
+        return self._push_op(_OP_ACCEPT, listen_fd, 0, "", 0, 0, 0, "", 0)
 
     me submit_connect(fd: i64, addr: text, port: i64) -> i64:
-        self._push_op(_OP_CONNECT, fd, port, addr, 0, 0, 0, "", 0)
+        var target = addr
+        if port > 0:
+            target = "{addr}:{port}"
+        return self._push_op(_OP_CONNECT, 0, 1000, target, 0, 0, 0, "", 0)
+
+    me submit_connect_timeout(addr: text, timeout_ms: i64) -> i64:
+        return self._push_op(_OP_CONNECT, 0, timeout_ms, addr, 0, 0, 0, "", 0)
 
     me submit_recv(fd: i64, buf_size: i64) -> i64:
         self._ev_register_read(fd)
-        self._push_op(_OP_RECV, fd, 0, "", buf_size, 0, 0, "", 0)
+        return self._push_op(_OP_RECV, fd, 0, "", buf_size, 0, 0, "", 0)
 
     me submit_send(fd: i64, data: text) -> i64:
-        self._push_op(_OP_SEND, fd, 0, data, 0, 0, data.len(), "", 0)
+        self._ev_register_write(fd)
+        return self._push_op(_OP_SEND, fd, 0, data, 0, 0, data.len(), "", 0)
 
     me submit_send_bytes(fd: i64, data: [u8]) -> i64:
+        self._ev_register_write(fd)
         val id = self._push_op(_OP_SEND_BYTES, fd, 0, "", 0, 0, data.len(), "", 0)
-        self._bytes_pending[id] = data
-        id
+        self._store_send_bytes(id, data)
+        return id
 
     me submit_sendfile(sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
-        self._push_op(_OP_SENDFILE, sock_fd, file_fd, "", 0, offset, len, "", 0)
+        return self._push_op(_OP_SENDFILE, sock_fd, file_fd, "", 0, offset, len, "", 0)
 
     # ---- UDP Operations ----
 
     me submit_udp_recv(fd: i64, buf_size: i64) -> i64:
         self._ev_register_read(fd)
-        self._push_op(_OP_UDP_RECV, fd, 0, "", buf_size, 0, 0, "", 0)
+        return self._push_op(_OP_UDP_RECV, fd, 0, "", buf_size, 0, 0, "", 0)
 
     me submit_udp_send(fd: i64, data: text, addr: text) -> i64:
-        self._push_op(_OP_UDP_SEND, fd, 0, data, 0, 0, data.len(), addr, 0)
+        return self._push_op(_OP_UDP_SEND, fd, 0, data, 0, 0, data.len(), addr, 0)
 
     # ---- File I/O Operations ----
 
     me submit_read(fd: i64, buf_size: i64, offset: i64) -> i64:
-        self._push_op(_OP_READ, fd, 0, "", buf_size, offset, 0, "", 0)
+        return self._push_op(_OP_READ, fd, 0, "", buf_size, offset, 0, "", 0)
 
     me submit_write(fd: i64, data: text, offset: i64) -> i64:
-        self._push_op(_OP_WRITE, fd, 0, data, 0, offset, data.len(), "", 0)
+        return self._push_op(_OP_WRITE, fd, 0, data, 0, offset, data.len(), "", 0)
 
     me submit_open(path: text, flags: i64, mode: i64) -> i64:
-        self._push_op(_OP_OPEN, flags, mode, "", 0, 0, 0, path, 0)
+        return self._push_op(_OP_OPEN, flags, mode, "", 0, 0, 0, path, 0)
 
     me submit_close(fd: i64) -> i64:
-        self._push_op(_OP_CLOSE, fd, 0, "", 0, 0, 0, "", 0)
+        return self._push_op(_OP_CLOSE, fd, 0, "", 0, 0, 0, "", 0)
 
     me submit_fsync(fd: i64) -> i64:
-        self._push_op(_OP_FSYNC, fd, 0, "", 0, 0, 0, "", 0)
+        return self._push_op(_OP_FSYNC, fd, 0, "", 0, 0, 0, "", 0)
 
     # ---- Timer ----
 
     me submit_timeout(timeout_ms: i64) -> i64:
         val target = self._now_ms() + timeout_ms
-        self._push_op(_OP_TIMEOUT, 0, 0, "", 0, 0, 0, "", target)
+        return self._push_op(_OP_TIMEOUT, 0, 0, "", 0, 0, 0, "", target)
 
     # ---- Cancellation ----
 
@@ -304,18 +475,72 @@ class IoDriver:
         self._c_result = []
         self._c_flags = []
         self._c_data = []
-        self._recv_bytes = {}
+        self._c_fd = []
+        self._c_recv_byte_data = []
+        self._recv_byte_ids = []
+        self._recv_byte_data = []
 
-        var ready: Dict<i64, bool> = {}
+        var accept_fast_index: i64 = -1
+        var accept_scan = 0
+        while accept_scan < self._p_id.len():
+            if self._p_type[accept_scan] == _OP_ACCEPT:
+                accept_fast_index = accept_scan
+                accept_scan = self._p_id.len()
+            else:
+                accept_scan = accept_scan + 1
+        if accept_fast_index >= 0 and max > 0:
+            val accept_ms = if self._p_id.len() > 1: 1 elif timeout_ms > 0: timeout_ms else: 1
+            val accept_res = rt_io_tcp_accept_timeout(self._p_fd[accept_fast_index], accept_ms)
+            if accept_res >= 0:
+                self._complete_fd(self._p_id[accept_fast_index], accept_res, 0, "", self._p_fd[accept_fast_index])
+                var keep_id: [i64] = []
+                var keep_type: [i64] = []
+                var keep_fd: [i64] = []
+                var keep_fd2: [i64] = []
+                var keep_data: [text] = []
+                var keep_size: [i64] = []
+                var keep_offset: [i64] = []
+                var keep_length: [i64] = []
+                var keep_path: [text] = []
+                var keep_time: [i64] = []
+                var keep_i = 0
+                while keep_i < self._p_id.len():
+                    if keep_i != accept_fast_index:
+                        keep_id.push(self._p_id[keep_i])
+                        keep_type.push(self._p_type[keep_i])
+                        keep_fd.push(self._p_fd[keep_i])
+                        keep_fd2.push(self._p_fd2[keep_i])
+                        keep_data.push(self._p_data[keep_i])
+                        keep_size.push(self._p_size[keep_i])
+                        keep_offset.push(self._p_offset[keep_i])
+                        keep_length.push(self._p_length[keep_i])
+                        keep_path.push(self._p_path[keep_i])
+                        keep_time.push(self._p_time[keep_i])
+                    keep_i = keep_i + 1
+                self._p_id = keep_id
+                self._p_type = keep_type
+                self._p_fd = keep_fd
+                self._p_fd2 = keep_fd2
+                self._p_data = keep_data
+                self._p_size = keep_size
+                self._p_offset = keep_offset
+                self._p_length = keep_length
+                self._p_path = keep_path
+                self._p_time = keep_time
+                return self._c_id.len()
+
+        var ready_fds: [i64] = []
         var has_ev = self._ev_fd >= 0
         var ev_has_results = false
         if has_ev:
-            val raw_ev = rt_event_loop_poll(self._ev_fd, 64, 0)
+            val raw_count = rt_event_loop_poll(self._ev_fd, 64, timeout_ms)
             var ri = 0
-            while ri + 2 < raw_ev.len():
-                ready[raw_ev[ri]] = true
-                ev_has_results = true
-                ri = ri + 3
+            while ri < raw_count:
+                val ready_fd = rt_event_loop_poll_get_fd(ri)
+                if ready_fd >= 0:
+                    ready_fds.push(ready_fd)
+                    ev_has_results = true
+                ri = ri + 1
 
         var np_id: [i64] = []
         var np_type: [i64] = []
@@ -328,7 +553,6 @@ class IoDriver:
         var np_path: [text] = []
         var np_time: [i64] = []
 
-        var accept_idx: i64 = -1
         var i = 0
 
         while i < self._p_id.len():
@@ -351,35 +575,70 @@ class IoDriver:
             val oid = self._p_id[i]
 
             if ot == _OP_ACCEPT:
-                accept_idx = i
+                val a_ms = if self._c_id.len() > 0: 1 elif timeout_ms > 0: timeout_ms else: 1
+                val res = rt_io_tcp_accept_timeout(fd, a_ms)
+                if res >= 0:
+                    self._complete_fd(oid, res, 0, "", fd)
+                    i = i + 1
+                    continue
+                np_id.push(self._p_id[i])
+                np_type.push(self._p_type[i])
+                np_fd.push(self._p_fd[i])
+                np_fd2.push(self._p_fd2[i])
+                np_data.push(self._p_data[i])
+                np_size.push(self._p_size[i])
+                np_offset.push(self._p_offset[i])
+                np_length.push(self._p_length[i])
+                np_path.push(self._p_path[i])
+                np_time.push(self._p_time[i])
                 i = i + 1
                 continue
 
             elif ot == _OP_SEND:
+                val send_ready = self._ready_contains(ready_fds, fd)
                 val res = rt_io_tcp_write_text(fd, self._p_data[i])
-                self._complete(oid, res, 0, "")
-                i = i + 1
-                continue
+                if res > 0 or (ev_has_results and send_ready):
+                    self._ev_complete_fd_interest(fd, oid)
+                    self._complete_fd(oid, res, 0, "", fd)
+                    i = i + 1
+                    continue
 
             elif ot == _OP_SEND_BYTES:
-                val bdata = self._bytes_pending.get(oid)
+                val send_ready = self._ready_contains(ready_fds, fd)
+                val bdata = self._load_send_bytes(oid)
                 var bres: i64 = 0
-                if bdata.?:
+                if bdata.len() > 0:
                     bres = rt_io_tcp_write_bytes(fd, bdata)
-                    self._bytes_pending.remove(oid)
-                self._complete(oid, bres, 0, "")
+                if bres > 0 or (ev_has_results and send_ready):
+                    self._store_send_bytes(oid, [])
+                    self._ev_complete_fd_interest(fd, oid)
+                    self._complete_fd(oid, bres, 0, "", fd)
+                    i = i + 1
+                    continue
+
+            elif ot == _OP_CONNECT:
+                val timeout = if self._p_fd2[i] > 0: self._p_fd2[i] else: 1
+                val addr = self._p_data[i]
+                val connect_fd = rt_io_tcp_connect_timeout(addr, timeout)
+                self._complete_fd(oid, connect_fd, 0, "", connect_fd)
                 i = i + 1
                 continue
 
             elif ot == _OP_RECV:
-                if (not ev_has_results) or ready.get(fd).?:
-                    val bytes = rt_io_tcp_read(fd, self._p_size[i])
-                    if bytes.len() > 0:
-                        val txt = rt_bytes_to_text(bytes)
-                        self._recv_bytes[oid] = bytes
-                        self._complete(oid, bytes.len(), 0, txt)
-                        i = i + 1
-                        continue
+                val recv_ready = self._ready_contains(ready_fds, fd)
+                val bytes = rt_io_tcp_read(fd, self._p_size[i])
+                if bytes.len() > 0:
+                    val txt = rt_bytes_to_text(bytes)
+                    self._store_recv_bytes(oid, bytes)
+                    self._ev_complete_fd_interest(fd, oid)
+                    self._complete_fd_bytes(oid, bytes.len(), 0, txt, fd, bytes)
+                    i = i + 1
+                    continue
+                if ev_has_results and recv_ready:
+                    self._ev_complete_fd_interest(fd, oid)
+                    self._complete_fd(oid, 0, 0, "", fd)
+                    i = i + 1
+                    continue
 
             elif ot == _OP_OPEN:
                 val path = self._p_path[i]
@@ -403,7 +662,7 @@ class IoDriver:
                     end_pos = content.len()
                 val chunk = content.slice(off, end_pos)
                 val res = rt_io_tcp_write_text(fd, chunk)
-                self._complete(oid, res, 0, "")
+                self._complete_fd(oid, res, 0, "", fd)
                 i = i + 1
                 continue
 
@@ -433,21 +692,21 @@ class IoDriver:
             elif ot == _OP_UDP_SEND:
                 val udp_bytes = rt_text_to_bytes(self._p_data[i])
                 val udp_sent = rt_io_udp_send_to(fd, udp_bytes, self._p_path[i])
-                self._complete(oid, udp_sent, 0, "")
+                self._complete_fd(oid, udp_sent, 0, "", fd)
                 i = i + 1
                 continue
 
             elif ot == _OP_UDP_RECV:
-                if (not ev_has_results) or ready.get(fd).?:
+                if (not ev_has_results) or self._ready_contains(ready_fds, fd):
                     val udp_result = rt_io_udp_recv_from(fd, self._p_size[i])
                     if udp_result != nil:
                         val udp_data = udp_result.0
                         val udp_addr = udp_result.1
                         # Store raw bytes for binary-safe access via poll_recv_bytes
-                        self._recv_bytes[oid] = udp_data
+                        self._store_recv_bytes(oid, udp_data)
                         # Store addr in _c_data (text); callers use poll_recv_bytes
                         # for the payload and poll_data for the peer address.
-                        self._complete(oid, udp_data.len(), 0, udp_addr)
+                        self._complete_fd_bytes(oid, udp_data.len(), 0, udp_addr, fd, udp_data)
                         i = i + 1
                         continue
 
@@ -467,25 +726,6 @@ class IoDriver:
             np_path.push(self._p_path[i])
             np_time.push(self._p_time[i])
             i = i + 1
-
-        if accept_idx >= 0 and self._c_id.len() < max:
-            val a_oid = self._p_id[accept_idx]
-            val a_fd = self._p_fd[accept_idx]
-            val a_ms = if self._c_id.len() > 0: 1 elif timeout_ms > 0: timeout_ms else: 1
-            val res = rt_io_tcp_accept_timeout(a_fd, a_ms)
-            if res >= 0:
-                self._complete(a_oid, res, 0, "")
-            else:
-                np_id.push(self._p_id[accept_idx])
-                np_type.push(self._p_type[accept_idx])
-                np_fd.push(self._p_fd[accept_idx])
-                np_fd2.push(self._p_fd2[accept_idx])
-                np_data.push(self._p_data[accept_idx])
-                np_size.push(self._p_size[accept_idx])
-                np_offset.push(self._p_offset[accept_idx])
-                np_length.push(self._p_length[accept_idx])
-                np_path.push(self._p_path[accept_idx])
-                np_time.push(self._p_time[accept_idx])
 
         self._p_id = np_id
         self._p_type = np_type
@@ -520,6 +760,11 @@ class IoDriver:
             return self._c_data[index]
         ""
 
+    fn poll_fd(index: i64) -> i64:
+        if index < self._c_fd.len():
+            return self._c_fd[index]
+        -1
+
     fn poll_data_len(self, index: i64) -> i64:
         if index < self._c_data.len():
             return self._c_data[index].len()
@@ -528,18 +773,19 @@ class IoDriver:
     # Return raw received bytes for a completion at `index`.
     # Only populated for _OP_RECV completions; returns [] for all other ops.
     # Use this instead of poll_data when binary-safe access is needed (e.g. H2 frames).
-    fn poll_recv_bytes(self, index: i64) -> [u8]:
+    me poll_recv_bytes(index: i64) -> [u8]:
         if index >= self._c_id.len():
             return []
+        if index < self._c_recv_byte_data.len():
+            val direct = self._c_recv_byte_data[index]
+            if direct.len() > 0:
+                return direct
         val oid = self._c_id[index]
-        val opt = self._recv_bytes.get(oid)
-        if opt.?:
-            return opt
-        []
+        self._load_recv_bytes(oid)
 
     # ---- Cancel ----
 
-    fn cancel(self, op_id: i64) -> bool:
+    me cancel(op_id: i64) -> bool:
         var nid: [i64] = []
         var nty: [i64] = []
         var nfd: [i64] = []
@@ -601,7 +847,7 @@ class IoDriver:
 
     # ---- Lifecycle ----
 
-    fn close(self):
+    me close():
         self._p_id = []
         self._p_type = []
         self._p_fd = []
@@ -618,8 +864,10 @@ class IoDriver:
         self._c_data = []
         self._fh_ids = []
         self._fh_data = []
-        self._bytes_pending = {}
-        self._recv_bytes = {}
+        self._bytes_pending_ids = []
+        self._bytes_pending_data = []
+        self._recv_byte_ids = []
+        self._recv_byte_data = []
         if self._ev_fd >= 0:
             rt_event_loop_close(self._ev_fd)
         self._ev_registered = {}

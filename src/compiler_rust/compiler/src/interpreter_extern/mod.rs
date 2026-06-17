@@ -972,6 +972,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_event_loop_poll", interpreter_event_loop::rt_event_loop_poll_interp);
     insert_simple!(
+        "rt_event_loop_poll_get_fd",
+        interpreter_event_loop::rt_event_loop_poll_get_fd_interp
+    );
+    insert_simple!(
         "rt_event_loop_register",
         interpreter_event_loop::rt_event_loop_register_interp
     );

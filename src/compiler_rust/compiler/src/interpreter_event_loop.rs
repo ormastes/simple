@@ -615,11 +615,35 @@ pub fn rt_event_loop_deregister_interp(args: &[Value]) -> Result<Value, CompileE
     Ok(Value::Bool(platform::deregister(loop_fd, fd)))
 }
 
+thread_local! {
+    // Ready-fd results from the most recent rt_event_loop_poll, retrieved by
+    // index via rt_event_loop_poll_get_fd. Mirrors the native `poll_results[]`
+    // contract (runtime_native.c): poll() returns the COUNT, get_fd(i) the fd.
+    static LAST_POLL_RESULTS: std::cell::RefCell<Vec<Value>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
 pub fn rt_event_loop_poll_interp(args: &[Value]) -> Result<Value, CompileError> {
     let loop_fd = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
     let max_events = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(64);
     let timeout_ms = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(-1);
-    Ok(Value::array(platform::poll(loop_fd, max_events, timeout_ms)))
+    let fds = platform::poll(loop_fd, max_events, timeout_ms);
+    let count = fds.len() as i64;
+    LAST_POLL_RESULTS.with(|r| *r.borrow_mut() = fds);
+    Ok(Value::Int(count))
+}
+
+pub fn rt_event_loop_poll_get_fd_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let index = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
+    let fd = LAST_POLL_RESULTS.with(|r| {
+        let results = r.borrow();
+        if index >= 0 && (index as usize) < results.len() {
+            results[index as usize].as_int().unwrap_or(-1)
+        } else {
+            -1
+        }
+    });
+    Ok(Value::Int(fd))
 }
 
 pub fn rt_event_loop_close_interp(args: &[Value]) -> Result<Value, CompileError> {
