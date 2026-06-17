@@ -164,11 +164,17 @@ array-only. Fix:
   `sendfile_pending`; the sendfile path's get/remove logic is covered by the unit
   sweep + server-pattern test above.)
 
-### Orthogonal native bug observed (NOT this fix, NOT dict-related)
-`for k in <array>` SIGSEGVs in native (`call 0x0` in the loop's iterator
-machinery) while working in the interpreter — reproduces on a pure array program
-with no dicts, and this dict fix touches neither array iteration nor for-loop
-lowering. Pre-existing / parallel-agent native-codegen issue; track separately.
+### Orthogonal native bug — FIXED 2026-06-17 (separate commit)
+`for k in <array>` SIGSEGV'd in native (`call 0x0`) while working in the
+interpreter. Root cause: for-in lowers to a `rt_for_iterable(collection)` call
+(normalize iterable: dict→array of (k,v) tuples, pass-through otherwise), which
+was implemented only in the Rust/JIT runtime and **absent from the C runtime**
+that native AOT links — the call hit a NULL GOT slot (`nm` showed
+`U rt_for_iterable`). Fixed by defining `rt_for_iterable` + `rt_dict_entries` in
+`runtime_native.c`. Verified: `for k in [1,7,8]`→`1 7 8`, `for (k,v) in dict`
+yields correct keys/values, all matching the interpreter. (Note: using an
+iterated dict KEY in arithmetic still sees its tagged form — a pre-existing
+tagged-value quirk present in the interpreter too, independent of this fix.)
 
 ### Out of scope / separate pre-existing bug (NOT this fix)
 `if val x = <optional>` and `opt.?` payload extraction are broken in the
