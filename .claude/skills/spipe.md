@@ -379,6 +379,14 @@ unresolved generated BDD calls (`rt_bdd_*` / `std.spec`) can no-op or segfault
 before `it` bodies execute. For native runtime hooks, pair interpreter SPipe
 coverage with a direct native entrypoint that uses hard `rt_exit` checks.
 
+For Pure Simple SSH/HTTPS server lanes, keep protocol code in `.spl` and limit
+runtime/SFFI to host access: TCP accept/read/write, time, entropy,
+filesystem/cert/key access, and process execution. `release` mode is the
+production Simple protocol path. `alpha` and `beta` may use native/SFFI protocol
+wrappers only as explicit comparison paths. Do not let `rt_ssh_*` or
+`rt_tls_server_*` silently replace Simple protocol behavior in release mode.
+See `doc/07_guide/lib/networking/pure_simple_servers.md`.
+
 Optimization must stay **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
 Exception: safety-critical guards in process/signal paths (e.g. `pid <= 0` checks
 before `kill()`/`waitpid()`) belong in the seed runtime too — a failed spawn's
@@ -471,6 +479,13 @@ reimplement an existing algorithm:
 - Full guides: [`doc/07_guide/lib/networking/typed_network_and_algorithms.md`](../../doc/07_guide/lib/networking/typed_network_and_algorithms.md)
   (tldr alongside) and, for the search/crypto/compress custom-typed layers,
   [`doc/07_guide/lib/algorithms/typed_alpha_algorithm_layers.md`](../../doc/07_guide/lib/algorithms/typed_alpha_algorithm_layers.md).
+- **JIT tuple-return gotcha:** network externs that return a tuple (e.g.
+  `rt_http_request → (status, body)`) read as garbage in default JIT on builds
+  before commit `49ca9697987` — cranelift unboxed the bridged composite result.
+  Run such specs on a build that includes the fix, and assert on **both** tuple
+  fields (`.0` and `.1`), not just `.0` — a spec that only checks the status
+  passed even while the body was corrupted. Same hazard for text-returning
+  externs. Bug: `doc/08_tracking/bug/itf_minio_sigv4_not_runnable_interp_or_native_2026-06-16.md`.
 
 ## Run
 
