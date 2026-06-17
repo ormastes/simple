@@ -203,21 +203,33 @@ impl RenderBackend for SoftwareBackend:
             row = row + 1
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-        if thickness <= 1:
-            self.sw_bresenham(x1, y1, x2, y2, color)
-        else:
-            val half = thickness / 2
-            var offset = -half
-            var adx = x2 - x1
-            if adx < 0: adx = -adx
-            var ady = y2 - y1
-            if ady < 0: ady = -ady
-            while offset <= half:
-                if adx >= ady:
-                    self.sw_bresenham(x1, y1 + offset, x2, y2 + offset, color)
-                else:
-                    self.sw_bresenham(x1 + offset, y1, x2 + offset, y2, color)
-                offset = offset + 1
+        # DDA line replicating the GPU kernel (recovered via spirv-dis of the
+        # spirv_line blob — the GLSL source was misleading) pixel-for-pixel so CPU
+        # and GPU are bit-exact: steps = max(|dx|,|dy|); the divisor is steps+1
+        # and step runs 0..=steps inclusive (steps+1 sample points), with
+        # truncating integer division; a (thickness/2)-radius square is stamped at
+        # each point. (GPU pixels are canonical.)
+        val dx = x2 - x1
+        val dy = y2 - y1
+        var adx = dx
+        if adx < 0: adx = -adx
+        var ady = dy
+        if ady < 0: ady = -ady
+        val steps = if adx >= ady: adx else: ady
+        val divisor = steps + 1
+        val half_t = thickness / 2
+        var step = 0
+        while step <= steps:
+            val px = x1 + (dx * step) / divisor
+            val py = y1 + (dy * step) / divisor
+            var ty = 0 - half_t
+            while ty <= half_t:
+                var tx = 0 - half_t
+                while tx <= half_t:
+                    self.sw_set_pixel(px + tx, py + ty, color)
+                    tx = tx + 1
+                ty = ty + 1
+            step = step + 1
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         # Circle OUTLINE as a distance-based ring, replicating the GPU kernel

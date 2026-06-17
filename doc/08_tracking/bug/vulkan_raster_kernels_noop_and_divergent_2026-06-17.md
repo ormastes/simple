@@ -39,11 +39,24 @@ After wiring all eight real kernels and measuring per-primitive:
 | triangle_filled | **fixed** — wired, bit-exact (0)                     |
 | rounded_rect    | **fixed** — wired + SW outline→fill bug fixed (0)    |
 | circle_outline  | **fixed** — wired + SW Bresenham→distance-ring (0)   |
-| line            | investigated, reverted to no-op (see below)         |
+| line            | **fixed** (thickness-1) — wired; recovered via spirv-dis |
 | gradient_rect   | divergent — kept no-op (float interpolation)        |
 | blit            | untested — kept no-op (needs source-buffer binding) |
 
-7 of 10 kernels now render bit-exact vs the SoftwareBackend reference. For
+8 of 10 kernels now render bit-exact (line: thickness-1 only) vs the
+SoftwareBackend reference.
+
+### line (RESOLVED via spirv-dis)
+`spirv-dis` of the `spirv_line` blob revealed the GLSL source was misleading: the
+blob computes `px = x1 + (dx*step)/(steps+1)`, `py = y1 + (dy*step)/(steps+1)`
+with `steps = max(|dx|,|dy|)` and `step` running `0..=steps` inclusive — the
+divisor is **steps+1**, not steps. Reimplementing `SoftwareBackend.draw_line` to
+match made thickness-1 lines bit-exact in all directions (0 mismatch) and the
+kernel is now wired. CAVEAT: the blob does NOT implement thickness (push constant
+5 is never read; no loops) — it draws a single 1px center pixel per step. So GPU
+lines are 1px regardless of requested thickness; SoftwareBackend still renders
+thickness on CPU. Cross-backend parity is asserted for thickness-1 only.
+Follow-up: a thickness-aware line SPIR-V blob. For
 rounded_rect and circle_outline the SoftwareBackend implementation was itself
 wrong/inconsistent with the canonical GPU/CUDA/Metal kernels and was corrected
 to match (GPU pixels are canonical, per owner decision).
