@@ -24,6 +24,18 @@ fn run_visibility_symbols(file: text) -> text:
     run_command_text(find_simple_binary(), [query_visibility_path(), "symbols", file, file])
 
 fn run_lsp_diagnostics(file: text) -> text:
+    # `simple check` is a CLI subcommand that spawns its own delegate child.
+    # Spawning it from inside the interpreted LSP server (source mode) deadlocks
+    # the no-GC interpreter's process_run wait (zombie child + parent stuck in
+    # futex_wait) — a Rust-runtime bug, not fixable from .spl. To avoid hanging
+    # the whole server, diagnostics is gated: it is skipped unless explicitly
+    # enabled with SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 (safe only for a native build
+    # whose tools/call actually works — currently none does). The other 10 LSP
+    # tools run a plain script via process_run and are unaffected.
+    # See doc/08_tracking/bug/lsp_mcp_native_arg_extract_and_source_diagnostics_deadlock_2026-06-18.md
+    val enabled = env_get("SIMPLE_LSP_ENABLE_DIAGNOSTICS") ?? ""
+    if enabled != "1":
+        return "diagnostics unavailable in source mode (process_run deadlocks on the `simple check` subcommand spawn). Run `simple check " + file + "` directly, or set SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 on a working native build."
     run_command_text(find_simple_binary(), ["check", file])
 
 fn lsp_parse_diag_line(line: text) -> text:

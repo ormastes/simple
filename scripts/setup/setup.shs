@@ -288,6 +288,33 @@ if [ "${1:-}" = "--json" ]; then
   exit 0
 fi
 
+# The native simple_lsp_mcp_server fails every tools/call with "Missing tool name"
+# (AOT arg-extraction codegen bug — only the initialize/tools/list handshake
+# survives). Default to source mode: 10/11 LSP tools work; lsp_diagnostics is
+# gated off in the server (deadlocks on `simple check`) and returns a message.
+# Opt back into native with SIMPLE_LSP_MCP_PREFER_NATIVE=1 after a real
+# tools/call probe passes. See
+# doc/08_tracking/bug/lsp_mcp_native_arg_extract_and_source_diagnostics_deadlock_2026-06-18.md
+if [ "${SIMPLE_LSP_MCP_PREFER_NATIVE:-0}" != "1" ]; then
+  export SIMPLE_LIB="${SIMPLE_LIB:-${repo_root}/src}"
+  export SIMPLE_LOG="${SIMPLE_LOG:-error}"
+  export RUST_LOG="${RUST_LOG:-error}"
+  src_entry="${repo_root}/src/app/simple_lsp_mcp/main.spl"
+  for src_runtime in \
+    "${SIMPLE_BINARY:-}" \
+    "${script_dir}/simple" \
+    "${script_dir}/release/${platform_dir}/simple" \
+    "${script_dir}/release/linux-x86_64/simple"
+  do
+    if [ -n "${src_runtime}" ] && [ -x "${src_runtime}" ] && [ -f "${src_entry}" ]; then
+      printf 'startup wrapper=simple_lsp_mcp_server mode=source-default runtime=%s cwd=%s\n' "${src_runtime}" "$(pwd)" >>"${log_dir}/simple_lsp_mcp_startup.log"
+      exec "${src_runtime}" "${src_entry}" "$@" 2>>"${log_dir}/simple_lsp_mcp_stderr.log"
+    fi
+  done
+  printf '%s\n' "error: simple runtime not found for LSP MCP source mode" >&2
+  exit 127
+fi
+
 _LSP_MCP_PROBE_WRAPPER_VERSION="simple_lsp_mcp_server:0.9.8"
 
 _lsp_mcp_probe_stat() {
