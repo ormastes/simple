@@ -220,24 +220,26 @@ impl RenderBackend for SoftwareBackend:
                 offset = offset + 1
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
-        var px = r
-        var py = 0
-        var d = 1 - r
-        while px >= py:
-            self.sw_set_pixel(cx + px, cy + py, color)
-            self.sw_set_pixel(cx - px, cy + py, color)
-            self.sw_set_pixel(cx + px, cy - py, color)
-            self.sw_set_pixel(cx - px, cy - py, color)
-            self.sw_set_pixel(cx + py, cy + px, color)
-            self.sw_set_pixel(cx - py, cy + px, color)
-            self.sw_set_pixel(cx + py, cy - px, color)
-            self.sw_set_pixel(cx - py, cy - px, color)
-            py = py + 1
-            if d <= 0:
-                d = d + 2 * py + 1
-            else:
-                px = px - 1
-                d = d + 2 * py - 2 * px + 1
+        # Circle OUTLINE as a distance-based ring, replicating the GPU kernel
+        # (backend_vulkan_glsl _glsl_circle_outline) pixel-for-pixel so CPU and
+        # GPU are bit-exact: a pixel is on the outline when its squared distance
+        # from the center lies in [(r-1)^2, r^2]. (GPU pixels are canonical.)
+        val r_sq = r * r
+        val r_inner = (r - 1) * (r - 1)
+        val diam = 2 * r + 1
+        var ly = 0
+        while ly < diam:
+            var lx = 0
+            while lx < diam:
+                val px = cx - r + lx
+                val py = cy - r + ly
+                val dx = px - cx
+                val dy = py - cy
+                val dist_sq = dx * dx + dy * dy
+                if dist_sq <= r_sq and dist_sq >= r_inner:
+                    self.sw_set_pixel(px, py, color)
+                lx = lx + 1
+            ly = ly + 1
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
         # Per-pixel disk: a pixel (dx, dy) is filled iff dx*dx + dy*dy <= r*r.
