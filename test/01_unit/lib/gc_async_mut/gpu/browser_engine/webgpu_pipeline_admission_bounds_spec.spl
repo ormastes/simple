@@ -1,0 +1,73 @@
+# @tag: unit, ui, webgpu, bounds
+"""
+# WebGPU Pipeline Admission Bounds Spec
+
+Verifies the browser WebGPU context rejects invalid pipeline creation before
+minting usable pipeline ids or advancing pipeline id state.
+
+## Overview
+
+Browser JavaScript, WASM, Simple2D, and Simple3D paths share pipeline creation.
+Invalid shader handles or device-not-ready state must not consume pipeline ids
+that can be mistaken for admitted backend work.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** .spipe/web_rendering_backend_animation_hardening/state.md
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Syntax
+
+The spec uses `std.spec` and direct pipeline id/state assertions.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.webgpu_context.{webgpu_create_context, GPUShaderModule}
+
+fn _invalid_shader(label: text) -> GPUShaderModule:
+    GPUShaderModule(id: -1, label: label, source: "", valid: false)
+
+describe "browser WebGPU pipeline admission bounds hardening":
+
+    it "rejects invalid render and compute pipelines without advancing ids":
+        var gpu_ctx = webgpu_create_context(true)
+
+        val not_ready_shader = _invalid_shader("not-ready")
+        val not_ready_pipeline = gpu_ctx.create_compute_pipeline(not_ready_shader)
+        expect(not_ready_pipeline.id).to_equal(-1)
+        expect(not_ready_pipeline.valid).to_be(false)
+        expect(gpu_ctx.next_pipeline_id).to_equal(1)
+
+        val requested = gpu_ctx.request_device()
+        expect(requested).to_be(true)
+
+        val invalid_vertex = _invalid_shader("bad-vs")
+        val invalid_fragment = _invalid_shader("bad-fs")
+        val invalid_render = gpu_ctx.create_render_pipeline(invalid_vertex, invalid_fragment)
+        expect(invalid_render.id).to_equal(-1)
+        expect(invalid_render.valid).to_be(false)
+        expect(gpu_ctx.next_pipeline_id).to_equal(1)
+
+        val valid_shader = gpu_ctx.create_shader_module("valid", "@compute @workgroup_size(1) fn main() { }")
+        expect(valid_shader.valid).to_be(true)
+
+        val valid_compute = gpu_ctx.create_compute_pipeline(valid_shader)
+        expect(valid_compute.id).to_equal(1)
+        expect(valid_compute.valid).to_be(true)
+        expect(gpu_ctx.next_pipeline_id).to_equal(2)
+
+        val valid_render = gpu_ctx.create_render_pipeline(valid_shader, valid_shader)
+        expect(valid_render.id).to_equal(2)
+        expect(valid_render.valid).to_be(true)
+        expect(gpu_ctx.next_pipeline_id).to_equal(3)

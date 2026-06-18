@@ -60,12 +60,14 @@ use std.nogc_async_mut.io.tls_io.{
     read_tls_record,
     recv_exact,
     send_all,
+    parse_record_header_wire_with_len,
     tls_tcp_bind,
     tls_tcp_close,
     tls_tcp_set_nonblocking
 }
 use std.nogc_async_mut.io.tls_handshake.{perform_server_handshake}
 use std.tls.utilities.{byte_at}
+use std.net.pure_server.{PureServerHostTarget, PureServerProtocol, PureServerRouteDecision, PureServerHttpsReleasePlan, pure_server_hosted_linux_adapter, pure_server_hosted_linux_caps, pure_server_https_release_plan, pure_server_release_route, pure_server_simpleos_adapter, pure_server_simpleos_caps}
 
 # ============================================================================
 # Hex Helpers
@@ -75,7 +77,9 @@ val HEX_CHARS = "0123456789abcdef"
 
 fn hex_byte(v: i64) -> text:
     """Convert a byte value (0-255) to a 2-character lowercase hex string."""
-    encode_u8(byte_at(HEX_CHARS, (v >> 4) & 15)) + encode_u8(byte_at(HEX_CHARS, v & 15))
+    val hi = (v >> 4) & 15
+    val lo = v & 15
+    HEX_CHARS.slice(hi, hi + 1) + HEX_CHARS.slice(lo, lo + 1)
 
 fn hex_u16_be(value: i64) -> text:
     """Encode a 16-bit value as 4-char hex (big-endian)."""
@@ -120,12 +124,12 @@ class AsyncTlsStream:
         if header_wire == nil:
             return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "connection closed during TLS record header read"))
 
-        val header_bytes = wire_to_bytes(header_wire)
-        val content_type = byte_at(header_bytes, 0)
-        val record_len = (byte_at(header_bytes, 3) * 256) + byte_at(header_bytes, 4)
-
-        if record_len > TLS_MAX_FRAGMENT_LENGTH:
-            return Err(IoError(kind: IoErrorKind.InvalidData, message: "TLS record too large"))
+        val record_header = parse_record_header_wire_with_len(header_wire, TLS_RECORD_HEADER_SIZE)
+        if record_header.is_err():
+            return Err(IoError(kind: IoErrorKind.InvalidData, message: record_header.err().unwrap()))
+        val header = record_header.unwrap()
+        val content_type = header.content_type
+        val record_len = header.payload_len
 
         val payload_wire = recv_exact(self.driver, self.fd, record_len)
         if payload_wire == nil:
@@ -210,6 +214,35 @@ class AsyncTlsListener:
     tls_config: TlsConfig
     driver: IoDriver
     is_open: bool
+
+    static fn release_route_for_target(target: PureServerHostTarget) -> Result<PureServerRouteDecision, text>:
+        """Build the HTTPS release-mode route decision without binding sockets."""
+        val caps = if target == PureServerHostTarget.HostedLinux:
+            pure_server_hosted_linux_caps()
+        else:
+            pure_server_simpleos_caps()
+        pure_server_release_route(PureServerProtocol.HTTPS, caps)
+
+    static fn release_plan_for_target(target: PureServerHostTarget) -> PureServerHttpsReleasePlan:
+        """Build the HTTPS release-mode protocol composition plan without binding sockets."""
+        val adapter = if target == PureServerHostTarget.HostedLinux:
+            pure_server_hosted_linux_adapter()
+        else:
+            pure_server_simpleos_adapter()
+        pure_server_https_release_plan(adapter, "")
+
+    static fn bind_release(driver: IoDriver, addr: text, config: TlsConfig, target: PureServerHostTarget) -> Result<AsyncTlsListener, IoError>:
+        """Bind after validating release-mode Pure Simple protocol composition."""
+        val plan = AsyncTlsListener.release_plan_for_target(target)
+        if not plan.release_ready:
+            return Err(IoError(kind: IoErrorKind.Other, message: plan.reason))
+        if not plan.uses_simple_protocol:
+            return Err(IoError(kind: IoErrorKind.Other, message: "https release mode cannot allow native protocol bypass"))
+        if plan.tls_stage != "simple-tls12-server":
+            return Err(IoError(kind: IoErrorKind.Other, message: "https release mode requires Simple TLS stage"))
+        if plan.http_stage != "simple-http-response":
+            return Err(IoError(kind: IoErrorKind.Other, message: "https release mode requires Simple HTTP stage"))
+        AsyncTlsListener.bind(driver, addr, config)
 
     static fn bind(driver: IoDriver, addr: text, config: TlsConfig) -> Result<AsyncTlsListener, IoError>:
         """Bind a TCP listener and prepare for TLS connections."""

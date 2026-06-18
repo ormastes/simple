@@ -199,7 +199,7 @@ fn attr_value_by_key(inner: text, key: text) -> text:
         val end = find_from(inner, q, i + 1)
         if end < 0:
             return ""
-        return decode_html_entities(inner.substring(i + 1, end))
+        return inner.substring(i + 1, end)
     # unquoted: read to whitespace
     var j = i
     val inner_len = inner.len()
@@ -208,7 +208,7 @@ fn attr_value_by_key(inner: text, key: text) -> text:
         if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
             break
         j = j + 1
-    decode_html_entities(inner.substring(i, j))
+    inner.substring(i, j)
 
 fn html_ascii_is_upper(c: text) -> bool:
     c == "A" or c == "B" or c == "C" or c == "D" or c == "E" or c == "F" or c == "G" or
@@ -353,6 +353,22 @@ fn html_text_tail_counts_as_node(html: text, start: i32, end: i32) -> bool:
 # Parser -> arena
 # ---------------------------------------------------------------------------
 
+val SIMPLE_WEB_HTML_LAYOUT_MAX_NODES: i32 = 512
+val SIMPLE_WEB_HTML_LAYOUT_MAX_PIXELS: i32 = 4194304
+
+fn simple_web_layout_node_count_cap() -> i32:
+    SIMPLE_WEB_HTML_LAYOUT_MAX_NODES
+
+fn simple_web_layout_viewport_valid(width: i32, height: i32) -> bool:
+    if width <= 0 or height <= 0:
+        return false
+    width <= SIMPLE_WEB_HTML_LAYOUT_MAX_PIXELS / height
+
+fn simple_web_layout_scroll_extent_valid(width: i32, height: i32, scroll_y: i32) -> bool:
+    val clamp_scroll = if scroll_y < 0: 0 else: scroll_y
+    val max_virtual_height = SIMPLE_WEB_HTML_LAYOUT_MAX_PIXELS / width
+    clamp_scroll <= max_virtual_height - height
+
 fn count_html_nodes(html: text) -> i32:
     var count = 1
     var pos = 0
@@ -362,10 +378,14 @@ fn count_html_nodes(html: text) -> i32:
         if lt < 0:
             if html_text_tail_counts_as_node(html, pos, n):
                 count = count + 1
+                if count >= SIMPLE_WEB_HTML_LAYOUT_MAX_NODES:
+                    return SIMPLE_WEB_HTML_LAYOUT_MAX_NODES
             break
         if lt > pos:
             if html_text_range_counts_as_node(html, pos, lt):
                 count = count + 1
+                if count >= SIMPLE_WEB_HTML_LAYOUT_MAX_NODES:
+                    return SIMPLE_WEB_HTML_LAYOUT_MAX_NODES
         if text_matches_at(html, "<!--", lt):
             val cend = find_from(html, "-->", lt)
             if cend < 0:
@@ -404,6 +424,8 @@ fn count_html_nodes(html: text) -> i32:
         if name == "head" or name == "meta" or name == "link" or name == "base":
             continue
         count = count + 1
+        if count >= SIMPLE_WEB_HTML_LAYOUT_MAX_NODES:
+            return SIMPLE_WEB_HTML_LAYOUT_MAX_NODES
     count
 
 # Decode the HTML character entities the markdown/office HTML emitters produce
@@ -420,26 +442,6 @@ fn decode_html_entities(s: text) -> text:
     out = out.replace("&quot;", "\"")
     out = out.replace("&#39;", "'")
     out = out.replace("&apos;", "'")
-    out = out.replace("&nbsp;", " ")
-    out = out.replace("&#32;", " ")
-    out = out.replace("&#x20;", " ")
-    out = out.replace("&#X20;", " ")
-    out = out.replace("&#34;", "\"")
-    out = out.replace("&#x22;", "\"")
-    out = out.replace("&#X22;", "\"")
-    out = out.replace("&#38;", "&")
-    out = out.replace("&#x26;", "&")
-    out = out.replace("&#X26;", "&")
-    out = out.replace("&#60;", "<")
-    out = out.replace("&#x3C;", "<")
-    out = out.replace("&#x3c;", "<")
-    out = out.replace("&#X3C;", "<")
-    out = out.replace("&#X3c;", "<")
-    out = out.replace("&#62;", ">")
-    out = out.replace("&#x3E;", ">")
-    out = out.replace("&#x3e;", ">")
-    out = out.replace("&#X3E;", ">")
-    out = out.replace("&#X3e;", ">")
     out.replace("&amp;", "&")
 
 fn parse_html(html: text) -> [HNode]:
@@ -456,6 +458,8 @@ fn parse_html(html: text) -> [HNode]:
             val tail = decode_html_entities(html.substring(pos, n))
             val tail_trimmed = tail.trim()
             if tail_trimmed.len() > 0:
+                if node_i >= node_count:
+                    break
                 var tn = mk_node("#text", pstack[stack_len - 1])
                 tn.text_data = tail
                 tn.text_trimmed = tail_trimmed
@@ -466,6 +470,8 @@ fn parse_html(html: text) -> [HNode]:
             val txt = decode_html_entities(html.substring(pos, lt))
             val txt_trimmed = txt.trim()
             if txt_trimmed.len() > 0 or txt == " ":
+                if node_i >= node_count:
+                    break
                 var tn = mk_node("#text", pstack[stack_len - 1])
                 tn.text_data = txt
                 tn.text_trimmed = txt_trimmed
@@ -523,6 +529,8 @@ fn parse_html(html: text) -> [HNode]:
             continue
         if name == "head" or name == "meta" or name == "link" or name == "base":
             continue
+        if node_i >= node_count:
+            break
         var node = mk_node(name, pstack[stack_len - 1])
         node.class_attr = attr_value_by_key(inner, "class=")
         if node.class_attr.len() > 0:
@@ -546,6 +554,26 @@ fn parse_html(html: text) -> [HNode]:
                 pstack[stack_len] = current_index
                 stack_len = stack_len + 1
     nodes
+
+pub fn simple_web_layout_debug_node_count(html: text) -> i32:
+    parse_html(html).len().to_i32()
+
+pub fn simple_web_layout_debug_max_node_count() -> i32:
+    simple_web_layout_node_count_cap()
+
+pub fn simple_web_layout_debug_max_css_rule_count() -> i32:
+    simple_web_layout_css_rule_count_cap()
+
+pub fn simple_web_layout_debug_materialized_node_count(html: text) -> i32:
+    val nodes = parse_html(html)
+    var count = 0
+    var i = 0
+    while i < nodes.len():
+        val node = nodes[i]
+        if i == 0 or node.tag != "#root" or node.parent != -1:
+            count = count + 1
+        i = i + 1
+    count
 
 pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> text:
     val nodes = parse_html(html)
@@ -614,6 +642,8 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
     ""
 
 pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32, id: text, field: text) -> text:
+    if not simple_web_layout_viewport_valid(width, height):
+        return ""
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val child_index = build_child_index(nodes)
@@ -1529,6 +1559,11 @@ class RuleBuckets:
     tag_rules: [[i32]]
     fallback_rules: [i32]
 
+val SIMPLE_WEB_HTML_LAYOUT_MAX_CSS_RULES: i32 = 256
+
+fn simple_web_layout_css_rule_count_cap() -> i32:
+    SIMPLE_WEB_HTML_LAYOUT_MAX_CSS_RULES
+
 fn css_matching_close(css: text, open: i64) -> i64:
     val css_len = css.len()
     var depth = 1
@@ -1584,6 +1619,8 @@ fn count_css_rules(html: text) -> i32:
                     val inner_sel = inner_sel_raw.trim()
                     if inner_sel.len() > 0:
                         count = count + 1
+                        if count >= SIMPLE_WEB_HTML_LAYOUT_MAX_CSS_RULES:
+                            return SIMPLE_WEB_HTML_LAYOUT_MAX_CSS_RULES
                     inner_cp = inner_endb + 1
                 cp = endb_outer + 1
             else:
@@ -1592,6 +1629,8 @@ fn count_css_rules(html: text) -> i32:
                     break
                 if sel.len() > 0:
                     count = count + 1
+                    if count >= SIMPLE_WEB_HTML_LAYOUT_MAX_CSS_RULES:
+                        return SIMPLE_WEB_HTML_LAYOUT_MAX_CSS_RULES
                 cp = endb + 1
         pos = close + 1
     count
@@ -1761,6 +1800,8 @@ fn extract_css(html: text) -> Rules:
                 # Find inner rules by continuing the loop from brace+1 to endb_outer
                 var inner_cp = brace + 1
                 while inner_cp < endb_outer:
+                    if rule_i >= rule_count:
+                        break
                     val inner_brace = find_from(css, "{", inner_cp)
                     if inner_brace < 0 or inner_brace >= endb_outer:
                         break
@@ -1779,6 +1820,8 @@ fn extract_css(html: text) -> Rules:
                     inner_cp = inner_endb + 1
                 cp = endb_outer + 1
             else:
+                if rule_i >= rule_count:
+                    break
                 val endb = css_matching_close(css, brace)
                 if endb < 0:
                     break
@@ -1790,7 +1833,11 @@ fn extract_css(html: text) -> Rules:
                     decls[rule_i] = decl
                     rule_i = rule_i + 1
                 cp = endb + 1
+            if rule_i >= rule_count:
+                break
         pos = close + 1
+        if rule_i >= rule_count:
+            break
     Rules(group_parts: group_parts, decls: decls)
 
 fn unquote_css_attr_value(raw: text) -> text:
@@ -4093,8 +4140,12 @@ fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, 
         if cpl < 1:
             cpl = 1
         if st.white_space_nowrap:
+            # Hoist .len() out of the array-repeat literal: `[recv.method(); n]`
+            # when recv is bound from an if-else trips a seed HIR type-inference
+            # gap that forces the whole render module to fall back from JIT.
+            val txt_len = txt.len()
             out_wrap_starts[i] = [0; 1]
-            out_wrap_ends[i] = [txt.len(); 1]
+            out_wrap_ends[i] = [txt_len; 1]
         else:
             val ranges = compute_wrap_ranges(txt, cpl)
             out_wrap_starts[i] = ranges.starts
@@ -5134,6 +5185,8 @@ fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, 
     commands
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
+    if not simple_web_layout_viewport_valid(width, height):
+        return draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [])
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val child_index = build_child_index(nodes)
@@ -5164,6 +5217,8 @@ pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32
     draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch])
 
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32) -> [u32]:
+    if not simple_web_layout_viewport_valid(width, height):
+        return []
     val nodes = parse_html(html)
     val rules = extract_css(html)
     val child_index = build_child_index(nodes)
@@ -5200,7 +5255,9 @@ pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, hei
 # paint coordinates into the viewport so allocation stays bounded by WxH.
 # This re-render approach keeps each call stateless.
 pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width: i32, height: i32, scroll_y: i32) -> [u32]:
-    if width <= 0 or height <= 0:
+    if not simple_web_layout_viewport_valid(width, height):
+        return []
+    if not simple_web_layout_scroll_extent_valid(width, height, scroll_y):
         return []
     val clamp_scroll = if scroll_y < 0: 0 else: scroll_y
     val virtual_h = height + clamp_scroll

@@ -50,7 +50,34 @@ Fresh local evidence from 2026-06-16 follow-up:
   `reason=webgpu-real-probe-run-failed`, `source=not_device_readback`,
   `backend_handle=0`, and checksum mismatch by absence (`0` vs `-1`).
 
+## Local Browser Hardening Baseline From 2026-06-17
+
+The local browser hardening lane is green before external native readback
+handoff:
+
+- authenticated `/api/state` and `/api/widgets` `200 OK` JSON responses carry
+  no-store/no-cache/nosniff headers
+- normal/shared-WM `/wm.js` and `/retained_renderer.js` script responses carry
+  no-store/no-cache/nosniff headers
+- shown `/wm/native_window` HTML response headers are covered
+- hidden unknown-route JSON `404 not_found` fallback headers are covered
+- `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` passes
+  all 6 live endpoint scenarios
+
 ## Environment Plans
+
+Detailed external-host execution and acceptance criteria are in:
+
+- `doc/03_plan/sys_test/simple_web_browser_external_host_proof_runbook.md`
+
+Each external-host run must also fill the runbook Evidence Manifest fields:
+host OS, GPU model, driver/runtime version, command exit status, status field,
+readback source or device/backend handle, checksum expected/actual values, and
+the exact report paths copied back into this checkout. Use
+`doc/09_report/simple_web_browser_external_host_evidence_manifest_template.md`
+as the capture template.
+Only manifests accepted by the runbook criteria, including the local baseline
+confirmation rows, can close the parent production hardening gates.
 
 ### Linux NVIDIA Vulkan
 

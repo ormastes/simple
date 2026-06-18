@@ -1,26 +1,50 @@
 <!-- codex-design -->
 # GPU Web and DB Offload Agent Tasks
 
-Status: recovered design draft.
+Status: crash-session plan recovered; benchmark-harness implementation in
+progress.
 
-## Implementation Order
+## Crash-Session Continuation
 
-1. Add proxy state structures and worker operation constants.
-2. Route `handler_type == "proxy"` to `start_proxy` before buffered handler dispatch.
-3. Implement upstream lookup, round-robin selection, header rewrite, streaming, timeouts, and bounded buffers.
-4. Add upstream connection reuse/pooling.
-5. Add shared GPU batch descriptor/executor with CPU fallback and deterministic evidence backend.
-6. Add web route GPU eligibility hooks.
-7. Add DB planner eligibility hooks for scan/filter/project/vector search.
-8. Add RAM-only GPU mode admission and fallback.
-9. Add SSD-backed GPU mode with WAL/reopen/invalidation gates.
-10. Add NoSQL/vector mode hooks and metadata-filter fallback.
-11. Add SPipe system specs and generated manuals.
-12. Add native/proxy and DB-mode performance evidence.
+The prior Codex rollout was found at
+`/home/ormastes/.codex/sessions/2026/06/16/rollout-2026-06-16T04-07-18-019ece9c-bb30-76a1-952f-7233322187d1.jsonl`.
+The current authoritative continuation surface is the worktree, especially
+`doc/03_plan/perf/gpu_web_db_offload_optimization_benchmark_plan.md`, because
+the recovered plan and harness artifacts have advanced beyond the original
+crash note.
 
-## Current Blocker
+Fast continuation check:
 
-The current jj working copy reports unrelated unresolved conflicts in
-`.spipe/gpu_containers_unified/state.md` and `src/app/cli/query_lint.spl`.
-Source implementation should wait until those conflicts are resolved or the
-user explicitly asks to implement in the conflicted checkout.
+```sh
+scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts
+```
+
+That check verifies the durable web, DB, readiness, recovery, env-template,
+setup-checklist, and missing-by-category artifacts without rebuilding native
+targets or rerunning live benchmarks.
+
+## Crash-Session Follow-On Plan
+
+1. Preserve the already-green reverse-proxy crash recovery gates:
+   live reverse proxy, upstream pool reuse, upload streaming, and upgrade tunnel.
+2. Add deterministic production-hardening evidence for the next proxy lane:
+   timeout state, request/upload backpressure, downstream response
+   backpressure, upstream pool pressure, and measured throughput.
+3. Keep the first implementation slice in pure policy helpers and unit specs so
+   worker/live gates can consume the same decisions without adding flaky crash
+   reproduction loops.
+4. Regenerate the async reverse-proxy spec manual and append status evidence to
+   `doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md`.
+5. After the pure helper is green, wire the evidence into the live worker/report
+   path and then resume broader GPU DB/web throughput benchmarking.
+
+## Current Scope
+
+The pure async reverse-proxy hardening helper, focused unit coverage, report
+row, web/DB benchmark rows, readiness wrapper, and recovery harness are already
+implemented. Continue by either filling external fixtures from the generated
+setup checklist or by extending the benchmark matrix with another measured
+producer that preserves the existing strict producer/consumer contracts.
+
+Do not re-run already-green live crash gates in this session unless a touched
+file invalidates their evidence.

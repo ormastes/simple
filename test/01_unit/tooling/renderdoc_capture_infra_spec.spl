@@ -1,0 +1,90 @@
+"""
+# RenderDoc capture infrastructure contract
+
+## Overview
+
+Verifies the shared RenderDoc shell infrastructure without launching a live
+capture. The contract keeps original RenderDoc Chrome capture and Simple
+in-application `rt_renderdoc_*` capture behind one CLI and one test helper
+facade.
+
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Requirements:** N/A
+**Research:** doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md
+**Architecture:** N/A - shell/test infrastructure only.
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+scripts/tool/renderdoc-evidence.shs env
+scripts/tool/renderdoc-evidence.shs capture-simple
+scripts/tool/renderdoc-evidence.shs capture-html
+```
+
+## Examples
+
+Tests can source the facade:
+
+```sh
+. test/helpers/renderdoc_capture_helper.shs
+renderdoc_test_env
+renderdoc_test_capture_html
+```
+
+## Acceptance
+
+- The shared CLI exposes `capture-simple`, `capture-html`, and
+  `register-layer`.
+- The shared library owns both capture implementations and `.rdc` magic
+  validation.
+- Capture commands write `evidence.env` with `rdoc_capture_status=` and
+  `rdoc_capture_reason=`.
+- Compatibility wrappers route through the shared CLI.
+- The setup script owns path discovery and Vulkan layer registration.
+
+## Notes
+
+This spec is intentionally static. Live RenderDoc capture is environmental and
+belongs in bounded check wrappers so unavailable hosts can report typed evidence
+instead of destabilizing ordinary unit checks.
+"""
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "RenderDoc capture infrastructure":
+    it "exposes one CLI for original HTML capture and Simple in-app capture":
+        val cli = source("scripts/tool/renderdoc-evidence.shs")
+        val common = source("scripts/lib/renderdoc-evidence-common.shs")
+
+        expect(cli).to_contain("capture-simple")
+        expect(cli).to_contain("capture-html")
+        expect(cli).to_contain("register-layer")
+        expect(common).to_contain("rdoc_capture_simple_vulkan")
+        expect(common).to_contain("rdoc_capture_html")
+        expect(common).to_contain("rdoc_validate_rdc_magic")
+        expect(common).to_contain("evidence.env")
+        expect(common).to_contain("rdoc_capture_status=")
+        expect(common).to_contain("rdoc_capture_reason=")
+
+    it "keeps test helpers and compatibility wrappers on the shared interface":
+        val helper = source("test/helpers/renderdoc_capture_helper.shs")
+        val vulkan_wrapper = source("scripts/check/check-renderdoc-vulkan-capture.shs")
+        val html_wrapper = source("scripts/check/check-renderdoc-html-capture.shs")
+
+        expect(helper).to_contain("renderdoc_test_capture_simple")
+        expect(helper).to_contain("renderdoc_test_capture_html")
+        expect(helper).to_contain("scripts/tool/renderdoc-evidence.shs")
+        expect(vulkan_wrapper).to_contain("scripts/tool/renderdoc-evidence.shs capture-simple")
+        expect(html_wrapper).to_contain("scripts/tool/renderdoc-evidence.shs capture-html")
+
+    it "keeps RenderDoc environment setup centralized":
+        val setup = source("scripts/setup/setup-renderdoc-env.shs")
+
+        expect(setup).to_contain("--check")
+        expect(setup).to_contain("--print")
+        expect(setup).to_contain("--register-vulkan-layer")
+        expect(setup).to_contain("rdoc_status_env")

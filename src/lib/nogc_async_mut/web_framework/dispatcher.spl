@@ -28,6 +28,20 @@ use std.web_framework.flash.{FlashMessage, flash_get, flash_clear}
 
 use std.web_framework.router.{WebRouter, parse_query_params}
 use std.web_framework.form_parser.{parse_request_body}
+use std.web_framework.gpu_offload.{
+    WebFrameworkGpuRouteConfig,
+    WebFrameworkGpuRouteAdoption,
+    WebFrameworkGpuRouteValidatedAdoption,
+    web_framework_gpu_route_config,
+    web_framework_gpu_route_execute_for_action,
+    web_framework_gpu_route_execute_device_validated_for_action
+}
+use std.web_db_offload.web_route.{WebGpuRouteKind}
+use std.web_db_offload.contract.{GpuWdbBudget, gpu_wdb_default_budget}
+use std.web_db_offload.queue.{GpuWdbQueueState, gpu_wdb_queue_initial}
+use std.web_db_offload.library.{GpuWdbLibraryRegistry, gpu_wdb_library_empty, gpu_wdb_library_with_targets}
+use std.web_db_offload.web_profile.{WebGpuOffloadProfile}
+use std.web_db_offload.device_backend.{GpuWdbDeviceBackend}
 
 # ============================================================================
 # Action Function Type
@@ -44,6 +58,12 @@ class AppDispatcher:
     router: WebRouter
     action_map: Dict<text, fn(ControllerContext) -> HttpResponseData>
     session_data: Dict<text, text>
+    gpu_route_configs: [WebFrameworkGpuRouteConfig]
+    gpu_queue_state: GpuWdbQueueState
+    gpu_registry: GpuWdbLibraryRegistry
+    gpu_available: bool
+    cpu_fallback_available: bool
+    gpu_budget: GpuWdbBudget
 
 impl AppDispatcher:
     static fn new(router: WebRouter) -> AppDispatcher:
@@ -51,7 +71,13 @@ impl AppDispatcher:
         AppDispatcher(
             router: router,
             action_map: {},
-            session_data: {}
+            session_data: {},
+            gpu_route_configs: [],
+            gpu_queue_state: gpu_wdb_queue_initial(4),
+            gpu_registry: gpu_wdb_library_empty(),
+            gpu_available: false,
+            cpu_fallback_available: true,
+            gpu_budget: gpu_wdb_default_budget()
         )
 
     me register_action(controller: text, action: text,
@@ -70,7 +96,38 @@ impl AppDispatcher:
         self.action_map[key] = handler
         self
 
-    fn dispatch(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
+    me register_gpu_route(controller: text, action: text,
+                          route_kind: WebGpuRouteKind,
+                          default_item_count: i64,
+                          default_bytes_per_item: i64) -> AppDispatcher:
+        """Register an opt-in GPU offload policy for one controller action."""
+        self.gpu_route_configs.push(web_framework_gpu_route_config(
+            controller,
+            action,
+            route_kind,
+            default_item_count,
+            default_bytes_per_item
+        ))
+        self
+
+    me configure_gpu_offload(backend: text, generation: i64,
+                             available_targets: [text],
+                             gpu_available: bool) -> AppDispatcher:
+        """Configure the shared GPU route registry used by opt-in actions."""
+        self.gpu_registry = gpu_wdb_library_with_targets(backend, generation, available_targets)
+        self.gpu_available = gpu_available
+        self
+
+    me configure_gpu_profile(profile: WebGpuOffloadProfile) -> AppDispatcher:
+        """Configure opt-in GPU routes from a reusable web GPU profile."""
+        self.gpu_registry = profile.registry
+        self.gpu_queue_state = profile.queue_state
+        self.gpu_budget = profile.budget
+        self.gpu_available = profile.gpu_available
+        self.cpu_fallback_available = profile.cpu_fallback_available
+        self
+
+    fn dispatch_with_gpu_adoption(request: HttpRequestData, location: LocationConfig) -> WebFrameworkGpuRouteAdoption:
         """Dispatch an incoming request to the matching controller action.
 
         Steps:
@@ -91,7 +148,19 @@ impl AppDispatcher:
         # Match route
         val matched = self.router.match_route(request.method, request.path)
         if matched == nil:
-            return build_error(404, "No route matches {request.method} {request.path}")
+            val response = build_error(404, "No route matches {request.method} {request.path}")
+            return web_framework_gpu_route_execute_for_action(
+                make_context(request, self.session_data, [], {}, nil),
+                [],
+                "router",
+                "not_found",
+                self.gpu_queue_state,
+                self.gpu_registry,
+                false,
+                self.cpu_fallback_available,
+                self.gpu_budget,
+                response
+            )
 
         val route_match = matched ?? RouteMatch(
             route: self.router.routes[0],
@@ -131,10 +200,161 @@ impl AppDispatcher:
         val action_key = "{route_match.route.controller_name}#{route_match.route.action_name}"
         val action = self.action_map.get(action_key)
         if action == nil:
-            return build_error(501, "No action registered for {action_key}")
+            val response = build_error(501, "No action registered for {action_key}")
+            return web_framework_gpu_route_execute_for_action(
+                ctx,
+                [],
+                route_match.route.controller_name,
+                route_match.route.action_name,
+                self.gpu_queue_state,
+                self.gpu_registry,
+                false,
+                self.cpu_fallback_available,
+                self.gpu_budget,
+                response
+            )
 
         val action_fn = action ?? default_action
-        action_fn(ctx)
+        val response = action_fn(ctx)
+        web_framework_gpu_route_execute_for_action(
+            ctx,
+            self.gpu_route_configs,
+            route_match.route.controller_name,
+            route_match.route.action_name,
+            self.gpu_queue_state,
+            self.gpu_registry,
+            self.gpu_available,
+            self.cpu_fallback_available,
+            self.gpu_budget,
+            response
+        )
+
+    fn dispatch(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
+        """Dispatch and return the controller response as the authoritative output."""
+        val adoption = self.dispatch_with_gpu_adoption(request, location)
+        adoption.execution.response
+
+    fn gpu_profile_for_dispatch() -> WebGpuOffloadProfile:
+        WebGpuOffloadProfile(
+            name: "dispatcher-gpu-profile",
+            registry: self.gpu_registry,
+            queue_state: self.gpu_queue_state,
+            budget: self.gpu_budget,
+            gpu_available: self.gpu_available,
+            cpu_fallback_available: self.cpu_fallback_available
+        )
+
+    fn dispatch_with_gpu_validated_adoption(request: HttpRequestData,
+                                           location: LocationConfig,
+                                           backend: GpuWdbDeviceBackend,
+                                           expected_generation: i64,
+                                           gpu_candidate_response: HttpResponseData,
+                                           started_us: i64,
+                                           finished_us: i64,
+                                           measured_device_time_us: i64,
+                                           timing_source: text) -> WebFrameworkGpuRouteValidatedAdoption:
+        val matched = self.router.match_route(request.method, request.path)
+        if matched == nil:
+            val response = build_error(404, "No route matches {request.method} {request.path}")
+            return web_framework_gpu_route_execute_device_validated_for_action(
+                make_context(request, self.session_data, [], {}, nil),
+                [],
+                "router",
+                "not_found",
+                self.gpu_profile_for_dispatch(),
+                backend,
+                expected_generation,
+                gpu_candidate_response,
+                started_us,
+                finished_us,
+                measured_device_time_us,
+                timing_source,
+                response
+            )
+
+        val route_match = matched ?? RouteMatch(
+            route: self.router.routes[0],
+            params: {}
+        )
+        var params = route_match.params
+        val query_params = parse_query_params(request.query)
+        for key in query_params.keys():
+            params[key] = query_params.get(key) ?? ""
+        if request.body.len() > 0:
+            val content_type = get_request_header(request, "content-type")
+            val body_params = parse_request_body(request.body, content_type)
+            for key in body_params.keys():
+                params[key] = body_params.get(key) ?? ""
+        for key in request.params.keys():
+            params[key] = request.params.get(key) ?? ""
+        val flash_messages = flash_get(self.session_data)
+        val ctx = make_context(
+            request,
+            self.session_data,
+            flash_messages,
+            params,
+            nil
+        )
+        val action_key = "{route_match.route.controller_name}#{route_match.route.action_name}"
+        val action = self.action_map.get(action_key)
+        if action == nil:
+            val response = build_error(501, "No action registered for {action_key}")
+            return web_framework_gpu_route_execute_device_validated_for_action(
+                ctx,
+                [],
+                route_match.route.controller_name,
+                route_match.route.action_name,
+                self.gpu_profile_for_dispatch(),
+                backend,
+                expected_generation,
+                gpu_candidate_response,
+                started_us,
+                finished_us,
+                measured_device_time_us,
+                timing_source,
+                response
+            )
+
+        val action_fn = action ?? default_action
+        val response = action_fn(ctx)
+        web_framework_gpu_route_execute_device_validated_for_action(
+            ctx,
+            self.gpu_route_configs,
+            route_match.route.controller_name,
+            route_match.route.action_name,
+            self.gpu_profile_for_dispatch(),
+            backend,
+            expected_generation,
+            gpu_candidate_response,
+            started_us,
+            finished_us,
+            measured_device_time_us,
+            timing_source,
+            response
+        )
+
+    me dispatch_with_gpu_validated_adoption_advancing(request: HttpRequestData,
+                                                      location: LocationConfig,
+                                                      backend: GpuWdbDeviceBackend,
+                                                      expected_generation: i64,
+                                                      gpu_candidate_response: HttpResponseData,
+                                                      started_us: i64,
+                                                      finished_us: i64,
+                                                      measured_device_time_us: i64,
+                                                      timing_source: text) -> WebFrameworkGpuRouteValidatedAdoption:
+        val adoption = self.dispatch_with_gpu_validated_adoption(
+            request,
+            location,
+            backend,
+            expected_generation,
+            gpu_candidate_response,
+            started_us,
+            finished_us,
+            measured_device_time_us,
+            timing_source
+        )
+        self.gpu_queue_state = adoption.execution.validated.profile.queue_state
+        adoption
 
 # ============================================================================
 # Registration

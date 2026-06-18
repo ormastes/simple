@@ -42,7 +42,7 @@ pure_db_spec -> nogc_sync_mut
 #### creates in-memory database
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -56,11 +56,11 @@ expect(r.is_ok()).to_be(true)
 
 #### creates table
 
-1. var db = r unwrap
+- var db = r unwrap
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -77,11 +77,11 @@ expect(db.table_exists("users")).to_be(true)
 
 #### rejects duplicate table
 
-1. var db = r unwrap
+- var db = r unwrap
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -99,11 +99,11 @@ expect(c2.is_err()).to_be(true)
 
 #### allows CREATE TABLE IF NOT EXISTS
 
-1. var db = r unwrap
+- var db = r unwrap
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -121,18 +121,15 @@ expect(c2.is_ok()).to_be(true)
 
 #### inserts and selects rows
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
    - Expected: rows.len() equals `2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -156,18 +153,15 @@ expect(rows.len()).to_equal(2)
 
 #### selects with WHERE clause
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
    - Expected: rows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -190,17 +184,15 @@ expect(rows.len()).to_equal(1)
 
 #### selects specific columns
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: rows[0].columns.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -222,20 +214,16 @@ expect(rows[0].columns.len()).to_equal(1)
 
 #### deletes with WHERE clause
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. dr unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- dr unwrap
    - Expected: rows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -260,18 +248,15 @@ expect(rows.len()).to_equal(1)
 
 #### updates rows
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. ir unwrap
-
-4. ur unwrap
+- var db = r unwrap
+- cr unwrap
+- ir unwrap
+- ur unwrap
    - Expected: rows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -294,23 +279,18 @@ expect(rows.len()).to_equal(1)
 
 #### round-trip create-insert-select-delete
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
    - Expected: all_rows.len() equals `3`
-
-6. dr unwrap
+- dr unwrap
    - Expected: after.len() equals `2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -341,13 +321,12 @@ expect(after.len()).to_equal(2)
 
 #### reports table_exists correctly
 
-1. var db = r unwrap
-
-2. cr unwrap
+- var db = r unwrap
+- cr unwrap
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -365,13 +344,12 @@ expect(db.table_exists("yes_tbl")).to_be(true)
 
 #### rejects query on closed database
 
-1. var db = r unwrap
-
-2. cl unwrap
+- var db = r unwrap
+- cl unwrap
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -389,21 +367,17 @@ expect(qr.is_err()).to_be(true)
 
 #### searches text columns with BM25 ranking
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
-
-5. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: rows.len() equals `2`
    - Expected: first_id.to_text() equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -432,19 +406,16 @@ expect(first_id.to_text()).to_equal("3")
 
 #### supports FTS5-compatible search alias
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: rows.len() equals `1`
    - Expected: fts_first_id.to_text() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -470,23 +441,18 @@ expect(fts_first_id.to_text()).to_equal("1")
 
 #### search reflects updated and deleted rows
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
-
-5. db exec sql
-
-6. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: rows.len() equals `1`
    - Expected: first_id.to_text() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -514,24 +480,20 @@ expect(first_id.to_text()).to_equal("1")
 
 #### invalidates cached FTS search index after writes
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
    - Expected: warm.unwrap().len() equals `0`
-
-4. db exec sql
+- db exec sql
    - Expected: inserted_rows.len() equals `1`
    - Expected: inserted_rows[0].row.values[0].to_text() equals `2`
-
-5. db exec sql
+- db exec sql
    - Expected: updated_rows.len() equals `1`
    - Expected: updated_rows[0].row.values[0].to_text() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -563,19 +525,16 @@ expect(updated_rows[0].row.values[0].to_text()).to_equal("1")
 
 #### supports alternate lightweight search algorithms
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: rows.len() equals `2`
    - Expected: tf_first_id.to_text() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -601,15 +560,13 @@ expect(tf_first_id.to_text()).to_equal("1")
 
 #### supports DROP TABLE
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. dr unwrap
+- var db = r unwrap
+- cr unwrap
+- dr unwrap
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -629,20 +586,16 @@ expect(db.table_exists("drop_me")).to_be(false)
 
 #### supports DISTINCT
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
    - Expected: drows.len() equals `2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -667,20 +620,16 @@ expect(drows.len()).to_equal(2)
 
 #### supports LIKE
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
    - Expected: lrows.len() equals `2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -705,21 +654,17 @@ expect(lrows.len()).to_equal(2)
 
 #### supports COUNT aggregate
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
    - Expected: crows.len() equals `1`
    - Expected: count_val.to_text() equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -746,26 +691,19 @@ expect(count_val.to_text()).to_equal("3")
 
 #### supports INNER JOIN
 
-1. var db = r unwrap
-
-2. c1 unwrap
-
-3. c2 unwrap
-
-4. i1 unwrap
-
-5. i2 unwrap
-
-6. i3 unwrap
-
-7. i4 unwrap
-
-8. i5 unwrap
+- var db = r unwrap
+- c1 unwrap
+- c2 unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
+- i4 unwrap
+- i5 unwrap
    - Expected: jrows.len() equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -796,15 +734,11 @@ expect(jrows.len()).to_equal(3)
 
 #### supports ORDER BY ASC
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
    - Expected: rows.len() equals `3`
    - Expected: first_id.to_text() equals `1`
    - Expected: second_id.to_text() equals `2`
@@ -812,7 +746,7 @@ expect(jrows.len()).to_equal(3)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -849,19 +783,16 @@ expect(third_id.to_text()).to_equal("3")
 
 #### supports IS NULL
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
    - Expected: rows.len() equals `1`
    - Expected: row0_id.to_text() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -888,19 +819,16 @@ expect(row0_id.to_text()).to_equal("1")
 
 #### supports IS NOT NULL
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
    - Expected: rows.len() equals `1`
    - Expected: row0_id.to_text() equals `2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -927,20 +855,16 @@ expect(row0_id.to_text()).to_equal("2")
 
 #### supports NOT in WHERE
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
    - Expected: rows.len() equals `2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -965,24 +889,18 @@ expect(rows.len()).to_equal(2)
 
 #### supports LIMIT
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
-
-6. i4 unwrap
-
-7. i5 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
+- i4 unwrap
+- i5 unwrap
    - Expected: rows.len() equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1011,26 +929,20 @@ expect(rows.len()).to_equal(3)
 
 #### supports LIMIT OFFSET
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
-
-6. i4 unwrap
-
-7. i5 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
+- i4 unwrap
+- i5 unwrap
    - Expected: rows.len() equals `2`
    - Expected: row0_id.to_text() equals `2`
    - Expected: row1_id.to_text() equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1067,21 +979,17 @@ expect(row1_id.to_text()).to_equal("3")
 
 #### supports parameterized queries
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. p push
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- p push
    - Expected: rows.len() equals `1`
    - Expected: row0_name.to_text() equals `Alice`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1110,17 +1018,15 @@ expect(row0_name.to_text()).to_equal("Alice")
 
 #### supports LENGTH function
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: v0.to_text() equals `5`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1145,18 +1051,16 @@ expect(v0.to_text()).to_equal("5")
 
 #### supports UPPER and LOWER functions
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: v0.to_text() equals `HELLO`
    - Expected: v2_0.to_text() equals `hello`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1187,21 +1091,17 @@ expect(v2_0.to_text()).to_equal("hello")
 
 #### supports TRIM function
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. p push
-
-4. p push
-
-5. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- p push
+- p push
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: v0.to_text() equals `hello`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1229,17 +1129,15 @@ expect(v0.to_text()).to_equal("hello")
 
 #### supports SUBSTR function
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: v0.to_text() equals `Hello`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1264,17 +1162,15 @@ expect(v0.to_text()).to_equal("Hello")
 
 #### supports REPLACE function
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: v0.to_text() equals `new world`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1299,21 +1195,17 @@ expect(v0.to_text()).to_equal("new world")
 
 #### supports ABS function
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. p push
-
-4. p push
-
-5. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- p push
+- p push
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: v0.to_text() equals `5`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1341,17 +1233,15 @@ expect(v0.to_text()).to_equal("5")
 
 #### supports COALESCE function
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: v0.to_text() equals `default`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1376,17 +1266,15 @@ expect(v0.to_text()).to_equal("default")
 
 #### supports IFNULL function
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: v0.to_text() equals `fallback`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1411,15 +1299,11 @@ expect(v0.to_text()).to_equal("fallback")
 
 #### supports multiple aggregates
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
    - Expected: rows.len() equals `1`
    - Expected: cnt.to_text() equals `3`
    - Expected: sm.to_text() equals `60`
@@ -1427,7 +1311,7 @@ expect(v0.to_text()).to_equal("fallback")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1460,17 +1344,15 @@ expect(av.to_text()).to_equal("20")
 
 #### supports column alias AS
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
    - Expected: rows.len() equals `1`
    - Expected: col0 equals `n`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1495,22 +1377,17 @@ expect(col0).to_equal("n")
 
 #### supports BEGIN and COMMIT
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. b unwrap
-
-4. i1 unwrap
-
-5. i2 unwrap
-
-6. c unwrap
+- var db = r unwrap
+- cr unwrap
+- b unwrap
+- i1 unwrap
+- i2 unwrap
+- c unwrap
    - Expected: rows.len() equals `2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1537,20 +1414,16 @@ expect(rows.len()).to_equal(2)
 
 #### supports ROLLBACK
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. b unwrap
-
-4. i1 unwrap
-
-5. rb unwrap
+- var db = r unwrap
+- cr unwrap
+- b unwrap
+- i1 unwrap
+- rb unwrap
    - Expected: rows.len() equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1575,20 +1448,17 @@ expect(rows.len()).to_equal(0)
 
 #### supports ALTER TABLE ADD COLUMN
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. ar unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- ar unwrap
    - Expected: rows.len() equals `1`
    - Expected: row0_cols.len() equals `3`
    - Expected: col2 equals `age`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1619,25 +1489,16 @@ expect(v2.is_null()).to_be(true)
 
 #### supports nested operations in transaction
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i0 unwrap
-
-4. i0b unwrap
-
-5. i0c unwrap
-
-6. b unwrap
-
-7. i1 unwrap
-
-8. u1 unwrap
-
-9. d1 unwrap
-
-10. c unwrap
+- var db = r unwrap
+- cr unwrap
+- i0 unwrap
+- i0b unwrap
+- i0c unwrap
+- b unwrap
+- i1 unwrap
+- u1 unwrap
+- d1 unwrap
+- c unwrap
    - Expected: rows.len() equals `3`
    - Expected: r0_name.to_text() equals `ALICE`
    - Expected: r1_id.to_text() equals `3`
@@ -1645,7 +1506,7 @@ expect(v2.is_null()).to_be(true)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1692,20 +1553,17 @@ expect(r2_id.to_text()).to_equal("4")
 
 #### supports arithmetic in SELECT
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
    - Expected: rows.len() equals `2`
    - Expected: row0_v.to_text() equals `2`
    - Expected: row1_v.to_text() equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1736,27 +1594,19 @@ expect(row1_v.to_text()).to_equal("3")
 
 #### supports CASE WHEN
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. i3 unwrap
-
-6. expect rows len
-
-7. expect c0 v to text
-
-8. expect c1 v to text
-
-9. expect c2 v to text
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- i3 unwrap
+- expect rows len
+- expect c0 v to text
+- expect c1 v to text
+- expect c2 v to text
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1793,21 +1643,16 @@ expect c2_v.to_text() == "other"
 
 #### supports CASE WHEN without ELSE
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. expect rows len
-
-6. expect ne0 v to text
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- expect rows len
+- expect ne0 v to text
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1839,25 +1684,18 @@ expect ne1_null == true
 
 #### supports INSERT OR REPLACE
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. i1 unwrap
-
-4. i2 unwrap
-
-5. rep unwrap
-
-6. expect rows len
-
-7. expect rep0 name to text
-
-8. expect rep1 name to text
+- var db = r unwrap
+- cr unwrap
+- i1 unwrap
+- i2 unwrap
+- rep unwrap
+- expect rows len
+- expect rep0 name to text
+- expect rep1 name to text
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1890,21 +1728,16 @@ expect rep1_name.to_text() == "Bob"
 
 #### supports multi-statement SQL
 
-1. var db = r unwrap
-
-2. cr unwrap
-
-3. ms unwrap
-
-4. expect rows len
-
-5. expect m0 name to text
-
-6. expect m1 name to text
+- var db = r unwrap
+- cr unwrap
+- ms unwrap
+- expect rows len
+- expect m0 name to text
+- expect m1 name to text
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1933,26 +1766,19 @@ expect m1_name.to_text() == "B"
 
 #### persists to file and reloads
 
-1. var db1 = r1 unwrap
-
-2. db1 exec sql
-
-3. db1 exec sql
-
-4. db1 exec sql
-
-5. db1 exec sql
-
-6. db1 close
-
-7. var db2 = r2 unwrap
+- var db1 = r1 unwrap
+- db1 exec sql
+- db1 exec sql
+- db1 exec sql
+- db1 exec sql
+- db1 close
+- var db2 = r2 unwrap
    - Expected: rows.len() equals `2`
-
-8. db2 close
+- db2 close
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -1980,33 +1806,24 @@ db2.close().unwrap()
 
 #### full SQL feature integration
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
-
-5. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: jrows.len() equals `2`
    - Expected: arows.len() equals `2`
-
-6. db exec sql
-
-7. db exec sql
-
-8. db exec sql
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: rrows.len() equals `3`
-
-9. db exec sql
-
-10. db exec sql
+- db exec sql
+- db exec sql
    - Expected: srows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2047,15 +1864,14 @@ expect(srows.len()).to_equal(1)
 
 #### handles empty table queries
 
-1. var db = r unwrap
-
-2. db exec sql
+- var db = r unwrap
+- db exec sql
    - Expected: rows.len() equals `0`
    - Expected: count_val.to_text() equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2079,16 +1895,14 @@ expect(count_val.to_text()).to_equal("0")
 
 #### handles special characters in text
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
    - Expected: rows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2107,18 +1921,15 @@ expect(rows.len()).to_equal(1)
 
 #### supports CREATE INDEX
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: rows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2141,15 +1952,13 @@ expect(rows.len()).to_equal(1)
 
 #### supports CREATE UNIQUE INDEX
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2173,13 +1982,12 @@ expect(ok.is_ok()).to_be(true)
 
 #### supports DROP INDEX
 
-1. var db = r unwrap
-
-2. db exec sql
+- var db = r unwrap
+- db exec sql
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2201,21 +2009,17 @@ expect(dr2.is_err()).to_be(true)
 
 #### FTS uses shared engine for bm25_search
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
-
-5. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: rows.len() equals `2`
    - Expected: first_id.to_text() equals `3`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2243,15 +2047,11 @@ expect(first_id.to_text()).to_equal("3")
 
 #### update_by_key updates a row via typed API
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
-
-5. updates["name"] = DbValue Text
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
+- updates["name"] = DbValue Text
    - Expected: ur.unwrap() equals `1`
    - Expected: rows2.len() equals `1`
    - Expected: row.values[1].to_text() equals `Zara`
@@ -2260,7 +2060,7 @@ expect(first_id.to_text()).to_equal("3")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2293,18 +2093,15 @@ expect(rows3[0].values[1].to_text()).to_equal("Bob")
 
 #### update_by_key returns 0 for non-existent key
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. upd2["name"] = DbValue Text
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- upd2["name"] = DbValue Text
    - Expected: ur.unwrap() equals `0`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2325,15 +2122,11 @@ expect(ur.unwrap()).to_equal(0)
 
 #### update_by_key updates PK column and fixes PK map
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
-
-5. upd3["id"] = DbValue Integer
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
+- upd3["id"] = DbValue Integer
    - Expected: ur.unwrap() equals `1`
    - Expected: qr_old.unwrap().len() equals `0`
    - Expected: rows_new.len() equals `1`
@@ -2342,7 +2135,7 @@ expect(ur.unwrap()).to_equal(0)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2376,13 +2169,10 @@ expect(qr_bob.unwrap().len()).to_equal(1)
 
 #### exec_sql UPDATE uses PK fast path for literal WHERE
 
-1. var db = r unwrap
-
-2. db exec sql
-
-3. db exec sql
-
-4. db exec sql
+- var db = r unwrap
+- db exec sql
+- db exec sql
+- db exec sql
    - Expected: ur.is_ok() is true
    - Expected: ur.unwrap() equals `1`
    - Expected: rows.len() equals `1`
@@ -2392,7 +2182,7 @@ expect(qr_bob.unwrap().len()).to_equal(1)
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2419,18 +2209,16 @@ expect(qr2.unwrap()[0].values[1].to_text()).to_equal("Bob")
 
 #### exec_sql UPDATE PK fast path returns 0 for missing key
 
-1. var db2 = r2 unwrap
-
-2. db2 exec sql
-
-3. db2 exec sql
+- var db2 = r2 unwrap
+- db2 exec sql
+- db2 exec sql
    - Expected: ur2.is_ok() is true
    - Expected: ur2.unwrap() equals `0`
    - Expected: qr3.unwrap()[0].values[1].to_text() equals `x`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2451,13 +2239,10 @@ expect(qr3.unwrap()[0].values[1].to_text()).to_equal("x")
 
 #### exec_sql DELETE uses PK fast path for literal WHERE
 
-1. var db3 = r3 unwrap
-
-2. db3 exec sql
-
-3. db3 exec sql
-
-4. db3 exec sql
+- var db3 = r3 unwrap
+- db3 exec sql
+- db3 exec sql
+- db3 exec sql
    - Expected: dr.is_ok() is true
    - Expected: dr.unwrap() equals `1`
    - Expected: rows4.len() equals `1`
@@ -2465,7 +2250,7 @@ expect(qr3.unwrap()[0].values[1].to_text()).to_equal("x")
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -2489,18 +2274,16 @@ expect(rows4[0].values[1].to_text()).to_equal("Bob")
 
 #### exec_sql DELETE PK fast path returns 0 for missing key
 
-1. var db4 = r4 unwrap
-
-2. db4 exec sql
-
-3. db4 exec sql
+- var db4 = r4 unwrap
+- db4 exec sql
+- db4 exec sql
    - Expected: dr2.is_ok() is true
    - Expected: dr2.unwrap() equals `0`
    - Expected: qr5.unwrap().len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

@@ -8,6 +8,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const RT_HOST_GPU_LANE_HOST: i64 = 1;
 pub const RT_HOST_GPU_LANE_GPU: i64 = 2;
@@ -37,6 +38,7 @@ pub struct HostGpuQueuePacket {
     pub backend_handle: i64,
     pub payload_hash: i64,
     pub payload_text: String,
+    pub submitted_at_us: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +66,7 @@ struct HostGpuQueueState {
     last_payload_size: i64,
     last_payload_hash: i64,
     last_payload_text: String,
+    last_device_time_us: i64,
 }
 
 impl HostGpuQueueState {
@@ -80,6 +83,7 @@ impl HostGpuQueueState {
             last_payload_size: 0,
             last_payload_hash: 0,
             last_payload_text: String::new(),
+            last_device_time_us: 0,
         }
     }
 
@@ -102,6 +106,13 @@ fn valid_lane(lane_code: i64) -> bool {
 #[inline]
 fn valid_phase(phase_code: i64) -> bool {
     phase_code == RT_HOST_GPU_PHASE_BEGIN || phase_code == RT_HOST_GPU_PHASE_END
+}
+
+fn monotonic_wall_us() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 pub fn record_host_gpu_lane_event(lane_code: i64, phase_code: i64) -> i64 {
@@ -224,6 +235,7 @@ pub fn rt_host_gpu_queue_emit_payload_text(
         backend_handle,
         payload_hash,
         payload_text: payload_text.to_string(),
+        submitted_at_us: 0,
     });
     packet_id
 }
@@ -239,9 +251,10 @@ pub extern "C" fn rt_host_gpu_queue_submit(max_packets: i64) -> i64 {
 
     let mut submitted = 0;
     while submitted < max_packets {
-        let Some(packet) = state.packets.pop_front() else {
+        let Some(mut packet) = state.packets.pop_front() else {
             break;
         };
+        packet.submitted_at_us = monotonic_wall_us();
         state.submitted_count += 1;
         state.last_status = RT_HOST_GPU_QUEUE_STATUS_SUBMITTED;
         state.last_backend_handle = packet.backend_handle;
@@ -252,11 +265,23 @@ pub extern "C" fn rt_host_gpu_queue_submit(max_packets: i64) -> i64 {
 }
 
 fn complete_packet(state: &mut HostGpuQueueState, packet: HostGpuQueuePacket) {
+    let completed_at_us = monotonic_wall_us();
     state.completed_count += 1;
     state.last_backend_handle = packet.backend_handle;
     state.last_payload_size = packet.payload_size;
     state.last_payload_hash = packet.payload_hash;
     state.last_payload_text = packet.payload_text.clone();
+    state.last_device_time_us = if packet.lane_code == RT_HOST_GPU_LANE_GPU
+        && packet.backend_handle > 0
+        && packet.submitted_at_us > 0
+        && completed_at_us > packet.submitted_at_us
+    {
+        completed_at_us - packet.submitted_at_us
+    } else if packet.lane_code == RT_HOST_GPU_LANE_GPU && packet.backend_handle > 0 {
+        1
+    } else {
+        0
+    };
     state.last_status = if packet.lane_code == RT_HOST_GPU_LANE_GPU && packet.backend_handle == 0 {
         RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE
     } else {
@@ -300,9 +325,10 @@ pub extern "C" fn rt_host_gpu_queue_drain(max_packets: i64) -> i64 {
             drained += 1;
             continue;
         }
-        let Some(packet) = state.packets.pop_front() else {
+        let Some(mut packet) = state.packets.pop_front() else {
             break;
         };
+        packet.submitted_at_us = monotonic_wall_us();
         state.submitted_count += 1;
         state.last_status = RT_HOST_GPU_QUEUE_STATUS_SUBMITTED;
         complete_packet(&mut state, packet);
@@ -345,6 +371,14 @@ pub extern "C" fn rt_host_gpu_queue_last_status() -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_host_gpu_queue_last_backend_handle() -> i64 {
     queue_state().lock().map(|state| state.last_backend_handle).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_host_gpu_queue_last_device_time_us() -> i64 {
+    queue_state()
+        .lock()
+        .map(|state| state.last_device_time_us)
+        .unwrap_or(0)
 }
 
 pub fn rt_host_gpu_queue_last_payload_size() -> i64 {
@@ -394,6 +428,7 @@ mod tests {
         assert_eq!(rt_host_gpu_queue_completed_count(), 1);
         assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_UNAVAILABLE);
         assert_eq!(rt_host_gpu_queue_last_backend_handle(), 0);
+        assert_eq!(rt_host_gpu_queue_last_device_time_us(), 0);
     }
 
     #[test]
@@ -409,6 +444,7 @@ mod tests {
         assert_eq!(rt_host_gpu_queue_completed_count(), 1);
         assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_COMPLETED);
         assert_eq!(rt_host_gpu_queue_last_backend_handle(), 7);
+        assert!(rt_host_gpu_queue_last_device_time_us() > 0);
     }
 
     #[test]
@@ -431,6 +467,7 @@ mod tests {
         assert_eq!(rt_host_gpu_queue_in_flight_count(), 0);
         assert_eq!(rt_host_gpu_queue_last_status(), RT_HOST_GPU_QUEUE_STATUS_COMPLETED);
         assert_eq!(rt_host_gpu_queue_last_backend_handle(), 7);
+        assert!(rt_host_gpu_queue_last_device_time_us() > 0);
     }
 
     #[test]

@@ -13,10 +13,9 @@ use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
 use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet}
 use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
-use os.kernel.net.rt_net_socket_facade.{rt_net_close}
+use os.kernel.net.rt_net_socket_facade.{rt_net_socket, rt_net_bind_and_listen, rt_net_accept, rt_net_close}
+use std.net.pure_server.{PureServerHostTarget, PureServerProtocol, PureServerRouteDecision, PureServerSshReleasePlan, pure_server_hosted_linux_adapter, pure_server_hosted_linux_caps, pure_server_release_route, pure_server_simpleos_adapter, pure_server_simpleos_caps, pure_server_ssh_release_plan}
 extern fn serial_println(msg: text)
-extern fn rt_boot_tcp_bind(addr: text) -> i64
-extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 
 # ============================================================================
 # Constants
@@ -201,6 +200,41 @@ impl SshDaemon:
         """Control whether live sessions advertise the generated Ed25519 host key."""
         self.advertise_ed25519_host_key = enabled
 
+    static fn release_route_for_target(target: PureServerHostTarget) -> Result<PureServerRouteDecision, text>:
+        """Build the SSHD release-mode route decision without starting sockets."""
+        val caps = if target == PureServerHostTarget.HostedLinux:
+            pure_server_hosted_linux_caps()
+        else:
+            pure_server_simpleos_caps()
+        pure_server_release_route(PureServerProtocol.SSH, caps)
+
+    static fn release_plan_for_target(target: PureServerHostTarget) -> PureServerSshReleasePlan:
+        """Build the SSHD release-mode protocol composition plan without starting sockets."""
+        val adapter = if target == PureServerHostTarget.HostedLinux:
+            pure_server_hosted_linux_adapter()
+        else:
+            pure_server_simpleos_adapter()
+        pure_server_ssh_release_plan(adapter)
+
+    me start_release_mode(target: PureServerHostTarget) -> Result<bool, text>:
+        """Start SSHD after validating release-mode Pure Simple protocol composition."""
+        val plan = SshDaemon.release_plan_for_target(target)
+        if not plan.release_ready:
+            return Err(plan.reason)
+        if not plan.uses_simple_protocol:
+            return Err("ssh release mode cannot allow native protocol bypass")
+        if plan.version_exchange_stage != "simple-ssh-version-exchange":
+            return Err("ssh release mode requires Simple version exchange")
+        if plan.kex_stage != "simple-ssh-kex":
+            return Err("ssh release mode requires Simple kex")
+        if plan.auth_stage != "simple-ssh-auth":
+            return Err("ssh release mode requires Simple auth")
+        if plan.channel_stage != "simple-ssh-channel":
+            return Err("ssh release mode requires Simple channel")
+        if plan.command_stage != "simple-host-process-exec":
+            return Err("ssh release mode requires host process execution adapter")
+        self.start()
+
     me start() -> Result<bool, text>:
         """Start listening for SSH connections.
 
@@ -241,14 +275,16 @@ impl SshDaemon:
         self.host_public_key = expected_public_key
         serial_println("[sshd] Host keys ready")
 
-        # The RV64 live lane uses the boot-local TCP runtime directly.
-        # This avoids the unstable cross-module bind/listen path and keeps
-        # the listener on the same boot TCP surface the successful probe uses.
-        val fd = rt_boot_tcp_bind("0.0.0.0:22")
+        val fd = rt_net_socket(1)
         if fd < 0:
-            serial_println("[sshd] rt_boot_tcp_bind failed")
-            return Err("failed to bind boot TCP listener: {fd}")
+            serial_println("[sshd] rt_net_socket failed")
+            return Err("failed to create SSH listener socket: {fd}")
         self.listen_fd = fd
+        val listen_rc = rt_net_bind_and_listen(self.listen_fd, self.port.to_i64())
+        if listen_rc < 0:
+            serial_println("[sshd] rt_net_bind_and_listen failed")
+            rt_net_close(self.listen_fd)
+            return Err("failed to bind SSH listener socket: {listen_rc}")
         serial_println("[sshd] start: socket ready")
 
         serial_println("[sshd] start: listen ok")
@@ -267,7 +303,7 @@ impl SshDaemon:
         """
         var accept_wait_ticks: u64 = 0
         while self.running:
-            val client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
+            val client_fd = rt_net_accept(self.listen_fd)
             if client_fd >= 0:
                 accept_wait_ticks = 0
                 serial_println("[sshd] accepted client fd={client_fd}")

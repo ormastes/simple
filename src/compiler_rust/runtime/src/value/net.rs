@@ -5,7 +5,7 @@
 //! global registry.
 
 use lazy_static::lazy_static;
-use socket2::Socket;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
@@ -104,6 +104,7 @@ impl From<std::io::Error> for NetError {
 
 /// Type of socket stored in the registry
 enum SocketEntry {
+    TcpSocket(Socket),
     TcpListener(TcpListener),
     TcpStream(TcpStream),
     UdpSocket(UdpSocket),
@@ -114,6 +115,8 @@ lazy_static! {
     static ref SOCKET_REGISTRY: Mutex<HashMap<i64, SocketEntry>> = Mutex::new(HashMap::new());
     /// Counter for generating unique handles
     static ref NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
+    static ref EVENT_LOOP_REGISTRY: Mutex<HashMap<i64, Vec<(i64, i64)>>> = Mutex::new(HashMap::new());
+    static ref EVENT_LOOP_POLL_RESULTS: Mutex<Vec<i64>> = Mutex::new(Vec::new());
 }
 
 /// Allocate a new handle for a socket
@@ -402,6 +405,141 @@ mod net_uds_windows {
     pub unsafe extern "C" fn rt_unix_socket_connect(_path_ptr: i64, _path_len: i64) -> i64 {
         NEG_ENOSYS
     }
+}
+
+/// Register a pre-bind TCP socket and return its handle
+fn register_tcp_socket(socket: Socket) -> i64 {
+    let handle = alloc_handle();
+    SOCKET_REGISTRY
+        .lock()
+        .unwrap()
+        .insert(handle, SocketEntry::TcpSocket(socket));
+    handle
+}
+
+#[no_mangle]
+pub extern "C" fn rt_event_loop_create() -> i64 {
+    let handle = alloc_handle();
+    EVENT_LOOP_REGISTRY.lock().unwrap().insert(handle, Vec::new());
+    handle
+}
+
+#[no_mangle]
+pub extern "C" fn rt_event_loop_register(loop_fd: i64, fd: i64, _interest: i64, _token: i64, _edge: bool) -> bool {
+    let mut registry = EVENT_LOOP_REGISTRY.lock().unwrap();
+    let Some(entries) = registry.get_mut(&loop_fd) else {
+        return false;
+    };
+    if let Some(existing) = entries.iter_mut().find(|(candidate, _)| *candidate == fd) {
+        existing.1 = _interest;
+    } else {
+        entries.push((fd, _interest));
+    }
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool {
+    let mut registry = EVENT_LOOP_REGISTRY.lock().unwrap();
+    let Some(entries) = registry.get_mut(&loop_fd) else {
+        return false;
+    };
+    entries.retain(|(candidate, _)| *candidate != fd);
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> i64 {
+    EVENT_LOOP_POLL_RESULTS.lock().unwrap().clear();
+
+    #[cfg(unix)]
+    {
+        let entries = {
+            let registry = EVENT_LOOP_REGISTRY.lock().unwrap();
+            match registry.get(&loop_fd) {
+                Some(entries) => entries.clone(),
+                None => return 0,
+            }
+        };
+        if entries.is_empty() || max_events <= 0 {
+            return 0;
+        }
+
+        let socket_registry = SOCKET_REGISTRY.lock().unwrap();
+        let mut poll_fds: Vec<(i64, libc::pollfd)> = Vec::new();
+        for (handle, interest) in entries {
+            let Some(entry) = socket_registry.get(&handle) else {
+                continue;
+            };
+            let raw_fd = match entry {
+                SocketEntry::TcpSocket(socket) => socket.as_raw_fd(),
+                SocketEntry::TcpListener(listener) => listener.as_raw_fd(),
+                SocketEntry::TcpStream(stream) => stream.as_raw_fd(),
+                SocketEntry::UdpSocket(socket) => socket.as_raw_fd(),
+            };
+            let events = match interest {
+                1 => libc::POLLOUT | libc::POLLERR | libc::POLLHUP,
+                2 => libc::POLLIN | libc::POLLOUT | libc::POLLERR | libc::POLLHUP,
+                _ => libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+            };
+            poll_fds.push((
+                handle,
+                libc::pollfd {
+                    fd: raw_fd,
+                    events,
+                    revents: 0,
+                },
+            ));
+        }
+        drop(socket_registry);
+
+        if poll_fds.is_empty() {
+            return 0;
+        }
+        let timeout = timeout_ms.clamp(-1, i32::MAX as i64) as libc::c_int;
+        let rc = unsafe { libc::poll(poll_fds.as_mut_ptr() as *mut libc::pollfd, poll_fds.len() as libc::nfds_t, timeout) };
+        if rc <= 0 {
+            return 0;
+        }
+
+        let mut results = EVENT_LOOP_POLL_RESULTS.lock().unwrap();
+        let limit = max_events.min(256) as usize;
+        for (handle, poll_fd) in poll_fds {
+            if poll_fd.revents != 0 {
+                results.push(handle);
+                if results.len() >= limit {
+                    break;
+                }
+            }
+        }
+        results.len() as i64
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = loop_fd;
+        let _ = max_events;
+        let _ = timeout_ms;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_event_loop_poll_get_fd(index: i64) -> i64 {
+    if index < 0 {
+        return -1;
+    }
+    EVENT_LOOP_POLL_RESULTS
+        .lock()
+        .unwrap()
+        .get(index as usize)
+        .copied()
+        .unwrap_or(-1)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_event_loop_close(loop_fd: i64) -> bool {
+    EVENT_LOOP_REGISTRY.lock().unwrap().remove(&loop_fd).is_some()
 }
 
 // ============================================================================

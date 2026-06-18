@@ -1,0 +1,50 @@
+"""
+# Simple Web HTML Layout Count-Pass Specification
+
+## Overview
+
+This focused unit spec guards the HTML layout parser count pass used for arena
+preallocation. It covers decoded entity-only whitespace so the count pass stays
+aligned with the parser's actual node materialization behavior.
+
+**Plan:** doc/03_plan/agent_tasks/browser_html_layout_renderer_count_pass_allocation.md
+
+**Requirements:** N/A
+
+**Design:** doc/03_plan/agent_tasks/browser_html_layout_renderer_count_pass_allocation.md
+
+**Research:** N/A
+
+## Syntax
+
+The spec uses `std.spec` scenarios and direct value matchers. It compares the
+renderer's allocated parser arena length against the count of materialized
+nodes for an `&nbsp;` tail-whitespace document.
+"""
+
+use std.spec.*
+use common.string_core.{str_repeat}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_max_node_count, simple_web_layout_debug_node_count, simple_web_layout_debug_materialized_node_count}
+
+describe "SimpleWebHtmlLayoutCountPass":
+
+    it "allocates the same count the parser materializes for decoded entity-only tail whitespace":
+        step("Parse a document with entity-only whitespace after the document element")
+        val html = "<html><body><div id='box'></div></body></html>&nbsp;"
+        val allocated_count = simple_web_layout_debug_node_count(html)
+        val materialized_count = simple_web_layout_debug_materialized_node_count(html)
+
+        step("Assert arena preallocation matches materialized parser nodes")
+        expect(allocated_count).to_equal(materialized_count)
+        expect(materialized_count).to_be_greater_than(4)
+
+    it "caps parser arena allocation for oversized element streams":
+        step("Parse more element nodes than the layout renderer admits")
+        val html = "<main>" + str_repeat("<div></div>", simple_web_layout_debug_max_node_count() + 32) + "</main>"
+        val allocated_count = simple_web_layout_debug_node_count(html)
+        val materialized_count = simple_web_layout_debug_materialized_node_count(html)
+
+        step("Assert allocation and materialization stop at the explicit node cap")
+        expect(allocated_count).to_equal(simple_web_layout_debug_max_node_count())
+        expect(materialized_count).to_equal(simple_web_layout_debug_max_node_count())

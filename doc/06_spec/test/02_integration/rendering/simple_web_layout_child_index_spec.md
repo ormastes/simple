@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -414,6 +414,38 @@ expect(composition.batches[0].commands.len()).to_be_greater_than(0)
 
 </details>
 
+#### rejects oversized Draw IR viewports before layout allocation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><section style=\"width:40px;height:16px;background-color:#e5e7eb\"></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 4096, 4097)
+expect(composition.batches.len()).to_equal(0)
+```
+
+</details>
+
+#### rejects oversized debug layout viewports before layout allocation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><section id=\"panel\" style=\"width:40px;height:16px;background-color:#e5e7eb\"></section></body></html>"
+val debug_width = simple_web_layout_debug_layout_by_id(html, 4096, 4097, "panel", "w")
+expect(debug_width).to_equal("")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -433,8 +465,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

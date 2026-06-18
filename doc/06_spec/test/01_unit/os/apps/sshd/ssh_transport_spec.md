@@ -28,7 +28,7 @@ ssh_transport_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -51,6 +51,26 @@ Reproduction: this block contains the complete executable scenario source.
 val version = ssh_parse_version_string(ssh_build_version_string())
 expect(version.is_ok()).to_equal(true)
 expect(version.unwrap()).to_equal("SSH-2.0-SimpleOS_1.0")
+```
+
+</details>
+
+#### extracts client version bytes without storing a canned banner
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val extracted = ssh_extract_version_bytes(_hex_decode("5353482d322e302d4f70656e5353485f392e367031205562756e74752d337562756e7475302e310d0a"))
+expect(extracted.is_ok()).to_equal(true)
+val version_bytes = extracted.unwrap()
+expect(version_bytes.len()).to_equal(39)
+expect(version_bytes[0]).to_equal(0x53)
+expect(version_bytes[8]).to_equal(0x4f)
+expect(version_bytes[38]).to_equal(0x31)
 ```
 
 </details>
@@ -470,8 +490,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

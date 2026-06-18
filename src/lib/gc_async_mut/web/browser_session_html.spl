@@ -14,6 +14,15 @@ use common.string_builder.{StringBuilder}
 use std.gc_async_mut.web.browser_session.{BrowserStylesheetSource, BrowserStylesheetExpansion}
 use std.gc_async_mut.web.browser_session_url.{find_text, resolve_relative_url}
 
+val BROWSER_SESSION_MAX_STYLESHEET_SOURCES: i32 = 64
+val BROWSER_SESSION_MAX_STYLESHEET_BYTES: i32 = 4096
+
+fn browser_session_debug_max_stylesheet_sources() -> i32:
+    BROWSER_SESSION_MAX_STYLESHEET_SOURCES
+
+fn browser_session_debug_max_stylesheet_bytes() -> i32:
+    BROWSER_SESSION_MAX_STYLESHEET_BYTES
+
 fn extract_title_text(html: text) -> text:
     val start = find_text(html, "<title>", 0)
     if start < 0:
@@ -314,6 +323,8 @@ fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
             break
         val content = html[tag_end + 1:close].trim()
         if content != "":
+            if write_idx >= source_count:
+                break
             sources[write_idx] = BrowserStylesheetSource.inline(content)
             write_idx = write_idx + 1
         style_pos = close + 8
@@ -329,6 +340,8 @@ fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
         val rel_value = extract_attr_value(tag_content, "rel").lower()
         val href_value = extract_attr_value(tag_content, "href")
         if href_value != "" and rel_contains_stylesheet(rel_value):
+            if write_idx >= source_count:
+                break
             sources[write_idx] = BrowserStylesheetSource.external(href_value)
             write_idx = write_idx + 1
         link_pos = tag_end + 1
@@ -351,6 +364,8 @@ fn stylesheet_source_count(html: text) -> i32:
         val content = html[tag_end + 1:close].trim()
         if content != "":
             count = count + 1
+            if count >= BROWSER_SESSION_MAX_STYLESHEET_SOURCES:
+                return BROWSER_SESSION_MAX_STYLESHEET_SOURCES
         style_pos = close + 8
     var link_pos = 0
     while link_pos < html_len:
@@ -365,6 +380,8 @@ fn stylesheet_source_count(html: text) -> i32:
         val href_value = extract_attr_value(tag_content, "href")
         if href_value != "" and rel_contains_stylesheet(rel_value):
             count = count + 1
+            if count >= BROWSER_SESSION_MAX_STYLESHEET_SOURCES:
+                return BROWSER_SESSION_MAX_STYLESHEET_SOURCES
         link_pos = tag_end + 1
     count
 
@@ -375,6 +392,8 @@ fn rel_contains_stylesheet(rel_value: text) -> bool:
     false
 
 fn expand_stylesheet_text(document_url: text, base_url: text, css_text: text) -> BrowserStylesheetExpansion:
+    if css_text.len() > BROWSER_SESSION_MAX_STYLESHEET_BYTES:
+        return BrowserStylesheetExpansion.create("", [])
     val imports = extract_css_import_sources(base_url, css_text)
     val cleaned = strip_css_imports(css_text).trim()
     val html = if cleaned != "": "<style>{cleaned}</style>" else: ""
@@ -398,6 +417,8 @@ fn extract_css_import_sources(base_url: text, css_text: text) -> [BrowserStylesh
         val stmt = css_text.slice(at, semi + 1)
         val href = extract_css_import_href(stmt)
         if href != "":
+            if write_idx >= source_count:
+                return sources
             sources[write_idx] = BrowserStylesheetSource.external(resolve_relative_url(base_url, href))
             write_idx = write_idx + 1
         pos = semi + 1
@@ -418,6 +439,8 @@ fn css_import_source_count(css_text: text) -> i32:
         val href = extract_css_import_href(stmt)
         if href != "":
             count = count + 1
+            if count >= BROWSER_SESSION_MAX_STYLESHEET_SOURCES:
+                return BROWSER_SESSION_MAX_STYLESHEET_SOURCES
         pos = semi + 1
     count
 
@@ -468,22 +491,27 @@ fn insert_stylesheet_sources(existing: [BrowserStylesheetSource], index: i32, ad
         return existing
     val existing_count = existing.len()
     val seed = if existing_count > 0: existing[0] else: additions[0]
-    var out: [BrowserStylesheetSource] = [seed; existing_count + additions_count]
+    var out_count = existing_count + additions_count
+    if out_count > BROWSER_SESSION_MAX_STYLESHEET_SOURCES:
+        out_count = BROWSER_SESSION_MAX_STYLESHEET_SOURCES
+    var out: [BrowserStylesheetSource] = [seed; out_count]
     var i = 0
     var write_idx = 0
-    while i < existing_count:
+    while i < existing_count and write_idx < out_count:
         if i == index:
             var add_idx = 0
-            while add_idx < additions_count:
+            while add_idx < additions_count and write_idx < out_count:
                 out[write_idx] = additions[add_idx]
                 write_idx = write_idx + 1
                 add_idx = add_idx + 1
+        if write_idx >= out_count:
+            break
         out[write_idx] = existing[i]
         write_idx = write_idx + 1
         i = i + 1
-    if index >= existing_count:
+    if index >= existing_count and write_idx < out_count:
         var add_idx = 0
-        while add_idx < additions_count:
+        while add_idx < additions_count and write_idx < out_count:
             out[write_idx] = additions[add_idx]
             write_idx = write_idx + 1
             add_idx = add_idx + 1

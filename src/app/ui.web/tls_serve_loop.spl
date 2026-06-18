@@ -26,9 +26,9 @@ use app.ui.web.bounded_channel.{BoundedChannel}
 use app.ui.web.html.{generate_html_page}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
-use app.ui.web.ws_handler.{handle_ws_upgrade, send_ws_text, is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed, ui_web_ws_upgrade_path_allowed}
-use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_json_security_headers, ui_web_html_security_headers, ui_web_request_head_allowed, ui_web_request_head_status}
+use app.ui.web.ws_handler.{handle_ws_upgrade, send_ws_text, is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed, ui_web_ws_upgrade_path_allowed, ui_web_ws_handshake_headers_allowed}
+use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_authorization_status}
+use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_principal_rate_decision, ui_web_extract_bearer, ui_web_json_security_headers, ui_web_html_security_headers, ui_web_tls_transport_security_headers, ui_web_request_head_allowed, ui_web_request_head_status, ui_web_sensitive_route_method_allowed}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -205,6 +205,8 @@ class TlsWebServer:
     origin_guard: OriginGuard
     token_secret: text
     ws_clients: [i64]
+    principal_rate_window_start_ms: Dict<text, u64>
+    principal_rate_request_count: Dict<text, i64>
 
     static fn new(file_path: text, port: i32, access_db_path: text) -> Result<TlsWebServer, text>:
         val tree_result = parse_ui_to_tree(file_path)
@@ -231,7 +233,9 @@ class TlsWebServer:
                     running: true,
                     origin_guard: OriginGuard.from_env(),
                     token_secret: load_secret(true),
-                    ws_clients: []
+                    ws_clients: [],
+                    principal_rate_window_start_ms: {},
+                    principal_rate_request_count: {}
                 ))
 
     fn start(tls_server_handle: i64):
@@ -307,6 +311,10 @@ class TlsWebServer:
                         Err(_):
                             break
 
+                if not ui_web_sensitive_route_method_allowed(path, method):
+                    conn.write_all(_tls_http_response(405, "application/json", "{\"error\": \"method_not_allowed\"}"))
+                    return
+
                 # /ui/* routes come first so /ui/ws reaches `_handle_ws_route`
                 # (adapter + read loop); the bare-upgrade branch below would
                 # otherwise hijack every WebSocket request and close it straight
@@ -333,6 +341,9 @@ class TlsWebServer:
                     if not ui_web_ws_upgrade_method_allowed(method):
                         conn.write_all(_tls_http_response(405, "application/json", "{\"error\": \"method_not_allowed\"}"))
                         return
+                    if not ui_web_ws_handshake_headers_allowed(headers):
+                        conn.write_all(_tls_http_response(400, "application/json", "{\"error\": \"bad_websocket_handshake\"}"))
+                        return
                     val ws_handle = conn.tls_handle
                     self.ws_clients = self.ws_clients.push(ws_handle)
                     handle_ws_upgrade(conn, path, headers, self.origin_guard, self.token_secret)
@@ -358,7 +369,10 @@ class TlsWebServer:
                         val html = generate_html_page(self.session.current_state(), self.port)
                         _tls_http_response(200, "text/html", html)
                     "/api/state":
-                        if not ui_web_request_authorized(headers, path, self.origin_guard, self.token_secret, rt_time_ms()):
+                        val auth_status = self.bearer_request_status(headers, path)
+                        if auth_status == "rate_limited":
+                            _tls_http_response(429, "application/json", "{\"error\": \"rate_limited\"}")
+                        elif auth_status != "ok":
                             _tls_http_response(403, "application/json", "{\"error\": \"forbidden\"}")
                         else:
                             val state_json = _tls_state_to_json(self.session.current_state())
@@ -382,6 +396,22 @@ class TlsWebServer:
                         _tls_reload_file(self.file_path, self.session, self.last_file_content)
                     _:
                         self.session.dispatch(event)
+
+    me bearer_request_status(headers: text, path: text) -> text:
+        val status = ui_web_authorization_status(headers, path, self.origin_guard, self.token_secret, rt_time_ms())
+        if status != "ok":
+            return status
+        val bearer = ui_web_extract_bearer(headers, path)
+        if bearer == "":
+            return "missing_bearer"
+        val window_start = self.principal_rate_window_start_ms.get(bearer) ?? 0u64
+        val request_count = self.principal_rate_request_count.get(bearer) ?? 0
+        val rate = ui_web_principal_rate_decision(window_start, request_count, rt_time_ms())
+        self.principal_rate_window_start_ms[bearer] = rate.1
+        self.principal_rate_request_count[bearer] = rate.2
+        if not rate.0:
+            return "rate_limited"
+        return "ok"
 
     me broadcast_render(html: text):
         """Push an HTML render update to all connected WebSocket clients."""
@@ -444,6 +474,7 @@ fn _tls_http_response(status: i32, content_type: text, body: text) -> text:
     var r = "HTTP/1.1 {status} {status_text}\r\n"
     r = "{r}Content-Type: {content_type}\r\n"
     r = "{r}X-UI-Protocol-Version: 1\r\n"
+    r = "{r}{ui_web_tls_transport_security_headers()}"
     r = "{r}{ui_web_json_security_headers(content_type)}"
     r = "{r}{ui_web_html_security_headers(content_type)}"
     r = "{r}Content-Length: {body.len()}\r\n"

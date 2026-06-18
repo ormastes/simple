@@ -1,0 +1,771 @@
+use std.spec.*
+use std.database.sql.types.{DbValue}
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
+use std.database.offload_profile.{db_offload_profile, db_offload_profile_budget}
+use std.database.storage_mode_offload.{DbStorageOffloadMode, DbStorageOffloadWorkload, db_storage_profile_allows_gpu, db_storage_offload_used_gpu}
+use std.web_db_offload.contract.{GpuWdbCoarseDataPath}
+use std.web_db_offload.device_backend.{gpu_wdb_device_backend}
+
+"""
+# Pure SQL GPU Offload Adapter Integration
+
+## Overview
+
+These scenarios verify that engine-owned pure-SQL SELECT execution can report
+storage-mode GPU offload evidence for join and aggregate work while keeping the
+existing CPU SQL rows authoritative.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/gpu_web_db_offload.md
+
+- Pure-SQL join and aggregate paths can be observed as join/aggregate offload
+  work.
+- CPU SQL result rows remain authoritative for all current join/aggregate shapes.
+- SSD offload still respects WAL freshness evidence.
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
+
+## Design
+
+**Design:** doc/05_design/gpu_web_db_offload.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+Call `query_with_offload_profile` with a RAM-heavy or SSD-accelerated DB
+profile. The returned rows come from the existing pure-SQL CPU engine while the
+offload record describes whether the SELECT shape was eligible for
+`gpu_db_join_aggregate_batch`.
+
+## Syntax
+
+```simple
+val execution = db.query_with_offload_profile(sql, [], profile, mode, true, 512).unwrap()
+```
+"""
+
+fn sql_offload_profile():
+    db_offload_profile(
+        "pure-sql-test",
+        "cuda",
+        1,
+        4,
+        ["gpu_db_columnar_scan_batch", "gpu_db_join_aggregate_batch"],
+        db_offload_profile_budget(8, 1024 * 1024, 1),
+        true,
+        true
+    )
+
+fn sql_offload_db() -> PureDatabase:
+    var db = PureDatabase.memory().unwrap()
+    db.exec_sql("CREATE TABLE users (uid INTEGER, name TEXT)").unwrap()
+    db.exec_sql("CREATE TABLE orders (oid INTEGER, user_id INTEGER, item TEXT)").unwrap()
+    db.exec_sql("INSERT INTO users (uid, name) VALUES (1, 'Alice')").unwrap()
+    db.exec_sql("INSERT INTO users (uid, name) VALUES (2, 'Bob')").unwrap()
+    db.exec_sql("INSERT INTO orders (oid, user_id, item) VALUES (10, 1, 'book')").unwrap()
+    db.exec_sql("INSERT INTO orders (oid, user_id, item) VALUES (11, 1, 'pen')").unwrap()
+    db.exec_sql("INSERT INTO orders (oid, user_id, item) VALUES (12, 2, 'hat')").unwrap()
+    db.exec_sql("CREATE TABLE categories (id INTEGER, category TEXT)").unwrap()
+    db.exec_sql("INSERT INTO categories (id, category) VALUES (1, 'fruit')").unwrap()
+    db.exec_sql("INSERT INTO categories (id, category) VALUES (2, 'fruit')").unwrap()
+    db.exec_sql("INSERT INTO categories (id, category) VALUES (3, 'veggie')").unwrap()
+    db.exec_sql("CREATE TABLE sales (sid INTEGER, category TEXT, amount INTEGER)").unwrap()
+    db.exec_sql("INSERT INTO sales (sid, category, amount) VALUES (1, 'fruit', 5)").unwrap()
+    db.exec_sql("INSERT INTO sales (sid, category, amount) VALUES (2, 'fruit', 7)").unwrap()
+    db.exec_sql("INSERT INTO sales (sid, category, amount) VALUES (3, 'veggie', 3)").unwrap()
+    db
+
+describe "Pure SQL GPU offload adapter integration":
+    it "should report filtered projection SELECT work as scan filter project offload":
+        step("Execute an engine-owned SQL projection/filter and preserve CPU row output")
+        var db = sql_offload_db()
+        val execution = db.query_with_offload_profile(
+            "SELECT name FROM users WHERE uid > 1",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(1)
+        expect(execution.rows[0].values[0].to_text()).to_equal("Bob")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.ScanFilterProject)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.validation_reason).to_equal("gpu-candidate-not-evaluated")
+        expect(execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuResidentBatch)
+        expect(db_storage_profile_allows_gpu(execution.offload)).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should report join SELECT work as join aggregate offload":
+        step("Execute an engine-owned SQL join and preserve CPU row output")
+        var db = sql_offload_db()
+        val execution = db.query_with_offload_profile(
+            "SELECT * FROM users JOIN orders ON uid = user_id",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(3)
+        expect(execution.rows[0].values[1].to_text()).to_equal("Alice")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.validation_reason).to_equal("gpu-candidate-not-evaluated")
+        expect(execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuResidentBatch)
+        expect(db_storage_profile_allows_gpu(execution.offload)).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should report grouped aggregate SELECT work through the adapter":
+        step("Execute GROUP BY COUNT with CPU-authoritative rows and offload metadata")
+        var db = sql_offload_db()
+        val execution = db.query_with_offload_profile(
+            "SELECT category, COUNT(*) FROM categories GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("2")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("1")
+
+    it "should execute grouped join aggregate rows through the adapter":
+        step("Execute an inner equi-join GROUP BY COUNT with CPU-authoritative rows")
+        var db = sql_offload_db()
+        val execution = db.query_with_offload_profile(
+            "SELECT name, COUNT(*) FROM users JOIN orders ON uid = user_id GROUP BY name",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("Alice")
+        expect(execution.rows[0].values[1].to_text()).to_equal("2")
+        expect(execution.rows[1].values[0].to_text()).to_equal("Bob")
+        expect(execution.rows[1].values[1].to_text()).to_equal("1")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should validate grouped join aggregate GPU candidate rows":
+        step("Compare a bounded join aggregate candidate with the CPU SQL oracle")
+        var db = sql_offload_db()
+        val execution = db.query_with_validated_offload_profile(
+            "SELECT name, COUNT(*) FROM users JOIN orders ON uid = user_id GROUP BY name",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("Alice")
+        expect(execution.rows[0].values[1].to_text()).to_equal("2")
+        expect(execution.rows[1].values[0].to_text()).to_equal("Bob")
+        expect(execution.rows[1].values[1].to_text()).to_equal("1")
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuResidentBatch)
+        expect(db_storage_profile_allows_gpu(execution.offload)).to_be(true)
+        expect(execution.result_source).to_equal("gpu_candidate_validated")
+
+    it "should validate filtered projection GPU candidate row ids":
+        step("Compare a bounded scan/filter/project candidate with the CPU SQL oracle")
+        var db = sql_offload_db()
+        val execution = db.query_with_validated_offload_profile(
+            "SELECT name FROM users WHERE uid > 1",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(1)
+        expect(execution.rows[0].values[0].to_text()).to_equal("Bob")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.ScanFilterProject)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(execution.offload.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.offload.row_ids.len()).to_equal(1)
+        expect(execution.offload.row_ids[0]).to_equal(0)
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.result_source).to_equal("gpu_candidate_validated")
+
+    it "should replace filtered projection rows only after native candidates match":
+        step("Require strict native device evidence before Pure SQL scan/filter/project replacement")
+        var db = sql_offload_db()
+        val execution = db.query_with_device_backend_validated(
+            "SELECT name FROM users WHERE uid > 1",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            11,
+            [0],
+            100,
+            210,
+            69,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(1)
+        expect(execution.rows[0].values[0].to_text()).to_equal("Bob")
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.execution.row_ids[0]).to_equal(0)
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("production_gpu_candidate_validated")
+
+    it "should keep filtered projection CPU authoritative when native candidates mismatch":
+        step("Reject Pure SQL scan/filter/project replacement when native row IDs disagree")
+        var db = sql_offload_db()
+        val execution = db.query_with_device_backend_validated(
+            "SELECT name FROM users WHERE uid > 1",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            11,
+            [1],
+            100,
+            210,
+            69,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(1)
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-mismatch")
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.execution.row_ids[0]).to_equal(0)
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should keep perf-only filtered projection device runs from replacing CPU rows":
+        step("Require production native timing before Pure SQL rows stop being CPU authoritative")
+        var db = sql_offload_db()
+        val execution = db.query_with_device_backend_validated(
+            "SELECT name FROM users WHERE uid > 1",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("mock", 11, ["gpu_db_columnar_scan_batch"], false, "mock-device"),
+            11,
+            [0],
+            100,
+            210,
+            69,
+            "mock-clock"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(1)
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-device-not-measured")
+        expect(execution.offload.execution.row_ids[0]).to_equal(0)
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(false)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should replace grouped join aggregate rows only after native candidates match":
+        step("Require strict native device evidence before Pure SQL join aggregate replacement")
+        var db = sql_offload_db()
+        val candidate_rows = db.query(
+            "SELECT name, COUNT(*) FROM users JOIN orders ON uid = user_id GROUP BY name",
+            []
+        ).unwrap()
+        val execution = db.query_join_aggregate_with_device_backend_validated(
+            "SELECT name, COUNT(*) FROM users JOIN orders ON uid = user_id GROUP BY name",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            11,
+            candidate_rows,
+            [0, 1],
+            100,
+            230,
+            81,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("Alice")
+        expect(execution.rows[0].values[1].to_text()).to_equal("2")
+        expect(execution.rows[1].values[0].to_text()).to_equal("Bob")
+        expect(execution.rows[1].values[1].to_text()).to_equal("1")
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.execution.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("production_gpu_candidate_validated")
+
+    it "should keep grouped join aggregate rows CPU authoritative when native rows mismatch":
+        step("Reject Pure SQL join aggregate replacement when native SQL rows disagree")
+        var db = sql_offload_db()
+        val candidate_rows = db.query(
+            "SELECT category, COUNT(*) FROM categories GROUP BY category",
+            []
+        ).unwrap()
+        val execution = db.query_join_aggregate_with_device_backend_validated(
+            "SELECT name, COUNT(*) FROM users JOIN orders ON uid = user_id GROUP BY name",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            11,
+            candidate_rows,
+            [0, 1],
+            100,
+            230,
+            81,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("Alice")
+        expect(execution.rows[0].values[1].to_text()).to_equal("2")
+        expect(execution.rows[1].values[0].to_text()).to_equal("Bob")
+        expect(execution.rows[1].values[1].to_text()).to_equal("1")
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-sql-row-mismatch")
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should keep validated filtered projection on CPU when GPU is unavailable":
+        step("Do not claim validation when scan/filter/project cannot dispatch to GPU")
+        var db = sql_offload_db()
+        val profile = db_offload_profile(
+            "pure-sql-no-scan-gpu",
+            "cuda",
+            1,
+            4,
+            ["gpu_db_columnar_scan_batch"],
+            db_offload_profile_budget(8, 1024 * 1024, 1),
+            false,
+            true
+        )
+        val execution = db.query_with_validated_offload_profile(
+            "SELECT name FROM users WHERE uid > 1",
+            [],
+            profile,
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(1)
+        expect(execution.rows[0].values[0].to_text()).to_equal("Bob")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.ScanFilterProject)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(false)
+        expect(execution.offload.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.validation_reason).to_equal("gpu-not-dispatched")
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should preserve no-hardware fallback for join aggregate SELECTs":
+        step("Keep join work CPU-authoritative when GPU hardware is unavailable")
+        var db = sql_offload_db()
+        val profile = db_offload_profile(
+            "pure-sql-no-gpu",
+            "cuda",
+            1,
+            4,
+            ["gpu_db_join_aggregate_batch"],
+            db_offload_profile_budget(8, 1024 * 1024, 1),
+            false,
+            true
+        )
+        val execution = db.query_with_offload_profile(
+            "SELECT * FROM users JOIN orders ON uid = user_id",
+            [],
+            profile,
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(3)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(false)
+        expect(execution.offload.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.reason).to_equal("gpu-unavailable")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.validation_reason).to_equal("gpu-candidate-not-evaluated")
+        expect(execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuResidentBatch)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should report SUM aggregate SELECT work through the adapter":
+        step("Execute GROUP BY SUM with CPU-authoritative rows and offload metadata")
+        var db = sql_offload_db()
+        val execution = db.query_with_offload_profile(
+            "SELECT category, SUM(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("12")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should validate SUM aggregate SELECT candidate rows":
+        step("Compare grouped SUM aggregate candidates with the CPU SQL oracle")
+        var db = sql_offload_db()
+        val execution = db.query_with_validated_offload_profile(
+            "SELECT category, SUM(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("12")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.result_source).to_equal("gpu_candidate_validated")
+
+    it "should validate AVG aggregate SELECT candidate rows":
+        step("Compare grouped AVG aggregate candidates with the CPU SQL oracle")
+        var db = sql_offload_db()
+        val execution = db.query_with_validated_offload_profile(
+            "SELECT category, AVG(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("6")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.result_source).to_equal("gpu_candidate_validated")
+
+    it "should validate MIN and MAX aggregate SELECT candidate rows":
+        step("Compare grouped MIN and MAX aggregate candidates with the CPU SQL oracle")
+        var db = sql_offload_db()
+        val min_execution = db.query_with_validated_offload_profile(
+            "SELECT category, MIN(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+        val max_execution = db.query_with_validated_offload_profile(
+            "SELECT category, MAX(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(min_execution.rows.len()).to_equal(2)
+        expect(min_execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(min_execution.rows[0].values[1].to_text()).to_equal("5")
+        expect(min_execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(min_execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(min_execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(min_execution.offload)).to_be(true)
+        expect(min_execution.offload.gpu_candidate_validated).to_be(true)
+        expect(min_execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(min_execution.result_source).to_equal("gpu_candidate_validated")
+        expect(max_execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(max_execution.rows[0].values[1].to_text()).to_equal("7")
+        expect(max_execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(max_execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(max_execution.offload.gpu_candidate_validated).to_be(true)
+        expect(max_execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(max_execution.result_source).to_equal("gpu_candidate_validated")
+
+    it "should replace grouped SUM aggregate rows only after native candidates match":
+        step("Require strict native device evidence before Pure SQL SUM aggregate replacement")
+        var db = sql_offload_db()
+        val candidate_rows = db.query(
+            "SELECT category, SUM(amount) FROM sales GROUP BY category",
+            []
+        ).unwrap()
+        val execution = db.query_join_aggregate_with_device_backend_validated(
+            "SELECT category, SUM(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            11,
+            candidate_rows,
+            [0, 1],
+            100,
+            230,
+            81,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("12")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.execution.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("production_gpu_candidate_validated")
+
+    it "should replace grouped AVG aggregate rows only after native candidates match":
+        step("Require strict native device evidence before Pure SQL AVG aggregate replacement")
+        var db = sql_offload_db()
+        val candidate_rows = db.query(
+            "SELECT category, AVG(amount) FROM sales GROUP BY category",
+            []
+        ).unwrap()
+        val execution = db.query_join_aggregate_with_device_backend_validated(
+            "SELECT category, AVG(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            11,
+            candidate_rows,
+            [0, 1],
+            100,
+            230,
+            81,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("6")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.execution.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("production_gpu_candidate_validated")
+
+    it "should replace grouped MIN aggregate rows only after native candidates match":
+        step("Require strict native device evidence before Pure SQL MIN aggregate replacement")
+        var db = sql_offload_db()
+        val candidate_rows = db.query(
+            "SELECT category, MIN(amount) FROM sales GROUP BY category",
+            []
+        ).unwrap()
+        val execution = db.query_join_aggregate_with_device_backend_validated(
+            "SELECT category, MIN(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            11,
+            candidate_rows,
+            [0, 1],
+            100,
+            230,
+            81,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("5")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("production_gpu_candidate_validated")
+
+    it "should replace grouped MAX aggregate rows only after native candidates match":
+        step("Require strict native device evidence before Pure SQL MAX aggregate replacement")
+        var db = sql_offload_db()
+        val candidate_rows = db.query(
+            "SELECT category, MAX(amount) FROM sales GROUP BY category",
+            []
+        ).unwrap()
+        val execution = db.query_join_aggregate_with_device_backend_validated(
+            "SELECT category, MAX(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            11,
+            candidate_rows,
+            [0, 1],
+            100,
+            230,
+            81,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("7")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("production_gpu_candidate_validated")
+
+    it "should keep grouped SUM aggregate rows CPU authoritative when native rows mismatch":
+        step("Reject Pure SQL SUM aggregate replacement when native SQL rows disagree")
+        var db = sql_offload_db()
+        val candidate_rows = db.query(
+            "SELECT name, COUNT(*) FROM users JOIN orders ON uid = user_id GROUP BY name",
+            []
+        ).unwrap()
+        val execution = db.query_join_aggregate_with_device_backend_validated(
+            "SELECT category, SUM(amount) FROM sales GROUP BY category",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512,
+            gpu_wdb_device_backend("cuda", 11, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            11,
+            candidate_rows,
+            [0, 1],
+            100,
+            230,
+            81,
+            "cuda-event"
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(2)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("12")
+        expect(execution.rows[1].values[0].to_text()).to_equal("veggie")
+        expect(execution.rows[1].values[1].to_text()).to_equal("3")
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-sql-row-mismatch")
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should report HAVING ORDER LIMIT aggregate SELECT work through the adapter":
+        step("Execute aggregate HAVING with order and limit while preserving CPU rows")
+        var db = sql_offload_db()
+        val execution = db.query_with_offload_profile(
+            "SELECT category, SUM(amount) FROM sales GROUP BY category HAVING SUM(amount) > 3 ORDER BY category DESC LIMIT 1",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.RamOnly,
+            true,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(1)
+        expect(execution.rows[0].values[0].to_text()).to_equal("fruit")
+        expect(execution.rows[0].values[1].to_text()).to_equal("12")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.result_source).to_equal("cpu_select")
+
+    it "should preserve stale WAL fallback for SSD SQL aggregate observation":
+        step("Keep SSD aggregate observation on CPU when WAL generation is stale")
+        var db = sql_offload_db()
+        val execution = db.query_with_offload_profile(
+            "SELECT COUNT(*) FROM categories",
+            [],
+            sql_offload_profile(),
+            DbStorageOffloadMode.SsdAccelerated,
+            false,
+            512
+        ).unwrap()
+
+        expect(execution.rows.len()).to_equal(1)
+        expect(execution.rows[0].values[0].to_text()).to_equal("3")
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(false)
+        expect(execution.offload.reason).to_equal("stale-generation")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.SsdStagedBatch)
+        expect(db_storage_profile_allows_gpu(execution.offload)).to_be(false)
+        expect(execution.result_source).to_equal("cpu_select")

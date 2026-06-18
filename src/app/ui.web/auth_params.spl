@@ -6,11 +6,15 @@ val UI_WEB_MAX_UNAUTH_BODY_BYTES: i64 = 8192
 val UI_WEB_MAX_AUTH_JSON_BYTES: i64 = 8192
 val UI_WEB_MAX_WS_FRAME_BYTES: i64 = 65536
 val UI_WEB_MAX_REQUEST_ID_BYTES: i64 = 64
+val UI_WEB_MAX_CAPABILITY_GRANT_ID_BYTES: i64 = 64
+val UI_WEB_MAX_SESSION_ID_BYTES: i64 = 64
 val UI_WEB_MAX_REQUEST_HEAD_BYTES: i64 = 32768
 val UI_WEB_MAX_REQUEST_LINE_BYTES: i64 = 8192
 val UI_WEB_MAX_HEADER_LINE_BYTES: i64 = 8192
 val UI_WEB_LOGIN_RATE_WINDOW_MS: u64 = 60000u64
 val UI_WEB_LOGIN_RATE_MAX_ATTEMPTS: i64 = 20
+val UI_WEB_PRINCIPAL_RATE_WINDOW_MS: u64 = 60000u64
+val UI_WEB_PRINCIPAL_RATE_MAX_REQUESTS: i64 = 600
 
 fn ui_web_extract_bearer(headers: text, path: text) -> text:
     val allow_query = ui_web_query_token_allowed_from_env_value(rt_env_get("SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN") ?? "")
@@ -126,8 +130,135 @@ fn ui_web_body_exceeds_unauth_limit(headers: text) -> bool:
 fn ui_web_request_body_framing_valid(headers: text) -> bool:
     return ui_web_request_body_status(headers) != "invalid_request_framing"
 
+fn ui_web_json_content_type_status(headers: text) -> text:
+    var count = 0
+    var value = ""
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with("content-type:"):
+            count = count + 1
+            value = trimmed[13:].trim().lower()
+    if count == 0:
+        return "missing_content_type"
+    if count > 1:
+        return "duplicate_content_type"
+    val semi = value.find(";")
+    if semi >= 0:
+        value = value.slice(0, semi).trim()
+    if value != "application/json":
+        return "unsupported_content_type"
+    return "ok"
+
+fn ui_web_json_content_type_allowed(headers: text) -> bool:
+    return ui_web_json_content_type_status(headers) == "ok"
+
+fn ui_web_fetch_site_status(headers: text) -> text:
+    var count = 0
+    var value = ""
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with("sec-fetch-site:"):
+            count = count + 1
+            value = trimmed[15:].trim().lower()
+    if count == 0:
+        return "ok"
+    if count > 1:
+        return "duplicate_fetch_site"
+    if value == "same-origin" or value == "same-site":
+        return "ok"
+    if value == "cross-site":
+        return "cross_site_request"
+    return "invalid_fetch_site"
+
+fn ui_web_fetch_site_allowed(headers: text) -> bool:
+    return ui_web_fetch_site_status(headers) == "ok"
+
+fn ui_web_host_header_status(headers: text) -> text:
+    var count = 0
+    var host = ""
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with("host:"):
+            count = count + 1
+            host = trimmed[5:].trim()
+    if count == 0:
+        return "missing_host"
+    if count > 1:
+        return "duplicate_host"
+    if not ui_web_host_value_allowed(host):
+        return "invalid_host"
+    return "ok"
+
+fn ui_web_host_value_allowed(host: text) -> bool:
+    if host == "":
+        return false
+    if host.contains(" ") or host.contains("\t"):
+        return false
+    if host.contains("/") or host.contains("?") or host.contains("#"):
+        return false
+    if host.contains("@") or host.contains(","):
+        return false
+    if host.starts_with("http:") or host.starts_with("https:"):
+        return false
+    return true
+
+fn ui_web_host_header_allowed(headers: text) -> bool:
+    return ui_web_host_header_status(headers) == "ok"
+
+fn ui_web_host_header_value(headers: text) -> text:
+    if ui_web_host_header_status(headers) != "ok":
+        return ""
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.lower().starts_with("host:"):
+            return trimmed[5:].trim().lower()
+    return ""
+
+fn ui_web_origin_authority(origin: text) -> text:
+    val scheme_pos = origin.find("://")
+    if scheme_pos < 0:
+        return ""
+    val authority_start = scheme_pos + 3
+    if authority_start >= origin.len():
+        return ""
+    val authority = origin.slice(authority_start, origin.len())
+    if authority.contains("/") or authority.contains("?") or authority.contains("#"):
+        return ""
+    return authority.lower()
+
+fn ui_web_host_origin_authority_status(headers: text, origin: text) -> text:
+    val host = ui_web_host_header_value(headers)
+    if host == "":
+        return "bad_host"
+    val authority = ui_web_origin_authority(origin)
+    if authority == "":
+        return "invalid_origin"
+    if host != authority:
+        return "origin_host_mismatch"
+    return "ok"
+
+fn ui_web_host_origin_authority_allowed(headers: text, origin: text) -> bool:
+    return ui_web_host_origin_authority_status(headers, origin) == "ok"
+
 fn ui_web_ws_frame_payload_allowed(payload_len: i64) -> bool:
     return payload_len >= 0 and payload_len <= UI_WEB_MAX_WS_FRAME_BYTES
+
+fn ui_web_ws_frame_metadata_status(first_byte: i64, masked: bool, payload_len: i64) -> text:
+    if not masked:
+        return "client_frame_unmasked"
+    if (first_byte & 0x70) != 0:
+        return "reserved_bits_set"
+    val fin_set = (first_byte & 0x80) != 0
+    if not fin_set:
+        return "fragmented_frame_unsupported"
+    val opcode = first_byte & 0x0F
+    if opcode != 0x01 and opcode != 0x08 and opcode != 0x09 and opcode != 0x0A:
+        return "unsupported_opcode"
+    if not ui_web_ws_frame_payload_allowed(payload_len):
+        return "frame_payload_too_large"
+    if opcode >= 0x08 and payload_len > 125:
+        return "control_frame_too_large"
+    return "ok"
 
 fn ui_web_request_head_allowed(head_len: i64) -> bool:
     return head_len >= 0 and head_len <= UI_WEB_MAX_REQUEST_HEAD_BYTES
@@ -152,20 +283,115 @@ fn ui_web_request_head_status(request_line: text, headers: text) -> text:
             return "request_head_too_large"
     return "ok"
 
+fn ui_web_sensitive_route_method_status(path: text, method: text) -> text:
+    var route = path
+    val query_idx = path.find("?")
+    if query_idx >= 0:
+        route = path.slice(0, query_idx)
+    if route == "/ui/login" or route == "/ui/resume":
+        if method == "POST":
+            return "ok"
+        return "method_not_allowed"
+    if route == "/ui/ws":
+        if method == "GET":
+            return "ok"
+        return "method_not_allowed"
+    if route == "/api/state" or route == "/api/widgets" or route == "/api/clients":
+        if method == "GET":
+            return "ok"
+        return "method_not_allowed"
+    return "not_sensitive_route"
+
+fn ui_web_sensitive_route_method_allowed(path: text, method: text) -> bool:
+    val status = ui_web_sensitive_route_method_status(path, method)
+    return status == "ok" or status == "not_sensitive_route"
+
+fn ui_web_session_id_status(session_id: text) -> text:
+    val trimmed = session_id.trim()
+    if trimmed == "":
+        return "missing_session_id"
+    if trimmed.len() > UI_WEB_MAX_SESSION_ID_BYTES:
+        return "session_id_too_large"
+    for ch in trimmed:
+        if not _ui_web_session_id_char_allowed(ch):
+            return "invalid_session_id"
+    return "ok"
+
+fn ui_web_session_id_allowed(session_id: text) -> bool:
+    return ui_web_session_id_status(session_id) == "ok"
+
+fn _ui_web_session_id_char_allowed(ch: text) -> bool:
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    return ch == "-" or ch == "_"
+
+fn ui_web_allow_public_bind_from_env_value(raw: text) -> bool:
+    val v = raw.trim().lower()
+    return v == "1" or v == "true" or v == "yes"
+
+fn ui_web_bind_host_from_env_value(raw_host: text, raw_allow_public: text) -> text:
+    val host = raw_host.trim()
+    if host == "":
+        return "127.0.0.1"
+    if _ui_web_bind_host_is_public(host) and not ui_web_allow_public_bind_from_env_value(raw_allow_public):
+        return "127.0.0.1"
+    if not _ui_web_bind_host_shape_allowed(host):
+        return "127.0.0.1"
+    return host
+
+fn _ui_web_bind_host_is_public(host: text) -> bool:
+    val h = host.trim().lower()
+    return h == "0.0.0.0" or h == "::" or h == "[::]"
+
+fn _ui_web_bind_host_shape_allowed(host: text) -> bool:
+    if host == "":
+        return false
+    if host.contains(" ") or host.contains("\t"):
+        return false
+    if host.contains("/") or host.contains("?") or host.contains("#"):
+        return false
+    if host.contains("@") or host.contains(","):
+        return false
+    if host.starts_with("http:") or host.starts_with("https:"):
+        return false
+    return true
+
 fn ui_web_json_security_headers(content_type: text) -> text:
     if content_type != "application/json":
         return ""
-    return "Cache-Control: no-store\r\nPragma: no-cache\r\nX-Content-Type-Options: nosniff\r\n"
+    var headers = "Cache-Control: no-store\r\nPragma: no-cache\r\nX-Content-Type-Options: nosniff\r\n"
+    headers = "{headers}Cross-Origin-Resource-Policy: same-origin\r\n"
+    return headers
+
+fn ui_web_script_security_headers(content_type: text) -> text:
+    if content_type != "application/javascript":
+        return ""
+    var headers = "Cache-Control: no-store\r\nPragma: no-cache\r\nX-Content-Type-Options: nosniff\r\n"
+    headers = "{headers}Cross-Origin-Resource-Policy: same-origin\r\n"
+    return headers
 
 fn ui_web_html_security_headers(content_type: text) -> text:
     if content_type != "text/html":
         return ""
-    var html_headers = "X-Content-Type-Options: nosniff\r\n"
+    var html_headers = "Cache-Control: no-store\r\nPragma: no-cache\r\nExpires: 0\r\nX-Content-Type-Options: nosniff\r\n"
     html_headers = "{html_headers}X-Frame-Options: DENY\r\n"
+    html_headers = "{html_headers}X-DNS-Prefetch-Control: off\r\n"
+    html_headers = "{html_headers}X-Permitted-Cross-Domain-Policies: none\r\n"
+    html_headers = "{html_headers}Cross-Origin-Opener-Policy: same-origin\r\n"
+    html_headers = "{html_headers}Cross-Origin-Embedder-Policy: require-corp\r\n"
+    html_headers = "{html_headers}Cross-Origin-Resource-Policy: same-origin\r\n"
+    html_headers = "{html_headers}Origin-Agent-Cluster: ?1\r\n"
     html_headers = "{html_headers}Referrer-Policy: no-referrer\r\n"
-    html_headers = "{html_headers}Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()\r\n"
-    html_headers = "{html_headers}Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n"
+    html_headers = "{html_headers}Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), clipboard-read=(), clipboard-write=(), display-capture=(), screen-wake-lock=(), xr-spatial-tracking=(), accelerometer=(), gyroscope=(), magnetometer=(), midi=(), autoplay=(), encrypted-media=(), fullscreen=()\r\n"
+    html_headers = "{html_headers}Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n"
     return html_headers
+
+fn ui_web_tls_transport_security_headers() -> text:
+    return "Strict-Transport-Security: max-age=31536000; includeSubDomains\r\n"
 
 fn ui_web_request_id(headers: text, fallback: text) -> text:
     for line in headers.split("\n"):
@@ -194,12 +420,111 @@ fn ui_web_sanitize_request_id(value: text) -> text:
 fn _ui_web_request_id_char_allowed(ch: text) -> bool:
     return (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == "."
 
+fn ui_web_capability_grant_id_status(grant_id: text) -> text:
+    val trimmed = grant_id.trim()
+    if trimmed == "":
+        return "missing_capability_grant"
+    if trimmed.len() > UI_WEB_MAX_CAPABILITY_GRANT_ID_BYTES:
+        return "capability_grant_too_large"
+    var pos = 0
+    while pos < trimmed.len():
+        val ch = trimmed.slice(pos, pos + 1)
+        if not _ui_web_capability_grant_id_char_allowed(ch):
+            return "invalid_capability_grant"
+        pos = pos + 1
+    return "ok"
+
+fn ui_web_capability_grant_id_allowed(grant_id: text) -> bool:
+    return ui_web_capability_grant_id_status(grant_id) == "ok"
+
+fn _ui_web_capability_grant_id_char_allowed(ch: text) -> bool:
+    return (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-" or ch == "_"
+
+fn ui_web_capability_grant_id_authorized(grant_id: text) -> bool:
+    val raw = rt_env_get("SIMPLE_UI_WEB_ALLOWED_CAPABILITY_GRANTS") ?? ""
+    return ui_web_capability_grant_id_authorized_from_value(grant_id, raw)
+
+fn ui_web_capability_grant_id_authorized_from_value(grant_id: text, raw: text) -> bool:
+    val trimmed_grant = grant_id.trim()
+    if not ui_web_capability_grant_id_allowed(trimmed_grant):
+        return false
+    if raw.trim() == "":
+        return trimmed_grant == "legacy" or trimmed_grant == "wm" or trimmed_grant == "dev" or trimmed_grant == "wm-default"
+    for part in raw.split(","):
+        val allowed = part.trim()
+        if ui_web_capability_grant_id_allowed(allowed) and allowed == trimmed_grant:
+            return true
+    return false
+
+fn ui_web_redact_sensitive_header_line(line: text) -> text:
+    val trimmed = line.trim()
+    val lower = trimmed.lower()
+    if lower.starts_with("authorization:"):
+        return "Authorization: <redacted>"
+    if lower.starts_with("cookie:"):
+        return "Cookie: <redacted>"
+    if lower.starts_with("set-cookie:"):
+        return "Set-Cookie: <redacted>"
+    if lower.starts_with("sec-websocket-protocol:"):
+        val value = trimmed[23:].trim()
+        var out = ""
+        for part in value.split(","):
+            val protocol = part.trim()
+            var safe = protocol
+            if protocol.lower().starts_with("bearer."):
+                safe = "bearer.<redacted>"
+            if out == "":
+                out = safe
+            else:
+                out = "{out}, {safe}"
+        return "Sec-WebSocket-Protocol: {out}"
+    return trimmed
+
+fn ui_web_redact_sensitive_headers(headers: text) -> text:
+    var out = ""
+    for line in headers.split("\n"):
+        if line == "":
+            continue
+        val safe = ui_web_redact_sensitive_header_line(line)
+        if out == "":
+            out = safe
+        else:
+            out = "{out}\n{safe}"
+    return out
+
+fn ui_web_redact_sensitive_path(path: text) -> text:
+    val idx = path.find("?")
+    if idx < 0:
+        return path
+    val prefix = path.slice(0, idx)
+    val query = path.slice(idx + 1, path.len())
+    var out = ""
+    for part in query.split("&"):
+        val eq = part.find("=")
+        var safe = part
+        if eq >= 0:
+            val key = part.slice(0, eq)
+            if key.lower() == "token" or key.lower() == "access_token":
+                safe = "{key}=<redacted>"
+        if out == "":
+            out = safe
+        else:
+            out = "{out}&{safe}"
+    return "{prefix}?{out}"
+
 fn ui_web_login_rate_decision(window_start_ms: u64, attempt_count: i64, now_ms: u64) -> (bool, u64, i64):
     if window_start_ms == 0u64 or now_ms >= window_start_ms + UI_WEB_LOGIN_RATE_WINDOW_MS:
         return (true, now_ms, 1)
     if attempt_count >= UI_WEB_LOGIN_RATE_MAX_ATTEMPTS:
         return (false, window_start_ms, attempt_count)
     return (true, window_start_ms, attempt_count + 1)
+
+fn ui_web_principal_rate_decision(window_start_ms: u64, request_count: i64, now_ms: u64) -> (bool, u64, i64):
+    if window_start_ms == 0u64 or now_ms >= window_start_ms + UI_WEB_PRINCIPAL_RATE_WINDOW_MS:
+        return (true, now_ms, 1)
+    if request_count >= UI_WEB_PRINCIPAL_RATE_MAX_REQUESTS:
+        return (false, window_start_ms, request_count)
+    return (true, window_start_ms, request_count + 1)
 
 fn ui_web_auth_json_field(json: text, field: text) -> text:
     """Bounded JSON field extraction for unauth/login and resume auth paths.
@@ -293,24 +618,55 @@ export ui_web_content_length
 export ui_web_body_exceeds_unauth_limit
 export ui_web_request_body_status
 export ui_web_request_body_framing_valid
+export ui_web_json_content_type_status
+export ui_web_json_content_type_allowed
+export ui_web_fetch_site_status
+export ui_web_fetch_site_allowed
+export ui_web_host_header_status
+export ui_web_host_value_allowed
+export ui_web_host_header_allowed
+export ui_web_host_header_value
+export ui_web_origin_authority
+export ui_web_host_origin_authority_status
+export ui_web_host_origin_authority_allowed
 export ui_web_ws_frame_payload_allowed
+export ui_web_ws_frame_metadata_status
 export ui_web_request_head_allowed
 export ui_web_request_line_allowed
 export ui_web_header_line_allowed
 export ui_web_request_head_status
+export ui_web_sensitive_route_method_status
+export ui_web_sensitive_route_method_allowed
+export ui_web_session_id_status
+export ui_web_session_id_allowed
+export ui_web_allow_public_bind_from_env_value
+export ui_web_bind_host_from_env_value
 export ui_web_json_security_headers
+export ui_web_script_security_headers
 export ui_web_html_security_headers
 export ui_web_request_id
 export ui_web_sanitize_request_id
+export ui_web_capability_grant_id_status
+export ui_web_capability_grant_id_allowed
+export ui_web_capability_grant_id_authorized
+export ui_web_capability_grant_id_authorized_from_value
+export ui_web_redact_sensitive_header_line
+export ui_web_redact_sensitive_headers
+export ui_web_redact_sensitive_path
 export ui_web_login_rate_decision
+export ui_web_principal_rate_decision
 export ui_web_auth_json_field
 export ui_web_percent_decode_query_component
 export UI_WEB_MAX_UNAUTH_BODY_BYTES
 export UI_WEB_MAX_AUTH_JSON_BYTES
 export UI_WEB_MAX_WS_FRAME_BYTES
 export UI_WEB_MAX_REQUEST_ID_BYTES
+export UI_WEB_MAX_CAPABILITY_GRANT_ID_BYTES
+export UI_WEB_MAX_SESSION_ID_BYTES
 export UI_WEB_MAX_REQUEST_HEAD_BYTES
 export UI_WEB_MAX_REQUEST_LINE_BYTES
 export UI_WEB_MAX_HEADER_LINE_BYTES
 export UI_WEB_LOGIN_RATE_WINDOW_MS
 export UI_WEB_LOGIN_RATE_MAX_ATTEMPTS
+export UI_WEB_PRINCIPAL_RATE_WINDOW_MS
+export UI_WEB_PRINCIPAL_RATE_MAX_REQUESTS

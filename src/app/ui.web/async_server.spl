@@ -15,7 +15,7 @@ use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open, ui_access_store
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page}
 use app.ui.web.async_ws.{start_ws_reader, ws_send_render}
-use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text, is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed, ui_web_ws_upgrade_path_allowed}
+use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text, is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed, ui_web_ws_upgrade_path_allowed, ui_web_ws_handshake_headers_allowed}
 use app.ui.test_api.handler.{handle_test_request}
 use app.ui.test_api.mount.{test_api_matches, dispatch_and_format}
 use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
@@ -23,7 +23,7 @@ use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized}
 use app.ui.web.tls_serve_loop.{ConnStream}
 use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
-use app.ui.web.auth_params.{ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_json_security_headers, ui_web_html_security_headers, ui_web_request_head_status}
+use app.ui.web.auth_params.{ui_web_bind_host_from_env_value, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_json_security_headers, ui_web_html_security_headers, ui_web_request_head_status, ui_web_sensitive_route_method_allowed}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -96,13 +96,14 @@ class AsyncWebServer:
         Task 2 (thread): File watcher -- check for file changes periodically
         Task 3 (main thread after accept_timeout): Process events + broadcast
         """
-        print "Starting Async UI Web Server on port {self.port}..."
+        val bind_host = ui_web_bind_host_from_env_value(rt_env_get("SIMPLE_UI_WEB_BIND_HOST") ?? "", rt_env_get("SIMPLE_UI_WEB_ALLOW_PUBLIC_BIND") ?? "")
+        print "Starting Async UI Web Server on {bind_host}:{self.port}..."
         print "Open http://localhost:{self.port} in your browser"
         print "Supports multiple concurrent connections with live push"
         print "Press Ctrl+C to stop"
         print ""
 
-        match TcpListener.bind("0.0.0.0:{self.port}"):
+        match TcpListener.bind("{bind_host}:{self.port}"):
             Err(e):
                 print "Error: Failed to bind to port {self.port}: {e}"
                 return
@@ -159,6 +160,9 @@ class AsyncWebServer:
 
                 val path = parts[1]
                 val method = parts[0]
+                if not ui_web_sensitive_route_method_allowed(path, method):
+                    stream.write_all(http_response(405, "application/json", "{\"error\": \"method_not_allowed\"}"))
+                    return
 
                 # Read remaining headers
                 var headers = ""
@@ -200,6 +204,9 @@ class AsyncWebServer:
                         return
                     if not ui_web_ws_upgrade_method_allowed(method):
                         stream.write_all(http_response(405, "application/json", "{\"error\": \"method_not_allowed\"}"))
+                        return
+                    if not ui_web_ws_handshake_headers_allowed(headers):
+                        stream.write_all(http_response(400, "application/json", "{\"error\": \"bad_websocket_handshake\"}"))
                         return
                     self.handle_ws_upgrade(stream, path, headers)
                     return
@@ -253,7 +260,9 @@ class AsyncWebServer:
             stream.write_all(forbidden)
             return
         val key = extract_ws_key(headers)
-        if key == "":
+        if not ui_web_ws_handshake_headers_allowed(headers):
+            val bad_request = http_response(400, "application/json", "{\"error\": \"bad_websocket_handshake\"}")
+            stream.write_all(bad_request)
             return
 
         val accept = compute_ws_accept(key)
@@ -472,7 +481,6 @@ fn http_response(status: i32, content_type: text, body: text) -> text:
     response = "{response}{ui_web_json_security_headers(content_type)}"
     response = "{response}{ui_web_html_security_headers(content_type)}"
     response = "{response}Content-Length: {body.len()}\r\n"
-    response = "{response}Access-Control-Allow-Origin: *\r\n"
     response = "{response}Connection: close\r\n"
     response = "{response}\r\n"
     response = "{response}{body}"

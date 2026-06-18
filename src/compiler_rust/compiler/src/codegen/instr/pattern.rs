@@ -98,14 +98,22 @@ pub(crate) fn compile_pattern_bind<M: Module>(
     subject: VReg,
     binding: &PatternBinding,
 ) {
-    let current = ctx.vreg_values[&subject];
-
-    let result = if binding.path.iter().any(|s| matches!(s, BindingStep::EnumPayload)) {
-        // All enums use rt_enum_new format, so use rt_enum_payload consistently
-        call_runtime_1(ctx, builder, "rt_enum_payload", current)
-    } else {
-        current
-    };
+    let mut result = ctx.vreg_values[&subject];
+    for step in &binding.path {
+        match step {
+            BindingStep::EnumPayload => {
+                // All enums use rt_enum_new format, so use rt_enum_payload consistently.
+                result = call_runtime_1(ctx, builder, "rt_enum_payload", result);
+            }
+            BindingStep::TupleIndex(idx) => {
+                let idx_val = builder.ins().iconst(types::I64, i64::from(*idx));
+                result = call_runtime_2(ctx, builder, "rt_tuple_get", result, idx_val);
+            }
+            BindingStep::FieldName(_) => {
+                // Field access on struct is not represented in this binding path yet.
+            }
+        }
+    }
     ctx.vreg_values.insert(dest, result);
 }
 

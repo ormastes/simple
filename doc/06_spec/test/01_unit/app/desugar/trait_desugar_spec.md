@@ -41,7 +41,7 @@ trait_desugar_spec
 #### keeps trait to struct desugar entrypoint available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect(source).to_contain("line.replace(\"trait \", \"struct \")")
 #### keeps trait method conversion helpers available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -80,7 +80,7 @@ expect(source).to_contain("field_type")
 #### keeps filtering of comments and default body lines available
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

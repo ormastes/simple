@@ -1,0 +1,89 @@
+"""
+# RenderDoc HTML external host gate
+
+## Overview
+
+Validates the fail-closed gate for the remaining original RenderDoc+Chrome
+HTML/CSS `.rdc` requirement. The local host may fail to produce a Chrome
+RenderDoc capture, but the gate still emits deterministic evidence that another
+host or CI job can satisfy.
+
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Requirements:** N/A
+**Research:** doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md
+**Architecture:** N/A - environmental evidence gate.
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+RDOC_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/html/evidence.env \
+BUILD_DIR=build/test-renderdoc-html-external-gate \
+REPORT_PATH=build/test-renderdoc-html-external-gate/report.md \
+sh scripts/check/check-renderdoc-html-external-host-gate.shs || true
+```
+
+## Examples
+
+Passing external-host evidence must include:
+
+```text
+rdoc_backend=original
+rdoc_capture_status=pass
+rdoc_capture_magic=RDOC
+```
+
+Local unavailable/fail evidence is acceptable only when it records a concrete
+reason and keeps the gate status out of `pass`.
+
+## Acceptance
+
+- Missing or failed Chrome RenderDoc evidence produces typed non-pass gate
+  evidence.
+- Passing gate evidence requires original backend, pass status, `RDOC` magic,
+  and an existing `.rdc` file.
+"""
+
+# @tag: system, gpu, renderdoc, html, external-host, evidence
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _value_of(lines: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = lines.split("\n")
+    var found = ""
+    for line in parts:
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+    found
+
+describe "RenderDoc HTML external host gate":
+
+    it "writes typed non-pass evidence for local missing or failed Chrome capture":
+        val command = "rm -rf build/test-renderdoc-html-external-gate && RDOC_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/html/evidence.env BUILD_DIR=build/test-renderdoc-html-external-gate REPORT_PATH=build/test-renderdoc-html-external-gate/report.md sh scripts/check/check-renderdoc-html-external-host-gate.shs || true"
+        val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = rt_file_read_text("build/test-renderdoc-html-external-gate/evidence.env") ?? ""
+        expect(evidence).to_contain("rdoc_html_external_gate_status=")
+        expect(evidence).to_contain("rdoc_html_external_gate_reason=")
+        expect(evidence).to_contain("rdoc_html_external_gate_source_env=")
+        expect(evidence).to_contain("rdoc_html_external_gate_required_backend=original")
+        expect(evidence).to_contain("rdoc_html_external_gate_required_status=pass")
+        expect(evidence).to_contain("rdoc_html_external_gate_required_magic=RDOC")
+
+        val status = _value_of(evidence, "rdoc_html_external_gate_status")
+        val reason = _value_of(evidence, "rdoc_html_external_gate_reason")
+        val backend = _value_of(evidence, "rdoc_html_external_gate_backend")
+        val capture_status = _value_of(evidence, "rdoc_html_external_gate_capture_status")
+        val magic = _value_of(evidence, "rdoc_html_external_gate_capture_magic")
+
+        if status == "pass":
+            expect(backend).to_equal("original")
+            expect(capture_status).to_equal("pass")
+            expect(magic).to_equal("RDOC")
+        else:
+            expect(reason.len()).to_be_greater_than(0)

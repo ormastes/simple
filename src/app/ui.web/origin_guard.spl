@@ -1,7 +1,7 @@
 # Origin Guard — validates the HTTP Origin header against an allowlist.
 #
 # Reads SIMPLE_UI_WEB_ALLOWED_ORIGINS (comma-separated).
-# Default for local dev mode: loopback HTTP/HTTPS origins with optional ports.
+# Loopback defaults require SIMPLE_UI_WEB_ALLOW_LOCAL_DEFAULT_ORIGINS=1.
 
 extern fn rt_env_get(key: text) -> text
 
@@ -27,12 +27,19 @@ class OriginGuard:
 
     static fn from_env() -> OriginGuard:
         """Build an OriginGuard from the SIMPLE_UI_WEB_ALLOWED_ORIGINS env var.
-        Falls back to localhost defaults when the variable is unset or empty."""
+        Missing allowlists fail closed unless local defaults are explicitly
+        enabled for development."""
         val raw = rt_env_get("SIMPLE_UI_WEB_ALLOWED_ORIGINS") ?? ""
-        return OriginGuard.from_env_value(raw)
+        val allow_local_raw = rt_env_get("SIMPLE_UI_WEB_ALLOW_LOCAL_DEFAULT_ORIGINS") ?? ""
+        return OriginGuard.from_env_value_with_policy(raw, _allow_local_default_origins_flag(allow_local_raw))
 
     static fn from_env_value(raw: text) -> OriginGuard:
+        return OriginGuard.from_env_value_with_policy(raw, true)
+
+    static fn from_env_value_with_policy(raw: text, allow_local_default_origins: bool) -> OriginGuard:
         if raw.trim() == "":
+            if not allow_local_default_origins:
+                return OriginGuard(allowed: [])
             return OriginGuard(allowed: ["https://localhost", "http://localhost"])
         var origins: List<text> = []
         for part in raw.split(","):
@@ -40,6 +47,8 @@ class OriginGuard:
             if trimmed != "":
                 origins = origins.push(trimmed)
         if origins.len() == 0:
+            if not allow_local_default_origins:
+                return OriginGuard(allowed: [])
             return OriginGuard(allowed: ["https://localhost", "http://localhost"])
         return OriginGuard(allowed: origins)
 
@@ -50,12 +59,15 @@ class OriginGuard:
         Returns Err(MissingOrigin) if no Origin header is present.
         Returns Err(DisallowedOrigin) if the origin is not in the allowlist."""
         var origin = ""
+        var origin_count = 0
         for line in headers.split("\n"):
             val trimmed = line.trim()
             if trimmed.lower().starts_with("origin:"):
+                origin_count = origin_count + 1
                 origin = trimmed[7:].trim()
-                break
-        if origin == "":
+        if origin_count == 0 or origin == "":
+            return Err(AuthError.MissingOrigin)
+        if origin_count > 1:
             return Err(AuthError.MissingOrigin)
         for allowed in self.allowed:
             if allowed == origin:
@@ -92,6 +104,10 @@ fn _is_loopback_origin(origin: text) -> bool:
     if origin.starts_with("http://[::1]:") or origin.starts_with("https://[::1]:"):
         return _origin_port_is_numeric(origin)
     return false
+
+fn _allow_local_default_origins_flag(raw: text) -> bool:
+    val v = raw.trim().lower()
+    return v == "1" or v == "true" or v == "yes"
 
 fn _origin_has_path_or_query(origin: text) -> bool:
     val scheme = "://"

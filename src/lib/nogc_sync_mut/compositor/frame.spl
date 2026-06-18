@@ -15,6 +15,11 @@ enum FrameState:
     Composite
     Present
 
+pub val FRAME_SCHEDULER_MAX_PENDING_RAF: i64 = 4096
+pub val FRAME_SCHEDULER_DEFAULT_TARGET_FPS: i64 = 60
+pub val FRAME_SCHEDULER_MAX_TARGET_FPS: i64 = 240
+pub val FRAME_SCHEDULER_MAX_DROPPED_PER_FRAME: i64 = 240
+
 # ---------------------------------------------------------------------------
 # FrameScheduler — controls frame production rate and budget.
 # ---------------------------------------------------------------------------
@@ -26,25 +31,29 @@ class FrameScheduler:
     frame_count: i64
     dropped_frames: i64
     state: FrameState
-    pending_callbacks: List<i64>
+    pending_callbacks: [i64]
     first_frame_time: f64
 
     static fn new(target_fps: i64) -> FrameScheduler:
-        val budget = 1000.0 / target_fps.to_f64()
+        val positive_fps = if target_fps <= 0: FRAME_SCHEDULER_DEFAULT_TARGET_FPS else: target_fps
+        val admitted_fps = if positive_fps > FRAME_SCHEDULER_MAX_TARGET_FPS: FRAME_SCHEDULER_MAX_TARGET_FPS else: positive_fps
+        val budget = 1000.0 / admitted_fps.to_f64()
         FrameScheduler(
-            target_fps: target_fps,
+            target_fps: admitted_fps,
             frame_budget_ms: budget,
             last_frame_time: 0.0,
             frame_count: 0,
             dropped_frames: 0,
             state: FrameState.Idle,
-            pending_callbacks: List<i64>(),
+            pending_callbacks: [],
             first_frame_time: 0.0
         )
 
     # Determine whether a new frame should be produced at the given timestamp.
     # Returns true if enough time has elapsed since the last frame.
     me begin_frame(timestamp_ms: f64) -> bool:
+        if timestamp_ms < 0.0:
+            return false
         if self.frame_count == 0:
             # First frame — always produce
             self.first_frame_time = timestamp_ms
@@ -60,7 +69,8 @@ class FrameScheduler:
 
         # Check if we dropped frames (elapsed > 2x budget)
         if elapsed > self.frame_budget_ms * 2.0:
-            val dropped = (elapsed / self.frame_budget_ms).to_i64() - 1
+            val raw_dropped = (elapsed / self.frame_budget_ms).to_i64() - 1
+            val dropped = if raw_dropped > FRAME_SCHEDULER_MAX_DROPPED_PER_FRAME: FRAME_SCHEDULER_MAX_DROPPED_PER_FRAME else: raw_dropped
             self.dropped_frames = self.dropped_frames + dropped
 
         self.last_frame_time = timestamp_ms
@@ -75,12 +85,19 @@ class FrameScheduler:
 
     # Schedule an animation callback by ID.
     me request_animation_frame(callback_id: i64):
+        if callback_id < 0:
+            return
+        if self.pending_callbacks.len() >= FRAME_SCHEDULER_MAX_PENDING_RAF:
+            return
         self.pending_callbacks.push(callback_id)
 
+    fn pending_callback_count() -> i64:
+        self.pending_callbacks.len().to_i64()
+
     # Consume and return all pending animation callbacks for this frame.
-    fn take_callbacks() -> List<i64>:
+    me take_callbacks() -> [i64]:
         val callbacks = self.pending_callbacks
-        self.pending_callbacks = List<i64>()
+        self.pending_callbacks = []
         callbacks
 
     # Calculate remaining time in the current frame budget.
@@ -89,6 +106,8 @@ class FrameScheduler:
         val remaining = self.frame_budget_ms - elapsed
         if remaining < 0.0:
             return 0.0
+        if remaining > self.frame_budget_ms:
+            return self.frame_budget_ms
         remaining
 
     # Check if the current frame is over budget.

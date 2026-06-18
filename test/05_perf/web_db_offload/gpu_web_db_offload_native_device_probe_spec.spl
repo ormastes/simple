@@ -1,0 +1,123 @@
+use std.spec.*
+
+"""
+# GPU Web/DB Native Device Probe
+
+## Overview
+
+These scenarios protect the fail-closed native device probe used before GPU
+Web/DB performance reports may claim hardware execution. Runtime backend
+availability is evidence only for whether a backend can be seen by the runtime;
+throughput claims still require measured device timing rows.
+
+## Examples
+
+Use the probe driver output to decide whether the report should say
+`unavailable`, `available_unmeasured`, or `measured`.
+
+**Requirements:** doc/02_requirements/nfr/gpu_web_db_offload.md
+**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
+**Design:** doc/05_design/gpu_web_db_offload.md
+**Research:** doc/01_research/local/gpu_web_db_offload.md
+"""
+
+extern fn rt_cuda_available() -> i64
+extern fn rt_cuda_device_count() -> i64
+extern fn rt_vk_available() -> i64
+extern fn rt_vulkan_is_available() -> i64
+extern fn rt_vulkan_device_count() -> i64
+
+struct GpuWdbNativeBackendProbe:
+    cuda_available: i64
+    cuda_device_count: i64
+    cuda_device_handle: i64
+    cuda_device_name: text
+    cuda_compute_capability: i64
+    vk_available: i64
+    vulkan_available: i64
+    vulkan_device_count: i64
+    vulkan_device_name: text
+
+fn gpu_wdb_native_backend_probe() -> GpuWdbNativeBackendProbe:
+    val cuda_available = rt_cuda_available()
+    val cuda_count = rt_cuda_device_count()
+    val cuda_device = 0
+    val vulkan_available = rt_vulkan_is_available()
+    val vulkan_count = rt_vulkan_device_count()
+    GpuWdbNativeBackendProbe(
+        cuda_available: cuda_available,
+        cuda_device_count: cuda_count,
+        cuda_device_handle: cuda_device,
+        cuda_device_name: if cuda_available > 0 and cuda_count > 0: "cuda-device-0" else: "unavailable",
+        cuda_compute_capability: 0,
+        vk_available: rt_vk_available(),
+        vulkan_available: vulkan_available,
+        vulkan_device_count: vulkan_count,
+        vulkan_device_name: if vulkan_available > 0 and vulkan_count > 0: "vulkan-device-0" else: "unavailable"
+    )
+
+fn gpu_wdb_native_backend_probe_status(probe: GpuWdbNativeBackendProbe) -> text:
+    if probe.cuda_available > 0 and probe.cuda_device_count > 0:
+        return "available_unmeasured"
+    if (probe.vk_available > 0 or probe.vulkan_available > 0) and probe.vulkan_device_count > 0:
+        return "available_unmeasured"
+    "unavailable"
+
+fn gpu_wdb_native_measured_row_status(status: text, target: text, kernel_time_us: i64, completion_latency_us: i64, transfer_bytes: i64, hardware_claim: text) -> text:
+    if status == "measured" and target == "gpu_db_vector_search_batch" and kernel_time_us > 0 and completion_latency_us > 0 and transfer_bytes > 0 and hardware_claim == "native-device-measured":
+        return "measured"
+    if status == "measured" and target == "gpu_db_columnar_scan_batch" and kernel_time_us > 0 and completion_latency_us > 0 and transfer_bytes > 0 and hardware_claim == "native-device-measured":
+        return "measured"
+    if status == "measured" and target == "gpu_web_inference_batch" and kernel_time_us > 0 and completion_latency_us > 0 and transfer_bytes > 0 and hardware_claim == "native-device-measured":
+        return "measured"
+    if status == "measured" and target == "gpu_web_embedding_batch" and kernel_time_us > 0 and completion_latency_us > 0 and transfer_bytes > 0 and hardware_claim == "native-device-measured":
+        return "measured"
+    if status == "measured" and target == "gpu_web_rank_batch" and kernel_time_us > 0 and completion_latency_us > 0 and transfer_bytes > 0 and hardware_claim == "native-device-measured":
+        return "measured"
+    if status == "measured" and target == "gpu_web_transform_batch" and kernel_time_us > 0 and completion_latency_us > 0 and transfer_bytes > 0 and hardware_claim == "native-device-measured":
+        return "measured"
+    "invalid_measured"
+
+describe "GPU web/db native device backend probe":
+    it "should expose runtime backend availability without throughput claims":
+        step("Read CUDA and Vulkan backend availability from runtime externs")
+        val probe = gpu_wdb_native_backend_probe()
+        expect(probe.cuda_available).to_be_greater_than(-1)
+        expect(probe.cuda_device_count).to_be_greater_than(-1)
+        expect(probe.cuda_device_handle).to_equal(0)
+        expect(probe.cuda_compute_capability).to_be_greater_than(-4)
+        expect(probe.vk_available).to_be_greater_than(-1)
+        expect(probe.vulkan_available).to_be_greater_than(-1)
+        expect(probe.vulkan_device_count).to_be_greater_than(-1)
+
+    it "should report only availability or unavailability before measured rows":
+        step("Classify runtime backend availability as non-throughput evidence")
+        val probe = gpu_wdb_native_backend_probe()
+        val status = gpu_wdb_native_backend_probe_status(probe)
+        if status == "available_unmeasured":
+            expect(status).to_equal("available_unmeasured")
+        else:
+            expect(status).to_equal("unavailable")
+            expect(probe.cuda_device_name).to_equal("unavailable")
+
+    it "should accept only positive GPU device timing rows as measured":
+        step("Validate measured row fields before report generation may claim native GPU execution")
+        val vector_status = gpu_wdb_native_measured_row_status("measured", "gpu_db_vector_search_batch", 168, 168, 8, "native-device-measured")
+        val columnar_status = gpu_wdb_native_measured_row_status("measured", "gpu_db_columnar_scan_batch", 168, 168, 8, "native-device-measured")
+        val web_inference_status = gpu_wdb_native_measured_row_status("measured", "gpu_web_inference_batch", 168, 168, 8, "native-device-measured")
+        val web_embedding_status = gpu_wdb_native_measured_row_status("measured", "gpu_web_embedding_batch", 168, 168, 8, "native-device-measured")
+        val web_rank_status = gpu_wdb_native_measured_row_status("measured", "gpu_web_rank_batch", 168, 168, 8, "native-device-measured")
+        val web_transform_status = gpu_wdb_native_measured_row_status("measured", "gpu_web_transform_batch", 168, 168, 8, "native-device-measured")
+        expect(vector_status).to_equal("measured")
+        expect(columnar_status).to_equal("measured")
+        expect(web_inference_status).to_equal("measured")
+        expect(web_embedding_status).to_equal("measured")
+        expect(web_rank_status).to_equal("measured")
+        expect(web_transform_status).to_equal("measured")
+
+    it "should reject fallback or zero-time rows as measured evidence":
+        step("Reject report rows that have fallback targets or missing measured timing")
+        val fallback_status = gpu_wdb_native_measured_row_status("measured", "cpu_fallback", 168, 168, 8, "native-device-measured")
+        val zero_status = gpu_wdb_native_measured_row_status("measured", "gpu_db_vector_search_batch", 0, 168, 8, "native-device-measured")
+        expect(fallback_status).to_equal("invalid_measured")
+        expect(zero_status).to_equal("invalid_measured")

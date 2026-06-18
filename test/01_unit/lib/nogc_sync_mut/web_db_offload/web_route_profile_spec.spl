@@ -1,0 +1,764 @@
+use std.spec.*
+use std.web_db_offload.{
+    WebGpuRouteKind as ExportedWebGpuRouteKind,
+    web_gpu_profile_inference as exported_web_gpu_profile_inference,
+    web_gpu_profile_execute_advancing as exported_web_gpu_profile_execute_advancing,
+    web_gpu_profile_execute_device as exported_web_gpu_profile_execute_device
+}
+use std.web_db_offload.web_profile.*
+use std.web_db_offload.web_route.{WebGpuRouteKind, web_gpu_route_offload_used_gpu}
+use std.web_db_offload.contract.{GpuWdbBudget, GpuWdbDecisionPath, GpuWdbWorkKind, GpuWdbCoarseDataPath}
+use std.web_db_offload.scheduler.{GpuWdbScheduleAction, GpuWdbScheduleClass, gpu_wdb_batch_accumulator}
+use std.web_db_offload.device_backend.{gpu_wdb_device_backend}
+
+"""
+# Web Route GPU Offload Profiles
+
+## Overview
+
+These scenarios verify reusable web GPU offload profiles for coarse application
+payload work. Profiles bundle registry targets, queue defaults, budgets, GPU
+availability, and CPU fallback policy for web inference, embedding, ranking,
+and transform routes.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/gpu_web_db_offload.md
+
+- Web server code can reuse named GPU offload profiles.
+- Inference profiles register only inference targets.
+- All-web profiles register inference, embedding, rank, and transform targets.
+- CPU-only profiles preserve authoritative CPU fallback.
+- Proxy forwarding remains CPU-owned even through a GPU profile.
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
+
+## Design
+
+**Design:** doc/05_design/gpu_web_db_offload.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+Use `web_gpu_profile_all` for a web process that has every coarse GPU route
+target loaded, then call `web_gpu_profile_execute` after CPU routing and auth.
+"""
+
+describe "web route reusable GPU offload profiles":
+    it "should dispatch inference with the inference profile":
+        step("Use an inference-only profile for /infer batches")
+        val profile = web_gpu_profile_inference("cuda", 1, 4)
+        val execution = web_gpu_profile_execute(
+            profile,
+            "/infer",
+            WebGpuRouteKind.Inference,
+            16,
+            256,
+            200,
+            "cpu-infer"
+        )
+        expect(profile.name).to_equal("web-inference")
+        expect(web_gpu_route_offload_used_gpu(execution)).to_be(true)
+        expect(execution.submission.dispatch_target).to_equal("gpu_web_inference_batch")
+        expect(execution.cpu_body).to_equal("cpu-infer")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.PinnedHostBatch)
+        expect(web_gpu_route_profile_allows_gpu(execution)).to_be(true)
+        expect(web_gpu_profile_execution_used_gpu(execution)).to_be(true)
+        expect(web_gpu_profile_execution_allows_gpu(execution)).to_be(true)
+
+    it "should advance web profile queue state across sequential executions":
+        step("Return the updated profile so web server code keeps queue accounting current")
+        val profile = web_gpu_profile_inference("cuda", 1, 4)
+        val first = web_gpu_profile_execute_advancing(
+            profile,
+            "/infer",
+            WebGpuRouteKind.Inference,
+            16,
+            256,
+            200,
+            "cpu-infer-1"
+        )
+        val second = web_gpu_profile_execute_advancing(
+            first.profile,
+            "/infer",
+            WebGpuRouteKind.Inference,
+            16,
+            256,
+            200,
+            "cpu-infer-2"
+        )
+        expect(web_gpu_route_offload_used_gpu(first.execution)).to_be(true)
+        expect(web_gpu_route_offload_used_gpu(second.execution)).to_be(true)
+        expect(first.profile.queue_state.submitted_count).to_equal(1)
+        expect(first.profile.queue_state.completed_count).to_equal(1)
+        expect(first.profile.queue_state.gpu_hit_count).to_equal(1)
+        expect(second.profile.queue_state.submitted_count).to_equal(2)
+        expect(second.profile.queue_state.completed_count).to_equal(2)
+        expect(second.profile.queue_state.gpu_hit_count).to_equal(2)
+        expect(second.execution.cpu_body).to_equal("cpu-infer-2")
+        expect(second.execution.cpu_authoritative).to_be(true)
+
+    it "should export advancing web profile APIs through the web offload package":
+        step("Let web server code import profile advancement from std.web_db_offload")
+        val profile = exported_web_gpu_profile_inference("cuda", 1, 4)
+        val advanced = exported_web_gpu_profile_execute_advancing(
+            profile,
+            "/infer",
+            ExportedWebGpuRouteKind.Inference,
+            16,
+            256,
+            200,
+            "cpu-infer"
+        )
+        expect(advanced.profile.queue_state.submitted_count).to_equal(1)
+        expect(advanced.profile.queue_state.completed_count).to_equal(1)
+        expect(advanced.execution.cpu_body).to_equal("cpu-infer")
+
+    it "should execute web inference profile through strict measured device backend":
+        step("Allow web route GPU evidence only through native backend timing")
+        val profile = web_gpu_profile_inference("cuda", 7, 4)
+        val backend = gpu_wdb_device_backend(
+            "cuda",
+            7,
+            ["gpu_web_inference_batch"],
+            true,
+            "cuda-device-0"
+        )
+        val result = exported_web_gpu_profile_execute_device(
+            profile,
+            "/infer",
+            ExportedWebGpuRouteKind.Inference,
+            16,
+            512,
+            200,
+            "cpu-infer",
+            backend,
+            7,
+            100,
+            180,
+            41,
+            "cuda-event"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-infer")
+        expect(result.execution.cpu_authoritative).to_be(true)
+        expect(result.device_result.submission.accepted).to_be(true)
+        expect(result.device_result.submission.dispatch_target).to_equal("gpu_web_inference_batch")
+        expect(result.device_result.production_device_claim).to_be(true)
+        expect(result.device_result.reason).to_equal("production-device-measured")
+        expect(result.device_result.evidence.backend_timing_valid).to_be(true)
+        expect(result.device_result.evidence.device_time_us).to_equal(41)
+        expect(result.profile.queue_state.gpu_hit_count).to_equal(1)
+
+    it "should replace web inference responses only after native candidates match":
+        step("Require production native timing and CPU response agreement before replacement")
+        val profile = web_gpu_profile_inference("cuda", 7, 4)
+        val result = web_gpu_profile_execute_device_validated(
+            profile,
+            "/infer",
+            WebGpuRouteKind.Inference,
+            16,
+            512,
+            200,
+            "cpu-infer",
+            gpu_wdb_device_backend("cuda", 7, ["gpu_web_inference_batch"], true, "cuda-device-0"),
+            7,
+            200,
+            "cpu-infer",
+            100,
+            180,
+            41,
+            "cuda-event"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-infer")
+        expect(result.execution.cpu_authoritative).to_be(false)
+        expect(result.execution.gpu_dispatched).to_be(true)
+        expect(result.execution.gpu_candidate_validated).to_be(true)
+        expect(result.execution.validation_reason).to_equal("production-gpu-web-response-match")
+        expect(result.gpu_candidate_validated).to_be(true)
+        expect(result.validation_reason).to_equal("production-gpu-web-response-match")
+        expect(result.device_result.production_device_claim).to_be(true)
+
+    it "should keep web inference responses CPU authoritative when native candidates mismatch":
+        step("Reject production web response replacement when status or body differs")
+        val profile = web_gpu_profile_inference("cuda", 7, 4)
+        val result = web_gpu_profile_execute_device_validated(
+            profile,
+            "/infer",
+            WebGpuRouteKind.Inference,
+            16,
+            512,
+            200,
+            "cpu-infer",
+            gpu_wdb_device_backend("cuda", 7, ["gpu_web_inference_batch"], true, "cuda-device-0"),
+            7,
+            200,
+            "gpu-infer",
+            100,
+            180,
+            41,
+            "cuda-event"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-infer")
+        expect(result.execution.cpu_authoritative).to_be(true)
+        expect(result.execution.gpu_dispatched).to_be(false)
+        expect(result.execution.gpu_candidate_validated).to_be(false)
+        expect(result.execution.validation_reason).to_equal("production-gpu-web-response-mismatch")
+        expect(result.gpu_candidate_validated).to_be(false)
+        expect(result.validation_reason).to_equal("production-gpu-web-response-mismatch")
+        expect(result.device_result.production_device_claim).to_be(true)
+
+    it "should replace embedding responses only after native candidates match":
+        step("Require production native timing and CPU response agreement before embedding replacement")
+        val profile = web_gpu_profile_embedding("cuda", 7, 4)
+        val result = web_gpu_profile_execute_device_validated(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            16,
+            512,
+            200,
+            "cpu-embed",
+            gpu_wdb_device_backend("cuda", 7, ["gpu_web_embedding_batch"], true, "cuda-device-0"),
+            7,
+            200,
+            "cpu-embed",
+            100,
+            180,
+            43,
+            "cuda-event"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-embed")
+        expect(result.execution.cpu_authoritative).to_be(false)
+        expect(result.execution.gpu_dispatched).to_be(true)
+        expect(result.execution.submission.dispatch_target).to_equal("gpu_web_embedding_batch")
+        expect(result.gpu_candidate_validated).to_be(true)
+        expect(result.validation_reason).to_equal("production-gpu-web-response-match")
+        expect(result.device_result.production_device_claim).to_be(true)
+
+    it "should keep rank responses CPU authoritative when native candidates mismatch":
+        step("Reject production rank response replacement when status or body differs")
+        val profile = web_gpu_profile_rank("cuda", 7, 4)
+        val result = web_gpu_profile_execute_device_validated(
+            profile,
+            "/rank",
+            WebGpuRouteKind.Rank,
+            32,
+            256,
+            200,
+            "cpu-rank",
+            gpu_wdb_device_backend("cuda", 7, ["gpu_web_rank_batch"], true, "cuda-device-0"),
+            7,
+            200,
+            "gpu-rank",
+            100,
+            180,
+            47,
+            "cuda-event"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-rank")
+        expect(result.execution.cpu_authoritative).to_be(true)
+        expect(result.execution.gpu_dispatched).to_be(false)
+        expect(result.execution.submission.dispatch_target).to_equal("gpu_web_rank_batch")
+        expect(result.gpu_candidate_validated).to_be(false)
+        expect(result.validation_reason).to_equal("production-gpu-web-response-mismatch")
+        expect(result.device_result.production_device_claim).to_be(true)
+
+    it "should keep perf-only web device runs from replacing CPU responses":
+        step("Reject web response replacement without production native timing")
+        val profile = web_gpu_profile_inference("cuda", 7, 4)
+        val result = web_gpu_profile_execute_device_validated(
+            profile,
+            "/infer",
+            WebGpuRouteKind.Inference,
+            16,
+            512,
+            200,
+            "cpu-infer",
+            gpu_wdb_device_backend("mock", 7, ["gpu_web_inference_batch"], false, "mock-device"),
+            7,
+            200,
+            "cpu-infer",
+            100,
+            180,
+            41,
+            "mock-clock"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-infer")
+        expect(result.execution.cpu_authoritative).to_be(true)
+        expect(result.execution.gpu_dispatched).to_be(false)
+        expect(result.execution.gpu_candidate_validated).to_be(false)
+        expect(result.execution.validation_reason).to_equal("production-device-not-measured")
+        expect(result.gpu_candidate_validated).to_be(false)
+        expect(result.validation_reason).to_equal("production-device-not-measured")
+        expect(result.device_result.production_device_claim).to_be(false)
+
+    it "should keep stale web native target generations on CPU fallback":
+        step("Prevent old web GPU kernels from producing production evidence")
+        val profile = web_gpu_profile_inference("cuda", 7, 4)
+        val backend = gpu_wdb_device_backend(
+            "cuda",
+            7,
+            ["gpu_web_inference_batch"],
+            true,
+            "cuda-device-0"
+        )
+        val result = web_gpu_profile_execute_device(
+            profile,
+            "/infer",
+            WebGpuRouteKind.Inference,
+            16,
+            512,
+            200,
+            "cpu-infer",
+            backend,
+            8,
+            100,
+            180,
+            41,
+            "cuda-event"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-infer")
+        expect(result.device_result.submission.accepted).to_be(false)
+        expect(result.device_result.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(result.device_result.submission.reason).to_equal("stale-generation")
+        expect(result.device_result.production_device_claim).to_be(false)
+        expect(result.device_result.evidence.backend_timing_valid).to_be(false)
+        expect(result.profile.queue_state.cpu_fallback_count).to_equal(1)
+
+    it "should not claim embedding GPU evidence from the inference profile":
+        step("Keep profile target registration scoped to loaded route libraries")
+        val profile = web_gpu_profile_inference("cuda", 1, 4)
+        val execution = web_gpu_profile_execute(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            16,
+            256,
+            200,
+            "cpu-embed"
+        )
+        expect(web_gpu_route_offload_used_gpu(execution)).to_be(false)
+        expect(execution.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.cpu_body).to_equal("cpu-embed")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.PinnedHostBatch)
+        expect(web_gpu_route_profile_allows_gpu(execution)).to_be(false)
+        expect(web_gpu_profile_execution_used_gpu(execution)).to_be(false)
+        expect(web_gpu_profile_execution_allows_gpu(execution)).to_be(false)
+
+    it "should dispatch transform routes with the all-web profile":
+        step("Use all-web profile targets for image or payload transforms")
+        val profile = web_gpu_profile_all("cuda", 1, 4)
+        val execution = web_gpu_profile_execute(
+            profile,
+            "/image/transform",
+            WebGpuRouteKind.Transform,
+            8,
+            2048,
+            200,
+            "cpu-transform"
+        )
+        expect(web_gpu_route_offload_used_gpu(execution)).to_be(true)
+        expect(execution.submission.dispatch_target).to_equal("gpu_web_transform_batch")
+        expect(web_gpu_profile_execution_allows_gpu(execution)).to_be(true)
+
+    it "should replace transform responses only after native candidates match":
+        step("Require production native timing and CPU response agreement before transform replacement")
+        val profile = web_gpu_profile_transform("cuda", 7, 4)
+        val result = web_gpu_profile_execute_device_validated(
+            profile,
+            "/image/transform",
+            WebGpuRouteKind.Transform,
+            8,
+            2048,
+            200,
+            "cpu-transform",
+            gpu_wdb_device_backend("cuda", 7, ["gpu_web_transform_batch"], true, "cuda-device-0"),
+            7,
+            200,
+            "cpu-transform",
+            100,
+            180,
+            41,
+            "cuda-event"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-transform")
+        expect(result.execution.cpu_authoritative).to_be(false)
+        expect(result.execution.gpu_dispatched).to_be(true)
+        expect(result.gpu_candidate_validated).to_be(true)
+        expect(result.validation_reason).to_equal("production-gpu-web-response-match")
+        expect(result.device_result.production_device_claim).to_be(true)
+        expect(result.device_result.submission.dispatch_target).to_equal("gpu_web_transform_batch")
+
+    it "should keep transform responses CPU authoritative when native candidates mismatch":
+        step("Reject transform replacement when the GPU response differs from the CPU oracle")
+        val profile = web_gpu_profile_transform("cuda", 7, 4)
+        val result = web_gpu_profile_execute_device_validated(
+            profile,
+            "/image/transform",
+            WebGpuRouteKind.Transform,
+            8,
+            2048,
+            200,
+            "cpu-transform",
+            gpu_wdb_device_backend("cuda", 7, ["gpu_web_transform_batch"], true, "cuda-device-0"),
+            7,
+            200,
+            "gpu-transform",
+            100,
+            180,
+            41,
+            "cuda-event"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-transform")
+        expect(result.execution.cpu_authoritative).to_be(true)
+        expect(result.execution.gpu_dispatched).to_be(false)
+        expect(result.gpu_candidate_validated).to_be(false)
+        expect(result.validation_reason).to_equal("production-gpu-web-response-mismatch")
+        expect(result.device_result.production_device_claim).to_be(true)
+
+    it "should keep perf-only transform device runs from replacing CPU responses":
+        step("Reject transform response replacement without production native timing")
+        val profile = web_gpu_profile_transform("host-safe-mock", 7, 4)
+        val result = web_gpu_profile_execute_device_validated(
+            profile,
+            "/image/transform",
+            WebGpuRouteKind.Transform,
+            8,
+            2048,
+            200,
+            "cpu-transform",
+            gpu_wdb_device_backend("host-safe-mock", 7, ["gpu_web_transform_batch"], false, "mock-device"),
+            7,
+            200,
+            "cpu-transform",
+            100,
+            180,
+            41,
+            "mock-clock"
+        )
+        expect(result.execution.cpu_body).to_equal("cpu-transform")
+        expect(result.execution.cpu_authoritative).to_be(true)
+        expect(result.execution.gpu_dispatched).to_be(false)
+        expect(result.gpu_candidate_validated).to_be(false)
+        expect(result.validation_reason).to_equal("production-device-not-measured")
+        expect(result.device_result.production_device_claim).to_be(false)
+
+    it "should keep CPU-only profiles on CPU fallback":
+        step("Disable GPU evidence without losing CPU response authority")
+        val profile = web_gpu_profile_cpu_only("web-maintenance")
+        val execution = web_gpu_profile_execute(
+            profile,
+            "/rank",
+            WebGpuRouteKind.Rank,
+            16,
+            256,
+            200,
+            "cpu-rank"
+        )
+        expect(profile.gpu_available).to_be(false)
+        expect(web_gpu_route_offload_used_gpu(execution)).to_be(false)
+        expect(web_gpu_profile_execution_used_gpu(execution)).to_be(false)
+        expect(web_gpu_profile_execution_allows_gpu(execution)).to_be(false)
+        expect(execution.submission.reason).to_equal("gpu-unavailable")
+        expect(execution.cpu_authoritative).to_be(true)
+
+    it "should defer small scheduled profile batches":
+        step("Use profile-level scheduling for batch accumulation")
+        val profile = web_gpu_profile_embedding("cuda", 1, 4)
+        val execution = web_gpu_profile_execute_scheduled(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            1,
+            128,
+            GpuWdbScheduleClass.Batch,
+            true,
+            200,
+            "cpu-embed"
+        )
+        expect(web_gpu_route_offload_used_gpu(execution)).to_be(false)
+        expect(execution.schedule_action).to_equal(GpuWdbScheduleAction.DeferForBatch)
+        expect(execution.submission.dispatch_target).to_equal("gpu_batch_accumulator")
+        expect(web_gpu_profile_execution_allows_gpu(execution)).to_be(false)
+
+    it "should keep stale scheduled web target generations on CPU fallback":
+        step("Check expected target generation before scheduled route GPU dispatch")
+        val profile = web_gpu_profile_embedding("cuda", 1, 4)
+        val execution = web_gpu_profile_execute_scheduled_for_generation(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            32,
+            256,
+            GpuWdbScheduleClass.Interactive,
+            false,
+            2,
+            200,
+            "cpu-embed"
+        )
+        expect(web_gpu_route_offload_used_gpu(execution)).to_be(false)
+        expect(execution.schedule_action).to_equal(GpuWdbScheduleAction.RunCpuFallback)
+        expect(execution.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.submission.reason).to_equal("stale-generation")
+        expect(web_gpu_profile_execution_allows_gpu(execution)).to_be(false)
+
+    it "should accumulate small scheduled profile batches":
+        step("Use profile defaults while mutating the reusable web batch accumulator")
+        val profile = web_gpu_profile_embedding("cuda", 1, 4)
+        val accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            1,
+            128,
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.WebEmbedding),
+            200,
+            "cpu-embed"
+        )
+        expect(web_gpu_route_offload_used_gpu(accumulated.execution)).to_be(false)
+        expect(accumulated.execution.schedule_action).to_equal(GpuWdbScheduleAction.DeferForBatch)
+        expect(accumulated.execution.cpu_body).to_equal("cpu-embed")
+        expect(accumulated.execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.PinnedHostBatch)
+        expect(accumulated.accumulator_result.accepted).to_be(true)
+        expect(accumulated.accumulator_result.accumulator.item_count).to_equal(1)
+
+    it "should leave profile accumulator unchanged for immediate web dispatch":
+        step("Do not accumulate profile work that is already GPU-worthy")
+        val profile = web_gpu_profile_all("cuda", 1, 4)
+        val accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/image/transform",
+            WebGpuRouteKind.Transform,
+            8,
+            2048,
+            GpuWdbScheduleClass.Batch,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.WebTransform),
+            200,
+            "cpu-transform"
+        )
+        expect(web_gpu_route_offload_used_gpu(accumulated.execution)).to_be(true)
+        expect(web_gpu_profile_execution_allows_gpu(accumulated.execution)).to_be(true)
+        expect(accumulated.execution.submission.dispatch_target).to_equal("gpu_web_transform_batch")
+        expect(accumulated.accumulator_result.accepted).to_be(false)
+        expect(accumulated.accumulator_result.reason).to_equal("route-not-deferred")
+        expect(accumulated.accumulator_result.accumulator.item_count).to_equal(0)
+
+    it "should flush accumulated web profile work through a registered GPU target":
+        step("Use profile queue and targets to submit a ready embedding batch")
+        val profile = web_gpu_profile_embedding("cuda", 1, 4)
+        val first_accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            16,
+            128,
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.WebEmbedding),
+            200,
+            "cpu-embed"
+        )
+        val accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            16,
+            128,
+            GpuWdbScheduleClass.Background,
+            first_accumulated.accumulator_result.accumulator,
+            200,
+            "cpu-embed"
+        )
+        val flushed = web_gpu_profile_flush_accumulator_current(
+            profile,
+            accumulated.accumulator_result.accumulator
+        )
+        expect(flushed.attempted).to_be(true)
+        expect(flushed.submission.accepted).to_be(true)
+        expect(flushed.submission.dispatch_target).to_equal("gpu_web_embedding_batch")
+        expect(flushed.accumulator_after.item_count).to_equal(0)
+
+    it "should advance web profile queue state after accumulator flush":
+        step("Return a profile with queued batch pressure after flushing accumulated work")
+        val profile = web_gpu_profile_embedding("cuda", 1, 4)
+        val first_accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            16,
+            128,
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.WebEmbedding),
+            200,
+            "cpu-embed"
+        )
+        val accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            16,
+            128,
+            GpuWdbScheduleClass.Background,
+            first_accumulated.accumulator_result.accumulator,
+            200,
+            "cpu-embed"
+        )
+        val flushed = web_gpu_profile_flush_accumulator_current_advancing(
+            profile,
+            accumulated.accumulator_result.accumulator
+        )
+        expect(flushed.flush.attempted).to_be(true)
+        expect(flushed.flush.submission.accepted).to_be(true)
+        expect(flushed.flush.submission.dispatch_target).to_equal("gpu_web_embedding_batch")
+        expect(flushed.profile.queue_state.submitted_count).to_equal(1)
+        expect(flushed.profile.queue_state.gpu_hit_count).to_equal(1)
+        expect(flushed.profile.queue_state.queue_depth).to_equal(1)
+        expect(flushed.profile.queue_state.completed_count).to_equal(0)
+        expect(flushed.flush.accumulator_after.item_count).to_equal(0)
+
+    it "should complete web profile flushed submissions and release queue pressure":
+        step("Use profile-level completion after a queued GPU batch finishes")
+        val profile = web_gpu_profile_embedding("cuda", 1, 4)
+        val first_accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            16,
+            128,
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.WebEmbedding),
+            200,
+            "cpu-embed"
+        )
+        val accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            16,
+            128,
+            GpuWdbScheduleClass.Background,
+            first_accumulated.accumulator_result.accumulator,
+            200,
+            "cpu-embed"
+        )
+        val flushed = web_gpu_profile_flush_accumulator_current_advancing(
+            profile,
+            accumulated.accumulator_result.accumulator
+        )
+        val completed = web_gpu_profile_complete_submission(
+            flushed.profile,
+            flushed.flush.submission
+        )
+        expect(completed.queue_state.submitted_count).to_equal(1)
+        expect(completed.queue_state.gpu_hit_count).to_equal(1)
+        expect(completed.queue_state.queue_depth).to_equal(0)
+        expect(completed.queue_state.completed_count).to_equal(1)
+
+    it "should flush stale web profile target generations to CPU fallback":
+        step("Use the profile registry generation guard before reporting GPU evidence")
+        val profile = web_gpu_profile_embedding("cuda", 1, 4)
+        val accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/embed",
+            WebGpuRouteKind.Embedding,
+            32,
+            128,
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.WebEmbedding),
+            200,
+            "cpu-embed"
+        )
+        val flushed = web_gpu_profile_flush_accumulator_for_generation(
+            profile,
+            accumulated.accumulator_result.accumulator,
+            2
+        )
+        expect(flushed.attempted).to_be(true)
+        expect(flushed.submission.accepted).to_be(false)
+        expect(flushed.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(flushed.reason).to_equal("stale-generation")
+        expect(flushed.accumulator_after.item_count).to_equal(0)
+
+    it "should clear accumulated web profile work after CPU fallback handles it":
+        step("Avoid retrying handled work when the profile lacks a matching target")
+        val profile = web_gpu_profile_inference("cuda", 1, 4)
+        val accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/rank",
+            WebGpuRouteKind.Rank,
+            32,
+            128,
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.WebRank),
+            200,
+            "cpu-rank"
+        )
+        val flushed = web_gpu_profile_flush_accumulator_current(
+            profile,
+            accumulated.accumulator_result.accumulator
+        )
+        expect(flushed.attempted).to_be(true)
+        expect(flushed.submission.accepted).to_be(false)
+        expect(flushed.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(flushed.reason).to_equal("gpu-unavailable")
+        expect(flushed.accumulator_after.item_count).to_equal(0)
+
+    it "should retain accumulated web profile work after hard reject":
+        step("Keep rejected accumulated work visible when CPU fallback is disabled")
+        val profile = web_gpu_profile(
+            "unsafe-web",
+            "cuda",
+            1,
+            4,
+            ["gpu_web_transform_batch"],
+            GpuWdbBudget(
+                max_queue_depth: 64,
+                max_batch_bytes: 1024 * 1024,
+                min_gpu_batch_bytes: 1024
+            ),
+            true,
+            false
+        )
+        val accumulated = web_gpu_profile_execute_accumulating(
+            profile,
+            "/image/transform",
+            WebGpuRouteKind.Transform,
+            1,
+            128,
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.WebTransform),
+            200,
+            "cpu-transform"
+        )
+        val flushed = web_gpu_profile_flush_accumulator_current(
+            profile,
+            accumulated.accumulator_result.accumulator
+        )
+        expect(flushed.attempted).to_be(true)
+        expect(flushed.submission.execution.decision.path).to_equal(GpuWdbDecisionPath.Reject)
+        expect(flushed.reason).to_equal("cpu-fallback-required")
+        expect(flushed.accumulator_after.item_count).to_equal(1)
+
+    it "should keep proxy forwarding on CPU through all-web profiles":
+        step("Do not let profile registration offload HTTP proxy control-plane work")
+        val profile = web_gpu_profile_all("cuda", 1, 4)
+        val execution = web_gpu_profile_execute(
+            profile,
+            "/api/",
+            WebGpuRouteKind.ProxyForwarding,
+            16,
+            256,
+            502,
+            "proxy-cpu"
+        )
+        expect(web_gpu_route_offload_used_gpu(execution)).to_be(false)
+        expect(execution.submission.execution.decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+        expect(execution.submission.reason).to_equal("control-plane-stays-on-cpu")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.CpuOnly)
+        expect(web_gpu_route_profile_allows_gpu(execution)).to_be(false)
+        expect(web_gpu_profile_execution_allows_gpu(execution)).to_be(false)

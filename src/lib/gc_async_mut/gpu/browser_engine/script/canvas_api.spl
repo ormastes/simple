@@ -8,6 +8,12 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_context.{
 use std.gc_async_mut.gpu.browser_engine.webgpu_software_executor.{webgpu_software_execute_queue}
 
 val SIMPLE2D_WEBGPU_BUFFER_USAGE_COPY_DST: i64 = 8
+val SIMPLE_WEBGPU_MAX_SURFACE_PIXELS: i64 = 4194304
+
+fn _simple_webgpu_surface_valid(width: i32, height: i32) -> bool:
+    if width <= 0 or height <= 0:
+        return false
+    width.to_i64() * height.to_i64() <= SIMPLE_WEBGPU_MAX_SURFACE_PIXELS
 
 pub class Simple2DCommandSummary:
     command_count: i32
@@ -116,12 +122,14 @@ pub class Simple3DContext:
         Simple3DCommandSummary(command_count: self.command_count(), triangle_count: self.triangle_count(), last_kind: self.last_kind(), scene3d_json: self.to_scene3d_json())
 
     fn submit_to_webgpu(secure_context: bool) -> Simple3DWebGPUDrawEvidence:
-        var ctx = canvas_get_context_webgpu(self.width, self.height, secure_context)
         val json = self.to_scene3d_json()
         val commands = self.command_count()
         val triangles = self.triangle_count()
         val scene_bytes = json.len().to_i64()
         val scene_checksum = _simple3d_scene_checksum(json)
+        if not _simple_webgpu_surface_valid(self.width, self.height):
+            return Simple3DWebGPUDrawEvidence(available: false, submitted: false, status: "webgpu-surface-size-invalid", command_count: commands, triangle_count: triangles, queue_write_count: 0, render_pass_count: 0, draw_call_count: 0, present_count: 0, pipeline_valid: false, scene_payload_bytes: scene_bytes, scene_payload_checksum: scene_checksum, scene3d_json: json)
+        var ctx = canvas_get_context_webgpu(self.width, self.height, secure_context)
         if not ctx.is_available():
             return Simple3DWebGPUDrawEvidence(available: false, submitted: false, status: "webgpu-unavailable", command_count: commands, triangle_count: triangles, queue_write_count: 0, render_pass_count: 0, draw_call_count: 0, present_count: 0, pipeline_valid: false, scene_payload_bytes: scene_bytes, scene_payload_checksum: scene_checksum, scene3d_json: json)
         if not ctx.request_device():
@@ -189,9 +197,11 @@ pub class Simple2DContext:
         Simple2DCommandSummary(command_count: self.command_count(), last_kind: self.last_kind(), canvas2d_json: self.to_canvas2d_json())
 
     fn submit_to_webgpu(secure_context: bool) -> Simple2DWebGPUDrawEvidence:
-        var ctx = canvas_get_context_webgpu(self.width, self.height, secure_context)
         val json = self.to_canvas2d_json()
         val commands = self.command_count()
+        if not _simple_webgpu_surface_valid(self.width, self.height):
+            return Simple2DWebGPUDrawEvidence(available: false, submitted: false, status: "webgpu-surface-size-invalid", command_count: commands, queue_write_count: 0, render_pass_count: 0, draw_call_count: 0, present_count: 0, pipeline_valid: false, canvas2d_json: json)
+        var ctx = canvas_get_context_webgpu(self.width, self.height, secure_context)
         if not ctx.is_available():
             return Simple2DWebGPUDrawEvidence(available: false, submitted: false, status: "webgpu-unavailable", command_count: commands, queue_write_count: 0, render_pass_count: 0, draw_call_count: 0, present_count: 0, pipeline_valid: false, canvas2d_json: json)
         if not ctx.request_device():

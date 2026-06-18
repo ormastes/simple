@@ -4,34 +4,156 @@
 # source. The dashboard can inspect these tools and task/status categories
 # without owning editor or MCP command logic.
 
-use app.editor.mcp_tools.{editor_mcp_tools}
+use app.editor.mcp_tools.{McpToolDef, editor_mcp_tools}
+
+struct IdeAgentDashboardLane:
+    lane_id: text
+    provider: text
+    role: text
+    status: text
+    requires_review: bool
+    source_module: text
+    review_gate_id: text
+    degraded_reason: text
+
+struct IdeAgentDashboardGate:
+    gate_id: text
+    status: text
+    required: bool
+    source_module: text
+    reason: text
 
 struct IdeAgentDashboardSurface:
     app_id: text
     owner_module: text
+    source_of_truth: text
     tool_count: i64
+    lsp_tool_count: i64
+    wiki_tool_count: i64
+    required_tool_count: i64
     has_lsp_tools: bool
     has_wiki_tools: bool
     modes: [text]
+    lanes: [IdeAgentDashboardLane]
+    gates: [IdeAgentDashboardGate]
+    blocked_count: i64
+    degraded_reasons: [text]
+    ready_for_integration: bool
+    handoff_status: text
 
-fn ide_agent_dashboard_surface() -> IdeAgentDashboardSurface:
-    val tools = editor_mcp_tools()
+fn ide_agent_dashboard_default_lanes() -> [IdeAgentDashboardLane]:
+    [
+        IdeAgentDashboardLane(lane_id: "spark-research", provider: "spark", role: "fast-explorer", status: "unavailable", requires_review: true, source_module: "assistant.control_plane", review_gate_id: "spark-output-reviewed", degraded_reason: "spark-unavailable"),
+        IdeAgentDashboardLane(lane_id: "normal-implementation", provider: "normal", role: "implementation", status: "ready", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: ""),
+        IdeAgentDashboardLane(lane_id: "normal-review", provider: "normal", role: "review", status: "ready", requires_review: false, source_module: "assistant.control_plane", review_gate_id: "normal-review-available", degraded_reason: ""),
+    ]
+
+fn _ide_agent_dashboard_lane_valid(lane: IdeAgentDashboardLane) -> bool:
+    val provider_ok = lane.provider == "spark" or lane.provider == "normal"
+    val status_ok = lane.status == "ready" or lane.status == "reviewed" or lane.status == "blocked" or lane.status == "unavailable"
+    val source_ok = lane.source_module == "assistant.control_plane"
+    val gate_ok = lane.review_gate_id == "spark-output-reviewed" or lane.review_gate_id == "normal-review-available"
+    provider_ok and status_ok and source_ok and gate_ok
+
+fn ide_agent_dashboard_review_gates(lanes: [IdeAgentDashboardLane], tool_count: i64, lsp_count: i64, wiki_count: i64, required_tool_count: i64) -> [IdeAgentDashboardGate]:
+    var gates: [IdeAgentDashboardGate] = []
+    var spark_review_status = "missing"
+    var spark_review_reason = "spark-lane-missing"
+    var normal_status = "missing"
+    var normal_reason = "normal-review-lane-missing"
+    var lane_valid_status = "ready"
+    var lane_valid_reason = ""
+    for lane in lanes:
+        if not _ide_agent_dashboard_lane_valid(lane):
+            lane_valid_status = "blocked"
+            lane_valid_reason = "invalid-lane"
+        if lane.provider == "spark" and lane.requires_review and lane.status != "reviewed":
+            spark_review_status = "blocked"
+            spark_review_reason = if lane.degraded_reason != "": lane.degraded_reason else: "spark-review-required"
+        if lane.provider == "spark" and lane.requires_review and lane.status == "reviewed" and lane.source_module == "assistant.control_plane" and lane.review_gate_id == "spark-output-reviewed":
+            spark_review_status = "passed"
+            spark_review_reason = ""
+        if lane.provider == "normal" and lane.role == "review" and (lane.status == "ready" or lane.status == "reviewed"):
+            if lane.source_module == "assistant.control_plane" and lane.review_gate_id == "normal-review-available":
+                normal_status = "ready"
+                normal_reason = ""
+    gates.push(IdeAgentDashboardGate(gate_id: "spark-output-reviewed", status: spark_review_status, required: true, source_module: "assistant.control_plane", reason: spark_review_reason))
+    gates.push(IdeAgentDashboardGate(gate_id: "normal-review-available", status: normal_status, required: true, source_module: "assistant.control_plane", reason: normal_reason))
+    gates.push(IdeAgentDashboardGate(gate_id: "lane-status-valid", status: lane_valid_status, required: true, source_module: "assistant.control_plane", reason: lane_valid_reason))
+    val registry_status = if tool_count >= required_tool_count: "ready" else: "missing"
+    val registry_reason = if tool_count == 0: "mcp-tool-registry-empty" else: if tool_count < required_tool_count: "required-tool-count-missing" else: ""
+    gates.push(IdeAgentDashboardGate(gate_id: "mcp-tool-registry-present", status: registry_status, required: true, source_module: "app.editor.mcp_tools", reason: registry_reason))
+    val lsp_status = if lsp_count > 0: "ready" else: "missing"
+    val lsp_reason = if lsp_count > 0: "" else: "lsp-tools-missing"
+    gates.push(IdeAgentDashboardGate(gate_id: "lsp-tools-present", status: lsp_status, required: true, source_module: "app.editor.mcp_tools", reason: lsp_reason))
+    val wiki_status = if wiki_count > 0: "ready" else: "missing"
+    val wiki_reason = if wiki_count > 0: "" else: "wiki-tools-missing"
+    gates.push(IdeAgentDashboardGate(gate_id: "wiki-tools-present", status: wiki_status, required: true, source_module: "app.editor.mcp_tools", reason: wiki_reason))
+    gates
+
+fn ide_agent_dashboard_blocked_count(lanes: [IdeAgentDashboardLane], gates: [IdeAgentDashboardGate]) -> i64:
+    var count = 0
+    for lane in lanes:
+        if lane.status == "blocked" or lane.status == "unavailable":
+            count = count + 1
+    for gate in gates:
+        if gate.required and (gate.status == "blocked" or gate.status == "missing"):
+            count = count + 1
+    count
+
+fn ide_agent_dashboard_status(lanes: [IdeAgentDashboardLane], gates: [IdeAgentDashboardGate]) -> text:
+    if ide_agent_dashboard_blocked_count(lanes, gates) > 0:
+        return "degraded-review-required"
+    "ready"
+
+fn _ide_agent_dashboard_reasons(lanes: [IdeAgentDashboardLane], gates: [IdeAgentDashboardGate]) -> [text]:
+    var reasons: [text] = []
+    for lane in lanes:
+        if (lane.status == "blocked" or lane.status == "unavailable") and lane.degraded_reason != "":
+            reasons.push(lane.degraded_reason)
+    for gate in gates:
+        if gate.required and (gate.status == "blocked" or gate.status == "missing") and gate.reason != "":
+            reasons.push(gate.reason)
+    reasons
+
+fn ide_agent_dashboard_surface_from_tools(tools: [McpToolDef], lanes: [IdeAgentDashboardLane]) -> IdeAgentDashboardSurface:
     var has_lsp = false
     var has_wiki = false
+    var lsp_count = 0
+    var wiki_count = 0
     for tool in tools:
         if tool.name.starts_with("editor.lsp_"):
             has_lsp = true
+            lsp_count = lsp_count + 1
         if tool.name.starts_with("editor.wiki_"):
             has_wiki = true
+            wiki_count = wiki_count + 1
+    val required_tool_count = 3
+    val gates = ide_agent_dashboard_review_gates(lanes, tools.len(), lsp_count, wiki_count, required_tool_count)
+    val handoff = ide_agent_dashboard_status(lanes, gates)
+    val blocked = ide_agent_dashboard_blocked_count(lanes, gates)
     IdeAgentDashboardSurface(
         app_id: "agent-dashboard",
         owner_module: "app.editor.mcp_tools",
+        source_of_truth: "assistant.control_plane",
         tool_count: tools.len(),
+        lsp_tool_count: lsp_count,
+        wiki_tool_count: wiki_count,
+        required_tool_count: required_tool_count,
         has_lsp_tools: has_lsp,
         has_wiki_tools: has_wiki,
-        modes: ["dashboard-replay", "mcp-standalone", "combined-live"]
+        modes: ["dashboard-replay", "mcp-standalone", "combined-live"],
+        lanes: lanes,
+        gates: gates,
+        blocked_count: blocked,
+        degraded_reasons: _ide_agent_dashboard_reasons(lanes, gates),
+        ready_for_integration: blocked == 0,
+        handoff_status: handoff
     )
+
+fn ide_agent_dashboard_surface() -> IdeAgentDashboardSurface:
+    ide_agent_dashboard_surface_from_tools(editor_mcp_tools(), ide_agent_dashboard_default_lanes())
 
 fn ide_agent_dashboard_summary() -> text:
     val surface = ide_agent_dashboard_surface()
-    "agent-dashboard: {surface.owner_module} tools={surface.tool_count} lsp={surface.has_lsp_tools} wiki={surface.has_wiki_tools} modes={surface.modes.len()}"
+    "agent-dashboard: tools={surface.tool_count} lsp={surface.lsp_tool_count} wiki={surface.wiki_tool_count} modes={surface.modes.len()} team={surface.lanes.len()} blocked={surface.blocked_count} status={surface.handoff_status}"

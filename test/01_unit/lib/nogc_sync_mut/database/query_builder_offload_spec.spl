@@ -1,0 +1,946 @@
+use std.spec.*
+use nogc_sync_mut.database.core.{SdnTable, SdnRow}
+use nogc_sync_mut.database.query.*
+use std.database.storage_mode_offload.{DbStorageOffloadMode, DbStorageOffloadWorkload, db_storage_execute_rows, db_storage_offload_used_gpu}
+use std.db.dbfs_engine.offload_snapshot.{DbfsSsdScanMaterialization, DbfsSsdProjectedRow}
+use std.web_db_offload.contract.{GpuWdbBudget}
+use std.web_db_offload.queue.{gpu_wdb_queue_initial}
+use std.web_db_offload.library.{gpu_wdb_library_empty, gpu_wdb_library_with_targets}
+use std.web_db_offload.device_backend.{gpu_wdb_device_backend}
+
+"""
+# QueryBuilder GPU Offload Integration
+
+## Overview
+
+These scenarios verify that the live `QueryBuilder` row operator path can feed
+RAM-only scan/filter/project and aggregate count work into the shared DB
+offload facade while keeping CPU-computed rows and row IDs authoritative.
+
+## Examples
+
+Build a normal `QueryBuilder`, call `execute_with_offload`, and inspect both
+the returned CPU rows and the offload accounting record.
+
+**Requirements:** doc/02_requirements/feature/gpu_web_db_offload.md
+**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
+**Design:** doc/05_design/gpu_web_db_offload.md
+**Research:** N/A
+"""
+
+fn qo_row(pairs: [(text, text)]) -> SdnRow:
+    var row = SdnRow.empty()
+    for pair in pairs:
+        row.set(pair.0, pair.1)
+    row
+
+fn qo_table() -> SdnTable:
+    val table = SdnTable.new("issues", ["id", "status", "score"])
+    table.add_row(qo_row([("id", "1"), ("status", "Open"), ("score", "30")]))
+    table.add_row(qo_row([("id", "2"), ("status", "Closed"), ("score", "10")]))
+    table.add_row(qo_row([("id", "3"), ("status", "Open"), ("score", "20")]))
+    table.add_row(qo_row([("id", "4"), ("status", "Open"), ("score", "40")]))
+    table
+
+fn qo_budget() -> GpuWdbBudget:
+    GpuWdbBudget(
+        max_queue_depth: 8,
+        max_batch_bytes: 1024 * 1024,
+        min_gpu_batch_bytes: 1024
+    )
+
+fn qo_projected_row(row_id: i64, id_value: text, score_value: text) -> DbfsSsdProjectedRow:
+    var values: Dict<text, text> = {}
+    values["id"] = id_value
+    values["score"] = score_value
+    DbfsSsdProjectedRow(row_id: row_id, values: values)
+
+fn qo_ssd_materialization(row_ids: [i64]) -> DbfsSsdScanMaterialization:
+    var projected_rows: [DbfsSsdProjectedRow] = []
+    for row_id in row_ids:
+        if row_id == 2:
+            projected_rows.push(qo_projected_row(row_id, "ssd-3", "20"))
+        elif row_id == 0:
+            projected_rows.push(qo_projected_row(row_id, "ssd-1", "30"))
+        elif row_id == 3:
+            projected_rows.push(qo_projected_row(row_id, "ssd-4", "40"))
+        else:
+            projected_rows.push(qo_projected_row(row_id, "ssd-other", "0"))
+    DbfsSsdScanMaterialization(
+        current: true,
+        materialized: true,
+        reason: "ssd-page-cursor-materialized",
+        page_cursor_ids: row_ids,
+        row_ids: row_ids,
+        row_payload_bytes: [20, 30, 40],
+        projected_rows: projected_rows,
+        schema_columns: ["id", "status", "score"],
+        projected_columns: ["id", "score"],
+        predicate: "status = Open",
+        row_count: row_ids.len(),
+        bytes_per_row: 512
+    )
+
+describe "QueryBuilder GPU offload integration":
+    it "should report GPU row-query accounting while preserving CPU row order":
+        step("Run a coarse RAM-only scan/filter/project query through offload accounting")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val rows = query.execute()
+        val offload = db_storage_execute_rows(
+            DbStorageOffloadMode.RamOnly,
+            DbStorageOffloadWorkload.ScanFilterProject,
+            4,
+            512,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            true,
+            qo_budget(),
+            [2, 0, 3]
+        )
+
+        expect(rows.len()).to_equal(3)
+        expect(rows[0].get("id")?).to_equal("3")
+        expect(rows[1].get("id")?).to_equal("1")
+        expect(rows[2].get("id")?).to_equal("4")
+        expect(offload.mode).to_equal(DbStorageOffloadMode.RamOnly)
+        expect(offload.workload).to_equal(DbStorageOffloadWorkload.ScanFilterProject)
+        expect(offload.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(offload.gpu_dispatched).to_be(true)
+        expect(offload.cpu_authoritative).to_be(true)
+        expect(offload.row_ids.len()).to_equal(3)
+        expect(offload.row_ids[0]).to_equal(2)
+        expect(offload.row_ids[1]).to_equal(0)
+        expect(offload.row_ids[2]).to_equal(3)
+
+    it "should replace QueryBuilder row output only after native device candidates match":
+        step("Validate measured native columnar-scan candidates against QueryBuilder row IDs")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.execute_with_device_backend_validated(
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 5, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            5,
+            true,
+            qo_budget(),
+            512,
+            [2, 0, 3],
+            100,
+            210,
+            67,
+            "cuda-event"
+        )
+
+        expect(execution.rows.len()).to_equal(3)
+        expect(execution.rows[0].get("id")?).to_equal("3")
+        expect(execution.rows[1].get("id")?).to_equal("1")
+        expect(execution.rows[2].get("id")?).to_equal("4")
+        expect(execution.offload.execution.gpu_dispatched).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.execution.row_ids[0]).to_equal(2)
+        expect(execution.offload.execution.row_ids[1]).to_equal(0)
+        expect(execution.offload.execution.row_ids[2]).to_equal(3)
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should return SSD materialized projected rows after candidate validation":
+        step("Consume projected SSD row values when QueryBuilder row IDs validate")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.execute_with_ssd_materialized_projection(
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 0, 3]
+        )
+
+        expect(execution.offload.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.rows.len()).to_equal(3)
+        expect(execution.rows[0].get("id")?).to_equal("ssd-3")
+        expect(execution.rows[0].get("score")?).to_equal("20")
+        expect(execution.rows[1].get("id")?).to_equal("ssd-1")
+        expect(execution.rows[2].get("id")?).to_equal("ssd-4")
+
+    it "should fall back to CPU rows when SSD materialized candidates mismatch":
+        step("Reject projected SSD row values when GPU candidate row IDs mismatch")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.execute_with_ssd_materialized_projection(
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 99, 3]
+        )
+
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(false)
+        expect(execution.offload.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.reason).to_equal("gpu-cpu-row-mismatch")
+        expect(execution.offload.gpu_candidate_validated).to_be(false)
+        expect(execution.rows.len()).to_equal(3)
+        expect(execution.rows[0].get("id")?).to_equal("3")
+        expect(execution.rows[1].get("id")?).to_equal("1")
+        expect(execution.rows[2].get("id")?).to_equal("4")
+
+    it "should fall back for tiny row-query batches without changing results":
+        step("Run a tiny RAM-only query that must not claim GPU performance")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Closed")
+        val rows = query.execute()
+        val offload = db_storage_execute_rows(
+            DbStorageOffloadMode.RamOnly,
+            DbStorageOffloadWorkload.ScanFilterProject,
+            4,
+            1,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            true,
+            qo_budget(),
+            [1]
+        )
+
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].get("id")?).to_equal("2")
+        expect(offload.gpu_dispatched).to_be(false)
+        expect(offload.dispatch_target).to_equal("cpu_fallback")
+        expect(offload.reason).to_equal("batch-too-small")
+        expect(offload.row_ids[0]).to_equal(1)
+
+    it "should keep take and missing registry behavior CPU-authoritative":
+        step("Run a sorted limited query when no GPU row target is registered")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", true)
+            .take(2)
+        val rows = query.execute()
+        val offload = db_storage_execute_rows(
+            DbStorageOffloadMode.RamOnly,
+            DbStorageOffloadWorkload.ScanFilterProject,
+            4,
+            512,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_empty(),
+            true,
+            true,
+            true,
+            qo_budget(),
+            [3, 0]
+        )
+
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].get("id")?).to_equal("4")
+        expect(rows[1].get("id")?).to_equal("1")
+        expect(offload.gpu_dispatched).to_be(false)
+        expect(offload.dispatch_target).to_equal("cpu_fallback")
+        expect(offload.reason).to_equal("gpu-unavailable")
+        expect(offload.row_ids.len()).to_equal(2)
+        expect(offload.row_ids[0]).to_equal(3)
+        expect(offload.row_ids[1]).to_equal(0)
+
+    it "should report aggregate count work as join aggregate offload":
+        step("Run QueryBuilder count through the join/aggregate storage workload")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.count_with_storage_offload(
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_join_aggregate_batch"]),
+            true,
+            true,
+            true,
+            qo_budget(),
+            512
+        )
+
+        val offload = execution.offload
+        expect(execution.count).to_equal(3)
+        expect(offload.mode).to_equal(DbStorageOffloadMode.RamOnly)
+        expect(offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(offload)).to_be(true)
+        expect(offload.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(offload.cpu_authoritative).to_be(true)
+        expect(offload.row_ids.len()).to_equal(3)
+        expect(offload.row_ids[0]).to_equal(0)
+        expect(offload.row_ids[1]).to_equal(2)
+        expect(offload.row_ids[2]).to_equal(3)
+
+    it "should report filtered SUM work as join aggregate offload":
+        step("Run QueryBuilder SUM through the join/aggregate storage workload")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.sum_i64_with_storage_offload(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_join_aggregate_batch"]),
+            true,
+            true,
+            true,
+            qo_budget(),
+            512
+        )
+
+        expect(execution.sum).to_equal(90)
+        expect(execution.offload.mode).to_equal(DbStorageOffloadMode.RamOnly)
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.offload.row_ids.len()).to_equal(3)
+        expect(execution.offload.row_ids[0]).to_equal(0)
+        expect(execution.offload.row_ids[1]).to_equal(2)
+        expect(execution.offload.row_ids[2]).to_equal(3)
+
+    it "should report filtered AVG work as join aggregate offload":
+        step("Run QueryBuilder AVG through the join/aggregate storage workload")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.avg_i64_with_storage_offload(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_join_aggregate_batch"]),
+            true,
+            true,
+            true,
+            qo_budget(),
+            512
+        )
+
+        expect(execution.value).to_equal(30)
+        expect(execution.offload.mode).to_equal(DbStorageOffloadMode.RamOnly)
+        expect(execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.cpu_authoritative).to_be(true)
+        expect(execution.offload.row_ids.len()).to_equal(3)
+        expect(execution.offload.row_ids[0]).to_equal(0)
+        expect(execution.offload.row_ids[1]).to_equal(2)
+        expect(execution.offload.row_ids[2]).to_equal(3)
+
+    it "should report filtered MIN and MAX work as join aggregate offload":
+        step("Run QueryBuilder MIN and MAX through the join/aggregate storage workload")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val min_execution = query.min_i64_with_storage_offload(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_join_aggregate_batch"]),
+            true,
+            true,
+            true,
+            qo_budget(),
+            512
+        )
+        val max_execution = query.max_i64_with_storage_offload(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_join_aggregate_batch"]),
+            true,
+            true,
+            true,
+            qo_budget(),
+            512
+        )
+
+        expect(min_execution.value).to_equal(20)
+        expect(max_execution.value).to_equal(40)
+        expect(min_execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(max_execution.offload.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(db_storage_offload_used_gpu(min_execution.offload)).to_be(true)
+        expect(db_storage_offload_used_gpu(max_execution.offload)).to_be(true)
+        expect(min_execution.offload.cpu_authoritative).to_be(true)
+        expect(max_execution.offload.cpu_authoritative).to_be(true)
+        expect(min_execution.offload.row_ids.len()).to_equal(3)
+        expect(max_execution.offload.row_ids[2]).to_equal(3)
+
+    it "should replace QueryBuilder COUNT only after native candidates match":
+        step("Require native timing, row IDs, and scalar count agreement")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.count_with_device_backend_validated(
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            true,
+            7,
+            true,
+            qo_budget(),
+            512,
+            [0, 2, 3],
+            3,
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+
+        expect(execution.count).to_equal(3)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.execution.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep QueryBuilder COUNT on CPU when native scalar candidates mismatch":
+        step("Reject native count replacement when the scalar candidate differs")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.count_with_device_backend_validated(
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            true,
+            7,
+            true,
+            qo_budget(),
+            512,
+            [0, 2, 3],
+            99,
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+
+        expect(execution.count).to_equal(3)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(false)
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-count-mismatch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should replace QueryBuilder SUM only after native candidates match":
+        step("Require native timing, row IDs, and scalar SUM agreement")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.sum_i64_with_device_backend_validated(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            true,
+            7,
+            true,
+            qo_budget(),
+            512,
+            [0, 2, 3],
+            90,
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+
+        expect(execution.sum).to_equal(90)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.execution.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should reject perf-only QueryBuilder SUM device evidence":
+        step("Keep SUM CPU authoritative when backend lacks production timing")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.sum_i64_with_device_backend_validated(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("host-safe-mock", 7, ["gpu_db_join_aggregate_batch"], false, "mock-device"),
+            true,
+            7,
+            true,
+            qo_budget(),
+            512,
+            [0, 2, 3],
+            90,
+            100,
+            190,
+            58,
+            "mock-timer"
+        )
+
+        expect(execution.sum).to_equal(90)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(false)
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-device-not-measured")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(false)
+
+    it "should replace QueryBuilder AVG only after native candidates match":
+        step("Require native timing, row IDs, and scalar AVG agreement")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.avg_i64_with_device_backend_validated(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            true,
+            7,
+            true,
+            qo_budget(),
+            512,
+            [0, 2, 3],
+            30,
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(30)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep QueryBuilder AVG on CPU when native scalar candidates mismatch":
+        step("Reject native AVG replacement when the scalar candidate differs")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.avg_i64_with_device_backend_validated(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            true,
+            7,
+            true,
+            qo_budget(),
+            512,
+            [0, 2, 3],
+            99,
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(30)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(false)
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-avg-mismatch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should replace QueryBuilder MIN only after native candidates match":
+        step("Require native timing, row IDs, and scalar MIN agreement")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.min_i64_with_device_backend_validated(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            true,
+            7,
+            true,
+            qo_budget(),
+            512,
+            [0, 2, 3],
+            20,
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(20)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep QueryBuilder MAX on CPU when native scalar candidates mismatch":
+        step("Reject native MAX replacement when the scalar candidate differs")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+        val execution = query.max_i64_with_device_backend_validated(
+            "score",
+            DbStorageOffloadMode.RamOnly,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_join_aggregate_batch"], true, "cuda-device-0"),
+            true,
+            7,
+            true,
+            qo_budget(),
+            512,
+            [0, 2, 3],
+            99,
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(40)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(false)
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-max-mismatch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should compute SUM from SSD projected rows after candidate validation":
+        step("Consume projected SSD numeric values for a validated QueryBuilder aggregate")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.sum_i64_with_ssd_materialized_projection(
+            "score",
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 0, 3]
+        )
+
+        expect(execution.sum).to_equal(90)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.offload.row_ids[0]).to_equal(2)
+        expect(execution.offload.row_ids[1]).to_equal(0)
+        expect(execution.offload.row_ids[2]).to_equal(3)
+
+    it "should compute MIN and MAX from SSD projected rows after candidate validation":
+        step("Consume projected SSD numeric values for validated QueryBuilder scalar aggregates")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val min_execution = query.min_i64_with_ssd_materialized_projection(
+            "score",
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 0, 3]
+        )
+        val max_execution = query.max_i64_with_ssd_materialized_projection(
+            "score",
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 0, 3]
+        )
+
+        expect(min_execution.value).to_equal(20)
+        expect(max_execution.value).to_equal(40)
+        expect(db_storage_offload_used_gpu(min_execution.offload)).to_be(true)
+        expect(db_storage_offload_used_gpu(max_execution.offload)).to_be(true)
+        expect(min_execution.offload.gpu_candidate_validated).to_be(true)
+        expect(max_execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+
+    it "should compute AVG from SSD projected rows after candidate validation":
+        step("Consume projected SSD numeric values for a validated QueryBuilder AVG")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.avg_i64_with_ssd_materialized_projection(
+            "score",
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 0, 3]
+        )
+
+        expect(execution.value).to_equal(30)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.offload.row_ids[0]).to_equal(2)
+        expect(execution.offload.row_ids[1]).to_equal(0)
+        expect(execution.offload.row_ids[2]).to_equal(3)
+
+    it "should compute COUNT from SSD projected rows after candidate validation":
+        step("Consume projected SSD row IDs for a validated QueryBuilder count aggregate")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.count_with_ssd_materialized_projection(
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 0, 3]
+        )
+
+        expect(execution.count).to_equal(3)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(true)
+        expect(execution.offload.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.offload.row_ids[0]).to_equal(2)
+        expect(execution.offload.row_ids[1]).to_equal(0)
+        expect(execution.offload.row_ids[2]).to_equal(3)
+
+    it "should replace SSD projected COUNT after native materialized candidates match":
+        step("Require native timing and SSD materialized row agreement for QueryBuilder count")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.count_with_ssd_materialized_projection_device_validated(
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 9, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            9,
+            true,
+            qo_budget(),
+            [2, 0, 3],
+            120,
+            210,
+            64,
+            "cuda-event"
+        )
+
+        expect(execution.count).to_equal(3)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep SSD projected SUM on CPU when native materialized rows mismatch":
+        step("Reject native SSD aggregate replacement when materialized rows differ from QueryBuilder rows")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.sum_i64_with_ssd_materialized_projection_device_validated(
+            "score",
+            qo_ssd_materialization([2, 0, 1]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 9, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            9,
+            true,
+            qo_budget(),
+            [2, 0, 1],
+            120,
+            210,
+            64,
+            "cuda-event"
+        )
+
+        expect(execution.sum).to_equal(90)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(false)
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-ssd-sum-mismatch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should replace SSD projected AVG after native materialized candidates match":
+        step("Require native timing and SSD materialized row agreement for QueryBuilder AVG")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.avg_i64_with_ssd_materialized_projection_device_validated(
+            "score",
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 9, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            9,
+            true,
+            qo_budget(),
+            [2, 0, 3],
+            120,
+            210,
+            64,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(30)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep SSD projected AVG on CPU when native materialized rows mismatch":
+        step("Reject native SSD AVG replacement when materialized rows differ from QueryBuilder rows")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.avg_i64_with_ssd_materialized_projection_device_validated(
+            "score",
+            qo_ssd_materialization([2, 0, 1]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 9, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            9,
+            true,
+            qo_budget(),
+            [2, 0, 1],
+            120,
+            210,
+            64,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(30)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(false)
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-ssd-avg-mismatch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should replace SSD projected MIN after native materialized candidates match":
+        step("Require native timing and SSD materialized row agreement for QueryBuilder MIN")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.min_i64_with_ssd_materialized_projection_device_validated(
+            "score",
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 9, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            9,
+            true,
+            qo_budget(),
+            [2, 0, 3],
+            120,
+            210,
+            64,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(20)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should replace SSD projected MAX after native materialized candidates match":
+        step("Require native timing and SSD materialized row agreement for QueryBuilder MAX")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.max_i64_with_ssd_materialized_projection_device_validated(
+            "score",
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 9, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            9,
+            true,
+            qo_budget(),
+            [2, 0, 3],
+            120,
+            210,
+            64,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(40)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(true)
+        expect(execution.offload.execution.cpu_authoritative).to_be(false)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.offload.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep SSD projected MAX on CPU when native materialized rows mismatch":
+        step("Reject native SSD MAX replacement when materialized rows differ from QueryBuilder rows")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.max_i64_with_ssd_materialized_projection_device_validated(
+            "score",
+            qo_ssd_materialization([2, 0, 1]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_device_backend("cuda", 9, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            9,
+            true,
+            qo_budget(),
+            [2, 0, 1],
+            120,
+            210,
+            64,
+            "cuda-event"
+        )
+
+        expect(execution.value).to_equal(40)
+        expect(db_storage_offload_used_gpu(execution.offload.execution)).to_be(false)
+        expect(execution.offload.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.execution.cpu_authoritative).to_be(true)
+        expect(execution.offload.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.offload.execution.validation_reason).to_equal("production-ssd-max-mismatch")
+        expect(execution.offload.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep SUM on CPU when SSD projected candidates mismatch":
+        step("Reject SSD projected aggregate values when candidate row IDs mismatch")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.sum_i64_with_ssd_materialized_projection(
+            "score",
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 99, 3]
+        )
+
+        expect(execution.sum).to_equal(90)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(false)
+        expect(execution.offload.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.reason).to_equal("gpu-cpu-row-mismatch")
+        expect(execution.offload.gpu_candidate_validated).to_be(false)
+
+    it "should keep COUNT on CPU when SSD projected candidates mismatch":
+        step("Reject SSD projected count values when candidate row IDs mismatch")
+        var query = QueryBuilder.for_table(qo_table())
+            .filter_by("status", CompareOp.Eq, "Open")
+            .order_by("score", false)
+        val execution = query.count_with_ssd_materialized_projection(
+            qo_ssd_materialization([2, 0, 3]),
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            qo_budget(),
+            [2, 99, 3]
+        )
+
+        expect(execution.count).to_equal(3)
+        expect(db_storage_offload_used_gpu(execution.offload)).to_be(false)
+        expect(execution.offload.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.offload.reason).to_equal("gpu-cpu-row-mismatch")
+        expect(execution.offload.gpu_candidate_validated).to_be(false)

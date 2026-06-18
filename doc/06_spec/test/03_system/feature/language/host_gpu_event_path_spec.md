@@ -27,7 +27,7 @@ host_gpu_event_path_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -211,12 +211,13 @@ expect(host_flow.receipt.committed_on_host).to_be(true)
    - Expected: drain.completed_count equals `1`
    - Expected: drain.last_status_code equals `4`
    - Expected: drain.status equals `typed_unavailable`
+   - Expected: rt_host_gpu_queue_last_device_time_us() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -232,6 +233,7 @@ expect(drain.submitted_count).to_equal(1)
 expect(drain.completed_count).to_equal(1)
 expect(drain.last_status_code).to_equal(4)
 expect(drain.status).to_equal("typed_unavailable")
+expect(rt_host_gpu_queue_last_device_time_us()).to_equal(0)
 expect(engine2d_host_gpu_runtime_drain_summary(drain)).to_contain("status=typed_unavailable")
 ```
 
@@ -297,8 +299,8 @@ expect(completed.last_status_code).to_equal(3)
 - Refuse runtime submission when the queue is unavailable or packet is too large
    - Expected: unavailable_submit.status equals `runtime_unavailable`
    - Expected: oversized_submit.status equals `packet_too_large`
-   - Expected: runtime_drain.drained equals `1`
-   - Expected: runtime_drain.status equals `completed`
+   - Expected: runtime_drain.drained equals `0`
+   - Expected: runtime_drain.status equals `empty`
 
 
 <details>
@@ -341,8 +343,40 @@ expect(unavailable_submit.submitted).to_be(false)
 expect(unavailable_submit.status).to_equal("runtime_unavailable")
 expect(oversized_submit.submitted).to_be(false)
 expect(oversized_submit.status).to_equal("packet_too_large")
-expect(runtime_drain.drained).to_equal(1)
-expect(runtime_drain.status).to_equal("completed")
+expect(runtime_drain.drained).to_equal(0)
+expect(runtime_drain.status).to_equal("empty")
+```
+
+</details>
+
+#### should expose runtime GPU queue device timing after backend completion
+
+- Submit and complete a GPU packet through the raw runtime SFFI
+- rt host gpu queue reset
+   - Expected: rt_host_gpu_queue_emit(2, 1, 512, 7) equals `1`
+   - Expected: rt_host_gpu_queue_submit(1) equals `1`
+   - Expected: rt_host_gpu_queue_last_status() equals `2`
+   - Expected: rt_host_gpu_queue_complete(1) equals `1`
+   - Expected: rt_host_gpu_queue_last_status() equals `3`
+   - Expected: rt_host_gpu_queue_last_backend_handle() equals `7`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Submit and complete a GPU packet through the raw runtime SFFI")
+rt_host_gpu_queue_reset()
+expect(rt_host_gpu_queue_emit(2, 1, 512, 7)).to_equal(1)
+expect(rt_host_gpu_queue_submit(1)).to_equal(1)
+expect(rt_host_gpu_queue_last_status()).to_equal(2)
+expect(rt_host_gpu_queue_complete(1)).to_equal(1)
+expect(rt_host_gpu_queue_last_status()).to_equal(3)
+expect(rt_host_gpu_queue_last_backend_handle()).to_equal(7)
+expect(rt_host_gpu_queue_last_device_time_us()).to_be_greater_than(0)
 ```
 
 </details>
@@ -351,8 +385,8 @@ expect(runtime_drain.status).to_equal("completed")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

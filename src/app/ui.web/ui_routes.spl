@@ -12,10 +12,10 @@ use app.ui.web.tls_serve_loop.{ConnStream}
 use nogc_sync_mut.ui.session.{UISession}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
 use app.ui.web.session_token.{verify, load_secret, random_hex}
-use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, ui_web_extract_bearer, ui_web_query_param, ui_web_percent_decode_query_component, ui_web_ws_response_protocol, ui_web_auth_json_field, ui_web_ws_frame_payload_allowed, ui_web_json_security_headers}
-use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
+use app.ui.web.auth_params.{UI_WEB_MAX_AUTH_JSON_BYTES, ui_web_extract_bearer, ui_web_query_param, ui_web_percent_decode_query_component, ui_web_ws_response_protocol, ui_web_auth_json_field, ui_web_capability_grant_id_authorized, ui_web_fetch_site_allowed, ui_web_host_header_allowed, ui_web_host_origin_authority_allowed, ui_web_json_content_type_allowed, ui_web_session_id_status, ui_web_ws_frame_payload_allowed, ui_web_ws_frame_metadata_status, ui_web_json_security_headers}
+use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text, ui_web_ws_handshake_headers_allowed}
 use app.ui.web.async_ws.{extract_field}
-use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter}
+use app.ui.web.web_runtime_adapter.{WebRuntimeAdapter, web_runtime_resume_frame}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.bounded_channel.{BoundedChannel}
 use app.ui.web.wire.{make_wire_frame}
@@ -53,17 +53,24 @@ fn dispatch_ui_route(path: text, method: text, headers: text, body: text, stream
     return true
 
 fn ui_web_authorization_status(headers: text, path: text, guard: OriginGuard, secret: text, now_ms: u64) -> text:
+    if not ui_web_host_header_allowed(headers):
+        return "bad_host"
     var origin = ""
     match guard.check(headers):
         Err(_): return "forbidden_origin"
         Ok(o): origin = o
+    if not ui_web_host_origin_authority_allowed(headers, origin):
+        return "origin_host_mismatch"
     val bearer = _extract_bearer(headers, path)
     if bearer == "":
         return "missing_bearer"
     val tok_result = verify(bearer, origin, secret, now_ms)
     match tok_result:
         Err(_): return "invalid_bearer"
-        Ok(_): return "ok"
+        Ok(tok):
+            if not ui_web_capability_grant_id_authorized(tok.grant_id):
+                return "unauthorized_grant"
+            return "ok"
 
 fn ui_web_request_authorized(headers: text, path: text, guard: OriginGuard, secret: text, now_ms: u64) -> bool:
     return ui_web_authorization_status(headers, path, guard, secret, now_ms) == "ok"
@@ -76,6 +83,9 @@ fn ui_web_resume_body_status(body: text) -> text:
     val seq_str = ui_web_auth_json_field(body, "last_sequence")
     if session_id == "":
         return "missing_session_id"
+    val session_status = ui_web_session_id_status(session_id)
+    if session_status != "ok":
+        return session_status
     if not _is_u64_literal(rev_str):
         return "invalid_snapshot_revision"
     if not _is_i64_literal(seq_str):
@@ -85,6 +95,7 @@ fn ui_web_resume_body_status(body: text) -> text:
 export ui_web_authorization_status
 export ui_web_request_authorized
 export ui_web_resume_body_status
+export ui_web_resume_response_body
 
 # =========================================================================
 # /ui/ws — WebSocket upgrade + adapter loop
@@ -92,6 +103,12 @@ export ui_web_resume_body_status
 
 fn _handle_ws_route(stream: ConnStream, path: text, headers: text, session: UISession, guard: OriginGuard, secret: text):
     """Gate origin + bearer, complete WS handshake, then run adapter read loop."""
+    if not ui_web_host_header_allowed(headers):
+        stream.write_all("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+        return
+    if not ui_web_fetch_site_allowed(headers):
+        stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        return
     # Security gate: origin check
     var origin = ""
     match guard.check(headers):
@@ -99,6 +116,9 @@ fn _handle_ws_route(stream: ConnStream, path: text, headers: text, session: UISe
             stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
         Ok(o): origin = o
+    if not ui_web_host_origin_authority_allowed(headers, origin):
+        stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        return
 
     # Security gate: bearer token
     val bearer = _extract_bearer(headers, path)
@@ -113,10 +133,13 @@ fn _handle_ws_route(stream: ConnStream, path: text, headers: text, session: UISe
             stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
         Ok(tok): grant_id = tok.grant_id
+    if not ui_web_capability_grant_id_authorized(grant_id):
+        stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        return
 
     # Complete WebSocket handshake
     val key = extract_ws_key(headers)
-    if key == "":
+    if not ui_web_ws_handshake_headers_allowed(headers):
         stream.write_all("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
         return
     val accept = compute_ws_accept(key)
@@ -258,6 +281,15 @@ fn _handle_host_wm_pointer(frame: text, session: UISession, session_id: text, ou
 # =========================================================================
 
 fn _handle_resume_route(stream: ConnStream, path: text, headers: text, body: text, session: UISession, guard: OriginGuard, secret: text):
+    if not ui_web_host_header_allowed(headers):
+        stream.write_all(_ui_json_response(400, "{\"error\": \"bad_host\"}"))
+        return
+    if not ui_web_fetch_site_allowed(headers):
+        stream.write_all(_ui_json_response(403, "{\"error\": \"forbidden_fetch_site\"}"))
+        return
+    if not ui_web_json_content_type_allowed(headers):
+        stream.write_all(_ui_json_response(415, "{\"error\": \"unsupported_content_type\"}"))
+        return
     var origin = ""
     match guard.check(headers):
         Err(_):
@@ -269,15 +301,16 @@ fn _handle_resume_route(stream: ConnStream, path: text, headers: text, body: tex
         stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
         return
     val tok_result = verify(bearer, origin, secret, rt_time_ms())
+    var grant_id = ""
     match tok_result:
         Err(_):
             stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
-        Ok(_):
-            pass_dn
-    val session_id = ui_web_auth_json_field(body, "session_id")
-    val rev_str = ui_web_auth_json_field(body, "snapshot_revision")
-    val seq_str = ui_web_auth_json_field(body, "last_sequence")
+        Ok(tok):
+            if not ui_web_capability_grant_id_authorized(tok.grant_id):
+                stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                return
+            grant_id = tok.grant_id
     val resume_status = ui_web_resume_body_status(body)
     if resume_status == "body_too_large":
         val too_large = "{\"error\": \"request_body_too_large\"}"
@@ -287,10 +320,16 @@ fn _handle_resume_route(stream: ConnStream, path: text, headers: text, body: tex
         val bad = "{\"error\": \"invalid_resume_body\"}"
         stream.write_all(_ui_json_response(400, bad))
         return
+    val resp_json = ui_web_resume_response_body(body, session, grant_id)
+    stream.write_all(_ui_json_response(200, resp_json))
+
+fn ui_web_resume_response_body(body: text, session: UISession, grant_id: text) -> text:
+    val session_id = ui_web_auth_json_field(body, "session_id")
+    val rev_str = ui_web_auth_json_field(body, "snapshot_revision")
+    val seq_str = ui_web_auth_json_field(body, "last_sequence")
     val rev: u64 = if rev_str == "": 0 else: _parse_u64(rev_str)
     val seq: i64 = if seq_str == "": 0 else: seq_str.parse_i64()
-    val resp_json = "{\"session_id\": \"{session_id}\", \"snapshot_revision\": {rev}, \"last_sequence\": {seq}}"
-    stream.write_all(_ui_json_response(200, resp_json))
+    return web_runtime_resume_frame(session_id, session, grant_id, rev, seq)
 
 # =========================================================================
 # Private helpers
@@ -302,6 +341,7 @@ fn _ui_json_response(status: i32, body: text) -> text:
         400: "Bad Request"
         405: "Method Not Allowed"
         413: "Payload Too Large"
+        415: "Unsupported Media Type"
         _: "OK"
     var resp = "HTTP/1.1 {status} {status_text}\r\n"
     resp = "{resp}Content-Type: application/json\r\n"
@@ -364,7 +404,7 @@ fn _read_ws_frame_conn(stream: ConnStream) -> text?:
                         for b in ext:
                             acc = acc * 256 + (b as i64)
                         payload_len = acc
-            if not ui_web_ws_frame_payload_allowed(payload_len):
+            if ui_web_ws_frame_metadata_status(byte0 as i64, masked, payload_len) != "ok":
                 return nil
 
             var mask_key: [u8] = []

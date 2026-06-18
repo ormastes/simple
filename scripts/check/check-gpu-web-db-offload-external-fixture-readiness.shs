@@ -1,0 +1,2026 @@
+#!/usr/bin/env sh
+set -eu
+
+REPORT="${REPORT:-doc/09_report/perf/gpu_web_db_offload_external_fixture_readiness_2026-06-17.md}"
+TABLE="${TABLE:-doc/10_metrics/perf/gpu_web_db_offload_external_fixture_readiness.md}"
+ENV_TEMPLATE_PATH="${ENV_TEMPLATE_PATH:-build/perf/gpu_web_db_offload/external-fixtures.env}"
+SETUP_CHECKLIST_PATH="${SETUP_CHECKLIST_PATH:-build/perf/gpu_web_db_offload/external-fixture-setup-checklist.md}"
+MISSING_BY_CATEGORY_PATH="${MISSING_BY_CATEGORY_PATH:-build/perf/gpu_web_db_offload/external-fixture-missing-by-category.env}"
+BOOTSTRAP_MANIFEST_PATH="${BOOTSTRAP_MANIFEST_PATH:-build/perf/gpu_web_db_offload/external-fixture-bootstrap-manifest.tsv}"
+DOCKER_COMPOSE_TEMPLATE_PATH="${DOCKER_COMPOSE_TEMPLATE_PATH:-build/perf/gpu_web_db_offload/external-fixture-compose.yaml}"
+DOCKER_RUN_TEMPLATE_PATH="${DOCKER_RUN_TEMPLATE_PATH:-build/perf/gpu_web_db_offload/external-fixture-docker-run.shs}"
+HAPROXY_CONFIG_TEMPLATE_PATH="${HAPROXY_CONFIG_TEMPLATE_PATH:-build/perf/gpu_web_db_offload/haproxy.cfg}"
+ENVOY_CONFIG_TEMPLATE_PATH="${ENVOY_CONFIG_TEMPLATE_PATH:-build/perf/gpu_web_db_offload/envoy.yaml}"
+ENV_HINTS_PATH="${ENV_HINTS_PATH:-build/perf/gpu_web_db_offload/external-fixture-env-hints.md}"
+RUNBOOK_PATH="${RUNBOOK_PATH:-build/perf/gpu_web_db_offload/external-fixture-runbook.md}"
+NEXT_ACTIONS_PATH="${NEXT_ACTIONS_PATH:-build/perf/gpu_web_db_offload/external-fixture-next-actions.md}"
+NEXT_ACTIONS_ENV_FILE="${NEXT_ACTIONS_ENV_FILE:-$ENV_TEMPLATE_PATH}"
+ENV_FIELDS_PATH="${ENV_FIELDS_PATH:-build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv}"
+BLOCKER_MANIFEST_PATH="${BLOCKER_MANIFEST_PATH:-build/perf/gpu_web_db_offload/external-fixture-blockers.tsv}"
+
+tool_path() {
+    command -v "$1" 2>/dev/null || true
+}
+
+first_available_tool() {
+    for tool in "$@"; do
+        path="$(tool_path "$tool")"
+        if [ "$path" != "" ]; then
+            printf '%s:%s\n' "$tool" "$path"
+            return 0
+        fi
+    done
+    return 1
+}
+
+docker_compose_tool() {
+    docker_path="$(tool_path docker)"
+    if [ "$docker_path" != "" ] && docker compose version >/dev/null 2>&1; then
+        printf 'docker compose:%s\n' "$docker_path"
+        return 0
+    fi
+    first_available_tool docker-compose || true
+}
+
+container_engine_status() {
+    runtime="$1"
+    case "$runtime" in
+        docker:*)
+            if docker info >/dev/null 2>&1; then
+                status_line "bootstrap_container_engine" "ready" "docker-info"
+            else
+                status_line "bootstrap_container_engine" "unavailable" "docker-info-failed"
+            fi
+            ;;
+        podman:*)
+            if podman info >/dev/null 2>&1; then
+                status_line "bootstrap_container_engine" "ready" "podman-info"
+            else
+                status_line "bootstrap_container_engine" "unavailable" "podman-info-failed"
+            fi
+            ;;
+        nerdctl:*)
+            if nerdctl version >/dev/null 2>&1; then
+                status_line "bootstrap_container_engine" "ready" "nerdctl-version"
+            else
+                status_line "bootstrap_container_engine" "unavailable" "nerdctl-version-failed"
+            fi
+            ;;
+        "")
+            status_line "bootstrap_container_engine" "missing" "container-runtime-not-installed"
+            ;;
+        *)
+            status_line "bootstrap_container_engine" "unknown" "$runtime"
+            ;;
+    esac
+}
+
+status_line() {
+    key="$1"
+    status="$2"
+    reason="$3"
+    printf '%s=%s|%s\n' "$key" "$status" "$reason"
+}
+
+tool_status() {
+    key="$1"
+    tool="$2"
+    path="$(tool_path "$tool")"
+    if [ "$path" != "" ]; then
+        status_line "$key" "ready" "$path"
+    else
+        status_line "$key" "missing" "$tool-not-installed"
+    fi
+}
+
+url_status() {
+    key="$1"
+    var_name="$2"
+    eval value=\"\${$var_name:-}\"
+    if [ "$value" != "" ]; then
+        status_line "$key" "ready" "$var_name-configured"
+    else
+        status_line "$key" "missing" "$var_name-not-configured"
+    fi
+}
+
+compound_tool_status() {
+    key="$1"
+    ready_reason="$2"
+    shift 2
+    for tool in "$@"; do
+        path="$(tool_path "$tool")"
+        if [ "$path" != "" ]; then
+            status_line "$key" "ready" "$ready_reason:$tool:$path"
+            return 0
+        fi
+    done
+    status_line "$key" "missing" "$key-not-installed"
+}
+
+emit_readiness() {
+    tool_status "wrk" "wrk"
+    tool_status "nginx" "nginx"
+    tool_status "caddy" "caddy"
+    tool_status "h2o" "h2o"
+    tool_status "haproxy" "haproxy"
+    tool_status "envoy" "envoy"
+    compound_tool_status "clickhouse" "clickhouse-ready" "clickhouse" "clickhouse-client"
+    tool_status "duckdb" "duckdb"
+    tool_status "psql" "psql"
+    tool_status "pgbench" "pgbench"
+    compound_tool_status "mongodb" "mongodb-ready" "mongosh" "mongo"
+    url_status "simple_cached_proxy_url" "SIMPLE_CACHED_PROXY_URL"
+    url_status "haproxy_cached_proxy_url" "HAPROXY_CACHED_PROXY_URL"
+    url_status "envoy_cached_proxy_url" "ENVOY_CACHED_PROXY_URL"
+    url_status "simple_upload_proxy_url" "SIMPLE_UPLOAD_PROXY_URL"
+    url_status "haproxy_upload_proxy_url" "HAPROXY_UPLOAD_PROXY_URL"
+    url_status "simple_tunnel_proxy_url" "SIMPLE_TUNNEL_PROXY_URL"
+    url_status "haproxy_tunnel_proxy_url" "HAPROXY_TUNNEL_PROXY_URL"
+    url_status "dynamic_gpu_plaintext_url" "DYNAMIC_GPU_PLAINTEXT_URL"
+    url_status "dynamic_cpu_plaintext_url" "DYNAMIC_CPU_PLAINTEXT_URL"
+    url_status "dynamic_gpu_json_url" "DYNAMIC_GPU_JSON_URL"
+    url_status "dynamic_cpu_json_url" "DYNAMIC_CPU_JSON_URL"
+    url_status "simple_reference_plaintext_url" "SIMPLE_REFERENCE_PLAINTEXT_URL"
+    url_status "uwebsockets_plaintext_url" "UWEBSOCKETS_PLAINTEXT_URL"
+    url_status "seastar_plaintext_url" "SEASTAR_PLAINTEXT_URL"
+    url_status "clickhouse_url" "CLICKHOUSE_URL"
+    url_status "postgres_url" "POSTGRES_URL"
+    url_status "mongo_url" "MONGO_URL"
+}
+
+emit_bootstrap_status() {
+    runtime="$(first_available_tool docker podman nerdctl || true)"
+    package_manager="$(first_available_tool apt apt-get dnf yum apk brew || true)"
+    compose="$(docker_compose_tool)"
+    engine_status="$(container_engine_status "$runtime")"
+
+    if [ "$runtime" != "" ]; then
+        status_line "bootstrap_container_runtime" "ready" "$runtime"
+    else
+        status_line "bootstrap_container_runtime" "missing" "docker-podman-nerdctl-not-installed"
+    fi
+    printf '%s\n' "$engine_status"
+    if [ "$package_manager" != "" ]; then
+        status_line "bootstrap_package_manager" "ready" "$package_manager"
+    else
+        status_line "bootstrap_package_manager" "missing" "supported-package-manager-not-installed"
+    fi
+    if [ "$compose" != "" ]; then
+        status_line "bootstrap_compose" "ready" "$compose"
+    else
+        status_line "bootstrap_compose" "optional-missing" "docker-compose-not-installed"
+    fi
+    missing_count="$(emit_readiness | awk -F'[=|]' '$2 == "missing" { count++ } END { print count + 0 }')"
+    status_line "bootstrap_missing_fixture_items" "info" "$missing_count"
+    if printf '%s\n' "$engine_status" | grep -q '^bootstrap_container_engine=ready|'; then
+        status_line "bootstrap_local_fixture_bootstrap" "possible" "container-engine-ready"
+    elif [ "$runtime" != "" ]; then
+        status_line "bootstrap_local_fixture_bootstrap" "engine-unavailable" "container-runtime-present-but-engine-unavailable"
+    elif [ "$package_manager" != "" ]; then
+        status_line "bootstrap_local_fixture_bootstrap" "manual-install-possible" "package-manager-available"
+    else
+        status_line "bootstrap_local_fixture_bootstrap" "blocked" "no-container-runtime-or-package-manager"
+    fi
+    status_line "bootstrap_side_effects" "none" "status-only-no-install-no-container-start"
+}
+
+emit_bootstrap_manifest() {
+    cat <<'EOF'
+fixture	kind	image_or_tool	default_port	fills	readiness_category	note
+caddy_static	container	caddy:2	8082	tool:caddy	web_proxy_tools	static-file baseline candidate; map generated static fixture root read-only
+h2o_static	manual_tool	h2o	8083	tool:h2o	web_proxy_tools	h2o packaging is host-specific; install tool or supply an equivalent fixture URL row
+haproxy_cached_proxy	container	haproxy:2.9	8091	tool:haproxy,HAPROXY_CACHED_PROXY_URL	proxy_fixture_urls	cached reverse-proxy baseline for Simple cached proxy comparison
+haproxy_upload_proxy	container	haproxy:2.9	8091	HAPROXY_UPLOAD_PROXY_URL	proxy_fixture_urls	upload-streaming proxy baseline; may share HAProxy container with cached proxy route
+haproxy_tunnel_proxy	container	haproxy:2.9	8091	HAPROXY_TUNNEL_PROXY_URL	proxy_fixture_urls	upgrade-tunnel proxy baseline; may share HAProxy container with cached proxy route
+envoy_cached_proxy	container	envoyproxy/envoy:v1.30-latest	8092	tool:envoy,ENVOY_CACHED_PROXY_URL	proxy_fixture_urls	cached reverse-proxy baseline for Envoy comparison
+clickhouse_olap	container	clickhouse/clickhouse-server:latest	9000	tool:clickhouse,CLICKHOUSE_URL	db_service_urls	ClickBench-style OLAP baseline service
+postgres_tpch	container	postgres:16	5432	tool:psql,tool:pgbench,POSTGRES_URL	db_service_urls	TPC-H-style relational baseline service
+mongo_ycsb	container	mongo:7	27017	tool:mongodb,MONGO_URL	db_service_urls	YCSB-style document-filter baseline service
+simple_cached_proxy	external_url	repo-local-simple-web	8090	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	Simple cached proxy fixture must come from the Simple server/proxy lane
+simple_upload_proxy	external_url	repo-local-simple-web	8090	SIMPLE_UPLOAD_PROXY_URL	proxy_fixture_urls	Simple upload streaming fixture must come from the Simple server/proxy lane
+simple_tunnel_proxy	external_url	repo-local-simple-web	8090	SIMPLE_TUNNEL_PROXY_URL	proxy_fixture_urls	Simple upgrade tunnel fixture must come from the Simple server/proxy lane
+dynamic_gpu_plaintext	external_url	repo-local-simple-web	8080	DYNAMIC_GPU_PLAINTEXT_URL	dynamic_route_urls	GPU-tagged dynamic plaintext route; must expose GPU hit/fallback evidence separately
+dynamic_cpu_plaintext	external_url	repo-local-simple-web	8081	DYNAMIC_CPU_PLAINTEXT_URL	dynamic_route_urls	CPU oracle plaintext route for dynamic route comparison
+dynamic_gpu_json	external_url	repo-local-simple-web	8080	DYNAMIC_GPU_JSON_URL	dynamic_route_urls	GPU-tagged JSON route; must expose GPU hit/fallback evidence separately
+dynamic_cpu_json	external_url	repo-local-simple-web	8081	DYNAMIC_CPU_JSON_URL	dynamic_route_urls	CPU oracle JSON route for dynamic route comparison
+simple_reference_plaintext	external_url	repo-local-simple-web	8084	SIMPLE_REFERENCE_PLAINTEXT_URL	reference_fixture_urls	Simple plaintext reference route for optional uWebSockets/Seastar comparisons
+uwebsockets_plaintext	external_url	external-uwebsockets	8085	UWEBSOCKETS_PLAINTEXT_URL	reference_fixture_urls	uWebSockets-style plaintext reference server with workload parity
+seastar_plaintext	external_url	external-seastar	8086	SEASTAR_PLAINTEXT_URL	reference_fixture_urls	Seastar-style plaintext reference server with workload parity
+EOF
+}
+
+write_bootstrap_manifest() {
+    path="${1:-$BOOTSTRAP_MANIFEST_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_bootstrap_manifest > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_docker_compose_template() {
+    cat <<'EOF'
+# GPU Web/DB external fixture Docker Compose template.
+# Generated by check-gpu-web-db-offload-external-fixture-readiness.shs.
+# This file is side-effect-free: generation does not pull images or start services.
+# Start manually after reviewing resource limits, ports, and proxy upstreams:
+#   docker compose -f build/perf/gpu_web_db_offload/external-fixture-compose.yaml up -d
+services:
+  caddy_static:
+    image: caddy:2
+    command: ["caddy", "respond", "--listen", ":8082", "--body", "gpu-web-db-static-fixture"]
+    ports:
+      - "8082:8082"
+
+  haproxy_cached_proxy:
+    image: haproxy:2.9
+    ports:
+      - "8091:8091"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    profiles: ["needs-proxy-config"]
+
+  envoy_cached_proxy:
+    image: envoyproxy/envoy:v1.30-latest
+    ports:
+      - "8092:8092"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    profiles: ["needs-proxy-config"]
+
+  clickhouse_olap:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+
+  postgres_tpch:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+
+  mongo_ycsb:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+EOF
+}
+
+write_docker_compose_template() {
+    path="${1:-$DOCKER_COMPOSE_TEMPLATE_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_docker_compose_template > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_docker_run_template() {
+    cat <<'EOF'
+#!/usr/bin/env sh
+set -eu
+
+# GPU Web/DB external fixture docker-run template.
+# Generated by check-gpu-web-db-offload-external-fixture-readiness.shs.
+# Review resource limits, ports, and proxy upstreams before running this file.
+# This generated file is an operator template; generators never execute it.
+# Re-running this template restarts only the named gpu-web-db-* fixture
+# containers below; it does not remove unrelated containers.
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+restart_fixture() {
+    name="$1"
+    shift
+    if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+        docker rm -f "$name"
+    fi
+    docker run -d --name "$name" "$@"
+}
+
+restart_fixture gpu-web-db-caddy-static \
+    -p 8082:8082 \
+    caddy:2 caddy respond --listen :8082 --body gpu-web-db-static-fixture
+
+restart_fixture gpu-web-db-haproxy-cached-proxy \
+    -p 8091:8091 \
+    --add-host=host.docker.internal:host-gateway \
+    -v "$SCRIPT_DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
+    haproxy:2.9
+
+restart_fixture gpu-web-db-envoy-cached-proxy \
+    -p 8092:8092 \
+    --add-host=host.docker.internal:host-gateway \
+    -v "$SCRIPT_DIR/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
+    envoyproxy/envoy:v1.30-latest
+
+restart_fixture gpu-web-db-clickhouse-olap \
+    -p 9000:9000 -p 8123:8123 \
+    clickhouse/clickhouse-server:latest
+
+restart_fixture gpu-web-db-postgres-tpch \
+    -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+    -p 5432:5432 \
+    postgres:16
+
+restart_fixture gpu-web-db-mongo-ycsb \
+    -p 27017:27017 \
+    mongo:7
+EOF
+}
+
+write_docker_run_template() {
+    path="${1:-$DOCKER_RUN_TEMPLATE_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_docker_run_template > "$path"
+    chmod +x "$path"
+    printf '%s\n' "$path"
+}
+
+emit_haproxy_config_template() {
+    cat <<'EOF'
+global
+    log stdout format raw local0
+    maxconn 4096
+
+defaults
+    mode http
+    log global
+    option httplog
+    timeout connect 5s
+    timeout client 60s
+    timeout server 60s
+
+frontend gpu_web_db_proxy
+    bind *:8091
+    default_backend simple_cached_proxy
+
+backend simple_cached_proxy
+    # Review this upstream before running the fixture.
+    # On Docker Desktop, host.docker.internal reaches the host.
+    # On Linux, replace it with the host gateway/IP if needed.
+    server simple_proxy host.docker.internal:8090 check
+EOF
+}
+
+emit_envoy_config_template() {
+    cat <<'EOF'
+static_resources:
+  listeners:
+    - name: gpu_web_db_proxy_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 8092
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: gpu_web_db_proxy
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: simple_cached_proxy
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: simple_cached_proxy
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: simple_cached_proxy
+      connect_timeout: 5s
+      type: STRICT_DNS
+      load_assignment:
+        cluster_name: simple_cached_proxy
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      # Review this host before running the fixture.
+                      address: host.docker.internal
+                      port_value: 8090
+EOF
+}
+
+write_proxy_config_templates() {
+    haproxy_path="${1:-$HAPROXY_CONFIG_TEMPLATE_PATH}"
+    envoy_path="${2:-$ENVOY_CONFIG_TEMPLATE_PATH}"
+    mkdir -p "$(dirname "$haproxy_path")" "$(dirname "$envoy_path")"
+    emit_haproxy_config_template > "$haproxy_path"
+    emit_envoy_config_template > "$envoy_path"
+    printf '%s\n' "$haproxy_path"
+    printf '%s\n' "$envoy_path"
+}
+
+emit_env_hints() {
+    cat <<'EOF'
+# GPU Web/DB External Fixture Env Hints
+
+These values are copy/paste hints for `external-fixtures.env` after the matching
+fixtures are actually running. This file is intentionally Markdown, not a
+sourceable env file, so generating it cannot mark readiness rows as `ready`.
+
+## Compose/Proxy Template Derived Hints
+
+```sh
+# After starting the generated HAProxy proxy fixture on port 8091:
+# HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
+# HAPROXY_UPLOAD_PROXY_URL=http://127.0.0.1:8091/upload
+# HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel
+
+# After starting the generated Envoy proxy fixture on port 8092:
+# ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
+
+# After starting the generated DB fixture containers:
+# CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+# POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+# MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+```
+
+## Operator-Supplied Simple/Dynamic Route Hints
+
+```sh
+# Fill these from the Simple web/proxy lane that owns the live route fixtures:
+# SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
+# SIMPLE_UPLOAD_PROXY_URL=http://127.0.0.1:8090/upload
+# SIMPLE_TUNNEL_PROXY_URL=http://127.0.0.1:8090/tunnel
+# DYNAMIC_GPU_PLAINTEXT_URL=http://127.0.0.1:8080/plaintext
+# DYNAMIC_CPU_PLAINTEXT_URL=http://127.0.0.1:8081/plaintext
+# DYNAMIC_GPU_JSON_URL=http://127.0.0.1:8080/json
+# DYNAMIC_CPU_JSON_URL=http://127.0.0.1:8081/json
+# SIMPLE_REFERENCE_PLAINTEXT_URL=http://127.0.0.1:8084/plaintext
+# UWEBSOCKETS_PLAINTEXT_URL=http://127.0.0.1:8085/plaintext
+# SEASTAR_PLAINTEXT_URL=http://127.0.0.1:8086/plaintext
+```
+
+After copying verified values into `build/perf/gpu_web_db_offload/external-fixtures.env`,
+run:
+
+```sh
+scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status
+scripts/check/check-gpu-web-db-offload-external-suite.shs --preflight
+```
+EOF
+}
+
+write_env_hints() {
+    path="${1:-$ENV_HINTS_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_env_hints > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_runbook() {
+    cat <<'EOF'
+# GPU Web/DB External Fixture Runbook
+
+This runbook is generated for operators who are preparing external web, proxy,
+dynamic-route, and DB fixtures. Generation is side-effect-free: it writes
+instructions only and does not pull images, start containers, or run benchmarks.
+
+## 1. Generate Fixture Handoff Files
+
+```sh
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-template
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-bootstrap-manifest
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-docker-compose-template
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-docker-run-template
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-proxy-config-templates
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-hints
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions
+```
+
+## 2. Review And Start Optional Local Fixtures
+
+Review `build/perf/gpu_web_db_offload/haproxy.cfg` and
+`build/perf/gpu_web_db_offload/envoy.yaml` before starting proxy containers.
+The generated proxy templates point to `host.docker.internal:8090`; on Linux,
+the generated Compose and docker-run templates map `host.docker.internal` to
+Docker's `host-gateway`. If the container runtime does not support that mapping,
+replace the upstream host with the host gateway or host IP before starting the
+proxy fixtures.
+
+```sh
+docker compose -f build/perf/gpu_web_db_offload/external-fixture-compose.yaml --profile needs-proxy-config up -d
+```
+
+If the host lacks Docker Compose, review and run the generated
+`build/perf/gpu_web_db_offload/external-fixture-docker-run.shs` template, or
+start equivalent Caddy, HAProxy, Envoy, ClickHouse, PostgreSQL, and MongoDB
+fixtures manually with another container runtime. Re-running the generated
+docker-run template restarts only its named `gpu-web-db-*` fixture containers.
+
+## 3. Fill The Fixture Env File
+
+Copy verified values from
+`build/perf/gpu_web_db_offload/external-fixture-env-hints.md` into
+`build/perf/gpu_web_db_offload/external-fixtures.env`. Keep unverified values
+empty; empty assignments are safe and do not make readiness pass.
+
+## 4. Refresh Readiness
+
+```sh
+scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status
+scripts/check/check-gpu-web-db-offload-external-suite.shs --status
+scripts/check/check-gpu-web-db-offload-external-suite.shs --status-json
+scripts/check/check-gpu-web-db-offload-external-suite.shs --preflight
+```
+
+## 5. Run The Guarded Suite
+
+Use the strict readiness gate before a measured run:
+
+```sh
+scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready
+scripts/check/check-gpu-web-db-offload-external-suite.shs
+```
+
+Use partial mode only to refresh local artifacts while fixtures remain missing:
+
+```sh
+scripts/check/check-gpu-web-db-offload-external-suite.shs --allow-partial
+```
+EOF
+}
+
+write_runbook() {
+    path="${1:-$RUNBOOK_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_runbook > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_env_fields() {
+    cat <<'EOF'
+readiness_item	env_variable	category	fills
+simple_cached_proxy_url	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	Simple cached reverse-proxy fixture URL
+haproxy_cached_proxy_url	HAPROXY_CACHED_PROXY_URL	proxy_fixture_urls	HAProxy cached reverse-proxy fixture URL
+envoy_cached_proxy_url	ENVOY_CACHED_PROXY_URL	proxy_fixture_urls	Envoy cached reverse-proxy fixture URL
+simple_upload_proxy_url	SIMPLE_UPLOAD_PROXY_URL	proxy_fixture_urls	Simple upload-streaming fixture URL
+haproxy_upload_proxy_url	HAPROXY_UPLOAD_PROXY_URL	proxy_fixture_urls	HAProxy upload-streaming fixture URL
+simple_tunnel_proxy_url	SIMPLE_TUNNEL_PROXY_URL	proxy_fixture_urls	Simple upgrade-tunnel fixture URL
+haproxy_tunnel_proxy_url	HAPROXY_TUNNEL_PROXY_URL	proxy_fixture_urls	HAProxy upgrade-tunnel fixture URL
+dynamic_gpu_plaintext_url	DYNAMIC_GPU_PLAINTEXT_URL	dynamic_route_urls	GPU plaintext dynamic route URL
+dynamic_cpu_plaintext_url	DYNAMIC_CPU_PLAINTEXT_URL	dynamic_route_urls	CPU plaintext dynamic route URL
+dynamic_gpu_json_url	DYNAMIC_GPU_JSON_URL	dynamic_route_urls	GPU JSON dynamic route URL
+dynamic_cpu_json_url	DYNAMIC_CPU_JSON_URL	dynamic_route_urls	CPU JSON dynamic route URL
+simple_reference_plaintext_url	SIMPLE_REFERENCE_PLAINTEXT_URL	reference_fixture_urls	Simple reference plaintext route URL
+uwebsockets_plaintext_url	UWEBSOCKETS_PLAINTEXT_URL	reference_fixture_urls	uWebSockets plaintext reference URL
+seastar_plaintext_url	SEASTAR_PLAINTEXT_URL	reference_fixture_urls	Seastar plaintext reference URL
+clickhouse_url	CLICKHOUSE_URL	db_service_urls	ClickHouse service URL
+postgres_url	POSTGRES_URL	db_service_urls	PostgreSQL service URL
+mongo_url	MONGO_URL	db_service_urls	MongoDB service URL
+EOF
+}
+
+write_env_fields() {
+    path="${1:-$ENV_FIELDS_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_env_fields > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_blocker_manifest() {
+    missing="${1:-$(emit_missing_by_category)}"
+    source="${2:-ambient-environment}"
+    export BLOCKER_MANIFEST_MISSING="$missing"
+    export BLOCKER_MANIFEST_SOURCE="$source"
+    python3 - <<'PY'
+import os
+
+env_fields = {
+    "simple_cached_proxy_url": ("SIMPLE_CACHED_PROXY_URL", "proxy_fixture_urls", "Start the Simple cached reverse-proxy fixture and fill the URL."),
+    "haproxy_cached_proxy_url": ("HAPROXY_CACHED_PROXY_URL", "proxy_fixture_urls", "Start the HAProxy cached reverse-proxy fixture and fill the URL."),
+    "envoy_cached_proxy_url": ("ENVOY_CACHED_PROXY_URL", "proxy_fixture_urls", "Start the Envoy cached reverse-proxy fixture and fill the URL."),
+    "simple_upload_proxy_url": ("SIMPLE_UPLOAD_PROXY_URL", "proxy_fixture_urls", "Start the Simple upload-streaming fixture and fill the URL."),
+    "haproxy_upload_proxy_url": ("HAPROXY_UPLOAD_PROXY_URL", "proxy_fixture_urls", "Start the HAProxy upload-streaming fixture and fill the URL."),
+    "simple_tunnel_proxy_url": ("SIMPLE_TUNNEL_PROXY_URL", "proxy_fixture_urls", "Start the Simple upgrade-tunnel fixture and fill the URL."),
+    "haproxy_tunnel_proxy_url": ("HAPROXY_TUNNEL_PROXY_URL", "proxy_fixture_urls", "Start the HAProxy upgrade-tunnel fixture and fill the URL."),
+    "dynamic_gpu_plaintext_url": ("DYNAMIC_GPU_PLAINTEXT_URL", "dynamic_route_urls", "Start the GPU plaintext dynamic route and fill the URL."),
+    "dynamic_cpu_plaintext_url": ("DYNAMIC_CPU_PLAINTEXT_URL", "dynamic_route_urls", "Start the CPU plaintext dynamic route and fill the URL."),
+    "dynamic_gpu_json_url": ("DYNAMIC_GPU_JSON_URL", "dynamic_route_urls", "Start the GPU JSON dynamic route and fill the URL."),
+    "dynamic_cpu_json_url": ("DYNAMIC_CPU_JSON_URL", "dynamic_route_urls", "Start the CPU JSON dynamic route and fill the URL."),
+    "simple_reference_plaintext_url": ("SIMPLE_REFERENCE_PLAINTEXT_URL", "reference_fixture_urls", "Start the Simple reference plaintext route and fill the URL."),
+    "uwebsockets_plaintext_url": ("UWEBSOCKETS_PLAINTEXT_URL", "reference_fixture_urls", "Start the uWebSockets-style plaintext reference and fill the URL."),
+    "seastar_plaintext_url": ("SEASTAR_PLAINTEXT_URL", "reference_fixture_urls", "Start the Seastar-style plaintext reference and fill the URL."),
+    "clickhouse_url": ("CLICKHOUSE_URL", "db_service_urls", "Start or point to ClickHouse and fill the service URL."),
+    "postgres_url": ("POSTGRES_URL", "db_service_urls", "Start or point to PostgreSQL and fill the service URL."),
+    "mongo_url": ("MONGO_URL", "db_service_urls", "Start or point to MongoDB and fill the service URL."),
+}
+tool_actions = {
+    "wrk": "Install wrk.",
+    "nginx": "Install nginx.",
+    "caddy": "Install or start Caddy.",
+    "h2o": "Install or start H2O.",
+    "haproxy": "Install or start HAProxy.",
+    "envoy": "Install or start Envoy.",
+    "clickhouse": "Install ClickHouse client tooling.",
+    "duckdb": "Install DuckDB.",
+    "psql": "Install PostgreSQL psql.",
+    "pgbench": "Install PostgreSQL pgbench.",
+    "mongodb": "Install Mongo shell tooling.",
+}
+
+print("source\tcategory\treadiness_item\tenv_variable\taction")
+source = os.environ["BLOCKER_MANIFEST_SOURCE"]
+for line in os.environ["BLOCKER_MANIFEST_MISSING"].splitlines():
+    if "=" not in line:
+        continue
+    category, items = line.split("=", 1)
+    for item in [value for value in items.split(",") if value]:
+        if item in env_fields:
+            variable, category, action = env_fields[item]
+        else:
+            variable = ""
+            action = tool_actions.get(item, "Resolve the missing readiness item.")
+        print(f"{source}\t{category}\t{item}\t{variable}\t{action}")
+PY
+}
+
+write_blocker_manifest() {
+    path="${1:-$BLOCKER_MANIFEST_PATH}"
+    env_file="${2:-$NEXT_ACTIONS_ENV_FILE}"
+    mkdir -p "$(dirname "$path")"
+    if [ -f "$env_file" ]; then
+        missing="$(emit_missing_by_category_from_env_file "$env_file")"
+        source="fixture-env-file:$env_file"
+    else
+        missing="$(emit_missing_by_category)"
+        source="ambient-environment"
+    fi
+    emit_blocker_manifest "$missing" "$source" > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_next_actions() {
+    missing="${1:-$(emit_missing_by_category)}"
+    source="${2:-ambient-environment}"
+    export NEXT_ACTIONS_MISSING="$missing"
+    export NEXT_ACTIONS_SOURCE="$source"
+    python3 - <<'PY'
+import os
+
+rows = []
+missing_count = 0
+missing_keys = []
+for line in os.environ["NEXT_ACTIONS_MISSING"].splitlines():
+    if "=" not in line:
+        continue
+    category, items = line.split("=", 1)
+    values = [item for item in items.split(",") if item]
+    missing_count += len(values)
+    missing_keys.extend(values)
+    rows.append((category, ", ".join(values) if values else "ready"))
+
+actions = [
+    ("core_load_tools", "Install `wrk` and `nginx`; these are required before web baseline rows can be measured."),
+    ("web_proxy_tools", "Install or start Caddy, H2O, HAProxy, and Envoy baselines; generated Compose/docker-run templates can cover Caddy, HAProxy, and Envoy."),
+    ("db_tools", "Install ClickHouse client, DuckDB, PostgreSQL `psql`/`pgbench`, and Mongo shell tooling before DB producers can emit measured rows."),
+    ("proxy_fixture_urls", "Start the Simple proxy fixture and HAProxy/Envoy proxy fixtures, then fill cached, upload, and tunnel proxy URLs in `external-fixtures.env`."),
+    ("dynamic_route_urls", "Start paired CPU and GPU dynamic route servers and fill plaintext and JSON route URLs in `external-fixtures.env`."),
+    ("reference_fixture_urls", "Start optional Simple/uWebSockets/Seastar plaintext reference servers with workload parity, then fill their URLs in `external-fixtures.env`."),
+    ("db_service_urls", "Start or point to ClickHouse, PostgreSQL, and MongoDB services, then fill their connection URLs in `external-fixtures.env`."),
+]
+
+env_fields = {
+    "simple_cached_proxy_url": ("SIMPLE_CACHED_PROXY_URL", "Simple cached reverse-proxy fixture URL"),
+    "haproxy_cached_proxy_url": ("HAPROXY_CACHED_PROXY_URL", "HAProxy cached reverse-proxy fixture URL"),
+    "envoy_cached_proxy_url": ("ENVOY_CACHED_PROXY_URL", "Envoy cached reverse-proxy fixture URL"),
+    "simple_upload_proxy_url": ("SIMPLE_UPLOAD_PROXY_URL", "Simple upload-streaming fixture URL"),
+    "haproxy_upload_proxy_url": ("HAPROXY_UPLOAD_PROXY_URL", "HAProxy upload-streaming fixture URL"),
+    "simple_tunnel_proxy_url": ("SIMPLE_TUNNEL_PROXY_URL", "Simple upgrade-tunnel fixture URL"),
+    "haproxy_tunnel_proxy_url": ("HAPROXY_TUNNEL_PROXY_URL", "HAProxy upgrade-tunnel fixture URL"),
+    "dynamic_gpu_plaintext_url": ("DYNAMIC_GPU_PLAINTEXT_URL", "GPU plaintext dynamic route URL"),
+    "dynamic_cpu_plaintext_url": ("DYNAMIC_CPU_PLAINTEXT_URL", "CPU plaintext dynamic route URL"),
+    "dynamic_gpu_json_url": ("DYNAMIC_GPU_JSON_URL", "GPU JSON dynamic route URL"),
+    "dynamic_cpu_json_url": ("DYNAMIC_CPU_JSON_URL", "CPU JSON dynamic route URL"),
+    "simple_reference_plaintext_url": ("SIMPLE_REFERENCE_PLAINTEXT_URL", "Simple reference plaintext route URL"),
+    "uwebsockets_plaintext_url": ("UWEBSOCKETS_PLAINTEXT_URL", "uWebSockets plaintext reference URL"),
+    "seastar_plaintext_url": ("SEASTAR_PLAINTEXT_URL", "Seastar plaintext reference URL"),
+    "clickhouse_url": ("CLICKHOUSE_URL", "ClickHouse service URL"),
+    "postgres_url": ("POSTGRES_URL", "PostgreSQL service URL"),
+    "mongo_url": ("MONGO_URL", "MongoDB service URL"),
+}
+missing_env_fields = [
+    (key, env_fields[key][0], env_fields[key][1])
+    for key in missing_keys
+    if key in env_fields
+]
+
+print("# GPU Web/DB External Fixture Next Actions")
+print()
+print("This file is generated from the current missing fixture categories. It is side-effect-free and does not install tools, start containers, or run benchmarks.")
+print()
+print(f"- Missing fixture items: `{missing_count}`")
+print(f"- Missing data source: `{os.environ['NEXT_ACTIONS_SOURCE']}`")
+print(f"- Strict readiness command: `scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready`")
+print()
+print("## Missing Categories")
+print()
+print("| category | missing items |")
+print("|---|---|")
+for category, items in rows:
+    print(f"| {category} | {items} |")
+print()
+if missing_env_fields:
+    print("## Fixture Env Fields")
+    print()
+    print("| readiness item | env variable | fills |")
+    print("|---|---|---|")
+    for key, variable, note in missing_env_fields:
+        print(f"| {key} | `{variable}` | {note} |")
+    print()
+print("## Action Map")
+print()
+print("| category | next action |")
+print("|---|---|")
+for category, action in actions:
+    print(f"| {category} | {action} |")
+print()
+print("## Refresh Commands")
+print()
+print("```sh")
+print("scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status")
+print("scripts/check/check-gpu-web-db-offload-external-suite.shs --preflight")
+print("scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready")
+print("```")
+PY
+}
+
+write_next_actions() {
+    path="${1:-$NEXT_ACTIONS_PATH}"
+    env_file="${2:-$NEXT_ACTIONS_ENV_FILE}"
+    mkdir -p "$(dirname "$path")"
+    if [ -f "$env_file" ]; then
+        missing="$(emit_missing_by_category_from_env_file "$env_file")"
+        source="fixture-env-file:$env_file"
+    else
+        missing="$(emit_missing_by_category)"
+        source="ambient-environment"
+    fi
+    emit_next_actions "$missing" "$source" > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_env_template() {
+    cat <<'EOF'
+# GPU Web/DB external fixture environment template.
+# Fill these values before running live dynamic-route or DB baseline producers.
+# Examples:
+# DYNAMIC_GPU_PLAINTEXT_URL=http://127.0.0.1:8080/plaintext
+# DYNAMIC_CPU_PLAINTEXT_URL=http://127.0.0.1:8081/plaintext
+# DYNAMIC_GPU_JSON_URL=http://127.0.0.1:8080/json
+# DYNAMIC_CPU_JSON_URL=http://127.0.0.1:8081/json
+# SIMPLE_REFERENCE_PLAINTEXT_URL=http://127.0.0.1:8084/plaintext
+# UWEBSOCKETS_PLAINTEXT_URL=http://127.0.0.1:8085/plaintext
+# SEASTAR_PLAINTEXT_URL=http://127.0.0.1:8086/plaintext
+# SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
+# HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
+# ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
+# SIMPLE_UPLOAD_PROXY_URL=http://127.0.0.1:8090/upload
+# HAPROXY_UPLOAD_PROXY_URL=http://127.0.0.1:8091/upload
+# SIMPLE_TUNNEL_PROXY_URL=http://127.0.0.1:8090/tunnel
+# HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel
+# CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+# POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+# MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+# Optional standard-shape query overrides. Leave empty to use producer defaults.
+# CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=SELECT sum(number) FROM numbers(1024) WHERE number % 2 = 0
+# DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=SELECT b.range AS segment, count(*) AS order_count, sum(a.range) AS revenue FROM range(1024) a JOIN range(16) b ON a.range % 16 = b.range GROUP BY b.range ORDER BY revenue DESC LIMIT 8
+# POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=SELECT b AS segment, count(*) AS order_count, sum(a) AS revenue FROM generate_series(1, 1024) a JOIN generate_series(1, 16) b ON a % 16 = b GROUP BY b ORDER BY revenue DESC LIMIT 8
+# MONGO_YCSB_DOCUMENT_FILTER_EVAL=const c=db.ycsb || db.getSiblingDB("ycsb").usertable; c.find({field0:{$gte:0}},{_id:1,field0:1}).limit(1024).itcount()
+SIMPLE_CACHED_PROXY_URL=
+HAPROXY_CACHED_PROXY_URL=
+ENVOY_CACHED_PROXY_URL=
+SIMPLE_UPLOAD_PROXY_URL=
+HAPROXY_UPLOAD_PROXY_URL=
+SIMPLE_TUNNEL_PROXY_URL=
+HAPROXY_TUNNEL_PROXY_URL=
+DYNAMIC_GPU_PLAINTEXT_URL=
+DYNAMIC_CPU_PLAINTEXT_URL=
+DYNAMIC_GPU_JSON_URL=
+DYNAMIC_CPU_JSON_URL=
+SIMPLE_REFERENCE_PLAINTEXT_URL=
+UWEBSOCKETS_PLAINTEXT_URL=
+SEASTAR_PLAINTEXT_URL=
+CLICKHOUSE_URL=
+POSTGRES_URL=
+MONGO_URL=
+CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
+DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
+POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=
+MONGO_YCSB_DOCUMENT_FILTER_EVAL=
+EOF
+}
+
+write_env_template() {
+    path="${1:-$ENV_TEMPLATE_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_env_template > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_setup_checklist() {
+    cat <<'EOF'
+# GPU Web/DB External Fixture Setup Checklist
+
+Use this checklist to turn readiness rows from `missing` into `ready` before
+running live web, proxy, dynamic-route, or DB baseline producers.
+
+## Required Load Tools
+
+- [ ] `wrk`: HTTP load generator used by the web comparison producers.
+- [ ] `nginx`: static-file reference server for the first measured baseline.
+
+## Additional Web And Proxy Baselines
+
+- [ ] `caddy`: additional static-file baseline.
+- [ ] `h2o`: additional static-file baseline.
+- [ ] `haproxy`: reverse-proxy cached, upload, and upgrade-tunnel baseline.
+- [ ] `envoy`: reverse-proxy cached baseline.
+
+## DB Baseline Tools And Services
+
+- [ ] `clickhouse` or `clickhouse-client`: ClickBench-style OLAP baseline.
+- [ ] `duckdb`: local TPC-H-style baseline.
+- [ ] `psql`: PostgreSQL connection probe and query client.
+- [ ] `pgbench`: PostgreSQL load helper for TPC-H-style baseline preparation.
+- [ ] `mongosh` or `mongo`: MongoDB/YCSB document-filter baseline.
+
+## URL And Service Configuration
+
+- [ ] Start the live GPU and CPU dynamic-route servers.
+- [ ] Start the live Simple cached-proxy fixture and optional HAProxy/Envoy
+      cached-proxy baselines.
+- [ ] Fill `SIMPLE_CACHED_PROXY_URL`, `HAPROXY_CACHED_PROXY_URL`, and/or
+      `ENVOY_CACHED_PROXY_URL`.
+- [ ] Start the live Simple and HAProxy upload-streaming proxy fixtures.
+- [ ] Fill `SIMPLE_UPLOAD_PROXY_URL` and `HAPROXY_UPLOAD_PROXY_URL`.
+- [ ] Start the live Simple and HAProxy upgrade-tunnel proxy fixtures.
+- [ ] Fill `SIMPLE_TUNNEL_PROXY_URL` and `HAPROXY_TUNNEL_PROXY_URL`.
+- [ ] Fill `DYNAMIC_GPU_PLAINTEXT_URL`, `DYNAMIC_CPU_PLAINTEXT_URL`,
+      `DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL`.
+- [ ] Start optional Simple/uWebSockets/Seastar plaintext reference fixtures
+      with workload parity.
+- [ ] Fill `SIMPLE_REFERENCE_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_URL`,
+      and `SEASTAR_PLAINTEXT_URL` when those optional reference baselines are
+      available.
+- [ ] Start or point to ClickHouse, PostgreSQL, and MongoDB services.
+- [ ] Fill `CLICKHOUSE_URL`, `POSTGRES_URL`, and `MONGO_URL`.
+- [ ] Leave the standard-shape query override variables empty for default
+      ClickBench/TPC-H/YCSB shapes, or fill them only when the external fixture
+      schema requires a compatible adjusted query.
+- [ ] Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`
+      until the required rows report `ready`.
+
+## Handoff Commands
+
+```sh
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-template
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-setup-checklist
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --check-env-file
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --bootstrap-status
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-bootstrap-manifest
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-docker-compose-template
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-docker-run-template
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-proxy-config-templates
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-hints
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-runbook
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --missing-by-category
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-missing-by-category
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs
+scripts/check/check-gpu-web-db-offload-external-suite.shs --dry-run
+# Suite refresh/preflight use build/perf/gpu_web_db_offload/external-fixtures.env when it exists.
+scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status
+scripts/check/check-gpu-web-db-offload-external-suite.shs --status
+scripts/check/check-gpu-web-db-offload-external-suite.shs --status-json
+scripts/check/check-gpu-web-db-offload-external-suite.shs --preflight
+scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready
+scripts/check/check-gpu-web-db-offload-external-suite.shs
+# Optional local artifact refresh when fixtures are still missing:
+scripts/check/check-gpu-web-db-offload-external-suite.shs --allow-partial
+```
+EOF
+}
+
+write_setup_checklist() {
+    path="${1:-$SETUP_CHECKLIST_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_setup_checklist > "$path"
+    printf '%s\n' "$path"
+}
+
+check_env_file() {
+    path="${1:-$ENV_TEMPLATE_PATH}"
+    output="$(emit_readiness_from_env_file "$path")"
+    printf '%s\n' "$output"
+    missing_count="$(printf '%s\n' "$output" | awk -F'[=|]' '$2 == "missing" { count++ } END { print count + 0 }')"
+    if [ "$missing_count" -eq 0 ]; then
+        echo "STATUS: PASS gpu web/db external fixture env file ready"
+    else
+        echo "STATUS: WARN gpu web/db external fixture env file missing:$missing_count"
+    fi
+}
+
+source_nonempty_readiness_env_file() {
+    path="$1"
+    test -f "$path"
+    while IFS= read -r line; do
+        case "$line" in
+            export\ *) line="${line#export }" ;;
+        esac
+        case "$line" in
+            *=*) ;;
+            *) continue ;;
+        esac
+        name="${line%%=*}"
+        value="${line#*=}"
+        if [ "$value" = "" ]; then
+            continue
+        fi
+        case "$value" in
+            \"*\") value="${value#\"}"; value="${value%\"}" ;;
+            \'*\') value="${value#\'}"; value="${value%\'}" ;;
+        esac
+        case "$name" in
+            SIMPLE_CACHED_PROXY_URL|HAPROXY_CACHED_PROXY_URL|ENVOY_CACHED_PROXY_URL|\
+SIMPLE_UPLOAD_PROXY_URL|HAPROXY_UPLOAD_PROXY_URL|SIMPLE_TUNNEL_PROXY_URL|\
+HAPROXY_TUNNEL_PROXY_URL|DYNAMIC_GPU_PLAINTEXT_URL|DYNAMIC_CPU_PLAINTEXT_URL|\
+DYNAMIC_GPU_JSON_URL|DYNAMIC_CPU_JSON_URL|SIMPLE_REFERENCE_PLAINTEXT_URL|\
+UWEBSOCKETS_PLAINTEXT_URL|SEASTAR_PLAINTEXT_URL|CLICKHOUSE_URL|POSTGRES_URL|MONGO_URL)
+                export "$name=$value"
+                ;;
+        esac
+    done < "$path"
+}
+
+emit_readiness_from_env_file() {
+    path="${1:-$ENV_TEMPLATE_PATH}"
+    source_nonempty_readiness_env_file "$path"
+    emit_readiness
+}
+
+emit_missing_by_category() {
+    output="${1:-$(emit_readiness)}"
+    printf '%s\n' "$output" | awk -F'[=|]' '
+        BEGIN {
+            categories[1] = "core_load_tools"
+            categories[2] = "web_proxy_tools"
+            categories[3] = "db_tools"
+            categories[4] = "proxy_fixture_urls"
+            categories[5] = "dynamic_route_urls"
+            categories[6] = "reference_fixture_urls"
+            categories[7] = "db_service_urls"
+        }
+        function category_for(key) {
+            if (key == "wrk" || key == "nginx") return "core_load_tools"
+            if (key == "caddy" || key == "h2o" || key == "haproxy" || key == "envoy") return "web_proxy_tools"
+            if (key == "clickhouse" || key == "duckdb" || key == "psql" || key == "pgbench" || key == "mongodb") return "db_tools"
+            if (key == "simple_cached_proxy_url" || key == "haproxy_cached_proxy_url" || key == "envoy_cached_proxy_url" || key == "simple_upload_proxy_url" || key == "haproxy_upload_proxy_url" || key == "simple_tunnel_proxy_url" || key == "haproxy_tunnel_proxy_url") return "proxy_fixture_urls"
+            if (key == "dynamic_gpu_plaintext_url" || key == "dynamic_cpu_plaintext_url" || key == "dynamic_gpu_json_url" || key == "dynamic_cpu_json_url") return "dynamic_route_urls"
+            if (key == "simple_reference_plaintext_url" || key == "uwebsockets_plaintext_url" || key == "seastar_plaintext_url") return "reference_fixture_urls"
+            if (key == "clickhouse_url" || key == "postgres_url" || key == "mongo_url") return "db_service_urls"
+            return "other"
+        }
+        $2 == "missing" {
+            category = category_for($1)
+            if (missing[category] == "") {
+                missing[category] = $1
+            } else {
+                missing[category] = missing[category] "," $1
+            }
+        }
+        END {
+            for (i = 1; i <= 7; i++) {
+                category = categories[i]
+                printf "%s=%s\n", category, missing[category]
+            }
+        }
+    '
+}
+
+write_missing_by_category() {
+    path="${1:-$MISSING_BY_CATEGORY_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_missing_by_category > "$path"
+    printf '%s\n' "$path"
+}
+
+emit_missing_by_category_from_env_file() {
+    env_file="${1:-$ENV_TEMPLATE_PATH}"
+    output="$(emit_readiness_from_env_file "$env_file")"
+    emit_missing_by_category "$output"
+}
+
+write_missing_by_category_from_env_file() {
+    path="${1:-$MISSING_BY_CATEGORY_PATH}"
+    env_file="${2:-$ENV_TEMPLATE_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_missing_by_category_from_env_file "$env_file" > "$path"
+    printf '%s\n' "$path"
+}
+
+write_artifacts() {
+    output="$1"
+    missing_count="$2"
+    export READINESS_OUTPUT="$output"
+    export READINESS_MISSING_COUNT="$missing_count"
+    export READINESS_BOOTSTRAP_STATUS="$(emit_bootstrap_status)"
+    export READINESS_ENV_TEMPLATE="$(emit_env_template)"
+    export READINESS_SETUP_CHECKLIST="$(emit_setup_checklist)"
+    export REPORT TABLE
+    mkdir -p "$(dirname "$REPORT")" "$(dirname "$TABLE")"
+    python3 - <<'PY'
+import os
+from pathlib import Path
+
+rows = []
+for line in os.environ["READINESS_OUTPUT"].splitlines():
+    if "=" not in line or "|" not in line:
+        continue
+    key, rest = line.split("=", 1)
+    status, reason = rest.split("|", 1)
+    rows.append((key, status, reason))
+
+bootstrap_rows = []
+for line in os.environ["READINESS_BOOTSTRAP_STATUS"].splitlines():
+    if "=" not in line or "|" not in line:
+        continue
+    key, rest = line.split("=", 1)
+    status, reason = rest.split("|", 1)
+    bootstrap_rows.append((key, status, reason))
+
+ready_count = sum(1 for _, status, _ in rows if status == "ready")
+missing_count = int(os.environ["READINESS_MISSING_COUNT"])
+header = "| fixture | status | reason |\n"
+sep = "|---|---|---|\n"
+body_rows = "".join(f"| {key} | {status} | {reason} |\n" for key, status, reason in rows)
+bootstrap_header = "| bootstrap check | status | reason |\n"
+bootstrap_sep = "|---|---|---|\n"
+bootstrap_body = "".join(
+    f"| {key} | {status} | {reason} |\n" for key, status, reason in bootstrap_rows
+)
+categories = [
+    ("core_load_tools", {"wrk", "nginx"}),
+    ("web_proxy_tools", {"caddy", "h2o", "haproxy", "envoy"}),
+    ("db_tools", {"clickhouse", "duckdb", "psql", "pgbench", "mongodb"}),
+    (
+        "proxy_fixture_urls",
+        {
+            "simple_cached_proxy_url",
+            "haproxy_cached_proxy_url",
+            "envoy_cached_proxy_url",
+            "simple_upload_proxy_url",
+            "haproxy_upload_proxy_url",
+            "simple_tunnel_proxy_url",
+            "haproxy_tunnel_proxy_url",
+        },
+    ),
+    (
+        "dynamic_route_urls",
+        {
+            "dynamic_gpu_plaintext_url",
+            "dynamic_cpu_plaintext_url",
+            "dynamic_gpu_json_url",
+            "dynamic_cpu_json_url",
+        },
+    ),
+    (
+        "reference_fixture_urls",
+        {
+            "simple_reference_plaintext_url",
+            "uwebsockets_plaintext_url",
+            "seastar_plaintext_url",
+        },
+    ),
+    ("db_service_urls", {"clickhouse_url", "postgres_url", "mongo_url"}),
+]
+category_header = "| category | ready | missing |\n"
+category_sep = "|---|---:|---:|\n"
+category_rows = []
+for category, keys in categories:
+    category_items = [(key, status) for key, status, _ in rows if key in keys]
+    category_ready = sum(1 for _, status in category_items if status == "ready")
+    category_missing = sum(1 for _, status in category_items if status == "missing")
+    category_rows.append(f"| {category} | {category_ready} | {category_missing} |\n")
+category_body = "".join(category_rows)
+summary = (
+    f"- Ready fixtures: `{ready_count}`\n"
+    f"- Missing fixtures: `{missing_count}`\n"
+    f"- Verdict: `{'PASS' if missing_count == 0 else 'WARN'}`\n\n"
+)
+report = (
+    "# GPU Web/DB External Fixture Readiness\n\n"
+    "This report is generated by `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`.\n"
+    "It records host readiness for external web, proxy, dynamic-route, and DB baseline fixtures. "
+    "It does not run benchmarks or create measured throughput claims.\n\n"
+    "## Summary\n\n"
+    + summary
+    + "## Category Summary\n\n"
+    + category_header
+    + category_sep
+    + category_body
+    + "\n"
+    + "## Bootstrap Status\n\n"
+    + bootstrap_header
+    + bootstrap_sep
+    + bootstrap_body
+    + "\n"
+    + "## Fixtures\n\n"
+    + header
+    + sep
+    + body_rows
+    + "\n## Fixture Environment Template\n\n"
+    + "Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --print-env-template` "
+    + "to print the URL contract required by live dynamic-route and DB baseline producers. "
+    + "Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-template` "
+    + "to write the same template to `build/perf/gpu_web_db_offload/external-fixtures.env`.\n\n"
+    + "```sh\n"
+    + os.environ["READINESS_ENV_TEMPLATE"]
+    + "\n```\n"
+    + "\n## Fixture Setup Checklist\n\n"
+    + "Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-setup-checklist` "
+    + "to write a Markdown setup checklist to `build/perf/gpu_web_db_offload/external-fixture-setup-checklist.md`.\n\n"
+    + os.environ["READINESS_SETUP_CHECKLIST"]
+    + "\n"
+)
+metrics = (
+    "# GPU Web/DB External Fixture Readiness Metrics\n\n"
+    "## Bootstrap Status\n\n"
+    + bootstrap_header
+    + bootstrap_sep
+    + bootstrap_body
+    + "\n## Fixtures\n\n"
+    + header
+    + sep
+    + body_rows
+)
+Path(os.environ["REPORT"]).write_text(report, encoding="utf-8")
+Path(os.environ["TABLE"]).write_text(metrics, encoding="utf-8")
+PY
+}
+
+if [ "${1:-}" = "--print-env-template" ]; then
+    emit_env_template
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-env-template" ]; then
+    write_env_template "${2:-$ENV_TEMPLATE_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-setup-checklist" ]; then
+    emit_setup_checklist
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-setup-checklist" ]; then
+    write_setup_checklist "${2:-$SETUP_CHECKLIST_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--check-env-file" ]; then
+    check_env_file "${2:-$ENV_TEMPLATE_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--bootstrap-status" ]; then
+    emit_bootstrap_status
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-bootstrap-manifest" ]; then
+    emit_bootstrap_manifest
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-bootstrap-manifest" ]; then
+    write_bootstrap_manifest "${2:-$BOOTSTRAP_MANIFEST_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-docker-compose-template" ]; then
+    emit_docker_compose_template
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-docker-compose-template" ]; then
+    write_docker_compose_template "${2:-$DOCKER_COMPOSE_TEMPLATE_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-docker-run-template" ]; then
+    emit_docker_run_template
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-docker-run-template" ]; then
+    write_docker_run_template "${2:-$DOCKER_RUN_TEMPLATE_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-proxy-config-templates" ]; then
+    write_proxy_config_templates "${2:-$HAPROXY_CONFIG_TEMPLATE_PATH}" "${3:-$ENVOY_CONFIG_TEMPLATE_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-env-fields" ]; then
+    emit_env_fields
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-env-fields" ]; then
+    write_env_fields "${2:-$ENV_FIELDS_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-blocker-manifest" ]; then
+    if [ -f "${2:-$NEXT_ACTIONS_ENV_FILE}" ]; then
+        env_file="${2:-$NEXT_ACTIONS_ENV_FILE}"
+        emit_blocker_manifest "$(emit_missing_by_category_from_env_file "$env_file")" "fixture-env-file:$env_file"
+    else
+        emit_blocker_manifest
+    fi
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-blocker-manifest" ]; then
+    write_blocker_manifest "${2:-$BLOCKER_MANIFEST_PATH}" "${3:-$NEXT_ACTIONS_ENV_FILE}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-env-hints" ]; then
+    emit_env_hints
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-env-hints" ]; then
+    write_env_hints "${2:-$ENV_HINTS_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-runbook" ]; then
+    emit_runbook
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-runbook" ]; then
+    write_runbook "${2:-$RUNBOOK_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-next-actions" ]; then
+    if [ -f "${2:-$NEXT_ACTIONS_ENV_FILE}" ]; then
+        env_file="${2:-$NEXT_ACTIONS_ENV_FILE}"
+        emit_next_actions "$(emit_missing_by_category_from_env_file "$env_file")" "fixture-env-file:$env_file"
+    else
+        emit_next_actions
+    fi
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-next-actions" ]; then
+    write_next_actions "${2:-$NEXT_ACTIONS_PATH}" "${3:-$NEXT_ACTIONS_ENV_FILE}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--missing-by-category" ]; then
+    emit_missing_by_category
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-missing-by-category" ]; then
+    write_missing_by_category "${2:-$MISSING_BY_CATEGORY_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--missing-by-category-from-env-file" ]; then
+    emit_missing_by_category_from_env_file "${2:-$ENV_TEMPLATE_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-missing-by-category-from-env-file" ]; then
+    write_missing_by_category_from_env_file "${2:-$MISSING_BY_CATEGORY_PATH}" "${3:-$ENV_TEMPLATE_PATH}"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test" ]; then
+    output="$(emit_readiness)"
+    printf '%s\n' "$output" | grep -q '^wrk='
+    printf '%s\n' "$output" | grep -q '^dynamic_gpu_plaintext_url='
+    printf '%s\n' "$output" | grep -q '^simple_cached_proxy_url='
+    printf '%s\n' "$output" | grep -q '^psql='
+    printf '%s\n' "$output" | grep -q '^pgbench='
+    printf '%s\n' "$output" | grep -q '^postgres_url='
+    count="$(printf '%s\n' "$output" | wc -l)"
+    if [ "$count" -lt 25 ]; then
+        echo "ERROR: readiness output is missing rows" >&2
+        exit 1
+    fi
+    echo "STATUS: PASS gpu web/db external fixture readiness self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-env-template" ]; then
+    template="$(emit_env_template)"
+    printf '%s\n' "$template" | grep -q '^DYNAMIC_GPU_PLAINTEXT_URL='
+    printf '%s\n' "$template" | grep -q '^SIMPLE_CACHED_PROXY_URL='
+    printf '%s\n' "$template" | grep -q '^HAPROXY_CACHED_PROXY_URL='
+    printf '%s\n' "$template" | grep -q '^ENVOY_CACHED_PROXY_URL='
+    printf '%s\n' "$template" | grep -q '^SIMPLE_UPLOAD_PROXY_URL='
+    printf '%s\n' "$template" | grep -q '^HAPROXY_UPLOAD_PROXY_URL='
+    printf '%s\n' "$template" | grep -q '^SIMPLE_TUNNEL_PROXY_URL='
+    printf '%s\n' "$template" | grep -q '^HAPROXY_TUNNEL_PROXY_URL='
+    printf '%s\n' "$template" | grep -q '^DYNAMIC_CPU_PLAINTEXT_URL='
+    printf '%s\n' "$template" | grep -q '^DYNAMIC_GPU_JSON_URL='
+    printf '%s\n' "$template" | grep -q '^DYNAMIC_CPU_JSON_URL='
+    printf '%s\n' "$template" | grep -q '^CLICKHOUSE_URL='
+    printf '%s\n' "$template" | grep -q '^POSTGRES_URL='
+    printf '%s\n' "$template" | grep -q '^MONGO_URL='
+    echo "STATUS: PASS gpu web/db external fixture env template self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-env-template" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    env_file="$tmpdir/external-fixtures.env"
+    written_path="$(write_env_template "$env_file")"
+    test "$written_path" = "$env_file"
+    test -f "$env_file"
+    grep -q '^DYNAMIC_GPU_PLAINTEXT_URL=' "$env_file"
+    grep -q '^SIMPLE_CACHED_PROXY_URL=' "$env_file"
+    grep -q '^HAPROXY_CACHED_PROXY_URL=' "$env_file"
+    grep -q '^ENVOY_CACHED_PROXY_URL=' "$env_file"
+    grep -q '^SIMPLE_UPLOAD_PROXY_URL=' "$env_file"
+    grep -q '^HAPROXY_UPLOAD_PROXY_URL=' "$env_file"
+    grep -q '^SIMPLE_TUNNEL_PROXY_URL=' "$env_file"
+    grep -q '^HAPROXY_TUNNEL_PROXY_URL=' "$env_file"
+    grep -q '^CLICKHOUSE_URL=' "$env_file"
+    grep -q '^POSTGRES_URL=' "$env_file"
+    grep -q '^MONGO_URL=' "$env_file"
+    grep -q '^CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=' "$env_file"
+    grep -q '^DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=' "$env_file"
+    grep -q '^POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=' "$env_file"
+    grep -q '^MONGO_YCSB_DOCUMENT_FILTER_EVAL=' "$env_file"
+    echo "STATUS: PASS gpu web/db external fixture env file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-env-template-safe-defaults" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    env_file="$tmpdir/external-fixtures.env"
+    write_env_template "$env_file" >/dev/null
+    output="$(
+        set -a
+        . "$env_file"
+        set +a
+        emit_readiness
+    )"
+    printf '%s\n' "$output" | grep -q '^dynamic_gpu_plaintext_url=missing|DYNAMIC_GPU_PLAINTEXT_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^simple_cached_proxy_url=missing|SIMPLE_CACHED_PROXY_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^haproxy_cached_proxy_url=missing|HAPROXY_CACHED_PROXY_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^envoy_cached_proxy_url=missing|ENVOY_CACHED_PROXY_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^simple_upload_proxy_url=missing|SIMPLE_UPLOAD_PROXY_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^haproxy_upload_proxy_url=missing|HAPROXY_UPLOAD_PROXY_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^simple_tunnel_proxy_url=missing|SIMPLE_TUNNEL_PROXY_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^haproxy_tunnel_proxy_url=missing|HAPROXY_TUNNEL_PROXY_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^dynamic_cpu_plaintext_url=missing|DYNAMIC_CPU_PLAINTEXT_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^clickhouse_url=missing|CLICKHOUSE_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^postgres_url=missing|POSTGRES_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^mongo_url=missing|MONGO_URL-not-configured'
+    echo "STATUS: PASS gpu web/db external fixture env template safe defaults self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-check-env-file" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    env_file="$tmpdir/external-fixtures.env"
+    cat > "$env_file" <<'EOF'
+DYNAMIC_GPU_PLAINTEXT_URL=http://127.0.0.1:8080/plaintext
+DYNAMIC_CPU_PLAINTEXT_URL=http://127.0.0.1:8081/plaintext
+DYNAMIC_GPU_JSON_URL=http://127.0.0.1:8080/json
+DYNAMIC_CPU_JSON_URL=http://127.0.0.1:8081/json
+SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
+HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
+ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
+SIMPLE_UPLOAD_PROXY_URL=http://127.0.0.1:8090/upload
+HAPROXY_UPLOAD_PROXY_URL=http://127.0.0.1:8091/upload
+SIMPLE_TUNNEL_PROXY_URL=http://127.0.0.1:8090/tunnel
+HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel
+CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+EOF
+    output="$(check_env_file "$env_file")"
+    printf '%s\n' "$output" | grep -q '^dynamic_gpu_plaintext_url=ready|DYNAMIC_GPU_PLAINTEXT_URL-configured'
+    printf '%s\n' "$output" | grep -q '^simple_cached_proxy_url=ready|SIMPLE_CACHED_PROXY_URL-configured'
+    printf '%s\n' "$output" | grep -q '^haproxy_cached_proxy_url=ready|HAPROXY_CACHED_PROXY_URL-configured'
+    printf '%s\n' "$output" | grep -q '^envoy_cached_proxy_url=ready|ENVOY_CACHED_PROXY_URL-configured'
+    printf '%s\n' "$output" | grep -q '^simple_upload_proxy_url=ready|SIMPLE_UPLOAD_PROXY_URL-configured'
+    printf '%s\n' "$output" | grep -q '^haproxy_upload_proxy_url=ready|HAPROXY_UPLOAD_PROXY_URL-configured'
+    printf '%s\n' "$output" | grep -q '^simple_tunnel_proxy_url=ready|SIMPLE_TUNNEL_PROXY_URL-configured'
+    printf '%s\n' "$output" | grep -q '^haproxy_tunnel_proxy_url=ready|HAPROXY_TUNNEL_PROXY_URL-configured'
+    printf '%s\n' "$output" | grep -q '^dynamic_cpu_json_url=ready|DYNAMIC_CPU_JSON_URL-configured'
+    printf '%s\n' "$output" | grep -q '^clickhouse_url=ready|CLICKHOUSE_URL-configured'
+    printf '%s\n' "$output" | grep -q '^postgres_url=ready|POSTGRES_URL-configured'
+    printf '%s\n' "$output" | grep -q '^mongo_url=ready|MONGO_URL-configured'
+    printf '%s\n' "$output" | grep -q '^caddy=missing|caddy-not-installed'
+    printf '%s\n' "$output" | grep -q 'STATUS: WARN gpu web/db external fixture env file missing:'
+    empty_env="$tmpdir/empty.env"
+    emit_env_template > "$empty_env"
+    preserved_output="$(SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable check_env_file "$empty_env")"
+    printf '%s\n' "$preserved_output" | grep -q '^simple_cached_proxy_url=ready|SIMPLE_CACHED_PROXY_URL-configured'
+    printf '%s\n' "$preserved_output" | grep -q '^haproxy_cached_proxy_url=missing|HAPROXY_CACHED_PROXY_URL-not-configured'
+    echo "STATUS: PASS gpu web/db external fixture env file check self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-bootstrap-status" ]; then
+    output="$(emit_bootstrap_status)"
+    printf '%s\n' "$output" | grep -Eq '^bootstrap_container_runtime=(ready|missing)\|'
+    printf '%s\n' "$output" | grep -Eq '^bootstrap_container_engine=(ready|unavailable|missing|unknown)\|'
+    printf '%s\n' "$output" | grep -Eq '^bootstrap_package_manager=(ready|missing)\|'
+    printf '%s\n' "$output" | grep -Eq '^bootstrap_compose=(ready|optional-missing)\|'
+    printf '%s\n' "$output" | grep -Eq '^bootstrap_compose=(ready\|(docker compose|docker-compose):|optional-missing\|docker-compose-not-installed$)'
+    printf '%s\n' "$output" | grep -Eq '^bootstrap_missing_fixture_items=info\|[0-9]+$'
+    printf '%s\n' "$output" | grep -Eq '^bootstrap_local_fixture_bootstrap=(possible|engine-unavailable|manual-install-possible|blocked)\|'
+    printf '%s\n' "$output" | grep -q '^bootstrap_side_effects=none|status-only-no-install-no-container-start$'
+    echo "STATUS: PASS gpu web/db external fixture bootstrap status self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-container-engine-status" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+
+    cat > "$tmpdir/docker" <<'EOF'
+#!/usr/bin/env sh
+if [ "${1:-}" = "info" ]; then
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$tmpdir/docker"
+    output="$(PATH="$tmpdir:$PATH" container_engine_status "docker:$tmpdir/docker")"
+    printf '%s\n' "$output" | grep -q '^bootstrap_container_engine=ready|docker-info$'
+
+    cat > "$tmpdir/docker" <<'EOF'
+#!/usr/bin/env sh
+exit 1
+EOF
+    chmod +x "$tmpdir/docker"
+    output="$(PATH="$tmpdir:$PATH" container_engine_status "docker:$tmpdir/docker")"
+    printf '%s\n' "$output" | grep -q '^bootstrap_container_engine=unavailable|docker-info-failed$'
+
+    output="$(container_engine_status "")"
+    printf '%s\n' "$output" | grep -q '^bootstrap_container_engine=missing|container-runtime-not-installed$'
+
+    output="$(container_engine_status "containerd:/usr/bin/containerd")"
+    printf '%s\n' "$output" | grep -q '^bootstrap_container_engine=unknown|containerd:/usr/bin/containerd$'
+
+    echo "STATUS: PASS gpu web/db external fixture container engine status self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-bootstrap-manifest" ]; then
+    manifest="$(emit_bootstrap_manifest)"
+    printf '%s\n' "$manifest" | grep -q '^fixture	kind	image_or_tool	default_port	fills	readiness_category	note$'
+    printf '%s\n' "$manifest" | grep -q '^caddy_static	container	caddy:2	8082	tool:caddy	web_proxy_tools	'
+    printf '%s\n' "$manifest" | grep -q '^clickhouse_olap	container	clickhouse/clickhouse-server:latest	9000	tool:clickhouse,CLICKHOUSE_URL	db_service_urls	'
+    printf '%s\n' "$manifest" | grep -q '^dynamic_gpu_plaintext	external_url	repo-local-simple-web	8080	DYNAMIC_GPU_PLAINTEXT_URL	dynamic_route_urls	'
+    echo "STATUS: PASS gpu web/db external fixture bootstrap manifest self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-bootstrap-manifest" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    manifest_file="$tmpdir/external-fixture-bootstrap-manifest.tsv"
+    written_path="$(write_bootstrap_manifest "$manifest_file")"
+    test "$written_path" = "$manifest_file"
+    test -f "$manifest_file"
+    grep -q '^fixture	kind	image_or_tool	default_port	fills	readiness_category	note$' "$manifest_file"
+    grep -q '^simple_cached_proxy	external_url	repo-local-simple-web	8090	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	' "$manifest_file"
+    echo "STATUS: PASS gpu web/db external fixture bootstrap manifest file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-docker-compose-template" ]; then
+    compose="$(emit_docker_compose_template)"
+    printf '%s\n' "$compose" | grep -q '^services:$'
+    printf '%s\n' "$compose" | grep -q '^  caddy_static:$'
+    printf '%s\n' "$compose" | grep -q 'image: caddy:2'
+    printf '%s\n' "$compose" | grep -q '^  haproxy_cached_proxy:$'
+    printf '%s\n' "$compose" | grep -q 'image: haproxy:2.9'
+    printf '%s\n' "$compose" | grep -q 'host.docker.internal:host-gateway'
+    printf '%s\n' "$compose" | grep -q '^  clickhouse_olap:$'
+    printf '%s\n' "$compose" | grep -q 'image: postgres:16'
+    printf '%s\n' "$compose" | grep -q 'image: mongo:7'
+    printf '%s\n' "$compose" | grep -q 'docker compose -f build/perf/gpu_web_db_offload/external-fixture-compose.yaml up -d'
+    echo "STATUS: PASS gpu web/db external fixture docker compose template self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-docker-compose-template" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    compose_file="$tmpdir/external-fixture-compose.yaml"
+    written_path="$(write_docker_compose_template "$compose_file")"
+    test "$written_path" = "$compose_file"
+    test -f "$compose_file"
+    grep -q '^services:$' "$compose_file"
+    grep -q '^  clickhouse_olap:$' "$compose_file"
+    grep -q 'image: postgres:16' "$compose_file"
+    grep -q 'image: mongo:7' "$compose_file"
+    echo "STATUS: PASS gpu web/db external fixture docker compose template file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-docker-run-template" ]; then
+    run_template="$(emit_docker_run_template)"
+    printf '%s\n' "$run_template" | grep -q 'GPU Web/DB external fixture docker-run template'
+    printf '%s\n' "$run_template" | grep -q 'restart_fixture()'
+    printf '%s\n' "$run_template" | grep -q 'docker rm -f "$name"'
+    printf '%s\n' "$run_template" | grep -q 'docker run -d --name "$name"'
+    printf '%s\n' "$run_template" | grep -q 'restart_fixture gpu-web-db-caddy-static'
+    printf '%s\n' "$run_template" | grep -q 'restart_fixture gpu-web-db-haproxy-cached-proxy'
+    printf '%s\n' "$run_template" | grep -q -- '--add-host=host.docker.internal:host-gateway'
+    printf '%s\n' "$run_template" | grep -q 'haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro'
+    printf '%s\n' "$run_template" | grep -q 'restart_fixture gpu-web-db-envoy-cached-proxy'
+    printf '%s\n' "$run_template" | grep -q 'restart_fixture gpu-web-db-clickhouse-olap'
+    printf '%s\n' "$run_template" | grep -q 'postgres:16'
+    printf '%s\n' "$run_template" | grep -q 'mongo:7'
+    echo "STATUS: PASS gpu web/db external fixture docker run template self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-docker-run-template" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    run_file="$tmpdir/external-fixture-docker-run.shs"
+    written_path="$(write_docker_run_template "$run_file")"
+    test "$written_path" = "$run_file"
+    test -f "$run_file"
+    test -x "$run_file"
+    grep -q 'restart_fixture gpu-web-db-caddy-static' "$run_file"
+    grep -q 'restart_fixture gpu-web-db-haproxy-cached-proxy' "$run_file"
+    grep -q 'docker rm -f "$name"' "$run_file"
+    grep -q 'envoyproxy/envoy:v1.30-latest' "$run_file"
+    grep -q 'clickhouse/clickhouse-server:latest' "$run_file"
+    echo "STATUS: PASS gpu web/db external fixture docker run template file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-proxy-config-templates" ]; then
+    haproxy="$(emit_haproxy_config_template)"
+    envoy="$(emit_envoy_config_template)"
+    printf '%s\n' "$haproxy" | grep -q '^frontend gpu_web_db_proxy$'
+    printf '%s\n' "$haproxy" | grep -q 'bind \*:8091'
+    printf '%s\n' "$haproxy" | grep -q 'server simple_proxy host.docker.internal:8090 check'
+    printf '%s\n' "$envoy" | grep -q 'name: gpu_web_db_proxy_listener'
+    printf '%s\n' "$envoy" | grep -q 'port_value: 8092'
+    printf '%s\n' "$envoy" | grep -q 'address: host.docker.internal'
+    echo "STATUS: PASS gpu web/db external fixture proxy config template self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-proxy-config-templates" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    haproxy_file="$tmpdir/haproxy.cfg"
+    envoy_file="$tmpdir/envoy.yaml"
+    output="$(write_proxy_config_templates "$haproxy_file" "$envoy_file")"
+    printf '%s\n' "$output" | grep -q "^$haproxy_file$"
+    printf '%s\n' "$output" | grep -q "^$envoy_file$"
+    test -f "$haproxy_file"
+    test -f "$envoy_file"
+    grep -q '^frontend gpu_web_db_proxy$' "$haproxy_file"
+    grep -q 'name: gpu_web_db_proxy_listener' "$envoy_file"
+    echo "STATUS: PASS gpu web/db external fixture proxy config template file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-env-fields" ]; then
+    fields="$(emit_env_fields)"
+    printf '%s\n' "$fields" | grep -q '^readiness_item	env_variable	category	fills$'
+    printf '%s\n' "$fields" | grep -q '^simple_cached_proxy_url	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	Simple cached reverse-proxy fixture URL$'
+    printf '%s\n' "$fields" | grep -q '^dynamic_gpu_plaintext_url	DYNAMIC_GPU_PLAINTEXT_URL	dynamic_route_urls	GPU plaintext dynamic route URL$'
+    printf '%s\n' "$fields" | grep -q '^postgres_url	POSTGRES_URL	db_service_urls	PostgreSQL service URL$'
+    echo "STATUS: PASS gpu web/db external fixture env fields self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-env-fields" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    fields_file="$tmpdir/external-fixture-env-fields.tsv"
+    written_path="$(write_env_fields "$fields_file")"
+    test "$written_path" = "$fields_file"
+    test -f "$fields_file"
+    grep -q '^readiness_item	env_variable	category	fills$' "$fields_file"
+    grep -q '^haproxy_upload_proxy_url	HAPROXY_UPLOAD_PROXY_URL	proxy_fixture_urls	HAProxy upload-streaming fixture URL$' "$fields_file"
+    grep -q '^mongo_url	MONGO_URL	db_service_urls	MongoDB service URL$' "$fields_file"
+    echo "STATUS: PASS gpu web/db external fixture env fields file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-blocker-manifest" ]; then
+    manifest="$(emit_blocker_manifest)"
+    printf '%s\n' "$manifest" | grep -q '^source	category	readiness_item	env_variable	action$'
+    printf '%s\n' "$manifest" | grep -q '^ambient-environment	web_proxy_tools	caddy		Install or start Caddy\.$'
+    printf '%s\n' "$manifest" | grep -q '^ambient-environment	dynamic_route_urls	dynamic_gpu_plaintext_url	DYNAMIC_GPU_PLAINTEXT_URL	Start the GPU plaintext dynamic route and fill the URL\.$'
+    printf '%s\n' "$manifest" | grep -q '^ambient-environment	db_service_urls	postgres_url	POSTGRES_URL	Start or point to PostgreSQL and fill the service URL\.$'
+    echo "STATUS: PASS gpu web/db external fixture blocker manifest self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-blocker-manifest" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    env_file="$tmpdir/external-fixtures.env"
+    manifest_file="$tmpdir/external-fixture-blockers.tsv"
+    cat > "$env_file" <<'EOF'
+SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
+DYNAMIC_GPU_PLAINTEXT_URL=http://127.0.0.1:8080/plaintext
+POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+EOF
+    written_path="$(write_blocker_manifest "$manifest_file" "$env_file")"
+    test "$written_path" = "$manifest_file"
+    test -f "$manifest_file"
+    grep -q '^source	category	readiness_item	env_variable	action$' "$manifest_file"
+    grep -q "^fixture-env-file:$env_file	web_proxy_tools	caddy		Install or start Caddy\\.$" "$manifest_file"
+    grep -q "^fixture-env-file:$env_file	dynamic_route_urls	dynamic_cpu_plaintext_url	DYNAMIC_CPU_PLAINTEXT_URL	Start the CPU plaintext dynamic route and fill the URL\\.$" "$manifest_file"
+    grep -q "^fixture-env-file:$env_file	db_service_urls	mongo_url	MONGO_URL	Start or point to MongoDB and fill the service URL\\.$" "$manifest_file"
+    if grep -q 'simple_cached_proxy_url' "$manifest_file"; then
+        echo "ERROR: filled proxy URL should not be a blocker" >&2
+        exit 1
+    fi
+    echo "STATUS: PASS gpu web/db external fixture blocker manifest file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-env-hints" ]; then
+    hints="$(emit_env_hints)"
+    printf '%s\n' "$hints" | grep -q 'GPU Web/DB External Fixture Env Hints'
+    printf '%s\n' "$hints" | grep -q '# HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable'
+    printf '%s\n' "$hints" | grep -q '# ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable'
+    printf '%s\n' "$hints" | grep -q '# CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default'
+    printf '%s\n' "$hints" | grep -q '# SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable'
+    printf '%s\n' "$hints" | grep -q 'sourceable env file'
+    echo "STATUS: PASS gpu web/db external fixture env hints self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-env-hints" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    hints_file="$tmpdir/external-fixture-env-hints.md"
+    written_path="$(write_env_hints "$hints_file")"
+    test "$written_path" = "$hints_file"
+    test -f "$hints_file"
+    grep -q 'GPU Web/DB External Fixture Env Hints' "$hints_file"
+    grep -q '# HAPROXY_UPLOAD_PROXY_URL=http://127.0.0.1:8091/upload' "$hints_file"
+    grep -q '# POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres' "$hints_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --preflight' "$hints_file"
+    echo "STATUS: PASS gpu web/db external fixture env hints file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-runbook" ]; then
+    runbook="$(emit_runbook)"
+    printf '%s\n' "$runbook" | grep -q 'GPU Web/DB External Fixture Runbook'
+    printf '%s\n' "$runbook" | grep -q 'Generation is side-effect-free'
+    printf '%s\n' "$runbook" | grep -q 'docker compose -f build/perf/gpu_web_db_offload/external-fixture-compose.yaml --profile needs-proxy-config up -d'
+    printf '%s\n' "$runbook" | grep -q 'external-fixture-docker-run.shs'
+    printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields'
+    printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest'
+    printf '%s\n' "$runbook" | grep -q 'external-fixture-env-hints.md'
+    printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions'
+    printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-suite.shs --require-ready'
+    printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-suite.shs --status-json'
+    printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-suite.shs --allow-partial'
+    echo "STATUS: PASS gpu web/db external fixture runbook self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-runbook" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    runbook_file="$tmpdir/external-fixture-runbook.md"
+    written_path="$(write_runbook "$runbook_file")"
+    test "$written_path" = "$runbook_file"
+    test -f "$runbook_file"
+    grep -q 'GPU Web/DB External Fixture Runbook' "$runbook_file"
+    grep -q 'external-fixture-compose.yaml --profile needs-proxy-config up -d' "$runbook_file"
+    grep -q 'external-fixture-docker-run.shs' "$runbook_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields' "$runbook_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest' "$runbook_file"
+    grep -q 'external-fixtures.env' "$runbook_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions' "$runbook_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --preflight' "$runbook_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --status-json' "$runbook_file"
+    echo "STATUS: PASS gpu web/db external fixture runbook file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-next-actions" ]; then
+    actions="$(emit_next_actions)"
+    printf '%s\n' "$actions" | grep -q 'GPU Web/DB External Fixture Next Actions'
+    printf '%s\n' "$actions" | grep -q 'Missing fixture items: `26`'
+    printf '%s\n' "$actions" | grep -q 'Missing data source: `ambient-environment`'
+    printf '%s\n' "$actions" | grep -q '| web_proxy_tools | caddy, h2o, haproxy, envoy |'
+    printf '%s\n' "$actions" | grep -q '| reference_fixture_urls | simple_reference_plaintext_url, uwebsockets_plaintext_url, seastar_plaintext_url |'
+    printf '%s\n' "$actions" | grep -q '| db_service_urls | clickhouse_url, postgres_url, mongo_url |'
+    printf '%s\n' "$actions" | grep -q 'Fixture Env Fields'
+    printf '%s\n' "$actions" | grep -q '| dynamic_gpu_plaintext_url | `DYNAMIC_GPU_PLAINTEXT_URL` | GPU plaintext dynamic route URL |'
+    printf '%s\n' "$actions" | grep -q '| uwebsockets_plaintext_url | `UWEBSOCKETS_PLAINTEXT_URL` | uWebSockets plaintext reference URL |'
+    printf '%s\n' "$actions" | grep -q '| postgres_url | `POSTGRES_URL` | PostgreSQL service URL |'
+    printf '%s\n' "$actions" | grep -q 'check-gpu-web-db-offload-external-suite.shs --require-ready'
+    echo "STATUS: PASS gpu web/db external fixture next actions self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-next-actions" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    actions_file="$tmpdir/external-fixture-next-actions.md"
+    written_path="$(write_next_actions "$actions_file" "$tmpdir/absent.env")"
+    test "$written_path" = "$actions_file"
+    test -f "$actions_file"
+    grep -q 'GPU Web/DB External Fixture Next Actions' "$actions_file"
+    grep -q 'Missing data source: `ambient-environment`' "$actions_file"
+    grep -q 'Missing Categories' "$actions_file"
+    grep -q 'Fixture Env Fields' "$actions_file"
+    grep -q '| simple_cached_proxy_url | `SIMPLE_CACHED_PROXY_URL` | Simple cached reverse-proxy fixture URL |' "$actions_file"
+    grep -q 'Action Map' "$actions_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --preflight' "$actions_file"
+    echo "STATUS: PASS gpu web/db external fixture next actions file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-next-actions-env-file" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    env_file="$tmpdir/external-fixtures.env"
+    actions_file="$tmpdir/external-fixture-next-actions.md"
+    cat > "$env_file" <<'EOF'
+SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
+HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
+ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
+DYNAMIC_GPU_PLAINTEXT_URL=http://127.0.0.1:8080/plaintext
+CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+EOF
+    written_path="$(write_next_actions "$actions_file" "$env_file")"
+    test "$written_path" = "$actions_file"
+    test -f "$actions_file"
+    grep -q '| proxy_fixture_urls | simple_upload_proxy_url, haproxy_upload_proxy_url, simple_tunnel_proxy_url, haproxy_tunnel_proxy_url |' "$actions_file"
+    grep -q '| dynamic_route_urls | dynamic_cpu_plaintext_url, dynamic_gpu_json_url, dynamic_cpu_json_url |' "$actions_file"
+    grep -q '| reference_fixture_urls | simple_reference_plaintext_url, uwebsockets_plaintext_url, seastar_plaintext_url |' "$actions_file"
+    grep -q '| db_service_urls | postgres_url, mongo_url |' "$actions_file"
+    grep -q '| simple_upload_proxy_url | `SIMPLE_UPLOAD_PROXY_URL` | Simple upload-streaming fixture URL |' "$actions_file"
+    grep -q '| dynamic_cpu_plaintext_url | `DYNAMIC_CPU_PLAINTEXT_URL` | CPU plaintext dynamic route URL |' "$actions_file"
+    grep -q '| seastar_plaintext_url | `SEASTAR_PLAINTEXT_URL` | Seastar plaintext reference URL |' "$actions_file"
+    grep -q '| mongo_url | `MONGO_URL` | MongoDB service URL |' "$actions_file"
+    grep -q "Missing data source: \`fixture-env-file:$env_file\`" "$actions_file"
+    echo "STATUS: PASS gpu web/db external fixture next actions env-file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-category-summary" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    REPORT="$tmpdir/readiness-report.md"
+    TABLE="$tmpdir/readiness-metrics.md"
+    output="$(emit_readiness)"
+    missing_count="$(printf '%s\n' "$output" | awk -F'[=|]' '$2 == "missing" { count++ } END { print count + 0 }')"
+    write_artifacts "$output" "$missing_count"
+    grep -q '## Category Summary' "$REPORT"
+    grep -q '| core_load_tools |' "$REPORT"
+    grep -q '| web_proxy_tools |' "$REPORT"
+    grep -q '| db_tools |' "$REPORT"
+    grep -q '| dynamic_route_urls |' "$REPORT"
+    grep -q '| reference_fixture_urls |' "$REPORT"
+    grep -q '| proxy_fixture_urls |' "$REPORT"
+    grep -q '| db_service_urls |' "$REPORT"
+    echo "STATUS: PASS gpu web/db external fixture category summary self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-missing-by-category" ]; then
+    output="$(emit_missing_by_category)"
+    printf '%s\n' "$output" | grep -q '^core_load_tools=$'
+    printf '%s\n' "$output" | grep -q '^web_proxy_tools=caddy,h2o,haproxy,envoy$'
+    printf '%s\n' "$output" | grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb$'
+    printf '%s\n' "$output" | grep -q '^proxy_fixture_urls=simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$'
+    printf '%s\n' "$output" | grep -q '^dynamic_route_urls=dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$'
+    printf '%s\n' "$output" | grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$'
+    printf '%s\n' "$output" | grep -q '^db_service_urls=clickhouse_url,postgres_url,mongo_url$'
+    echo "STATUS: PASS gpu web/db external fixture missing-by-category self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-missing-by-category" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    missing_file="$tmpdir/external-fixture-missing-by-category.env"
+    written_path="$(write_missing_by_category "$missing_file")"
+    test "$written_path" = "$missing_file"
+    test -f "$missing_file"
+    grep -q '^core_load_tools=$' "$missing_file"
+    grep -q '^web_proxy_tools=caddy,h2o,haproxy,envoy$' "$missing_file"
+    grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb$' "$missing_file"
+    grep -q '^proxy_fixture_urls=simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$' "$missing_file"
+    grep -q '^dynamic_route_urls=dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$' "$missing_file"
+    grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$' "$missing_file"
+    grep -q '^db_service_urls=clickhouse_url,postgres_url,mongo_url$' "$missing_file"
+    echo "STATUS: PASS gpu web/db external fixture missing-by-category file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-missing-by-category-from-env-file" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    env_file="$tmpdir/external-fixtures.env"
+    cat > "$env_file" <<'EOF'
+export SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
+HAPROXY_CACHED_PROXY_URL="http://127.0.0.1:8091/cacheable"
+ENVOY_CACHED_PROXY_URL='http://127.0.0.1:8092/cacheable'
+SIMPLE_UPLOAD_PROXY_URL=http://127.0.0.1:8090/upload
+HAPROXY_UPLOAD_PROXY_URL=http://127.0.0.1:8091/upload
+SIMPLE_TUNNEL_PROXY_URL=http://127.0.0.1:8090/tunnel
+HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel
+export DYNAMIC_GPU_PLAINTEXT_URL=http://127.0.0.1:8080/plaintext
+DYNAMIC_CPU_PLAINTEXT_URL="http://127.0.0.1:8081/plaintext"
+DYNAMIC_GPU_JSON_URL='http://127.0.0.1:8080/json'
+DYNAMIC_CPU_JSON_URL=http://127.0.0.1:8081/json
+SIMPLE_REFERENCE_PLAINTEXT_URL=http://127.0.0.1:8084/plaintext
+UWEBSOCKETS_PLAINTEXT_URL=http://127.0.0.1:8085/plaintext
+SEASTAR_PLAINTEXT_URL=http://127.0.0.1:8086/plaintext
+CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+export POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+MONGO_URL="mongodb://127.0.0.1:27017/ycsb"
+CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=SELECT sum(number) FROM numbers(1024)
+EOF
+    output="$(emit_missing_by_category_from_env_file "$env_file")"
+    printf '%s\n' "$output" | grep -q '^proxy_fixture_urls=$'
+    printf '%s\n' "$output" | grep -q '^dynamic_route_urls=$'
+    printf '%s\n' "$output" | grep -q '^reference_fixture_urls=$'
+    printf '%s\n' "$output" | grep -q '^db_service_urls=$'
+    printf '%s\n' "$output" | grep -q '^web_proxy_tools=caddy,h2o,haproxy,envoy$'
+    empty_env="$tmpdir/empty.env"
+    emit_env_template > "$empty_env"
+    empty_output="$(emit_missing_by_category_from_env_file "$empty_env")"
+    printf '%s\n' "$empty_output" | grep -q '^proxy_fixture_urls=simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$'
+    printf '%s\n' "$empty_output" | grep -q '^dynamic_route_urls=dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$'
+    printf '%s\n' "$empty_output" | grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$'
+    echo "STATUS: PASS gpu web/db external fixture env-file missing-by-category self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-missing-by-category-from-env-file" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    env_file="$tmpdir/external-fixtures.env"
+    missing_file="$tmpdir/missing-by-category.env"
+    cat > "$env_file" <<'EOF'
+SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
+DYNAMIC_GPU_PLAINTEXT_URL=http://127.0.0.1:8080/plaintext
+CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+EOF
+    written_path="$(write_missing_by_category_from_env_file "$missing_file" "$env_file")"
+    test "$written_path" = "$missing_file"
+    test -f "$missing_file"
+    grep -q '^proxy_fixture_urls=haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$' "$missing_file"
+    grep -q '^dynamic_route_urls=dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$' "$missing_file"
+    grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$' "$missing_file"
+    grep -q '^db_service_urls=postgres_url,mongo_url$' "$missing_file"
+    echo "STATUS: PASS gpu web/db external fixture env-file missing-by-category file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-setup-checklist" ]; then
+    checklist="$(emit_setup_checklist)"
+    printf '%s\n' "$checklist" | grep -q 'GPU Web/DB External Fixture Setup Checklist'
+    printf '%s\n' "$checklist" | grep -q '`haproxy`'
+    printf '%s\n' "$checklist" | grep -q 'SIMPLE_CACHED_PROXY_URL'
+    printf '%s\n' "$checklist" | grep -q 'SIMPLE_UPLOAD_PROXY_URL'
+    printf '%s\n' "$checklist" | grep -q 'SIMPLE_TUNNEL_PROXY_URL'
+    printf '%s\n' "$checklist" | grep -q 'UWEBSOCKETS_PLAINTEXT_URL'
+    printf '%s\n' "$checklist" | grep -q '`clickhouse` or `clickhouse-client`'
+    printf '%s\n' "$checklist" | grep -q 'DYNAMIC_GPU_PLAINTEXT_URL'
+    printf '%s\n' "$checklist" | grep -q 'CLICKHOUSE_URL'
+    printf '%s\n' "$checklist" | grep -q 'standard-shape query override variables'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-suite.shs --dry-run'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --bootstrap-status'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-bootstrap-manifest'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-docker-compose-template'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-docker-run-template'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-proxy-config-templates'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-hints'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-runbook'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-suite.shs --refresh-status'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-suite.shs --status'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-suite.shs --status-json'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-suite.shs --preflight'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-suite.shs --require-ready'
+    printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-suite.shs --allow-partial'
+    echo "STATUS: PASS gpu web/db external fixture setup checklist self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-setup-checklist" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    checklist_file="$tmpdir/external-fixture-setup-checklist.md"
+    written_path="$(write_setup_checklist "$checklist_file")"
+    test "$written_path" = "$checklist_file"
+    test -f "$checklist_file"
+    grep -q 'GPU Web/DB External Fixture Setup Checklist' "$checklist_file"
+    grep -q '`envoy`' "$checklist_file"
+    grep -q 'HAPROXY_CACHED_PROXY_URL' "$checklist_file"
+    grep -q 'HAPROXY_UPLOAD_PROXY_URL' "$checklist_file"
+    grep -q 'HAPROXY_TUNNEL_PROXY_URL' "$checklist_file"
+    grep -q 'POSTGRES_URL' "$checklist_file"
+    grep -q 'standard-shape query override variables' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --bootstrap-status' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-bootstrap-manifest' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-docker-compose-template' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-docker-run-template' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-proxy-config-templates' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-hints' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-runbook' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --refresh-status' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --status' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --status-json' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --preflight' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --require-ready' "$checklist_file"
+    grep -q 'check-gpu-web-db-offload-external-suite.shs --allow-partial' "$checklist_file"
+    echo "STATUS: PASS gpu web/db external fixture setup checklist file self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-artifacts" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    REPORT="$tmpdir/readiness-report.md"
+    TABLE="$tmpdir/readiness-metrics.md"
+    output="$(emit_readiness)"
+    missing_count="$(printf '%s\n' "$output" | awk -F'[=|]' '$2 == "missing" { count++ } END { print count + 0 }')"
+    write_artifacts "$output" "$missing_count"
+    test -f "$REPORT"
+    test -f "$TABLE"
+    grep -q 'GPU Web/DB External Fixture Readiness' "$REPORT"
+    grep -q 'Ready fixtures' "$REPORT"
+    grep -q 'Category Summary' "$REPORT"
+    grep -q 'Bootstrap Status' "$REPORT"
+    grep -q 'bootstrap_container_engine' "$REPORT"
+    grep -q 'Fixture Environment Template' "$REPORT"
+    grep -q 'Fixture Setup Checklist' "$REPORT"
+    grep -q 'Bootstrap Status' "$TABLE"
+    grep -q 'bootstrap_container_engine' "$TABLE"
+    grep -q '| fixture | status | reason |' "$TABLE"
+    grep -q 'dynamic_gpu_plaintext_url' "$TABLE"
+    echo "STATUS: PASS gpu web/db external fixture readiness artifact self-test"
+    exit 0
+fi
+
+output="$(emit_readiness)"
+printf '%s\n' "$output"
+missing_count="$(printf '%s\n' "$output" | awk -F'[=|]' '$2 == "missing" { count++ } END { print count + 0 }')"
+write_artifacts "$output" "$missing_count"
+test -f "$REPORT"
+test -f "$TABLE"
+grep -q 'wrk' "$TABLE"
+grep -q 'dynamic_gpu_plaintext_url' "$TABLE"
+if [ "$missing_count" -eq 0 ]; then
+    echo "STATUS: PASS gpu web/db external fixtures ready"
+else
+    echo "STATUS: WARN gpu web/db external fixtures missing:$missing_count"
+fi

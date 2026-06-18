@@ -1,0 +1,111 @@
+#!/bin/sh
+set -eu
+
+manifest="${1:-}"
+
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    exit 1
+}
+
+if [ "$manifest" = "" ]; then
+    fail "usage: sh scripts/check/check-simple-web-browser-external-host-evidence-manifest.shs <manifest.md>"
+fi
+if [ ! -s "$manifest" ]; then
+    fail "manifest missing or empty: $manifest"
+fi
+
+value_of() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$manifest" | tail -n 1
+}
+
+require_value() {
+    key="$1"
+    expected="$2"
+    actual="$(value_of "$key")"
+    if [ "$actual" != "$expected" ]; then
+        fail "$key expected '$expected' got '${actual:-<missing>}'"
+    fi
+}
+
+require_nonempty() {
+    key="$1"
+    actual="$(value_of "$key")"
+    if [ "$actual" = "" ]; then
+        fail "$key missing"
+    fi
+}
+
+require_positive() {
+    key="$1"
+    actual="$(value_of "$key")"
+    case "$actual" in
+        ''|*[!0-9]*) fail "$key must be a positive integer" ;;
+        0) fail "$key must be positive" ;;
+    esac
+}
+
+reject_token() {
+    token="$1"
+    if grep -q "$token" "$manifest"; then
+        fail "manifest contains non-acceptance token: $token"
+    fi
+}
+
+require_value simple_web_browser_external_host_manifest_status pass
+require_value simple_web_browser_external_host_accepted yes
+require_value simple_web_browser_external_host_baseline_confirmed yes
+require_value command_exit_status 0
+require_nonempty host_os
+require_nonempty gpu_model
+require_nonempty driver_runtime_version
+require_nonempty report_path
+require_nonempty expected_checksum
+require_nonempty actual_checksum
+require_value mismatch_count 0
+
+expected_checksum="$(value_of expected_checksum)"
+actual_checksum="$(value_of actual_checksum)"
+if [ "$expected_checksum" != "$actual_checksum" ]; then
+    fail "expected_checksum and actual_checksum differ"
+fi
+
+reject_token host-unavailable
+reject_token not_device_readback
+reject_token provenance-only
+reject_token surface_upload
+reject_token structured_readback_contract
+reject_token metal-requires-macos
+reject_token missing-primary-tool
+reject_token native-pending
+
+gate="$(value_of simple_web_browser_external_host_gate)"
+case "$gate" in
+    metal)
+        require_value metal_generated_2d_readback_status pass
+        require_value metal_engine2d_framebuffer_readback_status pass
+        require_value production_gui_web_renderer_parity_status pass
+        require_nonempty metal_native_device_name
+        ;;
+    rocm)
+        require_value rocm_generated_2d_readback_status pass
+        require_value rocm_generated_2d_readback_source device_readback
+        require_positive rocm_generated_2d_backend_handle
+        ;;
+    directx)
+        require_value directx_native_readback_status pass
+        require_value directx_native_readback_source device_readback
+        require_positive directx_native_backend_handle
+        ;;
+    webgpu)
+        require_value webgpu_real_readback_status pass
+        require_value webgpu_real_readback_source device_readback
+        require_positive webgpu_real_readback_backend_handle
+        ;;
+    *)
+        fail "simple_web_browser_external_host_gate must be metal, rocm, directx, or webgpu"
+        ;;
+esac
+
+printf 'PASS: accepted simple web browser external host evidence manifest (%s)\n' "$gate"

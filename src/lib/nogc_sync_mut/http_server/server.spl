@@ -9,6 +9,7 @@ use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.parser.{parse_request, parse_request_with_limits, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE}
 use std.nogc_sync_mut.http_server.response.{write_response, write_error}
 use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.proxy.{ReverseProxyRoute, reverse_proxy_route, reverse_proxy_route_with_limits, reverse_proxy_prefix_matches, reverse_proxy_stream}
 use std.concurrent.thread.{thread_spawn_with_args}
 
 # Default maximum number of header read iterations before we consider the
@@ -21,6 +22,7 @@ class SimpleHttpServer:
     host: text
     port: i32
     router: Router
+    proxy_routes: [ReverseProxyRoute]
     running: bool
 
     static fn new(host: text, port: i32, router: Router) -> SimpleHttpServer:
@@ -28,8 +30,22 @@ class SimpleHttpServer:
             host: host,
             port: port,
             router: router,
+            proxy_routes: [],
             running: false
         )
+
+    fn proxy(prefix: text, upstream_addr: text):
+        self.proxy_routes.push(reverse_proxy_route(prefix, upstream_addr))
+
+    fn proxy_with_limits(prefix: text, upstream_addr: text, connect_timeout_ms: i64,
+                         io_timeout_ms: i64, max_response_bytes: i64):
+        self.proxy_routes.push(reverse_proxy_route_with_limits(
+            prefix,
+            upstream_addr,
+            connect_timeout_ms,
+            io_timeout_ms,
+            max_response_bytes
+        ))
 
     fn start():
         self.running = true
@@ -78,6 +94,13 @@ class SimpleHttpServer:
     me handle_connection(stream: TcpStream):
         match parse_request(stream):
             Ok(req):
+                for proxy_route in self.proxy_routes:
+                    if reverse_proxy_prefix_matches(proxy_route, req):
+                        val status = reverse_proxy_stream(stream, req, proxy_route)
+                        if status != HttpStatus.Ok:
+                            val _err = write_error(stream, status, "reverse proxy failed")
+                        val _proxied_close = stream.close()
+                        return
                 val resp = self.router.dispatch(req)
                 if not write_response(stream, resp):
                     val _ = stream.close()

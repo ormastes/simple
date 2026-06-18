@@ -59,8 +59,8 @@ with BDD framework blocks like describe/context/it.
 
 #### supports fn() with no parameters
 
-1. fn call it
-2. f
+- fn call it
+- f
 
 
 <details>
@@ -81,8 +81,8 @@ expect result == 42
 
 #### supports fn(x) with single parameter
 
-1. fn apply
-2. f
+- fn apply
+- f
 
 
 <details>
@@ -103,8 +103,8 @@ expect result == 10
 
 #### supports fn(x, y) with multiple parameters
 
-1. fn apply2
-2. f
+- fn apply2
+- f
 
 
 <details>
@@ -127,9 +127,9 @@ expect result == 7
 
 #### supports fn() with indented block
 
-1. fn execute
-2. f
-3. fn sum xy
+- fn execute
+- f
+- fn sum xy
 
 
 <details>
@@ -155,9 +155,9 @@ expect result == 30
 
 #### supports fn(x) with parameter and block
 
-1. fn transform
-2. f
-3. fn compute square
+- fn transform
+- f
+- fn compute square
 
 
 <details>
@@ -185,9 +185,9 @@ expect result == 100
 
 #### supports nested fn() lambdas
 
-1. fn outer
-2. fn inner
-3. g
+- fn outer
+- fn inner
+- g
 
 
 <details>
@@ -213,8 +213,8 @@ expect result == 99
 
 #### fn() and \\ are interchangeable
 
-1. fn test sum
-2. f1
+- fn test sum
+- f1
 
 
 <details>
@@ -238,10 +238,10 @@ expect result == 30
 
 #### works with context/it blocks
 
-1. fn mock context
-2. block
-3. fn set executed
-4. mock context
+- fn mock context
+- block
+- fn set executed
+- mock context
 
 
 <details>

@@ -106,6 +106,22 @@ pub fn rt_host_gpu_queue_last_backend_handle(_args: &[Value]) -> Result<Value, C
     Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_last_backend_handle()))
 }
 
+pub fn rt_host_gpu_queue_last_device_time_us(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_last_device_time_us()))
+}
+
+pub fn rt_host_gpu_queue_last_payload_size(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_last_payload_size()))
+}
+
+pub fn rt_host_gpu_queue_last_payload_hash(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(host_gpu_lane::rt_host_gpu_queue_last_payload_hash()))
+}
+
+pub fn rt_host_gpu_queue_last_payload_text(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Str(host_gpu_lane::rt_host_gpu_queue_last_payload_text()))
+}
+
 fn expect_int(value: Option<&Value>, message: &str) -> Result<i64, CompileError> {
     match value {
         Some(Value::Int(v)) => Ok(*v),

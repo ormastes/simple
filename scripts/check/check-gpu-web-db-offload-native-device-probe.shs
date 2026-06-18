@@ -1,0 +1,176 @@
+#!/usr/bin/env sh
+set -eu
+
+REPORT="doc/09_report/perf/gpu_web_db_offload_native_device_probe_2026-06-16.md"
+TABLE="doc/10_metrics/perf/gpu_web_db_offload_native_device_probe.md"
+SPEC="test/05_perf/web_db_offload/gpu_web_db_offload_native_device_probe_spec.spl"
+DRIVER="test/05_perf/web_db_offload/gpu_web_db_offload_native_device_probe_driver.spl"
+CUDA_DRIVER="test/05_perf/web_db_offload/gpu_web_db_offload_cuda_measured_driver.spl"
+DOC="doc/06_spec/test/05_perf/web_db_offload/gpu_web_db_offload_native_device_probe_spec.md"
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/debug/simple}"
+if [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN="bin/simple"
+fi
+
+"$SIMPLE_BIN" check "$SPEC" "$DRIVER" "$CUDA_DRIVER"
+SIMPLE_LIB=src "$SIMPLE_BIN" test "$SPEC" --mode=interpreter --clean --sequential
+SIMPLE_LIB=src "$SIMPLE_BIN" spipe-docgen "$SPEC" --output doc/06_spec --no-index
+
+PROBE_OUTPUT="$(SIMPLE_LIB=src "$SIMPLE_BIN" run "$DRIVER")"
+CUDA_OUTPUT="$(SIMPLE_LIB=src timeout 45 "$SIMPLE_BIN" run "$CUDA_DRIVER" || true)"
+export PROBE_OUTPUT
+export CUDA_OUTPUT
+
+python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+
+report = Path("doc/09_report/perf/gpu_web_db_offload_native_device_probe_2026-06-16.md")
+table = Path("doc/10_metrics/perf/gpu_web_db_offload_native_device_probe.md")
+report.parent.mkdir(parents=True, exist_ok=True)
+table.parent.mkdir(parents=True, exist_ok=True)
+
+backend = os.environ.get("GPU_WDB_DEVICE_BACKEND", "").strip()
+device = os.environ.get("GPU_WDB_DEVICE_NAME", "").strip()
+target = os.environ.get("GPU_WDB_DEVICE_TARGET", "gpu_db_vector_search_batch").strip()
+dataset = os.environ.get("GPU_WDB_DEVICE_DATASET", "oracle_vectors_1024x128").strip()
+kernel = os.environ.get("GPU_WDB_DEVICE_KERNEL_TIME_US", "").strip()
+latency = os.environ.get("GPU_WDB_DEVICE_COMPLETION_LATENCY_US", "").strip()
+transfer = os.environ.get("GPU_WDB_DEVICE_TRANSFER_BYTES", "524288").strip()
+probe_output = os.environ.get("PROBE_OUTPUT", "")
+cuda_output = os.environ.get("CUDA_OUTPUT", "")
+
+probe = {}
+for line in probe_output.splitlines():
+    if "=" in line:
+        key, value = line.split("=", 1)
+        probe[key.strip()] = value.strip()
+
+device = {}
+for line in cuda_output.splitlines():
+    if "=" in line:
+        key, value = line.split("=", 1)
+        device[key.strip()] = value.strip()
+
+def positive_int(value: str) -> bool:
+    return value.isdigit() and int(value) > 0
+
+def int_value(key: str) -> int:
+    value = probe.get(key, "0")
+    if re.fullmatch(r"-?[0-9]+", value):
+        return int(value)
+    return 0
+
+cuda_available = int_value("cuda_available")
+cuda_count = int_value("cuda_device_count")
+cuda_name = probe.get("cuda_device_name", "unavailable") or "unavailable"
+cuda_capability = int_value("cuda_compute_capability")
+vk_available = int_value("vk_available")
+vulkan_available = int_value("vulkan_available")
+vulkan_count = int_value("vulkan_device_count")
+vulkan_name = probe.get("vulkan_device_name", "unavailable") or "unavailable"
+
+runtime_backend = "none"
+runtime_device = "unavailable"
+runtime_reason = "runtime-backend-unavailable"
+if cuda_available > 0 and cuda_count > 0:
+    runtime_backend = "cuda"
+    runtime_device = cuda_name if cuda_name != "unavailable" else "cuda-device-0"
+    runtime_reason = "runtime-backend-available-no-device-runner"
+elif (vk_available > 0 or vulkan_available > 0) and vulkan_count > 0:
+    runtime_backend = "vulkan"
+    runtime_device = vulkan_name if vulkan_name != "unavailable" else "vulkan-device-0"
+    runtime_reason = "runtime-backend-available-no-device-runner"
+
+device_status = device.get("GPU_WDB_DEVICE_STATUS", "")
+device_backend = device.get("GPU_WDB_DEVICE_BACKEND", "")
+device_name = device.get("GPU_WDB_DEVICE_NAME", "")
+device_target = device.get("GPU_WDB_DEVICE_TARGET", "")
+device_dataset = device.get("GPU_WDB_DEVICE_DATASET", "")
+device_transfer = device.get("GPU_WDB_DEVICE_TRANSFER_BYTES", "")
+device_kernel = device.get("GPU_WDB_DEVICE_KERNEL_TIME_US", "")
+device_latency = device.get("GPU_WDB_DEVICE_COMPLETION_LATENCY_US", "")
+device_reason = device.get("GPU_WDB_DEVICE_REASON", "")
+device_claim = device.get("GPU_WDB_DEVICE_HARDWARE_CLAIM", "")
+
+if (device_status == "measured" and device_backend and device_name
+        and device_target.startswith("gpu_")
+        and positive_int(device_kernel)
+        and positive_int(device_latency)
+        and positive_int(device_transfer)
+        and device_claim == "native-device-measured"):
+    backend = device_backend
+    device = device_name
+    target = device_target
+    dataset = device_dataset or dataset
+    kernel = device_kernel
+    latency = device_latency
+    transfer = device_transfer
+    status = "measured"
+    reason = device_reason or "native-device-runner"
+    hardware_claim = "native-device-measured"
+    gpu_hits = "1"
+    cpu_fallbacks = "0"
+else:
+    backend = backend or runtime_backend
+    device = device or runtime_device
+    target = "cpu_fallback"
+    dataset = dataset or "oracle_vectors_1024x128"
+    kernel = "0"
+    latency = "0"
+    transfer = "0"
+    if runtime_backend != "none":
+        status = "available_unmeasured"
+        reason = runtime_reason
+        hardware_claim = "none-device-availability-only"
+    else:
+        status = "unavailable"
+        reason = runtime_reason
+        hardware_claim = "none-device-unavailable"
+    gpu_hits = "0"
+    cpu_fallbacks = "1"
+
+header = "| status | backend | device | cuda_devices | cuda_compute_capability | vulkan_devices | dataset | dispatch_target | transfer_bytes | kernel_time_us | completion_latency_us | gpu_hits | cpu_fallbacks | reason | hardware_claim |\n"
+sep = "|---|---|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---|---|\n"
+row = f"| {status} | {backend} | {device} | {cuda_count} | {cuda_capability} | {vulkan_count} | {dataset} | {target} | {transfer} | {kernel} | {latency} | {gpu_hits} | {cpu_fallbacks} | {reason} | {hardware_claim} |\n"
+
+body = (
+    "# GPU Web/DB Native Device Probe\n\n"
+    "This report is generated by `scripts/check/check-gpu-web-db-offload-native-device-probe.shs`.\n"
+    "It is a fail-closed hardware evidence gate. Runtime CUDA/Vulkan availability may produce\n"
+    "`available_unmeasured`, but it still makes no GPU throughput claim. A measured row must provide\n"
+    "`GPU_WDB_DEVICE_BACKEND`, `GPU_WDB_DEVICE_NAME`, a `gpu_*` target, and positive kernel,\n"
+    "latency, and transfer metrics.\n\n"
+    + header + sep + row
+    + "\n## Runtime Probe\n\n"
+    + "```text\n"
+    + probe_output
+    + "\n```\n"
+    + "\n## CUDA Measured Runner\n\n"
+    + "```text\n"
+    + cuda_output
+    + "\n```\n"
+)
+
+table_body = "# GPU Web/DB Native Device Probe Metrics\n\n" + header + sep + row
+report.write_text(body, encoding="utf-8")
+table.write_text(table_body, encoding="utf-8")
+PY
+
+test -f "$REPORT"
+test -f "$TABLE"
+test -f "$DOC"
+grep -q 'runtime-backend-unavailable\|runtime-backend-available-no-device-runner\|cuda-measured-sum-squares-oracle\|native-device-runner' "$REPORT"
+grep -q 'none-device-unavailable\|none-device-availability-only\|native-device-measured' "$TABLE"
+if grep -q 'native-device-measured' "$REPORT"; then
+    grep -q '| measured |' "$REPORT"
+    grep -q 'gpu_' "$REPORT"
+elif grep -q 'none-device-availability-only' "$REPORT"; then
+    grep -q '| available_unmeasured |' "$REPORT"
+else
+    grep -q '| unavailable |' "$REPORT"
+    grep -q 'none-device-unavailable' "$REPORT"
+fi
+
+echo "STATUS: PASS gpu web/db native device probe"

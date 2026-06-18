@@ -44,6 +44,16 @@ pub extern "C" fn rt_tls_server_create(
 }
 
 #[no_mangle]
+pub extern "C" fn rt_tls_server_create_on(
+    _host: crate::value::RuntimeValue,
+    _port: i64,
+    _cert_path: crate::value::RuntimeValue,
+    _key_path: crate::value::RuntimeValue,
+) -> i64 {
+    -1
+}
+
+#[no_mangle]
 pub extern "C" fn rt_tls_server_accept(_server: i64) -> i64 { -1 }
 
 #[no_mangle]

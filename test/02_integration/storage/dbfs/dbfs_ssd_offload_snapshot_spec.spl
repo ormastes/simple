@@ -1,0 +1,394 @@
+use std.spec.*
+use std.db.dbfs_engine.pager.{DbfsPager, PageData}
+use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, WAL_RECORD_COMMIT}
+use std.db.dbfs_engine.checkpoint.{CheckpointEngine}
+use nogc_sync_mut.db.dbfs_engine.ns_btree.{NsBTree, ns_dentry_key, ns_ino}
+use std.db.dbfs_engine.offload_snapshot.*
+use std.database.storage_mode_offload.*
+use std.web_db_offload.contract.{GpuWdbBudget, GpuWdbCoarseDataPath}
+use std.web_db_offload.queue.{gpu_wdb_queue_initial}
+use std.web_db_offload.library.{gpu_wdb_library_with_targets}
+
+"""
+# DBFS SSD Offload Snapshot
+
+## Overview
+
+These scenarios verify the DBFS-owned freshness snapshot used before
+SSD-accelerated storage-mode GPU offload admission.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/gpu_web_db_offload.md
+
+- SSD-accelerated DB offload must require durable WAL and clean checkpoint
+  evidence.
+- Dirty pager pages keep SSD batches on CPU.
+- WAL tail beyond durable LSN keeps SSD batches on CPU.
+- Current DBFS snapshots can drive the storage-mode SSD adapter.
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
+
+## Design
+
+**Design:** doc/05_design/gpu_web_db_offload.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+Build a `DbfsSsdOffloadSnapshot` from pager, WAL, checkpoint, and namespace
+B-tree state, then pass it to `db_storage_execute_rows_for_ssd_snapshot`.
+"""
+
+fn ssd_budget() -> GpuWdbBudget:
+    GpuWdbBudget(
+        max_queue_depth: 64,
+        max_batch_bytes: 1024 * 1024,
+        min_gpu_batch_bytes: 1024
+    )
+
+fn commit_record(txn_id: i64) -> WalRecord:
+    WalRecord(txn_id: txn_id, record_type: WAL_RECORD_COMMIT, payload: "")
+
+fn clean_snapshot(row_count: i64, bytes_per_row: i64) -> DbfsSsdOffloadSnapshot:
+    val pager = DbfsPager.new(8)
+    val wal = DbfsWal.new()
+    wal.append(commit_record(1)).unwrap()
+    wal.flush().unwrap()
+    val checkpoints = CheckpointEngine.new()
+    checkpoints.checkpoint_now(1).unwrap()
+    val btree = NsBTree.new()
+    dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, row_count, bytes_per_row)
+
+fn row_page(row_id: i64) -> PageData:
+    val page = PageData.zeroed()
+    page.set_byte(0, row_id as u8)
+    page
+
+fn row_page_with_payload(row_id: i64, payload_byte: i64) -> PageData:
+    val page = row_page(row_id)
+    page.set_byte(1, payload_byte as u8)
+    page
+
+fn row_page_with_columns(row_id: i64, status_byte: i64, amount_byte: i64) -> PageData:
+    val page = row_page_with_payload(row_id, status_byte)
+    page.set_byte(2, amount_byte as u8)
+    page
+
+describe "DBFS SSD offload freshness snapshot":
+    it "should report current when checkpoint, WAL, pager, and B-tree are clean":
+        step("Build a snapshot from flushed WAL, clean checkpoint, and clean pager state")
+        val snapshot = clean_snapshot(128, 64)
+        expect(dbfs_ssd_snapshot_current(snapshot)).to_be(true)
+        expect(snapshot.pager_dirty_count).to_equal(0)
+        expect(snapshot.wal_tail_lsn).to_equal(snapshot.wal_durable_lsn)
+
+    it "should derive scan row ids from a current DBFS SSD snapshot":
+        step("Build a row-id manifest from DBFS snapshot row count rather than caller CPU state")
+        val snapshot = clean_snapshot(3, 64)
+        val row_ids = dbfs_ssd_snapshot_scan_row_ids(snapshot)
+        expect(row_ids.len()).to_equal(3)
+        expect(row_ids[0]).to_equal(0)
+        expect(row_ids[1]).to_equal(1)
+        expect(row_ids[2]).to_equal(2)
+
+    it "should report stale when the pager has dirty pages":
+        step("Dirty pager pages block SSD offload even with a clean checkpoint")
+        val pager = DbfsPager.new(8)
+        val page = pager.alloc_page().unwrap()
+        pager.write_page(page, PageData.zeroed(), 0, 0).unwrap()
+        val wal = DbfsWal.new()
+        wal.flush().unwrap()
+        val checkpoints = CheckpointEngine.new()
+        checkpoints.checkpoint_now(1).unwrap()
+        val btree = NsBTree.new()
+        val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 128, 64)
+        expect(dbfs_ssd_snapshot_current(snapshot)).to_be(false)
+        expect(snapshot.pager_dirty_count).to_equal(1)
+        expect(dbfs_ssd_snapshot_scan_row_ids(snapshot).len()).to_equal(0)
+
+    it "should report stale when WAL tail is beyond durable LSN":
+        step("Unflushed WAL tail blocks SSD offload")
+        val pager = DbfsPager.new(8)
+        val wal = DbfsWal.new()
+        wal.append(commit_record(2)).unwrap()
+        val checkpoints = CheckpointEngine.new()
+        checkpoints.checkpoint_now(1).unwrap()
+        val btree = NsBTree.new()
+        val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 128, 64)
+        expect(dbfs_ssd_snapshot_current(snapshot)).to_be(false)
+        expect(snapshot.wal_tail_lsn > snapshot.wal_durable_lsn).to_be(true)
+
+    it "should report stale when checkpoint is older than B-tree generation":
+        step("Namespace B-tree changes require a fresh checkpoint before SSD offload")
+        val pager = DbfsPager.new(8)
+        val wal = DbfsWal.new()
+        wal.flush().unwrap()
+        val checkpoints = CheckpointEngine.new()
+        val btree = NsBTree.new()
+        btree.insert(ns_dentry_key(1, 10), ns_ino(42)).unwrap()
+        val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 128, 64)
+        expect(dbfs_ssd_snapshot_current(snapshot)).to_be(false)
+        expect(snapshot.clean_checkpoint_available).to_be(false)
+
+    it "should drive SSD storage-mode GPU admission from DBFS snapshot evidence":
+        step("Use current DBFS snapshot evidence instead of a caller-owned freshness boolean")
+        val snapshot = clean_snapshot(128, 64)
+        val execution = db_storage_execute_rows_for_ssd_snapshot(
+            snapshot,
+            DbStorageOffloadWorkload.ScanFilterProject,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            ssd_budget(),
+            [1, 2, 3]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(execution.row_ids.len()).to_equal(3)
+
+    it "should drive SSD scan execution from DBFS-owned row ids":
+        step("Use snapshot-derived row ids for scan/filter/project execution")
+        val snapshot = clean_snapshot(3, 64)
+        val execution = db_storage_execute_ssd_snapshot_scan(
+            snapshot,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            ssd_budget()
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(execution.row_ids.len()).to_equal(3)
+        expect(execution.row_ids[0]).to_equal(0)
+        expect(execution.row_ids[1]).to_equal(1)
+        expect(execution.row_ids[2]).to_equal(2)
+
+    it "should materialize SSD scan rows from DBFS pager page cursors":
+        step("Read clean DBFS pages to produce CPU-authoritative scan rows")
+        val pager = DbfsPager.new(8)
+        val first = pager.alloc_page().unwrap()
+        val second = pager.alloc_page().unwrap()
+        pager.write_page(first, row_page_with_payload(42, 9), 0, 0).unwrap()
+        pager.write_page(second, row_page_with_payload(77, 11), 0, 0).unwrap()
+        pager.flush_dirty().unwrap()
+        val wal = DbfsWal.new()
+        wal.append(commit_record(3)).unwrap()
+        wal.flush().unwrap()
+        val checkpoints = CheckpointEngine.new()
+        checkpoints.checkpoint_now(1).unwrap()
+        val btree = NsBTree.new()
+        val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 2, 64)
+        val materialized = dbfs_ssd_snapshot_materialize_scan(snapshot, pager, [first.id, second.id])
+        expect(materialized.current).to_be(true)
+        expect(materialized.materialized).to_be(true)
+        expect(materialized.reason).to_equal("ssd-page-cursor-materialized")
+        expect(materialized.page_cursor_ids[0]).to_equal(first.id)
+        expect(materialized.row_ids[0]).to_equal(42)
+        expect(materialized.row_ids[1]).to_equal(77)
+        expect(materialized.row_payload_bytes[0]).to_equal(9)
+        expect(materialized.row_payload_bytes[1]).to_equal(11)
+
+    it "should carry SSD schema projection and predicate metadata":
+        step("Materialize clean page cursors with table schema and projected columns")
+        val pager = DbfsPager.new(8)
+        val first = pager.alloc_page().unwrap()
+        val second = pager.alloc_page().unwrap()
+        pager.write_page(first, row_page_with_payload(12, 21), 0, 0).unwrap()
+        pager.write_page(second, row_page_with_payload(34, 55), 0, 0).unwrap()
+        pager.flush_dirty().unwrap()
+        val wal = DbfsWal.new()
+        wal.append(commit_record(4)).unwrap()
+        wal.flush().unwrap()
+        val checkpoints = CheckpointEngine.new()
+        checkpoints.checkpoint_now(1).unwrap()
+        val btree = NsBTree.new()
+        val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 2, 96)
+        val materialized = dbfs_ssd_snapshot_materialize_projected_scan(
+            snapshot,
+            pager,
+            [first.id, second.id],
+            ["id", "status", "amount"],
+            ["id", "amount"],
+            "status = active"
+        )
+        expect(materialized.materialized).to_be(true)
+        expect(materialized.reason).to_equal("ssd-page-cursor-materialized")
+        expect(materialized.schema_columns.len()).to_equal(3)
+        expect(materialized.projected_columns.len()).to_equal(2)
+        expect(materialized.projected_columns[1]).to_equal("amount")
+        expect(materialized.predicate).to_equal("status = active")
+        expect(materialized.bytes_per_row).to_equal(96)
+        expect(materialized.row_ids[0]).to_equal(12)
+        expect(materialized.row_ids[1]).to_equal(34)
+        expect(materialized.row_payload_bytes[0]).to_equal(21)
+        expect(materialized.row_payload_bytes[1]).to_equal(55)
+
+    it "should materialize projected SSD row values from page bytes":
+        step("Expose projected table values, not only row IDs and payload bytes")
+        val pager = DbfsPager.new(8)
+        val first = pager.alloc_page().unwrap()
+        val second = pager.alloc_page().unwrap()
+        pager.write_page(first, row_page_with_columns(12, 1, 90), 0, 0).unwrap()
+        pager.write_page(second, row_page_with_columns(34, 2, 91), 0, 0).unwrap()
+        pager.flush_dirty().unwrap()
+        val wal = DbfsWal.new()
+        wal.append(commit_record(7)).unwrap()
+        wal.flush().unwrap()
+        val checkpoints = CheckpointEngine.new()
+        checkpoints.checkpoint_now(1).unwrap()
+        val btree = NsBTree.new()
+        val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 2, 96)
+        val materialized = dbfs_ssd_snapshot_materialize_projected_scan(
+            snapshot,
+            pager,
+            [first.id, second.id],
+            ["id", "status", "amount"],
+            ["id", "amount"],
+            "status > 0"
+        )
+        expect(materialized.materialized).to_be(true)
+        expect(materialized.projected_rows.len()).to_equal(2)
+        expect(materialized.projected_rows[0].row_id).to_equal(12)
+        expect(materialized.projected_rows[0].values["id"]).to_equal("12")
+        expect(materialized.projected_rows[0].values["amount"]).to_equal("90")
+        expect(materialized.projected_rows[1].row_id).to_equal(34)
+        expect(materialized.projected_rows[1].values["id"]).to_equal("34")
+        expect(materialized.projected_rows[1].values["amount"]).to_equal("91")
+
+    it "should validate projected SSD materialized scan GPU candidates":
+        step("Compare GPU candidates with DBFS projected page-cursor rows")
+        val pager = DbfsPager.new(32)
+        var page_ids: [i64] = []
+        var expected_ids: [i64] = []
+        var i = 0
+        while i < 16:
+            val page = pager.alloc_page().unwrap()
+            val row_id = 20 + i
+            pager.write_page(page, row_page_with_payload(row_id, 80 + i), 0, 0).unwrap()
+            page_ids.push(page.id)
+            expected_ids.push(row_id)
+            i = i + 1
+        pager.flush_dirty().unwrap()
+        val wal = DbfsWal.new()
+        wal.append(commit_record(5)).unwrap()
+        wal.flush().unwrap()
+        val checkpoints = CheckpointEngine.new()
+        checkpoints.checkpoint_now(1).unwrap()
+        val btree = NsBTree.new()
+        val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 16, 96)
+        val materialized = dbfs_ssd_snapshot_materialize_projected_scan(
+            snapshot,
+            pager,
+            page_ids,
+            ["id", "status", "amount"],
+            ["id", "amount"],
+            "status = active"
+        )
+        val execution = db_storage_execute_ssd_materialized_scan_validated(
+            materialized,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            ssd_budget(),
+            expected_ids
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(execution.gpu_candidate_validated).to_be(true)
+        expect(execution.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.row_ids.len()).to_equal(16)
+        expect(execution.row_ids[0]).to_equal(20)
+        expect(execution.row_ids[15]).to_equal(35)
+        expect(materialized.row_payload_bytes[0]).to_equal(80)
+        expect(materialized.row_payload_bytes[15]).to_equal(95)
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.SsdStagedBatch)
+
+    it "should reject mismatched projected SSD materialized scan GPU candidates":
+        step("Preserve DBFS projected page-cursor rows when GPU candidates differ")
+        val pager = DbfsPager.new(32)
+        var page_ids: [i64] = []
+        var candidate_ids: [i64] = []
+        var i = 0
+        while i < 16:
+            val page = pager.alloc_page().unwrap()
+            val row_id = 40 + i
+            pager.write_page(page, row_page(row_id), 0, 0).unwrap()
+            page_ids.push(page.id)
+            candidate_ids.push(row_id)
+            i = i + 1
+        candidate_ids[15] = 99
+        pager.flush_dirty().unwrap()
+        val wal = DbfsWal.new()
+        wal.append(commit_record(6)).unwrap()
+        wal.flush().unwrap()
+        val checkpoints = CheckpointEngine.new()
+        checkpoints.checkpoint_now(1).unwrap()
+        val btree = NsBTree.new()
+        val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 16, 96)
+        val materialized = dbfs_ssd_snapshot_materialize_projected_scan(
+            snapshot,
+            pager,
+            page_ids,
+            ["id", "status", "amount"],
+            ["id", "amount"],
+            "status = active"
+        )
+        val execution = db_storage_execute_ssd_materialized_scan_validated(
+            materialized,
+            gpu_wdb_queue_initial(4),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"]),
+            true,
+            true,
+            ssd_budget(),
+            candidate_ids
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.reason).to_equal("gpu-cpu-row-mismatch")
+        expect(execution.gpu_candidate_validated).to_be(false)
+        expect(execution.row_ids[0]).to_equal(40)
+        expect(execution.row_ids[15]).to_equal(55)
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.SsdStagedBatch)
+
+    it "should reject SSD projected scans with unknown columns":
+        step("Validate projected columns against the DBFS-owned schema metadata")
+        val snapshot = clean_snapshot(2, 64)
+        val pager = DbfsPager.new(8)
+        val materialized = dbfs_ssd_snapshot_materialize_projected_scan(
+            snapshot,
+            pager,
+            [1],
+            ["id", "status"],
+            ["id", "missing"],
+            "status = active"
+        )
+        expect(materialized.current).to_be(true)
+        expect(materialized.materialized).to_be(false)
+        expect(materialized.reason).to_equal("ssd-projection-column-missing")
+        expect(materialized.schema_columns[1]).to_equal("status")
+        expect(materialized.projected_columns[1]).to_equal("missing")
+        expect(materialized.row_ids.len()).to_equal(0)
+        expect(materialized.projected_rows.len()).to_equal(0)
+
+    it "should reject missing SSD page cursors during scan materialization":
+        step("Do not synthesize rows when a DBFS page cursor cannot be read")
+        val snapshot = clean_snapshot(2, 64)
+        val pager = DbfsPager.new(8)
+        val materialized = dbfs_ssd_snapshot_materialize_scan(snapshot, pager, [999])
+        expect(materialized.current).to_be(true)
+        expect(materialized.materialized).to_be(false)
+        expect(materialized.reason).to_equal("ssd-page-cursor-missing")
+        expect(materialized.row_ids.len()).to_equal(0)
+        expect(materialized.projected_rows.len()).to_equal(0)

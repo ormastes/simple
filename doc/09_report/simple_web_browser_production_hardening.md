@@ -6,13 +6,59 @@
   `tls_serve_loop.spl`, `async_server.spl`,
   `simple_web_browser_production_hardening_spec.spl`,
   `web_auth_hardening_spec.spl`, and `ws_handler_spec.spl`.
-- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 19 scenarios.
+- Unit auth spec: `bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean` passed with 21 scenarios on 2026-06-17 after adding request-head boundary and static script-header coverage.
+- Static script/API header check: `bin/simple check src/app/ui.web/auth_params.spl src/app/ui.web/server.spl test/01_unit/app/ui/web_auth_hardening_spec.spl` passed on 2026-06-17 after adding no-store/no-cache/nosniff guards to normal-server JavaScript responses and successful JSON state/widget responses.
+- Focused source/spec compile check: `bin/simple check src/app/ui.web/auth_params.spl src/app/ui.web/server.spl test/01_unit/app/ui/web_auth_hardening_spec.spl test/03_system/gui/simple_web_browser_production_hardening_spec.spl` passed after the static script/API header hardening and live `/wm.js` assertions.
+- Generated auth hardening manual:
+  `doc/06_spec/test/01_unit/app/ui/web_auth_hardening_spec.md` is newer than
+  `test/01_unit/app/ui/web_auth_hardening_spec.spl` and includes the browser
+  script-header scenario.
 - Unit async web spec: `bin/simple test test/01_unit/app/ui/async_web_spec.spl --mode=interpreter --clean` passed with 27 scenarios.
 - Unit WebSocket helper spec: `bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean` passed with 12 scenarios.
-- Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 6 scenarios.
-- Spec docgen: `bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec` completed with existing docgen warnings and regenerated the 6-scenario manual.
-- Production renderer parity: `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` passed.
-- Layout guard: `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
+- Live endpoint spec: `bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360` passed with 6 scenarios on 2026-06-17 after adding authenticated `/api/state` and `/api/widgets` `200 OK` no-store/no-cache/nosniff assertions plus live normal-server and shared-WM `/wm.js`, `/retained_renderer.js`, `/wm/native_window`, and unknown-route fallback header assertions.
+- Generated live endpoint manual:
+  `doc/06_spec/test/03_system/gui/simple_web_browser_production_hardening_spec.md`
+  was regenerated with `SIMPLE_LIB=src bin/simple spipe-docgen
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output
+  doc/06_spec --no-index` and includes authenticated `/api/state` and
+  `/api/widgets` success-header assertions plus normal-server and shared-WM
+  `/wm.js`, `/retained_renderer.js`, `/wm/native_window`, and
+  `/hidden-browser-production-gap` fallback assertions; docgen now reports
+  `OK simple_web_browser_production_hardening_spec (125 lines)`.
+- Traceability refresh: `doc/03_plan/sys_test/simple_web_browser_production_hardening.md`
+  and the `SIMPLE_WEB_BROWSER_PRODUCTION_HARDENING_2026_06_16` feature DB row
+  now include JSON/static-script response header hardening evidence for
+  `/wm.js` and `/retained_renderer.js`; `bin/simple lint
+  doc/08_tracking/feature/feature_db.sdn` passed.
+- Local completion audit:
+  `doc/09_report/simple_web_browser_local_completion_audit_2026-06-17.md`
+  records local PASS coverage for `REQ-WEB-HARD-001` through
+  `REQ-WEB-HARD-013` and `NFR-WEB-HARD-001` through `NFR-WEB-HARD-011`, with
+  WARN status for the external `REQ-WEB-HARD-014` / `NFR-WEB-HARD-012`
+  device-readback gates.
+- Focused stub audit: removed a placeholder-looking fallback UI parse no-op in
+  `src/app/ui.web/server.spl`, verified `bin/simple check
+  src/app/ui.web/server.spl`, and reran the focused stub scan with no matches.
+- Post-server-change live endpoint verification: `bin/simple test
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl
+  --mode=interpreter --clean --timeout 360` passed with 6 scenarios.
+- Post-change focused compile check: `bin/simple check
+  src/app/ui.web/auth_params.spl src/app/ui.web/server.spl
+  test/01_unit/app/ui/web_auth_hardening_spec.spl
+  test/03_system/gui/simple_web_browser_production_hardening_spec.spl` passed.
+- Numbered artifact guard: `sh scripts/audit/numbered-artifact-guard.shs
+  --working` returned `Numbered artifact guard: OK`.
+- Staged numbered artifact guard: `sh scripts/audit/numbered-artifact-guard.shs
+  --staged` returned `Numbered artifact guard: OK`.
+- Focused SPipe-quality scan over the auth hardening and live endpoint specs
+  returned no placeholder assertions, deprecated truthy helpers, no-op
+  placeholders, TODO/FIXME markers, or `pass_todo`.
+- Spec docgen: `SIMPLE_LIB=src bin/simple spipe-docgen test/03_system/gui/simple_web_browser_production_hardening_spec.spl --output doc/06_spec --no-index` reports
+  `OK simple_web_browser_production_hardening_spec (125 lines)` and regenerated
+  the 6-scenario manual with `/wm/native_window` and hidden-route fallback evidence.
+- Production renderer parity: `SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` passed on 2026-06-17 and wrote `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-17.md`.
+- Layout guard: `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`
+  after the focused auth and live endpoint manual refresh checks.
 
 ## Implemented Hardening
 
@@ -28,11 +74,29 @@
 - Browser JSON response helpers across normal, async, TLS, and shared `/ui/*`
   paths set `Cache-Control: no-store`, `Pragma: no-cache`, and
   `X-Content-Type-Options: nosniff`.
+- Normal and shared-WM unknown browser routes now use the centralized JSON
+  `404 not_found` fallback, and the live endpoint spec proves
+  `/hidden-browser-production-gap` inherits `Cache-Control: no-store`,
+  `Pragma: no-cache`, and `X-Content-Type-Options: nosniff`.
+- Normal-server successful `/api/state` and `/api/widgets` JSON responses now
+  use the same no-store/no-cache/nosniff guards as error and auth JSON
+  responses, with live success-path assertions for both routes.
+- Browser static script responses for `/wm.js` and `/retained_renderer.js`
+  now use no-store/no-cache/nosniff guards in both direct normal-server handling and
+  shared `_simple_response` handling.
+- The live normal-server scenario now requests `/wm.js` and
+  `/retained_renderer.js`, then verifies
+  `Cache-Control: no-store`, `Pragma: no-cache`, and
+  `X-Content-Type-Options: nosniff` on the actual HTTP responses.
+- Async/TLS/static response inspection on 2026-06-17 found no separate async or
+  TLS JavaScript-serving path requiring the script-header patch; shared-WM
+  `/wm.js` is covered by `_simple_response`.
 - Browser HTML document response helpers across normal, async, and TLS paths
   set `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: no-referrer`, `Permissions-Policy`, and a restrictive
-  `Content-Security-Policy`; the live root-page socket scenario covers the
-  normal server response.
+  `Content-Security-Policy`; the live endpoint spec covers the normal root page
+  and the shown `/wm/native_window` HTML surface in both normal and shared-WM
+  server paths.
 - Login and resume JSON responses echo only sanitized `X-Request-Id` values,
   rejecting bearer-like or otherwise unsafe correlation strings.
 - Authorized `/ui/resume` rejects missing or malformed `session_id`,
@@ -70,8 +134,11 @@
 - The normal `run_web` accept loop preserves per-server state across
   connections, so the login burst gate is enforced across repeated TCP
   requests.
-- Production renderer parity wrapper now passes locally with surface fail counts
-  `0`.
+- Production renderer parity wrapper now passes locally with top-level status
+  `pass`: Electron matrix, Electron CSS/layout manifest, Tauri/Chrome surface
+  manifest, and backend CPU SIMD/Metal parity pass. The layout/surface manifests
+  cover 18 cases with 16 exact passes, 2 tracked text-raster divergence rows,
+  and 0 failures; blur/tolerance remains unused.
 
 ## Host Environment Evidence
 
@@ -88,17 +155,30 @@
 - Browser WebGPU real-device readback is not proven locally; current evidence
   is matrix/provenance only and must be replaced by native device-readback
   evidence on a WebGPU-capable browser host.
+- External-host commands and field-level acceptance criteria are recorded in
+  `doc/03_plan/sys_test/simple_web_browser_external_host_proof_runbook.md`.
+- Fillable external-host evidence manifests should use
+  `doc/09_report/simple_web_browser_external_host_evidence_manifest_template.md`
+  before any remaining native rendering gate is marked closed.
+- The environment-bound follow-up is tracked separately as
+  `SIMPLE_WEB_BROWSER_EXTERNAL_NATIVE_READBACK_PROOF_2026_06_17` with plan
+  `doc/03_plan/agent_tasks/simple_web_browser_external_native_readback_proof.md`
+  and feature request
+  `doc/08_tracking/feature/simple_web_browser_external_native_readback_proof_2026-06-17.md`.
+- Current-host blocker evidence from 2026-06-17 is recorded in
+  `doc/09_report/simple_web_browser_external_host_blocker_2026-06-17.md`; this
+  host is Linux and lacks the required Metal, ROCm/HIP, Windows DirectX, and
+  real WebGPU device-readback proof environment.
 
 ## Workspace Hygiene Evidence
 
-Snapshot from 2026-06-16:
+Snapshot from 2026-06-17:
 
-- `jj --no-pager status` reports unrelated working-copy changes outside this
-  lane: 107 tracked changes (`A=66`, `M=39`, `D=2`) plus 5 untracked example
-  roots. Representative unrelated paths include
-  `.spipe/ide_md_counter_office_hardening/state.md`,
-  `doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md`,
-  `bootstrap/stage1/simple`, and `examples/08_gpu/simple_cuda_example/`.
+- The working copy still contains unrelated dirty files outside this lane.
+  Representative unrelated paths include `.spipe/ide_md_counter_office_hardening/state.md`,
+  `.spipe/simple_web_browser_production_hardening/state.md` sibling state
+  changes from this lane, GPU/web DB offload docs and specs, compiler/runtime
+  GPU changes, and untracked example roots.
 - `jj --no-pager log -r 'conflicts()'` reports 498 existing conflict commits.
   Representative unrelated conflict rows include `wyruwlsklnzt 3af695013cf1
   docs(compute): add std.compute/ExecTarget guide+tldr; spipe skill testing

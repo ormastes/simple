@@ -58,6 +58,34 @@ Submission returns `Result<GpuBatchTicket, GpuBatchError>`. Queue-full,
 unsupported backend, stale generation, transfer failure, and kernel failure are
 explicit fallback reasons.
 
+## Coarse Batch Profiles
+
+`GpuWdbCoarseBatchProfile` describes the reusable data path before dispatch:
+
+```simple
+enum GpuWdbCoarseDataPath:
+    CpuOnly
+    PinnedHostBatch
+    GpuResidentBatch
+    SsdStagedBatch
+    GpuIndexBatch
+
+struct GpuWdbCoarseBatchProfile:
+    data_path: GpuWdbCoarseDataPath
+    stream_count: i64
+    pinned_host_required: bool
+    gpu_resident_allowed: bool
+    cpu_control_path: bool
+    cpu_durability_path: bool
+    profile_name: text
+```
+
+Web inference/embedding/rank/transform routes use `PinnedHostBatch`. RAM DB
+uses `GpuResidentBatch`. SSD-backed DB uses `SsdStagedBatch` and keeps WAL and
+durability CPU-owned. NoSQL and vector modes use `GpuIndexBatch`. Proxy
+forwarding and HTTP control-plane work use `CpuOnly` and cannot report GPU
+dispatch evidence.
+
 ## Reliability Order
 
 1. CPU reverse proxy correctness.

@@ -1,0 +1,229 @@
+#!/usr/bin/env sh
+set -eu
+
+DB_FIXTURE_ENV_FILE="${DB_FIXTURE_ENV_FILE:-build/perf/gpu_web_db_offload/external-fixtures.env}"
+
+apply_standard_shape_defaults() {
+    if [ "${CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY:-}" = "" ]; then
+        CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY='SELECT sum(number) FROM numbers(1024) WHERE number % 2 = 0'
+    fi
+    if [ "${DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY:-}" = "" ]; then
+        DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY='SELECT b.range AS segment, count(*) AS order_count, sum(a.range) AS revenue FROM range(1024) a JOIN range(16) b ON a.range % 16 = b.range GROUP BY b.range ORDER BY revenue DESC LIMIT 8'
+    fi
+    if [ "${POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY:-}" = "" ]; then
+        POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY='SELECT b AS segment, count(*) AS order_count, sum(a) AS revenue FROM generate_series(1, 1024) a JOIN generate_series(1, 16) b ON a % 16 = b GROUP BY b ORDER BY revenue DESC LIMIT 8'
+    fi
+    if [ "${MONGO_YCSB_DOCUMENT_FILTER_EVAL:-}" = "" ]; then
+        MONGO_YCSB_DOCUMENT_FILTER_EVAL='const c=db.ycsb || db.getSiblingDB("ycsb").usertable; c.find({field0:{$gte:0}},{_id:1,field0:1}).limit(1024).itcount()'
+    fi
+}
+
+apply_standard_shape_defaults
+
+time_command_us() {
+    start_ns="$(date +%s%N)"
+    if "$@" >/dev/null 2>&1; then
+        end_ns="$(date +%s%N)"
+        elapsed_ns=$((end_ns - start_ns))
+        elapsed_us=$((elapsed_ns / 1000))
+        if [ "$elapsed_us" -le 0 ]; then
+            elapsed_us=1
+        fi
+        printf '%s\n' "$elapsed_us"
+        return 0
+    fi
+    return 1
+}
+
+source_db_fixture_env_file() {
+    path="${1:-$DB_FIXTURE_ENV_FILE}"
+    if [ -f "$path" ]; then
+        set -a
+        . "$path"
+        set +a
+    fi
+}
+
+PRODUCED_ROWS=0
+
+emit_measured_row() {
+    printf 'GPU_WDB_EXTERNAL_DB_MEASURED=%s|%s|%s|%s\n' "$1" "$2" "$3" "$4"
+    PRODUCED_ROWS=$((PRODUCED_ROWS + 1))
+}
+
+emit_standard_shape_manifest() {
+    printf '%s\n' "clickhouse_scan_filter_project=$CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY"
+    printf '%s\n' "duckdb_tpch_q3_join_aggregate=$DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY"
+    printf '%s\n' "postgresql_tpch_q3_join_aggregate=$POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY"
+    printf '%s\n' "mongo_ycsb_document_filter=$MONGO_YCSB_DOCUMENT_FILTER_EVAL"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    elapsed="$(time_command_us sh -c 'true')"
+    if [ "$elapsed" -le 0 ]; then
+        echo "ERROR: self-test timer did not produce a positive duration" >&2
+        exit 1
+    fi
+    output="$(
+        printf 'GPU_WDB_EXTERNAL_DB_MEASURED=%s|%s|%s|%s\n' \
+            'db_clickbench_clickhouse_external_measured' \
+            'clickbench_hits_scan_filter_project_1024_row_match' \
+            'clickhouse_scan_filter_project' \
+            "$elapsed"
+        printf 'GPU_WDB_EXTERNAL_DB_MEASURED=%s|%s|%s|%s\n' \
+            'db_tpch_duckdb_external_measured' \
+            'tpch_q3_join_aggregate_group_count_1024_row_match' \
+            'duckdb_tpch_q3_join_aggregate' \
+            "$elapsed"
+        printf 'GPU_WDB_EXTERNAL_DB_MEASURED=%s|%s|%s|%s\n' \
+            'db_tpch_postgresql_external_measured' \
+            'tpch_q3_join_aggregate_group_count_1024_row_match' \
+            'postgresql_tpch_q3_join_aggregate' \
+            "$elapsed"
+        printf 'GPU_WDB_EXTERNAL_DB_MEASURED=%s|%s|%s|%s\n' \
+            'db_ycsb_mongo_external_measured' \
+            'benchbase_ycsb_document_filter_1024_doc_match' \
+            'mongo_ycsb_document_filter' \
+            "$elapsed"
+    )"
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_clickbench_clickhouse_external_measured|clickbench_hits_scan_filter_project_1024_row_match|clickhouse_scan_filter_project|[1-9][0-9]*$'
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_tpch_duckdb_external_measured|tpch_q3_join_aggregate_group_count_1024_row_match|duckdb_tpch_q3_join_aggregate|[1-9][0-9]*$'
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_tpch_postgresql_external_measured|tpch_q3_join_aggregate_group_count_1024_row_match|postgresql_tpch_q3_join_aggregate|[1-9][0-9]*$'
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_ycsb_mongo_external_measured|benchbase_ycsb_document_filter_1024_doc_match|mongo_ycsb_document_filter|[1-9][0-9]*$'
+    echo "STATUS: PASS external DB baseline producer self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-standard-shape-manifest" ]; then
+    manifest="$(emit_standard_shape_manifest)"
+    printf '%s\n' "$manifest" | grep -q '^clickhouse_scan_filter_project=.*numbers(1024).*WHERE.*number % 2 = 0'
+    printf '%s\n' "$manifest" | grep -q '^duckdb_tpch_q3_join_aggregate=.*range(1024).*JOIN.*range(16).*GROUP BY.*ORDER BY.*LIMIT 8'
+    printf '%s\n' "$manifest" | grep -q '^postgresql_tpch_q3_join_aggregate=.*generate_series(1, 1024).*JOIN.*generate_series(1, 16).*GROUP BY.*ORDER BY.*LIMIT 8'
+    printf '%s\n' "$manifest" | grep -q '^mongo_ycsb_document_filter=.*ycsb.*find.*field0.*limit(1024).*itcount'
+    echo "STATUS: PASS external DB baseline standard-shape manifest self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-empty-query-env-defaults" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    env_file="$tmpdir/external-fixtures.env"
+    cat > "$env_file" <<'EOF'
+CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
+DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
+POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=
+MONGO_YCSB_DOCUMENT_FILTER_EVAL=
+EOF
+    source_db_fixture_env_file "$env_file"
+    apply_standard_shape_defaults
+    manifest="$(emit_standard_shape_manifest)"
+    printf '%s\n' "$manifest" | grep -q '^clickhouse_scan_filter_project=.*numbers(1024).*WHERE.*number % 2 = 0'
+    printf '%s\n' "$manifest" | grep -q '^duckdb_tpch_q3_join_aggregate=.*range(1024).*JOIN.*range(16).*GROUP BY.*ORDER BY.*LIMIT 8'
+    printf '%s\n' "$manifest" | grep -q '^postgresql_tpch_q3_join_aggregate=.*generate_series(1, 1024).*JOIN.*generate_series(1, 16).*GROUP BY.*ORDER BY.*LIMIT 8'
+    printf '%s\n' "$manifest" | grep -q '^mongo_ycsb_document_filter=.*ycsb.*find.*field0.*limit(1024).*itcount'
+    echo "STATUS: PASS external DB baseline empty query env defaults self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--print-standard-shape-manifest" ]; then
+    emit_standard_shape_manifest
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-env-file-source" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    mkdir -p "$tmpdir/bin"
+    cat > "$tmpdir/bin/psql" <<'EOF'
+#!/usr/bin/env sh
+test "$1" = "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+exit 0
+EOF
+    chmod +x "$tmpdir/bin/psql"
+    env_file="$tmpdir/external-fixtures.env"
+    cat > "$env_file" <<'EOF'
+POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+EOF
+    output="$(DB_FIXTURE_ENV_FILE="$env_file" PATH="$tmpdir/bin:$PATH" sh "$0")"
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_tpch_postgresql_external_measured|tpch_q3_join_aggregate_group_count_1024_row_match|postgresql_tpch_q3_join_aggregate|[1-9][0-9]*$'
+    echo "STATUS: PASS external DB baseline env-file source self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-no-rows-status" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    output="$(DB_FIXTURE_ENV_FILE="$tmpdir/missing.env" PATH="$tmpdir/bin" /bin/sh "$0")"
+    printf '%s\n' "$output" | grep -q '^STATUS: WARN tool-unavailable:external-db-baselines$'
+    if printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED='; then
+        echo "ERROR: no-row self-test unexpectedly produced measured rows" >&2
+        exit 1
+    fi
+    echo "STATUS: PASS external DB baseline no-row status self-test"
+    exit 0
+fi
+
+source_db_fixture_env_file
+apply_standard_shape_defaults
+
+if command -v clickhouse >/dev/null 2>&1; then
+    if elapsed="$(time_command_us clickhouse local -q "$CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY")"; then
+        emit_measured_row \
+            'db_clickbench_clickhouse_external_measured' \
+            'clickbench_hits_scan_filter_project_1024_row_match' \
+            'clickhouse_scan_filter_project' \
+            "$elapsed"
+    fi
+elif command -v clickhouse-client >/dev/null 2>&1 && [ "${CLICKHOUSE_URL:-}" != "" ]; then
+    if elapsed="$(time_command_us clickhouse-client --host "$CLICKHOUSE_URL" --query "$CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY")"; then
+        emit_measured_row \
+            'db_clickbench_clickhouse_external_measured' \
+            'clickbench_hits_scan_filter_project_1024_row_match' \
+            'clickhouse_scan_filter_project' \
+            "$elapsed"
+    fi
+fi
+
+if command -v duckdb >/dev/null 2>&1; then
+    if elapsed="$(time_command_us duckdb -c "$DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY")"; then
+        emit_measured_row \
+            'db_tpch_duckdb_external_measured' \
+            'tpch_q3_join_aggregate_group_count_1024_row_match' \
+            'duckdb_tpch_q3_join_aggregate' \
+            "$elapsed"
+    fi
+fi
+
+if command -v psql >/dev/null 2>&1 && [ "${POSTGRES_URL:-}" != "" ]; then
+    if elapsed="$(time_command_us psql "$POSTGRES_URL" -Atc "$POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY")"; then
+        emit_measured_row \
+            'db_tpch_postgresql_external_measured' \
+            'tpch_q3_join_aggregate_group_count_1024_row_match' \
+            'postgresql_tpch_q3_join_aggregate' \
+            "$elapsed"
+    fi
+fi
+
+if command -v mongosh >/dev/null 2>&1 && [ "${MONGO_URL:-}" != "" ]; then
+    if elapsed="$(time_command_us mongosh "$MONGO_URL" --quiet --eval "$MONGO_YCSB_DOCUMENT_FILTER_EVAL")"; then
+        emit_measured_row \
+            'db_ycsb_mongo_external_measured' \
+            'benchbase_ycsb_document_filter_1024_doc_match' \
+            'mongo_ycsb_document_filter' \
+            "$elapsed"
+    fi
+elif command -v mongo >/dev/null 2>&1 && [ "${MONGO_URL:-}" != "" ]; then
+    if elapsed="$(time_command_us mongo "$MONGO_URL" --quiet --eval "$MONGO_YCSB_DOCUMENT_FILTER_EVAL")"; then
+        emit_measured_row \
+            'db_ycsb_mongo_external_measured' \
+            'benchbase_ycsb_document_filter_1024_doc_match' \
+            'mongo_ycsb_document_filter' \
+            "$elapsed"
+    fi
+fi
+
+if [ "$PRODUCED_ROWS" -gt 0 ]; then
+    echo "STATUS: PASS external DB baseline producer rows:$PRODUCED_ROWS"
+else
+    echo "STATUS: WARN tool-unavailable:external-db-baselines"
+fi

@@ -1,0 +1,58 @@
+# Native real HttpServer reverse proxy fixture for live socket correctness evidence.
+
+use std.http_server.server.{HttpServer}
+use std.http_server.types.{
+    LocationConfig,
+    UpstreamConfig,
+    UpstreamServer,
+    LoadBalanceStrategy,
+    default_server_config
+}
+
+val LIVE_HTTPSERVER_PROXY_LISTEN: text = "0.0.0.0:18193"
+val LIVE_HTTPSERVER_BACKEND: text = "127.0.0.1:18194"
+
+fn main():
+    var config = default_server_config()
+    config.listen_addr = LIVE_HTTPSERVER_PROXY_LISTEN
+    config.worker_count = 1
+    config.max_connections = 128
+    config.keepalive_timeout_ms = 5000
+    config.read_timeout_ms = 5000
+    config.write_timeout_ms = 5000
+    config.idle_timeout_ms = 5000
+    config.drain_timeout_ms = 1000
+
+    val proxy_loc = LocationConfig(
+        pattern: "/api/",
+        match_type: "prefix",
+        handler_type: "proxy",
+        root: "",
+        proxy_pass: "backend",
+        middlewares: []
+    )
+    val upstream = UpstreamConfig(
+        name: "backend",
+        servers: [
+            UpstreamServer(
+                addr: LIVE_HTTPSERVER_BACKEND,
+                weight: 1,
+                max_fails: 1,
+                fail_timeout_ms: 1000
+            )
+        ],
+        strategy: LoadBalanceStrategy.RoundRobin,
+        health_check_interval_ms: 0,
+        health_check_max_probes: 1
+    )
+    config.locations = [proxy_loc]
+    config.upstreams = [upstream]
+
+    print "[simple-proxy-httpserver-ready] addr={LIVE_HTTPSERVER_PROXY_LISTEN} backend={LIVE_HTTPSERVER_BACKEND}"
+    var server = HttpServer.new(config)
+    val result = server.start()
+    match result:
+        Ok(_):
+            print "[simple-proxy-httpserver-stopped]"
+        Err(_):
+            print "[simple-proxy-httpserver-error] start"

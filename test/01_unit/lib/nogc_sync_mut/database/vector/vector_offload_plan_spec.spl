@@ -1,0 +1,76 @@
+use std.spec.*
+use std.database.vector.types.{DistanceMetric}
+use std.database.vector.offload_plan.*
+use std.web_db_offload.contract.{GpuWdbRuntimeSnapshot, GpuWdbDecisionPath, gpu_wdb_default_budget}
+
+fn vector_snapshot(queue_depth: i64, gpu_available: bool, generation_current: bool,
+                   cpu_fallback_available: bool) -> GpuWdbRuntimeSnapshot:
+    GpuWdbRuntimeSnapshot(
+        queue_depth: queue_depth,
+        gpu_available: gpu_available,
+        generation_current: generation_current,
+        cpu_fallback_available: cpu_fallback_available
+    )
+
+describe "vector search GPU offload planner":
+    it "should estimate vector search batch bytes":
+        step("Estimate candidate matrix plus query vector bytes")
+        val bytes = vector_search_estimated_batch_bytes(7, 16)
+        expect(bytes).to_equal(1024)
+
+    it "should plan eligible coarse vector search for GPU batch execution":
+        step("Plan a large vector search batch with current generation and GPU available")
+        val budget = gpu_wdb_default_budget()
+        val plan = plan_vector_search_offload(
+            DistanceMetric.Cosine,
+            128,
+            16,
+            true,
+            vector_snapshot(2, true, true, true),
+            budget
+        )
+        expect(plan.batch.execution.decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
+        expect(plan.batch.execution.target).to_equal("gpu_db_vector_search_batch")
+        expect(plan.batch.queue_depth_after).to_equal(3)
+        expect(vector_search_plan_uses_gpu(plan)).to_be(true)
+
+    it "should keep small vector search batches on CPU":
+        step("Plan a small batch that cannot justify GPU overhead")
+        val budget = gpu_wdb_default_budget()
+        val plan = plan_vector_search_offload(
+            DistanceMetric.Euclidean,
+            4,
+            8,
+            true,
+            vector_snapshot(0, true, true, true),
+            budget
+        )
+        expect(plan.batch.execution.decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+        expect(plan.batch.execution.decision.reason).to_equal("batch-too-small")
+        expect(plan.batch.queue_depth_after).to_equal(0)
+
+    it "should fall back when the GPU runtime is unavailable":
+        step("Plan a large vector search batch while GPU is unavailable")
+        val budget = gpu_wdb_default_budget()
+        val plan = plan_vector_search_offload(
+            DistanceMetric.DotProduct,
+            128,
+            16,
+            true,
+            vector_snapshot(0, false, true, true),
+            budget
+        )
+        expect(plan.batch.execution.decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+        expect(plan.batch.execution.decision.reason).to_equal("gpu-unavailable")
+
+    it "should reject metadata filtering that is not CPU-owned":
+        step("Plan a NoSQL-style metadata filtered vector search")
+        val plan = plan_vector_search_offload_default(
+            DistanceMetric.Cosine,
+            128,
+            16,
+            false,
+            vector_snapshot(0, true, true, true)
+        )
+        expect(plan.batch.execution.decision.path).to_equal(GpuWdbDecisionPath.Reject)
+        expect(plan.batch.execution.decision.reason).to_equal("metadata-filter-must-stay-cpu-owned")

@@ -1,0 +1,403 @@
+# Electron Simple Web Layout Bitmap Evidence
+
+- status: pass
+- reason: pass
+- scene: simple-web-layout-text-flow
+- capture mode: auto
+- DOM HTML path: 
+- dimensions: 96x64
+- Simple checksum: 26379064095284
+- Electron checksum: 26379064095284
+- Simple weighted checksum: 81048876441512278
+- Electron weighted checksum: 81048876441512278
+- mismatch count: 0
+- same pixels: 6144
+- Chrome extra text pixels: 0
+- Simple extra text pixels: 0
+- text color delta pixels: 0
+- surface geometry pixels: 0
+- blur/tolerance used: false
+- Electron frame us: 30788
+- HTML path: build/electron_simple_web_layout_bitmap_evidence/scene.html
+- expected ARGB path: build/electron_simple_web_layout_bitmap_evidence/expected-argb.json
+- captured ARGB path: build/electron_simple_web_layout_bitmap_evidence/electron-argb.json
+- captured ARGB written: true
+
+## Raw Evidence
+- electron_simple_web_layout_status=pass
+- electron_simple_web_layout_reason=pass
+- electron_simple_web_layout_scene=simple-web-layout-text-flow
+- electron_simple_web_layout_capture_mode=auto
+- electron_simple_web_layout_dom_html_path=
+- electron_simple_web_layout_width=96
+- electron_simple_web_layout_height=64
+- electron_simple_web_layout_iterations=3
+- electron_simple_web_layout_simple_checksum=26379064095284
+- electron_simple_web_layout_electron_checksum=26379064095284
+- electron_simple_web_layout_simple_weighted_checksum=81048876441512278
+- electron_simple_web_layout_electron_weighted_checksum=81048876441512278
+- electron_simple_web_layout_mismatch_count=0
+- electron_simple_web_layout_same_pixels=6144
+- electron_simple_web_layout_chrome_extra_text_pixels=0
+- electron_simple_web_layout_simple_extra_text_pixels=0
+- electron_simple_web_layout_text_color_delta_pixels=0
+- electron_simple_web_layout_surface_geometry_pixels=0
+- electron_simple_web_layout_blur_or_tolerance_used=false
+- electron_simple_web_layout_electron_frame_us=30788
+- electron_simple_web_layout_html_path=build/electron_simple_web_layout_bitmap_evidence/scene.html
+- electron_simple_web_layout_expected_argb_path=build/electron_simple_web_layout_bitmap_evidence/expected-argb.json
+- electron_simple_web_layout_captured_argb_path=build/electron_simple_web_layout_bitmap_evidence/electron-argb.json
+- electron_simple_web_layout_captured_argb_written=true
+- electron_simple_web_layout_exit_code=0
+
+## Simple Output
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl:40:47
+-    |
+-  40 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+-    |                                               ^
+- 
+- Use angle brackets: pixels<...> instead of pixels[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2396:58
+-    |
+- 2396 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2414:58
+-    |
+- 2414 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2447:58
+-    |
+- 2447 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2450:42
+-    |
+- 2450 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2474:58
+-    |
+- 2474 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2477:42
+-    |
+- 2477 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Cannot infer type: MethodCall { receiver: Identifier("txt"), method: "len", args: [], generic_args: [] } while lowering layout
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl:40:47
+-    |
+-  40 |             while x + run_w < width and pixels[y * width + x + run_w] == color:
+-    |                                               ^
+- 
+- Use angle brackets: pixels<...> instead of pixels[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2396:58
+-    |
+- 2396 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2414:58
+-    |
+- 2414 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2447:58
+-    |
+- 2447 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2450:42
+-    |
+- 2450 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2474:58
+-    |
+- 2474 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:2477:42
+-    |
+- 2477 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:138:31
+-    |
+- 138 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- 2026-06-17T01:25:23.189507Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=spl_dlopen
+- 2026-06-17T01:25:23.189609Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=spl_dlsym
+- 2026-06-17T01:25:23.189628Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=spl_dlclose
+- 2026-06-17T01:25:23.189644Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=spl_wffi_call_i64
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- 2026-06-17T01:25:23.808128Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_env_get
+- 2026-06-17T01:25:23.808205Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_env_home
+- 2026-06-17T01:25:23.808223Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_env_set
+- 2026-06-17T01:25:23.808238Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_env_cwd
+- 2026-06-17T01:25:23.808252Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_env_remove
+- 2026-06-17T01:25:23.808266Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_hostname
+- 2026-06-17T01:25:23.808280Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_process_run
+- 2026-06-17T01:25:23.808293Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_env_vars
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- 2026-06-17T01:25:23.878923Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_is_available
+- 2026-06-17T01:25:23.879038Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_init
+- 2026-06-17T01:25:23.879064Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_device_count
+- 2026-06-17T01:25:23.879085Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_malloc
+- 2026-06-17T01:25:23.879104Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_free
+- 2026-06-17T01:25:23.879121Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_device_name
+- 2026-06-17T01:25:23.879158Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_device_memory
+- 2026-06-17T01:25:23.879187Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_set_device
+- 2026-06-17T01:25:23.879208Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_get_device
+- 2026-06-17T01:25:23.879240Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_memcpy_h2d
+- 2026-06-17T01:25:23.879263Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_memcpy_d2h
+- 2026-06-17T01:25:23.879309Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_memcpy_d2d
+- 2026-06-17T01:25:23.879331Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_memset
+- 2026-06-17T01:25:23.879360Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_compile_hsaco
+- 2026-06-17T01:25:23.879383Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_get_function
+- 2026-06-17T01:25:23.879412Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_launch_kernel
+- 2026-06-17T01:25:23.879432Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_unload_module
+- 2026-06-17T01:25:23.879452Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_synchronize
+- 2026-06-17T01:25:23.879472Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_create_stream
+- 2026-06-17T01:25:23.879490Z  WARN ThreadId(02) simple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers: 727: Export statement references undefined symbol name=rt_rocm_destroy_stream
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-text-flow
+- width=96
+- height=64
+- checksum=26379064095284
+- weighted_checksum=81048876441512278
+- expected_argb_path=build/electron_simple_web_layout_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+- simple_status=pass
+- simple_reason=pass
+- renderer=pure-simple-web-layout-renderer
+- scene=simple-web-layout-text-flow
+- width=96
+- height=64
+- checksum=26379064095284
+- weighted_checksum=81048876441512278
+- expected_argb_path=build/electron_simple_web_layout_bitmap_evidence/expected-argb.json
+- blur_or_tolerance_used=false
+
+## Electron Output
+- [2106822:0617/012534.139502:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [2106822:0617/012534.209342:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [2106822:0617/012534.229632:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [2106822:0617/012534.236160:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+- [2106822:0617/012534.236372:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")
+- [2106822:0617/012534.247227:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+- [2106822:0617/012534.247493:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: 
+- renderer=electron-live-capture-page
+- scene=simple-web-layout-text-flow
+- width=96
+- height=64
+- iterations=3
+- checksum=26379064095284
+- expected_checksum=26379064095284
+- weighted_checksum=81048876441512278
+- expected_weighted_checksum=81048876441512278
+- mismatch_count=0
+- frame_us=30788
+- capture_native_width=96
+- capture_native_height=64
+- capture_downsampled=false
+- captured_argb_path=build/electron_simple_web_layout_bitmap_evidence/electron-argb.json
+- captured_argb_written=true
+- generated_gui_text_normalization_pixels=0
+- blur_or_tolerance_used=false

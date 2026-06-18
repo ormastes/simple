@@ -105,6 +105,19 @@ helper functions inside normal SSpec `it` blocks. The helper may wrap repeated
 setup/readback, but it must contain real assertions and must not replace
 `expect`, `describe`, `it`, or the canonical matchers.
 
+For RenderDoc evidence, use the shared helper interface instead of spelling
+`renderdoccmd` directly in each spec or check script:
+
+- `scripts/tool/renderdoc-evidence.shs capture-simple` for the Simple
+  in-application `rt_renderdoc_*` Vulkan Engine2D path.
+- `scripts/tool/renderdoc-evidence.shs capture-html` for original RenderDoc
+  Chrome HTML/CSS capture.
+- `test/helpers/renderdoc_capture_helper.shs` for test-facing shell helpers.
+
+Record `.rdc` path, `RDOC` magic validation, capture log path, and any
+host-unavailable reason as artifact captures. Screenshot-only evidence is not
+Vulkan IO-level RenderDoc evidence.
+
 Prefer the strongest available oracle for the surface:
 
 - HTML/CSS/WASM-backed surfaces: first assert HTML, DOM-visible text,

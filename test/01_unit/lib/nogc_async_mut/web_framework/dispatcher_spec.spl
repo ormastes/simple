@@ -1,0 +1,367 @@
+use std.spec.*
+use std.http_server.types.{HttpRequestData, LocationConfig, HttpResponseData}
+use std.http_server.response.{build_json}
+use std.web_framework.{WebFrameworkGpuRouteValidatedAdoption}
+use std.web_framework.router.{WebRouter}
+use std.web_framework.app.{WebApp}
+use std.web_framework.dispatcher.{AppDispatcher}
+use std.web_db_offload.web_route.{WebGpuRouteKind}
+use std.web_db_offload.contract.{GpuWdbCoarseDataPath}
+use std.web_db_offload.web_profile.{web_gpu_profile_rank, web_gpu_profile_all, web_gpu_profile_cpu_only}
+use std.web_db_offload.device_backend.{gpu_wdb_device_backend}
+
+"""
+# Async Web Framework Dispatcher GPU Adoption
+
+## Overview
+
+These scenarios verify the production dispatcher adoption path for GPU web
+route accounting. Controller responses remain CPU-authoritative while
+configured coarse routes may record GPU dispatch evidence through the shared
+web/database offload facade.
+
+## Examples
+
+Register normal controller actions, opt a route into `WebGpuRouteKind.Rank`,
+and call `dispatch_with_gpu_adoption` to inspect the offload evidence.
+
+**Requirements:** doc/02_requirements/feature/gpu_web_db_offload.md
+**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
+**Design:** doc/05_design/gpu_web_db_offload.md
+**Research:** N/A
+"""
+
+fn dispatch_request(method: text, path: text, params: Dict<text, text>) -> HttpRequestData:
+    HttpRequestData(
+        method: method,
+        path: path,
+        query: "",
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: params,
+        peer_addr: "127.0.0.1"
+    )
+
+fn dispatch_location() -> LocationConfig:
+    LocationConfig(
+        pattern: "/",
+        match_type: "prefix",
+        handler_type: "app",
+        root: "",
+        proxy_pass: "",
+        middlewares: []
+    )
+
+fn rank_create(ctx) -> HttpResponseData:
+    build_json("{\"ranked\":true}")
+
+fn embed_create(ctx) -> HttpResponseData:
+    build_json("{\"embedding\":[1,2,3]}")
+
+fn transform_update(ctx) -> HttpResponseData:
+    build_json("{\"transformed\":true}")
+
+fn proxy_forward(ctx) -> HttpResponseData:
+    build_json("{\"proxied\":true}")
+
+fn health_show(ctx) -> HttpResponseData:
+    build_json("{\"status\":\"ok\"}")
+
+describe "async web framework dispatcher GPU adoption":
+    it "should execute matched GPU route adoption while preserving controller response":
+        step("Route a configured controller action through dispatcher offload adoption")
+        var router = WebRouter.new()
+        router = router.post("/rank", "rank", "create")
+        var dispatcher = AppDispatcher.new(router)
+        dispatcher = dispatcher.register_action("rank", "create", rank_create)
+        dispatcher = dispatcher.register_gpu_route("rank", "create", WebGpuRouteKind.Rank, 8, 512)
+        dispatcher = dispatcher.configure_gpu_offload("cuda", 1, ["gpu_web_rank_batch"], true)
+
+        val adoption = dispatcher.dispatch_with_gpu_adoption(
+            dispatch_request("POST", "/rank", {}),
+            dispatch_location()
+        )
+        val response = dispatcher.dispatch(
+            dispatch_request("POST", "/rank", {}),
+            dispatch_location()
+        )
+
+        expect(adoption.matched).to_be(true)
+        expect(adoption.reason).to_equal("matched-gpu-route-config")
+        expect(adoption.execution.offload.submission.dispatch_target).to_equal("gpu_web_rank_batch")
+        expect(adoption.execution.offload.gpu_dispatched).to_be(true)
+        expect(adoption.execution.offload.cpu_authoritative).to_be(true)
+        expect(adoption.execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.PinnedHostBatch)
+        expect(adoption.execution.response.body).to_equal("{\"ranked\":true}")
+        expect(response.body).to_equal("{\"ranked\":true}")
+        expect(response.status).to_equal(200)
+
+    it "should keep unconfigured dispatcher actions on CPU without fake GPU evidence":
+        step("Route an unconfigured controller action through CPU-owned fallback")
+        var router = WebRouter.new()
+        router = router.get("/health", "health", "show")
+        var dispatcher = AppDispatcher.new(router)
+        dispatcher = dispatcher.register_action("health", "show", health_show)
+        dispatcher = dispatcher.configure_gpu_offload("cuda", 1, ["gpu_web_rank_batch"], true)
+
+        val adoption = dispatcher.dispatch_with_gpu_adoption(
+            dispatch_request("GET", "/health", {}),
+            dispatch_location()
+        )
+
+        expect(adoption.matched).to_be(false)
+        expect(adoption.reason).to_equal("no-gpu-route-config")
+        expect(adoption.execution.offload.route_kind).to_equal(WebGpuRouteKind.HttpControlPlane)
+        expect(adoption.execution.offload.gpu_dispatched).to_be(false)
+        expect(adoption.execution.offload.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(adoption.execution.offload.submission.reason).to_equal("control-plane-stays-on-cpu")
+        expect(adoption.execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.CpuOnly)
+        expect(adoption.execution.response.body).to_equal("{\"status\":\"ok\"}")
+
+    it "should configure dispatcher GPU adoption from a reusable web profile":
+        step("Use a named web GPU profile instead of raw target registration")
+        var router = WebRouter.new()
+        router = router.post("/rank", "rank", "create")
+        var dispatcher = AppDispatcher.new(router)
+        dispatcher = dispatcher.register_action("rank", "create", rank_create)
+        dispatcher = dispatcher.register_gpu_route("rank", "create", WebGpuRouteKind.Rank, 8, 512)
+        dispatcher = dispatcher.configure_gpu_profile(web_gpu_profile_rank("cuda", 7, 4))
+
+        val adoption = dispatcher.dispatch_with_gpu_adoption(
+            dispatch_request("POST", "/rank", {}),
+            dispatch_location()
+        )
+
+        expect(adoption.matched).to_be(true)
+        expect(adoption.execution.offload.submission.dispatch_target).to_equal("gpu_web_rank_batch")
+        expect(adoption.execution.offload.gpu_dispatched).to_be(true)
+        expect(adoption.execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.PinnedHostBatch)
+
+    it "should configure GPU route adoption through the WebApp facade":
+        step("Use WebApp ergonomic methods and dispatch through the configured app dispatcher")
+        var app = WebApp.simple("127.0.0.1:0").unwrap()
+        app = app.post("/rank", "rank", "create")
+        app = app.register_action("rank", "create", rank_create)
+        app = app.register_gpu_route("rank", "create", WebGpuRouteKind.Rank, 8, 512)
+        app = app.configure_gpu_profile(web_gpu_profile_rank("cuda", 7, 4))
+
+        val adoption = app.dispatcher.dispatch_with_gpu_adoption(
+            dispatch_request("POST", "/rank", {}),
+            dispatch_location()
+        )
+
+        expect(adoption.matched).to_be(true)
+        expect(adoption.reason).to_equal("matched-gpu-route-config")
+        expect(adoption.execution.offload.submission.dispatch_target).to_equal("gpu_web_rank_batch")
+        expect(adoption.execution.offload.gpu_dispatched).to_be(true)
+        expect(adoption.execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.PinnedHostBatch)
+        expect(adoption.execution.response.body).to_equal("{\"ranked\":true}")
+
+    it "should replace matched dispatcher responses after native candidates match":
+        step("Expose validated web profile replacement through dispatcher GPU adoption")
+        var router = WebRouter.new()
+        router = router.post("/rank", "rank", "create")
+        var dispatcher = AppDispatcher.new(router)
+        dispatcher = dispatcher.register_action("rank", "create", rank_create)
+        dispatcher = dispatcher.register_gpu_route("rank", "create", WebGpuRouteKind.Rank, 8, 512)
+        dispatcher = dispatcher.configure_gpu_profile(web_gpu_profile_rank("cuda", 7, 4))
+
+        val adoption: WebFrameworkGpuRouteValidatedAdoption = dispatcher.dispatch_with_gpu_validated_adoption(
+            dispatch_request("POST", "/rank", {}),
+            dispatch_location(),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_web_rank_batch"], true, "cuda-device-0"),
+            7,
+            build_json("{\"ranked\":true}"),
+            100,
+            190,
+            47,
+            "cuda-event"
+        )
+
+        expect(adoption.matched).to_be(true)
+        expect(adoption.reason).to_equal("matched-gpu-route-config")
+        expect(adoption.execution.validated.gpu_candidate_validated).to_be(true)
+        expect(adoption.execution.validated.validation_reason).to_equal("production-gpu-web-response-match")
+        expect(adoption.execution.validated.execution.cpu_authoritative).to_be(false)
+        expect(adoption.execution.response.body).to_equal("{\"ranked\":true}")
+
+    it "should keep unconfigured validated dispatcher routes CPU owned":
+        step("Avoid production replacement for actions without GPU route config")
+        var router = WebRouter.new()
+        router = router.get("/health", "health", "show")
+        var dispatcher = AppDispatcher.new(router)
+        dispatcher = dispatcher.register_action("health", "show", health_show)
+        dispatcher = dispatcher.configure_gpu_profile(web_gpu_profile_rank("cuda", 7, 4))
+
+        val adoption = dispatcher.dispatch_with_gpu_validated_adoption(
+            dispatch_request("GET", "/health", {}),
+            dispatch_location(),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_web_rank_batch"], true, "cuda-device-0"),
+            7,
+            build_json("{\"status\":\"ok\"}"),
+            100,
+            190,
+            47,
+            "cuda-event"
+        )
+
+        expect(adoption.matched).to_be(false)
+        expect(adoption.reason).to_equal("no-gpu-route-config")
+        expect(adoption.execution.validated.gpu_candidate_validated).to_be(false)
+        expect(adoption.execution.validated.execution.cpu_authoritative).to_be(true)
+        expect(adoption.execution.validated.validation_reason).to_equal("production-device-not-measured")
+        expect(adoption.execution.response.body).to_equal("{\"status\":\"ok\"}")
+
+    it "should advance dispatcher queue state after validated native replacements":
+        step("Carry production native queue state across validated dispatcher requests")
+        var router = WebRouter.new()
+        router = router.post("/rank", "rank", "create")
+        var dispatcher = AppDispatcher.new(router)
+        dispatcher = dispatcher.register_action("rank", "create", rank_create)
+        dispatcher = dispatcher.register_gpu_route("rank", "create", WebGpuRouteKind.Rank, 8, 512)
+        dispatcher = dispatcher.configure_gpu_profile(web_gpu_profile_rank("cuda", 7, 4))
+        val backend = gpu_wdb_device_backend("cuda", 7, ["gpu_web_rank_batch"], true, "cuda-device-0")
+
+        val first = dispatcher.dispatch_with_gpu_validated_adoption_advancing(
+            dispatch_request("POST", "/rank", {}),
+            dispatch_location(),
+            backend,
+            7,
+            build_json("{\"ranked\":true}"),
+            100,
+            190,
+            47,
+            "cuda-event"
+        )
+        val second = dispatcher.dispatch_with_gpu_validated_adoption_advancing(
+            dispatch_request("POST", "/rank", {}),
+            dispatch_location(),
+            backend,
+            7,
+            build_json("{\"ranked\":true}"),
+            200,
+            290,
+            49,
+            "cuda-event"
+        )
+
+        expect(first.execution.validated.profile.queue_state.submitted_count).to_equal(1)
+        expect(first.execution.validated.profile.queue_state.completed_count).to_equal(1)
+        expect(first.execution.validated.profile.queue_state.gpu_hit_count).to_equal(1)
+        expect(second.execution.validated.profile.queue_state.submitted_count).to_equal(2)
+        expect(second.execution.validated.profile.queue_state.completed_count).to_equal(2)
+        expect(second.execution.validated.profile.queue_state.gpu_hit_count).to_equal(2)
+        expect(second.execution.validated.gpu_candidate_validated).to_be(true)
+        expect(second.execution.response.body).to_equal("{\"ranked\":true}")
+
+    it "should preserve CPU fallback from a reusable CPU-only web profile":
+        step("Use a named CPU-only profile to disable GPU evidence")
+        var router = WebRouter.new()
+        router = router.post("/rank", "rank", "create")
+        var dispatcher = AppDispatcher.new(router)
+        dispatcher = dispatcher.register_action("rank", "create", rank_create)
+        dispatcher = dispatcher.register_gpu_route("rank", "create", WebGpuRouteKind.Rank, 8, 512)
+        dispatcher = dispatcher.configure_gpu_profile(web_gpu_profile_cpu_only("web-maintenance"))
+
+        val adoption = dispatcher.dispatch_with_gpu_adoption(
+            dispatch_request("POST", "/rank", {}),
+            dispatch_location()
+        )
+
+        expect(adoption.matched).to_be(true)
+        expect(adoption.execution.offload.gpu_dispatched).to_be(false)
+        expect(adoption.execution.offload.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(adoption.execution.offload.submission.reason).to_equal("gpu-unavailable")
+        expect(adoption.execution.response.body).to_equal("{\"ranked\":true}")
+
+    it "should validate mixed non-inference WebApp routes through the all GPU profile":
+        step("Carry app-level transform and embedding routes through validated native adoption")
+        var app = WebApp.simple("127.0.0.1:0").unwrap()
+        app = app.post("/embed", "embed", "create")
+        app = app.post("/transform", "transform", "update")
+        app = app.register_action("embed", "create", embed_create)
+        app = app.register_action("transform", "update", transform_update)
+        app = app.register_gpu_route("embed", "create", WebGpuRouteKind.Embedding, 16, 512)
+        app = app.register_gpu_route("transform", "update", WebGpuRouteKind.Transform, 8, 1024)
+        app = app.configure_gpu_profile(web_gpu_profile_all("cuda", 7, 4))
+        val backend = gpu_wdb_device_backend(
+            "cuda",
+            7,
+            ["gpu_web_embedding_batch", "gpu_web_transform_batch"],
+            true,
+            "cuda-device-0"
+        )
+
+        val embedding = app.dispatcher.dispatch_with_gpu_validated_adoption_advancing(
+            dispatch_request("POST", "/embed", {}),
+            dispatch_location(),
+            backend,
+            7,
+            build_json("{\"embedding\":[1,2,3]}"),
+            100,
+            180,
+            43,
+            "cuda-event"
+        )
+        val transform = app.dispatcher.dispatch_with_gpu_validated_adoption_advancing(
+            dispatch_request("POST", "/transform", {}),
+            dispatch_location(),
+            backend,
+            7,
+            build_json("{\"transformed\":true}"),
+            200,
+            290,
+            51,
+            "cuda-event"
+        )
+
+        expect(embedding.matched).to_be(true)
+        expect(embedding.execution.validated.gpu_candidate_validated).to_be(true)
+        expect(embedding.execution.validated.execution.submission.dispatch_target).to_equal("gpu_web_embedding_batch")
+        expect(embedding.execution.response.body).to_equal("{\"embedding\":[1,2,3]}")
+        expect(transform.matched).to_be(true)
+        expect(transform.execution.validated.gpu_candidate_validated).to_be(true)
+        expect(transform.execution.validated.execution.submission.dispatch_target).to_equal("gpu_web_transform_batch")
+        expect(transform.execution.validated.profile.queue_state.submitted_count).to_equal(2)
+        expect(transform.execution.validated.profile.queue_state.completed_count).to_equal(2)
+        expect(transform.execution.validated.profile.queue_state.gpu_hit_count).to_equal(2)
+        expect(transform.execution.response.body).to_equal("{\"transformed\":true}")
+
+    it "should keep configured WebApp proxy forwarding CPU owned under the all GPU profile":
+        step("Prevent proxy control-plane routes from claiming GPU dispatch through product config")
+        var app = WebApp.simple("127.0.0.1:0").unwrap()
+        app = app.post("/proxy", "proxy", "forward")
+        app = app.register_action("proxy", "forward", proxy_forward)
+        app = app.register_gpu_route("proxy", "forward", WebGpuRouteKind.ProxyForwarding, 1, 4096)
+        app = app.configure_gpu_profile(web_gpu_profile_all("cuda", 7, 4))
+
+        val adoption = app.dispatcher.dispatch_with_gpu_adoption(
+            dispatch_request("POST", "/proxy", {}),
+            dispatch_location()
+        )
+
+        expect(adoption.matched).to_be(true)
+        expect(adoption.reason).to_equal("matched-gpu-route-config")
+        expect(adoption.execution.offload.route_kind).to_equal(WebGpuRouteKind.ProxyForwarding)
+        expect(adoption.execution.offload.gpu_dispatched).to_be(false)
+        expect(adoption.execution.offload.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(adoption.execution.offload.submission.reason).to_equal("control-plane-stays-on-cpu")
+        expect(adoption.execution.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.CpuOnly)
+        expect(adoption.execution.response.body).to_equal("{\"proxied\":true}")
+
+    it "should return normal dispatcher errors without GPU route side effects":
+        step("Reject missing routes before any configured GPU action can match")
+        var router = WebRouter.new()
+        router = router.post("/rank", "rank", "create")
+        var dispatcher = AppDispatcher.new(router)
+        dispatcher = dispatcher.register_action("rank", "create", rank_create)
+        dispatcher = dispatcher.register_gpu_route("rank", "create", WebGpuRouteKind.Rank, 8, 512)
+
+        val response = dispatcher.dispatch(
+            dispatch_request("GET", "/missing", {}),
+            dispatch_location()
+        )
+
+        expect(response.status).to_equal(404)
+        expect(response.body).to_contain("No route matches")

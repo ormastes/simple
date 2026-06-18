@@ -25,8 +25,26 @@ Generated ROCm/HIP evidence is intentionally fail-closed until a verified HSACO 
 - Verify runtime tooling before running: rocminfo, libamdhip64, libhsa-runtime64.
 - Verify visible AMD GPU runtime before running: rocminfo.
 - Refresh and rebuild generated toolchains for HSACO:
+<<<<<<< Conflict 1 of 3
++++++++ Contents of side #1
   SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=src HIPCC_TOOL=hipcc HIP_ARCH=gfx1100 sh scripts/check/check-portable-compute-toolchains.shs
+%%%%%%% Changes from base to side #2
+-  - SIMPLE_BIN=bin/simple SIMPLE_LIB=src HIPCC_TOOL=hipcc HIP_ARCH=gfx1100 sh scripts/check/check-portable-compute-toolchains.shs
++  SIMPLE_BIN=bin/simple SIMPLE_LIB=src HIPCC_TOOL=hipcc HIP_ARCH=gfx1100 sh scripts/check/check-portable-compute-toolchains.shs
+>>>>>>> Conflict 1 of 3 ends
 - Run proof lane directly:
+<<<<<<< Conflict 2 of 3
++++++++ Contents of side #1
   SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=src HIP_ARCH=gfx1100 sh scripts/check/check-rocm-generated-2d-readback.shs
+%%%%%%% Changes from base to side #2
+-  - SIMPLE_BIN=bin/simple SIMPLE_LIB=src HIP_ARCH=gfx1100 sh scripts/check/check-rocm-generated-2d-readback.shs
++  SIMPLE_BIN=bin/simple SIMPLE_LIB=src HIP_ARCH=gfx1100 sh scripts/check/check-rocm-generated-2d-readback.shs
+>>>>>>> Conflict 2 of 3 ends
 - Promote through platform aggregate:
+<<<<<<< Conflict 3 of 3
++++++++ Contents of side #1
   SIMPLE_BIN=/home/ormastes/dev/pub/simple/bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
+%%%%%%% Changes from base to side #2
+-  - SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
++  SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
+>>>>>>> Conflict 3 of 3 ends

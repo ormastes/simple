@@ -1,0 +1,321 @@
+use std.spec.*
+use std.database.core.{SdnDatabase, SdnTable, SdnRow}
+use std.database.{DbStorageVectorDeviceOffloadExecution, db_query_offload_execute_vector_device_validated, vector_search_profile_allows_gpu}
+use std.database.vector.types.{DistanceMetric, VectorDbConfig}
+use std.database.vector.codec.{encode_vector, encode_metadata}
+use std.database.vector.index.{BruteForceIndex}
+use std.database.vector.store.{VectorDatabase}
+use std.database.vector.search_offload.{vector_search_offload_used_gpu}
+use std.database.query_offload.{db_query_vector}
+use std.database.storage_mode_offload.{DbStorageOffloadWorkload}
+use std.web_db_offload.contract.{GpuWdbBudget, GpuWdbWorkKind, gpu_wdb_default_budget}
+use std.web_db_offload.queue.{gpu_wdb_queue_initial}
+use std.web_db_offload.library.{gpu_wdb_library_empty, gpu_wdb_library_with_targets}
+use std.web_db_offload.device_backend.{gpu_wdb_device_backend}
+use std.web_db_offload.scheduler.{GpuWdbScheduleClass, gpu_wdb_batch_accumulator}
+
+"""
+# Vector Store Search Offload
+
+## Overview
+
+These scenarios prove the vector store remains CPU-authoritative by default
+while exposing opt-in GPU queue accounting for coarse vector search batches.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/gpu_web_db_offload.md
+
+- Vector store search remains CPU-authoritative by default.
+- Coarse vector search batches can report registered GPU dispatch evidence.
+- Small background vector searches can defer into the shared accumulator.
+- Metadata filtering remains CPU-owned before offload accounting.
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
+
+## Design
+
+**Design:** doc/05_design/gpu_web_db_offload.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+Call `search_with_offload_accumulating` after normal CPU vector search. The
+returned results remain the CPU-authoritative nearest neighbors while the
+offload record can defer small batches into `GpuWdbWorkKind.DbVectorSearch`.
+"""
+
+fn store_config() -> VectorDbConfig:
+    VectorDbConfig(
+        dimensions: 2,
+        metric: DistanceMetric.Euclidean,
+        max_entries: 0
+    )
+
+fn offload_test_budget() -> GpuWdbBudget:
+    GpuWdbBudget(
+        max_queue_depth: 64,
+        max_batch_bytes: 1024,
+        min_gpu_batch_bytes: 1
+    )
+
+fn entry_row(id: text, vector: [f64], metadata: Dict<text, text>) -> SdnRow:
+    var row = SdnRow.empty()
+    row.set("id", id)
+    row.set("vector", encode_vector(vector))
+    row.set("norm", "0.0")
+    row.set("metadata", encode_metadata(metadata))
+    row.set("valid", "1")
+    row
+
+fn sample_store(path: text) -> VectorDatabase:
+    var table = SdnTable.new("entries", ["id", "vector", "norm", "metadata", "valid"])
+    table.add_row(entry_row("a", [0.0, 0.0], {"tenant": "t1"}))
+    table.add_row(entry_row("b", [10.0, 0.0], {"tenant": "t2"}))
+    table.add_row(entry_row("c", [1.0, 0.0], {"tenant": "t1"}))
+    var meta = SdnDatabase.new(path)
+    meta.set_table("entries", table)
+    var idx = BruteForceIndex.create(2)
+    val a = idx.add("a", [0.0, 0.0])
+    val b = idx.add("b", [10.0, 0.0])
+    val c = idx.add("c", [1.0, 0.0])
+    expect(a.?).to_be(true)
+    expect(b.?).to_be(true)
+    expect(c.?).to_be(true)
+    VectorDatabase(
+        meta_db: meta,
+        config: store_config(),
+        index: idx,
+        entry_count: 3
+    )
+
+describe "vector store search offload":
+    it "should preserve normal CPU search as the default behavior":
+        step("Run ordinary search without any GPU queue or registry config")
+        val db = sample_store("/tmp/simple_vector_store_default")
+        val results = db.search([0.0, 0.0], 2).unwrap()
+        expect(results.len()).to_equal(2)
+        expect(results[0].id).to_equal("a")
+        expect(results[1].id).to_equal("c")
+
+    it "should return CPU-authoritative results when GPU target is missing":
+        step("Opt into offload accounting with an empty target registry")
+        val db = sample_store("/tmp/simple_vector_store_missing_gpu")
+        val cpu = db.search([0.0, 0.0], 2).unwrap()
+        val execution = db.search_with_offload(
+            [0.0, 0.0],
+            2,
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_library_empty(),
+            true,
+            true,
+            true,
+            offload_test_budget()
+        ).unwrap()
+        expect(vector_search_offload_used_gpu(execution)).to_be(false)
+        expect(execution.results.len()).to_equal(cpu.len())
+        expect(execution.results[0].id).to_equal(cpu[0].id)
+        expect(execution.submission.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.cpu_authoritative).to_be(true)
+
+    it "should record GPU dispatch for coarse registered vector search":
+        step("Opt into a registered vector GPU target while preserving CPU results")
+        val db = sample_store("/tmp/simple_vector_store_registered_gpu")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_vector_search_batch"])
+        val execution = db.search_with_offload(
+            [0.0, 0.0],
+            2,
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            true,
+            offload_test_budget()
+        ).unwrap()
+        expect(vector_search_profile_allows_gpu(execution)).to_be(true)
+        expect(vector_search_offload_used_gpu(execution)).to_be(true)
+        expect(execution.submission.dispatch_target).to_equal("gpu_db_vector_search_batch")
+        expect(execution.results[0].id).to_equal("a")
+        expect(execution.results[1].id).to_equal("c")
+        expect(execution.cpu_authoritative).to_be(true)
+
+    it "should replace vector store search results after native candidates match":
+        step("Validate native vector candidates against live vector store CPU search")
+        val db = sample_store("/tmp/simple_vector_store_native_vector_match")
+        val cpu = db.search([0.0, 0.0], 2).unwrap()
+        val execution = db.search_with_device_backend_validated(
+            [0.0, 0.0],
+            2,
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 9, ["gpu_db_vector_search_batch"], true, "cuda-device-0"),
+            true,
+            9,
+            true,
+            offload_test_budget(),
+            cpu,
+            100,
+            220,
+            71,
+            "cuda-event"
+        ).unwrap()
+        expect(vector_search_offload_used_gpu(execution.execution)).to_be(true)
+        expect(execution.execution.cpu_authoritative).to_be(false)
+        expect(execution.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.execution.validation_reason).to_equal("production-gpu-vector-match")
+        expect(execution.execution.results[0].id).to_equal("a")
+        expect(execution.execution.results[1].id).to_equal("c")
+        expect(execution.device_result.production_device_claim).to_be(true)
+
+    it "should expose query-level device validation for vector store search":
+        step("Reuse the DB query offload facade from the vector store boundary")
+        val db = sample_store("/tmp/simple_vector_store_query_native_match")
+        val cpu = db.search([0.0, 0.0], 2).unwrap()
+        val execution = db.search_with_query_device_backend_validated(
+            [0.0, 0.0],
+            2,
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 10, ["gpu_db_vector_search_batch"], true, "cuda-device-0"),
+            true,
+            10,
+            true,
+            offload_test_budget(),
+            cpu,
+            120,
+            260,
+            82,
+            "cuda-event"
+        ).unwrap()
+        val query_execution: DbStorageVectorDeviceOffloadExecution = execution.query_execution
+        expect(execution.results[0].id).to_equal("a")
+        expect(execution.results[1].id).to_equal("c")
+        expect(query_execution.execution.workload).to_equal(DbStorageOffloadWorkload.VectorSearch)
+        expect(query_execution.execution.cpu_authoritative).to_be(false)
+        expect(query_execution.execution.gpu_candidate_validated).to_be(true)
+        expect(query_execution.execution.validation_reason).to_equal("production-gpu-vector-match")
+        expect(query_execution.execution.vector_ids[0]).to_equal("a")
+        expect(query_execution.execution.vector_ids[1]).to_equal("c")
+        expect(query_execution.device_result.production_device_claim).to_be(true)
+        val direct_query_execution: DbStorageVectorDeviceOffloadExecution = db_query_offload_execute_vector_device_validated(
+            db_query_vector(DistanceMetric.Euclidean, 3, 2, true, true, cpu),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 10, ["gpu_db_vector_search_batch"], true, "cuda-device-0"),
+            10,
+            true,
+            offload_test_budget(),
+            cpu,
+            120,
+            260,
+            82,
+            "cuda-event"
+        )
+        expect(direct_query_execution.execution.gpu_candidate_validated).to_be(true)
+        expect(direct_query_execution.execution.validation_reason).to_equal("production-gpu-vector-match")
+
+    it "should keep query-level vector store results CPU-authoritative on GPU mismatch":
+        step("Reject mismatched native vector candidates at the query facade boundary")
+        val db = sample_store("/tmp/simple_vector_store_query_native_mismatch")
+        val cpu = db.search([0.0, 0.0], 2).unwrap()
+        val gpu_candidate = db.search([10.0, 0.0], 2).unwrap()
+        val execution = db.search_with_query_device_backend_validated(
+            [0.0, 0.0],
+            2,
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 10, ["gpu_db_vector_search_batch"], true, "cuda-device-0"),
+            true,
+            10,
+            true,
+            offload_test_budget(),
+            gpu_candidate,
+            120,
+            260,
+            82,
+            "cuda-event"
+        ).unwrap()
+        val query_execution: DbStorageVectorDeviceOffloadExecution = execution.query_execution
+        expect(execution.results[0].id).to_equal(cpu[0].id)
+        expect(execution.results[1].id).to_equal(cpu[1].id)
+        expect(query_execution.execution.cpu_authoritative).to_be(true)
+        expect(query_execution.execution.gpu_candidate_validated).to_be(false)
+        expect(query_execution.execution.validation_reason).to_equal("production-gpu-vector-mismatch")
+        expect(query_execution.execution.vector_ids[0]).to_equal(cpu[0].id)
+        expect(query_execution.execution.vector_ids[1]).to_equal(cpu[1].id)
+
+    it "should keep metadata filtering CPU-owned in offload-aware search":
+        step("Apply metadata filtering before returning CPU-authoritative results")
+        val db = sample_store("/tmp/simple_vector_store_filter_gpu")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_vector_search_batch"])
+        val execution = db.search_with_filter_offload(
+            [0.0, 0.0],
+            2,
+            {"tenant": "t1"},
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            true,
+            offload_test_budget()
+        ).unwrap()
+        expect(execution.results.len()).to_equal(2)
+        expect(execution.results[0].metadata.get("tenant")).to_equal("t1")
+        expect(execution.results[1].metadata.get("tenant")).to_equal("t1")
+        expect(execution.cpu_authoritative).to_be(true)
+
+    it "should accumulate small vector searches through the vector store":
+        step("Defer tiny background vector search batches into the shared accumulator")
+        val db = sample_store("/tmp/simple_vector_store_accumulate")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_vector_search_batch"])
+        val execution = db.search_with_offload_accumulating(
+            [0.0, 0.0],
+            2,
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            true,
+            GpuWdbBudget(
+                max_queue_depth: 64,
+                max_batch_bytes: 1024,
+                min_gpu_batch_bytes: 1024
+            ),
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.DbVectorSearch)
+        ).unwrap()
+        expect(execution.results[0].id).to_equal("a")
+        expect(execution.results[1].id).to_equal("c")
+        expect(execution.accumulated.execution.workload).to_equal(DbStorageOffloadWorkload.VectorSearch)
+        expect(execution.accumulated.execution.dispatch_target).to_equal("gpu_batch_accumulator")
+        expect(execution.accumulated.accumulator_result.accepted).to_be(true)
+        expect(execution.accumulated.accumulator_result.accumulator.item_count).to_equal(3)
+
+    it "should keep filtered vector accumulation CPU-owned":
+        step("Apply metadata filters before accumulating vector offload evidence")
+        val db = sample_store("/tmp/simple_vector_store_filter_accumulate")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_vector_search_batch"])
+        val execution = db.search_with_filter_offload_accumulating(
+            [0.0, 0.0],
+            2,
+            {"tenant": "t1"},
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            true,
+            GpuWdbBudget(
+                max_queue_depth: 64,
+                max_batch_bytes: 1024,
+                min_gpu_batch_bytes: 1024
+            ),
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.DbVectorSearch)
+        ).unwrap()
+        expect(execution.results.len()).to_equal(2)
+        expect(execution.results[0].metadata.get("tenant")).to_equal("t1")
+        expect(execution.results[1].metadata.get("tenant")).to_equal("t1")
+        expect(execution.accumulated.execution.vector_ids[0]).to_equal("a")
+        expect(execution.accumulated.execution.vector_ids[1]).to_equal("c")
+        expect(execution.accumulated.accumulator_result.accepted).to_be(true)

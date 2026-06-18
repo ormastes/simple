@@ -1,0 +1,79 @@
+#!/usr/bin/env sh
+set -eu
+
+SPEC="test/05_perf/web/proxy_reverse_proxy_bench_spec.spl"
+DOC="doc/06_spec/test/05_perf/web/proxy_reverse_proxy_bench_spec.md"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ -z "$SIMPLE_BIN" ]; then
+    if [ -x "bin/simple" ]; then
+        SIMPLE_BIN="bin/simple"
+    else
+        SIMPLE_BIN="$(command -v simple)"
+    fi
+fi
+
+"$SIMPLE_BIN" check "$SPEC"
+SIMPLE_LIB=src "$SIMPLE_BIN" test "$SPEC" --mode=interpreter
+SIMPLE_LIB=src "$SIMPLE_BIN" spipe-docgen "$SPEC" --output doc/06_spec --no-index
+
+test -f "$DOC"
+grep -q 'async_proxy_policy_100' "$DOC"
+grep -q 'async_proxy_request_stream_100' "$DOC"
+grep -q 'async_proxy_tunnel_handshake_100' "$DOC"
+grep -q 'async_proxy_hardening_evidence_100' "$DOC"
+grep -q 'sync_proxy_helper_100' "$DOC"
+
+sh scripts/check/check-proxy-live-socket-benchmark.shs
+grep -q 'live_socket_proxy_http_cached_50' doc/09_report/perf/proxy_live_socket_benchmark_2026-06-16.md
+grep -q 'native_simple_cached_proxy_http_50' doc/09_report/perf/proxy_live_socket_benchmark_2026-06-16.md
+grep -q 'upstream_reuse' doc/09_report/perf/proxy_live_socket_benchmark_2026-06-16.md
+grep -q 'max_rss_kb' doc/09_report/perf/proxy_live_socket_benchmark_2026-06-16.md
+grep -q 'native_simple_cached_proxy_loopback' doc/09_report/perf/proxy_live_socket_benchmark_2026-06-16.md
+grep -q 'native_simple_cached_proxy_loopback' doc/10_metrics/perf/proxy_live_socket_benchmark.md
+
+python3 - <<'PY'
+from pathlib import Path
+
+paths = [
+    Path("doc/09_report/perf/proxy_live_socket_benchmark_2026-06-16.md"),
+    Path("doc/10_metrics/perf/proxy_live_socket_benchmark.md"),
+]
+expected = {
+    "live_socket_proxy_http_cached_50": ("python_reference_loopback", 50, 49, 1),
+    "live_socket_proxy_tunnel_50": ("python_reference_loopback", 50, 0, 0),
+    "native_simple_cached_proxy_http_50": ("native_simple_cached_proxy_loopback", 50, 49, 1),
+}
+
+for path in paths:
+    rows = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| ") or line.startswith("| name ") or line.startswith("|---"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != 12:
+            raise SystemExit(f"{path}: malformed row: {line}")
+        rows[cells[0]] = cells
+
+    for name, (runtime, iterations, reuse, connects) in expected.items():
+        if name not in rows:
+            raise SystemExit(f"{path}: missing row {name}")
+        cells = rows[name]
+        if cells[1] != runtime:
+            raise SystemExit(f"{path}: {name} runtime={cells[1]} expected={runtime}")
+        if int(cells[2]) != iterations:
+            raise SystemExit(f"{path}: {name} iterations={cells[2]} expected={iterations}")
+        if int(cells[6]) <= 0:
+            raise SystemExit(f"{path}: {name} bytes must be > 0")
+        if int(cells[7]) != reuse:
+            raise SystemExit(f"{path}: {name} upstream_reuse={cells[7]} expected={reuse}")
+        if int(cells[8]) != connects:
+            raise SystemExit(f"{path}: {name} upstream_connects={cells[8]} expected={connects}")
+        if int(cells[9]) <= 0:
+            raise SystemExit(f"{path}: {name} max_rss_kb must be > 0")
+        if int(cells[10]) != 0:
+            raise SystemExit(f"{path}: {name} timeouts={cells[10]} expected=0")
+        if int(cells[11]) != 0:
+            raise SystemExit(f"{path}: {name} errors={cells[11]} expected=0")
+PY
+
+echo "STATUS: PASS proxy benchmark report"

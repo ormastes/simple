@@ -1,0 +1,263 @@
+#!/bin/sh
+# Shared RenderDoc evidence helpers for original renderdoccmd capture and the
+# Simple in-application rt_renderdoc_* capture path.
+
+rdoc_repo_root() {
+    if [ "${RDOC_ROOT:-}" != "" ]; then
+        printf '%s\n' "$RDOC_ROOT"
+    else
+        CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd
+    fi
+}
+
+rdoc_find_renderdoc_home() {
+    if [ "${RDOC_HOME:-}" != "" ] && [ -x "$RDOC_HOME/bin/renderdoccmd" ]; then
+        printf '%s\n' "$RDOC_HOME"
+        return 0
+    fi
+    root="$1"
+    if [ -x "$root/build/tools/renderdoc/bin/renderdoccmd" ]; then
+        printf '%s\n' "$root/build/tools/renderdoc"
+        return 0
+    fi
+    for candidate in "$root"/build/tools/renderdoc-*; do
+        if [ -x "$candidate/bin/renderdoccmd" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+rdoc_find_chrome() {
+    root="$1"
+    if [ "${RDOC_CHROME:-}" != "" ] && [ -x "$RDOC_CHROME" ]; then
+        printf '%s\n' "$RDOC_CHROME"
+        return 0
+    fi
+    for candidate in \
+        "$HOME/.cache/ms-playwright"/chromium-*/chrome-linux64/chrome \
+        "$root/.cache/ms-playwright"/chromium-*/chrome-linux64/chrome \
+        /usr/bin/google-chrome \
+        /usr/bin/google-chrome-stable \
+        /usr/bin/chromium \
+        /usr/bin/chromium-browser
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+rdoc_status_env() {
+    root="$1"
+    renderdoc_home="${2:-}"
+    chrome_bin="${3:-}"
+    echo "rdoc_root=$root"
+    echo "rdoc_home=$renderdoc_home"
+    if [ "$renderdoc_home" != "" ]; then
+        echo "rdoc_cmd=$renderdoc_home/bin/renderdoccmd"
+        echo "rdoc_lib=$renderdoc_home/lib"
+    else
+        echo "rdoc_cmd="
+        echo "rdoc_lib="
+    fi
+    echo "rdoc_chrome=$chrome_bin"
+    echo "rdoc_output_dir=${RDOC_OUTPUT_DIR:-build/renderdoc/evidence}"
+    echo "rdoc_timeout_secs=${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
+}
+
+rdoc_require_renderdoc() {
+    root="$1"
+    renderdoc_home="$(rdoc_find_renderdoc_home "$root" || true)"
+    if [ "$renderdoc_home" = "" ]; then
+        echo "SKIP: renderdoccmd not found under build/tools/renderdoc*" >&2
+        return 1
+    fi
+    printf '%s\n' "$renderdoc_home"
+}
+
+rdoc_prepare_output_dir() {
+    out_dir="$1"
+    rm -rf "$out_dir"
+    mkdir -p "$out_dir"
+}
+
+rdoc_validate_rdc_magic() {
+    validate_rdc_file="$1"
+    validate_env_path="${2:-}"
+    if [ ! -s "$validate_rdc_file" ]; then
+        {
+            echo "rdoc_capture_status=fail"
+            echo "rdoc_capture_reason=missing-rdc"
+            echo "rdoc_capture_file="
+            echo "rdoc_capture_size=0"
+            echo "rdoc_capture_magic="
+        } | tee ${validate_env_path:+"$validate_env_path"}
+        return 1
+    fi
+    magic="$(dd if="$validate_rdc_file" bs=4 count=1 2>/dev/null || true)"
+    size="$(wc -c < "$validate_rdc_file")"
+    if [ "$magic" = "RDOC" ]; then
+        {
+            echo "rdoc_capture_status=pass"
+            echo "rdoc_capture_reason=pass"
+            echo "rdoc_capture_file=$validate_rdc_file"
+            echo "rdoc_capture_size=$size"
+            echo "rdoc_capture_magic=RDOC"
+        } | tee ${validate_env_path:+"$validate_env_path"}
+        return 0
+    fi
+    {
+        echo "rdoc_capture_status=fail"
+        echo "rdoc_capture_reason=bad-rdc-magic"
+        echo "rdoc_capture_file=$validate_rdc_file"
+        echo "rdoc_capture_size=$size"
+        echo "rdoc_capture_magic=$magic"
+    } | tee ${validate_env_path:+"$validate_env_path"}
+    return 1
+}
+
+rdoc_build_simple_interpreter() {
+    root="$1"
+    fresh="$root/src/compiler_rust/target/release/simple"
+    ( cd "$root/src/compiler_rust" \
+        && unset MAKEFLAGS CARGO_MAKEFLAGS MFLAGS \
+        && cargo build --release --bin simple >/dev/null 2>&1 )
+    if [ ! -x "$fresh" ]; then
+        echo "FAIL: interpreter binary not built at $fresh" >&2
+        return 1
+    fi
+    printf '%s\n' "$fresh"
+}
+
+rdoc_capture_simple_vulkan() {
+    root="$1"
+    renderdoc_home="$2"
+    out_dir="$3"
+    prog="${RDOC_SIMPLE_PROG:-$root/src/app/test/renderdoc_vulkan_capture.spl}"
+    simple_bin="${RDOC_SIMPLE_BIN:-}"
+    rdoc_prepare_output_dir "$out_dir"
+    env_path="$out_dir/evidence.env"
+    if [ "$simple_bin" = "" ]; then
+        simple_bin="$(rdoc_build_simple_interpreter "$root")"
+    fi
+    {
+        echo "rdoc_backend=simple"
+        echo "rdoc_scene=${RDOC_SCENE:-vulkan-engine2d}"
+        echo "rdoc_program=$prog"
+        echo "rdoc_renderdoc_home=$renderdoc_home"
+        echo "rdoc_log=$out_dir/renderdoc-simple.log"
+    } | tee "$env_path"
+    LD_LIBRARY_PATH="$renderdoc_home/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    SIMPLE_EXECUTION_MODE=interpret \
+        "$renderdoc_home/bin/renderdoccmd" capture -d "$root" -c "$out_dir/simple_gui" -w \
+        "$simple_bin" run "$prog" >"$out_dir/renderdoc-simple.log" 2>&1 || true
+    sed -n '1,120p' "$out_dir/renderdoc-simple.log"
+    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
+    tmp_env="$out_dir/evidence.status.env"
+    set +e
+    rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
+    validate_code=$?
+    set -e
+    cat "$tmp_env" >> "$env_path"
+    return "$validate_code"
+}
+
+rdoc_capture_html() {
+    root="$1"
+    renderdoc_home="$2"
+    chrome_bin="$3"
+    out_dir="$4"
+    html_path="${RDOC_HTML_PATH:-$root/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+    timeout_secs="${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
+    width="${RDOC_CHROME_WIDTH:-1280}"
+    height="${RDOC_CHROME_HEIGHT:-720}"
+    rdoc_prepare_output_dir "$out_dir"
+    env_path="$out_dir/evidence.env"
+    if [ ! -s "$html_path" ]; then
+        {
+            echo "rdoc_backend=original"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-chrome}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-html-fixture"
+            echo "rdoc_html_path=$html_path"
+        } | tee "$env_path"
+        return 1
+    fi
+    if [ "$chrome_bin" = "" ]; then
+        {
+            echo "rdoc_backend=original"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-chrome}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-chrome"
+            echo "rdoc_html_path=$html_path"
+        } | tee "$env_path"
+        return 1
+    fi
+    {
+        echo "rdoc_backend=original"
+        echo "rdoc_scene=${RDOC_SCENE:-html-css-chrome}"
+        echo "rdoc_html_path=$html_path"
+        echo "rdoc_chrome=$chrome_bin"
+        echo "rdoc_renderdoc_home=$renderdoc_home"
+        echo "rdoc_log=$out_dir/renderdoc-html.log"
+        echo "rdoc_screenshot=$out_dir/html_chrome.png"
+    } | tee "$env_path"
+    if command -v xvfb-run >/dev/null 2>&1; then
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$timeout_secs" "$renderdoc_home/bin/renderdoccmd" capture -w --opt-hook-children \
+                -c "$out_dir/html_chrome" \
+                xvfb-run -a "$chrome_bin" \
+                --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
+                --enable-features=Vulkan --use-angle=vulkan \
+                --user-data-dir="$out_dir/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        else
+            "$renderdoc_home/bin/renderdoccmd" capture -w --opt-hook-children \
+                -c "$out_dir/html_chrome" \
+                xvfb-run -a "$chrome_bin" \
+                --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
+                --enable-features=Vulkan --use-angle=vulkan \
+                --user-data-dir="$out_dir/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        fi
+    else
+        if command -v timeout >/dev/null 2>&1; then
+            timeout "$timeout_secs" "$renderdoc_home/bin/renderdoccmd" capture -w --opt-hook-children \
+                -c "$out_dir/html_chrome" \
+                "$chrome_bin" \
+                --headless=new --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
+                --enable-features=Vulkan --use-angle=vulkan \
+                --user-data-dir="$out_dir/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        else
+            "$renderdoc_home/bin/renderdoccmd" capture -w --opt-hook-children \
+                -c "$out_dir/html_chrome" \
+                "$chrome_bin" \
+                --headless=new --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
+                --enable-features=Vulkan --use-angle=vulkan \
+                --user-data-dir="$out_dir/chrome-profile" \
+                --window-size="${width},${height}" \
+                --screenshot="$out_dir/html_chrome.png" \
+                "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
+        fi
+    fi
+    sed -n '1,160p' "$out_dir/renderdoc-html.log"
+    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
+    tmp_env="$out_dir/evidence.status.env"
+    set +e
+    rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
+    validate_code=$?
+    set -e
+    cat "$tmp_env" >> "$env_path"
+    return "$validate_code"
+}

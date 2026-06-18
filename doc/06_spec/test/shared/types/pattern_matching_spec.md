@@ -1,6 +1,6 @@
 # Pattern Matching Specification
 
-> 1. expect match int
+> <details>
 
 <!-- sdn-diagram:id=pattern_matching_spec.arch -->
 <details class="sdn-source">
@@ -44,7 +44,7 @@ pattern_matching_spec
 
 #### matches zero
 
-1. expect match int
+- expect match int
 
 
 <details>
@@ -61,7 +61,7 @@ expect match_int(0) == "zero"
 
 #### matches positive integers
 
-1. expect match int
+- expect match int
 
 
 <details>
@@ -78,7 +78,7 @@ expect match_int(42) == "found"
 
 #### matches larger integers
 
-1. expect match int
+- expect match int
 
 
 <details>
@@ -95,7 +95,7 @@ expect match_int(100) == "hundred"
 
 #### uses wildcard for unmatched
 
-1. expect match int
+- expect match int
 
 
 <details>
@@ -114,7 +114,7 @@ expect match_int(999) == "other"
 
 #### matches true
 
-1. expect match bool
+- expect match bool
 
 
 <details>
@@ -131,7 +131,7 @@ expect match_bool(true) == "yes"
 
 #### matches false
 
-1. expect match bool
+- expect match bool
 
 
 <details>
@@ -150,7 +150,7 @@ expect match_bool(false) == "no"
 
 #### matches string values
 
-1. expect match string
+- expect match string
 
 
 <details>
@@ -167,7 +167,7 @@ expect match_string("hello") == "greeting"
 
 #### matches empty string
 
-1. expect match string
+- expect match string
 
 
 <details>
@@ -184,7 +184,7 @@ expect match_string("") == "empty"
 
 #### uses wildcard for unmatched strings
 
-1. expect match string
+- expect match string
 
 
 <details>
@@ -205,7 +205,7 @@ expect match_string("other") == "unknown"
 
 #### binds value to variable
 
-1. expect double via match
+- expect double via match
 
 
 <details>
@@ -222,7 +222,7 @@ expect double_via_match(42) == 84
 
 #### binds and uses in expression
 
-1. expect add five via match
+- expect add five via match
 
 
 <details>
@@ -243,7 +243,7 @@ expect add_five_via_match(10) == 15
 
 #### matches anything
 
-1. expect wildcard match
+- expect wildcard match
 
 
 <details>
@@ -260,7 +260,7 @@ expect wildcard_match(99) == "matched"
 
 #### serves as catch-all
 
-1. expect catchall match
+- expect catchall match
 
 
 <details>
@@ -277,8 +277,8 @@ expect catchall_match(42) == "other"
 
 #### matches specific values first
 
-1. expect catchall match
-2. expect catchall match
+- expect catchall match
+- expect catchall match
 
 
 <details>
@@ -300,7 +300,7 @@ expect catchall_match(1) == "one"
 
 #### matches Red
 
-1. expect match color
+- expect match color
 
 
 <details>
@@ -317,7 +317,7 @@ expect match_color(Color.Red) == "red"
 
 #### matches Green
 
-1. expect match color
+- expect match color
 
 
 <details>
@@ -334,7 +334,7 @@ expect match_color(Color.Green) == "green"
 
 #### matches Blue
 
-1. expect match color
+- expect match color
 
 
 <details>
@@ -353,7 +353,7 @@ expect match_color(Color.Blue) == "blue"
 
 #### matches Some and extracts value
 
-1. expect match option
+- expect match option
 
 
 <details>
@@ -370,7 +370,7 @@ expect match_option(MyOption.Some(42)) == 42
 
 #### matches None
 
-1. expect match option none default
+- expect match option none default
 
 
 <details>
@@ -387,7 +387,7 @@ expect match_option_none_default(MyOption.None) == 99
 
 #### matches Ok result
 
-1. expect match result ok
+- expect match result ok
 
 
 <details>
@@ -404,7 +404,7 @@ expect match_result_ok(MyResult.Ok(100)) == 100
 
 #### matches Err result
 
-1. expect match result err
+- expect match result err
 
 
 <details>
@@ -423,7 +423,7 @@ expect match_result_err(MyResult.Err("failed")) == "failed"
 
 #### matches Circle and extracts radius
 
-1. expect match shape
+- expect match shape
 
 
 <details>
@@ -440,7 +440,7 @@ expect match_shape(Shape.Circle(5.0)) == 5.0
 
 #### matches Rectangle and extracts first dimension
 
-1. expect match shape
+- expect match shape
 
 
 <details>
@@ -459,7 +459,7 @@ expect match_shape(Shape.Rectangle(4.0, 3.0)) == 4.0
 
 #### matches Point unit variant
 
-1. expect match shape
+- expect match shape
 
 
 <details>
@@ -480,7 +480,7 @@ expect match_shape(Shape.Point) == 0.0
 
 #### destructures pair
 
-1. expect match pair
+- expect match pair
 
 
 <details>
@@ -497,7 +497,7 @@ expect match_pair((1, 2)) == 3
 
 #### destructures triple
 
-1. expect match triple
+- expect match triple
 
 
 <details>
@@ -514,7 +514,7 @@ expect match_triple((1, 2, 3)) == 6
 
 #### matches with partial wildcards
 
-1. expect match pair first
+- expect match pair first
 
 
 <details>
@@ -531,7 +531,7 @@ expect match_pair_first((10, 20)) == 10
 
 #### matches with all wildcards
 
-1. expect match pair wildcard
+- expect match pair wildcard
 
 
 <details>
@@ -550,7 +550,7 @@ expect match_pair_wildcard((1, 2)) == "matched"
 
 #### destructures nested tuples
 
-1. expect match nested tuple
+- expect match nested tuple
 
 
 <details>
@@ -569,7 +569,7 @@ expect match_nested_tuple(((1, 2), 3)) == 6
 
 #### matches tuple with literal first element
 
-1. expect match tuple literal first
+- expect match tuple literal first
 
 
 <details>
@@ -586,7 +586,7 @@ expect match_tuple_literal_first((0, 42)) == 42
 
 #### matches tuple with literal second element
 
-1. expect match tuple literal second
+- expect match tuple literal second
 
 
 <details>
@@ -607,7 +607,7 @@ expect match_tuple_literal_second((10, 0)) == 10
 
 #### accesses Point2D fields
 
-1. expect match point
+- expect match point
 
 
 <details>
@@ -625,7 +625,7 @@ expect match_point(p) == 7
 
 #### accesses Person fields
 
-1. expect match person age
+- expect match person age
 
 
 <details>
@@ -645,7 +645,7 @@ expect match_person_age(person) == 30
 
 #### matches origin point
 
-1. expect match point origin
+- expect match point origin
 
 
 <details>
@@ -663,7 +663,7 @@ expect match_point_origin(p) == "origin"
 
 #### matches non-origin point
 
-1. expect match point origin
+- expect match point origin
 
 
 <details>
@@ -681,7 +681,7 @@ expect match_point_origin(p) == "not origin"
 
 #### matches point on x-axis
 
-1. expect match point axis
+- expect match point axis
 
 
 <details>
@@ -699,7 +699,7 @@ expect match_point_axis(p) == "on x-axis"
 
 #### matches point on y-axis
 
-1. expect match point axis
+- expect match point axis
 
 
 <details>
@@ -717,7 +717,7 @@ expect match_point_axis(p) == "on y-axis"
 
 #### matches point elsewhere
 
-1. expect match point axis
+- expect match point axis
 
 
 <details>
@@ -739,7 +739,7 @@ expect match_point_axis(p) == "elsewhere"
 
 #### matches with true guard
 
-1. expect match with guard
+- expect match with guard
 
 
 <details>
@@ -756,7 +756,7 @@ expect match_with_guard(10) == "big"
 
 #### skips when guard is false
 
-1. expect match with guard
+- expect match with guard
 
 
 <details>
@@ -775,7 +775,7 @@ expect match_with_guard(3) == "small"
 
 #### categorizes zero
 
-1. expect categorize number
+- expect categorize number
 
 
 <details>
@@ -792,7 +792,7 @@ expect categorize_number(0) == "zero"
 
 #### categorizes small numbers
 
-1. expect categorize number
+- expect categorize number
 
 
 <details>
@@ -809,7 +809,7 @@ expect categorize_number(5) == "small"
 
 #### categorizes medium numbers
 
-1. expect categorize number
+- expect categorize number
 
 
 <details>
@@ -826,7 +826,7 @@ expect categorize_number(50) == "medium"
 
 #### categorizes large numbers
 
-1. expect categorize number
+- expect categorize number
 
 
 <details>
@@ -845,7 +845,7 @@ expect categorize_number(150) == "large"
 
 #### uses guard on enum payload - large
 
-1. expect match option with guard
+- expect match option with guard
 
 
 <details>
@@ -862,7 +862,7 @@ expect match_option_with_guard(MyOption.Some(150)) == "large"
 
 #### uses guard on enum payload - medium
 
-1. expect match option with guard
+- expect match option with guard
 
 
 <details>
@@ -879,7 +879,7 @@ expect match_option_with_guard(MyOption.Some(50)) == "medium"
 
 #### uses guard on enum payload - small
 
-1. expect match option with guard
+- expect match option with guard
 
 
 <details>
@@ -896,7 +896,7 @@ expect match_option_with_guard(MyOption.Some(5)) == "small"
 
 #### handles None
 
-1. expect match option with guard
+- expect match option with guard
 
 
 <details>
@@ -915,7 +915,7 @@ expect match_option_with_guard(MyOption.None) == "none"
 
 #### uses guard on tuple elements - sum is 7
 
-1. expect match tuple with guard
+- expect match tuple with guard
 
 
 <details>
@@ -932,7 +932,7 @@ expect match_tuple_with_guard((3, 4)) == "sum is 7"
 
 #### uses guard on tuple elements - equal
 
-1. expect match tuple with guard
+- expect match tuple with guard
 
 
 <details>
@@ -949,7 +949,7 @@ expect match_tuple_with_guard((5, 5)) == "equal"
 
 #### uses guard on tuple elements - other
 
-1. expect match tuple with guard
+- expect match tuple with guard
 
 
 <details>
@@ -970,7 +970,7 @@ expect match_tuple_with_guard((1, 2)) == "other"
 
 #### matches first alternative
 
-1. expect match or pattern
+- expect match or pattern
 
 
 <details>
@@ -987,7 +987,7 @@ expect match_or_pattern(1) == "small"
 
 #### matches middle alternative
 
-1. expect match or pattern
+- expect match or pattern
 
 
 <details>
@@ -1004,7 +1004,7 @@ expect match_or_pattern(2) == "small"
 
 #### matches last alternative
 
-1. expect match or pattern
+- expect match or pattern
 
 
 <details>
@@ -1021,7 +1021,7 @@ expect match_or_pattern(3) == "small"
 
 #### falls through when no match
 
-1. expect match or pattern
+- expect match or pattern
 
 
 <details>
@@ -1040,7 +1040,7 @@ expect match_or_pattern(5) == "other"
 
 #### matches Red in or pattern
 
-1. expect match color or
+- expect match color or
 
 
 <details>
@@ -1057,7 +1057,7 @@ expect match_color_or(Color.Red) == "primary"
 
 #### matches Blue in or pattern
 
-1. expect match color or
+- expect match color or
 
 
 <details>
@@ -1074,7 +1074,7 @@ expect match_color_or(Color.Blue) == "primary"
 
 #### matches Green separately
 
-1. expect match color or
+- expect match color or
 
 
 <details>
@@ -1095,7 +1095,7 @@ expect match_color_or(Color.Green) == "secondary"
 
 #### matches within range
 
-1. expect match range
+- expect match range
 
 
 <details>
@@ -1112,7 +1112,7 @@ expect match_range(5) == "in range"
 
 #### matches at lower bound
 
-1. expect match range
+- expect match range
 
 
 <details>
@@ -1129,7 +1129,7 @@ expect match_range(1) == "in range"
 
 #### matches at upper bound
 
-1. expect match range
+- expect match range
 
 
 <details>
@@ -1146,7 +1146,7 @@ expect match_range(10) == "in range"
 
 #### does not match outside range
 
-1. expect match range
+- expect match range
 
 
 <details>
@@ -1165,7 +1165,7 @@ expect match_range(11) == "out of range"
 
 #### grades A
 
-1. expect grade score
+- expect grade score
 
 
 <details>
@@ -1182,7 +1182,7 @@ expect grade_score(95) == "A"
 
 #### grades B
 
-1. expect grade score
+- expect grade score
 
 
 <details>
@@ -1199,7 +1199,7 @@ expect grade_score(85) == "B"
 
 #### grades C
 
-1. expect grade score
+- expect grade score
 
 
 <details>
@@ -1216,7 +1216,7 @@ expect grade_score(75) == "C"
 
 #### grades D
 
-1. expect grade score
+- expect grade score
 
 
 <details>
@@ -1233,7 +1233,7 @@ expect grade_score(65) == "D"
 
 #### grades F
 
-1. expect grade score
+- expect grade score
 
 
 <details>
@@ -1254,7 +1254,7 @@ expect grade_score(55) == "F"
 
 #### matches single element
 
-1. expect match single array
+- expect match single array
 
 
 <details>
@@ -1271,7 +1271,7 @@ expect match_single_array([42]) == 42
 
 #### matches two elements
 
-1. expect match pair array
+- expect match pair array
 
 
 <details>
@@ -1288,7 +1288,7 @@ expect match_pair_array([1, 2]) == 3
 
 #### returns default for wrong length
 
-1. expect match single array
+- expect match single array
 
 
 <details>
@@ -1411,7 +1411,7 @@ expect result == 30
 
 #### matches nested enum in tuple
 
-1. expect match nested enum tuple
+- expect match nested enum tuple
 
 
 <details>
@@ -1428,7 +1428,7 @@ expect match_nested_enum_tuple((MyOption.Some(42), "label")) == 42
 
 #### matches None in tuple
 
-1. expect match nested enum tuple
+- expect match nested enum tuple
 
 
 <details>
@@ -1447,7 +1447,7 @@ expect match_nested_enum_tuple((MyOption.None, "label")) == 0
 
 #### uses guard on tuple values - large
 
-1. expect match tuple guard complex
+- expect match tuple guard complex
 
 
 <details>
@@ -1464,7 +1464,7 @@ expect match_tuple_guard_complex((10, 20)) == "large sum"
 
 #### uses guard on tuple values - small
 
-1. expect match tuple guard complex
+- expect match tuple guard complex
 
 
 <details>

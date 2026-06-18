@@ -238,6 +238,66 @@ DBFS is a filesystem that uses database techniques to manage metadata and file n
 
 Simple DB includes shared SIMD-accelerated primitives for scan and bitmap operations. See `doc/05_design/simple_db_shared_accel_simd.md`.
 
+## Vector Store GPU Offload
+
+Vector search offload is a coarse payload-compute path. The CPU still owns
+storage, metadata filtering, request validation, and the authoritative oracle.
+GPU candidates can replace CPU results only after measured device execution and
+candidate IDs match the CPU search result order.
+
+Use the vector store API when the caller owns a `VectorDatabase`:
+
+```simple
+use std.database.vector.store.{VectorDatabase}
+
+val execution = db.search_with_query_device_backend_validated(
+    query,
+    k,
+    queue_state,
+    device_backend,
+    generation_current,
+    expected_backend_generation,
+    cpu_fallback_available,
+    budget,
+    gpu_candidate_results,
+    started_us,
+    finished_us,
+    measured_device_time_us,
+    "cuda-event"
+).unwrap()
+```
+
+Use the DB query/storage facade when DB server code already has CPU vector
+results and wants the reusable validation boundary:
+
+```simple
+use std.database.{DbStorageVectorDeviceOffloadExecution, db_query_offload_execute_vector_device_validated}
+use std.database.query_offload.{db_query_vector}
+
+val checked: DbStorageVectorDeviceOffloadExecution =
+    db_query_offload_execute_vector_device_validated(
+        db_query_vector(metric, candidate_count, dimensions, true, generation_current, cpu_results),
+        queue_state,
+        device_backend,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        gpu_candidate_results,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        "cuda-event"
+    )
+```
+
+`checked.execution.validation_reason` records
+`production-gpu-vector-match`, `production-gpu-vector-mismatch`, or the device
+rejection reason. Treat `gpu_dispatched` as queue evidence only; treat
+`gpu_candidate_validated` plus `cpu_authoritative == false` as replacement
+evidence. Use `std.database.vector_search_profile_allows_gpu(...)` when callers
+need to distinguish a GPU-capable coarse profile from a CPU-only fallback
+profile through the root database API.
+
 ## Project Layout
 
 ```

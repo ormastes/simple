@@ -28,7 +28,7 @@ ws_handler_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,6 +44,9 @@ Verifies selected Feature C and NFR C WebSocket upgrade parsing, canonical route
 | Category | Application |
 | Status | Active |
 | Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
+| Plan | doc/03_plan/agent_tasks/simple_browser_production_level.md |
+| Design | doc/05_design/simple_web_browser_production_hardening.md |
+| Research | doc/01_research/local/simple_browser_production_level.md |
 | Source | `test/01_unit/app/ui/ws_handler_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
@@ -55,6 +58,9 @@ route gating, bearer extraction, query-token non-authorization, and frame bounds
 
 **Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
+**Research:** doc/01_research/local/simple_browser_production_level.md
+**Plan:** doc/03_plan/agent_tasks/simple_browser_production_level.md
+**Design:** doc/05_design/simple_web_browser_production_hardening.md
 **Traceability:** REQ-WEB-HARD-005, REQ-WEB-HARD-007, REQ-WEB-HARD-012, NFR-WEB-HARD-004, NFR-WEB-HARD-005, NFR-WEB-HARD-008, NFR-WEB-HARD-010
 
 ## Scenarios
@@ -127,6 +133,58 @@ val headers = "Host: localhost\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n"
 expect(extract_ws_key(headers)).to_equal("dGhlIHNhbXBsZSBub25jZQ==")
 val lowercase = "Host: localhost\nsec-websocket-key: lowercase-key\n"
 expect(extract_ws_key(lowercase)).to_equal("lowercase-key")
+```
+
+</details>
+
+#### requires websocket version 13 and a base64 nonce-shaped key
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val valid_headers = "Host: localhost\nSec-WebSocket-Version: 13\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n"
+expect(ui_web_ws_version_allowed(valid_headers)).to_be(true)
+expect(ui_web_ws_key_shape_allowed("dGhlIHNhbXBsZSBub25jZQ==")).to_be(true)
+expect(ui_web_ws_handshake_headers_allowed(valid_headers)).to_be(true)
+
+val missing_version = "Host: localhost\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n"
+expect(ui_web_ws_version_allowed(missing_version)).to_be(false)
+expect(ui_web_ws_handshake_headers_allowed(missing_version)).to_be(false)
+
+val wrong_version = "Host: localhost\nSec-WebSocket-Version: 12\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\n"
+expect(ui_web_ws_version_allowed(wrong_version)).to_be(false)
+expect(ui_web_ws_handshake_headers_allowed(wrong_version)).to_be(false)
+
+val short_key = "Host: localhost\nSec-WebSocket-Version: 13\nSec-WebSocket-Key: abc\n"
+expect(ui_web_ws_key_shape_allowed("abc")).to_be(false)
+expect(ui_web_ws_handshake_headers_allowed(short_key)).to_be(false)
+
+val invalid_key = "Host: localhost\nSec-WebSocket-Version: 13\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ!!\n"
+expect(ui_web_ws_key_shape_allowed("dGhlIHNhbXBsZSBub25jZQ!!")).to_be(false)
+expect(ui_web_ws_handshake_headers_allowed(invalid_key)).to_be(false)
+```
+
+</details>
+
+#### rejects explicit cross-site fetch metadata before websocket token redemption
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_fetch_site_status("Sec-Fetch-Site: same-origin\n")).to_equal("ok")
+expect(ui_web_fetch_site_status("Sec-Fetch-Site: same-site\n")).to_equal("ok")
+expect(ui_web_fetch_site_allowed("Host: localhost\n")).to_be(true)
+expect(ui_web_fetch_site_allowed("Sec-Fetch-Site: cross-site\n")).to_be(false)
+expect(ui_web_fetch_site_status("Sec-Fetch-Site: cross-site\n")).to_equal("cross_site_request")
+expect(ui_web_fetch_site_status("Sec-Fetch-Site: same-origin\nSec-Fetch-Site: same-site\n")).to_equal("duplicate_fetch_site")
 ```
 
 </details>
@@ -278,12 +336,32 @@ expect(ui_web_ws_frame_payload_allowed(UI_WEB_MAX_WS_FRAME_BYTES + 1)).to_be(fal
 
 </details>
 
+#### rejects unsafe client websocket frame metadata before payload allocation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(ui_web_ws_frame_metadata_status(0x81, true, 5)).to_equal("ok")
+expect(ui_web_ws_frame_metadata_status(0x81, false, 5)).to_equal("client_frame_unmasked")
+expect(ui_web_ws_frame_metadata_status(0x01, true, 5)).to_equal("fragmented_frame_unsupported")
+expect(ui_web_ws_frame_metadata_status(0xC1, true, 5)).to_equal("reserved_bits_set")
+expect(ui_web_ws_frame_metadata_status(0x82, true, 5)).to_equal("unsupported_opcode")
+expect(ui_web_ws_frame_metadata_status(0x89, true, 126)).to_equal("control_frame_too_large")
+expect(ui_web_ws_frame_metadata_status(0x81, true, UI_WEB_MAX_WS_FRAME_BYTES + 1)).to_equal("frame_payload_too_large")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -292,6 +370,9 @@ expect(ui_web_ws_frame_payload_allowed(UI_WEB_MAX_WS_FRAME_BYTES + 1)).to_be(fal
 ## Related Documentation
 
 - **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
+- **Plan:** [doc/03_plan/agent_tasks/simple_browser_production_level.md](doc/03_plan/agent_tasks/simple_browser_production_level.md)
+- **Design:** [doc/05_design/simple_web_browser_production_hardening.md](doc/05_design/simple_web_browser_production_hardening.md)
+- **Research:** [doc/01_research/local/simple_browser_production_level.md](doc/01_research/local/simple_browser_production_level.md)
 
 
 </details>

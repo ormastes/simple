@@ -1,0 +1,97 @@
+# Native cached reverse proxy for live socket throughput evidence.
+
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> i64
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_connect(addr: text) -> i64
+extern fn rt_io_tcp_read_line(fd: i64) -> text?
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+
+val NATIVE_PROXY_BACKEND_ADDR: text = "127.0.0.1:18191"
+val NATIVE_PROXY_LISTEN_ADDR: text = "127.0.0.1:18192"
+val NATIVE_PROXY_BENCH_ITERS: i64 = 50
+
+fn native_proxy_drain_headers(fd: i64):
+    var done = false
+    while not done:
+        val line = rt_io_tcp_read_line(fd)
+        if line == nil:
+            done = true
+        else:
+            val text_line = line as text
+            if text_line == "" or text_line == "\n" or text_line == "\r\n":
+                done = true
+
+fn native_proxy_read_backend_response(fd: i64) -> text:
+    val status = rt_io_tcp_read_line(fd)
+    if status == nil:
+        return ""
+
+    var response = status as text
+    var headers_done = false
+    while not headers_done:
+        val line = rt_io_tcp_read_line(fd)
+        if line == nil:
+            return ""
+        val text_line = line as text
+        response = response + text_line
+        if text_line == "" or text_line == "\n" or text_line == "\r\n":
+            headers_done = true
+
+    val body = rt_io_tcp_read_line(fd)
+    if body == nil:
+        ""
+    else:
+        response + (body as text)
+
+fn main():
+    val upstream = rt_io_tcp_connect(NATIVE_PROXY_BACKEND_ADDR)
+    if upstream < 0:
+        print "[simple-proxy-native-error] connect"
+        return
+
+    val listener = rt_io_tcp_bind(NATIVE_PROXY_LISTEN_ADDR)
+    if listener < 0:
+        val _upstream_closed = rt_io_tcp_close(upstream)
+        print "[simple-proxy-native-error] bind"
+        return
+    val listening = rt_io_tcp_listen(listener, 8)
+    if listening <= 0:
+        val _listener_closed = rt_io_tcp_close(listener)
+        val _upstream_closed = rt_io_tcp_close(upstream)
+        print "[simple-proxy-native-error] listen"
+        return
+
+    print "[simple-proxy-native-ready] addr={NATIVE_PROXY_LISTEN_ADDR} backend={NATIVE_PROXY_BACKEND_ADDR} requests={NATIVE_PROXY_BENCH_ITERS}"
+    var served: i64 = 0
+    var errors: i64 = 0
+    while served < NATIVE_PROXY_BENCH_ITERS:
+        val client = rt_io_tcp_accept(listener)
+        if client < 0:
+            errors = errors + 1
+        else:
+            val request_line = rt_io_tcp_read_line(client)
+            if request_line == nil:
+                errors = errors + 1
+            else:
+                native_proxy_drain_headers(client)
+                val upstream_request = "GET /native-cached HTTP/1.1\r\nHost: native-simple-backend\r\nConnection: keep-alive\r\n\r\n"
+                val upstream_written = rt_io_tcp_write_text(upstream, upstream_request)
+                if upstream_written <= 0:
+                    errors = errors + 1
+                else:
+                    val response = native_proxy_read_backend_response(upstream)
+                    if response == "":
+                        errors = errors + 1
+                    else:
+                        val client_written = rt_io_tcp_write_text(client, response)
+                        if client_written <= 0:
+                            errors = errors + 1
+            val _client_closed = rt_io_tcp_close(client)
+            served = served + 1
+
+    val _upstream_closed = rt_io_tcp_close(upstream)
+    val _listener_closed = rt_io_tcp_close(listener)
+    val reuse = NATIVE_PROXY_BENCH_ITERS - 1
+    print "[simple-proxy-native-done] served={served} upstream_connects=1 upstream_reuse={reuse} errors={errors}"

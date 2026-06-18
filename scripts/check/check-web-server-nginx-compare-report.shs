@@ -1,0 +1,492 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "${1:-}" = "--self-test-tool-row-classification" ]; then
+    python3 - <<'PY'
+def blank_row(workload, simple_target, baseline, status, reason):
+    return {
+        "workload": workload,
+        "simple_target": simple_target,
+        "external_baseline": baseline,
+        "load_tool": "wrk",
+        "status": status,
+        "simple_rps": 0,
+        "external_rps": 0,
+        "rps_ratio": 0,
+        "simple_p99_ms": 0,
+        "external_p99_ms": 0,
+        "throughput_mbps": 0,
+        "failures": 0,
+        "reason": reason,
+    }
+
+def planned_row(tools, workload, simple_target, tool, baseline):
+    if not tools["wrk"]:
+        return blank_row(workload, simple_target, baseline, "load-tool-unavailable", "wrk-not-installed")
+    if not tools[tool]:
+        return blank_row(workload, simple_target, baseline, "external-baseline-unavailable", f"{tool}-not-installed")
+    return blank_row(workload, simple_target, baseline, "ready_unmeasured", f"run-live-simple-{tool}-wrk-wrapper")
+
+missing_wrk = {"wrk": "", "nginx": "/usr/sbin/nginx", "caddy": "", "h2o": "", "haproxy": "", "envoy": ""}
+missing_baseline = {"wrk": "/usr/bin/wrk", "nginx": "", "caddy": "", "h2o": "", "haproxy": "", "envoy": ""}
+ready = {"wrk": "/usr/bin/wrk", "nginx": "/usr/sbin/nginx", "caddy": "", "h2o": "", "haproxy": "", "envoy": ""}
+
+load_tool_row = planned_row(missing_wrk, "static_1kb", "native_simple_static_1024", "nginx", "nginx_static_1024")
+missing_row = planned_row(missing_baseline, "static_1kb", "native_simple_static_1024", "nginx", "nginx_static_1024")
+ready_row = planned_row(ready, "static_1kb", "native_simple_static_1024", "nginx", "nginx_static_1024")
+if load_tool_row["status"] != "load-tool-unavailable" or load_tool_row["reason"] != "wrk-not-installed":
+    raise SystemExit(f"unexpected load-tool row: {load_tool_row}")
+if missing_row["status"] != "external-baseline-unavailable" or missing_row["reason"] != "nginx-not-installed":
+    raise SystemExit(f"unexpected missing-baseline row: {missing_row}")
+if ready_row["status"] != "ready_unmeasured" or ready_row["reason"] != "run-live-simple-nginx-wrk-wrapper":
+    raise SystemExit(f"unexpected ready row: {ready_row}")
+if ready_row["simple_rps"] != 0 or ready_row["external_rps"] != 0 or ready_row["failures"] != 0:
+    raise SystemExit(f"ready row unexpectedly contains measured values: {ready_row}")
+print("STATUS: PASS web comparison tool row classification self-test")
+PY
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-external-web-measured-parser" ]; then
+    python3 - <<'PY'
+columns = [
+    "workload",
+    "simple_target",
+    "external_baseline",
+    "load_tool",
+    "status",
+    "simple_rps",
+    "external_rps",
+    "rps_ratio",
+    "simple_p99_ms",
+    "external_p99_ms",
+    "throughput_mbps",
+    "failures",
+    "reason",
+]
+
+known = {
+    ("static_1kb", "nginx_static_1024"): "native_simple_static_1024",
+    ("cached_reverse_proxy", "haproxy_cached_reverse_proxy"): "native_simple_cached_proxy",
+    ("cached_reverse_proxy", "envoy_cached_reverse_proxy"): "native_simple_cached_proxy",
+    ("upload_streaming_proxy", "haproxy_upload_streaming_proxy"): "native_simple_upload_proxy",
+    ("upgrade_tunnel_proxy", "haproxy_upgrade_tunnel_proxy"): "native_simple_upgrade_tunnel",
+    ("dynamic_gpu_plaintext", "cpu_simple_plaintext"): "native_simple_gpu_route_plaintext",
+    ("dynamic_gpu_json", "cpu_simple_json"): "native_simple_gpu_route_json",
+    ("reference_plaintext", "uwebsockets_plaintext"): "native_simple_reference_plaintext",
+    ("reference_plaintext", "seastar_plaintext"): "native_simple_reference_plaintext",
+}
+
+def measured_rows(text):
+    parsed = {}
+    prefix = "WEB_SERVER_EXTERNAL_COMPARE_MEASURED="
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith(prefix):
+            continue
+        parts = line[len(prefix):].split("|")
+        if len(parts) != 10:
+            continue
+        workload, simple_target, baseline, simple_rps, external_rps, simple_p99, external_p99, throughput, failures, reason = parts
+        key = (workload, baseline)
+        if known.get(key) != simple_target:
+            continue
+        try:
+            simple_rps = float(simple_rps)
+            external_rps = float(external_rps)
+            simple_p99 = float(simple_p99)
+            external_p99 = float(external_p99)
+            throughput = float(throughput)
+            failures = int(failures)
+        except ValueError:
+            continue
+        if simple_rps <= 0 or external_rps <= 0 or simple_p99 < 0 or external_p99 < 0 or throughput < 0 or failures < 0:
+            continue
+        status = "measured" if failures == 0 else "measured_with_failures"
+        if not reason:
+            reason = "external-web-measured-row"
+        parsed[key] = {
+            "workload": workload,
+            "simple_target": simple_target,
+            "external_baseline": baseline,
+            "load_tool": "wrk",
+            "status": status,
+            "simple_rps": f"{simple_rps:.2f}",
+            "external_rps": f"{external_rps:.2f}",
+            "rps_ratio": f"{simple_rps / external_rps:.3f}",
+            "simple_p99_ms": f"{simple_p99:.3f}",
+            "external_p99_ms": f"{external_p99:.3f}",
+            "throughput_mbps": f"{throughput:.3f}",
+            "failures": str(failures),
+            "reason": reason,
+        }
+    return parsed
+
+sample = "\n".join([
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|nginx_static_1024|1200|1000|1.5|2.0|9.8|0|live-simple-nginx-wrk",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=cached_reverse_proxy|native_simple_cached_proxy|haproxy_cached_reverse_proxy|900|1000|3|2|7.2|4|wrk-socket-errors",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=cached_reverse_proxy|native_simple_cached_proxy|envoy_cached_reverse_proxy|850|1000|4|3|6.8|1|wrk-errors-or-missing-rps",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=upload_streaming_proxy|native_simple_upload_proxy|haproxy_upload_streaming_proxy|120|100|8|7|95.5|0|live-simple-haproxy-upload-wrk",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=upgrade_tunnel_proxy|native_simple_upgrade_tunnel|haproxy_upgrade_tunnel_proxy|75|80|12|11|4.4|0|live-simple-haproxy-tunnel-wrk",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=dynamic_gpu_plaintext|native_simple_gpu_route_plaintext|cpu_simple_plaintext|600|550|5|6|4.8|0|live-simple-cpu-gpu-plaintext-wrk",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=dynamic_gpu_json|native_simple_gpu_route_json|cpu_simple_json|500|480|7|8|3.9|0|live-simple-cpu-gpu-json-wrk",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=reference_plaintext|native_simple_reference_plaintext|uwebsockets_plaintext|700|900|4|3|5.6|0|live-simple-uwebsockets-plaintext-wrk",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=reference_plaintext|native_simple_reference_plaintext|seastar_plaintext|650|950|5|3|6.1|0|live-simple-seastar-plaintext-wrk",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|wrong_target|nginx_static_1024|1|1|1|1|1|0|bad-target",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=unknown|native_simple_static_1024|nginx_static_1024|1|1|1|1|1|0|bad-workload",
+    "WEB_SERVER_EXTERNAL_COMPARE_MEASURED=static_1kb|native_simple_static_1024|nginx_static_1024|0|1|1|1|1|0|zero-rps",
+])
+rows = measured_rows(sample)
+nginx = rows.get(("static_1kb", "nginx_static_1024"))
+haproxy = rows.get(("cached_reverse_proxy", "haproxy_cached_reverse_proxy"))
+envoy = rows.get(("cached_reverse_proxy", "envoy_cached_reverse_proxy"))
+upload = rows.get(("upload_streaming_proxy", "haproxy_upload_streaming_proxy"))
+tunnel = rows.get(("upgrade_tunnel_proxy", "haproxy_upgrade_tunnel_proxy"))
+plaintext = rows.get(("dynamic_gpu_plaintext", "cpu_simple_plaintext"))
+json = rows.get(("dynamic_gpu_json", "cpu_simple_json"))
+uwebsockets = rows.get(("reference_plaintext", "uwebsockets_plaintext"))
+seastar = rows.get(("reference_plaintext", "seastar_plaintext"))
+if len(rows) != 9:
+    raise SystemExit(f"unexpected measured row count: {rows}")
+if nginx["status"] != "measured" or nginx["rps_ratio"] != "1.200" or nginx["failures"] != "0":
+    raise SystemExit(f"unexpected nginx measured row: {nginx}")
+if haproxy["status"] != "measured_with_failures" or haproxy["reason"] != "wrk-socket-errors":
+    raise SystemExit(f"unexpected haproxy measured row: {haproxy}")
+if envoy["status"] != "measured_with_failures" or envoy["external_baseline"] != "envoy_cached_reverse_proxy":
+    raise SystemExit(f"unexpected envoy measured row: {envoy}")
+if upload["status"] != "measured" or upload["simple_target"] != "native_simple_upload_proxy":
+    raise SystemExit(f"unexpected upload measured row: {upload}")
+if tunnel["status"] != "measured" or tunnel["simple_target"] != "native_simple_upgrade_tunnel":
+    raise SystemExit(f"unexpected tunnel measured row: {tunnel}")
+if plaintext["status"] != "measured" or plaintext["simple_target"] != "native_simple_gpu_route_plaintext":
+    raise SystemExit(f"unexpected dynamic plaintext measured row: {plaintext}")
+if json["status"] != "measured" or json["external_baseline"] != "cpu_simple_json":
+    raise SystemExit(f"unexpected dynamic json measured row: {json}")
+if uwebsockets["status"] != "measured" or uwebsockets["simple_target"] != "native_simple_reference_plaintext":
+    raise SystemExit(f"unexpected uWebSockets measured row: {uwebsockets}")
+if seastar["status"] != "measured" or seastar["external_baseline"] != "seastar_plaintext":
+    raise SystemExit(f"unexpected Seastar measured row: {seastar}")
+print("STATUS: PASS external web measured parser self-test")
+PY
+    exit 0
+fi
+
+SPEC="test/05_perf/web_server_nginx_compare/external_compare_report_spec.spl"
+DOC="doc/06_spec/test/05_perf/web_server_nginx_compare/external_compare_report_spec.md"
+REPORT="doc/09_report/perf/web_server_nginx_compare_2026-06-17.md"
+TABLE="doc/10_metrics/perf/web_server_nginx_compare.md"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ -z "$SIMPLE_BIN" ]; then
+    if [ -x "bin/simple" ]; then
+        SIMPLE_BIN="bin/simple"
+    else
+        SIMPLE_BIN="$(command -v simple)"
+    fi
+fi
+
+SIMPLE_LIB=src:test/05_perf "$SIMPLE_BIN" check test/05_perf/web_server_nginx_compare/external_compare_report.spl "$SPEC"
+SIMPLE_LIB=src:test/05_perf "$SIMPLE_BIN" test "$SPEC" --mode=interpreter --clean
+SIMPLE_LIB=src:test/05_perf "$SIMPLE_BIN" spipe-docgen "$SPEC" --output doc/06_spec --no-index
+
+test -f "$DOC"
+grep -q 'static_1kb' "$DOC"
+grep -q 'ready_unmeasured' "$DOC"
+
+NGINX_PATH="$(command -v nginx || true)"
+WRK_PATH="$(command -v wrk || true)"
+HAPROXY_PATH="$(command -v haproxy || true)"
+ENVOY_PATH="$(command -v envoy || true)"
+CADDY_PATH="$(command -v caddy || true)"
+H2O_PATH="$(command -v h2o || true)"
+export NGINX_PATH WRK_PATH HAPROXY_PATH ENVOY_PATH CADDY_PATH H2O_PATH REPORT TABLE
+
+python3 - <<'PY'
+import os
+import platform
+import shutil
+import subprocess
+from pathlib import Path
+
+report = Path(os.environ["REPORT"])
+table = Path(os.environ["TABLE"])
+report.parent.mkdir(parents=True, exist_ok=True)
+table.parent.mkdir(parents=True, exist_ok=True)
+
+tools = {
+    "nginx": os.environ.get("NGINX_PATH", ""),
+    "wrk": os.environ.get("WRK_PATH", ""),
+    "haproxy": os.environ.get("HAPROXY_PATH", ""),
+    "envoy": os.environ.get("ENVOY_PATH", ""),
+    "caddy": os.environ.get("CADDY_PATH", ""),
+    "h2o": os.environ.get("H2O_PATH", ""),
+}
+
+def command_output(args):
+    try:
+        out = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
+        return "; ".join(line.strip() for line in out.splitlines() if line.strip())
+    except Exception:
+        return ""
+
+def first_cpu_model():
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return platform.processor() or "unknown"
+
+def mem_total():
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("MemTotal:"):
+                return " ".join(line.split()[1:3])
+    except Exception:
+        pass
+    return "unknown"
+
+def environment_markdown():
+    nvidia = shutil.which("nvidia-smi")
+    nvidia_summary = "missing"
+    if nvidia:
+        nvidia_summary = command_output([nvidia, "--query-gpu=name,driver_version", "--format=csv,noheader"]) or f"available at `{nvidia}`"
+    storage = command_output(["df", "-h", "."])
+    storage_line = storage.splitlines()[-1] if storage else "unknown"
+    simple_runtime = os.environ.get("SIMPLE_BIN", f"auto:{shutil.which('simple') or 'missing'}")
+    return (
+        "## Environment\n\n"
+        f"- CPU model: `{first_cpu_model()}`\n"
+        f"- CPU cores: `{os.cpu_count() or 'unknown'}`\n"
+        f"- Kernel: `{platform.release()}`\n"
+        f"- RAM: `{mem_total()}`\n"
+        f"- Storage: `{storage_line}`\n"
+        f"- CUDA/nvidia-smi: `{nvidia_summary}`\n"
+        f"- Simple runtime: `{simple_runtime}`\n\n"
+    )
+
+def normalization_markdown():
+    return (
+        "## Benchmark Normalization\n\n"
+        "| payload_policy | keepalive_policy | connections | threads | duration_seconds | worker_policy | logging_policy | cpu_affinity_policy |\n"
+        "|---|---|---:|---:|---:|---|---|---|\n"
+        "| same bytes per compared workload | wrk default keep-alive | 1 | 1 | 1 | one measured server worker unless wrapper overrides both sides | access logging disabled for measured hot path | not pinned on this host; report must say so |\n\n"
+    )
+
+header = "| workload | simple_target | external_baseline | load_tool | status | simple_rps | external_rps | rps_ratio | simple_p99_ms | external_p99_ms | throughput_mbps | failures | reason |\n"
+sep = "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|\n"
+columns = [
+    "workload",
+    "simple_target",
+    "external_baseline",
+    "load_tool",
+    "status",
+    "simple_rps",
+    "external_rps",
+    "rps_ratio",
+    "simple_p99_ms",
+    "external_p99_ms",
+    "throughput_mbps",
+    "failures",
+    "reason",
+]
+
+def parse_existing_preserved(path):
+    preserved = {}
+    if not path.exists():
+        return preserved
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| ") or line.startswith("| workload ") or line.startswith("|---"):
+            continue
+        parts = [p.strip() for p in line.strip().strip("|").split("|")]
+        if len(parts) != len(columns):
+            continue
+        row = dict(zip(columns, parts))
+        if row["status"].startswith("measured") or row["status"] == "live-fixture-unavailable":
+            preserved[(row["workload"], row["external_baseline"])] = row
+    return preserved
+
+known_rows = {
+    ("static_1kb", "nginx_static_1024"): "native_simple_static_1024",
+    ("static_1kb", "caddy_static_1024"): "native_simple_static_1024",
+    ("static_1kb", "h2o_static_1024"): "native_simple_static_1024",
+    ("static_1mb", "nginx_static_1048576"): "native_simple_static_1048576",
+    ("static_1mb", "caddy_static_1048576"): "native_simple_static_1048576",
+    ("static_1mb", "h2o_static_1048576"): "native_simple_static_1048576",
+    ("cached_reverse_proxy", "haproxy_cached_reverse_proxy"): "native_simple_cached_proxy",
+    ("cached_reverse_proxy", "envoy_cached_reverse_proxy"): "native_simple_cached_proxy",
+    ("upload_streaming_proxy", "haproxy_upload_streaming_proxy"): "native_simple_upload_proxy",
+    ("upgrade_tunnel_proxy", "haproxy_upgrade_tunnel_proxy"): "native_simple_upgrade_tunnel",
+    ("dynamic_gpu_plaintext", "cpu_simple_plaintext"): "native_simple_gpu_route_plaintext",
+    ("dynamic_gpu_json", "cpu_simple_json"): "native_simple_gpu_route_json",
+    ("reference_plaintext", "uwebsockets_plaintext"): "native_simple_reference_plaintext",
+    ("reference_plaintext", "seastar_plaintext"): "native_simple_reference_plaintext",
+}
+
+def parse_external_measured_rows(text):
+    measured = {}
+    prefix = "WEB_SERVER_EXTERNAL_COMPARE_MEASURED="
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith(prefix):
+            continue
+        parts = line[len(prefix):].split("|")
+        if len(parts) != 10:
+            continue
+        workload, simple_target, baseline, simple_rps, external_rps, simple_p99, external_p99, throughput, failures, reason = parts
+        key = (workload, baseline)
+        if known_rows.get(key) != simple_target:
+            continue
+        try:
+            simple_rps = float(simple_rps)
+            external_rps = float(external_rps)
+            simple_p99 = float(simple_p99)
+            external_p99 = float(external_p99)
+            throughput = float(throughput)
+            failures = int(failures)
+        except ValueError:
+            continue
+        if simple_rps <= 0 or external_rps <= 0 or simple_p99 < 0 or external_p99 < 0 or throughput < 0 or failures < 0:
+            continue
+        status = "measured" if failures == 0 else "measured_with_failures"
+        if not reason:
+            reason = "external-web-measured-row"
+        measured[key] = {
+            "workload": workload,
+            "simple_target": simple_target,
+            "external_baseline": baseline,
+            "load_tool": "wrk",
+            "status": status,
+            "simple_rps": f"{simple_rps:.2f}",
+            "external_rps": f"{external_rps:.2f}",
+            "rps_ratio": f"{simple_rps / external_rps:.3f}",
+            "simple_p99_ms": f"{simple_p99:.3f}",
+            "external_p99_ms": f"{external_p99:.3f}",
+            "throughput_mbps": f"{throughput:.3f}",
+            "failures": str(failures),
+            "reason": reason,
+        }
+    return measured
+
+def measured_input_text():
+    chunks = []
+    for producer_path in [
+        Path("build/perf/web_server_nginx_compare/live-nginx-measured-rows.env"),
+        Path("build/perf/web_server_nginx_compare/static-external-measured-rows.env"),
+        Path("build/perf/web_server_nginx_compare/proxy-external-measured-rows.env"),
+        Path("build/perf/web_server_nginx_compare/dynamic-gpu-route-measured-rows.env"),
+    ]:
+        if producer_path.exists():
+            chunks.append(producer_path.read_text(encoding="utf-8", errors="replace"))
+    chunks.append(os.environ.get("WEB_SERVER_EXTERNAL_COMPARE_MEASURED_OUTPUT", ""))
+    return "\n".join(chunks)
+
+def blank_row(workload, simple_target, baseline, status, reason):
+    return {
+        "workload": workload,
+        "simple_target": simple_target,
+        "external_baseline": baseline,
+        "load_tool": "wrk",
+        "status": status,
+        "simple_rps": 0,
+        "external_rps": 0,
+        "rps_ratio": 0,
+        "simple_p99_ms": 0,
+        "external_p99_ms": 0,
+        "throughput_mbps": 0,
+        "failures": 0,
+        "reason": reason,
+    }
+
+def planned_row(workload, simple_target, tool, baseline):
+    if not tools["wrk"]:
+        return blank_row(workload, simple_target, baseline, "load-tool-unavailable", "wrk-not-installed")
+    if not tools[tool]:
+        return blank_row(workload, simple_target, baseline, "external-baseline-unavailable", f"{tool}-not-installed")
+    return blank_row(workload, simple_target, baseline, "ready_unmeasured", f"run-live-simple-{tool}-wrk-wrapper")
+
+external_measured = parse_external_measured_rows(measured_input_text())
+existing_preserved = parse_existing_preserved(table)
+rows = []
+for workload, size in [("static_1kb", 1024), ("static_1mb", 1048576)]:
+    simple = f"native_simple_static_{size}"
+    for tool in ["nginx", "caddy", "h2o"]:
+        baseline = f"{tool}_static_{size}"
+        row = external_measured.get((workload, baseline)) or existing_preserved.get((workload, baseline))
+        rows.append(row if row else planned_row(workload, simple, tool, baseline))
+
+for workload, simple, baselines in [
+    ("cached_reverse_proxy", "native_simple_cached_proxy", ["haproxy", "envoy"]),
+    ("upload_streaming_proxy", "native_simple_upload_proxy", ["haproxy"]),
+    ("upgrade_tunnel_proxy", "native_simple_upgrade_tunnel", ["haproxy"]),
+]:
+    for tool in baselines:
+        baseline = f"{tool}_{workload}"
+        row = external_measured.get((workload, baseline)) or existing_preserved.get((workload, baseline))
+        rows.append(row if row else planned_row(workload, simple, tool, baseline))
+
+for workload, simple, baseline in [
+    ("dynamic_gpu_plaintext", "native_simple_gpu_route_plaintext", "cpu_simple_plaintext"),
+    ("dynamic_gpu_json", "native_simple_gpu_route_json", "cpu_simple_json"),
+]:
+    row = external_measured.get((workload, baseline)) or existing_preserved.get((workload, baseline))
+    if row:
+        rows.append(row)
+    elif not tools["wrk"]:
+        rows.append(blank_row(workload, simple, baseline, "load-tool-unavailable", "wrk-not-installed"))
+    else:
+        rows.append(blank_row(workload, simple, baseline, "ready_unmeasured", "run-live-simple-cpu-gpu-route-wrk-wrapper"))
+
+for workload, simple, baseline in [
+    ("reference_plaintext", "native_simple_reference_plaintext", "uwebsockets_plaintext"),
+    ("reference_plaintext", "native_simple_reference_plaintext", "seastar_plaintext"),
+]:
+    row = external_measured.get((workload, baseline)) or existing_preserved.get((workload, baseline))
+    if row:
+        rows.append(row)
+    elif not tools["wrk"]:
+        rows.append(blank_row(workload, simple, baseline, "load-tool-unavailable", "wrk-not-installed"))
+    else:
+        rows.append(blank_row(workload, simple, baseline, "live-fixture-unavailable", "reference-fixture-url-not-configured"))
+
+def fmt(value):
+    return str(value)
+
+body_rows = "".join(
+    f"| {r['workload']} | {r['simple_target']} | {r['external_baseline']} | {r['load_tool']} | {r['status']} | {fmt(r['simple_rps'])} | {fmt(r['external_rps'])} | {fmt(r['rps_ratio'])} | {fmt(r['simple_p99_ms'])} | {fmt(r['external_p99_ms'])} | {fmt(r['throughput_mbps'])} | {fmt(r['failures'])} | {r['reason']} |\n"
+    for r in rows
+)
+
+body = (
+    "# Web Server NGINX Comparison Report\n\n"
+    "This report is generated by `scripts/check/check-web-server-nginx-compare-report.shs`.\n"
+    "It is the first external-comparison gate for the GPU Web/DB optimization lane. "
+    "Rows marked `ready_unmeasured` prove installed baseline/load-tool readiness and required report shape; they do not claim Simple speedup.\n\n"
+    "## Tool Availability\n\n"
+    + "".join(f"- {name}: {'available at `' + path + '`' if path else 'missing'}\n" for name, path in tools.items())
+    + "\n"
+    + environment_markdown()
+    + normalization_markdown()
+    + header + sep + body_rows
+)
+metrics = "# Web Server NGINX Comparison Metrics\n\n" + normalization_markdown() + header + sep + body_rows
+report.write_text(body, encoding="utf-8")
+table.write_text(metrics, encoding="utf-8")
+PY
+
+test -f "$REPORT"
+test -f "$TABLE"
+grep -q 'static_1kb' "$REPORT"
+grep -q 'nginx_static_1048576' "$REPORT"
+grep -Eq 'ready_unmeasured|external-baseline-unavailable|load-tool-unavailable' "$REPORT"
+grep -q 'haproxy_cached_reverse_proxy' "$REPORT"
+grep -q 'envoy_cached_reverse_proxy' "$REPORT"
+grep -q 'caddy_static_1024' "$REPORT"
+grep -q 'h2o_static_1048576' "$REPORT"
+grep -q 'dynamic_gpu_plaintext' "$REPORT"
+grep -q 'dynamic_gpu_json' "$REPORT"
+grep -q 'Benchmark Normalization' "$REPORT"
+grep -q 'same bytes per compared workload' "$TABLE"
+grep -q 'native_simple_static_1024' "$TABLE"
+
+echo "STATUS: PASS web server nginx comparison report"

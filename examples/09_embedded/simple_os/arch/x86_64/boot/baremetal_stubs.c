@@ -6885,6 +6885,200 @@ int64_t rt_net_close(int64_t sock_fd)
     return ENCODE_INT(0);
 }
 
+int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv);
+RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len);
+RuntimeValue rt_net_recv_version_text(int64_t sock_fd);
+
+static int _boot_tcp_active_fd = -1;
+
+static int64_t _decode_runtime_i64(int64_t value)
+{
+    if ((value & 7) == TAG_INT) {
+        return value >> 3;
+    }
+    return value;
+}
+
+static int _boot_tcp_resolve_fd(int64_t fd)
+{
+    if (fd == 200 && _boot_tcp_active_fd >= 0) {
+        return _boot_tcp_active_fd;
+    }
+    return (int)fd;
+}
+
+int64_t rt_boot_tcp_bind(RuntimeValue addr)
+{
+    (void)addr;
+    int64_t sock = _decode_runtime_i64(rt_net_socket(6));
+    if (sock < 0) return sock;
+    int64_t bind_rc = _decode_runtime_i64(rt_net_bind(sock, 22));
+    if (bind_rc < 0) return bind_rc;
+    int64_t listen_rc = _decode_runtime_i64(rt_net_listen(sock, 5));
+    if (listen_rc < 0) return listen_rc;
+    serial_puts("[btcp-x64] bind/listen fd=");
+    serial_put_dec(sock);
+    serial_puts("\r\n");
+    return sock;
+}
+
+int64_t rt_boot_tcp_bind_port(int64_t port)
+{
+    int64_t sock = _decode_runtime_i64(rt_net_socket(6));
+    if (sock < 0) return sock;
+    int64_t bind_rc = _decode_runtime_i64(rt_net_bind(sock, port));
+    if (bind_rc < 0) return bind_rc;
+    int64_t listen_rc = _decode_runtime_i64(rt_net_listen(sock, 5));
+    if (listen_rc < 0) return listen_rc;
+    serial_puts("[btcp-x64] bind/listen fd=");
+    serial_put_dec(sock);
+    serial_puts(" port=");
+    serial_put_dec(port);
+    serial_puts("\r\n");
+    return sock;
+}
+
+int64_t rt_boot_tcp_accept_timeout(int64_t fd, int64_t ms)
+{
+    (void)ms;
+    int64_t accepted = _decode_runtime_i64(rt_net_accept(fd));
+    if (accepted < 0) return accepted;
+    _boot_tcp_active_fd = (int)accepted;
+    serial_puts("[btcp-x64] accepted fd=");
+    serial_put_dec(accepted);
+    serial_puts("\r\n");
+    return accepted;
+}
+
+int64_t rt_boot_tcp_write_bytes(int64_t fd, RuntimeValue data_rv)
+{
+    int resolved = _boot_tcp_resolve_fd(fd);
+    int64_t sent = _decode_runtime_i64(rt_net_send_bytes(resolved, data_rv));
+    serial_puts("[btcp-x64] write fd=");
+    serial_put_dec(resolved);
+    serial_puts(" rc=");
+    serial_put_dec(sent);
+    serial_puts("\r\n");
+    return sent;
+}
+
+int64_t rt_boot_tcp_send_ssh_banner(int64_t fd)
+{
+    static const uint8_t banner[] = "SSH-2.0-SimpleOS_1.0\r\n";
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (sizeof(banner) - 1U) * sizeof(RuntimeValue));
+    if (!a) return -12;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (sizeof(banner) - 1U) * sizeof(RuntimeValue));
+    a->len = (uint32_t)(sizeof(banner) - 1U);
+    a->cap = a->len;
+    a->items = runtime_array_inline_items(a);
+    for (uint32_t i = 0; i < a->len; i++) {
+        a->items[i] = ENCODE_INT((int64_t)banner[i]);
+    }
+    int64_t sent = rt_boot_tcp_write_bytes(fd, ENCODE_PTR(a));
+    if (sent < 0) {
+        serial_puts("BTCP SSH BANNER DROP\r\n");
+        return sent;
+    }
+    serial_puts("BTCP SSH BANNER SENT\r\n");
+    return sent;
+}
+
+int64_t rt_boot_tcp_send_plain_payload(int64_t fd, RuntimeValue data_rv)
+{
+    int resolved = _boot_tcp_resolve_fd(fd);
+    if ((resolved < 0 || resolved >= MAX_SOCKETS || !_sockets[resolved].in_use) &&
+        _boot_tcp_active_fd >= 0) {
+        resolved = _boot_tcp_active_fd;
+    }
+    if (!IS_HEAP(data_rv)) return -22;
+    RuntimeArray *payload = (RuntimeArray *)(uintptr_t)DECODE_PTR(data_rv);
+    if (!payload) return -22;
+    uint32_t payload_len = payload->len;
+    uint32_t padding_len = 4U;
+    while (((5U + payload_len + padding_len) % 8U) != 0U) {
+        padding_len++;
+    }
+    uint32_t packet_length = 1U + payload_len + padding_len;
+    uint32_t total_len = 4U + packet_length;
+    if (total_len > 4096U) return -90;
+
+    RuntimeArray *wire = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)total_len * sizeof(RuntimeValue));
+    if (!wire) return -12;
+    wire->hdr.type = HEAP_ARRAY;
+    wire->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)total_len * sizeof(RuntimeValue));
+    wire->len = total_len;
+    wire->cap = total_len;
+    wire->items = runtime_array_inline_items(wire);
+    RuntimeValue *items = runtime_array_items(wire);
+    RuntimeValue *payload_items = runtime_array_items(payload);
+    items[0] = ENCODE_INT((packet_length >> 24) & 0xffU);
+    items[1] = ENCODE_INT((packet_length >> 16) & 0xffU);
+    items[2] = ENCODE_INT((packet_length >> 8) & 0xffU);
+    items[3] = ENCODE_INT(packet_length & 0xffU);
+    items[4] = ENCODE_INT(padding_len & 0xffU);
+    for (uint32_t i = 0; i < payload_len; i++) {
+        items[5U + i] = ENCODE_INT(_rv_byte(payload_items[i]));
+    }
+    for (uint32_t i = 0; i < padding_len; i++) {
+        items[5U + payload_len + i] = ENCODE_INT(0);
+    }
+    int64_t sent = _decode_runtime_i64(rt_net_send_bytes(resolved, ENCODE_PTR(wire)));
+    serial_puts("[btcp-x64] send plain payload fd=");
+    serial_put_dec(resolved);
+    serial_puts(" rc=");
+    serial_put_dec(sent);
+    serial_puts("\r\n");
+    return sent;
+}
+
+RuntimeValue rt_boot_tcp_read_bytes(int64_t max_len)
+{
+    if (_boot_tcp_active_fd < 0) {
+        RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
+        if (!empty) return NIL_VALUE;
+        empty->hdr.type = HEAP_ARRAY;
+        empty->hdr.size = sizeof(RuntimeArray);
+        empty->len = 0;
+        empty->cap = 0;
+        empty->items = runtime_array_inline_items(empty);
+        return ENCODE_PTR(empty);
+    }
+    return rt_net_recv_bytes(_boot_tcp_active_fd, max_len);
+}
+
+RuntimeValue rt_net_recv_ssh_plain_packet_payload(int64_t sock_fd);
+
+RuntimeValue rt_boot_tcp_read_ssh_plain_packet_payload(int64_t fd)
+{
+    int resolved = _boot_tcp_resolve_fd(fd);
+    serial_puts("[btcp-x64] read plain payload fd=");
+    serial_put_dec(resolved);
+    serial_puts("\r\n");
+    return rt_net_recv_ssh_plain_packet_payload(resolved);
+}
+
+RuntimeValue rt_boot_tcp_take_version_text(int64_t fd)
+{
+    int resolved = _boot_tcp_resolve_fd(fd);
+    return rt_net_recv_version_text(resolved);
+}
+
+RuntimeValue rt_boot_tcp_take_version_bytes(int64_t fd)
+{
+    int resolved = _boot_tcp_resolve_fd(fd);
+    return rt_net_recv_bytes(resolved, 255);
+}
+
+int64_t rt_boot_tcp_close(int64_t fd)
+{
+    int resolved = _boot_tcp_resolve_fd(fd);
+    if (resolved == _boot_tcp_active_fd) {
+        _boot_tcp_active_fd = -1;
+    }
+    return _decode_runtime_i64(rt_net_close(resolved));
+}
+
 /* rt_net_send_bytes: send byte array data on an established socket.
  * data_rv is a RuntimeValue pointing to a RuntimeArray of u8.
  * Returns bytes sent or negative errno. */
@@ -6952,6 +7146,13 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
     if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) {
         return NIL_VALUE; /* nil */
     }
+    int64_t limit = (int64_t)simpleos_expose_runtime_value((RuntimeValue)max_len);
+    if (limit <= 0) {
+        limit = 1;
+    }
+    if (limit > 4096) {
+        limit = 4096;
+    }
     /* Poll until data available or timeout */
     int timeout = 0;
     while (_tcp_rx_available(fd) == 0 &&
@@ -6974,7 +7175,7 @@ RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
         return ENCODE_PTR(a);
     }
     uint32_t read_len = avail;
-    if ((int64_t)read_len > max_len) read_len = (uint32_t)max_len;
+    if ((int64_t)read_len > limit) read_len = (uint32_t)limit;
 
     /* Read data from socket rx buffer */
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue));

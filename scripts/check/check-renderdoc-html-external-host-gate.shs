@@ -1,0 +1,82 @@
+#!/bin/sh
+# Validate original RenderDoc+Chrome HTML/CSS capture evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/html-external-host-gate}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_html_external_host_gate_$(date -u +%F).md}"
+SOURCE_ENV="${RDOC_HTML_EVIDENCE_ENV:-build/renderdoc/canonical-probe/html/evidence.env}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_evidence() {
+    status="$1"
+    reason="$2"
+    {
+        echo "rdoc_html_external_gate_status=$status"
+        echo "rdoc_html_external_gate_reason=$reason"
+        echo "rdoc_html_external_gate_source_env=$SOURCE_ENV"
+        echo "rdoc_html_external_gate_backend=${backend:-}"
+        echo "rdoc_html_external_gate_capture_status=${capture_status:-}"
+        echo "rdoc_html_external_gate_capture_reason=${capture_reason:-}"
+        echo "rdoc_html_external_gate_capture_file=${capture_file:-}"
+        echo "rdoc_html_external_gate_capture_magic=${capture_magic:-}"
+        echo "rdoc_html_external_gate_required_backend=original"
+        echo "rdoc_html_external_gate_required_status=pass"
+        echo "rdoc_html_external_gate_required_magic=RDOC"
+    } >"$OUT_ENV"
+    {
+        echo "# RenderDoc HTML External Host Gate"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- source evidence: $SOURCE_ENV"
+        echo "- backend: ${backend:-}"
+        echo "- capture status: ${capture_status:-}"
+        echo "- capture reason: ${capture_reason:-}"
+        echo "- capture file: ${capture_file:-}"
+        echo "- capture magic: ${capture_magic:-}"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+    cat "$OUT_ENV"
+}
+
+if [ ! -s "$SOURCE_ENV" ]; then
+    backend=""
+    capture_status=""
+    capture_reason="missing-source-evidence"
+    capture_file=""
+    capture_magic=""
+    write_evidence "unavailable" "missing-source-evidence"
+    exit 1
+fi
+
+backend="$(value_of rdoc_backend "$SOURCE_ENV")"
+capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
+capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
+capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
+capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
+
+if [ "$backend" = "original" ] && [ "$capture_status" = "pass" ] && [ "$capture_magic" = "RDOC" ] && [ -s "$capture_file" ]; then
+    write_evidence "pass" "pass"
+    exit 0
+fi
+
+if [ "$capture_status" = "" ]; then
+    write_evidence "unavailable" "missing-capture-status"
+else
+    write_evidence "fail" "${capture_reason:-capture-not-pass}"
+fi
+exit 1

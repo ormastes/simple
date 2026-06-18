@@ -1,0 +1,54 @@
+use std.spec
+use std.tls.types.{CONTENT_TYPE_APPLICATION_DATA, CONTENT_TYPE_HANDSHAKE, TLS_VERSION_1_2}
+use std.nogc_async_mut.io.tls_io.{parse_record_header_hex, parse_record_hex}
+
+describe "TLS record hex parser":
+
+    it "parses a TLS 1.2 handshake record":
+        val parsed = parse_record_hex("1603030003616263")
+        expect(parsed.is_ok()).to_be(true)
+        val view = parsed.unwrap()
+        expect(view.content_type).to_equal(CONTENT_TYPE_HANDSHAKE)
+        expect(view.version).to_equal(TLS_VERSION_1_2)
+        expect(view.payload_len).to_equal(3)
+        expect(view.payload_hex).to_equal("616263")
+
+    it "parses a TLS 1.2 application data record for HTTPS payloads":
+        val parsed = parse_record_hex("1703030012474554202f20485454502f312e310d0a0d0a")
+        expect(parsed.is_ok()).to_be(true)
+        val view = parsed.unwrap()
+        expect(view.content_type).to_equal(CONTENT_TYPE_APPLICATION_DATA)
+        expect(view.payload_hex).to_contain("474554202f20485454502f312e31")
+
+    it "rejects short TLS record headers":
+        val parsed = parse_record_hex("16030300")
+        expect(parsed.is_err()).to_be(true)
+        expect(parsed.err().unwrap()).to_equal("tls record header too short")
+
+    it "rejects unsupported TLS record content types":
+        val parsed = parse_record_hex("6303030003616263")
+        expect(parsed.is_err()).to_be(true)
+        expect(parsed.err().unwrap()).to_equal("tls record content type unsupported")
+
+    it "rejects unsupported TLS record versions":
+        val parsed = parse_record_hex("1603040003616263")
+        expect(parsed.is_err()).to_be(true)
+        expect(parsed.err().unwrap()).to_equal("tls record version unsupported")
+
+    it "rejects mismatched TLS record lengths":
+        val parsed = parse_record_hex("1603030004616263")
+        expect(parsed.is_err()).to_be(true)
+        expect(parsed.err().unwrap()).to_equal("tls record length mismatch")
+
+    it "parses a TLS record header before the payload is read":
+        val header = parse_record_header_hex("1703030012")
+        expect(header.is_ok()).to_be(true)
+        val view = header.unwrap()
+        expect(view.content_type).to_equal(CONTENT_TYPE_APPLICATION_DATA)
+        expect(view.version).to_equal(TLS_VERSION_1_2)
+        expect(view.payload_len).to_equal(18)
+
+    it "rejects oversized TLS record headers before reading payload":
+        val header = parse_record_header_hex("1703034001")
+        expect(header.is_err()).to_be(true)
+        expect(header.err().unwrap()).to_equal("tls record payload too large")

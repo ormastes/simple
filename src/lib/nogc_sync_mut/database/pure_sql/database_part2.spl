@@ -20,6 +20,36 @@ use nogc_sync_mut.db.dbfs_engine.mvcc.{
 use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
 use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
 use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
+use std.database.offload_profile.{DbOffloadProfile, db_offload_profile_execute}
+use std.database.query_offload.{db_query_rows}
+use std.database.sql_join_aggregate_offload.{
+    sql_join_aggregate_offload_execute_profile,
+    sql_join_aggregate_offload_execute_profile_validated,
+    sql_join_aggregate_offload_execute_device_validated
+}
+use std.database.storage_mode_offload.{
+    DbStorageOffloadMode,
+    DbStorageOffloadWorkload,
+    DbStorageOffloadExecution,
+    DbStorageDeviceOffloadExecution,
+    db_storage_execute_rows_validated,
+    db_storage_execute_rows_with_device_backend_validated
+}
+use std.web_db_offload.device_backend.{GpuWdbDeviceBackend}
+
+struct PureSqlQueryOffloadExecution:
+    rows: [DbRow]
+    offload: DbStorageOffloadExecution
+    result_source: text
+
+struct PureSqlQueryDeviceOffloadExecution:
+    rows: [DbRow]
+    offload: DbStorageDeviceOffloadExecution
+    result_source: text
+
+struct PureSqlOffloadRows:
+    columns: [text]
+    rows: [[DbValue]]
 
 class PureDatabase:
     _path: text
@@ -1014,6 +1044,367 @@ class PureDatabase:
         if stmt.kind == SqlStmtKind.Select:
             return self._do_select(stmt.select, params)
         Err(DbError.QueryFailed(sql: sql, message: "query() requires SELECT"))
+
+    me query_with_offload_profile(sql: text, params: [DbValue],
+                                  profile: DbOffloadProfile,
+                                  mode: DbStorageOffloadMode,
+                                  wal_generation_current: bool,
+                                  bytes_per_row: i64) -> Result<PureSqlQueryOffloadExecution, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        _reset_param_idx()
+        val pr = sql_parse(sql)
+        if pr.is_err():
+            return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+        val stmt = pr.unwrap()
+        if stmt.kind != SqlStmtKind.Select:
+            return Err(DbError.QueryFailed(sql: sql, message: "query_with_offload_profile() requires SELECT"))
+        val workload = _pure_sql_select_offload_workload(stmt.select)
+        val estimated_items = self._select_offload_item_count(stmt.select)
+        val rows = self._do_select(stmt.select, params)?
+        if workload == DbStorageOffloadWorkload.JoinAggregate:
+            val aggregate = sql_join_aggregate_offload_execute_profile(
+                rows,
+                _pure_sql_result_row_ids(estimated_items),
+                profile,
+                mode,
+                wal_generation_current,
+                bytes_per_row
+            )
+            return Ok(PureSqlQueryOffloadExecution(
+                rows: aggregate.rows,
+                offload: aggregate.offload,
+                result_source: "cpu_select"
+            ))
+        val offload = db_offload_profile_execute(
+            profile,
+            db_query_rows(
+                mode,
+                workload,
+                estimated_items,
+                bytes_per_row,
+                wal_generation_current,
+                _pure_sql_result_row_ids(estimated_items)
+            )
+        )
+        Ok(PureSqlQueryOffloadExecution(
+            rows: rows,
+            offload: offload,
+            result_source: "cpu_select"
+        ))
+
+    me query_with_validated_offload_profile(sql: text, params: [DbValue],
+                                            profile: DbOffloadProfile,
+                                            mode: DbStorageOffloadMode,
+                                            wal_generation_current: bool,
+                                            bytes_per_row: i64) -> Result<PureSqlQueryOffloadExecution, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        _reset_param_idx()
+        val pr = sql_parse(sql)
+        if pr.is_err():
+            return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+        val stmt = pr.unwrap()
+        if stmt.kind != SqlStmtKind.Select:
+            return Err(DbError.QueryFailed(sql: sql, message: "query_with_validated_offload_profile() requires SELECT"))
+        val workload = _pure_sql_select_offload_workload(stmt.select)
+        val estimated_items = self._select_offload_item_count(stmt.select)
+        val rows = self._do_select(stmt.select, params)?
+        if workload == DbStorageOffloadWorkload.JoinAggregate:
+            val candidate = self._try_join_aggregate_offload_rows(stmt.select, params)?
+            if val gpu_candidate_rows = candidate:
+                val aggregate = sql_join_aggregate_offload_execute_profile_validated(
+                    rows,
+                    gpu_candidate_rows,
+                    _pure_sql_result_row_ids(estimated_items),
+                    profile,
+                    mode,
+                    wal_generation_current,
+                    bytes_per_row
+                )
+                return Ok(PureSqlQueryOffloadExecution(
+                    rows: aggregate.rows,
+                    offload: aggregate.offload,
+                    result_source: "gpu_candidate_validated"
+                ))
+        if workload == DbStorageOffloadWorkload.ScanFilterProject:
+            val cpu_row_ids = _pure_sql_result_row_ids(rows.len())
+            val offload = db_storage_execute_rows_validated(
+                mode,
+                workload,
+                estimated_items,
+                bytes_per_row,
+                profile.queue_state,
+                profile.registry,
+                profile.gpu_available,
+                wal_generation_current,
+                profile.cpu_fallback_available,
+                profile.budget,
+                cpu_row_ids,
+                cpu_row_ids
+            )
+            return Ok(PureSqlQueryOffloadExecution(
+                rows: rows,
+                offload: offload,
+                result_source: if offload.gpu_candidate_validated: "gpu_candidate_validated" else: "cpu_select"
+            ))
+        self.query_with_offload_profile(sql, params, profile, mode, wal_generation_current, bytes_per_row)
+
+    me query_with_device_backend_validated(sql: text, params: [DbValue],
+                                           profile: DbOffloadProfile,
+                                           mode: DbStorageOffloadMode,
+                                           wal_generation_current: bool,
+                                           bytes_per_row: i64,
+                                           backend: GpuWdbDeviceBackend,
+                                           expected_backend_generation: i64,
+                                           gpu_candidate_row_ids: [i64],
+                                           started_us: i64,
+                                           finished_us: i64,
+                                           measured_device_time_us: i64,
+                                           timing_source: text) -> Result<PureSqlQueryDeviceOffloadExecution, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        _reset_param_idx()
+        val pr = sql_parse(sql)
+        if pr.is_err():
+            return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+        val stmt = pr.unwrap()
+        if stmt.kind != SqlStmtKind.Select:
+            return Err(DbError.QueryFailed(sql: sql, message: "query_with_device_backend_validated() requires SELECT"))
+        val workload = _pure_sql_select_offload_workload(stmt.select)
+        if workload != DbStorageOffloadWorkload.ScanFilterProject:
+            return Err(DbError.QueryFailed(sql: sql, message: "query_with_device_backend_validated() requires scan/filter/project SELECT"))
+        val estimated_items = self._select_offload_item_count(stmt.select)
+        val rows = self._do_select(stmt.select, params)?
+        val cpu_row_ids = _pure_sql_result_row_ids(rows.len())
+        val offload = db_storage_execute_rows_with_device_backend_validated(
+            mode,
+            workload,
+            estimated_items,
+            bytes_per_row,
+            profile.queue_state,
+            backend,
+            wal_generation_current,
+            expected_backend_generation,
+            profile.cpu_fallback_available,
+            profile.budget,
+            cpu_row_ids,
+            gpu_candidate_row_ids,
+            started_us,
+            finished_us,
+            measured_device_time_us,
+            timing_source
+        )
+        Ok(PureSqlQueryDeviceOffloadExecution(
+            rows: rows,
+            offload: offload,
+            result_source: if offload.execution.gpu_candidate_validated: "production_gpu_candidate_validated" else: "cpu_select"
+        ))
+
+    me query_join_aggregate_with_device_backend_validated(sql: text, params: [DbValue],
+                                                          profile: DbOffloadProfile,
+                                                          mode: DbStorageOffloadMode,
+                                                          wal_generation_current: bool,
+                                                          bytes_per_row: i64,
+                                                          backend: GpuWdbDeviceBackend,
+                                                          expected_backend_generation: i64,
+                                                          gpu_candidate_rows: [DbRow],
+                                                          gpu_candidate_row_ids: [i64],
+                                                          started_us: i64,
+                                                          finished_us: i64,
+                                                          measured_device_time_us: i64,
+                                                          timing_source: text) -> Result<PureSqlQueryDeviceOffloadExecution, DbError>:
+        if not self.is_open:
+            return Err(DbError.Closed)
+        _reset_param_idx()
+        val pr = sql_parse(sql)
+        if pr.is_err():
+            return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+        val stmt = pr.unwrap()
+        if stmt.kind != SqlStmtKind.Select:
+            return Err(DbError.QueryFailed(sql: sql, message: "query_join_aggregate_with_device_backend_validated() requires SELECT"))
+        val workload = _pure_sql_select_offload_workload(stmt.select)
+        if workload != DbStorageOffloadWorkload.JoinAggregate:
+            return Err(DbError.QueryFailed(sql: sql, message: "query_join_aggregate_with_device_backend_validated() requires join/aggregate SELECT"))
+        val rows = self._do_select(stmt.select, params)?
+        val cpu_row_ids = _pure_sql_result_row_ids(rows.len())
+        val aggregate = sql_join_aggregate_offload_execute_device_validated(
+            rows,
+            gpu_candidate_rows,
+            cpu_row_ids,
+            gpu_candidate_row_ids,
+            mode,
+            profile.queue_state,
+            backend,
+            wal_generation_current,
+            expected_backend_generation,
+            profile.cpu_fallback_available,
+            profile.budget,
+            bytes_per_row,
+            started_us,
+            finished_us,
+            measured_device_time_us,
+            timing_source
+        )
+        Ok(PureSqlQueryDeviceOffloadExecution(
+            rows: aggregate.rows,
+            offload: aggregate.device_offload,
+            result_source: if aggregate.gpu_candidate_validated: "production_gpu_candidate_validated" else: "cpu_select"
+        ))
+
+    me _select_offload_item_count(sel: SqlSelect) -> i64:
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(sel.from_table):
+            ti = self._tbl_name_idx[sel.from_table]
+        else:
+            ti = _find_idx(self._tbl_names, sel.from_table)
+        if ti < 0:
+            return 0
+        self._tbl_data[ti].tuples.len()
+
+    me _try_join_aggregate_offload_rows(sel: SqlSelect, params: [DbValue]) -> Result<[DbRow]?, DbError>:
+        if sel.distinct:
+            return Ok(nil)
+        if sel.group_by.len() != 1:
+            return Ok(nil)
+        if sel.having.?:
+            return Ok(nil)
+        if sel.order_by.len() > 0 or sel.limit >= 0 or sel.offset > 0:
+            return Ok(nil)
+        if sel.columns.len() != 2:
+            return Ok(nil)
+        val aggregate_expr = _unwrap_as_expr(sel.columns[1])
+        val aggregate_is_count = _pure_sql_is_count_star_expr(sel.columns[1])
+        val aggregate_is_sum = _pure_sql_is_sum_column_expr(sel.columns[1])
+        val aggregate_is_avg = _pure_sql_is_avg_column_expr(sel.columns[1])
+        val aggregate_is_min = _pure_sql_is_min_column_expr(sel.columns[1])
+        val aggregate_is_max = _pure_sql_is_max_column_expr(sel.columns[1])
+        if not aggregate_is_count and not aggregate_is_sum and not aggregate_is_avg and not aggregate_is_min and not aggregate_is_max:
+            return Ok(nil)
+        val group_expr = _unwrap_as_expr(sel.columns[0])
+        if group_expr.kind != SqlExprKind.Column:
+            return Ok(nil)
+        if _unwrap_as_expr(sel.group_by[0]).kind != SqlExprKind.Column:
+            return Ok(nil)
+        var ji: i32 = 0
+        while ji < sel.joins.len() as i32:
+            if sel.joins[ji].kind != JoinKind.Inner:
+                return Ok(nil)
+            ji = ji + 1
+        val joined = self._join_aggregate_offload_input_rows(sel, params)?
+        val col_names = joined.columns
+        val rows = joined.rows
+        val group_col_idx = _find_idx(col_names, group_expr.value)
+        if group_col_idx < 0:
+            return Ok(nil)
+        var group_keys: [text] = []
+        var group_rows: [[[DbValue]]] = []
+        var values: [DbValue] = []
+        var ri: i32 = 0
+        while ri < rows.len() as i32:
+            val row_vals = rows[ri]
+            val group_value = row_vals[group_col_idx]
+            val key = group_value.to_text()
+            val existing = _find_idx(group_keys, key)
+            if existing < 0:
+                group_keys.push(key)
+                var new_group: [[DbValue]] = []
+                new_group.push(row_vals)
+                group_rows.push(new_group)
+                values.push(group_value)
+            else:
+                var existing_group = group_rows[existing]
+                existing_group.push(row_vals)
+                group_rows[existing] = existing_group
+            ri = ri + 1
+        val group_alias = _get_as_alias(sel.columns[0])
+        val group_col_name = if group_alias != "": group_alias else: group_expr.value
+        val count_col_name = _agg_col_name(sel.columns[1])
+        var out: [DbRow] = []
+        var gi: i32 = 0
+        while gi < group_keys.len() as i32:
+            val aggregate_value = if aggregate_is_count:
+                DbValue.Integer(value: group_rows[gi].len() as i64)
+            else:
+                _eval_agg_col(aggregate_expr, col_names, group_rows[gi])
+            out.push(DbRow(
+                columns: [group_col_name, count_col_name],
+                values: [values[gi], aggregate_value]
+            ))
+            gi = gi + 1
+        Ok(Some(out))
+
+    me _join_aggregate_offload_input_rows(sel: SqlSelect, params: [DbValue]) -> Result<PureSqlOffloadRows, DbError>:
+        val left = self._visible_table_rows(sel.from_table)?
+        var col_names = left.columns
+        var current_rows = left.rows
+        var ji: i32 = 0
+        while ji < sel.joins.len() as i32:
+            val join = sel.joins[ji]
+            val right = self._visible_table_rows(join.table)?
+            var combined_cols = col_names
+            var rci: i32 = 0
+            while rci < right.columns.len() as i32:
+                combined_cols.push(right.columns[rci])
+                rci = rci + 1
+            var joined_rows: [[DbValue]] = []
+            var li: i32 = 0
+            while li < current_rows.len() as i32:
+                val left_vals = current_rows[li]
+                var ri: i32 = 0
+                while ri < right.rows.len() as i32:
+                    val right_vals = right.rows[ri]
+                    var combo: [DbValue] = []
+                    var lci: i32 = 0
+                    while lci < left_vals.len() as i32:
+                        combo.push(left_vals[lci])
+                        lci = lci + 1
+                    var rrci: i32 = 0
+                    while rrci < right_vals.len() as i32:
+                        combo.push(right_vals[rrci])
+                        rrci = rrci + 1
+                    if _check_where(join.on_expr, combined_cols, combo, params):
+                        joined_rows.push(combo)
+                    ri = ri + 1
+                li = li + 1
+            col_names = combined_cols
+            current_rows = joined_rows
+            ji = ji + 1
+        var filtered: [[DbValue]] = []
+        var fi: i32 = 0
+        while fi < current_rows.len() as i32:
+            if _check_where(sel.where_expr, col_names, current_rows[fi], params):
+                filtered.push(current_rows[fi])
+            fi = fi + 1
+        Ok(PureSqlOffloadRows(columns: col_names, rows: filtered))
+
+    me _visible_table_rows(table_name: text) -> Result<PureSqlOffloadRows, DbError>:
+        var ti: i32 = -1
+        if self._tbl_name_idx.has(table_name):
+            ti = self._tbl_name_idx[table_name]
+        else:
+            ti = _find_idx(self._tbl_names, table_name)
+        if ti < 0:
+            return Err(DbError.QueryFailed(sql: "SELECT", message: "no such table: {table_name}"))
+        val snap = self._txn.snapshot()
+        var tbl = self._tbl_data[ti]
+        val typed = self._tbl_typed[ti]
+        val use_typed = typed.len() == tbl.tuples.len()
+        var rows: [[DbValue]] = []
+        if use_typed:
+            var i: i32 = 0
+            while i < tbl.tuples.len() as i32:
+                if mvcc_is_visible(tbl.tuples[i], snap):
+                    rows.push(typed[i])
+                i = i + 1
+        else:
+            val visible = tbl.scan(snap)
+            var vi: i32 = 0
+            while vi < visible.len() as i32:
+                rows.push(_deserialize_row(visible[vi]))
+                vi = vi + 1
+        self._tbl_data[ti] = tbl
+        Ok(PureSqlOffloadRows(columns: self._tbl_cols[ti], rows: rows))
 
     me query_one(sql: text, params: [DbValue]) -> Result<DbRow?, DbError>:
         val rows = self.query(sql, params)?
@@ -2699,3 +3090,89 @@ fn _project_row(sel: SqlSelect, col_names: [text], row_vals: [DbValue]) -> DbRow
             proj_vals.push(_eval_expr(inner, col_names, row_vals, []))
         ci = ci + 1
     DbRow(columns: proj_cols, values: proj_vals)
+
+fn _pure_sql_select_offload_workload(sel: SqlSelect) -> DbStorageOffloadWorkload:
+    if sel.joins.len() > 0:
+        return DbStorageOffloadWorkload.JoinAggregate
+    if sel.group_by.len() > 0:
+        return DbStorageOffloadWorkload.JoinAggregate
+    if _has_any_agg(sel.columns):
+        return DbStorageOffloadWorkload.JoinAggregate
+    DbStorageOffloadWorkload.ScanFilterProject
+
+fn _pure_sql_is_count_star_expr(expr: SqlExpr) -> bool:
+    val inner = _unwrap_as_expr(expr)
+    if inner.kind != SqlExprKind.FunctionCall:
+        return false
+    if inner.value.to_upper() != "COUNT":
+        return false
+    if inner.args.len() != 1:
+        return false
+    inner.args[0].kind == SqlExprKind.Star
+
+fn _pure_sql_is_sum_column_expr(expr: SqlExpr) -> bool:
+    val inner = _unwrap_as_expr(expr)
+    if inner.kind != SqlExprKind.FunctionCall:
+        return false
+    if inner.value.to_upper() != "SUM":
+        return false
+    if inner.args.len() != 1:
+        return false
+    inner.args[0].kind == SqlExprKind.Column
+
+fn _pure_sql_is_avg_column_expr(expr: SqlExpr) -> bool:
+    val inner = _unwrap_as_expr(expr)
+    if inner.kind != SqlExprKind.FunctionCall:
+        return false
+    if inner.value.to_upper() != "AVG":
+        return false
+    if inner.args.len() != 1:
+        return false
+    inner.args[0].kind == SqlExprKind.Column
+
+fn _pure_sql_is_min_column_expr(expr: SqlExpr) -> bool:
+    val inner = _unwrap_as_expr(expr)
+    if inner.kind != SqlExprKind.FunctionCall:
+        return false
+    if inner.value.to_upper() != "MIN":
+        return false
+    if inner.args.len() != 1:
+        return false
+    inner.args[0].kind == SqlExprKind.Column
+
+fn _pure_sql_is_max_column_expr(expr: SqlExpr) -> bool:
+    val inner = _unwrap_as_expr(expr)
+    if inner.kind != SqlExprKind.FunctionCall:
+        return false
+    if inner.value.to_upper() != "MAX":
+        return false
+    if inner.args.len() != 1:
+        return false
+    inner.args[0].kind == SqlExprKind.Column
+
+fn _pure_sql_mark_offload_authoritative(offload: DbStorageOffloadExecution) -> DbStorageOffloadExecution:
+    DbStorageOffloadExecution(
+        mode: offload.mode,
+        workload: offload.workload,
+        profile: offload.profile,
+        dispatch_target: offload.dispatch_target,
+        reason: offload.reason,
+        gpu_dispatched: offload.gpu_dispatched,
+        cpu_authoritative: false,
+        row_ids: offload.row_ids,
+        document_ids: offload.document_ids,
+        vector_ids: offload.vector_ids,
+        queue_depth_after: offload.queue_depth_after,
+        completed_count: offload.completed_count,
+        state_after: offload.state_after,
+        gpu_candidate_validated: offload.gpu_candidate_validated,
+        validation_reason: offload.validation_reason
+    )
+
+fn _pure_sql_result_row_ids(row_count: i64) -> [i64]:
+    var row_ids: [i64] = []
+    var row_idx = 0
+    while row_idx < row_count:
+        row_ids.push(row_idx)
+        row_idx = row_idx + 1
+    row_ids

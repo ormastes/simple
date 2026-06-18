@@ -1,0 +1,350 @@
+# External Web Server Comparison Report Contract
+
+> This host-safe spec validates the first Simple-vs-NGINX comparison report rows. Rows may be `ready_unmeasured` when NGINX and wrk are installed but the live benchmark has not been run; they must not claim speedup until measured values exist.
+
+<!-- sdn-diagram:id=external_compare_report_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=external_compare_report_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+external_compare_report_spec -> std
+external_compare_report_spec -> web_server_nginx_compare
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=external_compare_report_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 11 | 11 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# External Web Server Comparison Report Contract
+
+This host-safe spec validates the first Simple-vs-NGINX comparison report rows. Rows may be `ready_unmeasured` when NGINX and wrk are installed but the live benchmark has not been run; they must not claim speedup until measured values exist.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Plan | doc/03_plan/perf/gpu_web_db_offload_optimization_benchmark_plan.md |
+| Source | `test/05_perf/web_server_nginx_compare/external_compare_report_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This host-safe spec validates the first Simple-vs-NGINX comparison report rows.
+Rows may be `ready_unmeasured` when NGINX and wrk are installed but the live
+benchmark has not been run; they must not claim speedup until measured values
+exist.
+
+## Requirements
+
+**Plan:** doc/03_plan/perf/gpu_web_db_offload_optimization_benchmark_plan.md
+
+## Scenarios
+
+### external web server comparison report
+
+#### should define complete normalized HTTP benchmark inputs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val normalization = external_http_benchmark_normalization()
+expect(normalization.payload_policy).to_equal("same bytes per compared workload")
+expect(normalization.keepalive_policy).to_equal("wrk default keep-alive")
+expect(normalization.connection_count).to_equal(1)
+expect(normalization.thread_count).to_equal(1)
+expect(normalization.duration_seconds).to_equal(1)
+expect(normalization.logging_policy).to_contain("disabled")
+expect(external_benchmark_normalization_complete(normalization)).to_be(true)
+```
+
+</details>
+
+#### should mark static NGINX rows ready when nginx and wrk are available
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val nginx = external_tool_status("nginx", true, "/usr/sbin/nginx", "")
+val wrk = external_tool_status("wrk", true, "/usr/bin/wrk", "")
+val row = external_static_nginx_row("static_1kb", 1024, nginx, wrk)
+expect(row.workload).to_equal("static_1kb")
+expect(row.simple_target).to_equal("native_simple_static_1024")
+expect(row.external_baseline).to_equal("nginx_static_1024")
+expect(row.load_tool).to_equal("wrk")
+expect(row.status).to_equal("ready_unmeasured")
+expect(external_comparison_row_ready(row)).to_be(true)
+expect(external_comparison_row_claims_speedup(row)).to_be(false)
+```
+
+</details>
+
+#### should report unavailable load tool without claiming speedup
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val nginx = external_tool_status("nginx", true, "/usr/sbin/nginx", "")
+val wrk = external_tool_status("wrk", false, "", "wrk-not-installed")
+val row = external_static_nginx_row("static_1mb", 1048576, nginx, wrk)
+expect(row.status).to_equal("load-tool-unavailable")
+expect(row.reason).to_equal("wrk-not-installed")
+expect(external_comparison_row_ready(row)).to_be(false)
+expect(external_comparison_row_claims_speedup(row)).to_be(false)
+```
+
+</details>
+
+#### should report unavailable external baseline without claiming speedup
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val nginx = external_tool_status("nginx", false, "", "nginx-not-installed")
+val wrk = external_tool_status("wrk", true, "/usr/bin/wrk", "")
+val row = external_static_nginx_row("static_1kb", 1024, nginx, wrk)
+expect(row.status).to_equal("external-baseline-unavailable")
+expect(row.reason).to_equal("nginx-not-installed")
+expect(external_comparison_row_ready(row)).to_be(false)
+```
+
+</details>
+
+#### should report named unavailable baselines without measured values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = external_unavailable_baseline_row(
+    "cached_reverse_proxy",
+    "native_simple_cached_proxy",
+    "haproxy_cached_proxy",
+    "wrk",
+    "haproxy-not-installed"
+)
+expect(row.workload).to_equal("cached_reverse_proxy")
+expect(row.external_baseline).to_equal("haproxy_cached_proxy")
+expect(row.status).to_equal("external-baseline-unavailable")
+expect(row.simple_rps).to_equal(0.0)
+expect(row.external_rps).to_equal(0.0)
+expect(row.failure_count).to_equal(0)
+expect(external_comparison_row_claims_speedup(row)).to_be(false)
+```
+
+</details>
+
+#### should report ready dynamic GPU route shapes without measured values
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = external_ready_unmeasured_row(
+    "dynamic_gpu_plaintext",
+    "native_simple_gpu_route_plaintext",
+    "cpu_simple_plaintext",
+    "wrk",
+    "run-live-simple-cpu-gpu-route-wrk-wrapper"
+)
+expect(row.workload).to_equal("dynamic_gpu_plaintext")
+expect(row.simple_target).to_equal("native_simple_gpu_route_plaintext")
+expect(row.external_baseline).to_equal("cpu_simple_plaintext")
+expect(row.status).to_equal("ready_unmeasured")
+expect(row.simple_rps).to_equal(0.0)
+expect(row.external_rps).to_equal(0.0)
+expect(external_comparison_row_ready(row)).to_be(true)
+expect(external_comparison_row_claims_speedup(row)).to_be(false)
+```
+
+</details>
+
+#### should report unavailable live dynamic route fixtures without claiming speedup
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = external_live_fixture_unavailable_row(
+    "dynamic_gpu_json",
+    "native_simple_gpu_route_json",
+    "cpu_simple_json",
+    "wrk",
+    "dynamic-gpu-route-live-server-not-configured"
+)
+expect(row.workload).to_equal("dynamic_gpu_json")
+expect(row.status).to_equal("live-fixture-unavailable")
+expect(row.simple_rps).to_equal(0.0)
+expect(row.external_rps).to_equal(0.0)
+expect(row.reason).to_equal("dynamic-gpu-route-live-server-not-configured")
+expect(external_comparison_row_ready(row)).to_be(false)
+expect(external_comparison_row_claims_speedup(row)).to_be(false)
+```
+
+</details>
+
+#### should report measured static rows with latency and throughput evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = external_measured_static_nginx_row(
+    "static_1kb",
+    1024,
+    1200.0,
+    1000.0,
+    1.5,
+    2.0,
+    9.8,
+    0,
+    "live-simple-nginx-wrk"
+)
+expect(row.status).to_equal("measured")
+expect(row.rps_ratio).to_equal(1.2)
+expect(row.simple_p99_ms).to_equal(1.5)
+expect(row.external_p99_ms).to_equal(2.0)
+expect(row.throughput_mbps).to_equal(9.8)
+expect(external_comparison_row_claims_speedup(row)).to_be(true)
+```
+
+</details>
+
+#### should mark measured rows with failures without claiming speedup
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val row = external_measured_static_nginx_row(
+    "static_1mb",
+    1048576,
+    1200.0,
+    1000.0,
+    1.5,
+    2.0,
+    9830.4,
+    2,
+    "wrk-socket-errors"
+)
+expect(row.status).to_equal("measured_with_failures")
+expect(external_comparison_row_claims_speedup(row)).to_be(false)
+```
+
+</details>
+
+#### should format markdown rows for report and metrics docs
+
+- external static nginx row
+- external static nginx row
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val nginx = external_tool_status("nginx", true, "/usr/sbin/nginx", "")
+val wrk = external_tool_status("wrk", true, "/usr/bin/wrk", "")
+val report = external_comparison_markdown([
+    external_static_nginx_row("static_1kb", 1024, nginx, wrk),
+    external_static_nginx_row("static_1mb", 1048576, nginx, wrk)
+])
+expect(report).to_contain("| workload | simple_target | external_baseline |")
+expect(report).to_contain("simple_p99_ms")
+expect(report).to_contain("throughput_mbps")
+expect(report).to_contain("static_1kb")
+expect(report).to_contain("nginx_static_1048576")
+expect(report).to_contain("ready_unmeasured")
+```
+
+</details>
+
+#### should format normalized benchmark inputs for report and metrics docs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val report = external_benchmark_normalization_markdown(external_http_benchmark_normalization())
+expect(report).to_contain("| payload_policy | keepalive_policy |")
+expect(report).to_contain("same bytes per compared workload")
+expect(report).to_contain("wrk default keep-alive")
+expect(report).to_contain("not pinned on this host")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 11 |
+| Active scenarios | 11 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/perf/gpu_web_db_offload_optimization_benchmark_plan.md](doc/03_plan/perf/gpu_web_db_offload_optimization_benchmark_plan.md)
+
+
+</details>

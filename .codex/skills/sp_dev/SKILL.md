@@ -35,6 +35,12 @@ matching guide/process documentation in the same lane. For GPU, Engine2D, Simple
 Web, Electron/Tauri, QEMU, or backend readback evidence, update the relevant
 `doc/03_plan`, `doc/07_guide`, and `doc/09_report` references so future agents
 can find the canonical wrapper instead of repeating stale commands.
+For RenderDoc evidence specifically, use
+`scripts/tool/renderdoc-evidence.shs capture-simple` for the Simple
+in-application `rt_renderdoc_*` path and
+`scripts/tool/renderdoc-evidence.shs capture-html` for original
+RenderDoc+Chrome HTML/CSS capture. Tests should route through
+`test/helpers/renderdoc_capture_helper.shs` or the compatibility wrappers.
 
 For runtime concurrency work, keep the public API map current in
 `doc/07_guide/lib/misc/stdlib.md`, `doc/07_guide/compiler/check_perf.md`, and
@@ -85,6 +91,15 @@ Prefer helper names that expose those mode names directly:
 Keep the legacy `assert/critical/pure_simple` helper names only as temporary
 compatibility aliases. New wrappers, examples, and docs should use the
 `alpha/beta/normal` helper names.
+
+For Pure Simple SSH/HTTPS server work, use `alpha`/`beta`/`release` mode names:
+`release` is the production single-path Simple protocol mode, while `alpha` and
+`beta` may compare against native/SFFI protocol wrappers. Runtime/SFFI may supply
+host access only (TCP accept/read/write, time, entropy, filesystem/cert/key
+access, and process execution). Release-mode production wrappers must not call
+`rt_ssh_*` or `rt_tls_server_*` as complete protocol bypasses. Keep
+`doc/07_guide/lib/networking/pure_simple_servers.md` current when this contract
+changes.
 
 When a task introduces a new runtime/pure wrapper, update the shared guide at
 `doc/07_guide/os/crypto_dual_backend.md` and prefer an explicit

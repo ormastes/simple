@@ -11,6 +11,7 @@
 @direction LR
 
 sshd_spec -> os
+sshd_spec -> std
 ```
 
 </details>
@@ -27,7 +28,7 @@ sshd_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -37,6 +38,65 @@ sshd_spec -> os
 ## Scenarios
 
 ### sshd direct runtime integer decoding
+
+#### builds release-mode route through Simple SSH protocol for hosted Linux
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val route = SshDaemon.release_route_for_target(PureServerHostTarget.HostedLinux)
+expect(route.is_ok()).to_equal(true)
+val decision = route.unwrap()
+expect(decision.uses_simple_protocol).to_equal(true)
+expect(decision.allows_native_protocol_bypass).to_equal(false)
+```
+
+</details>
+
+#### builds release-mode SSH plan through Simple protocol stages for hosted Linux
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plan = SshDaemon.release_plan_for_target(PureServerHostTarget.HostedLinux)
+expect(plan.release_ready).to_equal(true)
+expect(plan.uses_simple_protocol).to_equal(true)
+expect(plan.adapter_name).to_equal("hosted-linux-rt-host-access")
+expect(plan.version_exchange_stage).to_equal("simple-ssh-version-exchange")
+expect(plan.kex_stage).to_equal("simple-ssh-kex")
+expect(plan.auth_stage).to_equal("simple-ssh-auth")
+expect(plan.channel_stage).to_equal("simple-ssh-channel")
+expect(plan.command_stage).to_equal("simple-host-process-exec")
+```
+
+</details>
+
+#### builds release-mode SSH plan through the same stages for SimpleOS
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val plan = SshDaemon.release_plan_for_target(PureServerHostTarget.SimpleOS)
+expect(plan.release_ready).to_equal(true)
+expect(plan.uses_simple_protocol).to_equal(true)
+expect(plan.adapter_name).to_equal("simpleos-kernel-host-access")
+expect(plan.version_exchange_stage).to_equal("simple-ssh-version-exchange")
+expect(plan.command_stage).to_equal("simple-host-process-exec")
+```
+
+</details>
 
 #### untags positive file descriptors returned by the baremetal net runtime
 
@@ -160,8 +220,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

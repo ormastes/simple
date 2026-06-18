@@ -1,0 +1,873 @@
+use std.spec.*
+use std.database.query_offload.*
+use std.database.nosql_offload.{NoSqlSsdDocumentCollection}
+use std.database.storage_mode_offload.{DbStorageOffloadMode, DbStorageOffloadWorkload, db_storage_profile_allows_gpu, db_storage_offload_used_gpu}
+use std.database.vector.types.{DistanceMetric, SearchResult}
+use std.db.dbfs_engine.pager.{DbfsPager, PageData}
+use std.db.dbfs_engine.wal.{DbfsWal, WalRecord, WAL_RECORD_COMMIT}
+use std.db.dbfs_engine.checkpoint.{CheckpointEngine}
+use nogc_sync_mut.db.dbfs_engine.ns_btree.{NsBTree}
+use std.db.dbfs_engine.offload_snapshot.{DbfsSsdOffloadSnapshot, DbfsSsdScanMaterialization, dbfs_ssd_offload_snapshot, dbfs_ssd_snapshot_materialize_scan}
+use std.web_db_offload.contract.{GpuWdbBudget, GpuWdbWorkKind, GpuWdbCoarseDataPath}
+use std.web_db_offload.queue.{gpu_wdb_queue_initial}
+use std.web_db_offload.library.{gpu_wdb_library_with_targets}
+use std.web_db_offload.device_backend.{gpu_wdb_device_backend}
+use std.web_db_offload.scheduler.{GpuWdbScheduleClass, gpu_wdb_batch_accumulator}
+use std.nogc_sync_mut.io.file_ops.{file_delete}
+
+"""
+# DB Query GPU Offload Facade
+
+## Overview
+
+These scenarios verify the DB-server-facing query facade that chooses the
+correct storage-mode offload adapter for RAM-only, SSD-accelerated, NoSQL
+document, and vector-search query work.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/gpu_web_db_offload.md
+
+- DB server callers can use one query offload entrypoint.
+- RAM and SSD row queries route to row batch offload.
+- NoSQL document queries route to document batch offload.
+- Vector queries route to vector search offload.
+- Invalid mode/workload combinations stay CPU authoritative.
+
+## Plan
+
+**Plan:** doc/03_plan/agent_tasks/gpu_web_db_offload_impl_status.md
+
+## Design
+
+**Design:** doc/05_design/gpu_web_db_offload.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+DB server code can build a `DbQueryOffloadRequest` with `db_query_rows`,
+`db_query_documents`, or `db_query_vector`, then call
+`db_query_offload_execute` with the shared GPU queue and registry.
+"""
+
+fn query_budget() -> GpuWdbBudget:
+    GpuWdbBudget(
+        max_queue_depth: 64,
+        max_batch_bytes: 1024 * 1024,
+        min_gpu_batch_bytes: 1024
+    )
+
+fn query_vector_result(id: text, distance: f64) -> SearchResult:
+    SearchResult(id: id, distance: distance, metadata: {})
+
+fn query_commit_record(txn_id: i64) -> WalRecord:
+    WalRecord(txn_id: txn_id, record_type: WAL_RECORD_COMMIT, payload: "")
+
+fn query_clean_ssd_snapshot(row_count: i64, bytes_per_row: i64) -> DbfsSsdOffloadSnapshot:
+    val pager = DbfsPager.new(8)
+    val wal = DbfsWal.new()
+    wal.append(query_commit_record(1)).unwrap()
+    wal.flush().unwrap()
+    val checkpoints = CheckpointEngine.new()
+    checkpoints.checkpoint_now(1).unwrap()
+    val btree = NsBTree.new()
+    dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, row_count, bytes_per_row)
+
+fn query_dirty_ssd_snapshot(row_count: i64, bytes_per_row: i64) -> DbfsSsdOffloadSnapshot:
+    val pager = DbfsPager.new(8)
+    val page = pager.alloc_page().unwrap()
+    pager.write_page(page, PageData.zeroed(), 0, 0).unwrap()
+    val wal = DbfsWal.new()
+    wal.flush().unwrap()
+    val checkpoints = CheckpointEngine.new()
+    checkpoints.checkpoint_now(1).unwrap()
+    val btree = NsBTree.new()
+    dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, row_count, bytes_per_row)
+
+fn query_row_page(row_id: i64) -> PageData:
+    val page = PageData.zeroed()
+    page.set_byte(0, row_id as u8)
+    page
+
+fn query_clean_materialized_scan() -> DbfsSsdScanMaterialization:
+    val pager = DbfsPager.new(8)
+    val first = pager.alloc_page().unwrap()
+    val second = pager.alloc_page().unwrap()
+    pager.write_page(first, query_row_page(12), 0, 0).unwrap()
+    pager.write_page(second, query_row_page(34), 0, 0).unwrap()
+    pager.flush_dirty().unwrap()
+    val wal = DbfsWal.new()
+    wal.append(query_commit_record(9)).unwrap()
+    wal.flush().unwrap()
+    val checkpoints = CheckpointEngine.new()
+    checkpoints.checkpoint_now(1).unwrap()
+    val btree = NsBTree.new()
+    val snapshot = dbfs_ssd_offload_snapshot(pager, wal, checkpoints, btree, 2, 1024)
+    dbfs_ssd_snapshot_materialize_scan(snapshot, pager, [first.id, second.id])
+
+describe "DB query GPU offload facade":
+    it "should dispatch RAM-only row scans through the query facade":
+        step("Use one DB server entrypoint for row scan/filter/project batches")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"])
+        val execution = db_query_offload_execute(
+            db_query_rows(
+                DbStorageOffloadMode.RamOnly,
+                DbStorageOffloadWorkload.ScanFilterProject,
+                128,
+                64,
+                true,
+                [1, 2]
+            ),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget()
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(execution.row_ids[0]).to_equal(1)
+        expect(execution.gpu_candidate_validated).to_be(false)
+        expect(execution.validation_reason).to_equal("gpu-candidate-not-evaluated")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuResidentBatch)
+        expect(db_storage_profile_allows_gpu(execution)).to_be(true)
+
+    it "should keep SSD row queries on CPU when generation is stale":
+        step("Preserve WAL freshness before SSD GPU dispatch")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"])
+        val execution = db_query_offload_execute(
+            db_query_rows(
+                DbStorageOffloadMode.SsdAccelerated,
+                DbStorageOffloadWorkload.ScanFilterProject,
+                128,
+                64,
+                false,
+                [7]
+            ),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget()
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.reason).to_equal("stale-generation")
+        expect(execution.row_ids[0]).to_equal(7)
+        expect(execution.gpu_candidate_validated).to_be(false)
+        expect(execution.validation_reason).to_equal("gpu-candidate-not-evaluated")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.SsdStagedBatch)
+        expect(db_storage_profile_allows_gpu(execution)).to_be(false)
+
+    it "should replace CPU query rows only after native device candidates match":
+        step("Accept query-level row replacement only from measured native device evidence")
+        val execution = db_query_offload_execute_rows_device_validated(
+            db_query_rows(
+                DbStorageOffloadMode.RamOnly,
+                DbStorageOffloadWorkload.ScanFilterProject,
+                128,
+                64,
+                true,
+                [1, 2]
+            ),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 3, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            3,
+            true,
+            query_budget(),
+            [1, 2],
+            100,
+            188,
+            51,
+            "cuda-event"
+        )
+        expect(execution.execution.gpu_dispatched).to_be(true)
+        expect(execution.execution.cpu_authoritative).to_be(false)
+        expect(execution.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.execution.row_ids[0]).to_equal(1)
+        expect(execution.execution.row_ids[1]).to_equal(2)
+        expect(execution.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep CPU query rows authoritative when native device candidates mismatch":
+        step("Reject query-level row replacement when measured native candidates differ")
+        val execution = db_query_offload_execute_rows_device_validated(
+            db_query_rows(
+                DbStorageOffloadMode.RamOnly,
+                DbStorageOffloadWorkload.ScanFilterProject,
+                128,
+                64,
+                true,
+                [1, 2]
+            ),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 3, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            3,
+            true,
+            query_budget(),
+            [1, 3],
+            100,
+            188,
+            51,
+            "cuda-event"
+        )
+        expect(execution.execution.gpu_dispatched).to_be(false)
+        expect(execution.execution.cpu_authoritative).to_be(true)
+        expect(execution.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.execution.validation_reason).to_equal("production-gpu-row-mismatch")
+        expect(execution.execution.row_ids[0]).to_equal(1)
+        expect(execution.execution.row_ids[1]).to_equal(2)
+        expect(execution.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep perf-only query device runs from replacing CPU rows":
+        step("Require production native device claims before query rows stop being CPU authoritative")
+        val execution = db_query_offload_execute_rows_device_validated(
+            db_query_rows(
+                DbStorageOffloadMode.RamOnly,
+                DbStorageOffloadWorkload.ScanFilterProject,
+                128,
+                64,
+                true,
+                [1, 2]
+            ),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("mock", 3, ["gpu_db_columnar_scan_batch"], false, "mock-device"),
+            3,
+            true,
+            query_budget(),
+            [1, 2],
+            100,
+            188,
+            51,
+            "mock-clock"
+        )
+        expect(execution.execution.gpu_dispatched).to_be(false)
+        expect(execution.execution.cpu_authoritative).to_be(true)
+        expect(execution.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.execution.validation_reason).to_equal("production-device-not-measured")
+        expect(execution.execution.row_ids[0]).to_equal(1)
+        expect(execution.device_execution.device_result.production_device_claim).to_be(false)
+
+    it "should dispatch SSD row queries from DBFS snapshot evidence":
+        step("Use DBFS-owned SSD freshness at the query facade boundary")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"])
+        val execution = db_query_offload_execute_for_ssd_snapshot(
+            query_clean_ssd_snapshot(128, 64),
+            DbStorageOffloadWorkload.ScanFilterProject,
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            [7, 8]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(execution.row_ids[0]).to_equal(7)
+        expect(execution.row_ids[1]).to_equal(8)
+
+    it "should dispatch SSD scan queries from snapshot-derived row ids":
+        step("Use the DBFS-owned scan facade without caller-provided CPU row ids")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"])
+        val execution = db_query_offload_execute_ssd_snapshot_scan(
+            query_clean_ssd_snapshot(3, 64),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget()
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.dispatch_target).to_equal("gpu_db_columnar_scan_batch")
+        expect(execution.row_ids.len()).to_equal(3)
+        expect(execution.row_ids[0]).to_equal(0)
+        expect(execution.row_ids[1]).to_equal(1)
+        expect(execution.row_ids[2]).to_equal(2)
+
+    it "should validate SSD materialized scan GPU candidates":
+        step("Compare GPU candidates against DBFS page-cursor materialized rows")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"])
+        val execution = db_query_offload_execute_ssd_materialized_scan_validated(
+            query_clean_materialized_scan(),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            [12, 34]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.gpu_candidate_validated).to_be(true)
+        expect(execution.validation_reason).to_equal("gpu-cpu-row-match")
+        expect(execution.row_ids[0]).to_equal(12)
+        expect(execution.row_ids[1]).to_equal(34)
+
+    it "should reject mismatched SSD materialized scan GPU candidates":
+        step("Keep DBFS page-cursor materialized rows authoritative on mismatch")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"])
+        val execution = db_query_offload_execute_ssd_materialized_scan_validated(
+            query_clean_materialized_scan(),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            [12, 35]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.reason).to_equal("gpu-cpu-row-mismatch")
+        expect(execution.gpu_candidate_validated).to_be(false)
+        expect(execution.row_ids[0]).to_equal(12)
+        expect(execution.row_ids[1]).to_equal(34)
+
+    it "should validate production SSD materialized scan candidates through the query facade":
+        step("Let measured native SSD scan candidates replace CPU output only after CPU oracle validation")
+        val execution = db_query_offload_execute_ssd_materialized_scan_device_validated(
+            query_clean_materialized_scan(),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 8, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            8,
+            true,
+            query_budget(),
+            [12, 34],
+            100,
+            190,
+            61,
+            "cuda-event"
+        )
+        expect(db_storage_offload_used_gpu(execution.execution)).to_be(true)
+        expect(execution.execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.SsdStagedBatch)
+        expect(execution.execution.cpu_authoritative).to_be(false)
+        expect(execution.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.execution.validation_reason).to_equal("production-gpu-row-match")
+        expect(execution.execution.row_ids[0]).to_equal(12)
+        expect(execution.execution.row_ids[1]).to_equal(34)
+        expect(execution.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should reject mismatched production SSD materialized scan candidates through the query facade":
+        step("Keep DBFS materialized scan rows authoritative when a native candidate disagrees")
+        val execution = db_query_offload_execute_ssd_materialized_scan_device_validated(
+            query_clean_materialized_scan(),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 8, ["gpu_db_columnar_scan_batch"], true, "cuda-device-0"),
+            8,
+            true,
+            query_budget(),
+            [12, 35],
+            100,
+            190,
+            61,
+            "cuda-event"
+        )
+        expect(db_storage_offload_used_gpu(execution.execution)).to_be(false)
+        expect(execution.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.execution.cpu_authoritative).to_be(true)
+        expect(execution.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.execution.validation_reason).to_equal("production-gpu-row-mismatch")
+        expect(execution.execution.row_ids[0]).to_equal(12)
+        expect(execution.execution.row_ids[1]).to_equal(34)
+        expect(execution.device_execution.device_result.production_device_claim).to_be(true)
+
+    it "should reject perf-only SSD materialized scan candidates through the query facade":
+        step("Require production native timing before SSD scan candidates replace CPU output")
+        val execution = db_query_offload_execute_ssd_materialized_scan_device_validated(
+            query_clean_materialized_scan(),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("host-safe-mock", 8, ["gpu_db_columnar_scan_batch"], false, "mock-device"),
+            8,
+            true,
+            query_budget(),
+            [12, 34],
+            100,
+            190,
+            61,
+            "mock-timer"
+        )
+        expect(db_storage_offload_used_gpu(execution.execution)).to_be(false)
+        expect(execution.execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.SsdStagedBatch)
+        expect(execution.execution.cpu_authoritative).to_be(true)
+        expect(execution.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.execution.validation_reason).to_equal("production-device-not-measured")
+        expect(execution.execution.row_ids[0]).to_equal(12)
+        expect(execution.execution.row_ids[1]).to_equal(34)
+        expect(execution.device_execution.device_result.production_device_claim).to_be(false)
+
+    it "should dispatch SSD join aggregate queries from DBFS snapshot evidence":
+        step("Use the DBFS snapshot query path for SSD SQL aggregate work")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_join_aggregate_batch"])
+        val execution = db_query_offload_execute_for_ssd_snapshot(
+            query_clean_ssd_snapshot(128, 64),
+            DbStorageOffloadWorkload.JoinAggregate,
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            [0, 2, 3]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(execution.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(execution.row_ids[2]).to_equal(3)
+
+    it "should keep SSD query facade work on CPU for stale DBFS snapshots":
+        step("Dirty DBFS pager state blocks SSD query dispatch")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"])
+        val execution = db_query_offload_execute_for_ssd_snapshot(
+            query_dirty_ssd_snapshot(128, 64),
+            DbStorageOffloadWorkload.ScanFilterProject,
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            [9]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.mode).to_equal(DbStorageOffloadMode.SsdAccelerated)
+        expect(execution.reason).to_equal("stale-generation")
+        expect(execution.row_ids[0]).to_equal(9)
+
+    it "should reject document workloads on the SSD snapshot query path":
+        step("Avoid mixing SSD row snapshots with document-filter workloads")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_document_filter_batch"])
+        val execution = db_query_offload_execute_for_ssd_snapshot(
+            query_clean_ssd_snapshot(128, 64),
+            DbStorageOffloadWorkload.DocumentFilter,
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            [11]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.reason).to_equal("query-mode-workload-mismatch")
+        expect(execution.row_ids[0]).to_equal(11)
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.SsdStagedBatch)
+
+    it "should dispatch NoSQL document queries through document offload":
+        step("Use the same query facade for document-filter batches")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_document_filter_batch"])
+        val execution = db_query_offload_execute(
+            db_query_documents(64, 128, true, true, ["doc-1", "doc-2"]),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget()
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.dispatch_target).to_equal("gpu_db_document_filter_batch")
+        expect(execution.document_ids[1]).to_equal("doc-2")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuIndexBatch)
+        expect(db_storage_profile_allows_gpu(execution)).to_be(true)
+
+    it "should dispatch saved SSD NoSQL document queries through the query facade":
+        step("Use durable document metadata freshness at the DB query boundary")
+        val path = "/tmp/simple-db-query-ssd-nosql-documents.sdn"
+        file_delete(path)
+        var collection = NoSqlSsdDocumentCollection.create(path)
+        collection.insert("doc-1", 128, {"kind": "invoice"})
+        collection.insert("doc-2", 256, {"kind": "note"})
+        expect(collection.save()).to_be(true)
+
+        val loaded = NoSqlSsdDocumentCollection.open(path)
+        val execution = db_query_offload_execute_ssd_documents(
+            loaded,
+            "kind",
+            "invoice",
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_document_filter_batch"]),
+            true,
+            true,
+            query_budget()
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.dispatch_target).to_equal("gpu_db_document_filter_batch")
+        expect(execution.document_ids[0]).to_equal("doc-1")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuIndexBatch)
+        expect(execution.cpu_authoritative).to_be(true)
+        val _deleted = file_delete(path)
+
+    it "should keep unsaved SSD NoSQL query facade changes on CPU":
+        step("Block query-level GPU dispatch until SSD NoSQL changes are durable")
+        val path = "/tmp/simple-db-query-ssd-nosql-documents-stale.sdn"
+        file_delete(path)
+        var collection = NoSqlSsdDocumentCollection.create(path)
+        collection.insert("doc-1", 128, {"kind": "invoice"})
+        val execution = db_query_offload_execute_ssd_documents(
+            collection,
+            "kind",
+            "invoice",
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_document_filter_batch"]),
+            true,
+            true,
+            query_budget()
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.reason).to_equal("stale-generation")
+        expect(execution.document_ids[0]).to_equal("doc-1")
+        expect(execution.cpu_authoritative).to_be(true)
+        val _deleted = file_delete(path)
+
+    it "should validate production SSD NoSQL document device candidates through the query facade":
+        step("Let measured native document candidates replace CPU output only after CPU oracle validation")
+        val path = "/tmp/simple-db-query-ssd-nosql-documents-device.sdn"
+        file_delete(path)
+        var collection = NoSqlSsdDocumentCollection.create(path)
+        collection.insert("doc-1", 1024, {"kind": "invoice"})
+        collection.insert("doc-2", 1024, {"kind": "note"})
+        expect(collection.save()).to_be(true)
+
+        val loaded = NoSqlSsdDocumentCollection.open(path)
+        val execution = db_query_offload_execute_ssd_documents_device_validated(
+            loaded,
+            "kind",
+            "invoice",
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 8, ["gpu_db_document_filter_batch"], true, "cuda-device-0"),
+            8,
+            true,
+            query_budget(),
+            ["doc-1"],
+            100,
+            190,
+            61,
+            "cuda-event"
+        )
+        expect(db_storage_offload_used_gpu(execution.execution)).to_be(true)
+        expect(execution.execution.cpu_authoritative).to_be(false)
+        expect(execution.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.execution.validation_reason).to_equal("production-gpu-document-match")
+        expect(execution.execution.document_ids[0]).to_equal("doc-1")
+        expect(execution.device_result.production_device_claim).to_be(true)
+        val _deleted = file_delete(path)
+
+    it "should reject mismatched SSD NoSQL document device candidates through the query facade":
+        step("Keep SSD document CPU oracle output authoritative when a native candidate disagrees")
+        val path = "/tmp/simple-db-query-ssd-nosql-documents-device-mismatch.sdn"
+        file_delete(path)
+        var collection = NoSqlSsdDocumentCollection.create(path)
+        collection.insert("doc-1", 1024, {"kind": "invoice"})
+        collection.insert("doc-2", 1024, {"kind": "note"})
+        expect(collection.save()).to_be(true)
+
+        val loaded = NoSqlSsdDocumentCollection.open(path)
+        val execution = db_query_offload_execute_ssd_documents_device_validated(
+            loaded,
+            "kind",
+            "invoice",
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 8, ["gpu_db_document_filter_batch"], true, "cuda-device-0"),
+            8,
+            true,
+            query_budget(),
+            ["doc-2"],
+            100,
+            190,
+            61,
+            "cuda-event"
+        )
+        expect(db_storage_offload_used_gpu(execution.execution)).to_be(false)
+        expect(execution.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.execution.cpu_authoritative).to_be(true)
+        expect(execution.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.execution.validation_reason).to_equal("production-gpu-document-mismatch")
+        expect(execution.execution.document_ids[0]).to_equal("doc-1")
+        expect(execution.device_result.production_device_claim).to_be(true)
+        val _deleted = file_delete(path)
+
+    it "should dispatch vector queries through vector search offload":
+        step("Use the same query facade for vector-search batches")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_vector_search_batch"])
+        val execution = db_query_offload_execute(
+            db_query_vector(
+                DistanceMetric.Cosine,
+                128,
+                32,
+                true,
+                true,
+                [query_vector_result("vec-1", 0.1)]
+            ),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget()
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.dispatch_target).to_equal("gpu_db_vector_search_batch")
+        expect(execution.vector_ids[0]).to_equal("vec-1")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuIndexBatch)
+        expect(execution.profile.stream_count).to_equal(4)
+
+    it "should validate vector query candidates through the query facade":
+        step("Expose vector result replacement through the DB query boundary")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_vector_search_batch"])
+        val execution = db_query_offload_execute_vector_validated(
+            db_query_vector(
+                DistanceMetric.Cosine,
+                128,
+                32,
+                true,
+                true,
+                [query_vector_result("vec-1", 0.1), query_vector_result("vec-2", 0.2)]
+            ),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            [query_vector_result("vec-1", 0.1), query_vector_result("vec-2", 0.2)]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(true)
+        expect(execution.cpu_authoritative).to_be(false)
+        expect(execution.gpu_candidate_validated).to_be(true)
+        expect(execution.validation_reason).to_equal("gpu-cpu-vector-match")
+        expect(execution.vector_ids[1]).to_equal("vec-2")
+
+    it "should reject mismatched vector query candidates through the query facade":
+        step("Keep query CPU vector output authoritative on candidate mismatch")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_vector_search_batch"])
+        val execution = db_query_offload_execute_vector_validated(
+            db_query_vector(
+                DistanceMetric.Cosine,
+                128,
+                32,
+                true,
+                true,
+                [query_vector_result("vec-1", 0.1), query_vector_result("vec-2", 0.2)]
+            ),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            [query_vector_result("vec-1", 0.1), query_vector_result("vec-3", 0.3)]
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.cpu_authoritative).to_be(true)
+        expect(execution.gpu_candidate_validated).to_be(false)
+        expect(execution.validation_reason).to_equal("gpu-cpu-vector-mismatch")
+        expect(execution.vector_ids[1]).to_equal("vec-2")
+
+    it "should replace vector query results only after native device candidates match":
+        step("Expose measured native vector replacement through the DB query facade")
+        val execution = db_query_offload_execute_vector_device_validated(
+            db_query_vector(
+                DistanceMetric.Cosine,
+                128,
+                32,
+                true,
+                true,
+                [query_vector_result("vec-1", 0.1), query_vector_result("vec-2", 0.2)]
+            ),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_vector_search_batch"], true, "cuda-device-0"),
+            7,
+            true,
+            query_budget(),
+            [query_vector_result("vec-1", 0.1), query_vector_result("vec-2", 0.2)],
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+        expect(db_storage_offload_used_gpu(execution.execution)).to_be(true)
+        expect(execution.execution.cpu_authoritative).to_be(false)
+        expect(execution.execution.gpu_candidate_validated).to_be(true)
+        expect(execution.execution.validation_reason).to_equal("production-gpu-vector-match")
+        expect(execution.execution.vector_ids[1]).to_equal("vec-2")
+        expect(execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep vector query results CPU authoritative when native candidates mismatch":
+        step("Reject measured native vector candidates that disagree with CPU IDs")
+        val execution = db_query_offload_execute_vector_device_validated(
+            db_query_vector(
+                DistanceMetric.Cosine,
+                128,
+                32,
+                true,
+                true,
+                [query_vector_result("vec-1", 0.1), query_vector_result("vec-2", 0.2)]
+            ),
+            gpu_wdb_queue_initial(2),
+            gpu_wdb_device_backend("cuda", 7, ["gpu_db_vector_search_batch"], true, "cuda-device-0"),
+            7,
+            true,
+            query_budget(),
+            [query_vector_result("vec-1", 0.1), query_vector_result("vec-3", 0.3)],
+            100,
+            190,
+            58,
+            "cuda-event"
+        )
+        expect(db_storage_offload_used_gpu(execution.execution)).to_be(false)
+        expect(execution.execution.dispatch_target).to_equal("cpu_fallback")
+        expect(execution.execution.cpu_authoritative).to_be(true)
+        expect(execution.execution.gpu_candidate_validated).to_be(false)
+        expect(execution.execution.validation_reason).to_equal("production-gpu-vector-mismatch")
+        expect(execution.execution.vector_ids[1]).to_equal("vec-2")
+        expect(execution.device_result.production_device_claim).to_be(true)
+
+    it "should keep invalid mode workload pairs on CPU":
+        step("Avoid dispatch when a row workload is paired with a document mode")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_columnar_scan_batch"])
+        val request = db_query_rows(
+            DbStorageOffloadMode.NoSqlDocument,
+            DbStorageOffloadWorkload.ScanFilterProject,
+            128,
+            64,
+            true,
+            [9]
+        )
+        val execution = db_query_offload_execute(
+            request,
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget()
+        )
+        expect(db_query_mode_matches_workload(request.mode, request.workload)).to_be(false)
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.reason).to_equal("query-mode-workload-mismatch")
+        expect(execution.row_ids[0]).to_equal(9)
+
+    it "should defer tiny scheduled document queries for batch accumulation":
+        step("Use shared scheduler admission before DB query queue mutation")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_document_filter_batch"])
+        val execution = db_query_offload_execute_scheduled(
+            db_query_documents(1, 128, true, true, ["doc-small"]),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            GpuWdbScheduleClass.Batch,
+            true
+        )
+        expect(db_storage_offload_used_gpu(execution)).to_be(false)
+        expect(execution.dispatch_target).to_equal("gpu_batch_accumulator")
+        expect(execution.reason).to_equal("batch-too-small-defer")
+        expect(execution.document_ids[0]).to_equal("doc-small")
+        expect(execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuIndexBatch)
+
+    it "should add deferred document queries to the reusable accumulator":
+        step("Accumulate tiny NoSQL document work while preserving CPU-authoritative IDs")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_document_filter_batch"])
+        val accumulated = db_query_offload_execute_accumulating(
+            db_query_documents(1, 128, true, true, ["doc-small"]),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.DbDocumentFilter)
+        )
+        expect(db_storage_offload_used_gpu(accumulated.execution)).to_be(false)
+        expect(accumulated.execution.dispatch_target).to_equal("gpu_batch_accumulator")
+        expect(accumulated.execution.document_ids[0]).to_equal("doc-small")
+        expect(accumulated.accumulator_result.accepted).to_be(true)
+        expect(accumulated.accumulator_result.should_flush).to_be(false)
+        expect(accumulated.accumulator_result.accumulator.item_count).to_equal(1)
+
+    it "should not accumulate DB query work that dispatches immediately":
+        step("Keep accumulator state unchanged for GPU-worthy DB query batches")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_vector_search_batch"])
+        val accumulated = db_query_offload_execute_accumulating(
+            db_query_vector(
+                DistanceMetric.Cosine,
+                128,
+                32,
+                true,
+                true,
+                [query_vector_result("vec-1", 0.1)]
+            ),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            GpuWdbScheduleClass.Batch,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.DbVectorSearch)
+        )
+        expect(db_storage_offload_used_gpu(accumulated.execution)).to_be(true)
+        expect(accumulated.execution.dispatch_target).to_equal("gpu_db_vector_search_batch")
+        expect(accumulated.accumulator_result.accepted).to_be(false)
+        expect(accumulated.accumulator_result.reason).to_equal("query-not-deferred")
+        expect(accumulated.accumulator_result.accumulator.item_count).to_equal(0)
+
+    it "should accumulate tiny join aggregate queries through the DB query facade":
+        step("Defer small SQL aggregate work into the shared join/aggregate accumulator")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_join_aggregate_batch"])
+        val accumulated = db_query_offload_execute_accumulating(
+            db_query_rows(
+                DbStorageOffloadMode.RamOnly,
+                DbStorageOffloadWorkload.JoinAggregate,
+                4,
+                128,
+                true,
+                [0, 2, 3]
+            ),
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget(),
+            GpuWdbScheduleClass.Background,
+            gpu_wdb_batch_accumulator(GpuWdbWorkKind.DbJoinAggregate)
+        )
+        expect(db_storage_offload_used_gpu(accumulated.execution)).to_be(false)
+        expect(accumulated.execution.workload).to_equal(DbStorageOffloadWorkload.JoinAggregate)
+        expect(accumulated.execution.dispatch_target).to_equal("gpu_batch_accumulator")
+        expect(accumulated.execution.row_ids[0]).to_equal(0)
+        expect(accumulated.execution.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuResidentBatch)
+        expect(db_storage_profile_allows_gpu(accumulated.execution)).to_be(false)
+        expect(accumulated.execution.row_ids[1]).to_equal(2)
+        expect(accumulated.execution.row_ids[2]).to_equal(3)
+        expect(accumulated.accumulator_result.accepted).to_be(true)
+        expect(accumulated.accumulator_result.accumulator.item_count).to_equal(4)
+
+    it "should return SQL aggregate operator results with reusable offload metadata":
+        step("Wrap CPU-authoritative aggregate count output with query offload execution")
+        val registry = gpu_wdb_library_with_targets("cuda", 1, ["gpu_db_join_aggregate_batch"])
+        val aggregate = db_query_join_aggregate_count_execute(
+            db_query_rows(
+                DbStorageOffloadMode.RamOnly,
+                DbStorageOffloadWorkload.JoinAggregate,
+                128,
+                64,
+                true,
+                [0, 2, 3]
+            ),
+            3,
+            gpu_wdb_queue_initial(2),
+            registry,
+            true,
+            true,
+            query_budget()
+        )
+        expect(aggregate.operator).to_equal("join_aggregate_count")
+        expect(aggregate.count).to_equal(3)
+        expect(db_storage_offload_used_gpu(aggregate.offload)).to_be(true)
+        expect(aggregate.offload.dispatch_target).to_equal("gpu_db_join_aggregate_batch")
+        expect(aggregate.offload.cpu_authoritative).to_be(true)
+        expect(aggregate.offload.profile.data_path).to_equal(GpuWdbCoarseDataPath.GpuResidentBatch)
+        expect(aggregate.row_ids[0]).to_equal(0)
+        expect(aggregate.row_ids[1]).to_equal(2)
+        expect(aggregate.row_ids[2]).to_equal(3)

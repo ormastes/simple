@@ -27,7 +27,6 @@ use std.http_server.types.{
 use std.http_server.parser.{HttpRequestParser}
 use std.http_server.response.{serialize_response, serialize_response_bytes, add_keepalive_headers}
 use std.http_server.error.{HttpServerError}
-use std.http.headers.{get_header}
 use std.thread_sffi.{spl_thread_current_id}
 
 # ============================================================================
@@ -48,6 +47,7 @@ class Connection:
     request: HttpRequestData?
     response_bytes: text
     response_bytes_buf: [u8]
+    pending_tunnel_bytes: [u8]
     write_offset: i64
     keepalive: bool
     requests_count: i64
@@ -70,6 +70,7 @@ class Connection:
             request: nil,
             response_bytes: "",
             response_bytes_buf: [],
+            pending_tunnel_bytes: [],
             write_offset: 0,
             keepalive: true,
             requests_count: 0,
@@ -125,6 +126,62 @@ class Connection:
                 # Data received in unexpected state
                 ConnectionAction.Close
 
+    me on_data_received_bytes(data: text, raw_bytes: [u8], now: i64) -> ConnectionAction:
+        """Process data while preserving bytes received after parsed headers.
+
+        Upgrade and CONNECT tunnels can receive raw payload bytes in the same
+        socket read that completed the HTTP request headers. The text parser
+        still owns header parsing, while the worker can drain `pending_tunnel_bytes`
+        when routing to a tunnel.
+        """
+        self.last_activity = now
+
+        match self.state:
+            ConnectionState.ReadingRequest:
+                val result = self.parser.feed(data)
+                match result:
+                    Ok(consumed):
+                        if self.parser.is_complete():
+                            self.request = self.parser.to_request(self.peer_addr)
+                            self.pending_tunnel_bytes = self.raw_bytes_after_consumed(raw_bytes, consumed)
+                            self.state = ConnectionState.Routing
+                            return ConnectionAction.RequestReady
+                        else:
+                            return ConnectionAction.ContinueReading
+                    Err(e):
+                        return ConnectionAction.Error(400, "Bad Request")
+
+            ConnectionState.KeepAlive:
+                self.state = ConnectionState.ReadingRequest
+                val result = self.parser.feed(data)
+                match result:
+                    Ok(consumed):
+                        if self.parser.is_complete():
+                            self.request = self.parser.to_request(self.peer_addr)
+                            self.pending_tunnel_bytes = self.raw_bytes_after_consumed(raw_bytes, consumed)
+                            self.state = ConnectionState.Routing
+                            return ConnectionAction.RequestReady
+                        else:
+                            return ConnectionAction.ContinueReading
+                    Err(e):
+                        return ConnectionAction.Error(400, "Bad Request")
+
+            _:
+                ConnectionAction.Close
+
+    fn raw_bytes_after_consumed(raw_bytes: [u8], consumed: i64) -> [u8]:
+        var out: [u8] = []
+        var i = consumed
+        while i < raw_bytes.len():
+            out.push(raw_bytes[i])
+            i = i + 1
+        out
+
+    me drain_pending_tunnel_bytes() -> [u8]:
+        val out = self.pending_tunnel_bytes
+        self.pending_tunnel_bytes = []
+        out
+
     me set_response(resp: HttpResponseData, keepalive_timeout_s: i64):
         """Prepare a response for sending.
 
@@ -134,11 +191,11 @@ class Connection:
             resp: Response to send
             keepalive_timeout_s: Keep-alive timeout in seconds for header
         """
-        # Determine keepalive from request
-        self.keepalive = self.should_keepalive()
+        # Native response hot path: close after response until header tuple
+        # scanning is reliable in compiled mode.
+        self.keepalive = false
 
-        val final_resp = add_keepalive_headers(resp, self.keepalive, keepalive_timeout_s)
-        self.response_bytes = serialize_response(final_resp)
+        self.response_bytes = serialize_response(resp)
         self.write_offset = 0
         self.state = ConnectionState.SendingResponse
 
@@ -155,9 +212,8 @@ class Connection:
             resp: Response to send (must have body_bytes populated)
             keepalive_timeout_s: Keep-alive timeout in seconds for header
         """
-        self.keepalive = self.should_keepalive()
-        val final_resp = add_keepalive_headers(resp, self.keepalive, keepalive_timeout_s)
-        self.response_bytes_buf = serialize_response_bytes(final_resp)
+        self.keepalive = false
+        self.response_bytes_buf = serialize_response_bytes(resp)
         self.response_bytes = ""
         self.write_offset = 0
         self.state = ConnectionState.SendingResponse
@@ -248,6 +304,7 @@ class Connection:
         self.parser.reset()
         self.request = nil
         self.response_bytes = ""
+        self.pending_tunnel_bytes = []
         self.write_offset = 0
         self.state = ConnectionState.KeepAlive
 
@@ -256,10 +313,19 @@ class Connection:
         match self.request:
             Some(req):
                 # HTTP/1.1 defaults to keep-alive
-                val conn_header = get_header(req.headers, "Connection")
+                val conn_header = self.request_header_value(req, "Connection")
                 if conn_header.?:
                     conn_header.lower() != "close"
                 else:
                     req.version == "HTTP/1.1"
             nil:
                 false
+
+    fn request_header_value(req: HttpRequestData, name: text) -> text?:
+        var i = 0
+        while i < req.headers.len():
+            val pair = req.headers[i]
+            if pair.0.lower() == name.lower():
+                return pair.1
+            i = i + 1
+        nil

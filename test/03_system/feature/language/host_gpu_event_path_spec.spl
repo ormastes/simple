@@ -66,6 +66,11 @@ use std.gpu.engine2d.host_gpu_draw_ir_event_flow.{
 
 extern fn rt_host_gpu_queue_reset()
 extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_code: i64) -> i64
+extern fn rt_host_gpu_queue_submit(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_complete(max_packets: i64) -> i64
+extern fn rt_host_gpu_queue_last_status() -> i64
+extern fn rt_host_gpu_queue_last_backend_handle() -> i64
+extern fn rt_host_gpu_queue_last_device_time_us() -> i64
 
 describe "host/GPU event path evidence":
 
@@ -145,6 +150,7 @@ describe "host/GPU event path evidence":
         expect(drain.completed_count).to_equal(1)
         expect(drain.last_status_code).to_equal(4)
         expect(drain.status).to_equal("typed_unavailable")
+        expect(rt_host_gpu_queue_last_device_time_us()).to_equal(0)
         expect(engine2d_host_gpu_runtime_drain_summary(drain)).to_contain("status=typed_unavailable")
 
     it "should expose submitted state before runtime queue completion":
@@ -206,3 +212,14 @@ describe "host/GPU event path evidence":
         expect(oversized_submit.status).to_equal("packet_too_large")
         expect(runtime_drain.drained).to_equal(0)
         expect(runtime_drain.status).to_equal("empty")
+
+    it "should expose runtime GPU queue device timing after backend completion":
+        step("Submit and complete a GPU packet through the raw runtime SFFI")
+        rt_host_gpu_queue_reset()
+        expect(rt_host_gpu_queue_emit(2, 1, 512, 7)).to_equal(1)
+        expect(rt_host_gpu_queue_submit(1)).to_equal(1)
+        expect(rt_host_gpu_queue_last_status()).to_equal(2)
+        expect(rt_host_gpu_queue_complete(1)).to_equal(1)
+        expect(rt_host_gpu_queue_last_status()).to_equal(3)
+        expect(rt_host_gpu_queue_last_backend_handle()).to_equal(7)
+        expect(rt_host_gpu_queue_last_device_time_us()).to_be_greater_than(0)

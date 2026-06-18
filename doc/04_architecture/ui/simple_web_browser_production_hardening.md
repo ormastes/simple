@@ -17,8 +17,11 @@ The production browser boundary is the Simple Web HTTP/WebSocket entrypoint:
 - Shared `/ui/*` dispatch: `src/app/ui.web/ui_routes.spl`
 - Token and origin policy: `src/app/ui.web/session_token.spl`,
   `src/app/ui.web/origin_guard.spl`, `src/app/ui.web/auth_params.spl`
-- Browser clients: generated JS in `src/app/ui.web/html.spl` and static WM
-  client `src/app/ui.web/wm.js`
+- Browser clients: generated JS in `src/app/ui.web/html.spl`, static WM client
+  `src/app/ui.web/wm.js`, and retained DOM renderer client
+  `src/app/ui.web/retained_renderer.js`
+- Browser HTML and fallback surfaces: root document, shown
+  `/wm/native_window`, and unknown-route JSON `404 not_found` fallback.
 
 The boundary is fail-closed by default: missing production secrets, missing or
 disallowed origins, malformed tokens, wrong-origin tokens, and unauthenticated
@@ -42,6 +45,16 @@ Browser WebSocket clients authenticate through
 bearer transport is deprecated and non-authorizing, including when the legacy
 `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` environment knob is present.
 
+## Response Header Boundary
+
+Sensitive JSON, unknown-route fallback, and static browser script responses are
+part of the production browser boundary. Authenticated successful `/api/state`
+and `/api/widgets` `200 OK` responses, unknown-route `404 not_found` responses,
+and normal/shared-WM `/wm.js` plus `/retained_renderer.js` script responses must
+carry no-store/no-cache/nosniff headers. HTML document responses, including the
+shown `/wm/native_window` surface, keep the stricter HTML policy with nosniff,
+frame-deny, no-referrer, permissions policy, and CSP headers.
+
 ## Renderer Evidence Gate
 
 The release evidence gate is
@@ -56,7 +69,9 @@ record marker-free, exact renderer parity for the current GUI/Web slice:
 
 Linux Metal, AMD ROCm, Windows DirectX, and browser WebGPU proof remain
 environment-bound follow-ups, documented in
-`doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md`.
+`doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` and captured
+with
+`doc/09_report/simple_web_browser_external_host_evidence_manifest_template.md`.
 
 ## Hot Paths
 

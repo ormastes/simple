@@ -1,6 +1,6 @@
-# Web Render Backend Api Specification
+# Web render backend API production shell contract
 
-> <details>
+> Verifies the shared Simple Web render API contract used by the normal web server, BrowserBackend, Electron, Tauri, Chrome/Chromium, TUI-web, and headless render targets. The production browser lane relies on this spec for visible shell behavior that must be present before any backend-specific pixels or host GPU evidence can be trusted.
 
 <!-- sdn-diagram:id=web_render_backend_api_spec.arch -->
 <details class="sdn-source">
@@ -29,16 +29,216 @@ web_render_backend_api_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Web Render Backend Api Specification
+# Web render backend API production shell contract
+
+Verifies the shared Simple Web render API contract used by the normal web server, BrowserBackend, Electron, Tauri, Chrome/Chromium, TUI-web, and headless render targets. The production browser lane relies on this spec for visible shell behavior that must be present before any backend-specific pixels or host GPU evidence can be trusted.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/simple_browser_production_level_options.md |
+| Plan | doc/03_plan/agent_tasks/simple_browser_production_level.md |
+| Design | doc/05_design/simple_web_browser_production_hardening.md |
+| Research | doc/01_research/local/simple_browser_production_level.md |
+| Source | `test/01_unit/app/ui/web_render_backend_api_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Verifies the shared Simple Web render API contract used by the normal web
+server, BrowserBackend, Electron, Tauri, Chrome/Chromium, TUI-web, and
+headless render targets. The production browser lane relies on this spec for
+visible shell behavior that must be present before any backend-specific pixels
+or host GPU evidence can be trusted.
+
+This manual is intentionally broader than a unit test list: it explains which
+parts of the generated HTML are release-significant. The Simple Web shell must
+have a focusable application root, screen-reader-visible connection status,
+JavaScript-disabled fallback, explicit target capability reporting, stable
+transport bundles, cache keys, and degraded-mode reconnect evidence. Those
+contracts let production verification distinguish a healthy browser surface
+from a page that merely rendered once.
+
+**Research:** doc/01_research/local/simple_browser_production_level.md
+**Requirements:** doc/02_requirements/feature/simple_browser_production_level_options.md
+**Plan:** doc/03_plan/agent_tasks/simple_browser_production_level.md
+**Architecture:** doc/04_architecture/ui/simple_gui_stack.md
+**Design:** doc/05_design/simple_web_browser_production_hardening.md
+**Generated manual:** doc/06_spec/test/01_unit/app/ui/web_render_backend_api_spec.md
+
+## Syntax
+
+The normal Simple Web shell must expose an accessible application root:
+
+```html
+<main id="app" role="application" aria-label="Simple Web application"
+      tabindex="0" data-ui-web-keyboard-root="true">
+```
+
+The live status node must be inspectable by tests and assistive technology:
+
+```html
+<div id="ui-web-status" role="status" aria-live="polite"
+     data-ui-web-status="connecting"
+     data-ui-web-retry-count="0"
+     data-ui-web-retry-delay-ms="0">
+```
+
+The shell also exposes an accessible reconnect command:
+
+```html
+<button id="ui-web-reconnect" data-ui-web-action="reconnect"
+        aria-controls="ui-web-status">
+```
+
+The reconnect script must use bounded exponential backoff instead of a fixed
+blind retry loop:
+
+```javascript
+reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30000)
+scheduleReconnect('Simple Web connection closed', connect)
+```
+
+Durable reconnect must persist the server cursor and replay it when the
+WebSocket is recreated:
+
+```javascript
+localStorage.setItem(resumeStorageKey, JSON.stringify(cursor))
+{ t: 'resume_session', snapshot_revision, last_sequence }
+```
+
+Browser navigation controls are part of the hidden shell contract so host
+wrappers can wire visible chrome without inventing event names:
+
+```html
+<button data-browser-nav="back">
+<input data-browser-address="true">
+```
+
+```javascript
+{ type: 'browser_navigation', action: 'address',
+  url: 'https://example.com', source: 'simple-web-shell' }
+```
+
+## Examples
+
+Run the focused spec:
+
+```sh
+src/compiler_rust/target/release/simple test \
+  test/01_unit/app/ui/web_render_backend_api_spec.spl --mode=interpreter
+```
+
+Regenerate this manual after changing the shell contract:
+
+```sh
+src/compiler_rust/target/release/simple spipe-docgen \
+  test/01_unit/app/ui/web_render_backend_api_spec.spl --output doc/06_spec
+```
+
+## Production Assertions
+
+- The Simple Web page and shared compact wrapper both carry accessible
+  degraded-mode markers.
+- Retry count and retry delay are exposed as stable `data-*` attributes.
+- Manual reconnect is available as an accessible command, even though it is
+  visually hidden by default.
+- Durable reconnect persists `snapshot_revision` and `last_sequence`, then
+  sends `resume_session` instead of always starting a fresh session.
+- Browser back, forward, reload, and address-entry intents use a stable
+  `browser_navigation` event shape.
+- Browser render targets keep explicit capability summaries rather than
+  inheriting ambiguous generic web behavior.
+- Runtime queue and Engine2D evidence remains explicit; local fallback pixels
+  cannot masquerade as host GPU readback.
+
+## Verification Scope
+
+This spec deliberately stays at the shared API layer. It does not claim native
+Metal, ROCm/HIP, DirectX, or browser WebGPU device-readback completion; those
+remain external-host gates in the production browser lane. It does prove that
+every local browser-facing backend receives the same request/transport shape
+and that the default generated shell exposes production-visible failure state.
+
+The scenario manual should be reviewed when any of these contracts change:
+
+- Browser shell accessibility attributes.
+- Degraded/offline status and reconnect behavior.
+- Hidden browser navigation controls and event payload shape.
+- Backend target names or capability summaries.
+- IPC payload shape for Web, Electron, and Tauri transports.
+- Runtime queue evidence flags.
+- Engine2D fallback/result status strings.
+- Cache-key and dynamic-region optimization behavior.
+
+When adding a new browser-like target, extend this spec before adding broad
+renderer proof. A target is not production-ready merely because it can emit
+HTML; it must preserve the same shell, transport, provenance, and evidence
+surface so operators can debug degraded behavior without opening backend code.
 
 ## Scenarios
 
 ### web render backends use the shared common API
+
+#### emits accessible degraded-mode shell markers for the Simple Web page
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 38 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val state = sample_state()
+val html = generate_html_page(state, 4123)
+
+expect(html).to_contain("<main id=\"app\" role=\"application\" aria-label=\"Simple Web application\" tabindex=\"0\"")
+expect(html).to_contain("data-ui-web-keyboard-root=\"true\"")
+expect(html).to_contain("id=\"ui-web-status\" class=\"sr-only\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\"")
+expect(html).to_contain("data-ui-web-status=\"connecting\"")
+expect(html).to_contain("data-ui-web-retry-count=\"0\"")
+expect(html).to_contain("data-ui-web-retry-delay-ms=\"0\"")
+expect(html).to_contain("id=\"ui-web-reconnect\" class=\"sr-only\" type=\"button\" data-ui-web-action=\"reconnect\"")
+expect(html).to_contain("aria-controls=\"ui-web-status\" aria-label=\"Reconnect Simple Web runtime\"")
+expect(html).to_contain("id=\"ui-web-browser-navigation\" class=\"sr-only\" aria-label=\"Browser navigation controls\"")
+expect(html).to_contain("data-browser-nav=\"back\"")
+expect(html).to_contain("data-browser-nav=\"forward\"")
+expect(html).to_contain("data-browser-nav=\"reload\"")
+expect(html).to_contain("data-browser-address=\"true\"")
+expect(html).to_contain("<noscript><div role=\"alert\" data-ui-web-degraded=\"javascript-disabled\">")
+expect(html).to_contain(".sr-only { position: absolute; width: 1px; height: 1px;")
+expect(html).to_contain("function setBrowserStatus(state, message)")
+expect(html).to_contain("function scheduleReconnect(reason, fn)")
+expect(html).to_contain("reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30000)")
+expect(html).to_contain("reconnectButton.addEventListener('click', manualReconnect)")
+expect(html).to_contain("const resumeStorageKey = 'simple-web:resume:'")
+expect(html).to_contain("function loadResumeCursor()")
+expect(html).to_contain("function storeResumeCursor(cursor)")
+expect(html).to_contain("function sendResumeFromDurableCursor()")
+expect(html).to_contain("t: 'resume_session', snapshot_revision: cursor.snapshot_revision || 0, last_sequence: cursor.last_sequence || 0")
+expect(html).to_contain("function persistWireCursor(data)")
+expect(html).to_contain("data.t === 'snapshot' || data.t === 'patch_batch' || data.t === 'resume_current'")
+expect(html).to_contain("last_applied_sequence: Number(data.seq) || 0")
+expect(html).to_contain("function normalizeBrowserAddress(raw)")
+expect(html).to_contain("function sendBrowserNavigationIntent(kind, value)")
+expect(html).to_contain("type: 'browser_navigation', action: kind, url: value || '', source: 'simple-web-shell'")
+expect(html).to_contain("function bindBrowserNavigationControls()")
+expect(html).to_contain("sendBrowserNavigationIntent('address', normalizeBrowserAddress(input.value))")
+expect(html).to_contain("bindBrowserNavigationControls()")
+expect(html).to_contain("setBrowserStatus('connected', 'Connected to Simple Web runtime')")
+expect(html).to_contain("scheduleReconnect('Simple Web connection closed', connect)")
+```
+
+</details>
 
 #### keeps headless as an explicit no-display render target
 
@@ -97,7 +297,7 @@ expect(web_render_capabilities_for_target(WEB_RENDER_TARGET_CHROME).len()).to_eq
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -107,12 +307,16 @@ val web_html = web.render_html(state)
 expect(web_html).to_contain("widget-panel")
 expect(web_html).to_contain("widget-button")
 expect(web.input_envelope_json("main", UIEvent.KeyPress(key: "enter"))).to_contain("\"target\":\"simple_web\"")
+expect(web.input_envelope_json("main", UIEvent.BrowserNavigation(action: "address", url: "https://example.test"))).to_contain("\"event_type\":\"browser_navigation\"")
+expect(web.input_envelope_json("main", UIEvent.BrowserNavigation(action: "address", url: "https://example.test"))).to_contain("\"target_id\":\"address\"")
+expect(web.input_envelope_json("main", UIEvent.BrowserNavigation(action: "address", url: "https://example.test"))).to_contain("\"value\":\"https://example.test\"")
 expect(web.snapshot_envelope_json("main", 3u64, "{\"mode\":\"NORMAL\"}")).to_contain("\"type\":\"snapshot\"")
 expect(web.patch_envelope_json("main", 3u64, 4u64, "[]", "")).to_contain("\"type\":\"patch\"")
 
 val tui_web = TuiWebBackend.new()
 expect(tui_web.render_html(state)).to_equal(web_html)
 expect(tui_web.input_envelope_json("main", UIEvent.KeyPress(key: "enter"))).to_contain("\"target\":\"tui_web\"")
+expect(tui_web.input_envelope_json("main", UIEvent.BrowserNavigation(action: "reload", url: ""))).to_contain("\"event_type\":\"browser_navigation\"")
 expect(tui_web.snapshot_envelope_json("main", 3u64, "{\"mode\":\"NORMAL\"}")).to_contain("\"type\":\"snapshot\"")
 expect(tui_web.patch_envelope_json("main", 3u64, 4u64, "[]", "")).to_contain("\"target\":\"tui_web\"")
 
@@ -129,6 +333,7 @@ match electron_result:
         expect(electron.input_envelope_json("main", UIEvent.KeyPress(key: "enter"))).to_contain("\"target\":\"electron\"")
         expect(electron.input_envelope_json("main", UIEvent.Resize(width: 640, height: 480))).to_contain("\"event_type\":\"resize\"")
         expect(electron.input_envelope_json("main", UIEvent.InputChange(target_id: "name", value: "Ada"))).to_contain("\"event_type\":\"input\"")
+        expect(electron.input_envelope_json("main", UIEvent.BrowserNavigation(action: "back", url: ""))).to_contain("\"target_id\":\"back\"")
         expect(electron.input_envelope_json("main", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"))).to_contain("\"event_type\":\"mouse_down\"")
         expect(electron.snapshot_envelope_json("main", 3u64, "{\"mode\":\"NORMAL\"}")).to_contain("\"revision\":3")
         expect(electron.patch_envelope_json("main", 3u64, 4u64, "[]", "")).to_contain("\"to_sequence\":4")
@@ -165,7 +370,7 @@ match tauri_result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -182,7 +387,8 @@ match backend_result:
         backend.render_frame(state.tree, state)
         expect(backend.web_render_target).to_equal("pure_simple")
         expect(backend.last_artifact_capabilities).to_contain("touch")
-        expect(backend.last_artifact_html).to_contain("<div id=\"app\">")
+        expect(backend.last_artifact_html).to_contain("<main id=\"app\" role=\"application\"")
+        expect(backend.last_artifact_html).to_contain("id=\"ui-web-status\" class=\"sr-only\" role=\"status\"")
         expect(backend.last_artifact_html).to_contain("widget-button")
         expect(backend.last_artifact_pixels).to_equal(64 * 48)
         expect(backend.last_artifact_engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_RENDERED)
@@ -496,7 +702,7 @@ expect(web_render_ipc_json(req)).to_contain("\"target\":\"electron\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -511,7 +717,10 @@ expect(req.wants_pixels).to_equal(true)
 val pixel_req = web_render_url_to_request(WEB_RENDER_TARGET_PURE_SIMPLE, "about:blank", 320, 200)
 expect(pixel_req.body_html).to_equal(req.body_html)
 expect(pixel_req.wants_pixels).to_equal(true)
-expect(web_render_pixel_default_page_html("about:blank")).to_contain("<div id=\"app\"><main class='simple-web-default'>")
+val default_html = web_render_pixel_default_page_html("about:blank")
+expect(default_html).to_contain("<main id=\"app\" role=\"application\"")
+expect(default_html).to_contain("<main class='simple-web-default'>")
+expect(default_html).to_contain("id=\"ui-web-status\" class=\"sr-only\" role=\"status\"")
 ```
 
 </details>
@@ -556,30 +765,23 @@ expect(queued.queue_drained).to_equal(1)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/ui/web_render_backend_api_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- web render backends use the shared common API
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** [doc/02_requirements/feature/simple_browser_production_level_options.md](doc/02_requirements/feature/simple_browser_production_level_options.md)
+- **Plan:** [doc/03_plan/agent_tasks/simple_browser_production_level.md](doc/03_plan/agent_tasks/simple_browser_production_level.md)
+- **Design:** [doc/05_design/simple_web_browser_production_hardening.md](doc/05_design/simple_web_browser_production_hardening.md)
+- **Research:** [doc/01_research/local/simple_browser_production_level.md](doc/01_research/local/simple_browser_production_level.md)
 
 
 </details>

@@ -8,6 +8,7 @@ wire-building helpers used by both the handshake and the stream layer.
 use std.nogc_async_mut.io.driver.{IoDriver}
 use std.tls.types.{
     CONTENT_TYPE_ALERT,
+    CONTENT_TYPE_APPLICATION_DATA,
     CONTENT_TYPE_HANDSHAKE,
     CONTENT_TYPE_CHANGE_CIPHER_SPEC,
     TLS_VERSION_1_2,
@@ -23,7 +24,8 @@ use std.nogc_async_mut.io.tls_common.{
     wire_to_bytes
 }
 use std.tls.utilities.{byte_at}
-use std.nogc_sync_mut.io.tcp.{
+use std.string_core.{char_code}
+use std.nogc_async_mut.io.tcp_backend.{
     tcp_backend_bind,
     tcp_backend_close,
     tcp_backend_set_nonblocking
@@ -56,13 +58,11 @@ fn read_tls_record(driver: IoDriver, fd: i64) -> text?:
     if header == nil:
         return nil
 
-    val header_bytes = wire_to_bytes(header)
-    if len(header_bytes) < TLS_RECORD_HEADER_SIZE:
+    val record_header = parse_record_header_wire_with_len(header, TLS_RECORD_HEADER_SIZE)
+    if record_header.is_err():
         return nil
 
-    val payload_len = (byte_at(header_bytes, 3) * 256) + byte_at(header_bytes, 4)
-    if payload_len > TLS_MAX_FRAGMENT_LENGTH:
-        return nil
+    val payload_len = record_header.unwrap().payload_len
 
     if payload_len == 0:
         return header
@@ -121,6 +121,156 @@ fn send_all(driver: IoDriver, fd: i64, data: text) -> bool:
 # ============================================================================
 # Record-Layer Wire Helpers
 # ============================================================================
+
+struct TlsRecordView:
+    content_type: i64
+    version: i64
+    payload_len: i64
+    payload: text
+
+struct TlsRecordHeader:
+    content_type: i64
+    version: i64
+    payload_len: i64
+
+struct TlsRecordHexView:
+    content_type: i64
+    version: i64
+    payload_len: i64
+    payload_hex: text
+
+fn tls_content_type_allowed(content_type: i64) -> bool:
+    content_type == CONTENT_TYPE_ALERT or
+        content_type == CONTENT_TYPE_APPLICATION_DATA or
+        content_type == CONTENT_TYPE_HANDSHAKE or
+        content_type == CONTENT_TYPE_CHANGE_CIPHER_SPEC
+
+fn _tls_wire_byte(record: text, offset: i64) -> i64:
+    char_code(record.slice(offset, offset + 1)) & 255
+
+fn _tls_hex_nibble(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a" or c == "A": return 10
+    if c == "b" or c == "B": return 11
+    if c == "c" or c == "C": return 12
+    if c == "d" or c == "D": return 13
+    if c == "e" or c == "E": return 14
+    if c == "f" or c == "F": return 15
+    -1
+
+fn _tls_hex_byte(hex: text, offset: i64) -> i64:
+    if offset + 2 > hex.len():
+        return -1
+    val hi = _tls_hex_nibble(hex.slice(offset, offset + 1))
+    val lo = _tls_hex_nibble(hex.slice(offset + 1, offset + 2))
+    if hi < 0 or lo < 0:
+        return -1
+    hi * 16 + lo
+
+fn parse_record_hex(record_hex: text) -> Result<TlsRecordHexView, text>:
+    """Parse and validate one complete TLS 1.2 record encoded as lowercase or uppercase hex."""
+    if record_hex.len() < TLS_RECORD_HEADER_SIZE * 2:
+        return Err("tls record header too short")
+    if record_hex.len() % 2 != 0:
+        return Err("tls record hex length odd")
+
+    val content_type = _tls_hex_byte(record_hex, 0)
+    if not tls_content_type_allowed(content_type):
+        return Err("tls record content type unsupported")
+
+    val version = (_tls_hex_byte(record_hex, 2) * 256) + _tls_hex_byte(record_hex, 4)
+    if version != TLS_VERSION_1_2:
+        return Err("tls record version unsupported")
+
+    val payload_len = (_tls_hex_byte(record_hex, 6) * 256) + _tls_hex_byte(record_hex, 8)
+    if payload_len > TLS_MAX_FRAGMENT_LENGTH:
+        return Err("tls record payload too large")
+    if record_hex.len() != (TLS_RECORD_HEADER_SIZE + payload_len) * 2:
+        return Err("tls record length mismatch")
+
+    Ok(TlsRecordHexView(
+        content_type: content_type,
+        version: version,
+        payload_len: payload_len,
+        payload_hex: record_hex.slice(TLS_RECORD_HEADER_SIZE * 2, record_hex.len())
+    ))
+
+fn parse_record_header_hex(header_hex: text) -> Result<TlsRecordHeader, text>:
+    """Parse and validate only a TLS 1.2 record header encoded as hex."""
+    if header_hex.len() != TLS_RECORD_HEADER_SIZE * 2:
+        return Err("tls record header length mismatch")
+
+    val content_type = _tls_hex_byte(header_hex, 0)
+    if not tls_content_type_allowed(content_type):
+        return Err("tls record content type unsupported")
+
+    val version = (_tls_hex_byte(header_hex, 2) * 256) + _tls_hex_byte(header_hex, 4)
+    if version != TLS_VERSION_1_2:
+        return Err("tls record version unsupported")
+
+    val payload_len = (_tls_hex_byte(header_hex, 6) * 256) + _tls_hex_byte(header_hex, 8)
+    if payload_len > TLS_MAX_FRAGMENT_LENGTH:
+        return Err("tls record payload too large")
+
+    Ok(TlsRecordHeader(content_type: content_type, version: version, payload_len: payload_len))
+
+fn parse_record_header_wire_with_len(header: text, wire_len: i64) -> Result<TlsRecordHeader, text>:
+    """Parse and validate only a TLS 1.2 record header from wire text."""
+    if wire_len != TLS_RECORD_HEADER_SIZE:
+        return Err("tls record header length mismatch")
+
+    val content_type = _tls_wire_byte(header, 0)
+    if not tls_content_type_allowed(content_type):
+        return Err("tls record content type unsupported")
+
+    val version = (_tls_wire_byte(header, 1) * 256) + _tls_wire_byte(header, 2)
+    if version != TLS_VERSION_1_2:
+        return Err("tls record version unsupported")
+
+    val payload_len = (_tls_wire_byte(header, 3) * 256) + _tls_wire_byte(header, 4)
+    if payload_len > TLS_MAX_FRAGMENT_LENGTH:
+        return Err("tls record payload too large")
+
+    Ok(TlsRecordHeader(content_type: content_type, version: version, payload_len: payload_len))
+
+fn parse_record_wire(record: text) -> Result<TlsRecordView, text>:
+    """Parse and validate one complete TLS 1.2 record from wire text."""
+    parse_record_wire_with_len(record, record.len())
+
+fn parse_record_wire_with_len(record: text, wire_len: i64) -> Result<TlsRecordView, text>:
+    """Parse one TLS 1.2 record when the caller knows the exact wire byte length."""
+    if wire_len < TLS_RECORD_HEADER_SIZE:
+        return Err("tls record header too short")
+
+    val content_type = _tls_wire_byte(record, 0)
+    if not tls_content_type_allowed(content_type):
+        return Err("tls record content type unsupported")
+
+    val version = (_tls_wire_byte(record, 1) * 256) + _tls_wire_byte(record, 2)
+    if version != TLS_VERSION_1_2:
+        return Err("tls record version unsupported")
+
+    val payload_len = (_tls_wire_byte(record, 3) * 256) + _tls_wire_byte(record, 4)
+    if payload_len > TLS_MAX_FRAGMENT_LENGTH:
+        return Err("tls record payload too large")
+    if wire_len != TLS_RECORD_HEADER_SIZE + payload_len:
+        return Err("tls record length mismatch")
+
+    Ok(TlsRecordView(
+        content_type: content_type,
+        version: version,
+        payload_len: payload_len,
+        payload: record.slice(TLS_RECORD_HEADER_SIZE, record.len())
+    ))
 
 fn build_handshake_wire(msg_type: i64, body: text) -> text:
     """Build a handshake message as wire bytes: type(1) + length(3) + body."""

@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+checker="scripts/check/check-simple-web-browser-external-host-evidence-manifest.shs"
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/simple-web-manifest-contract.XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
+write_webgpu_pass() {
+    path="$1"
+    cat >"$path" <<'EOF'
+simple_web_browser_external_host_manifest_status=pass
+simple_web_browser_external_host_gate=webgpu
+simple_web_browser_external_host_accepted=yes
+simple_web_browser_external_host_baseline_confirmed=yes
+host_os=Linux WebGPU host
+gpu_model=Discrete Test GPU
+driver_runtime_version=WebGPU runtime 1.0
+command_exit_status=0
+report_path=doc/09_report/webgpu_real_readback_2099-01-01.md
+expected_checksum=123456
+actual_checksum=123456
+mismatch_count=0
+webgpu_real_readback_status=pass
+webgpu_real_readback_source=device_readback
+webgpu_real_readback_backend_handle=42
+EOF
+}
+
+expect_pass() {
+    path="$1"
+    sh "$checker" "$path" >/dev/null
+}
+
+expect_fail() {
+    path="$1"
+    if sh "$checker" "$path" >/dev/null 2>"$tmp_dir/fail.log"; then
+        echo "FAIL: checker accepted invalid manifest $path" >&2
+        exit 1
+    fi
+}
+
+valid="$tmp_dir/webgpu-pass.md"
+write_webgpu_pass "$valid"
+expect_pass "$valid"
+
+missing_baseline="$tmp_dir/missing-baseline.md"
+write_webgpu_pass "$missing_baseline"
+sed -i 's/simple_web_browser_external_host_baseline_confirmed=yes/simple_web_browser_external_host_baseline_confirmed=no/' "$missing_baseline"
+expect_fail "$missing_baseline"
+
+not_device="$tmp_dir/not-device.md"
+write_webgpu_pass "$not_device"
+sed -i 's/webgpu_real_readback_source=device_readback/webgpu_real_readback_source=surface_upload/' "$not_device"
+expect_fail "$not_device"
+
+mismatch="$tmp_dir/checksum-mismatch.md"
+write_webgpu_pass "$mismatch"
+sed -i 's/actual_checksum=123456/actual_checksum=654321/' "$mismatch"
+expect_fail "$mismatch"
+
+placeholder="$tmp_dir/placeholder.md"
+write_webgpu_pass "$placeholder"
+printf '%s\n' 'host-unavailable' >>"$placeholder"
+expect_fail "$placeholder"
+
+echo "PASS: simple web browser external host manifest contract"
