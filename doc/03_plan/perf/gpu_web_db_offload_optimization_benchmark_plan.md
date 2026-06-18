@@ -189,6 +189,16 @@ Implemented and verified on the current host:
   plus `UWEBSOCKETS_PLAINTEXT_URL` and/or `SEASTAR_PLAINTEXT_URL` to let the
   proxy external producer emit strict `reference_plaintext` measured rows that
   the web comparison report accepts.
+- The reference-comparator handoff now exists at
+  `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs`.
+  It writes a blank sourceable env template at
+  `build/perf/gpu_web_db_offload/reference-comparator-fixtures.env` and a
+  Markdown runbook at
+  `build/perf/gpu_web_db_offload/reference-comparator-handoff.md` that ties
+  the uWebSockets/Seastar endpoint, provenance, producer, strict suite, and
+  fastest-comparator audit commands together. Generating these artifacts does
+  not mark reference readiness; operators must fill verified live endpoints and
+  provenance before running the strict gates.
 - The readiness handoff now writes
   `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv`, a
   side-effect-free machine-readable map from URL-backed readiness items to the
@@ -228,7 +238,7 @@ Implemented and verified on the current host:
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
   With the default sourceable `external-fixtures.env` template left blank, the
-  current strict status is 32 suite steps, 29 missing fixture items, 26
+  current strict status is 33 suite steps, 29 missing fixture items, 26
   required missing fixture items, and 3 optional reference fixture URLs. Local
   Docker-backed fixture candidates must be copied into a separate verified env
   file or exported for the suite run before those rows can become ready.
@@ -317,7 +327,9 @@ Remaining blockers before this plan can be marked done:
   `UWEBSOCKETS_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_PROVENANCE`,
   `SEASTAR_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_PROVENANCE` when available.
   The provenance variables must identify the real comparator binary, image, or
-  commit; URL-only placeholders remain blocked.
+  commit; URL-only placeholders remain blocked. Use
+  `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs` to
+  refresh the blank env template and exact strict evidence command sequence.
   The open tracking note is
   `doc/08_tracking/bug/gpu_web_db_external_comparator_fixture_gap_2026-06-18.md`.
 The current blocker list is machine-checkable with

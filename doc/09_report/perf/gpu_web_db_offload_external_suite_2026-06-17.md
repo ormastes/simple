@@ -5,7 +5,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 
 ## Summary
 
-- Suite steps: `32`
+- Suite steps: `33`
 - Missing fixture items: `29`
 - Verdict: `WAITING_ON_FIXTURES`
 
@@ -37,6 +37,8 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | required_blockers | `build/perf/gpu_web_db_offload/external-suite-required-blockers.tsv` |
 | completion_audit | `build/perf/gpu_web_db_offload/external-suite-completion-audit.md` |
 | required_next_actions | `build/perf/gpu_web_db_offload/external-suite-required-next-actions.md` |
+| reference_comparator_env | `build/perf/gpu_web_db_offload/reference-comparator-fixtures.env` |
+| reference_comparator_handoff | `build/perf/gpu_web_db_offload/reference-comparator-handoff.md` |
 
 ## Suite Steps
 
@@ -64,6 +66,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | write-required-blockers | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-required-blockers` |
 | write-completion-audit | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-completion-audit` |
 | write-required-next-actions | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-required-next-actions` |
+| write-reference-comparator-handoff | `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs` |
 | readiness | `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs` |
 | nginx-live | `scripts/check/check-web-server-nginx-live-compare.shs` |
 | static-external | `scripts/check/check-web-server-static-external-live-compare.shs` |
