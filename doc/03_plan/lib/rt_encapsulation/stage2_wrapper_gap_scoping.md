@@ -82,10 +82,14 @@ Related: lint `raw_rt_access`, `doc/07_guide/app/lint.md`, memory
 ## CORRECTION (2026-06-18): the general-gap rt_* are largely UNIMPLEMENTED
 
 Attempting Stage 2a (build the 8 general wrappers) showed the premise was wrong.
-Of the 8 "genuinely-general" rt_*, only `rt_get_cwd` actually runs in the
-interpreter. Verified: `rt_file_list_dir` **core-dumps** when called;
-`rt_stdin_read_bytes`, `rt_shell_exit_code`, `rt_process_get_rss_kb`,
-`rt_random_bytes_c`, `rt_term_write`, `rt_term_flush` are registered **NOWHERE**
+Of the 8 "genuinely-general" rt_*: `rt_get_cwd` runs; `rt_file_list_dir` is
+actually **registered and works** (`interpreter_extern/mod.rs:1059` →
+`file_io::rt_dir_list`) — it only *appeared* to core-dump during scoping because
+the deployed binary was **stale** AND it returns `[text]`, hitting the separate
+missing-pointer-extern SIGSEGV bug
+(`doc/08_tracking/bug/interp_missing_pointer_extern_nil_deref_sigsegv_2026-06-18.md`).
+But `rt_stdin_read_bytes`, `rt_shell_exit_code`, `rt_process_get_rss_kb`,
+`rt_random_bytes_c`, `rt_term_write`, `rt_term_flush` ARE registered **NOWHERE**
 in the standard backends (interpreter `interpreter_extern/` + native
 `runtime_sffi.rs`); `rt_term_poll`/`rt_term_read_timeout` exist only in a
 pure-Simple runtime core (`src/runtime/simple_core/core_process.spl`).
