@@ -8,6 +8,7 @@
 | syntax proxy external comparison | pass | host-safe-self-test |
 | syntax proxy external local fixture | pass | host-safe-self-test |
 | syntax dynamic route comparison | pass | host-safe-self-test |
+| syntax dynamic route local fixture | pass | host-safe-self-test |
 | syntax gpu web/db benchmark report | pass | host-safe-self-test |
 | syntax external DB baseline producer | pass | host-safe-self-test |
 | syntax external fixture readiness | pass | host-safe-self-test |

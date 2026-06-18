@@ -40,7 +40,7 @@ It is the first external-comparison gate for the GPU Web/DB optimization lane. R
 | cached_reverse_proxy | native_simple_cached_proxy | envoy_cached_reverse_proxy | wrk | measured | 1420.12 | 471.71 | 3.011 | 0.844 | 3.070 | 1420.120 | 0 | live-simple-envoy-wrk |
 | upload_streaming_proxy | native_simple_upload_proxy | haproxy_upload_streaming_proxy | wrk | measured | 37.48 | 37.56 | 0.998 | 26.683 | 26.624 | 315.075 | 0 | live-simple-haproxy-upload-http |
 | upgrade_tunnel_proxy | native_simple_upgrade_tunnel | haproxy_upgrade_tunnel_proxy | wrk | measured | 240.86 | 173.32 | 1.390 | 4.152 | 5.770 | 0.046 | 0 | live-simple-haproxy-tunnel-socket |
-| dynamic_gpu_plaintext | native_simple_gpu_route_plaintext | cpu_simple_plaintext | wrk | live-fixture-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | dynamic-gpu-route-live-server-not-configured |
-| dynamic_gpu_json | native_simple_gpu_route_json | cpu_simple_json | wrk | live-fixture-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | dynamic-gpu-route-live-server-not-configured |
+| dynamic_gpu_plaintext | native_simple_gpu_route_plaintext | cpu_simple_plaintext | wrk | measured | 1661.13 | 1894.27 | 0.877 | 1.220 | 0.795 | 0.970 | 0 | live-simple-cpu-gpu-route-wrk |
+| dynamic_gpu_json | native_simple_gpu_route_json | cpu_simple_json | wrk | measured | 591.43 | 1026.29 | 0.576 | 2.070 | 1.730 | 1.051 | 0 | live-simple-cpu-gpu-route-wrk |
 | reference_plaintext | native_simple_reference_plaintext | uwebsockets_plaintext | wrk | live-fixture-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | reference-fixture-url-not-configured |
 | reference_plaintext | native_simple_reference_plaintext | seastar_plaintext | wrk | live-fixture-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | reference-fixture-url-not-configured |

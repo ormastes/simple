@@ -52,6 +52,7 @@ Local green evidence already recorded:
 - `sh scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs`
 - `sh scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts`
 - `sh scripts/check/check-web-server-proxy-external-local-fixture.shs`
+- `sh scripts/check/check-web-server-dynamic-gpu-route-local-fixture.shs`
 
 Current metrics live in:
 
@@ -121,11 +122,17 @@ Implemented and verified on the current host:
   Normal web report regeneration auto-consumes producer files under
   `build/perf/web_server_nginx_compare/`.
 - Dynamic GPU route rows have parser and producer self-tests plus URL-driven
-  live producer coverage through the proxy external wrapper, but remain
-  `live-fixture-unavailable` on this host because live CPU/GPU route URLs are
-  not configured. The standalone dynamic route wrapper now sources
+  live producer coverage. The standalone dynamic route wrapper now sources
   `build/perf/gpu_web_db_offload/external-fixtures.env`, matching the generated
-  readiness handoff used by the proxy and DB producers.
+  readiness handoff used by the proxy and DB producers, and empty assignments
+  in that generated template no longer overwrite already-exported live URL
+  values. Local dynamic route comparison now has a repo-owned wrapper at
+  `scripts/check/check-web-server-dynamic-gpu-route-local-fixture.shs`. It
+  native-builds paired Simple fixtures on ports `8080` and `8081`, verifies the
+  GPU-tagged route exposes `gpu_hits=0` and `cpu_fallbacks=1` fallback evidence,
+  exports the matching plaintext/JSON URL pairs, and delegates to the dynamic
+  `wrk` producer. On this host it produced measured zero-failure plaintext and
+  JSON rows against the CPU oracle routes.
 - DB external baseline rows cover ClickHouse, DuckDB, PostgreSQL,
   MongoDB/YCSB, and Redis/Valkey availability, measured-row parsing, producer
   self-tests, persistence, and auto-consumption under
@@ -259,9 +266,12 @@ Remaining blockers before this plan can be marked done:
   those values are written into the selected
   `build/perf/gpu_web_db_offload/external-fixtures.env` or exported for the
   suite run. Do not mark the suite complete from the default empty env file.
-- Start live CPU and GPU dynamic route servers and set
-  `DYNAMIC_GPU_PLAINTEXT_URL`, `DYNAMIC_CPU_PLAINTEXT_URL`,
-  `DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL`.
+- Dynamic route rows now have local measured evidence through
+  `scripts/check/check-web-server-dynamic-gpu-route-local-fixture.shs`, but the
+  strict external-suite preflight still reports dynamic-route URLs missing until
+  those values are written into the selected
+  `build/perf/gpu_web_db_offload/external-fixtures.env` or exported for the
+  suite run. Do not mark the suite complete from the default empty env file.
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_URL` when available.
@@ -443,20 +453,22 @@ The HTTP matrix also includes dynamic GPU route readiness rows:
 
 | Workload | Simple target | Baseline | Status |
 |---|---|---|---|
-| `dynamic_gpu_plaintext` | `native_simple_gpu_route_plaintext` | `cpu_simple_plaintext` | ready unmeasured |
-| `dynamic_gpu_json` | `native_simple_gpu_route_json` | `cpu_simple_json` | ready unmeasured |
+| `dynamic_gpu_plaintext` | `native_simple_gpu_route_plaintext` | `cpu_simple_plaintext` | measured locally, zero failures |
+| `dynamic_gpu_json` | `native_simple_gpu_route_json` | `cpu_simple_json` | measured locally, zero failures |
 
 These rows map the TechEmpower-style plaintext/JSON route shapes into the
-external comparison table. They still need configured live CPU and GPU route
-server URLs before any dynamic-route throughput claim.
+external comparison table. The local GPU-tagged fixture explicitly reports
+`gpu_hits=0` and `cpu_fallbacks=1`, so these rows are route-throughput evidence
+with visible fallback accounting rather than GPU acceleration evidence.
 
 The live dynamic-route wrapper now exists at
-`scripts/check/check-web-server-dynamic-gpu-route-compare.shs`. On this host it
-records both dynamic rows as `live-fixture-unavailable` because the CPU and GPU
-route server URLs are not configured. When live route servers are available, set
-`DYNAMIC_GPU_PLAINTEXT_URL`, `DYNAMIC_CPU_PLAINTEXT_URL`,
-`DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL` so the wrapper can run `wrk`
-and replace those rows with measured values. The wrapper also exposes
+`scripts/check/check-web-server-dynamic-gpu-route-compare.shs`, and the local
+fixture wrapper is
+`scripts/check/check-web-server-dynamic-gpu-route-local-fixture.shs`. When
+separate live route servers are available, set `DYNAMIC_GPU_PLAINTEXT_URL`,
+`DYNAMIC_CPU_PLAINTEXT_URL`, `DYNAMIC_GPU_JSON_URL`, and
+`DYNAMIC_CPU_JSON_URL` so the generic wrapper can run `wrk` against those
+servers. The wrapper also exposes
 `--self-test-dynamic-route-parser` to verify `wrk` parsing, p99 unit conversion,
 ratio formatting, throughput calculation, and failure classification without
 requiring live route servers, plus `--self-test-dynamic-route-producer-lines`
