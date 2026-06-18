@@ -1,8 +1,8 @@
 # Runtime Large ArrayBuffer Probe Resume Plan
 
-Status: EVIDENCE REFRESHED (2026-06-18) — focused regression rechecked; not
-marked done because normal review found the broader cleanup evidence rule still
-needs explicit requirements/NFR and guide-applicability evidence.
+Status: DONE (2026-06-18) — focused regression, requirements/NFR traceability,
+and guide-applicability evidence recorded for the bounded sparse
+ArrayBuffer/Uint8Array runtime slice.
 
 ## Context
 
@@ -77,11 +77,18 @@ Completion note 2026-06-18:
 - The implementation and generated manual listed above already existed, and no
   backing-buffer or WASM memory behavior changed in this cleanup lane, so the
   optional WASM host check was not required.
-- Normal review rejected a `DONE` mark until the lane also cites requirements,
-  NFR, and guide-update applicability evidence.
+- Final requirements and NFR traceability were added:
+  `doc/02_requirements/feature/runtime_large_arraybuffer_probe_resume.md` and
+  `doc/02_requirements/nfr/runtime_large_arraybuffer_probe_resume.md`.
+- Guide applicability: no `doc/07_guide` update is required for this cleanup
+  lane because it changes no public API, command, wrapper, or operator process.
+  The canonical reproduction path is the generated SSpec manual:
+  `doc/06_spec/test/01_unit/lib/common/web/browser_session_large_arraybuffer_spec.md`.
+  Broader WebAssembly.Memory/WebGPU guidance remains covered by the separate
+  browser/WASM/WebGPU plans and is intentionally not claimed by this row.
 
-Use this plan to resume with a small, bounded follow-up. Treat unrelated dirty
-files as other-lane work.
+This plan is complete for the bounded sparse large-buffer runtime slice. Treat
+unrelated dirty files as other-lane work.
 
 Recommended next step:
 
@@ -112,7 +119,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/app/browser/feature/webgpu_js_wasm
 Prefer the one-case large-buffer unit spec first because the WebAssembly host
 and WebGPU system specs are known slow.
 
-## Stop Conditions
+## Historical Stop Conditions
 
 - Do not run repeated green checks.
 - Do not run the broad WebGPU system spec more than once.
