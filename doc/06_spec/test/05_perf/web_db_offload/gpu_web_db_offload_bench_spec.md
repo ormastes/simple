@@ -1020,13 +1020,14 @@ expect(row.backend_timing_valid).to_be(true)
    - Expected: duckdb_external_status equals `measured`
    - Expected: postgresql_external_status equals `measured`
    - Expected: mongo_external_status equals `measured`
+   - Expected: redis_valkey_external_status equals `measured`
    - Expected: external_wrong_source_status equals `invalid_measured`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 244 lines folded for reproduction.
+Runnable source: 253 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1239,6 +1240,14 @@ val mongo_external_status = gpu_wdb_benchmark_measured_row_status(
     "external-db-baseline-driver",
     "external-db-baseline-measured"
 )
+val redis_valkey_external_status = gpu_wdb_benchmark_measured_row_status(
+    "db_key_value_redis_valkey_external_measured",
+    "redis_valkey_getset_1024_key_match",
+    "redis_valkey_key_value_getset",
+    905,
+    "external-db-baseline-driver",
+    "external-db-baseline-measured"
+)
 val external_wrong_source_status = gpu_wdb_benchmark_measured_row_status(
     "db_tpch_duckdb_external_measured",
     "tpch_q3_join_aggregate_group_count_1024_row_match",
@@ -1273,6 +1282,7 @@ expect(clickhouse_external_status).to_equal("measured")
 expect(duckdb_external_status).to_equal("measured")
 expect(postgresql_external_status).to_equal("measured")
 expect(mongo_external_status).to_equal("measured")
+expect(redis_valkey_external_status).to_equal("measured")
 expect(external_wrong_source_status).to_equal("invalid_measured")
 ```
 

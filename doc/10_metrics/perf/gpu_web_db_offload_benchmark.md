@@ -4,14 +4,14 @@
 |---|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---|---|---|---|
 | db_vector_gpu_hit | host-safe-mock | oracle_vectors_1024x128 | 1024 | 0 | 128 | 8 | 1 | gpu_db_vector_search_batch | 1 | 0 | 0 | host-derived | false |  | none-host-safe-contract |
 | db_vector_native_timing_probe | native-device-probe | oracle_vectors_1024x128 | 1024 | 0 | 128 | 8 | 1 | gpu_db_vector_search_batch | 1 | 0 | 37 | native-device-timer | true |  | none-native-provenance-contract |
-| db_vector_cuda_measured | cuda | oracle_vectors_1024x128 | 1024 | 0 | 128 | 8 | 1 | gpu_db_vector_search_batch | 1 | 0 | 182 | cuda-measured-driver | true |  | native-device-measured |
-| db_columnar_scan_cuda_measured | cuda | pure_sql_scan_filter_project | 1024 | 0 | 0 | 8 | 1 | gpu_db_columnar_scan_batch | 1 | 0 | 233 | cuda-measured-driver | true |  | native-device-measured |
-| db_join_aggregate_cuda_measured | cuda | pure_sql_join_aggregate_group_count | 1024 | 0 | 0 | 8 | 1 | gpu_db_join_aggregate_batch | 1 | 0 | 189 | cuda-measured-driver | true |  | native-device-measured |
-| db_document_filter_cuda_measured | cuda | nosql_document_filter_metadata | 0 | 1024 | 0 | 8 | 1 | gpu_db_document_filter_batch | 1 | 0 | 157 | cuda-measured-driver | true |  | native-device-measured |
-| web_inference_cuda_measured | cuda | web_inference_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_inference_batch | 1 | 0 | 209 | cuda-measured-driver | true |  | native-device-measured |
-| web_embedding_cuda_measured | cuda | web_embedding_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_embedding_batch | 1 | 0 | 186 | cuda-measured-driver | true |  | native-device-measured |
-| web_rank_cuda_measured | cuda | web_rank_32x256_response_match | 0 | 32 | 0 | 32 | 1 | gpu_web_rank_batch | 1 | 0 | 182 | cuda-measured-driver | true |  | native-device-measured |
-| web_transform_cuda_measured | cuda | web_transform_8x2048_response_match | 0 | 8 | 0 | 8 | 1 | gpu_web_transform_batch | 1 | 0 | 201 | cuda-measured-driver | true |  | native-device-measured |
+| db_vector_cuda_measured | cuda | oracle_vectors_1024x128 | 1024 | 0 | 128 | 8 | 1 | gpu_db_vector_search_batch | 1 | 0 | 149 | cuda-measured-driver | true |  | native-device-measured |
+| db_columnar_scan_cuda_measured | cuda | pure_sql_scan_filter_project | 1024 | 0 | 0 | 8 | 1 | gpu_db_columnar_scan_batch | 1 | 0 | 167 | cuda-measured-driver | true |  | native-device-measured |
+| db_join_aggregate_cuda_measured | cuda | pure_sql_join_aggregate_group_count | 1024 | 0 | 0 | 8 | 1 | gpu_db_join_aggregate_batch | 1 | 0 | 193 | cuda-measured-driver | true |  | native-device-measured |
+| db_document_filter_cuda_measured | cuda | nosql_document_filter_metadata | 0 | 1024 | 0 | 8 | 1 | gpu_db_document_filter_batch | 1 | 0 | 151 | cuda-measured-driver | true |  | native-device-measured |
+| web_inference_cuda_measured | cuda | web_inference_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_inference_batch | 1 | 0 | 198 | cuda-measured-driver | true |  | native-device-measured |
+| web_embedding_cuda_measured | cuda | web_embedding_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_embedding_batch | 1 | 0 | 197 | cuda-measured-driver | true |  | native-device-measured |
+| web_rank_cuda_measured | cuda | web_rank_32x256_response_match | 0 | 32 | 0 | 32 | 1 | gpu_web_rank_batch | 1 | 0 | 196 | cuda-measured-driver | true |  | native-device-measured |
+| web_transform_cuda_measured | cuda | web_transform_8x2048_response_match | 0 | 8 | 0 | 8 | 1 | gpu_web_transform_batch | 1 | 0 | 200 | cuda-measured-driver | true |  | native-device-measured |
 | web_inference_device_validated_contract | cuda | web_inference_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_inference_batch | 1 | 0 | 41 | cuda-event-contract | true |  | production-device-validated-contract |
 | web_embedding_device_validated_contract | cuda | web_embedding_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_embedding_batch | 1 | 0 | 43 | cuda-event-contract | true |  | production-device-validated-contract |
 | web_rank_device_validated_contract | cuda | web_rank_32x256_response_match | 0 | 32 | 0 | 32 | 1 | gpu_web_rank_batch | 1 | 0 | 47 | cuda-event-contract | true |  | production-device-validated-contract |

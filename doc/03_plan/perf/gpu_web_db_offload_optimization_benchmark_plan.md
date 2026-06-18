@@ -213,8 +213,8 @@ Implemented and verified on the current host:
   `STATUS: WARN ... preflight missing:N`.
 - DB baseline rows remain unavailable on this host because the external DB tools
   and/or service connection URLs are not installed/configured. Redis/Valkey is
-  now included in that readiness handoff as `redis_valkey` tool readiness plus
-  `REDIS_URL`, matching the report's Redis/Valkey status-only row.
+  included in that readiness handoff as `redis_valkey` tool readiness plus
+  `REDIS_URL`, matching the report's Redis/Valkey row.
 
 Remaining blockers before this plan can be marked done:
 
@@ -311,7 +311,7 @@ non-mutating parser, producer, and readiness self-tests without rerunning native
 builds, live servers, or heavyweight benchmark specs. The command writes
 durable PASS artifacts under `doc/09_report/perf/` and `doc/10_metrics/perf/`
 with one row per syntax/self-test gate; the current recovery artifacts record
-68 passed host-safe gates. `--self-test-artifacts` verifies that same
+70 passed host-safe gates. `--self-test-artifacts` verifies that same
 artifact-writing path with temporary report and metrics files. The harness also
 validates the fixture environment template, safe-default behavior, setup
 checklist, env-file validation, category summary, missing-by-category output,
@@ -461,15 +461,18 @@ scan batch is admitted to GPU, a join/aggregate batch falls back when the queue
 is full, and a tiny document-filter batch remains on CPU. The standard-shape
 rows preserve the workload matrix and the Simple dispatch target mapping. They
 do not measure ClickHouse, DuckDB, PostgreSQL, BenchBase, Mongo, Redis/Valkey,
-or an ANN fixture yet. The external DB baseline status rows make the
-implemented missing-tool state machine-checkable in the report instead of
-leaving it only in prose. The Redis/Valkey key/value row is currently a
-status contract only: it records `redis-cli`, `valkey-cli`, or
-`redis-benchmark` availability as unavailable or ready-unmeasured, but it does
-not claim Redis throughput or latency parity. When a
-supported DB tool is installed, the same report row changes to
-`external-db-baseline-ready-unmeasured:*` until a measured wrapper fills real
-throughput and latency. The report gate now has a measured-row input contract:
+or an ANN fixture on this host yet. The external DB baseline status rows make
+the implemented missing-tool state machine-checkable in the report instead of
+leaving it only in prose. Redis/Valkey now has the same strict measured-row
+producer/parser contract as the other external DB baselines:
+`db_key_value_redis_valkey_external_measured` with
+`redis_valkey_getset_1024_key_match` and `redis_valkey_key_value_getset`.
+Current local artifacts still do not claim Redis throughput or latency parity
+because `redis-benchmark` and `REDIS_URL` are not configured on this host.
+`redis-cli` and `valkey-cli` readiness is status-only; it does not emit a
+measured Redis/Valkey SET/GET row. When a supported DB tool is installed, the
+status row changes to `external-db-baseline-ready-unmeasured:*` until a
+measured wrapper fills real throughput and latency. The report gate now has a measured-row input contract:
 external DB wrappers may provide
 `GPU_WDB_EXTERNAL_DB_MEASURED=name|dataset|target|time_us` lines through
 `GPU_WDB_EXTERNAL_DB_BASELINE_OUTPUT`, and only known DB baseline names with
@@ -477,8 +480,9 @@ matching datasets, matching targets, and positive timings are accepted.
 `scripts/check/check-gpu-web-db-offload-external-db-baselines.shs` is the local
 producer for those lines; it measures only real external commands that are
 available locally or configured by connection URL and emits nothing otherwise.
-Its `--self-test` mode validates the timing helper and the four strict measured
-line shapes without requiring any external DB installation.
+Its `--self-test` mode validates the timing helper and the five strict measured
+line shapes, including Redis/Valkey key/value, without requiring any external
+DB installation.
 The producer now sources
 `build/perf/gpu_web_db_offload/external-fixtures.env` by default before probing
 URL-backed DB baselines, so values written by

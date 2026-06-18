@@ -89,11 +89,17 @@ if [ "${1:-}" = "--self-test" ]; then
             'benchbase_ycsb_document_filter_1024_doc_match' \
             'mongo_ycsb_document_filter' \
             "$elapsed"
+        printf 'GPU_WDB_EXTERNAL_DB_MEASURED=%s|%s|%s|%s\n' \
+            'db_key_value_redis_valkey_external_measured' \
+            'redis_valkey_getset_1024_key_match' \
+            'redis_valkey_key_value_getset' \
+            "$elapsed"
     )"
     printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_clickbench_clickhouse_external_measured|clickbench_hits_scan_filter_project_1024_row_match|clickhouse_scan_filter_project|[1-9][0-9]*$'
     printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_tpch_duckdb_external_measured|tpch_q3_join_aggregate_group_count_1024_row_match|duckdb_tpch_q3_join_aggregate|[1-9][0-9]*$'
     printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_tpch_postgresql_external_measured|tpch_q3_join_aggregate_group_count_1024_row_match|postgresql_tpch_q3_join_aggregate|[1-9][0-9]*$'
     printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_ycsb_mongo_external_measured|benchbase_ycsb_document_filter_1024_doc_match|mongo_ycsb_document_filter|[1-9][0-9]*$'
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_key_value_redis_valkey_external_measured|redis_valkey_getset_1024_key_match|redis_valkey_key_value_getset|[1-9][0-9]*$'
     echo "STATUS: PASS external DB baseline producer self-test"
     exit 0
 fi
@@ -154,6 +160,33 @@ EOF
     output="$(DB_FIXTURE_ENV_FILE="$env_file" PATH="$tmpdir/bin:$PATH" sh "$0")"
     printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_tpch_postgresql_external_measured|tpch_q3_join_aggregate_group_count_1024_row_match|postgresql_tpch_q3_join_aggregate|[1-9][0-9]*$'
     echo "STATUS: PASS external DB baseline env-file source self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-redis-env-file-source" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    mkdir -p "$tmpdir/bin"
+    cat > "$tmpdir/bin/redis-benchmark" <<'EOF'
+#!/usr/bin/env sh
+test "$1" = "-u"
+test "$2" = "redis://127.0.0.1:6379/0"
+test "$3" = "-t"
+test "$4" = "set,get"
+test "$5" = "-n"
+test "$6" = "1024"
+test "$7" = "-d"
+test "$8" = "1024"
+exit 0
+EOF
+    chmod +x "$tmpdir/bin/redis-benchmark"
+    env_file="$tmpdir/external-fixtures.env"
+    cat > "$env_file" <<'EOF'
+REDIS_URL=redis://127.0.0.1:6379/0
+EOF
+    output="$(DB_FIXTURE_ENV_FILE="$env_file" PATH="$tmpdir/bin:$PATH" sh "$0")"
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_key_value_redis_valkey_external_measured|redis_valkey_getset_1024_key_match|redis_valkey_key_value_getset|[1-9][0-9]*$'
+    echo "STATUS: PASS external DB baseline Redis/Valkey env-file source self-test"
     exit 0
 fi
 
@@ -225,6 +258,16 @@ elif command -v mongo >/dev/null 2>&1 && [ "${MONGO_URL:-}" != "" ]; then
             'db_ycsb_mongo_external_measured' \
             'benchbase_ycsb_document_filter_1024_doc_match' \
             'mongo_ycsb_document_filter' \
+            "$elapsed"
+    fi
+fi
+
+if command -v redis-benchmark >/dev/null 2>&1 && [ "${REDIS_URL:-}" != "" ]; then
+    if elapsed="$(time_command_us redis-benchmark -u "$REDIS_URL" -t set,get -n 1024 -d 1024)"; then
+        emit_measured_row \
+            'db_key_value_redis_valkey_external_measured' \
+            'redis_valkey_getset_1024_key_match' \
+            'redis_valkey_key_value_getset' \
             "$elapsed"
     fi
 fi
