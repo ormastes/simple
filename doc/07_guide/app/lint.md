@@ -57,6 +57,7 @@ Deep analysis using the arena-based AST. Runs during compilation.
 | COLL007 | Collection | HIGH | Array rebuild to pop last — use `.pop()` |
 | COLL008 | Collection | MEDIUM | Unbounded global `.push()` with no reset |
 | DTYP001 | Type Safety | WARNING | Positional args sharing type — use named args |
+| RAW-RT-001 (`raw_rt_access`) | Encapsulation | WARNING | Raw `extern fn rt_*` runtime intrinsic declared outside the privileged tiers (`src/lib`, `src/runtime`, `src/compiler`) — app/library code must use a std wrapper (e.g. `std.io_runtime.file_read`/`file_write`) |
 | STUB001 | Stub Impl | ERROR | Function with params returns trivial value, params unused |
 | STUB002 | Stub Impl | INFO | Zero-param function returns default value (possible stub) |
 | STUB003 | Stub Impl | ERROR | Whole-function explicit placeholder body (`pass_todo`, `pass_do_nothing`, `pass_dn`) in production code |
