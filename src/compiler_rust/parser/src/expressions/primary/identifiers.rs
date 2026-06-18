@@ -75,9 +75,8 @@ impl<'a> Parser<'a> {
             // "unit" to match expect_identifier() in parser_helpers.rs (declaration context),
             // otherwise a parameter/variable named `unit` is stored as "unit" but looked up as
             // "Unit" -> "Unknown variable: Unit". Same class as the Slice/Flat fix (2026-06-12).
-            // TODO: this source fix is INERT until the seed is rebuilt + bootstrapped; until then
-            // the pure-.spl workaround (rename `unit`->`unit_label`) stands. Do NOT --deploy
-            // without the bootstrap smoke gate (see .claude/rules/bootstrap.md).
+            // The bare-`unit`-statement case is disambiguated in core.rs (parse_unit vs
+            // expression) via peek_next lookahead.
             TokenKind::Unit => self.parse_keyword_identifier("unit"),
             TokenKind::Sync => self.parse_keyword_identifier("sync"),
             TokenKind::Async => self.parse_keyword_identifier("async"),

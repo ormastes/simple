@@ -612,7 +612,19 @@ impl<'a> Parser<'a> {
                     self.parse_var() // parse as var
                 }
             }
-            TokenKind::Unit => self.parse_unit(),
+            TokenKind::Unit => {
+                // 'unit Name: ...' is a unit-type declaration (the name is always
+                // an identifier directly after `unit`). A bare `unit` followed by
+                // anything else is an identifier/expression — e.g. a parameter or
+                // variable named `unit` used as an implicit-return statement.
+                // Mirrors the Comptime/From keyword-vs-identifier disambiguation.
+                let next = self.peek_next();
+                if matches!(next.kind, TokenKind::Identifier { .. }) {
+                    self.parse_unit()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
