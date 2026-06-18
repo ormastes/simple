@@ -6,7 +6,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 ## Summary
 
 - Suite steps: `31`
-- Missing fixture items: `22`
+- Missing fixture items: `15`
 - Verdict: `WAITING_ON_FIXTURES`
 
 - Missing data source: `fixture-env-file:build/perf/gpu_web_db_offload/external-fixtures.env`
@@ -92,8 +92,8 @@ It records the ordered external-fixture suite and the current missing fixture ca
 |---|---|
 | core_load_tools |  |
 | web_proxy_tools |  |
-| db_tools | clickhouse,duckdb,psql,pgbench,mongodb |
+| db_tools | duckdb |
 | proxy_fixture_urls | simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url |
 | dynamic_route_urls | dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url |
 | reference_fixture_urls | simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url |
-| db_service_urls | clickhouse_url,postgres_url,mongo_url |
+| db_service_urls |  |

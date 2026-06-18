@@ -5,8 +5,8 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 
 ## Summary
 
-- Ready fixtures: `9`
-- Missing fixtures: `22`
+- Ready fixtures: `16`
+- Missing fixtures: `15`
 - Verdict: `WARN`
 
 ## Category Summary
@@ -15,11 +15,11 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 |---|---:|---:|
 | core_load_tools | 2 | 0 |
 | web_proxy_tools | 4 | 0 |
-| db_tools | 2 | 5 |
+| db_tools | 6 | 1 |
 | proxy_fixture_urls | 0 | 7 |
 | dynamic_route_urls | 0 | 4 |
 | reference_fixture_urls | 0 | 3 |
-| db_service_urls | 1 | 3 |
+| db_service_urls | 4 | 0 |
 
 ## Bootstrap Status
 
@@ -29,7 +29,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 22 |
+| bootstrap_missing_fixture_items | info | 15 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -43,11 +43,11 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | h2o | ready | h2o-ready:docker-container:gpu-web-db-h2o-static:h2o |
 | haproxy | ready | haproxy-ready:docker-container:gpu-web-db-haproxy-cached-proxy:haproxy |
 | envoy | ready | envoy-ready:docker-container:gpu-web-db-envoy-cached-proxy:envoy |
-| clickhouse | missing | clickhouse-not-installed |
+| clickhouse | ready | clickhouse-ready:docker-container:gpu-web-db-clickhouse-olap:clickhouse |
 | duckdb | missing | duckdb-not-installed |
-| psql | missing | psql-not-installed |
-| pgbench | missing | pgbench-not-installed |
-| mongodb | missing | mongodb-not-installed |
+| psql | ready | psql-ready:docker-container:gpu-web-db-postgres-tpch:psql |
+| pgbench | ready | pgbench-ready:docker-container:gpu-web-db-postgres-tpch:pgbench |
+| mongodb | ready | mongodb-ready:docker-container:gpu-web-db-mongo-ycsb:mongosh |
 | redis_valkey | ready | redis-valkey-ready:docker-container:gpu-web-db-redis-valkey-kv:redis-cli |
 | redis_benchmark | ready | redis-benchmark-ready:docker-container:gpu-web-db-redis-valkey-kv:redis-benchmark |
 | simple_cached_proxy_url | missing | SIMPLE_CACHED_PROXY_URL-not-configured |
@@ -64,9 +64,9 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | simple_reference_plaintext_url | missing | SIMPLE_REFERENCE_PLAINTEXT_URL-not-configured |
 | uwebsockets_plaintext_url | missing | UWEBSOCKETS_PLAINTEXT_URL-not-configured |
 | seastar_plaintext_url | missing | SEASTAR_PLAINTEXT_URL-not-configured |
-| clickhouse_url | missing | CLICKHOUSE_URL-not-configured |
-| postgres_url | missing | POSTGRES_URL-not-configured |
-| mongo_url | missing | MONGO_URL-not-configured |
+| clickhouse_url | ready | CLICKHOUSE_URL-configured |
+| postgres_url | ready | POSTGRES_URL-configured |
+| mongo_url | ready | MONGO_URL-configured |
 | redis_url | ready | REDIS_URL-configured |
 
 ## Fixture Environment Template
@@ -96,8 +96,11 @@ Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --pri
 # SIMPLE_TUNNEL_PROXY_URL=http://127.0.0.1:8090/tunnel
 # HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel
 # CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+# CLICKHOUSE_CONTAINER=gpu-web-db-clickhouse-olap
 # POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+# POSTGRES_CONTAINER=gpu-web-db-postgres-tpch
 # MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+# MONGO_CONTAINER=gpu-web-db-mongo-ycsb
 # REDIS_URL=redis://127.0.0.1:6379/0
 # REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv
 # Optional standard-shape query overrides. Leave empty to use producer defaults.
@@ -125,8 +128,11 @@ SIMPLE_REFERENCE_PLAINTEXT_URL=
 UWEBSOCKETS_PLAINTEXT_URL=
 SEASTAR_PLAINTEXT_URL=
 CLICKHOUSE_URL=
+CLICKHOUSE_CONTAINER=
 POSTGRES_URL=
+POSTGRES_CONTAINER=
 MONGO_URL=
+MONGO_CONTAINER=
 REDIS_URL=
 REDIS_BENCHMARK_CONTAINER=
 CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=

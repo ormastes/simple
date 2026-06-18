@@ -8,7 +8,7 @@
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 22 |
+| bootstrap_missing_fixture_items | info | 15 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -22,11 +22,11 @@
 | h2o | ready | h2o-ready:docker-container:gpu-web-db-h2o-static:h2o |
 | haproxy | ready | haproxy-ready:docker-container:gpu-web-db-haproxy-cached-proxy:haproxy |
 | envoy | ready | envoy-ready:docker-container:gpu-web-db-envoy-cached-proxy:envoy |
-| clickhouse | missing | clickhouse-not-installed |
+| clickhouse | ready | clickhouse-ready:docker-container:gpu-web-db-clickhouse-olap:clickhouse |
 | duckdb | missing | duckdb-not-installed |
-| psql | missing | psql-not-installed |
-| pgbench | missing | pgbench-not-installed |
-| mongodb | missing | mongodb-not-installed |
+| psql | ready | psql-ready:docker-container:gpu-web-db-postgres-tpch:psql |
+| pgbench | ready | pgbench-ready:docker-container:gpu-web-db-postgres-tpch:pgbench |
+| mongodb | ready | mongodb-ready:docker-container:gpu-web-db-mongo-ycsb:mongosh |
 | redis_valkey | ready | redis-valkey-ready:docker-container:gpu-web-db-redis-valkey-kv:redis-cli |
 | redis_benchmark | ready | redis-benchmark-ready:docker-container:gpu-web-db-redis-valkey-kv:redis-benchmark |
 | simple_cached_proxy_url | missing | SIMPLE_CACHED_PROXY_URL-not-configured |
@@ -43,7 +43,7 @@
 | simple_reference_plaintext_url | missing | SIMPLE_REFERENCE_PLAINTEXT_URL-not-configured |
 | uwebsockets_plaintext_url | missing | UWEBSOCKETS_PLAINTEXT_URL-not-configured |
 | seastar_plaintext_url | missing | SEASTAR_PLAINTEXT_URL-not-configured |
-| clickhouse_url | missing | CLICKHOUSE_URL-not-configured |
-| postgres_url | missing | POSTGRES_URL-not-configured |
-| mongo_url | missing | MONGO_URL-not-configured |
+| clickhouse_url | ready | CLICKHOUSE_URL-configured |
+| postgres_url | ready | POSTGRES_URL-configured |
+| mongo_url | ready | MONGO_URL-configured |
 | redis_url | ready | REDIS_URL-configured |

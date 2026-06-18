@@ -196,9 +196,9 @@ Implemented and verified on the current host:
   `--write-policy-json` persists
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
-  On this host after starting the generated Redis, Caddy, H2O, HAProxy, and
-  Envoy Docker fixtures, the split is 19 required missing fixtures and 3 optional
-  reference fixture URLs.
+  On this host after starting the generated Redis, Caddy, H2O, HAProxy, Envoy,
+  ClickHouse, PostgreSQL, and MongoDB Docker fixtures, the split is 12 required
+  missing fixtures and 3 optional reference fixture URLs.
 - The suite now also writes required-only handoff artifacts for resumed
   sessions that need to separate release-blocking fixture work from optional
   reference baselines:
@@ -224,14 +224,12 @@ Implemented and verified on the current host:
   before a full external-suite run. It refreshes readiness, prints the same
   status/category rows, and emits `STATUS: PASS ... preflight ready` or
   `STATUS: WARN ... preflight missing:N`.
-- Most DB baseline rows remain unavailable on this host because the external DB
-  tools and/or service connection URLs are not installed/configured. Redis/Valkey
-  now has a live Docker-backed measured SET/GET row when
-  `REDIS_URL=redis://127.0.0.1:6379/0` and
-  `REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv` are set in the fixture
-  env file. The readiness handoff treats that container as both Redis/Valkey CLI
-  readiness and `redis_benchmark` readiness without treating a CLI ping alone as
-  throughput evidence.
+- ClickHouse, PostgreSQL, MongoDB/YCSB, and Redis/Valkey now have
+  Docker-backed measured external DB rows on this host. The producer uses
+  `CLICKHOUSE_CONTAINER`, `POSTGRES_CONTAINER`, `MONGO_CONTAINER`,
+  `REDIS_BENCHMARK_CONTAINER`, and the matching service URLs in
+  `build/perf/gpu_web_db_offload/external-fixtures.env`. DuckDB remains the
+  only missing required DB tool in the current fixture readiness status.
 
 Remaining blockers before this plan can be marked done:
 
@@ -248,19 +246,17 @@ Remaining blockers before this plan can be marked done:
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_URL` when available.
-- Install/configure ClickHouse, DuckDB, PostgreSQL/pgbench, and MongoDB shell
-baselines, or provide their connection URLs where
-  required.
+- Install/configure DuckDB or provide an equivalent DuckDB-capable fixture for
+  the remaining TPC-H-style local DB baseline row.
 
 The current blocker list is machine-checkable with
 `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`. On the
 current host it reports `wrk`, `nginx`, Docker-backed Caddy, Docker-backed H2O,
-Docker-backed HAProxy, Docker-backed Envoy, and Docker-backed Redis/Valkey
-ready, then `STATUS: WARN` with the missing ClickHouse, DuckDB, `psql`,
-`pgbench`, MongoDB shell, live cached-proxy, upload-proxy, tunnel-proxy,
-dynamic-route, optional Seastar/uWebSockets
-reference URLs, and non-Redis DB connection URL
-requirements. The
+Docker-backed HAProxy, Docker-backed Envoy, Docker-backed ClickHouse,
+Docker-backed PostgreSQL/pgbench, Docker-backed MongoDB shell, and
+Docker-backed Redis/Valkey ready, then `STATUS: WARN` with missing DuckDB,
+live cached-proxy, upload-proxy, tunnel-proxy, dynamic-route, and optional
+Seastar/uWebSockets reference URL requirements. The
 same run writes durable readiness artifacts under `doc/09_report/perf/` and
 `doc/10_metrics/perf/`; `--self-test-artifacts` verifies that artifact writing
 path using temporary output files. `--print-env-template` prints the exact
@@ -482,30 +478,24 @@ the next DB lane:
 | TPC-H-style join/aggregate | `db_tpch_join_aggregate_shape_contract` | `gpu_db_join_aggregate_batch` | standard baseline unavailable |
 | BenchBase/YCSB document filter | `db_benchbase_ycsb_document_shape_contract` | `gpu_db_document_filter_batch` | standard baseline unavailable |
 | ANN vector search | `db_ann_vector_search_shape_contract` | `gpu_db_vector_search_batch` | standard baseline unavailable |
-| ClickHouse ClickBench baseline | `db_clickbench_clickhouse_external_baseline_status` | `clickhouse_scan_filter_project` | unavailable or ready-unmeasured |
+| ClickHouse ClickBench baseline | `db_clickbench_clickhouse_external_baseline_status` | `clickhouse_scan_filter_project` | measured on this host |
 | DuckDB TPC-H baseline | `db_tpch_duckdb_external_baseline_status` | `duckdb_tpch_q3_join_aggregate` | unavailable or ready-unmeasured |
-| PostgreSQL TPC-H baseline | `db_tpch_postgresql_external_baseline_status` | `postgresql_tpch_q3_join_aggregate` | unavailable or ready-unmeasured |
-| MongoDB/YCSB baseline | `db_ycsb_mongo_external_baseline_status` | `mongo_ycsb_document_filter` | unavailable or ready-unmeasured |
+| PostgreSQL TPC-H baseline | `db_tpch_postgresql_external_baseline_status` | `postgresql_tpch_q3_join_aggregate` | measured on this host |
+| MongoDB/YCSB baseline | `db_ycsb_mongo_external_baseline_status` | `mongo_ycsb_document_filter` | measured on this host |
 | ANN/vector baseline | `db_ann_vector_external_baseline_status` | `ann_vector_topk_recall` | unavailable until fixture/tool is configured |
 
 The admission row proves the DB queue decision surface before dispatch: a coarse
 scan batch is admitted to GPU, a join/aggregate batch falls back when the queue
 is full, and a tiny document-filter batch remains on CPU. The standard-shape
 rows preserve the workload matrix and the Simple dispatch target mapping. They
-do not measure ClickHouse, DuckDB, PostgreSQL, BenchBase, Mongo, Redis/Valkey,
-or an ANN fixture on this host yet. The external DB baseline status rows make
-the implemented missing-tool state machine-checkable in the report instead of
-leaving it only in prose. Redis/Valkey now has the same strict measured-row
-producer/parser contract as the other external DB baselines:
-`db_key_value_redis_valkey_external_measured` with
-`redis_valkey_getset_1024_key_match` and `redis_valkey_key_value_getset`.
-Current local artifacts still do not claim Redis throughput or latency parity
-unless either host `redis-benchmark` or a running generated Docker fixture named
-by `REDIS_BENCHMARK_CONTAINER` is available alongside `REDIS_URL`. `redis-cli`
-and `valkey-cli` readiness is status-only; it does not emit a measured
-Redis/Valkey SET/GET row. When a supported DB tool is installed, the status row
-changes to `external-db-baseline-ready-unmeasured:*` until a measured wrapper
-fills real throughput and latency. The report gate now has a measured-row input contract:
+do not measure DuckDB or an ANN fixture on this host yet. The external DB
+baseline status rows make the implemented missing-tool state machine-checkable
+in the report instead of leaving it only in prose. ClickHouse, PostgreSQL,
+MongoDB/YCSB, and Redis/Valkey now use the strict measured-row producer/parser
+contract. Their status rows move to
+`external-db-baseline-ready-measured:*` only when a measured wrapper fills real
+latency values; CLI/container readiness alone is not treated as throughput
+evidence. The report gate now has a measured-row input contract:
 external DB wrappers may provide
 `GPU_WDB_EXTERNAL_DB_MEASURED=name|dataset|target|time_us` lines through
 `GPU_WDB_EXTERNAL_DB_BASELINE_OUTPUT`, and only known DB baseline names with
@@ -681,12 +671,11 @@ No benchmark row may claim GPU acceleration unless all are true:
    The DB external-baseline status slice is materialized in
    `test/05_perf/web_db_offload/gpu_web_db_offload_bench_spec.spl` and
    `scripts/check/check-gpu-web-db-offload-benchmark-report.shs`: ClickHouse,
-   DuckDB, PostgreSQL, MongoDB/YCSB, Redis/Valkey, and ANN/vector baselines now have explicit
-   `external-db-baseline` rows with unavailable-tool reasons on this host and
-   ready-unmeasured reasons when matching tools are installed. They still make
-   no speedup claim until a measured wrapper fills real values through the
-   strict `GPU_WDB_EXTERNAL_DB_BASELINE_OUTPUT` contract. The first producer
-   wrapper for that contract is
+   DuckDB, PostgreSQL, MongoDB/YCSB, Redis/Valkey, and ANN/vector baselines now
+   have explicit `external-db-baseline` rows with unavailable, ready-unmeasured,
+   or ready-measured reasons. They still make no speedup claim; measured rows
+   only record external baseline latency through the strict
+   `GPU_WDB_EXTERNAL_DB_BASELINE_OUTPUT` contract. The producer wrapper for that contract is
    `scripts/check/check-gpu-web-db-offload-external-db-baselines.shs`, which the
    GPU Web/DB benchmark report gate now runs automatically. The same report
    gate exposes `--self-test-external-db-measured-parser` so the strict parser
