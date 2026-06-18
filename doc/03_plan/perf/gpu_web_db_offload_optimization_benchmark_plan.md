@@ -76,7 +76,7 @@ Implemented and verified on the current host:
   `scripts/check/check-web-server-static-external-live-compare.shs`. On hosts
   without Caddy/H2O it exits cleanly with
   `STATUS: WARN tool-unavailable:caddy,h2o`; on hosts with Caddy/H2O or Docker
-  for the generated Caddy fixture, it emits strict
+  for the generated Caddy/H2O fixtures, it emits strict
   `WEB_SERVER_EXTERNAL_COMPARE_MEASURED=...` rows to
   `build/perf/web_server_nginx_compare/static-external-measured-rows.env`.
 - HAProxy/Envoy cached reverse-proxy comparison now has a URL-driven producer at
@@ -94,8 +94,9 @@ Implemented and verified on the current host:
   `build/perf/gpu_web_db_offload/external-fixtures.env` by default and also
   emits dynamic CPU/GPU route rows when the plaintext or JSON URL pairs are
   configured.
-- The base web comparison report records explicit unavailable rows for missing
-  Caddy, H2O, HAProxy, and Envoy baselines.
+- The base web comparison report now records measured Docker-backed Caddy and
+  H2O static rows on this host, and explicit unavailable rows for missing
+  HAProxy and Envoy baselines.
 - The live NGINX wrapper, dynamic route wrapper, and base web report share the
   strict `WEB_SERVER_EXTERNAL_COMPARE_MEASURED=...` producer/consumer contract.
   Normal web report regeneration auto-consumes producer files under
@@ -195,8 +196,8 @@ Implemented and verified on the current host:
   `--write-policy-json` persists
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
-  On this host after starting the generated Redis and Caddy Docker fixtures, the split is
-  22 required missing fixtures and 3 optional
+  On this host after starting the generated Redis, Caddy, and H2O Docker fixtures, the split is
+  21 required missing fixtures and 3 optional
   reference fixture URLs.
 - The suite now also writes required-only handoff artifacts for resumed
   sessions that need to separate release-blocking fixture work from optional
@@ -234,7 +235,6 @@ Implemented and verified on the current host:
 
 Remaining blockers before this plan can be marked done:
 
-- Install/configure H2O for the remaining additional static-server baseline.
 - Install/configure HAProxy and Envoy plus matching live proxy fixtures for
   cached proxy, upload streaming, and upgrade tunnel rows.
 - Start live CPU and GPU dynamic route servers and set
@@ -249,8 +249,8 @@ baselines, or provide their connection URLs where
 
 The current blocker list is machine-checkable with
 `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`. On the
-current host it reports `wrk`, `nginx`, Docker-backed Caddy, and Docker-backed
-Redis/Valkey ready, then `STATUS: WARN` with the missing H2O, HAProxy, Envoy,
+current host it reports `wrk`, `nginx`, Docker-backed Caddy, Docker-backed H2O,
+and Docker-backed Redis/Valkey ready, then `STATUS: WARN` with the missing HAProxy, Envoy,
 ClickHouse, DuckDB, `psql`, `pgbench`, MongoDB shell, live cached-proxy,
 upload-proxy, tunnel-proxy, dynamic-route, optional Seastar/uWebSockets
 reference URLs, and non-Redis DB connection URL
@@ -346,7 +346,7 @@ hints, env-fields TSV, blocker manifest TSV, runbook, next-actions handoff,
 missing-by-category files, and external-suite status under
 `build/perf/gpu_web_db_offload/`.
 
-Local benchmark tool availability on 2026-06-17:
+Local benchmark fixture availability on 2026-06-18:
 
 | Tool | Status |
 |---|---|
@@ -354,8 +354,8 @@ Local benchmark tool availability on 2026-06-17:
 | `wrk` | available at `/usr/bin/wrk` |
 | `haproxy` | missing |
 | `envoy` | missing |
-| `caddy` | missing |
-| `h2o` | missing |
+| `caddy` | Docker-backed fixture ready: `gpu-web-db-caddy-static` |
+| `h2o` | Docker-backed fixture ready: `gpu-web-db-h2o-static` |
 
 The first local external-comparison gate produces Simple-vs-NGINX static rows
 with `wrk` readiness and explicit unavailable-baseline/load-tool statuses. The
@@ -368,10 +368,19 @@ local NGINX baseline:
 | `static_1mb` | 736.16 | 762.85 | 0.965 | 1.770 ms | 1.850 ms | 0 |
 
 These measurements are evidence, not a speedup claim: Simple is below NGINX for
-1 KiB and near parity for 1 MiB on this host. Missing server baselines now have
-explicit unavailable rows in the same report: Caddy/H2O static baselines,
-HAProxy/Envoy cached reverse-proxy baselines, and HAProxy upload/upgrade
-baselines. When those tools are installed, their rows should move from
+1 KiB and near parity for 1 MiB on this host. Docker-backed Caddy and H2O rows
+are now also measured through the static external wrapper:
+
+| Workload | Baseline | Simple RPS | External RPS | RPS ratio | Simple p99 | External p99 | Failures |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `static_1kb` | Caddy | 2351.70 | 3776.07 | 0.623 | 0.499 ms | 0.409 ms | 0 |
+| `static_1mb` | Caddy | 267.30 | 1359.38 | 0.197 | 4.800 ms | 0.930 ms | 0 |
+| `static_1kb` | H2O | 2281.64 | 9389.05 | 0.243 | 0.523 ms | 0.123 ms | 0 |
+| `static_1mb` | H2O | 261.93 | 1201.20 | 0.218 | 4.780 ms | 1.160 ms | 0 |
+
+Missing server baselines still have explicit unavailable rows in the same
+report: HAProxy/Envoy cached reverse-proxy baselines, and HAProxy
+upload/upgrade baselines. When those tools are installed, their rows should move from
 `external-baseline-unavailable` to `ready_unmeasured` or measured rows rather
 than being added as a separate ad hoc table. The base report script now exposes
 `--self-test-tool-row-classification` to verify those status transitions without

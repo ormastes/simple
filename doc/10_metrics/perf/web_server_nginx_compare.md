@@ -9,11 +9,11 @@
 | workload | simple_target | external_baseline | load_tool | status | simple_rps | external_rps | rps_ratio | simple_p99_ms | external_p99_ms | throughput_mbps | failures | reason |
 |---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|
 | static_1kb | native_simple_static_1024 | nginx_static_1024 | wrk | measured | 2551.83 | 15460.12 | 0.165 | 0.449 | 0.090 | 126.649 | 0 | live-simple-nginx-wrk |
-| static_1kb | native_simple_static_1024 | caddy_static_1024 | wrk | measured | 2641.07 | 3533.34 | 0.747 | 0.444 | 0.372 | 28.945 | 0 | live-simple-caddy-wrk |
-| static_1kb | native_simple_static_1024 | h2o_static_1024 | wrk | external-baseline-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | h2o-not-installed |
+| static_1kb | native_simple_static_1024 | caddy_static_1024 | wrk | measured | 2351.70 | 3776.07 | 0.623 | 0.499 | 0.409 | 30.934 | 0 | live-simple-caddy-wrk |
+| static_1kb | native_simple_static_1024 | h2o_static_1024 | wrk | measured | 2281.64 | 9389.05 | 0.243 | 0.523 | 0.123 | 76.915 | 0 | live-simple-h2o-wrk |
 | static_1mb | native_simple_static_1048576 | nginx_static_1048576 | wrk | measured | 835.83 | 1380.71 | 0.605 | 1.600 | 1.170 | 11582.235 | 0 | live-simple-nginx-wrk |
-| static_1mb | native_simple_static_1048576 | caddy_static_1048576 | wrk | measured | 863.73 | 1338.52 | 0.645 | 1.360 | 1.110 | 11228.320 | 0 | live-simple-caddy-wrk |
-| static_1mb | native_simple_static_1048576 | h2o_static_1048576 | wrk | external-baseline-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | h2o-not-installed |
+| static_1mb | native_simple_static_1048576 | caddy_static_1048576 | wrk | measured | 267.30 | 1359.38 | 0.197 | 4.800 | 0.930 | 11403.306 | 0 | live-simple-caddy-wrk |
+| static_1mb | native_simple_static_1048576 | h2o_static_1048576 | wrk | measured | 261.93 | 1201.20 | 0.218 | 4.780 | 1.160 | 10076.396 | 0 | live-simple-h2o-wrk |
 | cached_reverse_proxy | native_simple_cached_proxy | haproxy_cached_reverse_proxy | wrk | external-baseline-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | haproxy-not-installed |
 | cached_reverse_proxy | native_simple_cached_proxy | envoy_cached_reverse_proxy | wrk | external-baseline-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | envoy-not-installed |
 | upload_streaming_proxy | native_simple_upload_proxy | haproxy_upload_streaming_proxy | wrk | external-baseline-unavailable | 0 | 0 | 0 | 0 | 0 | 0 | 0 | haproxy-not-installed |

@@ -13,6 +13,8 @@ WRK_DURATION="${WRK_DURATION:-1s}"
 WRK_THREADS="${WRK_THREADS:-1}"
 WRK_CONNECTIONS="${WRK_CONNECTIONS:-1}"
 CADDY_DOCKER_CONTAINER="${CADDY_DOCKER_CONTAINER:-gpu-web-db-caddy-static}"
+H2O_DOCKER_CONTAINER="${H2O_DOCKER_CONTAINER:-gpu-web-db-h2o-static}"
+H2O_DOCKER_IMAGE="${H2O_DOCKER_IMAGE:-lkwg82/h2o-http2-server:latest}"
 
 SIMPLE_BIN="${SIMPLE_BIN:-}"
 if [ -z "$SIMPLE_BIN" ]; then
@@ -122,6 +124,16 @@ if [ "${1:-}" = "--self-test-static-external-docker-caddy-command" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--self-test-static-external-docker-h2o-command" ]; then
+    cmd="docker run -d --rm --name $H2O_DOCKER_CONTAINER -p $H2O_PORT:80 -v /tmp/static:/srv:ro -v /tmp/h2o.conf:/etc/h2o/h2o.conf:ro $H2O_DOCKER_IMAGE h2o -c /etc/h2o/h2o.conf"
+    printf '%s\n' "$cmd" | grep -q "docker run -d --rm --name $H2O_DOCKER_CONTAINER"
+    printf '%s\n' "$cmd" | grep -q -- "-p $H2O_PORT:80"
+    printf '%s\n' "$cmd" | grep -q -- "-v /tmp/h2o.conf:/etc/h2o/h2o.conf:ro"
+    printf '%s\n' "$cmd" | grep -q "$H2O_DOCKER_IMAGE h2o -c /etc/h2o/h2o.conf"
+    echo "STATUS: PASS static external Docker H2O command self-test"
+    exit 0
+fi
+
 if ! command -v wrk >/dev/null 2>&1; then
     echo "STATUS: WARN tool-unavailable:wrk"
     exit 0
@@ -129,6 +141,7 @@ fi
 
 AVAILABLE=""
 CADDY_RUNTIME=""
+H2O_RUNTIME=""
 if command -v caddy >/dev/null 2>&1; then
     AVAILABLE="$AVAILABLE caddy"
     CADDY_RUNTIME="host"
@@ -138,6 +151,10 @@ elif command -v docker >/dev/null 2>&1; then
 fi
 if command -v h2o >/dev/null 2>&1; then
     AVAILABLE="$AVAILABLE h2o"
+    H2O_RUNTIME="host"
+elif command -v docker >/dev/null 2>&1; then
+    AVAILABLE="$AVAILABLE h2o"
+    H2O_RUNTIME="docker"
 fi
 if [ "$AVAILABLE" = "" ]; then
     echo "STATUS: WARN tool-unavailable:caddy,h2o"
@@ -154,6 +171,7 @@ root.mkdir(parents=True, exist_ok=True)
 PY
 
 SIMPLE_LIB=src:test/05_perf "$SIMPLE_BIN" native-build \
+    --runtime-bundle core-c-bootstrap \
     --source src/lib \
     --source test/05_perf/web_server_nginx_compare \
     --entry test/05_perf/web_server_nginx_compare/live_static_native_server.spl \
@@ -165,6 +183,7 @@ SIMPLE_PID=""
 CADDY_PID=""
 CADDY_CONTAINER_STARTED=""
 H2O_PID=""
+H2O_CONTAINER_STARTED=""
 cleanup() {
     for pid in "$SIMPLE_PID" "$CADDY_PID" "$H2O_PID"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -174,6 +193,9 @@ cleanup() {
     done
     if [ -n "$CADDY_CONTAINER_STARTED" ]; then
         docker rm -f "$CADDY_CONTAINER_STARTED" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$H2O_CONTAINER_STARTED" ]; then
+        docker rm -f "$H2O_CONTAINER_STARTED" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT INT TERM
@@ -210,9 +232,19 @@ run_wrk() {
     echo "$out"
 }
 
-"$SIMPLE_SERVER" >"$LOG_DIR/simple-static-external.log" 2>&1 &
-SIMPLE_PID="$!"
-wait_http "http://127.0.0.1:$SIMPLE_PORT/1kb.html"
+start_simple_server() {
+    "$SIMPLE_SERVER" >"$LOG_DIR/simple-static-external.log" 2>&1 &
+    SIMPLE_PID="$!"
+    wait_http "http://127.0.0.1:$SIMPLE_PORT/1kb.html"
+}
+
+stop_simple_server() {
+    if [ -n "$SIMPLE_PID" ] && kill -0 "$SIMPLE_PID" 2>/dev/null; then
+        kill "$SIMPLE_PID" 2>/dev/null || true
+        wait "$SIMPLE_PID" 2>/dev/null || true
+    fi
+    SIMPLE_PID=""
+}
 
 if printf '%s\n' "$AVAILABLE" | grep -q 'caddy'; then
     if [ "$CADDY_RUNTIME" = "docker" ]; then
@@ -234,18 +266,30 @@ if printf '%s\n' "$AVAILABLE" | grep -q 'h2o'; then
     H2O_CONF="$BUILD_DIR/h2o.conf"
     cat > "$H2O_CONF" <<EOF
 listen:
-  host: 127.0.0.1
-  port: $H2O_PORT
+  host: 0.0.0.0
+  port: 80
 hosts:
   default:
     paths:
       /:
-        file.dir: $PWD/$DATA_ROOT
+        file.dir: /srv
 access-log: /dev/null
-error-log: $PWD/$LOG_DIR/h2o-error.log
+error-log: /dev/stderr
 EOF
-    h2o -c "$H2O_CONF" >"$LOG_DIR/h2o.log" 2>&1 &
-    H2O_PID="$!"
+    if [ "$H2O_RUNTIME" = "docker" ]; then
+        docker rm -f "$H2O_DOCKER_CONTAINER" >/dev/null 2>&1 || true
+        docker run -d --rm \
+            --name "$H2O_DOCKER_CONTAINER" \
+            -p "$H2O_PORT:80" \
+            -v "$PWD/$DATA_ROOT:/srv:ro" \
+            -v "$PWD/$H2O_CONF:/etc/h2o/h2o.conf:ro" \
+            "$H2O_DOCKER_IMAGE" h2o -c /etc/h2o/h2o.conf >"$LOG_DIR/h2o-docker.cid"
+        H2O_CONTAINER_STARTED="$H2O_DOCKER_CONTAINER"
+    else
+        sed "s/host: 0.0.0.0/host: 127.0.0.1/; s/port: 80/port: $H2O_PORT/; s#file.dir: /srv#file.dir: $PWD/$DATA_ROOT#; s#error-log: /dev/stderr#error-log: $PWD/$LOG_DIR/h2o-error.log#" "$H2O_CONF" > "$BUILD_DIR/h2o-host.conf"
+        h2o -c "$BUILD_DIR/h2o-host.conf" >"$LOG_DIR/h2o.log" 2>&1 &
+        H2O_PID="$!"
+    fi
     wait_http "http://127.0.0.1:$H2O_PORT/1kb.html"
 fi
 
@@ -258,6 +302,7 @@ for baseline_tool in $AVAILABLE; do
         h2o) baseline_port="$H2O_PORT" ;;
         *) continue ;;
     esac
+    start_simple_server
     for entry in "static_1kb 1024 1kb.html" "static_1mb 1048576 1mb.txt"; do
         set -- $entry
         workload="$1"
@@ -287,6 +332,7 @@ print(",".join([
 ]))
 PY
     done
+    stop_simple_server
 done
 
 export TMP_ROWS PRODUCER_ROWS
