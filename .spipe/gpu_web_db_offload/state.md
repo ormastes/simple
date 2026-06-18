@@ -175,7 +175,11 @@ implementation-in-progress-recovered
   `--write-local-required-env` mode writes only that isolated env file for
   resumed handoff checks without starting fixtures or measured producers,
   `--status` and `--status-json` print local-required readiness with that env
-  selected, and `--dry-run` prints the ordered local-required evidence sequence.
+  selected, `--require-required-ready` fails fast on missing required local
+  fixtures without running measured producers, and `--dry-run` prints the
+  ordered local-required evidence sequence. This remains narrower than the
+  strict fastest-server comparator suite because Simple/uWebSockets/Seastar
+  reference endpoints stay blank in the local-required env.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

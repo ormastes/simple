@@ -257,8 +257,9 @@ Implemented and verified on the current host:
   `scripts/check/check-gpu-web-db-offload-local-required-suite.shs --write-local-required-env`
   to write only the isolated env file without starting fixtures or running
   producers. Use `--status` or `--status-json` to print the selected
-  local-required readiness status without running producers, and `--dry-run`
-  to print the ordered local-required evidence sequence.
+  local-required readiness status without running producers, use
+  `--require-required-ready` as the side-effect-light required-readiness gate,
+  and use `--dry-run` to print the ordered local-required evidence sequence.
 - Use `scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status`
   after installing tools or exporting fixture URLs; it refreshes
   `build/perf/gpu_web_db_offload/external-fixture-missing-by-category.env`
@@ -299,8 +300,10 @@ Remaining blockers before this plan can be marked done:
   instead of mutating the default empty env template, and it blanks optional
   Simple/uWebSockets/Seastar reference fields. Use `--write-local-required-env`
   for a side-effect-light env handoff refresh, `--status`/`--status-json` to
-  inspect readiness with the local-required env selected, and `--dry-run` to
-  inspect the exact local-required producer/report order.
+  inspect readiness with the local-required env selected,
+  `--require-required-ready` to fail fast when required local fixtures are not
+  ready without running measured producers, and `--dry-run` to inspect the exact
+  local-required producer/report order.
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_PROVENANCE`,
@@ -632,7 +635,11 @@ claim requires production-shape comparator endpoints, identical payloads and
 connection profiles, p50/p95/p99/error evidence, CPU/RSS accounting, and a
 strict `--require-ready` suite run with the real comparator URLs filled. The
 repo-local required suite proves required proxy/dynamic/DB fixture wiring; it
-does not replace real uWebSockets or Seastar reference services.
+does not replace real uWebSockets or Seastar reference services. The
+local-required `--require-required-ready` gate is intentionally narrower than
+strict `--require-ready`: it proves required fixture readiness only, while
+strict fastest-server evidence still requires the optional reference endpoints
+and provenance to be populated.
 
 ## Benchmark Matrix
 
