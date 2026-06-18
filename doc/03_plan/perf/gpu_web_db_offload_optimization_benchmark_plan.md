@@ -32,7 +32,9 @@ overclaiming GPU acceleration.
 Local green evidence already recorded:
 
 - `sh scripts/check/check-proxy-live-httpserver-reliable-suite.shs`
-- `sh scripts/check/check-proxy-live-socket-benchmark.shs`
+- `sh scripts/check/check-proxy-live-socket-benchmark.shs` (historical; current
+  rerun on 2026-06-18 fails before the native backend ready marker, tracked in
+  `doc/08_tracking/bug/proxy_native_tcp_fixture_no_ready_2026-06-18.md`)
 - `sh scripts/check/check-gpu-web-db-offload-native-device-probe.shs`
 - `sh scripts/check/check-gpu-web-db-offload-benchmark-report.shs`
 - `sh scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`
@@ -243,7 +245,10 @@ Remaining blockers before this plan can be marked done:
   `SIMPLE_CACHED_PROXY_URL`, `HAPROXY_CACHED_PROXY_URL`,
   `ENVOY_CACHED_PROXY_URL`, `SIMPLE_UPLOAD_PROXY_URL`,
   `HAPROXY_UPLOAD_PROXY_URL`, `SIMPLE_TUNNEL_PROXY_URL`, and
-  `HAPROXY_TUNNEL_PROXY_URL`.
+  `HAPROXY_TUNNEL_PROXY_URL`. The immediate cached-proxy sub-blocker is that
+  the current native Simple TCP proxy fixture does not reach its backend ready
+  marker under `sh scripts/check/check-proxy-live-socket-benchmark.shs`; see
+  `doc/08_tracking/bug/proxy_native_tcp_fixture_no_ready_2026-06-18.md`.
 - Start live CPU and GPU dynamic route servers and set
   `DYNAMIC_GPU_PLAINTEXT_URL`, `DYNAMIC_CPU_PLAINTEXT_URL`,
   `DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL`.
