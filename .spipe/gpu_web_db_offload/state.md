@@ -214,7 +214,9 @@ implementation-in-progress-recovered
   `build/perf/gpu_web_db_offload/reference-comparator-env-check.md`.
   `--write-validated-env-fragment` fails closed on that validation and only
   writes `build/perf/gpu_web_db_offload/reference-comparator-validated-external.env`
-  after the reference URLs and provenance are ready.
+  after the reference URLs and provenance are ready. `--apply-validated-env-fragment`
+  then appends the managed validated block to the strict
+  `build/perf/gpu_web_db_offload/external-fixtures.env` target.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

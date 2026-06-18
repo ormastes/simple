@@ -61,7 +61,8 @@ After that report is `READY`,
 `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --write-validated-env-fragment`
 emits
 `build/perf/gpu_web_db_offload/reference-comparator-validated-external.env`
-for guarded transfer into the strict external fixture env.
+and `--apply-validated-env-fragment` appends a managed validated block into the
+strict external fixture env.
 
 ## Why This Matters
 
@@ -107,7 +108,7 @@ STATUS: PASS gpu web/db external suite require-ready
 ```text
 STATUS: PASS gpu web/db fastest comparator evidence require-ready
 ```
-- a reference-comparator env validation pass before copying values into the
+- a reference-comparator env validation pass before applying values into the
   strict fixture env:
 
 ```text

@@ -211,8 +211,10 @@ Implemented and verified on the current host:
 - `--write-validated-env-fragment` fails closed on the same validation and only
   writes `build/perf/gpu_web_db_offload/reference-comparator-validated-external.env`
   after the Simple/uWebSockets/Seastar URLs and uWebSockets/Seastar provenance
-  are ready, so the strict suite no longer depends on manually copying
-  unvalidated reference fields.
+  are ready. `--apply-validated-env-fragment` then appends a managed validated
+  reference block to `build/perf/gpu_web_db_offload/external-fixtures.env`, so
+  the strict suite no longer depends on manually copying unvalidated reference
+  fields.
 - The readiness handoff now writes
   `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv`, a
   side-effect-free machine-readable map from URL-backed readiness items to the
@@ -360,7 +362,8 @@ Remaining blockers before this plan can be marked done:
   `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs` to
   refresh the blank env template and exact strict evidence command sequence,
   then run `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --check-env-file build/perf/gpu_web_db_offload/reference-comparator-fixtures.env`
-  before copying values into the strict external fixture env.
+  followed by `--apply-validated-env-fragment` before running the strict
+  external fixture suite.
   The open tracking note is
   `doc/08_tracking/bug/gpu_web_db_external_comparator_fixture_gap_2026-06-18.md`.
 The current blocker list is machine-checkable with
