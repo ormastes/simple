@@ -67,6 +67,7 @@
 | external suite refresh status | pass | host-safe-self-test |
 | external suite refresh status env file | pass | host-safe-self-test |
 | external suite preflight | pass | host-safe-self-test |
+| external suite require required ready | pass | host-safe-self-test |
 | external suite default guard | pass | host-safe-self-test |
 | external suite allow partial | pass | host-safe-self-test |
 | external suite plan artifacts | pass | host-safe-self-test |

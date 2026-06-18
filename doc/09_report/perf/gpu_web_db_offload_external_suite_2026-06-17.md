@@ -5,7 +5,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 
 ## Summary
 
-- Suite steps: `25`
+- Suite steps: `30`
 - Missing fixture items: `26`
 - Verdict: `WAITING_ON_FIXTURES`
 
@@ -31,6 +31,11 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | missing_by_category_source | `build/perf/gpu_web_db_offload/external-fixture-missing-by-category-source.env` |
 | status_json | `build/perf/gpu_web_db_offload/external-suite-status.json` |
 | policy_json | `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json` |
+| required_env_missing | `build/perf/gpu_web_db_offload/external-suite-required-env-missing.env` |
+| required_env_hints | `build/perf/gpu_web_db_offload/external-suite-required-env-hints.md` |
+| required_blockers | `build/perf/gpu_web_db_offload/external-suite-required-blockers.tsv` |
+| completion_audit | `build/perf/gpu_web_db_offload/external-suite-completion-audit.md` |
+| required_next_actions | `build/perf/gpu_web_db_offload/external-suite-required-next-actions.md` |
 
 ## Suite Steps
 
@@ -52,6 +57,11 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | write-missing-by-category | `scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status` |
 | write-status-json | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-status-json` |
 | write-policy-json | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-policy-json` |
+| write-required-env-missing | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-required-env-missing` |
+| write-required-env-hints | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-required-env-hints` |
+| write-required-blockers | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-required-blockers` |
+| write-completion-audit | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-completion-audit` |
+| write-required-next-actions | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-required-next-actions` |
 | readiness | `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs` |
 | nginx-live | `scripts/check/check-web-server-nginx-live-compare.shs` |
 | static-external | `scripts/check/check-web-server-static-external-live-compare.shs` |

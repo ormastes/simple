@@ -186,6 +186,17 @@ Implemented and verified on the current host:
   separates required fixture blockers from optional reference-baseline gaps.
   On this host the split is 23 required missing fixtures and 3 optional
   reference fixture URLs.
+- The suite now also writes required-only handoff artifacts for resumed
+  sessions that need to separate release-blocking fixture work from optional
+  reference baselines:
+  `--write-required-env-missing`,
+  `--write-required-env-hints`,
+  `--write-required-blockers`,
+  `--write-completion-audit`, and
+  `--write-required-next-actions`. The required gate is
+  `scripts/check/check-gpu-web-db-offload-external-suite.shs --require-required-ready`;
+  strict suite completion still uses `--require-ready` so optional reference
+  baselines are not silently dropped.
 - Use `scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status`
   after installing tools or exporting fixture URLs; it refreshes
   `build/perf/gpu_web_db_offload/external-fixture-missing-by-category.env`
