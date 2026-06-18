@@ -6,7 +6,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 ## Summary
 
 - Suite steps: `30`
-- Missing fixture items: `26`
+- Missing fixture items: `28`
 - Verdict: `WAITING_ON_FIXTURES`
 
 - Missing data source: `fixture-env-file:build/perf/gpu_web_db_offload/external-fixtures.env`
@@ -80,7 +80,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 26 |
+| bootstrap_missing_fixture_items | info | 28 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -90,8 +90,8 @@ It records the ordered external-fixture suite and the current missing fixture ca
 |---|---|
 | core_load_tools |  |
 | web_proxy_tools | caddy,h2o,haproxy,envoy |
-| db_tools | clickhouse,duckdb,psql,pgbench,mongodb |
+| db_tools | clickhouse,duckdb,psql,pgbench,mongodb,redis_valkey |
 | proxy_fixture_urls | simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url |
 | dynamic_route_urls | dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url |
 | reference_fixture_urls | simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url |
-| db_service_urls | clickhouse_url,postgres_url,mongo_url |
+| db_service_urls | clickhouse_url,postgres_url,mongo_url,redis_url |

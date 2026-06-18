@@ -8,7 +8,7 @@
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 26 |
+| bootstrap_missing_fixture_items | info | 28 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -27,6 +27,7 @@
 | psql | missing | psql-not-installed |
 | pgbench | missing | pgbench-not-installed |
 | mongodb | missing | mongodb-not-installed |
+| redis_valkey | missing | redis_valkey-not-installed |
 | simple_cached_proxy_url | missing | SIMPLE_CACHED_PROXY_URL-not-configured |
 | haproxy_cached_proxy_url | missing | HAPROXY_CACHED_PROXY_URL-not-configured |
 | envoy_cached_proxy_url | missing | ENVOY_CACHED_PROXY_URL-not-configured |
@@ -44,3 +45,4 @@
 | clickhouse_url | missing | CLICKHOUSE_URL-not-configured |
 | postgres_url | missing | POSTGRES_URL-not-configured |
 | mongo_url | missing | MONGO_URL-not-configured |
+| redis_url | missing | REDIS_URL-not-configured |

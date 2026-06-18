@@ -184,7 +184,7 @@ Implemented and verified on the current host:
   `--write-policy-json` persists
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
-  On this host the split is 23 required missing fixtures and 3 optional
+  On this host the split is 25 required missing fixtures and 3 optional
   reference fixture URLs.
 - The suite now also writes required-only handoff artifacts for resumed
   sessions that need to separate release-blocking fixture work from optional
@@ -212,7 +212,9 @@ Implemented and verified on the current host:
   status/category rows, and emits `STATUS: PASS ... preflight ready` or
   `STATUS: WARN ... preflight missing:N`.
 - DB baseline rows remain unavailable on this host because the external DB tools
-  and/or service connection URLs are not installed/configured.
+  and/or service connection URLs are not installed/configured. Redis/Valkey is
+  now included in that readiness handoff as `redis_valkey` tool readiness plus
+  `REDIS_URL`, matching the report's Redis/Valkey status-only row.
 
 Remaining blockers before this plan can be marked done:
 
@@ -225,15 +227,17 @@ Remaining blockers before this plan can be marked done:
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_URL` when available.
-- Install/configure ClickHouse, DuckDB, PostgreSQL/pgbench, and MongoDB shell
-  baselines, or provide their connection URLs where required.
+- Install/configure ClickHouse, DuckDB, PostgreSQL/pgbench, MongoDB shell, and
+  Redis/Valkey CLI/benchmark baselines, or provide their connection URLs where
+  required.
 
 The current blocker list is machine-checkable with
 `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`. On the
 current host it reports `wrk` and `nginx` ready, then `STATUS: WARN` with the
 missing Caddy, H2O, HAProxy, Envoy, ClickHouse, DuckDB, `psql`, `pgbench`,
-MongoDB shell, live cached-proxy, upload-proxy, tunnel-proxy, dynamic-route,
-optional Seastar/uWebSockets reference URLs, and DB connection URL
+MongoDB shell, Redis/Valkey CLI or benchmark tooling, live cached-proxy,
+upload-proxy, tunnel-proxy, dynamic-route, optional Seastar/uWebSockets
+reference URLs, and DB connection URL
 requirements. The
 same run writes durable readiness artifacts under `doc/09_report/perf/` and
 `doc/10_metrics/perf/`; `--self-test-artifacts` verifies that artifact writing

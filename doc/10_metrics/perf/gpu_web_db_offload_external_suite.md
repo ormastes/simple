@@ -3,7 +3,7 @@
 | metric | value |
 |---|---:|
 | suite_steps | 30 |
-| missing_fixture_items | 26 |
+| missing_fixture_items | 28 |
 | missing_data_source | fixture-env-file:build/perf/gpu_web_db_offload/external-fixtures.env |
 | strict_readiness_command | scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready |
 
@@ -39,7 +39,7 @@
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 26 |
+| bootstrap_missing_fixture_items | info | 28 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 

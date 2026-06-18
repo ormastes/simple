@@ -130,6 +130,7 @@ emit_readiness() {
     tool_status "psql" "psql"
     tool_status "pgbench" "pgbench"
     compound_tool_status "mongodb" "mongodb-ready" "mongosh" "mongo"
+    compound_tool_status "redis_valkey" "redis-valkey-ready" "redis-cli" "valkey-cli" "redis-benchmark"
     url_status "simple_cached_proxy_url" "SIMPLE_CACHED_PROXY_URL"
     url_status "haproxy_cached_proxy_url" "HAPROXY_CACHED_PROXY_URL"
     url_status "envoy_cached_proxy_url" "ENVOY_CACHED_PROXY_URL"
@@ -147,6 +148,7 @@ emit_readiness() {
     url_status "clickhouse_url" "CLICKHOUSE_URL"
     url_status "postgres_url" "POSTGRES_URL"
     url_status "mongo_url" "MONGO_URL"
+    url_status "redis_url" "REDIS_URL"
 }
 
 emit_bootstrap_status() {
@@ -197,6 +199,7 @@ envoy_cached_proxy	container	envoyproxy/envoy:v1.30-latest	8092	tool:envoy,ENVOY
 clickhouse_olap	container	clickhouse/clickhouse-server:latest	9000	tool:clickhouse,CLICKHOUSE_URL	db_service_urls	ClickBench-style OLAP baseline service
 postgres_tpch	container	postgres:16	5432	tool:psql,tool:pgbench,POSTGRES_URL	db_service_urls	TPC-H-style relational baseline service
 mongo_ycsb	container	mongo:7	27017	tool:mongodb,MONGO_URL	db_service_urls	YCSB-style document-filter baseline service
+redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	Redis/Valkey-compatible key/value baseline service
 simple_cached_proxy	external_url	repo-local-simple-web	8090	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	Simple cached proxy fixture must come from the Simple server/proxy lane
 simple_upload_proxy	external_url	repo-local-simple-web	8090	SIMPLE_UPLOAD_PROXY_URL	proxy_fixture_urls	Simple upload streaming fixture must come from the Simple server/proxy lane
 simple_tunnel_proxy	external_url	repo-local-simple-web	8090	SIMPLE_TUNNEL_PROXY_URL	proxy_fixture_urls	Simple upgrade tunnel fixture must come from the Simple server/proxy lane
@@ -269,6 +272,11 @@ services:
     image: mongo:7
     ports:
       - "27017:27017"
+
+  redis_valkey_kv:
+    image: redis:7
+    ports:
+      - "6379:6379"
 EOF
 }
 
@@ -330,6 +338,10 @@ restart_fixture gpu-web-db-postgres-tpch \
 restart_fixture gpu-web-db-mongo-ycsb \
     -p 27017:27017 \
     mongo:7
+
+restart_fixture gpu-web-db-redis-valkey-kv \
+    -p 6379:6379 \
+    redis:7
 EOF
 }
 
@@ -446,6 +458,7 @@ sourceable env file, so generating it cannot mark readiness rows as `ready`.
 # CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
 # POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
 # MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+# REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
 ## Operator-Supplied Simple/Dynamic Route Hints
@@ -583,6 +596,7 @@ seastar_plaintext_url	SEASTAR_PLAINTEXT_URL	reference_fixture_urls	Seastar plain
 clickhouse_url	CLICKHOUSE_URL	db_service_urls	ClickHouse service URL
 postgres_url	POSTGRES_URL	db_service_urls	PostgreSQL service URL
 mongo_url	MONGO_URL	db_service_urls	MongoDB service URL
+redis_url	REDIS_URL	db_service_urls	Redis/Valkey service URL
 EOF
 }
 
@@ -619,6 +633,7 @@ env_fields = {
     "clickhouse_url": ("CLICKHOUSE_URL", "db_service_urls", "Start or point to ClickHouse and fill the service URL."),
     "postgres_url": ("POSTGRES_URL", "db_service_urls", "Start or point to PostgreSQL and fill the service URL."),
     "mongo_url": ("MONGO_URL", "db_service_urls", "Start or point to MongoDB and fill the service URL."),
+    "redis_url": ("REDIS_URL", "db_service_urls", "Start or point to Redis/Valkey and fill the service URL."),
 }
 tool_actions = {
     "wrk": "Install wrk.",
@@ -632,6 +647,7 @@ tool_actions = {
     "psql": "Install PostgreSQL psql.",
     "pgbench": "Install PostgreSQL pgbench.",
     "mongodb": "Install Mongo shell tooling.",
+    "redis_valkey": "Install Redis/Valkey CLI or benchmark tooling.",
 }
 
 print("source\tcategory\treadiness_item\tenv_variable\taction")
@@ -688,11 +704,11 @@ for line in os.environ["NEXT_ACTIONS_MISSING"].splitlines():
 actions = [
     ("core_load_tools", "Install `wrk` and `nginx`; these are required before web baseline rows can be measured."),
     ("web_proxy_tools", "Install or start Caddy, H2O, HAProxy, and Envoy baselines; generated Compose/docker-run templates can cover Caddy, HAProxy, and Envoy."),
-    ("db_tools", "Install ClickHouse client, DuckDB, PostgreSQL `psql`/`pgbench`, and Mongo shell tooling before DB producers can emit measured rows."),
+    ("db_tools", "Install ClickHouse client, DuckDB, PostgreSQL `psql`/`pgbench`, Mongo shell tooling, and Redis/Valkey CLI or benchmark tooling before DB producers can emit measured/status rows."),
     ("proxy_fixture_urls", "Start the Simple proxy fixture and HAProxy/Envoy proxy fixtures, then fill cached, upload, and tunnel proxy URLs in `external-fixtures.env`."),
     ("dynamic_route_urls", "Start paired CPU and GPU dynamic route servers and fill plaintext and JSON route URLs in `external-fixtures.env`."),
     ("reference_fixture_urls", "Start optional Simple/uWebSockets/Seastar plaintext reference servers with workload parity, then fill their URLs in `external-fixtures.env`."),
-    ("db_service_urls", "Start or point to ClickHouse, PostgreSQL, and MongoDB services, then fill their connection URLs in `external-fixtures.env`."),
+    ("db_service_urls", "Start or point to ClickHouse, PostgreSQL, MongoDB, and Redis/Valkey services, then fill their connection URLs in `external-fixtures.env`."),
 ]
 
 env_fields = {
@@ -713,6 +729,7 @@ env_fields = {
     "clickhouse_url": ("CLICKHOUSE_URL", "ClickHouse service URL"),
     "postgres_url": ("POSTGRES_URL", "PostgreSQL service URL"),
     "mongo_url": ("MONGO_URL", "MongoDB service URL"),
+    "redis_url": ("REDIS_URL", "Redis/Valkey service URL"),
 }
 missing_env_fields = [
     (key, env_fields[key][0], env_fields[key][1])
@@ -819,6 +836,7 @@ SEASTAR_PLAINTEXT_URL=
 CLICKHOUSE_URL=
 POSTGRES_URL=
 MONGO_URL=
+REDIS_URL=
 CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
 DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
 POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=
@@ -859,6 +877,8 @@ running live web, proxy, dynamic-route, or DB baseline producers.
 - [ ] `psql`: PostgreSQL connection probe and query client.
 - [ ] `pgbench`: PostgreSQL load helper for TPC-H-style baseline preparation.
 - [ ] `mongosh` or `mongo`: MongoDB/YCSB document-filter baseline.
+- [ ] `redis-cli`, `valkey-cli`, or `redis-benchmark`: Redis/Valkey
+      key/value baseline status probe.
 
 ## URL And Service Configuration
 
@@ -878,8 +898,9 @@ running live web, proxy, dynamic-route, or DB baseline producers.
 - [ ] Fill `SIMPLE_REFERENCE_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_URL`,
       and `SEASTAR_PLAINTEXT_URL` when those optional reference baselines are
       available.
-- [ ] Start or point to ClickHouse, PostgreSQL, and MongoDB services.
-- [ ] Fill `CLICKHOUSE_URL`, `POSTGRES_URL`, and `MONGO_URL`.
+- [ ] Start or point to ClickHouse, PostgreSQL, MongoDB, and Redis/Valkey
+      services.
+- [ ] Fill `CLICKHOUSE_URL`, `POSTGRES_URL`, `MONGO_URL`, and `REDIS_URL`.
 - [ ] Leave the standard-shape query override variables empty for default
       ClickBench/TPC-H/YCSB shapes, or fill them only when the external fixture
       schema requires a compatible adjusted query.
@@ -963,7 +984,7 @@ source_nonempty_readiness_env_file() {
 SIMPLE_UPLOAD_PROXY_URL|HAPROXY_UPLOAD_PROXY_URL|SIMPLE_TUNNEL_PROXY_URL|\
 HAPROXY_TUNNEL_PROXY_URL|DYNAMIC_GPU_PLAINTEXT_URL|DYNAMIC_CPU_PLAINTEXT_URL|\
 DYNAMIC_GPU_JSON_URL|DYNAMIC_CPU_JSON_URL|SIMPLE_REFERENCE_PLAINTEXT_URL|\
-UWEBSOCKETS_PLAINTEXT_URL|SEASTAR_PLAINTEXT_URL|CLICKHOUSE_URL|POSTGRES_URL|MONGO_URL)
+UWEBSOCKETS_PLAINTEXT_URL|SEASTAR_PLAINTEXT_URL|CLICKHOUSE_URL|POSTGRES_URL|MONGO_URL|REDIS_URL)
                 export "$name=$value"
                 ;;
         esac
@@ -991,11 +1012,11 @@ emit_missing_by_category() {
         function category_for(key) {
             if (key == "wrk" || key == "nginx") return "core_load_tools"
             if (key == "caddy" || key == "h2o" || key == "haproxy" || key == "envoy") return "web_proxy_tools"
-            if (key == "clickhouse" || key == "duckdb" || key == "psql" || key == "pgbench" || key == "mongodb") return "db_tools"
+            if (key == "clickhouse" || key == "duckdb" || key == "psql" || key == "pgbench" || key == "mongodb" || key == "redis_valkey") return "db_tools"
             if (key == "simple_cached_proxy_url" || key == "haproxy_cached_proxy_url" || key == "envoy_cached_proxy_url" || key == "simple_upload_proxy_url" || key == "haproxy_upload_proxy_url" || key == "simple_tunnel_proxy_url" || key == "haproxy_tunnel_proxy_url") return "proxy_fixture_urls"
             if (key == "dynamic_gpu_plaintext_url" || key == "dynamic_cpu_plaintext_url" || key == "dynamic_gpu_json_url" || key == "dynamic_cpu_json_url") return "dynamic_route_urls"
             if (key == "simple_reference_plaintext_url" || key == "uwebsockets_plaintext_url" || key == "seastar_plaintext_url") return "reference_fixture_urls"
-            if (key == "clickhouse_url" || key == "postgres_url" || key == "mongo_url") return "db_service_urls"
+            if (key == "clickhouse_url" || key == "postgres_url" || key == "mongo_url" || key == "redis_url") return "db_service_urls"
             return "other"
         }
         $2 == "missing" {
@@ -1079,7 +1100,7 @@ bootstrap_body = "".join(
 categories = [
     ("core_load_tools", {"wrk", "nginx"}),
     ("web_proxy_tools", {"caddy", "h2o", "haproxy", "envoy"}),
-    ("db_tools", {"clickhouse", "duckdb", "psql", "pgbench", "mongodb"}),
+    ("db_tools", {"clickhouse", "duckdb", "psql", "pgbench", "mongodb", "redis_valkey"}),
     (
         "proxy_fixture_urls",
         {
@@ -1109,7 +1130,7 @@ categories = [
             "seastar_plaintext_url",
         },
     ),
-    ("db_service_urls", {"clickhouse_url", "postgres_url", "mongo_url"}),
+    ("db_service_urls", {"clickhouse_url", "postgres_url", "mongo_url", "redis_url"}),
 ]
 category_header = "| category | ready | missing |\n"
 category_sep = "|---|---:|---:|\n"
@@ -1354,6 +1375,7 @@ if [ "${1:-}" = "--self-test-env-template" ]; then
     printf '%s\n' "$template" | grep -q '^CLICKHOUSE_URL='
     printf '%s\n' "$template" | grep -q '^POSTGRES_URL='
     printf '%s\n' "$template" | grep -q '^MONGO_URL='
+    printf '%s\n' "$template" | grep -q '^REDIS_URL='
     echo "STATUS: PASS gpu web/db external fixture env template self-test"
     exit 0
 fi
@@ -1376,6 +1398,7 @@ if [ "${1:-}" = "--self-test-write-env-template" ]; then
     grep -q '^CLICKHOUSE_URL=' "$env_file"
     grep -q '^POSTGRES_URL=' "$env_file"
     grep -q '^MONGO_URL=' "$env_file"
+    grep -q '^REDIS_URL=' "$env_file"
     grep -q '^CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=' "$env_file"
     grep -q '^DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=' "$env_file"
     grep -q '^POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=' "$env_file"
@@ -1407,6 +1430,7 @@ if [ "${1:-}" = "--self-test-env-template-safe-defaults" ]; then
     printf '%s\n' "$output" | grep -q '^clickhouse_url=missing|CLICKHOUSE_URL-not-configured'
     printf '%s\n' "$output" | grep -q '^postgres_url=missing|POSTGRES_URL-not-configured'
     printf '%s\n' "$output" | grep -q '^mongo_url=missing|MONGO_URL-not-configured'
+    printf '%s\n' "$output" | grep -q '^redis_url=missing|REDIS_URL-not-configured'
     echo "STATUS: PASS gpu web/db external fixture env template safe defaults self-test"
     exit 0
 fi
@@ -1430,6 +1454,7 @@ HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel
 CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
 POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
 MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+REDIS_URL=redis://127.0.0.1:6379/0
 EOF
     output="$(check_env_file "$env_file")"
     printf '%s\n' "$output" | grep -q '^dynamic_gpu_plaintext_url=ready|DYNAMIC_GPU_PLAINTEXT_URL-configured'
@@ -1444,6 +1469,7 @@ EOF
     printf '%s\n' "$output" | grep -q '^clickhouse_url=ready|CLICKHOUSE_URL-configured'
     printf '%s\n' "$output" | grep -q '^postgres_url=ready|POSTGRES_URL-configured'
     printf '%s\n' "$output" | grep -q '^mongo_url=ready|MONGO_URL-configured'
+    printf '%s\n' "$output" | grep -q '^redis_url=ready|REDIS_URL-configured'
     printf '%s\n' "$output" | grep -q '^caddy=missing|caddy-not-installed'
     printf '%s\n' "$output" | grep -q 'STATUS: WARN gpu web/db external fixture env file missing:'
     empty_env="$tmpdir/empty.env"
@@ -1507,6 +1533,7 @@ if [ "${1:-}" = "--self-test-bootstrap-manifest" ]; then
     printf '%s\n' "$manifest" | grep -q '^fixture	kind	image_or_tool	default_port	fills	readiness_category	note$'
     printf '%s\n' "$manifest" | grep -q '^caddy_static	container	caddy:2	8082	tool:caddy	web_proxy_tools	'
     printf '%s\n' "$manifest" | grep -q '^clickhouse_olap	container	clickhouse/clickhouse-server:latest	9000	tool:clickhouse,CLICKHOUSE_URL	db_service_urls	'
+    printf '%s\n' "$manifest" | grep -q '^redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	'
     printf '%s\n' "$manifest" | grep -q '^dynamic_gpu_plaintext	external_url	repo-local-simple-web	8080	DYNAMIC_GPU_PLAINTEXT_URL	dynamic_route_urls	'
     echo "STATUS: PASS gpu web/db external fixture bootstrap manifest self-test"
     exit 0
@@ -1521,6 +1548,7 @@ if [ "${1:-}" = "--self-test-write-bootstrap-manifest" ]; then
     test -f "$manifest_file"
     grep -q '^fixture	kind	image_or_tool	default_port	fills	readiness_category	note$' "$manifest_file"
     grep -q '^simple_cached_proxy	external_url	repo-local-simple-web	8090	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	' "$manifest_file"
+    grep -q '^redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	' "$manifest_file"
     echo "STATUS: PASS gpu web/db external fixture bootstrap manifest file self-test"
     exit 0
 fi
@@ -1536,6 +1564,7 @@ if [ "${1:-}" = "--self-test-docker-compose-template" ]; then
     printf '%s\n' "$compose" | grep -q '^  clickhouse_olap:$'
     printf '%s\n' "$compose" | grep -q 'image: postgres:16'
     printf '%s\n' "$compose" | grep -q 'image: mongo:7'
+    printf '%s\n' "$compose" | grep -q 'image: redis:7'
     printf '%s\n' "$compose" | grep -q 'docker compose -f build/perf/gpu_web_db_offload/external-fixture-compose.yaml up -d'
     echo "STATUS: PASS gpu web/db external fixture docker compose template self-test"
     exit 0
@@ -1552,6 +1581,7 @@ if [ "${1:-}" = "--self-test-write-docker-compose-template" ]; then
     grep -q '^  clickhouse_olap:$' "$compose_file"
     grep -q 'image: postgres:16' "$compose_file"
     grep -q 'image: mongo:7' "$compose_file"
+    grep -q 'image: redis:7' "$compose_file"
     echo "STATUS: PASS gpu web/db external fixture docker compose template file self-test"
     exit 0
 fi
@@ -1570,6 +1600,7 @@ if [ "${1:-}" = "--self-test-docker-run-template" ]; then
     printf '%s\n' "$run_template" | grep -q 'restart_fixture gpu-web-db-clickhouse-olap'
     printf '%s\n' "$run_template" | grep -q 'postgres:16'
     printf '%s\n' "$run_template" | grep -q 'mongo:7'
+    printf '%s\n' "$run_template" | grep -q 'restart_fixture gpu-web-db-redis-valkey-kv'
     echo "STATUS: PASS gpu web/db external fixture docker run template self-test"
     exit 0
 fi
@@ -1587,6 +1618,7 @@ if [ "${1:-}" = "--self-test-write-docker-run-template" ]; then
     grep -q 'docker rm -f "$name"' "$run_file"
     grep -q 'envoyproxy/envoy:v1.30-latest' "$run_file"
     grep -q 'clickhouse/clickhouse-server:latest' "$run_file"
+    grep -q 'redis:7' "$run_file"
     echo "STATUS: PASS gpu web/db external fixture docker run template file self-test"
     exit 0
 fi
@@ -1626,6 +1658,7 @@ if [ "${1:-}" = "--self-test-env-fields" ]; then
     printf '%s\n' "$fields" | grep -q '^simple_cached_proxy_url	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	Simple cached reverse-proxy fixture URL$'
     printf '%s\n' "$fields" | grep -q '^dynamic_gpu_plaintext_url	DYNAMIC_GPU_PLAINTEXT_URL	dynamic_route_urls	GPU plaintext dynamic route URL$'
     printf '%s\n' "$fields" | grep -q '^postgres_url	POSTGRES_URL	db_service_urls	PostgreSQL service URL$'
+    printf '%s\n' "$fields" | grep -q '^redis_url	REDIS_URL	db_service_urls	Redis/Valkey service URL$'
     echo "STATUS: PASS gpu web/db external fixture env fields self-test"
     exit 0
 fi
@@ -1640,6 +1673,7 @@ if [ "${1:-}" = "--self-test-write-env-fields" ]; then
     grep -q '^readiness_item	env_variable	category	fills$' "$fields_file"
     grep -q '^haproxy_upload_proxy_url	HAPROXY_UPLOAD_PROXY_URL	proxy_fixture_urls	HAProxy upload-streaming fixture URL$' "$fields_file"
     grep -q '^mongo_url	MONGO_URL	db_service_urls	MongoDB service URL$' "$fields_file"
+    grep -q '^redis_url	REDIS_URL	db_service_urls	Redis/Valkey service URL$' "$fields_file"
     echo "STATUS: PASS gpu web/db external fixture env fields file self-test"
     exit 0
 fi
@@ -1650,6 +1684,7 @@ if [ "${1:-}" = "--self-test-blocker-manifest" ]; then
     printf '%s\n' "$manifest" | grep -q '^ambient-environment	web_proxy_tools	caddy		Install or start Caddy\.$'
     printf '%s\n' "$manifest" | grep -q '^ambient-environment	dynamic_route_urls	dynamic_gpu_plaintext_url	DYNAMIC_GPU_PLAINTEXT_URL	Start the GPU plaintext dynamic route and fill the URL\.$'
     printf '%s\n' "$manifest" | grep -q '^ambient-environment	db_service_urls	postgres_url	POSTGRES_URL	Start or point to PostgreSQL and fill the service URL\.$'
+    printf '%s\n' "$manifest" | grep -q '^ambient-environment	db_service_urls	redis_url	REDIS_URL	Start or point to Redis/Valkey and fill the service URL\.$'
     echo "STATUS: PASS gpu web/db external fixture blocker manifest self-test"
     exit 0
 fi
@@ -1671,6 +1706,7 @@ EOF
     grep -q "^fixture-env-file:$env_file	web_proxy_tools	caddy		Install or start Caddy\\.$" "$manifest_file"
     grep -q "^fixture-env-file:$env_file	dynamic_route_urls	dynamic_cpu_plaintext_url	DYNAMIC_CPU_PLAINTEXT_URL	Start the CPU plaintext dynamic route and fill the URL\\.$" "$manifest_file"
     grep -q "^fixture-env-file:$env_file	db_service_urls	mongo_url	MONGO_URL	Start or point to MongoDB and fill the service URL\\.$" "$manifest_file"
+    grep -q "^fixture-env-file:$env_file	db_service_urls	redis_url	REDIS_URL	Start or point to Redis/Valkey and fill the service URL\\.$" "$manifest_file"
     if grep -q 'simple_cached_proxy_url' "$manifest_file"; then
         echo "ERROR: filled proxy URL should not be a blocker" >&2
         exit 1
@@ -1685,6 +1721,7 @@ if [ "${1:-}" = "--self-test-env-hints" ]; then
     printf '%s\n' "$hints" | grep -q '# HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable'
     printf '%s\n' "$hints" | grep -q '# ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable'
     printf '%s\n' "$hints" | grep -q '# CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default'
+    printf '%s\n' "$hints" | grep -q '# REDIS_URL=redis://127.0.0.1:6379/0'
     printf '%s\n' "$hints" | grep -q '# SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable'
     printf '%s\n' "$hints" | grep -q 'sourceable env file'
     echo "STATUS: PASS gpu web/db external fixture env hints self-test"
@@ -1746,15 +1783,16 @@ fi
 if [ "${1:-}" = "--self-test-next-actions" ]; then
     actions="$(emit_next_actions)"
     printf '%s\n' "$actions" | grep -q 'GPU Web/DB External Fixture Next Actions'
-    printf '%s\n' "$actions" | grep -q 'Missing fixture items: `26`'
+    printf '%s\n' "$actions" | grep -q 'Missing fixture items: `28`'
     printf '%s\n' "$actions" | grep -q 'Missing data source: `ambient-environment`'
     printf '%s\n' "$actions" | grep -q '| web_proxy_tools | caddy, h2o, haproxy, envoy |'
     printf '%s\n' "$actions" | grep -q '| reference_fixture_urls | simple_reference_plaintext_url, uwebsockets_plaintext_url, seastar_plaintext_url |'
-    printf '%s\n' "$actions" | grep -q '| db_service_urls | clickhouse_url, postgres_url, mongo_url |'
+    printf '%s\n' "$actions" | grep -q '| db_service_urls | clickhouse_url, postgres_url, mongo_url, redis_url |'
     printf '%s\n' "$actions" | grep -q 'Fixture Env Fields'
     printf '%s\n' "$actions" | grep -q '| dynamic_gpu_plaintext_url | `DYNAMIC_GPU_PLAINTEXT_URL` | GPU plaintext dynamic route URL |'
     printf '%s\n' "$actions" | grep -q '| uwebsockets_plaintext_url | `UWEBSOCKETS_PLAINTEXT_URL` | uWebSockets plaintext reference URL |'
     printf '%s\n' "$actions" | grep -q '| postgres_url | `POSTGRES_URL` | PostgreSQL service URL |'
+    printf '%s\n' "$actions" | grep -q '| redis_url | `REDIS_URL` | Redis/Valkey service URL |'
     printf '%s\n' "$actions" | grep -q 'check-gpu-web-db-offload-external-suite.shs --require-ready'
     echo "STATUS: PASS gpu web/db external fixture next actions self-test"
     exit 0
@@ -1789,6 +1827,7 @@ HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
 ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
 DYNAMIC_GPU_PLAINTEXT_URL=http://127.0.0.1:8080/plaintext
 CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+REDIS_URL=redis://127.0.0.1:6379/0
 EOF
     written_path="$(write_next_actions "$actions_file" "$env_file")"
     test "$written_path" = "$actions_file"
@@ -1830,11 +1869,11 @@ if [ "${1:-}" = "--self-test-missing-by-category" ]; then
     output="$(emit_missing_by_category)"
     printf '%s\n' "$output" | grep -q '^core_load_tools=$'
     printf '%s\n' "$output" | grep -q '^web_proxy_tools=caddy,h2o,haproxy,envoy$'
-    printf '%s\n' "$output" | grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb$'
+    printf '%s\n' "$output" | grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb,redis_valkey$'
     printf '%s\n' "$output" | grep -q '^proxy_fixture_urls=simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$'
     printf '%s\n' "$output" | grep -q '^dynamic_route_urls=dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$'
     printf '%s\n' "$output" | grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$'
-    printf '%s\n' "$output" | grep -q '^db_service_urls=clickhouse_url,postgres_url,mongo_url$'
+    printf '%s\n' "$output" | grep -q '^db_service_urls=clickhouse_url,postgres_url,mongo_url,redis_url$'
     echo "STATUS: PASS gpu web/db external fixture missing-by-category self-test"
     exit 0
 fi
@@ -1848,11 +1887,11 @@ if [ "${1:-}" = "--self-test-write-missing-by-category" ]; then
     test -f "$missing_file"
     grep -q '^core_load_tools=$' "$missing_file"
     grep -q '^web_proxy_tools=caddy,h2o,haproxy,envoy$' "$missing_file"
-    grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb$' "$missing_file"
+    grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb,redis_valkey$' "$missing_file"
     grep -q '^proxy_fixture_urls=simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$' "$missing_file"
     grep -q '^dynamic_route_urls=dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$' "$missing_file"
     grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$' "$missing_file"
-    grep -q '^db_service_urls=clickhouse_url,postgres_url,mongo_url$' "$missing_file"
+    grep -q '^db_service_urls=clickhouse_url,postgres_url,mongo_url,redis_url$' "$missing_file"
     echo "STATUS: PASS gpu web/db external fixture missing-by-category file self-test"
     exit 0
 fi
@@ -1879,6 +1918,7 @@ SEASTAR_PLAINTEXT_URL=http://127.0.0.1:8086/plaintext
 CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
 export POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
 MONGO_URL="mongodb://127.0.0.1:27017/ycsb"
+REDIS_URL=redis://127.0.0.1:6379/0
 CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=SELECT sum(number) FROM numbers(1024)
 EOF
     output="$(emit_missing_by_category_from_env_file "$env_file")"
@@ -1913,7 +1953,7 @@ EOF
     grep -q '^proxy_fixture_urls=haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$' "$missing_file"
     grep -q '^dynamic_route_urls=dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$' "$missing_file"
     grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$' "$missing_file"
-    grep -q '^db_service_urls=postgres_url,mongo_url$' "$missing_file"
+    grep -q '^db_service_urls=postgres_url,mongo_url,redis_url$' "$missing_file"
     echo "STATUS: PASS gpu web/db external fixture env-file missing-by-category file self-test"
     exit 0
 fi
@@ -1929,6 +1969,7 @@ if [ "${1:-}" = "--self-test-setup-checklist" ]; then
     printf '%s\n' "$checklist" | grep -q '`clickhouse` or `clickhouse-client`'
     printf '%s\n' "$checklist" | grep -q 'DYNAMIC_GPU_PLAINTEXT_URL'
     printf '%s\n' "$checklist" | grep -q 'CLICKHOUSE_URL'
+    printf '%s\n' "$checklist" | grep -q 'REDIS_URL'
     printf '%s\n' "$checklist" | grep -q 'standard-shape query override variables'
     printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-suite.shs --dry-run'
     printf '%s\n' "$checklist" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --bootstrap-status'

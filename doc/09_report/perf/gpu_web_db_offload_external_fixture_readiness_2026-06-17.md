@@ -6,7 +6,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 ## Summary
 
 - Ready fixtures: `2`
-- Missing fixtures: `26`
+- Missing fixtures: `28`
 - Verdict: `WARN`
 
 ## Category Summary
@@ -15,11 +15,11 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 |---|---:|---:|
 | core_load_tools | 2 | 0 |
 | web_proxy_tools | 0 | 4 |
-| db_tools | 0 | 5 |
+| db_tools | 0 | 6 |
 | proxy_fixture_urls | 0 | 7 |
 | dynamic_route_urls | 0 | 4 |
 | reference_fixture_urls | 0 | 3 |
-| db_service_urls | 0 | 3 |
+| db_service_urls | 0 | 4 |
 
 ## Bootstrap Status
 
@@ -29,7 +29,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 26 |
+| bootstrap_missing_fixture_items | info | 28 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -48,6 +48,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | psql | missing | psql-not-installed |
 | pgbench | missing | pgbench-not-installed |
 | mongodb | missing | mongodb-not-installed |
+| redis_valkey | missing | redis_valkey-not-installed |
 | simple_cached_proxy_url | missing | SIMPLE_CACHED_PROXY_URL-not-configured |
 | haproxy_cached_proxy_url | missing | HAPROXY_CACHED_PROXY_URL-not-configured |
 | envoy_cached_proxy_url | missing | ENVOY_CACHED_PROXY_URL-not-configured |
@@ -65,6 +66,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | clickhouse_url | missing | CLICKHOUSE_URL-not-configured |
 | postgres_url | missing | POSTGRES_URL-not-configured |
 | mongo_url | missing | MONGO_URL-not-configured |
+| redis_url | missing | REDIS_URL-not-configured |
 
 ## Fixture Environment Template
 
@@ -113,6 +115,7 @@ SEASTAR_PLAINTEXT_URL=
 CLICKHOUSE_URL=
 POSTGRES_URL=
 MONGO_URL=
+REDIS_URL=
 CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
 DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
 POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=
@@ -147,6 +150,8 @@ running live web, proxy, dynamic-route, or DB baseline producers.
 - [ ] `psql`: PostgreSQL connection probe and query client.
 - [ ] `pgbench`: PostgreSQL load helper for TPC-H-style baseline preparation.
 - [ ] `mongosh` or `mongo`: MongoDB/YCSB document-filter baseline.
+- [ ] `redis-cli`, `valkey-cli`, or `redis-benchmark`: Redis/Valkey
+      key/value baseline status probe.
 
 ## URL And Service Configuration
 
@@ -166,8 +171,9 @@ running live web, proxy, dynamic-route, or DB baseline producers.
 - [ ] Fill `SIMPLE_REFERENCE_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_URL`,
       and `SEASTAR_PLAINTEXT_URL` when those optional reference baselines are
       available.
-- [ ] Start or point to ClickHouse, PostgreSQL, and MongoDB services.
-- [ ] Fill `CLICKHOUSE_URL`, `POSTGRES_URL`, and `MONGO_URL`.
+- [ ] Start or point to ClickHouse, PostgreSQL, MongoDB, and Redis/Valkey
+      services.
+- [ ] Fill `CLICKHOUSE_URL`, `POSTGRES_URL`, `MONGO_URL`, and `REDIS_URL`.
 - [ ] Leave the standard-shape query override variables empty for default
       ClickBench/TPC-H/YCSB shapes, or fill them only when the external fixture
       schema requires a compatible adjusted query.
