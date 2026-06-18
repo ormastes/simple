@@ -12,6 +12,7 @@ H2O_PORT="${H2O_PORT:-19083}"
 WRK_DURATION="${WRK_DURATION:-1s}"
 WRK_THREADS="${WRK_THREADS:-1}"
 WRK_CONNECTIONS="${WRK_CONNECTIONS:-1}"
+CADDY_DOCKER_CONTAINER="${CADDY_DOCKER_CONTAINER:-gpu-web-db-caddy-static}"
 
 SIMPLE_BIN="${SIMPLE_BIN:-}"
 if [ -z "$SIMPLE_BIN" ]; then
@@ -112,14 +113,28 @@ PY
     exit 0
 fi
 
+if [ "${1:-}" = "--self-test-static-external-docker-caddy-command" ]; then
+    cmd="docker run -d --rm --name $CADDY_DOCKER_CONTAINER -p $CADDY_PORT:80 -v /tmp/static:/srv:ro caddy:2 caddy file-server --listen :80 --root /srv"
+    printf '%s\n' "$cmd" | grep -q "docker run -d --rm --name $CADDY_DOCKER_CONTAINER"
+    printf '%s\n' "$cmd" | grep -q -- "-p $CADDY_PORT:80"
+    printf '%s\n' "$cmd" | grep -q 'caddy:2 caddy file-server --listen :80 --root /srv'
+    echo "STATUS: PASS static external Docker Caddy command self-test"
+    exit 0
+fi
+
 if ! command -v wrk >/dev/null 2>&1; then
     echo "STATUS: WARN tool-unavailable:wrk"
     exit 0
 fi
 
 AVAILABLE=""
+CADDY_RUNTIME=""
 if command -v caddy >/dev/null 2>&1; then
     AVAILABLE="$AVAILABLE caddy"
+    CADDY_RUNTIME="host"
+elif command -v docker >/dev/null 2>&1; then
+    AVAILABLE="$AVAILABLE caddy"
+    CADDY_RUNTIME="docker"
 fi
 if command -v h2o >/dev/null 2>&1; then
     AVAILABLE="$AVAILABLE h2o"
@@ -148,6 +163,7 @@ SIMPLE_LIB=src:test/05_perf "$SIMPLE_BIN" native-build \
 
 SIMPLE_PID=""
 CADDY_PID=""
+CADDY_CONTAINER_STARTED=""
 H2O_PID=""
 cleanup() {
     for pid in "$SIMPLE_PID" "$CADDY_PID" "$H2O_PID"; do
@@ -156,6 +172,9 @@ cleanup() {
             wait "$pid" 2>/dev/null || true
         fi
     done
+    if [ -n "$CADDY_CONTAINER_STARTED" ]; then
+        docker rm -f "$CADDY_CONTAINER_STARTED" >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -196,8 +215,18 @@ SIMPLE_PID="$!"
 wait_http "http://127.0.0.1:$SIMPLE_PORT/1kb.html"
 
 if printf '%s\n' "$AVAILABLE" | grep -q 'caddy'; then
+    if [ "$CADDY_RUNTIME" = "docker" ]; then
+        docker rm -f "$CADDY_DOCKER_CONTAINER" >/dev/null 2>&1 || true
+        docker run -d --rm \
+            --name "$CADDY_DOCKER_CONTAINER" \
+            -p "$CADDY_PORT:80" \
+            -v "$PWD/$DATA_ROOT:/srv:ro" \
+            caddy:2 caddy file-server --listen :80 --root /srv >"$LOG_DIR/caddy-docker.cid"
+        CADDY_CONTAINER_STARTED="$CADDY_DOCKER_CONTAINER"
+    else
     caddy file-server --listen "127.0.0.1:$CADDY_PORT" --root "$PWD/$DATA_ROOT" >"$LOG_DIR/caddy.log" 2>&1 &
     CADDY_PID="$!"
+    fi
     wait_http "http://127.0.0.1:$CADDY_PORT/1kb.html"
 fi
 

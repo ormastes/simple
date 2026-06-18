@@ -5,7 +5,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 
 ## Summary
 
-- Passed gates: `73`
+- Passed gates: `74`
 - Verdict: `PASS`
 
 ## Gates
@@ -27,6 +27,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 | nginx live producer lines | pass | host-safe-self-test |
 | static external parser | pass | host-safe-self-test |
 | static external producer lines | pass | host-safe-self-test |
+| static external Docker Caddy command | pass | host-safe-self-test |
 | proxy external producer lines | pass | host-safe-self-test |
 | proxy external env file source | pass | host-safe-self-test |
 | dynamic route parser | pass | host-safe-self-test |

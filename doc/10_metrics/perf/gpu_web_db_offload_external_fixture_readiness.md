@@ -8,7 +8,7 @@
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 26 |
+| bootstrap_missing_fixture_items | info | 25 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -18,7 +18,7 @@
 |---|---|---|
 | wrk | ready | /usr/bin/wrk |
 | nginx | ready | /usr/sbin/nginx |
-| caddy | missing | caddy-not-installed |
+| caddy | ready | caddy-ready:docker-container:gpu-web-db-caddy-static:caddy |
 | h2o | missing | h2o-not-installed |
 | haproxy | missing | haproxy-not-installed |
 | envoy | missing | envoy-not-installed |

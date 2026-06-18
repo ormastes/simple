@@ -75,8 +75,9 @@ Implemented and verified on the current host:
 - Caddy/H2O static-file comparison now has an optional live producer at
   `scripts/check/check-web-server-static-external-live-compare.shs`. On hosts
   without Caddy/H2O it exits cleanly with
-  `STATUS: WARN tool-unavailable:caddy,h2o`; on hosts with either tool it emits
-  strict `WEB_SERVER_EXTERNAL_COMPARE_MEASURED=...` rows to
+  `STATUS: WARN tool-unavailable:caddy,h2o`; on hosts with Caddy/H2O or Docker
+  for the generated Caddy fixture, it emits strict
+  `WEB_SERVER_EXTERNAL_COMPARE_MEASURED=...` rows to
   `build/perf/web_server_nginx_compare/static-external-measured-rows.env`.
 - HAProxy/Envoy cached reverse-proxy comparison now has a URL-driven producer at
   `scripts/check/check-web-server-proxy-external-live-compare.shs`. On hosts
@@ -194,8 +195,8 @@ Implemented and verified on the current host:
   `--write-policy-json` persists
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
-  On this host after starting the generated Redis Docker fixture, the split is
-  23 required missing fixtures and 3 optional
+  On this host after starting the generated Redis and Caddy Docker fixtures, the split is
+  22 required missing fixtures and 3 optional
   reference fixture URLs.
 - The suite now also writes required-only handoff artifacts for resumed
   sessions that need to separate release-blocking fixture work from optional
@@ -233,7 +234,7 @@ Implemented and verified on the current host:
 
 Remaining blockers before this plan can be marked done:
 
-- Install/configure Caddy or H2O for additional static-server baselines.
+- Install/configure H2O for the remaining additional static-server baseline.
 - Install/configure HAProxy and Envoy plus matching live proxy fixtures for
   cached proxy, upload streaming, and upgrade tunnel rows.
 - Start live CPU and GPU dynamic route servers and set
@@ -242,17 +243,17 @@ Remaining blockers before this plan can be marked done:
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_URL` when available.
-- Install/configure ClickHouse, DuckDB, PostgreSQL/pgbench, MongoDB shell, and
-Redis/Valkey CLI and benchmark baselines, or provide their connection URLs where
+- Install/configure ClickHouse, DuckDB, PostgreSQL/pgbench, and MongoDB shell
+baselines, or provide their connection URLs where
   required.
 
 The current blocker list is machine-checkable with
 `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`. On the
-current host it reports `wrk` and `nginx` ready, then `STATUS: WARN` with the
-missing Caddy, H2O, HAProxy, Envoy, ClickHouse, DuckDB, `psql`, `pgbench`,
-MongoDB shell, Redis/Valkey CLI tooling, Redis benchmark tooling, live cached-proxy,
+current host it reports `wrk`, `nginx`, Docker-backed Caddy, and Docker-backed
+Redis/Valkey ready, then `STATUS: WARN` with the missing H2O, HAProxy, Envoy,
+ClickHouse, DuckDB, `psql`, `pgbench`, MongoDB shell, live cached-proxy,
 upload-proxy, tunnel-proxy, dynamic-route, optional Seastar/uWebSockets
-reference URLs, and DB connection URL
+reference URLs, and non-Redis DB connection URL
 requirements. The
 same run writes durable readiness artifacts under `doc/09_report/perf/` and
 `doc/10_metrics/perf/`; `--self-test-artifacts` verifies that artifact writing
@@ -326,7 +327,7 @@ non-mutating parser, producer, and readiness self-tests without rerunning native
 builds, live servers, or heavyweight benchmark specs. The command writes
 durable PASS artifacts under `doc/09_report/perf/` and `doc/10_metrics/perf/`
 with one row per syntax/self-test gate; the current recovery artifacts record
-73 passed host-safe gates. `--self-test-artifacts` verifies that same
+74 passed host-safe gates. `--self-test-artifacts` verifies that same
 artifact-writing path with temporary report and metrics files. The harness also
 validates the fixture environment template, safe-default behavior, setup
 checklist, env-file validation, category summary, missing-by-category output,
