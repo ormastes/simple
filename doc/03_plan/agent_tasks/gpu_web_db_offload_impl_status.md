@@ -21,10 +21,10 @@ Current Benchmark Recovery State (2026-06-17):
   producer/consumer contracts, report auto-consumption of producer files, and
   explicit unavailable rows for missing web and DB baselines.
 - NGINX is the only fastest-server-style external baseline with measured rows
-  on this host. Redis/Valkey-style key/value server comparisons are not
-  implemented or measured; current DB external baseline coverage is limited to
-  ClickHouse, DuckDB, PostgreSQL, and MongoDB/YCSB status/measured-row
-  contracts.
+  on this host. Redis/Valkey-style key/value server coverage now exists as a
+  status-only external baseline row and standard-shape manifest entry, but it
+  is not measured; current DB measured-row coverage remains limited to the
+  ClickHouse, DuckDB, PostgreSQL, and MongoDB/YCSB contracts.
 - `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`
   reports the remaining external fixture/tool readiness in one host-safe gate
   and writes durable artifacts to

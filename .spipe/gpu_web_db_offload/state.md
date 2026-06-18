@@ -48,11 +48,11 @@ implementation-in-progress-recovered
   `/usr/sbin/nginx` and `wrk` at `/usr/bin/wrk`; `haproxy`, `envoy`, `caddy`,
   and `h2o` are missing and must be represented as explicit
   `tool-unavailable:*` rows until installed.
-- evidence: Simple-vs-NGINX static rows are measured on this host, but
-  Redis/Valkey-style key/value server comparisons are not implemented or
-  measured yet. The DB external baseline matrix currently covers
-  ClickHouse, DuckDB, PostgreSQL, and MongoDB/YCSB status/measured-row
-  contracts only, so the lane must not claim Redis parity or speedup.
+- evidence: Simple-vs-NGINX static rows are measured on this host. Redis/Valkey
+  key/value server coverage now exists as a status-only external baseline row
+  and standard-shape manifest entry, but it is not measured yet. The lane must
+  not claim Redis parity or speedup until a real measured producer/consumer
+  contract and live fixture evidence exist.
 - recovery: Crash-session continuation was traced to
   `/home/ormastes/.codex/sessions/2026/06/16/rollout-2026-06-16T04-07-18-019ece9c-bb30-76a1-952f-7233322187d1.jsonl`.
   The actionable current worktree state is now the benchmark plan plus the

@@ -737,7 +737,7 @@ expect(row.backend_timing_valid).to_be(false)
 
 #### should report external DB baseline status rows before DB speedup claims
 
-- Record unavailable ClickHouse, DuckDB, PostgreSQL, and MongoDB baseline tools as explicit report rows
+- Record unavailable ClickHouse, DuckDB, PostgreSQL, MongoDB, and Redis/Valkey baseline tools as explicit report rows
    - Expected: clickhouse.name equals `db_clickbench_clickhouse_external_baseline_status`
    - Expected: clickhouse.backend equals `external-db-baseline`
    - Expected: clickhouse.dataset equals `clickbench_hits_scan_filter_project_1024_row_match`
@@ -754,20 +754,27 @@ expect(row.backend_timing_valid).to_be(false)
    - Expected: mongo.name equals `db_ycsb_mongo_external_baseline_status`
    - Expected: mongo.dispatch_target equals `mongo_ycsb_document_filter`
    - Expected: mongo.fallback_reason equals `external-db-baseline-unavailable:mongo-not-installed`
+   - Expected: redis_valkey.name equals `db_key_value_redis_valkey_external_baseline_status`
+   - Expected: redis_valkey.dataset equals `redis_valkey_getset_1024_key_match`
+   - Expected: redis_valkey.dispatch_target equals `redis_valkey_key_value_getset`
+   - Expected: redis_valkey.fallback_reason equals `external-db-baseline-unavailable:redis-valkey-not-installed`
+   - Expected: redis_valkey.device_timing_source equals `external-db-baseline-status`
+   - Expected: redis_valkey.gpu_hits equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Record unavailable ClickHouse, DuckDB, PostgreSQL, and MongoDB baseline tools as explicit report rows")
+step("Record unavailable ClickHouse, DuckDB, PostgreSQL, MongoDB, and Redis/Valkey baseline tools as explicit report rows")
 val clickhouse = make_clickhouse_clickbench_external_baseline_status_row()
 val duckdb = make_duckdb_tpch_external_baseline_status_row()
 val postgresql = make_postgresql_tpch_external_baseline_status_row()
 val mongo = make_mongo_ycsb_external_baseline_status_row()
+val redis_valkey = make_redis_valkey_external_baseline_status_row()
 expect(clickhouse.name).to_equal("db_clickbench_clickhouse_external_baseline_status")
 expect(clickhouse.backend).to_equal("external-db-baseline")
 expect(clickhouse.dataset).to_equal("clickbench_hits_scan_filter_project_1024_row_match")
@@ -785,6 +792,13 @@ expect(postgresql.fallback_reason).to_equal("external-db-baseline-unavailable:po
 expect(mongo.name).to_equal("db_ycsb_mongo_external_baseline_status")
 expect(mongo.dispatch_target).to_equal("mongo_ycsb_document_filter")
 expect(mongo.fallback_reason).to_equal("external-db-baseline-unavailable:mongo-not-installed")
+expect(redis_valkey.name).to_equal("db_key_value_redis_valkey_external_baseline_status")
+expect(redis_valkey.dataset).to_equal("redis_valkey_getset_1024_key_match")
+expect(redis_valkey.dispatch_target).to_equal("redis_valkey_key_value_getset")
+expect(redis_valkey.fallback_reason).to_equal("external-db-baseline-unavailable:redis-valkey-not-installed")
+expect(redis_valkey.device_timing_source).to_equal("external-db-baseline-status")
+expect(redis_valkey.backend_timing_valid).to_be(false)
+expect(redis_valkey.gpu_hits).to_equal(0)
 ```
 
 </details>

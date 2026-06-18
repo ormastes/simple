@@ -445,9 +445,13 @@ The admission row proves the DB queue decision surface before dispatch: a coarse
 scan batch is admitted to GPU, a join/aggregate batch falls back when the queue
 is full, and a tiny document-filter batch remains on CPU. The standard-shape
 rows preserve the workload matrix and the Simple dispatch target mapping. They
-do not measure ClickHouse, DuckDB, PostgreSQL, BenchBase, Mongo, or an ANN
-fixture yet. The external DB baseline status rows make that missing-tool state
-machine-checkable in the report instead of leaving it only in prose. When a
+do not measure ClickHouse, DuckDB, PostgreSQL, BenchBase, Mongo, Redis/Valkey,
+or an ANN fixture yet. The external DB baseline status rows make the
+implemented missing-tool state machine-checkable in the report instead of
+leaving it only in prose. The Redis/Valkey key/value row is currently a
+status contract only: it records `redis-cli`, `valkey-cli`, or
+`redis-benchmark` availability as unavailable or ready-unmeasured, but it does
+not claim Redis throughput or latency parity. When a
 supported DB tool is installed, the same report row changes to
 `external-db-baseline-ready-unmeasured:*` until a measured wrapper fills real
 throughput and latency. The report gate now has a measured-row input contract:
