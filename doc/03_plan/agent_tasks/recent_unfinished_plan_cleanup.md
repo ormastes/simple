@@ -2,6 +2,7 @@
 
 Date: 2026-06-18
 SPipe state: `.spipe/recent-plan-cleanup/state.md`
+Guide: `doc/07_guide/infra/recent_plan_cleanup.md`
 
 ## Scope
 
@@ -128,4 +129,6 @@ This cleanup plan is done when:
 4. `.spipe/recent-plan-cleanup/state.md` records verification results;
 5. `sh scripts/setup/install-spipe-dev-command.shs --check` passes or is logged;
 6. `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`;
-7. the documentation-only change is committed, rebased, and pushed.
+7. `doc/07_guide/infra/recent_plan_cleanup.md` and
+   `.codex/skills/sp_dev/SKILL.md` describe how to restart this cleanup style;
+8. the documentation-only change is committed, rebased, and pushed.
