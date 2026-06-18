@@ -214,10 +214,12 @@ Implemented and verified on the current host:
   are ready. `--apply-validated-env-fragment` then appends a managed validated
   reference block to `build/perf/gpu_web_db_offload/external-fixtures.env`.
   `--verify-applied-env-fragment` confirms that managed block still matches
-  the validated reference env before measurement. The strict suite no longer
-  depends on manually copying unvalidated reference fields, and the
-  external-suite handoff map advertises both guarded transfer paths for
-  crash-session recovery and automation.
+  the validated reference env before measurement, and
+  `--write-applied-env-check-report` persists the same state at
+  `build/perf/gpu_web_db_offload/reference-comparator-applied-env-check.md`.
+  The strict suite no longer depends on manually copying unvalidated reference
+  fields, and the external-suite handoff map advertises the guarded transfer
+  and verification paths for crash-session recovery and automation.
 - The readiness handoff now writes
   `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv`, a
   side-effect-free machine-readable map from URL-backed readiness items to the

@@ -218,8 +218,11 @@ implementation-in-progress-recovered
   then appends the managed validated block to the strict
   `build/perf/gpu_web_db_offload/external-fixtures.env` target.
   `--verify-applied-env-fragment` confirms the applied block still matches the
-  validated reference env before measurement. The external suite handoff map
-  now advertises both guarded transfer paths.
+  validated reference env before measurement. `--write-applied-env-check-report`
+  persists the same state at
+  `build/perf/gpu_web_db_offload/reference-comparator-applied-env-check.md`.
+  The external suite handoff map now advertises the guarded transfer and
+  verification paths.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

@@ -64,6 +64,8 @@ emits
 and `--apply-validated-env-fragment` appends a managed validated block into the
 strict external fixture env. `--verify-applied-env-fragment` confirms the
 strict fixture env still matches the validated reference env before measurement.
+The persisted applied-env report is
+`build/perf/gpu_web_db_offload/reference-comparator-applied-env-check.md`.
 
 ## Why This Matters
 
