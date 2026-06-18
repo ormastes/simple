@@ -212,10 +212,12 @@ Implemented and verified on the current host:
   writes `build/perf/gpu_web_db_offload/reference-comparator-validated-external.env`
   after the Simple/uWebSockets/Seastar URLs and uWebSockets/Seastar provenance
   are ready. `--apply-validated-env-fragment` then appends a managed validated
-  reference block to `build/perf/gpu_web_db_offload/external-fixtures.env`, so
-  the strict suite no longer depends on manually copying unvalidated reference
-  fields. The external-suite handoff map advertises both guarded transfer paths
-  for crash-session recovery and automation.
+  reference block to `build/perf/gpu_web_db_offload/external-fixtures.env`.
+  `--verify-applied-env-fragment` confirms that managed block still matches
+  the validated reference env before measurement. The strict suite no longer
+  depends on manually copying unvalidated reference fields, and the
+  external-suite handoff map advertises both guarded transfer paths for
+  crash-session recovery and automation.
 - The readiness handoff now writes
   `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv`, a
   side-effect-free machine-readable map from URL-backed readiness items to the

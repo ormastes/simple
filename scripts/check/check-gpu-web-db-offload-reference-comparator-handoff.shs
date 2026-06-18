@@ -148,6 +148,45 @@ apply_validated_env_fragment() {
     printf '%s\n' "$target"
 }
 
+verify_applied_env_fragment() {
+    file="${1:-$ENV_TEMPLATE}"
+    target="${2:-$EXTERNAL_FIXTURE_ENV}"
+    if ! check_env_file "$file" >/dev/null; then
+        return 1
+    fi
+    if [ ! -f "$target" ]; then
+        echo "reference-comparator-applied-env=file|missing:$target" >&2
+        return 1
+    fi
+    begin_count="$(grep -c '^# BEGIN validated reference comparator env$' "$target" || true)"
+    end_count="$(grep -c '^# END validated reference comparator env$' "$target" || true)"
+    if [ "$begin_count" -ne 1 ] || [ "$end_count" -ne 1 ]; then
+        echo "reference-comparator-applied-env=managed-block|invalid-count:$begin_count:$end_count" >&2
+        return 1
+    fi
+    status=0
+    for field in \
+        SIMPLE_REFERENCE_PLAINTEXT_URL \
+        UWEBSOCKETS_PLAINTEXT_URL \
+        UWEBSOCKETS_PLAINTEXT_PROVENANCE \
+        SEASTAR_PLAINTEXT_URL \
+        SEASTAR_PLAINTEXT_PROVENANCE
+    do
+        expected="$(env_value "$field" "$file")"
+        actual="$(env_value "$field" "$target")"
+        if [ "$expected" != "$actual" ]; then
+            echo "reference-comparator-applied-env=$field|mismatch" >&2
+            status=1
+        fi
+    done
+    if [ "$status" -eq 0 ]; then
+        echo "STATUS: PASS gpu web/db reference comparator applied env"
+    else
+        echo "STATUS: FAIL gpu web/db reference comparator applied env"
+    fi
+    return "$status"
+}
+
 env_check_rows() {
     file="${1:-$ENV_TEMPLATE}"
     if [ ! -f "$file" ]; then
@@ -267,11 +306,12 @@ The guarded strict fixture env target is \`$EXTERNAL_FIXTURE_ENV\`.
 2. Run \`scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --check-env-file $ENV_TEMPLATE\`.
 3. Run \`scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --write-validated-env-fragment $ENV_TEMPLATE $VALIDATED_ENV_FRAGMENT\`.
 4. Run \`scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --apply-validated-env-fragment $ENV_TEMPLATE $EXTERNAL_FIXTURE_ENV\`.
-5. Run \`EXTERNAL_FIXTURE_ENV_FILE=$EXTERNAL_FIXTURE_ENV $CANONICAL_PROXY_PRODUCER\`.
-6. Run \`$CANONICAL_WEB_REPORT\`.
-7. Run \`$CANONICAL_EXTERNAL_SUITE --refresh-status\`.
-8. Run \`$CANONICAL_EXTERNAL_SUITE --require-ready\`.
-9. Run \`$CANONICAL_FASTEST_AUDIT --require-ready\`.
+5. Run \`scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --verify-applied-env-fragment $ENV_TEMPLATE $EXTERNAL_FIXTURE_ENV\`.
+6. Run \`EXTERNAL_FIXTURE_ENV_FILE=$EXTERNAL_FIXTURE_ENV $CANONICAL_PROXY_PRODUCER\`.
+7. Run \`$CANONICAL_WEB_REPORT\`.
+8. Run \`$CANONICAL_EXTERNAL_SUITE --refresh-status\`.
+9. Run \`$CANONICAL_EXTERNAL_SUITE --require-ready\`.
+10. Run \`$CANONICAL_FASTEST_AUDIT --require-ready\`.
 
 The final two gates must pass before claiming strict fastest-comparator
 coverage for uWebSockets or Seastar.
@@ -338,6 +378,13 @@ if [ "${1:-}" = "--apply-validated-env-fragment" ]; then
     apply_validated_env_fragment "$src" "$target"
     echo "STATUS: PASS gpu web/db reference comparator env applied"
     exit 0
+fi
+
+if [ "${1:-}" = "--verify-applied-env-fragment" ]; then
+    src="${2:-$ENV_TEMPLATE}"
+    target="${3:-$EXTERNAL_FIXTURE_ENV}"
+    verify_applied_env_fragment "$src" "$target"
+    exit $?
 fi
 
 if [ "${1:-}" = "--check-env-file" ]; then
@@ -416,6 +463,12 @@ EOF
         echo "ERROR: expected exactly one managed reference env block" >&2
         exit 1
     fi
+    verify_applied_env_fragment "$ready" "$applied" | grep -q '^STATUS: PASS gpu web/db reference comparator applied env$'
+    sed 's#UWEBSOCKETS_PLAINTEXT_URL="http://127.0.0.1:8085/plaintext"#UWEBSOCKETS_PLAINTEXT_URL="http://127.0.0.1:9999/plaintext"#' "$applied" > "$applied.stale"
+    if verify_applied_env_fragment "$ready" "$applied.stale" >/dev/null 2>&1; then
+        echo "ERROR: stale applied reference env passed verification" >&2
+        exit 1
+    fi
     echo "STATUS: PASS gpu web/db reference comparator env check self-test"
     exit 0
 fi
@@ -447,6 +500,7 @@ if [ "${1:-}" = "--self-test" ]; then
     grep -q -- '--check-env-file' "$HANDOFF"
     grep -q -- '--write-validated-env-fragment' "$HANDOFF"
     grep -q -- '--apply-validated-env-fragment' "$HANDOFF"
+    grep -q -- '--verify-applied-env-fragment' "$HANDOFF"
     grep -q 'EXTERNAL_FIXTURE_ENV_FILE=build/perf/gpu_web_db_offload/external-fixtures.env scripts/check/check-web-server-proxy-external-live-compare.shs' "$HANDOFF"
     grep -q 'scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready' "$HANDOFF"
     grep -q 'scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --require-ready' "$HANDOFF"

@@ -62,7 +62,8 @@ After that report is `READY`,
 emits
 `build/perf/gpu_web_db_offload/reference-comparator-validated-external.env`
 and `--apply-validated-env-fragment` appends a managed validated block into the
-strict external fixture env.
+strict external fixture env. `--verify-applied-env-fragment` confirms the
+strict fixture env still matches the validated reference env before measurement.
 
 ## Why This Matters
 
