@@ -315,10 +315,12 @@ Port the runtime and service dependencies used by `src/app/mcp` and `src/app/sim
   A string scan of the resulting stripped binaries found no
   `libsimple_native_all`, `rust-hosted`, `_Unwind`, or `unwind` markers.
 - The row is still not done: both package builds emitted unresolved-stub
-  warnings, and the production wrappers still document native `tools/call`
-  blockers. Next closure action: remove or intentionally classify the remaining
-  package stubs and fix/prove native `tools/call` before claiming full
-  MCP/LSP package parity.
+  warnings, production wrappers still document native `tools/call` blockers,
+  and the current native smoke only proves initialize/tools-list framing. Row
+  closure requires `check-mcp-native-smoke.shs` to include successful native
+  `tools/call` assertions for both MCP and LSP plus an `unknown tool` failure
+  case, and it requires unresolved native stubs to be removed or explicitly
+  documented as tolerated before claiming full MCP/LSP package parity.
 
 ## Workstream 3: Package MCP/LSP Binaries On Core Lanes
 

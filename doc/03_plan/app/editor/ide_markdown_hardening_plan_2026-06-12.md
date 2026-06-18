@@ -28,10 +28,25 @@ wiki-index hardening (35), view-layer (45), 7 `ide_*_harden_spec.spl` files.
 9 failures in 4 files, present at baseline `37d11d8da27` (not caused by
 Phase 1; verified via empty diff on those areas):
 
-- `test/01_unit/lib/editor/editor_path_text_spec.spl`
-- `test/01_unit/lib/editor/host_simpleos_surface_contract_spec.spl`
-- `test/01_unit/lib/editor/multi_buffer_spec.spl`
-- `test/01_unit/lib/editor/split_pane_spec.spl`
+- `test/01_unit/lib/editor/editor_path_text_spec.spl`: 3 passed, 2 failed
+  (`keeps GUI shell path and payload helpers in shared lib`,
+  `keeps reusable editor modules on shared path helpers`).
+- `test/01_unit/lib/editor/host_simpleos_surface_contract_spec.spl`: 3
+  passed, 5 failed (`documents host adapters outside the SimpleOS-safe path`,
+  `documents legacy VS Code docs pointed at current shared IDE surfaces`,
+  `wraps editor GUI HTML for pure Simple web before host presentation`,
+  `documents the live editor MCP subset without overclaiming the full catalog`,
+  `documents pure Simple render proof separately from Tauri shell proof`).
+- `test/01_unit/lib/editor/multi_buffer_spec.spl`: 0 passed, 1 failed
+  (file-level failure).
+- `test/01_unit/lib/editor/split_pane_spec.spl`: 0 passed, 1 failed
+  (file-level failure).
+
+Native-mode root-cause probes point at
+`src/lib/nogc_sync_mut/editor/panels/inspector.spl` field inference for
+`SceneNodeData.sprite_texture` and `src/lib/editor/70.backend/gui_backend.spl`
+`ANY.selected_index` / wrapper inference. Fix those lowering blockers before
+rerunning the four focused specs.
 
 Root-cause each (no skip/weakening per no-cover-up rule). Run with
 `SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed`.
