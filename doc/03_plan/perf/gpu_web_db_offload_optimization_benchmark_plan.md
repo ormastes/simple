@@ -600,6 +600,22 @@ claims unless the same workload and hardware are reproduced locally:
   workloads.
   <https://github.com/cmu-db/benchbase>
 
+## Fastest-Server Parity Guardrail
+
+Current reports contain real measured baseline rows for local NGINX-style
+static HTTP comparisons, Caddy/H2O static fixtures, HAProxy/Envoy cached proxy
+fixtures, HAProxy upload/tunnel fixtures, dynamic CPU/GPU Simple routes, and
+ClickHouse/DuckDB/PostgreSQL/MongoDB/Redis-style DB baseline rows when those
+fixtures are configured. Treat these as scoped fixture evidence only.
+
+Do not claim Simple is faster than NGINX, Redis/Valkey, uWebSockets, Seastar,
+or TechEmpower-leading servers from the current reports. A fastest-server
+claim requires production-shape comparator endpoints, identical payloads and
+connection profiles, p50/p95/p99/error evidence, CPU/RSS accounting, and a
+strict `--require-ready` suite run with the real comparator URLs filled. The
+repo-local required suite proves required proxy/dynamic/DB fixture wiring; it
+does not replace real uWebSockets or Seastar reference services.
+
 ## Benchmark Matrix
 
 ### Web Server / Reverse Proxy
