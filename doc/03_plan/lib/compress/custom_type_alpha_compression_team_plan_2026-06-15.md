@@ -43,6 +43,17 @@ types in `src/lib/common/compress/types.spl` (extend existing): `LzToken` enum
 façade shape (`CompressionCodec`, `CompressionOptions`, `compress_bytes`,
 `try_compress_bytes`, `encoder_finish_checked`).
 
+Status 2026-06-18: Phase 0 type barrier is implemented under the existing typed
+compression namespace. Evidence: `src/lib/common/bytes/checksum.spl` owns
+`Crc32` and `Adler32`; `src/lib/common/compress/typed/types.spl` defines
+`LzToken`, `HuffTable`, `FseTable`, `SymbolFreqs`, `Plaintext`, and
+`Compressed`; `src/lib/common/compress/typed/__init__.spl` exports those names;
+`SIMPLE_LIB=src bin/simple check src/lib/common/compress/typed/types.spl
+src/lib/common/compress/typed/__init__.spl` passed; and
+`SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/compress/typed/types_spec.spl
+--mode=interpreter` passed 28 tests. The plan remains open for Phase 1 codec
+refactors and Phase 2 hardening/parity.
+
 ### Phase 1 — Codec refactor onto custom types (disjoint scope)
 | Sub-team | Scope (files) | Custom types | C oracle |
 |----------|---------------|--------------|----------|

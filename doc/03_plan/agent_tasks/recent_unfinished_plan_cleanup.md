@@ -78,8 +78,8 @@ must not revert concurrent changes, and must preserve unrelated worktree edits.
 | `doc/03_plan/ui/web_browser/simple_web_server_exe_path_2026-05-27.md` | `needs-implementation` | App/UI Spark | Finish Phase 2: resolve compiled-mode extern gaps, build the native binary, and benchmark. |
 | `doc/03_plan/ui/web_browser/simple_browser_chromium_html_parity.md` | `needs-implementation` | App/UI Spark | Extend beyond the current geometry lane by closing deeper layout/lattice coverage and remaining objective-scope fixtures. |
 | `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md` | `needs-implementation` | Review-Discovered Spark | Finish R1 step 3 by reconciling the two lint surfaces on one `LintConfig`, then continue the remaining reliable-mode rungs. |
-| `doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md` | `needs-implementation` | Review-Discovered Spark | Start and complete Phase 0: consume the shared foundation barrier and add `src/lib/common/search/types.spl`. |
-| `doc/03_plan/lib/compress/custom_type_alpha_compression_team_plan_2026-06-15.md` | `needs-implementation` | Review-Discovered Spark | Start and complete Phase 0: consume the crypto barrier, move checksum types, and add `src/lib/common/compress/types.spl`. |
+| `doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md` | `needs-implementation` | Review-Discovered Spark | Phase 0 type barrier marked complete 2026-06-18 with `src/lib/common/search/types.spl` check evidence; next step is Phase 1 exact/multi/prefilter/SIMD refactor work. |
+| `doc/03_plan/lib/compress/custom_type_alpha_compression_team_plan_2026-06-15.md` | `needs-implementation` | Review-Discovered Spark | Phase 0 type barrier marked complete 2026-06-18 with checksum barrier, typed exports, and 28-test `compress/typed/types_spec.spl` evidence; next step is Phase 1 codec refactors. |
 
 ## Spark Audit Result
 

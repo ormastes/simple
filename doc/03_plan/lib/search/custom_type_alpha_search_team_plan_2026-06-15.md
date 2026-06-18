@@ -37,6 +37,14 @@ Consume crypto §Phase-0. Add only search-domain types from the research
 mirrors the crypto seam probe: attempt `PostingList<Id>` as a true generic first;
 file a language item if it forces erasure/`[u8]` fallback.
 
+Status 2026-06-18: Phase 0 is complete for the search type barrier. Evidence:
+`src/lib/common/search/types.spl` defines `Haystack`, `Pattern`, `MatchSpan`,
+`PostingList<Id>`, `Embedding<D>`, and `Score`; it imports the shared
+`std.common.bytes.span` foundation; and
+`SIMPLE_LIB=src bin/simple check src/lib/common/search/types.spl` passed. The
+plan remains open for Phase 1 exact/multi/prefilter/SIMD refactors and Phase 2
+index/rank/ANN work.
+
 ### Phase 1 — Exact + prefilter (disjoint scope)
 | Sub-team | Scope | Custom types |
 |----------|-------|--------------|
