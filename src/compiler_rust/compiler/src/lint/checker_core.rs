@@ -405,6 +405,9 @@ impl LintChecker {
             // Check runtime family GC/noalloc dependency boundaries
             self.check_gc_boundary_imports(items, &source_file);
 
+            // Check for raw rt_* runtime intrinsic declarations outside privileged tiers
+            self.check_raw_rt_access(items, &source_file);
+
             // Check for bypass directories with code files
             self.check_bypass_validity(items, &source_file);
         }

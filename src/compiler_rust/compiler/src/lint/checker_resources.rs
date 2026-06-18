@@ -602,6 +602,49 @@ impl LintChecker {
         check_use_stmts(self, items, source_family);
     }
 
+    /// Check that raw `rt_*` runtime intrinsics are not declared outside the
+    /// privileged runtime tiers.
+    ///
+    /// Only source files under `src/lib/` or `src/runtime/` may declare
+    /// `extern fn rt_<name>(...)`. Any other module (notably `src/app/**`,
+    /// `examples/**`, and external user projects) must route through a std
+    /// wrapper (e.g. `std.io_runtime`) instead of declaring the intrinsic.
+    pub fn check_raw_rt_access(&mut self, items: &[Node], source_file: &Path) {
+        // Privileged tiers may declare raw intrinsics directly.
+        if source_path_is_privileged(source_file) {
+            return;
+        }
+
+        fn check_items(checker: &mut LintChecker, items: &[Node]) {
+            for node in items {
+                match node {
+                    Node::Extern(ext) if ext.name.starts_with("rt_") => {
+                        checker.emit(
+                            LintName::RawRtAccess,
+                            ext.span,
+                            format!(
+                                "application code must not declare raw runtime intrinsic `{}` directly",
+                                ext.name
+                            ),
+                            Some(
+                                "use the std wrapper (e.g. std.io_runtime.file_read / file_write) instead of extern fn rt_*"
+                                    .to_string(),
+                            ),
+                        );
+                    }
+                    Node::ModDecl(mod_decl) => {
+                        if let Some(ref body) = mod_decl.body {
+                            check_items(checker, body);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        check_items(self, items);
+    }
+
     /// Check if a bypass directory incorrectly contains .spl code files.
     ///
     /// When __init__.spl has `#[bypass]`, the directory must contain only
@@ -780,6 +823,23 @@ impl LintChecker {
             false
         }
     }
+}
+
+/// Returns true when the source file lives in a privileged runtime tier:
+/// any path containing a `src/lib/`, `src/runtime/`, or `src/compiler/`
+/// segment. The compiler itself defines and bridges the `rt_*` runtime
+/// interface, so it must declare those intrinsics directly (it cannot route
+/// through std wrappers without circularity). Robust to both relative and
+/// absolute paths since the segment pair appears regardless of prefix.
+fn source_path_is_privileged(source_file: &Path) -> bool {
+    let components: Vec<String> = source_file
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect();
+
+    components.windows(2).any(|pair| {
+        pair[0] == "src" && (pair[1] == "lib" || pair[1] == "runtime" || pair[1] == "compiler")
+    })
 }
 
 fn runtime_family_from_source_path(source_file: &Path) -> Option<RuntimeFamily> {
