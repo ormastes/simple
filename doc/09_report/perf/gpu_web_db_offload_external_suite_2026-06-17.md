@@ -40,6 +40,8 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | reference_comparator_env | `build/perf/gpu_web_db_offload/reference-comparator-fixtures.env` |
 | reference_comparator_env_fields_tsv | `build/perf/gpu_web_db_offload/reference-comparator-env-fields.tsv` |
 | reference_comparator_env_check_report | `build/perf/gpu_web_db_offload/reference-comparator-env-check.md` |
+| reference_comparator_validated_env_fragment | `build/perf/gpu_web_db_offload/reference-comparator-validated-external.env` |
+| reference_comparator_external_fixture_env | `build/perf/gpu_web_db_offload/external-fixtures.env` |
 | reference_comparator_handoff | `build/perf/gpu_web_db_offload/reference-comparator-handoff.md` |
 | fastest_comparator_status_json | `build/perf/gpu_web_db_offload/fastest-comparator-status.json` |
 | fastest_comparator_coverage_tsv | `build/perf/gpu_web_db_offload/fastest-comparator-coverage.tsv` |

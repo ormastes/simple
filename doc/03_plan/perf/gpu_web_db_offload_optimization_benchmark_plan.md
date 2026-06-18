@@ -214,7 +214,8 @@ Implemented and verified on the current host:
   are ready. `--apply-validated-env-fragment` then appends a managed validated
   reference block to `build/perf/gpu_web_db_offload/external-fixtures.env`, so
   the strict suite no longer depends on manually copying unvalidated reference
-  fields.
+  fields. The external-suite handoff map advertises both guarded transfer paths
+  for crash-session recovery and automation.
 - The readiness handoff now writes
   `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv`, a
   side-effect-free machine-readable map from URL-backed readiness items to the
