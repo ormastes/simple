@@ -104,6 +104,11 @@ Already completed:
   `scripts/tool/renderdoc-evidence.shs`,
   `scripts/lib/renderdoc-evidence-common.shs`,
   `test/helpers/renderdoc_capture_helper.shs`, and the setup/check wrappers.
+- The macOS portability restart path was run on 2026-06-18 and recorded in
+  `doc/09_report/html_css_macos_moltenvk_portability_probe_2026-06-18.md`.
+  That report is supplemental evidence for this macOS host: Metal is present,
+  Homebrew `vulkan-tools` verifies Apple M4 through MoltenVK, and
+  `renderdoccmd` is unavailable, so no macOS `.rdc` capture was produced.
 
 Do not repeat these completed checks unless a related file changed:
 
@@ -113,11 +118,18 @@ Do not repeat these completed checks unless a related file changed:
   Chrome, RenderDoc, GPU, and VM capability state documented in
   `doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md`.
 
-Remaining goal:
+Completed restart-path goal:
+
+- The plan's alternative restart path to add a macOS/MoltenVK portability
+  report is complete for the current macOS host:
+  `doc/09_report/html_css_macos_moltenvk_portability_probe_2026-06-18.md`.
+
+Remaining original gate:
 
 - Produce original Chrome HTML/CSS RenderDoc evidence on a host where
-  Chrome-on-Vulkan can be captured without the documented GPU-process crash, or
-  add a new portability report for macOS/MoltenVK or another external host.
+  Chrome-on-Vulkan can be captured without the documented GPU-process crash.
+  The external-host completion gate below remains the required proof for that
+  original Linux/Chrome/Vulkan `.rdc` evidence.
 
 Valid restart paths:
 
