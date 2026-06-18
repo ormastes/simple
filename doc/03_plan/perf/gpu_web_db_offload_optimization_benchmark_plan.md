@@ -148,7 +148,9 @@ Implemented and verified on the current host:
   PostgreSQL, MongoDB, and Redis fixtures. Use
   `--write-local-env-candidates` only after the matching local containers and
   Simple route fixtures are actually running; copy only verified values into
-  `external-fixtures.env`.
+  `external-fixtures.env`. The external suite includes this as the
+  `write-local-env-candidates` step and advertises the path through
+  `external-suite-handoff=local_env_candidates|...`.
 - Optional Seastar/uWebSockets-style plaintext reference baselines are now
   first-class URL-driven handoff rows. Fill `SIMPLE_REFERENCE_PLAINTEXT_URL`
   plus `UWEBSOCKETS_PLAINTEXT_URL` and/or `SEASTAR_PLAINTEXT_URL` to let the

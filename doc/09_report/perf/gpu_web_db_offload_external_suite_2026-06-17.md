@@ -5,7 +5,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 
 ## Summary
 
-- Suite steps: `30`
+- Suite steps: `31`
 - Missing fixture items: `29`
 - Verdict: `WAITING_ON_FIXTURES`
 
@@ -25,6 +25,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | env_fields | `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv` |
 | blocker_manifest | `build/perf/gpu_web_db_offload/external-fixture-blockers.tsv` |
 | env_hints | `build/perf/gpu_web_db_offload/external-fixture-env-hints.md` |
+| local_env_candidates | `build/perf/gpu_web_db_offload/external-fixture-local-env-candidates.env` |
 | runbook | `build/perf/gpu_web_db_offload/external-fixture-runbook.md` |
 | next_actions | `build/perf/gpu_web_db_offload/external-fixture-next-actions.md` |
 | missing_by_category | `build/perf/gpu_web_db_offload/external-fixture-missing-by-category.env` |
@@ -52,6 +53,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | write-env-fields | `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields` |
 | write-blocker-manifest | `NEXT_ACTIONS_ENV_FILE=build/perf/gpu_web_db_offload/external-fixtures.env scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest` |
 | write-env-hints | `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-hints` |
+| write-local-env-candidates | `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-local-env-candidates` |
 | write-runbook | `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-runbook` |
 | write-next-actions | `NEXT_ACTIONS_ENV_FILE=build/perf/gpu_web_db_offload/external-fixtures.env scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions` |
 | write-missing-by-category | `scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status` |
