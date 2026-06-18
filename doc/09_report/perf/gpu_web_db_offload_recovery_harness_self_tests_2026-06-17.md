@@ -5,7 +5,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 
 ## Summary
 
-- Passed gates: `81`
+- Passed gates: `83`
 - Verdict: `PASS`
 
 ## Gates
@@ -23,6 +23,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 | syntax external DB baseline producer | pass | host-safe-self-test |
 | syntax external fixture readiness | pass | host-safe-self-test |
 | syntax external suite | pass | host-safe-self-test |
+| syntax local required suite | pass | host-safe-self-test |
 | web comparison tool row classification | pass | host-safe-self-test |
 | web comparison measured-row parser | pass | host-safe-self-test |
 | nginx live parser | pass | host-safe-self-test |
@@ -92,4 +93,5 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 | external suite require required ready | pass | host-safe-self-test |
 | external suite default guard | pass | host-safe-self-test |
 | external suite allow partial | pass | host-safe-self-test |
+| local required suite env | pass | host-safe-self-test |
 | external suite plan artifacts | pass | host-safe-self-test |

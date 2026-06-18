@@ -1,0 +1,101 @@
+#!/usr/bin/env sh
+set -eu
+
+BUILD_DIR="build/perf/gpu_web_db_offload"
+LOCAL_ENV="$BUILD_DIR/external-fixtures.local-required.env"
+BASE_ENV="${BASE_ENV:-$BUILD_DIR/external-fixtures.env}"
+SUITE="${SUITE:-scripts/check/check-gpu-web-db-offload-external-suite.shs}"
+PROXY_LOCAL="${PROXY_LOCAL:-scripts/check/check-web-server-proxy-external-local-fixture.shs}"
+DYNAMIC_LOCAL="${DYNAMIC_LOCAL:-scripts/check/check-web-server-dynamic-gpu-route-local-fixture.shs}"
+WEB_REPORT="${WEB_REPORT:-scripts/check/check-web-server-nginx-compare-report.shs}"
+DB_BASELINES="${DB_BASELINES:-scripts/check/check-gpu-web-db-offload-external-db-baselines.shs}"
+DB_REPORT="${DB_REPORT:-scripts/check/check-gpu-web-db-offload-benchmark-report.shs}"
+RECOVERY="${RECOVERY:-scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs}"
+
+mkdir -p "$BUILD_DIR"
+
+write_local_required_env() {
+    if [ -f "$BASE_ENV" ]; then
+        cp "$BASE_ENV" "$LOCAL_ENV"
+    else
+        sh scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-template >/dev/null
+        cp "$BASE_ENV" "$LOCAL_ENV"
+    fi
+    python3 - "$LOCAL_ENV" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+values = {
+    "SIMPLE_CACHED_PROXY_URL": "http://127.0.0.1:8090/cacheable",
+    "HAPROXY_CACHED_PROXY_URL": "http://127.0.0.1:8091/cacheable",
+    "ENVOY_CACHED_PROXY_URL": "http://127.0.0.1:8092/cacheable",
+    "SIMPLE_UPLOAD_PROXY_URL": "http://127.0.0.1:8090/upload",
+    "HAPROXY_UPLOAD_PROXY_URL": "http://127.0.0.1:8091/upload",
+    "SIMPLE_TUNNEL_PROXY_URL": "http://127.0.0.1:8090/tunnel",
+    "HAPROXY_TUNNEL_PROXY_URL": "http://127.0.0.1:8091/tunnel",
+    "DYNAMIC_GPU_PLAINTEXT_URL": "http://127.0.0.1:8080/plaintext",
+    "DYNAMIC_CPU_PLAINTEXT_URL": "http://127.0.0.1:8081/plaintext",
+    "DYNAMIC_GPU_JSON_URL": "http://127.0.0.1:8080/json",
+    "DYNAMIC_CPU_JSON_URL": "http://127.0.0.1:8081/json",
+}
+lines = path.read_text(encoding="utf-8").splitlines()
+seen = set()
+out = []
+for line in lines:
+    if "=" not in line or line.lstrip().startswith("#"):
+        out.append(line)
+        continue
+    key = line.split("=", 1)[0].replace("export ", "").strip()
+    if key in values:
+        out.append(f"{key}={values[key]}")
+        seen.add(key)
+    else:
+        out.append(line)
+for key, value in values.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+    printf '%s\n' "$LOCAL_ENV"
+}
+
+if [ "${1:-}" = "--self-test-local-required-env" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    BASE_ENV="$tmpdir/base.env"
+    LOCAL_ENV="$tmpdir/local.env"
+    cat > "$BASE_ENV" <<'EOF'
+SIMPLE_CACHED_PROXY_URL=
+HAPROXY_CACHED_PROXY_URL=
+ENVOY_CACHED_PROXY_URL=
+SIMPLE_UPLOAD_PROXY_URL=
+HAPROXY_UPLOAD_PROXY_URL=
+SIMPLE_TUNNEL_PROXY_URL=
+HAPROXY_TUNNEL_PROXY_URL=
+DYNAMIC_GPU_PLAINTEXT_URL=
+DYNAMIC_CPU_PLAINTEXT_URL=
+DYNAMIC_GPU_JSON_URL=
+DYNAMIC_CPU_JSON_URL=
+CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+EOF
+    write_local_required_env >/dev/null
+    grep -q '^SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable$' "$LOCAL_ENV"
+    grep -q '^HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel$' "$LOCAL_ENV"
+    grep -q '^DYNAMIC_GPU_JSON_URL=http://127.0.0.1:8080/json$' "$LOCAL_ENV"
+    grep -q '^CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default$' "$LOCAL_ENV"
+    echo "STATUS: PASS gpu web/db local required suite env self-test"
+    exit 0
+fi
+
+write_local_required_env >/dev/null
+
+FIXTURE_ENV_FILE="$LOCAL_ENV" EXTERNAL_FIXTURE_ENV_FILE="$LOCAL_ENV" sh "$SUITE" --require-required-ready
+sh "$PROXY_LOCAL"
+sh "$DYNAMIC_LOCAL"
+sh "$WEB_REPORT"
+EXTERNAL_FIXTURE_ENV_FILE="$LOCAL_ENV" sh "$DB_BASELINES"
+EXTERNAL_FIXTURE_ENV_FILE="$LOCAL_ENV" sh "$DB_REPORT"
+sh "$RECOVERY" --check-current-artifacts
+
+echo "STATUS: PASS gpu web/db local required suite"

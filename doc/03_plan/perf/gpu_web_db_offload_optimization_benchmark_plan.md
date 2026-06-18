@@ -53,6 +53,7 @@ Local green evidence already recorded:
 - `sh scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts`
 - `sh scripts/check/check-web-server-proxy-external-local-fixture.shs`
 - `sh scripts/check/check-web-server-dynamic-gpu-route-local-fixture.shs`
+- `sh scripts/check/check-gpu-web-db-offload-local-required-suite.shs`
 
 Current metrics live in:
 
@@ -74,7 +75,10 @@ other words: parts of this lane are already tested against fast external
 servers such as NGINX and Redis/Valkey, but those rows are baseline evidence,
 not speedup claims. They do not yet prove end-to-end parity for live
 proxy/dynamic web workloads against HAProxy, Envoy, Seastar, uWebSockets, or
-complete TechEmpower-style route fixtures.
+complete TechEmpower-style route fixtures. They also do not prove Redis-class
+cache/server throughput parity beyond the recorded Redis/Valkey key/value
+baseline row; a fastest-server claim needs dedicated production-shape fixtures,
+load profiles, and p50/p95/p99/error evidence for each comparator.
 
 ## Current Implementation State
 
@@ -238,6 +242,15 @@ Implemented and verified on the current host:
   `scripts/check/check-gpu-web-db-offload-external-suite.shs --require-required-ready`;
   strict suite completion still uses `--require-ready` so optional reference
   baselines are not silently dropped.
+- The local required-suite bridge now exists at
+  `scripts/check/check-gpu-web-db-offload-local-required-suite.shs`. It writes
+  `build/perf/gpu_web_db_offload/external-fixtures.local-required.env` with the
+  repo-local proxy and dynamic route fixture URLs, proves
+  `--require-required-ready` against that env file, runs the local proxy and
+  dynamic route measured producers, refreshes web and DB reports, and runs the
+  recovery artifact guard. This is the canonical host-local path for required
+  fixture evidence while optional uWebSockets/Seastar reference URLs remain
+  absent.
 - Use `scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status`
   after installing tools or exporting fixture URLs; it refreshes
   `build/perf/gpu_web_db_offload/external-fixture-missing-by-category.env`
@@ -272,6 +285,10 @@ Remaining blockers before this plan can be marked done:
   those values are written into the selected
   `build/perf/gpu_web_db_offload/external-fixtures.env` or exported for the
   suite run. Do not mark the suite complete from the default empty env file.
+- Use `scripts/check/check-gpu-web-db-offload-local-required-suite.shs` to run
+  the required suite path with repo-local proxy and dynamic fixtures. It uses a
+  generated local-required env file instead of mutating the default empty env
+  template.
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_URL` when available.
