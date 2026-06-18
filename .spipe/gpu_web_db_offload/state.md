@@ -171,7 +171,9 @@ implementation-in-progress-recovered
   repo-local proxy/dynamic URLs and generated local DB/proxy container
   candidate values. It does not mutate the default blank strict fixture env and
   explicitly clears optional Simple/uWebSockets/Seastar reference URL and
-  provenance fields so those rows remain strict-suite-only evidence.
+  provenance fields so those rows remain strict-suite-only evidence. The
+  `--write-local-required-env` mode writes only that isolated env file for
+  resumed handoff checks without starting fixtures or measured producers.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

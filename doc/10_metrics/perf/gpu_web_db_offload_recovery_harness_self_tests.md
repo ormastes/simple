@@ -85,4 +85,5 @@
 | external suite default guard | pass | host-safe-self-test |
 | external suite allow partial | pass | host-safe-self-test |
 | local required suite env | pass | host-safe-self-test |
+| local required suite env writer | pass | host-safe-self-test |
 | external suite plan artifacts | pass | host-safe-self-test |
