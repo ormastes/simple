@@ -4,6 +4,7 @@ set -eu
 WEB_TABLE="${WEB_TABLE:-doc/10_metrics/perf/web_server_nginx_compare.md}"
 DB_TABLE="${DB_TABLE:-doc/10_metrics/perf/gpu_web_db_offload_benchmark.md}"
 STATUS_JSON="${STATUS_JSON:-build/perf/gpu_web_db_offload/external-suite-status.json}"
+FASTEST_COMPARATOR_STATUS_JSON="${FASTEST_COMPARATOR_STATUS_JSON:-build/perf/gpu_web_db_offload/fastest-comparator-status.json}"
 
 audit_json() {
     python3 - "$WEB_TABLE" "$DB_TABLE" "$STATUS_JSON" <<'PY'
@@ -100,6 +101,14 @@ if [ "${1:-}" = "--status-json" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--write-status-json" ]; then
+    mkdir -p "$(dirname "$FASTEST_COMPARATOR_STATUS_JSON")"
+    audit_json > "$FASTEST_COMPARATOR_STATUS_JSON"
+    printf '%s\n' "$FASTEST_COMPARATOR_STATUS_JSON"
+    echo "STATUS: PASS gpu web/db fastest comparator evidence status json"
+    exit 0
+fi
+
 if [ "${1:-}" = "--require-ready" ]; then
     json="$(audit_json)"
     AUDIT_JSON="$json" python3 - <<'PY'
@@ -138,6 +147,17 @@ EOF
 EOF
     printf '%s\n' '{"verdict":"READY","optional_missing_fixture_items":0}' > "$status"
     WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --require-ready >/dev/null
+    out="$tmpdir/fastest-status.json"
+    FASTEST_COMPARATOR_STATUS_JSON="$out" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-status-json >/dev/null
+    python3 - "$out" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+assert data["verdict"] == "READY"
+assert data["missing"] == []
+PY
     printf '%s\n' '| reference_plaintext | native_simple_reference_plaintext | seastar_plaintext | wrk | live-fixture-unavailable |' >> "$web"
     sed -i '/uwebsockets_plaintext/d' "$web"
     output="$(WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0")"

@@ -238,7 +238,7 @@ Implemented and verified on the current host:
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
   With the default sourceable `external-fixtures.env` template left blank, the
-  current strict status is 33 suite steps, 29 missing fixture items, 26
+  current strict status is 34 suite steps, 29 missing fixture items, 26
   required missing fixture items, and 3 optional reference fixture URLs. Local
   Docker-backed fixture candidates must be copied into a separate verified env
   file or exported for the suite run before those rows can become ready.
@@ -256,11 +256,13 @@ Implemented and verified on the current host:
 - Fastest-server comparator evidence is now audited by
   `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs`.
   The default mode prints a WARN status with the missing comparator rows,
-  `--status-json` emits the same verdict for automation, and `--require-ready`
-  is the strict gate for a future fastest-server claim. On the current
-  artifacts it reports NGINX static rows and Redis/Valkey measured evidence as
-  ready, while uWebSockets plaintext, Seastar plaintext, and strict external
-  suite readiness remain missing.
+  `--status-json` emits the same verdict for automation,
+  `--write-status-json` persists it at
+  `build/perf/gpu_web_db_offload/fastest-comparator-status.json`, and
+  `--require-ready` is the strict gate for a future fastest-server claim. On
+  the current artifacts it reports NGINX static rows and Redis/Valkey measured
+  evidence as ready, while uWebSockets plaintext, Seastar plaintext, and strict
+  external suite readiness remain missing.
 - The local required-suite bridge now exists at
   `scripts/check/check-gpu-web-db-offload-local-required-suite.shs`. It writes
   `build/perf/gpu_web_db_offload/external-fixtures.local-required.env` with the

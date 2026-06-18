@@ -5,7 +5,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 
 ## Summary
 
-- Suite steps: `33`
+- Suite steps: `34`
 - Missing fixture items: `29`
 - Verdict: `WAITING_ON_FIXTURES`
 
@@ -39,6 +39,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | required_next_actions | `build/perf/gpu_web_db_offload/external-suite-required-next-actions.md` |
 | reference_comparator_env | `build/perf/gpu_web_db_offload/reference-comparator-fixtures.env` |
 | reference_comparator_handoff | `build/perf/gpu_web_db_offload/reference-comparator-handoff.md` |
+| fastest_comparator_status_json | `build/perf/gpu_web_db_offload/fastest-comparator-status.json` |
 
 ## Suite Steps
 
@@ -75,6 +76,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | web-report | `scripts/check/check-web-server-nginx-compare-report.shs` |
 | db-baselines | `scripts/check/check-gpu-web-db-offload-external-db-baselines.shs` |
 | db-report | `scripts/check/check-gpu-web-db-offload-benchmark-report.shs` |
+| write-fastest-comparator-status-json | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --write-status-json` |
 | fastest-comparator-audit | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs` |
 | artifact-consistency | `scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts` |
 

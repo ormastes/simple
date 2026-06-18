@@ -5,7 +5,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 
 ## Summary
 
-- Passed gates: `93`
+- Passed gates: `94`
 - Verdict: `PASS`
 
 ## Gates
@@ -103,5 +103,6 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 | local required suite require required ready | pass | host-safe-self-test |
 | local required suite dry run | pass | host-safe-self-test |
 | fastest comparator evidence | pass | host-safe-self-test |
+| fastest comparator status json | pass | host-safe-self-test |
 | reference comparator handoff | pass | host-safe-self-test |
 | external suite plan artifacts | pass | host-safe-self-test |

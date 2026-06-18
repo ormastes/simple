@@ -141,7 +141,7 @@ implementation-in-progress-recovered
 - evidence: `scripts/check/check-gpu-web-db-offload-external-suite.shs --status`
   prints the suite-step count, missing-fixture item count, and verdict directly.
   With the default generated `external-fixtures.env` template left blank, the
-  current status reports 33 steps, 29 missing fixture items, 26 required
+  current status reports 34 steps, 29 missing fixture items, 26 required
   missing items, 3 optional missing reference items, and
   `WAITING_ON_FIXTURES`.
   It also prints `external-suite-missing=<category>|...`
@@ -183,10 +183,12 @@ implementation-in-progress-recovered
 - implementation: The fastest-comparator evidence audit now exists at
   `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs`.
   It reads the web and DB metrics tables plus the external-suite status JSON,
-  reports current fastest-comparator readiness, and offers `--require-ready`
-  for the final strict claim gate. Current artifacts show NGINX static and
-  Redis/Valkey measured evidence ready, while uWebSockets plaintext, Seastar
-  plaintext, and strict external-suite readiness are still missing.
+  reports current fastest-comparator readiness, persists
+  `build/perf/gpu_web_db_offload/fastest-comparator-status.json` through
+  `--write-status-json`, and offers `--require-ready` for the final strict
+  claim gate. Current artifacts show NGINX static and Redis/Valkey measured
+  evidence ready, while uWebSockets plaintext, Seastar plaintext, and strict
+  external-suite readiness are still missing.
 - implementation: The reference-comparator handoff now exists at
   `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs`.
   It writes the blank
