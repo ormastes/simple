@@ -94,5 +94,6 @@
 | local required suite dry run | pass | host-safe-self-test |
 | fastest comparator evidence | pass | host-safe-self-test |
 | fastest comparator status json | pass | host-safe-self-test |
+| fastest comparator next actions | pass | host-safe-self-test |
 | reference comparator handoff | pass | host-safe-self-test |
 | external suite plan artifacts | pass | host-safe-self-test |
