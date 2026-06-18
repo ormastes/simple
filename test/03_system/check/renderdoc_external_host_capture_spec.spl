@@ -1,0 +1,74 @@
+"""
+# RenderDoc external host capture wrapper
+
+## Overview
+
+Validates the single-command wrapper for the remaining original
+RenderDoc+Chrome HTML/CSS `.rdc` gate. The local test runs readiness-only mode,
+which must not launch Chrome or repeat the known-crashing capture path.
+
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Requirements:** N/A
+**Research:** doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+BUILD_DIR=build/test-renderdoc-external-host-capture \
+REPORT_PATH=build/test-renderdoc-external-host-capture/report.md \
+sh scripts/check/check-renderdoc-external-host-capture.shs
+```
+
+## Acceptance
+
+- Readiness-only mode writes stable `rdoc_external_host_*` evidence keys.
+- Readiness-only mode records `capture-not-requested`.
+- The pass requirement is explicit: original backend, pass status, and `RDOC`
+  magic.
+"""
+
+# @tag: system, gpu, renderdoc, html, external-host, evidence
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _value_of(lines: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = lines.split("\n")
+    var found = ""
+    for line in parts:
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+    found
+
+describe "RenderDoc external host capture wrapper":
+
+    it "writes readiness-only evidence without launching Chrome capture":
+        val command = "rm -rf build/test-renderdoc-external-host-capture && BUILD_DIR=build/test-renderdoc-external-host-capture REPORT_PATH=build/test-renderdoc-external-host-capture/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
+        val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = rt_file_read_text("build/test-renderdoc-external-host-capture/evidence.env") ?? ""
+        expect(evidence).to_contain("rdoc_external_host_capture_status=")
+        expect(evidence).to_contain("rdoc_external_host_capture_reason=")
+        expect(evidence).to_contain("rdoc_external_host_setup_status=")
+        expect(evidence).to_contain("rdoc_external_host_run_capture=0")
+        expect(evidence).to_contain("rdoc_external_host_required_backend=original")
+        expect(evidence).to_contain("rdoc_external_host_required_status=pass")
+        expect(evidence).to_contain("rdoc_external_host_required_magic=RDOC")
+
+        val status = _value_of(evidence, "rdoc_external_host_capture_status")
+        val reason = _value_of(evidence, "rdoc_external_host_capture_reason")
+        val raw_capture = _value_of(evidence, "rdoc_external_host_capture_status_raw")
+        val gate_status = _value_of(evidence, "rdoc_external_host_gate_status")
+
+        expect(status).to_equal("unavailable")
+        expect(reason).to_equal("capture-not-requested")
+        expect(raw_capture).to_equal("not-run")
+        expect(gate_status).to_equal("not-run")
+
+        val report = rt_file_read_text("build/test-renderdoc-external-host-capture/report.md") ?? ""
+        expect(report).to_contain("# RenderDoc External Host Capture")

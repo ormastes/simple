@@ -7,6 +7,7 @@ scripts/setup/setup-renderdoc-env.shs --check
 scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
 scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
+RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 ```
 
 ## Interfaces
@@ -68,11 +69,14 @@ Use the gate when another host or CI job supplies the original
 RenderDoc+Chrome evidence:
 
 ```sh
+RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
+
 RDOC_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/html/evidence.env \
   sh scripts/check/check-renderdoc-html-external-host-gate.shs
 ```
 
-The gate passes only when the source evidence contains:
+The external-host wrapper runs setup, capture, and the gate. The low-level gate
+passes only when the source evidence contains:
 
 - `rdoc_backend=original`
 - `rdoc_capture_status=pass`
@@ -81,6 +85,10 @@ The gate passes only when the source evidence contains:
 
 Otherwise it writes fail-closed evidence under
 `build/renderdoc/html-external-host-gate/evidence.env`.
+
+Without `RDOC_EXTERNAL_RUN_CAPTURE=1`, the wrapper performs a readiness-only
+run and writes `rdoc_external_host_capture_status=unavailable` with
+`rdoc_external_host_capture_reason=capture-not-requested`.
 
 ## macOS Notes
 

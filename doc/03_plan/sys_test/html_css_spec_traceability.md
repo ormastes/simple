@@ -115,6 +115,8 @@ Valid restart paths:
   `scripts/tool/renderdoc-evidence.shs capture-html`, then validate the
   resulting `evidence.env` with
   `scripts/check/check-renderdoc-html-external-host-gate.shs`.
+  Canonical single-command wrapper:
+  `RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs`.
 - macOS portability probe: run the macOS checks below and write a new
   `doc/09_report/` entry. Treat the result as supplemental unless it satisfies
   the same original RenderDoc+Chrome `.rdc` gate.
@@ -155,6 +157,17 @@ Current canonical local evidence:
   segfaulted through RenderDoc before emitting a capture.
 
 External-host completion gate:
+
+```sh
+RDOC_EXTERNAL_RUN_CAPTURE=1 \
+  sh scripts/check/check-renderdoc-external-host-capture.shs
+```
+
+The wrapper runs setup, `capture-html`, and the gate in order. For readiness or
+dry-run checks, omit `RDOC_EXTERNAL_RUN_CAPTURE=1`; it records typed
+`capture-not-requested` evidence without launching Chrome.
+
+Low-level gate:
 
 ```sh
 RDOC_HTML_EVIDENCE_ENV=<path-to-original-chrome-renderdoc-evidence.env> \

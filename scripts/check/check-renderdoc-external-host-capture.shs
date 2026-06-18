@@ -1,0 +1,138 @@
+#!/bin/sh
+# One-command external-host wrapper for the remaining original
+# RenderDoc+Chrome HTML/CSS capture gate.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/html-external-host-capture}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_external_host_capture_$(date -u +%F).md}"
+RUN_CAPTURE="${RDOC_EXTERNAL_RUN_CAPTURE:-0}"
+CAPTURE_OUT="$BUILD_DIR/capture"
+SETUP_OUT="$BUILD_DIR/setup.out"
+GATE_OUT="$BUILD_DIR/gate.out"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+setup_status="unavailable"
+setup_reason="not-run"
+capture_status="not-run"
+capture_reason="not-run"
+capture_env="${RDOC_HTML_EVIDENCE_ENV:-$CAPTURE_OUT/html/evidence.env}"
+gate_status="not-run"
+gate_reason="not-run"
+overall_status="unavailable"
+overall_reason="capture-not-requested"
+
+if scripts/setup/setup-renderdoc-env.shs --check >"$SETUP_OUT" 2>&1; then
+    setup_status="ready"
+    setup_reason="ready"
+else
+    setup_status="unavailable"
+    setup_reason="$(awk -F= '/^rdoc_status=/ { print $2; exit }' "$SETUP_OUT" 2>/dev/null || true)"
+    if [ "$setup_reason" = "" ]; then
+        setup_reason="setup-check-failed"
+    fi
+fi
+
+if [ "$RUN_CAPTURE" = "1" ]; then
+    if [ "$setup_status" = "ready" ]; then
+        if RDOC_OUTPUT_DIR="$CAPTURE_OUT" scripts/tool/renderdoc-evidence.shs capture-html >"$BUILD_DIR/capture-html.out" 2>&1; then
+            capture_status="$(awk -F= '/^rdoc_capture_status=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+            capture_reason="$(awk -F= '/^rdoc_capture_reason=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+            if [ "$capture_status" = "" ]; then
+                capture_status="unknown"
+                capture_reason="missing-capture-evidence"
+            fi
+        else
+            capture_status="$(awk -F= '/^rdoc_capture_status=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+            capture_reason="$(awk -F= '/^rdoc_capture_reason=/ { print $2; exit }' "$capture_env" 2>/dev/null || true)"
+            if [ "$capture_status" = "" ]; then
+                capture_status="fail"
+                capture_reason="capture-command-failed"
+            fi
+        fi
+    else
+        capture_status="unavailable"
+        capture_reason="$setup_reason"
+    fi
+fi
+
+if [ -f "$capture_env" ]; then
+    if RDOC_HTML_EVIDENCE_ENV="$capture_env" \
+        BUILD_DIR="$BUILD_DIR/gate" \
+        REPORT_PATH="$BUILD_DIR/gate/report.md" \
+        sh scripts/check/check-renderdoc-html-external-host-gate.shs >"$GATE_OUT" 2>&1; then
+        gate_status="pass"
+        gate_reason="pass"
+    else
+        gate_status="$(awk -F= '/^rdoc_html_external_gate_status=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        gate_reason="$(awk -F= '/^rdoc_html_external_gate_reason=/ { print $2; exit }' "$BUILD_DIR/gate/evidence.env" 2>/dev/null || true)"
+        if [ "$gate_status" = "" ]; then
+            gate_status="fail"
+            gate_reason="gate-command-failed"
+        fi
+    fi
+fi
+
+if [ "$gate_status" = "pass" ]; then
+    overall_status="pass"
+    overall_reason="pass"
+elif [ "$RUN_CAPTURE" != "1" ]; then
+    overall_status="unavailable"
+    overall_reason="capture-not-requested"
+elif [ "$setup_status" != "ready" ]; then
+    overall_status="unavailable"
+    overall_reason="$setup_reason"
+else
+    overall_status="fail"
+    overall_reason="${gate_reason:-capture-not-pass}"
+fi
+
+{
+    echo "rdoc_external_host_capture_status=$overall_status"
+    echo "rdoc_external_host_capture_reason=$overall_reason"
+    echo "rdoc_external_host_setup_status=$setup_status"
+    echo "rdoc_external_host_setup_reason=$setup_reason"
+    echo "rdoc_external_host_run_capture=$RUN_CAPTURE"
+    echo "rdoc_external_host_capture_env=$capture_env"
+    echo "rdoc_external_host_capture_status_raw=$capture_status"
+    echo "rdoc_external_host_capture_reason_raw=$capture_reason"
+    echo "rdoc_external_host_gate_status=$gate_status"
+    echo "rdoc_external_host_gate_reason=$gate_reason"
+    echo "rdoc_external_host_required_backend=original"
+    echo "rdoc_external_host_required_status=pass"
+    echo "rdoc_external_host_required_magic=RDOC"
+} >"$OUT_ENV"
+
+{
+    echo "# RenderDoc External Host Capture"
+    echo
+    echo "- status: $overall_status"
+    echo "- reason: $overall_reason"
+    echo "- setup status: $setup_status"
+    echo "- setup reason: $setup_reason"
+    echo "- run capture: $RUN_CAPTURE"
+    echo "- capture env: $capture_env"
+    echo "- capture status: $capture_status"
+    echo "- capture reason: $capture_reason"
+    echo "- gate status: $gate_status"
+    echo "- gate reason: $gate_reason"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$overall_status" = "pass" ]; then
+    exit 0
+fi
+
+if [ "$RUN_CAPTURE" = "1" ]; then
+    exit 1
+fi
+
+exit 0
