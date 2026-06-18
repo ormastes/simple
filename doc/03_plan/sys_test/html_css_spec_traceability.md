@@ -76,6 +76,52 @@ then verifies:
   assignment through
   `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.spl`.
 
+## Restart Checklist
+
+Use this section when restarting the goal from this plan doc.
+
+Already completed:
+
+- HTML inventory traceability exists for the current WHATWG element set used by
+  this audit, including `selectedcontent`.
+- CSS traceability exists for the implemented Simple Web subset and for
+  unsupported W3C CSS properties through the inventory SSpec.
+- Common generated GUI HTML/CSS combinations have executable SSpec coverage.
+- Simple in-application Vulkan/RenderDoc evidence has passed locally with a
+  valid `.rdc` magic header.
+- RenderDoc helper infrastructure exists through
+  `scripts/tool/renderdoc-evidence.shs`,
+  `scripts/lib/renderdoc-evidence-common.shs`,
+  `test/helpers/renderdoc_capture_helper.shs`, and the setup/check wrappers.
+
+Do not repeat these completed checks unless a related file changed:
+
+- `sh scripts/check/check-html-css-sspec-traceability.shs`
+- `scripts/tool/renderdoc-evidence.shs capture-simple`
+- local host/Docker/QEMU attempts to run Chrome under RenderDoc with the same
+  Chrome, RenderDoc, GPU, and VM capability state documented in
+  `doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md`.
+
+Remaining goal:
+
+- Produce original Chrome HTML/CSS RenderDoc evidence on a host where
+  Chrome-on-Vulkan can be captured without the documented GPU-process crash, or
+  add a new portability report for macOS/MoltenVK or another external host.
+
+Valid restart paths:
+
+- External Linux host or CI: run `scripts/setup/setup-renderdoc-env.shs
+  --check`, register the Vulkan layer, run
+  `scripts/tool/renderdoc-evidence.shs capture-html`, then validate the
+  resulting `evidence.env` with
+  `scripts/check/check-renderdoc-html-external-host-gate.shs`.
+- macOS portability probe: run the macOS checks below and write a new
+  `doc/09_report/` entry. Treat the result as supplemental unless it satisfies
+  the same original RenderDoc+Chrome `.rdc` gate.
+- Privileged local GPU passthrough: only after operator approval to bind an
+  isolated GPU group to `vfio-pci`; then run a desktop guest with real GPU
+  Vulkan, Chrome, and RenderDoc.
+
 ## Vulkan/RenderDoc Follow-Up
 
 Linux software-renderer SSpec coverage does not prove Vulkan IO-level behavior.
