@@ -389,10 +389,29 @@ scenario comment, file comment, nearest folder/root config, built-in default.
 Invalid manual visibility metadata renders a manual warning and leaves the
 scenario visible by default so the generated doc is still reviewable.
 
+File-level layout metadata controls where the scenario manual appears in the
+generated page:
+
+```simple
+# @manual-layout: manual-first
+describe "Operator flow":
+    # @manual: show
+    it "starts with the primary operator scenario":
+        ...
+```
+
+Use `manual-first` for exemplar operator manuals where the first screen must
+open on visible scenario steps. Omit it for the default `summary-first` layout,
+which keeps the summary card, dependency diagram, and test-count table before a
+folded full manual.
+
 ## SDN Diagrams in Generated Docs
 
-Generated docs now include a summary card with an SDN diagram placeholder at
-the top. The full scenario manual is folded below in a `<details>` block.
+Generated docs use the summary-first layout by default: a summary card with an
+SDN diagram placeholder appears at the top, and the full scenario manual is
+folded below in a `<details>` block. `# @manual-layout: manual-first` is the
+opt-in exception for primary operator manuals that must open directly with the
+scenario flow.
 
 The diagram is auto-generated from the spec's `use` imports, showing which
 modules the spec depends on. After generating docs, run:
