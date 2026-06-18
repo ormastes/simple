@@ -2,7 +2,7 @@
 
 | metric | value |
 |---|---:|
-| suite_steps | 36 |
+| suite_steps | 37 |
 | missing_fixture_items | 29 |
 | missing_data_source | fixture-env-file:build/perf/gpu_web_db_offload/external-fixtures.env |
 | strict_readiness_command | scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready |
@@ -32,6 +32,7 @@
 | completion_audit | `build/perf/gpu_web_db_offload/external-suite-completion-audit.md` |
 | required_next_actions | `build/perf/gpu_web_db_offload/external-suite-required-next-actions.md` |
 | reference_comparator_env | `build/perf/gpu_web_db_offload/reference-comparator-fixtures.env` |
+| reference_comparator_env_fields_tsv | `build/perf/gpu_web_db_offload/reference-comparator-env-fields.tsv` |
 | reference_comparator_handoff | `build/perf/gpu_web_db_offload/reference-comparator-handoff.md` |
 | fastest_comparator_status_json | `build/perf/gpu_web_db_offload/fastest-comparator-status.json` |
 | fastest_comparator_next_actions | `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.md` |
@@ -76,6 +77,7 @@
 | write-completion-audit | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-completion-audit` |
 | write-required-next-actions | `scripts/check/check-gpu-web-db-offload-external-suite.shs --write-required-next-actions` |
 | write-reference-comparator-handoff | `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs` |
+| write-reference-comparator-env-fields-tsv | `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --write-env-fields-tsv` |
 | readiness | `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs` |
 | nginx-live | `scripts/check/check-web-server-nginx-live-compare.shs` |
 | static-external | `scripts/check/check-web-server-static-external-live-compare.shs` |

@@ -3,6 +3,7 @@ set -eu
 
 BUILD_DIR="${BUILD_DIR:-build/perf/gpu_web_db_offload}"
 ENV_TEMPLATE="${ENV_TEMPLATE:-$BUILD_DIR/reference-comparator-fixtures.env}"
+ENV_FIELDS_TSV="${ENV_FIELDS_TSV:-$BUILD_DIR/reference-comparator-env-fields.tsv}"
 HANDOFF="${HANDOFF:-$BUILD_DIR/reference-comparator-handoff.md}"
 PROXY_PRODUCER="${PROXY_PRODUCER:-scripts/check/check-web-server-proxy-external-live-compare.shs}"
 WEB_REPORT="${WEB_REPORT:-scripts/check/check-web-server-nginx-compare-report.shs}"
@@ -26,6 +27,17 @@ SEASTAR_PLAINTEXT_PROVENANCE=
 EOF
 }
 
+emit_env_fields_tsv() {
+    cat <<'EOF'
+field	required_for	description
+SIMPLE_REFERENCE_PLAINTEXT_URL	uwebsockets_plaintext,seastar_plaintext	Simple plaintext route with the same payload and connection profile
+UWEBSOCKETS_PLAINTEXT_URL	uwebsockets_plaintext	Real uWebSockets plaintext endpoint URL
+UWEBSOCKETS_PLAINTEXT_PROVENANCE	uwebsockets_plaintext	Binary, image, or commit identifying the uWebSockets reference implementation
+SEASTAR_PLAINTEXT_URL	seastar_plaintext	Real Seastar plaintext endpoint URL
+SEASTAR_PLAINTEXT_PROVENANCE	seastar_plaintext	Binary, image, or commit identifying the Seastar reference implementation
+EOF
+}
+
 emit_handoff() {
     cat <<EOF
 # GPU Web/DB Reference Comparator Handoff
@@ -44,6 +56,8 @@ values, and does not claim fastest-server evidence.
 | uWebSockets provenance | \`UWEBSOCKETS_PLAINTEXT_PROVENANCE\` | Binary, image, or commit identifying the reference implementation |
 | Seastar plaintext | \`SEASTAR_PLAINTEXT_URL\` | Real Seastar-style plaintext reference endpoint |
 | Seastar provenance | \`SEASTAR_PLAINTEXT_PROVENANCE\` | Binary, image, or commit identifying the reference implementation |
+
+The machine-readable field map is \`$ENV_FIELDS_TSV\`.
 
 ## Strict Evidence Sequence
 
@@ -66,6 +80,12 @@ write_env_template() {
     printf '%s\n' "$ENV_TEMPLATE"
 }
 
+write_env_fields_tsv() {
+    mkdir -p "$(dirname "$ENV_FIELDS_TSV")"
+    emit_env_fields_tsv > "$ENV_FIELDS_TSV"
+    printf '%s\n' "$ENV_FIELDS_TSV"
+}
+
 write_handoff() {
     mkdir -p "$(dirname "$HANDOFF")"
     emit_handoff > "$HANDOFF"
@@ -75,6 +95,12 @@ write_handoff() {
 if [ "${1:-}" = "--write-env-template" ]; then
     write_env_template
     echo "STATUS: PASS gpu web/db reference comparator env template"
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-env-fields-tsv" ]; then
+    write_env_fields_tsv
+    echo "STATUS: PASS gpu web/db reference comparator env fields tsv"
     exit 0
 fi
 
@@ -88,15 +114,24 @@ if [ "${1:-}" = "--self-test" ]; then
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' EXIT INT TERM
     ENV_TEMPLATE="$tmpdir/reference.env"
+    ENV_FIELDS_TSV="$tmpdir/reference-env-fields.tsv"
     HANDOFF="$tmpdir/handoff.md"
     WEB_REPORT="$tmpdir/stub-step.sh"
     write_env_template >/dev/null
+    write_env_fields_tsv >/dev/null
     write_handoff >/dev/null
     grep -q '^SIMPLE_REFERENCE_PLAINTEXT_URL=$' "$ENV_TEMPLATE"
     grep -q '^UWEBSOCKETS_PLAINTEXT_URL=$' "$ENV_TEMPLATE"
     grep -q '^UWEBSOCKETS_PLAINTEXT_PROVENANCE=$' "$ENV_TEMPLATE"
     grep -q '^SEASTAR_PLAINTEXT_URL=$' "$ENV_TEMPLATE"
     grep -q '^SEASTAR_PLAINTEXT_PROVENANCE=$' "$ENV_TEMPLATE"
+    grep -q '^field	required_for	description$' "$ENV_FIELDS_TSV"
+    grep -q '^SIMPLE_REFERENCE_PLAINTEXT_URL	uwebsockets_plaintext,seastar_plaintext	' "$ENV_FIELDS_TSV"
+    grep -q '^UWEBSOCKETS_PLAINTEXT_URL	uwebsockets_plaintext	' "$ENV_FIELDS_TSV"
+    grep -q '^UWEBSOCKETS_PLAINTEXT_PROVENANCE	uwebsockets_plaintext	' "$ENV_FIELDS_TSV"
+    grep -q '^SEASTAR_PLAINTEXT_URL	seastar_plaintext	' "$ENV_FIELDS_TSV"
+    grep -q '^SEASTAR_PLAINTEXT_PROVENANCE	seastar_plaintext	' "$ENV_FIELDS_TSV"
+    grep -q 'reference-env-fields.tsv' "$HANDOFF"
     grep -q 'EXTERNAL_FIXTURE_ENV_FILE=build/perf/gpu_web_db_offload/external-fixtures.env scripts/check/check-web-server-proxy-external-live-compare.shs' "$HANDOFF"
     grep -q 'scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready' "$HANDOFF"
     grep -q 'scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --require-ready' "$HANDOFF"
@@ -110,5 +145,6 @@ if [ "${1:-}" = "--self-test" ]; then
 fi
 
 write_env_template
+write_env_fields_tsv
 write_handoff
 echo "STATUS: PASS gpu web/db reference comparator handoff artifacts"

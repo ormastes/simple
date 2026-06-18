@@ -141,7 +141,7 @@ implementation-in-progress-recovered
 - evidence: `scripts/check/check-gpu-web-db-offload-external-suite.shs --status`
   prints the suite-step count, missing-fixture item count, and verdict directly.
   With the default generated `external-fixtures.env` template left blank, the
-  current status reports 36 steps, 29 missing fixture items, 26 required
+  current status reports 37 steps, 29 missing fixture items, 26 required
   missing items, 3 optional missing reference items, and
   `WAITING_ON_FIXTURES`.
   It also prints `external-suite-missing=<category>|...`
@@ -197,7 +197,8 @@ implementation-in-progress-recovered
   `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs`.
   It writes the blank
   `build/perf/gpu_web_db_offload/reference-comparator-fixtures.env` template
-  plus `build/perf/gpu_web_db_offload/reference-comparator-handoff.md`, which
+  plus `build/perf/gpu_web_db_offload/reference-comparator-env-fields.tsv` and
+  `build/perf/gpu_web_db_offload/reference-comparator-handoff.md`, which
   gives the exact producer, report, strict suite, and fastest-comparator audit
   sequence for real uWebSockets/Seastar plaintext endpoint evidence. These
   artifacts are side-effect-free and do not mark optional reference readiness.

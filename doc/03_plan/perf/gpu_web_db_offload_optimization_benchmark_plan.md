@@ -192,7 +192,9 @@ Implemented and verified on the current host:
 - The reference-comparator handoff now exists at
   `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs`.
   It writes a blank sourceable env template at
-  `build/perf/gpu_web_db_offload/reference-comparator-fixtures.env` and a
+  `build/perf/gpu_web_db_offload/reference-comparator-fixtures.env`, a
+  machine-readable fill map at
+  `build/perf/gpu_web_db_offload/reference-comparator-env-fields.tsv`, and a
   Markdown runbook at
   `build/perf/gpu_web_db_offload/reference-comparator-handoff.md` that ties
   the uWebSockets/Seastar endpoint, provenance, producer, strict suite, and
@@ -238,7 +240,7 @@ Implemented and verified on the current host:
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
   With the default sourceable `external-fixtures.env` template left blank, the
-  current strict status is 36 suite steps, 29 missing fixture items, 26
+  current strict status is 37 suite steps, 29 missing fixture items, 26
   required missing fixture items, and 3 optional reference fixture URLs. Local
   Docker-backed fixture candidates must be copied into a separate verified env
   file or exported for the suite run before those rows can become ready.
