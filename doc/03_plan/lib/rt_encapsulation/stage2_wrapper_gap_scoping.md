@@ -78,3 +78,27 @@ impls) declare the marker to keep raw `rt_*`; everything else still migrates.
 
 Related: lint `raw_rt_access`, `doc/07_guide/app/lint.md`, memory
 `project_rt_encapsulation_rollout`.
+
+## CORRECTION (2026-06-18): the general-gap rt_* are largely UNIMPLEMENTED
+
+Attempting Stage 2a (build the 8 general wrappers) showed the premise was wrong.
+Of the 8 "genuinely-general" rt_*, only `rt_get_cwd` actually runs in the
+interpreter. Verified: `rt_file_list_dir` **core-dumps** when called;
+`rt_stdin_read_bytes`, `rt_shell_exit_code`, `rt_process_get_rss_kb`,
+`rt_random_bytes_c`, `rt_term_write`, `rt_term_flush` are registered **NOWHERE**
+in the standard backends (interpreter `interpreter_extern/` + native
+`runtime_sffi.rs`); `rt_term_poll`/`rt_term_read_timeout` exist only in a
+pure-Simple runtime core (`src/runtime/simple_core/core_process.spl`).
+
+So the restricted apps/examples that declare these are native-special or stale —
+the gap is **not "missing wrappers" but "missing/broken intrinsics."** The wrapper
+batch was **reverted** from `io_runtime.spl` to avoid shipping core-dumping std
+APIs (extern decls are lazy, but a std-blessed `random_bytes()` that cores when
+called is a footgun).
+
+**Revised Stage-2 method:** before wrapping any rt_*, verify it is implemented and
+callable in the target backend (run a smoke call, not just a name grep). The real
+Stage-2 work is (a) the `@runtime_intrinsics` opt-out (DONE) for legitimately
+low-level modules, and (b) the **mechanical migration of the 594 soft-gap callers**
+to *existing, working* std wrappers — not building new wrappers for unimplemented
+intrinsics.
