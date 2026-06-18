@@ -28,7 +28,7 @@ deps_tool_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,6 +38,59 @@ deps_tool_spec -> app
 ## Scenarios
 
 ### deps tool
+
+### CLI argument normalization
+
+#### strips command-table deps prefix
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = normalize_deps_args(["deps", "fast", ENTRY_FILE])
+expect(args.len()).to_equal(2)
+expect(args[0]).to_equal("fast")
+expect(args[1]).to_equal(ENTRY_FILE)
+```
+
+</details>
+
+#### strips run-file app path prefix
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = normalize_deps_args(["src/app/deps/main.spl", "normal", ENTRY_FILE])
+expect(args.len()).to_equal(2)
+expect(args[0]).to_equal("normal")
+expect(args[1]).to_equal(ENTRY_FILE)
+```
+
+</details>
+
+#### strips absolute app path and separator
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val args = normalize_deps_args(["/tmp/repo/src/app/deps/main.spl", "--", "deep", ENTRY_FILE])
+expect(args.len()).to_equal(2)
+expect(args[0]).to_equal("deep")
+expect(args[1]).to_equal(ENTRY_FILE)
+```
+
+</details>
 
 ### _parse_use_line
 
@@ -442,6 +495,7 @@ expect(count > 30).to_equal(true)
 
 Tests covering:
 - deps tool
+- CLI argument normalization
 - _parse_use_line
 - direct imports from entry fixture
 - transitive scanning
@@ -453,8 +507,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

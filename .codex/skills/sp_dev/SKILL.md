@@ -168,6 +168,10 @@ guide aligned with the current wrapper contract (native-first, probe-stamped,
 no silent source fallback in production), the direct-`rt_*` guard policy, the
 interface-cache/source-mtime contract, and the latest local smoke numbers from
 `scripts/check/check-mcp-native-smoke.shs`.
+Use `bin/simple deps fast|normal|deep <entry.spl>` and
+`doc/07_guide/compiler/deps_tool.md` when a startup or tool-server change claims
+dependency-closure reduction; record before/after file counts and the concrete
+imports removed or localized.
 
 Do not write boolean-wrapper assertions in new SPipe specs:
 `expect(a == b).to_equal(true)`, `expect(a != b).to_equal(false)`, and similar
