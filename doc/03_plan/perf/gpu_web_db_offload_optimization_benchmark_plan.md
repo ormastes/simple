@@ -142,6 +142,13 @@ Implemented and verified on the current host:
   to the env file, setup checklist, bootstrap manifest, Compose/docker-run
   templates, env-fields TSV, blocker manifest TSV, env hints, runbook,
   next-actions file, and missing-category files.
+- The readiness handoff can now write a sourceable local candidate env file at
+  `build/perf/gpu_web_db_offload/external-fixture-local-env-candidates.env`
+  with the default localhost URLs for generated HAProxy, Envoy, ClickHouse,
+  PostgreSQL, MongoDB, and Redis fixtures. Use
+  `--write-local-env-candidates` only after the matching local containers and
+  Simple route fixtures are actually running; copy only verified values into
+  `external-fixtures.env`.
 - Optional Seastar/uWebSockets-style plaintext reference baselines are now
   first-class URL-driven handoff rows. Fill `SIMPLE_REFERENCE_PLAINTEXT_URL`
   plus `UWEBSOCKETS_PLAINTEXT_URL` and/or `SEASTAR_PLAINTEXT_URL` to let the
@@ -313,16 +320,16 @@ non-mutating parser, producer, and readiness self-tests without rerunning native
 builds, live servers, or heavyweight benchmark specs. The command writes
 durable PASS artifacts under `doc/09_report/perf/` and `doc/10_metrics/perf/`
 with one row per syntax/self-test gate; the current recovery artifacts record
-70 passed host-safe gates. `--self-test-artifacts` verifies that same
+72 passed host-safe gates. `--self-test-artifacts` verifies that same
 artifact-writing path with temporary report and metrics files. The harness also
 validates the fixture environment template, safe-default behavior, setup
 checklist, env-file validation, category summary, missing-by-category output,
 missing-by-category file writing, env-file import behavior, proxy config
 templates, Docker run fallback, machine-readable env-fields TSV, blocker
-manifest TSV, env hints, runbook, next-actions handoff, next-actions env-field
-mapping, next-actions env-file import behavior, suite status/preflight guards,
-status JSON, readiness policy JSON, and suite artifact writing so setup drift is
-caught before rerunning live producers.
+manifest TSV, env hints, local env candidates, runbook, next-actions handoff,
+next-actions env-field mapping, next-actions env-file import behavior, suite
+status/preflight guards, status JSON, readiness policy JSON, and suite artifact
+writing so setup drift is caught before rerunning live producers.
 `--check-current-artifacts` is the fastest crash-session continuation check: it
 verifies the current durable web, DB, readiness, and recovery artifacts still
 contain the expected measured/status rows and passed-gate evidence. It also

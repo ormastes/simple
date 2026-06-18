@@ -12,6 +12,7 @@ DOCKER_RUN_TEMPLATE_PATH="${DOCKER_RUN_TEMPLATE_PATH:-build/perf/gpu_web_db_offl
 HAPROXY_CONFIG_TEMPLATE_PATH="${HAPROXY_CONFIG_TEMPLATE_PATH:-build/perf/gpu_web_db_offload/haproxy.cfg}"
 ENVOY_CONFIG_TEMPLATE_PATH="${ENVOY_CONFIG_TEMPLATE_PATH:-build/perf/gpu_web_db_offload/envoy.yaml}"
 ENV_HINTS_PATH="${ENV_HINTS_PATH:-build/perf/gpu_web_db_offload/external-fixture-env-hints.md}"
+LOCAL_ENV_CANDIDATES_PATH="${LOCAL_ENV_CANDIDATES_PATH:-build/perf/gpu_web_db_offload/external-fixture-local-env-candidates.env}"
 RUNBOOK_PATH="${RUNBOOK_PATH:-build/perf/gpu_web_db_offload/external-fixture-runbook.md}"
 NEXT_ACTIONS_PATH="${NEXT_ACTIONS_PATH:-build/perf/gpu_web_db_offload/external-fixture-next-actions.md}"
 NEXT_ACTIONS_ENV_FILE="${NEXT_ACTIONS_ENV_FILE:-$ENV_TEMPLATE_PATH}"
@@ -495,6 +496,29 @@ write_env_hints() {
     printf '%s\n' "$path"
 }
 
+emit_local_env_candidates() {
+    cat <<'EOF'
+# GPU Web/DB local fixture env candidates.
+# Source or copy these values only after the generated local containers and
+# matching Simple route fixtures are actually running.
+HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
+HAPROXY_UPLOAD_PROXY_URL=http://127.0.0.1:8091/upload
+HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel
+ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
+CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
+POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+REDIS_URL=redis://127.0.0.1:6379/0
+EOF
+}
+
+write_local_env_candidates() {
+    path="${1:-$LOCAL_ENV_CANDIDATES_PATH}"
+    mkdir -p "$(dirname "$path")"
+    emit_local_env_candidates > "$path"
+    printf '%s\n' "$path"
+}
+
 emit_runbook() {
     cat <<'EOF'
 # GPU Web/DB External Fixture Runbook
@@ -543,6 +567,14 @@ Copy verified values from
 `build/perf/gpu_web_db_offload/external-fixture-env-hints.md` into
 `build/perf/gpu_web_db_offload/external-fixtures.env`. Keep unverified values
 empty; empty assignments are safe and do not make readiness pass.
+
+After starting the generated local fixture containers, this helper writes a
+sourceable candidate file with the default local URLs. Review the services first,
+then copy only verified values into `external-fixtures.env`:
+
+```sh
+scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --write-local-env-candidates
+```
 
 ## 4. Refresh Readiness
 
@@ -1303,6 +1335,16 @@ if [ "${1:-}" = "--write-env-hints" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--print-local-env-candidates" ]; then
+    emit_local_env_candidates
+    exit 0
+fi
+
+if [ "${1:-}" = "--write-local-env-candidates" ]; then
+    write_local_env_candidates "${2:-$LOCAL_ENV_CANDIDATES_PATH}"
+    exit 0
+fi
+
 if [ "${1:-}" = "--print-runbook" ]; then
     emit_runbook
     exit 0
@@ -1753,6 +1795,30 @@ if [ "${1:-}" = "--self-test-write-env-hints" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--self-test-local-env-candidates" ]; then
+    candidates="$(emit_local_env_candidates)"
+    printf '%s\n' "$candidates" | grep -q '^HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable$'
+    printf '%s\n' "$candidates" | grep -q '^CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default$'
+    printf '%s\n' "$candidates" | grep -q '^POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres$'
+    printf '%s\n' "$candidates" | grep -q '^REDIS_URL=redis://127.0.0.1:6379/0$'
+    echo "STATUS: PASS gpu web/db external fixture local env candidates self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-write-local-env-candidates" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    candidates_file="$tmpdir/external-fixture-local-env-candidates.env"
+    written_path="$(write_local_env_candidates "$candidates_file")"
+    test "$written_path" = "$candidates_file"
+    test -f "$candidates_file"
+    grep -q '^ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable$' "$candidates_file"
+    grep -q '^MONGO_URL=mongodb://127.0.0.1:27017/ycsb$' "$candidates_file"
+    grep -q '^REDIS_URL=redis://127.0.0.1:6379/0$' "$candidates_file"
+    echo "STATUS: PASS gpu web/db external fixture local env candidates file self-test"
+    exit 0
+fi
+
 if [ "${1:-}" = "--self-test-runbook" ]; then
     runbook="$(emit_runbook)"
     printf '%s\n' "$runbook" | grep -q 'GPU Web/DB External Fixture Runbook'
@@ -1762,6 +1828,7 @@ if [ "${1:-}" = "--self-test-runbook" ]; then
     printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields'
     printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest'
     printf '%s\n' "$runbook" | grep -q 'external-fixture-env-hints.md'
+    printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-local-env-candidates'
     printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions'
     printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-suite.shs --require-ready'
     printf '%s\n' "$runbook" | grep -q 'check-gpu-web-db-offload-external-suite.shs --status-json'
@@ -1783,6 +1850,7 @@ if [ "${1:-}" = "--self-test-write-runbook" ]; then
     grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-env-fields' "$runbook_file"
     grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-blocker-manifest' "$runbook_file"
     grep -q 'external-fixtures.env' "$runbook_file"
+    grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-local-env-candidates' "$runbook_file"
     grep -q 'check-gpu-web-db-offload-external-fixture-readiness.shs --write-next-actions' "$runbook_file"
     grep -q 'check-gpu-web-db-offload-external-suite.shs --preflight' "$runbook_file"
     grep -q 'check-gpu-web-db-offload-external-suite.shs --status-json' "$runbook_file"

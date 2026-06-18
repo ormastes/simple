@@ -5,7 +5,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 
 ## Summary
 
-- Passed gates: `70`
+- Passed gates: `72`
 - Verdict: `PASS`
 
 ## Gates
@@ -63,6 +63,8 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 | external fixture docker run template file | pass | host-safe-self-test |
 | external fixture env hints | pass | host-safe-self-test |
 | external fixture env hints file | pass | host-safe-self-test |
+| external fixture local env candidates | pass | host-safe-self-test |
+| external fixture local env candidates file | pass | host-safe-self-test |
 | external fixture runbook | pass | host-safe-self-test |
 | external fixture runbook file | pass | host-safe-self-test |
 | external fixture next actions | pass | host-safe-self-test |
