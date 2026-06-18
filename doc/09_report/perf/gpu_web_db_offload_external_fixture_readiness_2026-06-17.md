@@ -5,8 +5,8 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 
 ## Summary
 
-- Ready fixtures: `17`
-- Missing fixtures: `14`
+- Ready fixtures: `2`
+- Missing fixtures: `29`
 - Verdict: `WARN`
 
 ## Category Summary
@@ -14,12 +14,12 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | category | ready | missing |
 |---|---:|---:|
 | core_load_tools | 2 | 0 |
-| web_proxy_tools | 4 | 0 |
-| db_tools | 7 | 0 |
+| web_proxy_tools | 0 | 4 |
+| db_tools | 0 | 7 |
 | proxy_fixture_urls | 0 | 7 |
 | dynamic_route_urls | 0 | 4 |
 | reference_fixture_urls | 0 | 3 |
-| db_service_urls | 4 | 0 |
+| db_service_urls | 0 | 4 |
 
 ## Bootstrap Status
 
@@ -29,7 +29,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 14 |
+| bootstrap_missing_fixture_items | info | 29 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -39,17 +39,17 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 |---|---|---|
 | wrk | ready | /usr/bin/wrk |
 | nginx | ready | /usr/sbin/nginx |
-| caddy | ready | caddy-ready:docker-container:gpu-web-db-caddy-static:caddy |
-| h2o | ready | h2o-ready:docker-container:gpu-web-db-h2o-static:h2o |
-| haproxy | ready | haproxy-ready:docker-container:gpu-web-db-haproxy-cached-proxy:haproxy |
-| envoy | ready | envoy-ready:docker-container:gpu-web-db-envoy-cached-proxy:envoy |
-| clickhouse | ready | clickhouse-ready:docker-container:gpu-web-db-clickhouse-olap:clickhouse |
-| duckdb | ready | duckdb-ready:docker-image:duckdb/duckdb:latest:duckdb |
-| psql | ready | psql-ready:docker-container:gpu-web-db-postgres-tpch:psql |
-| pgbench | ready | pgbench-ready:docker-container:gpu-web-db-postgres-tpch:pgbench |
-| mongodb | ready | mongodb-ready:docker-container:gpu-web-db-mongo-ycsb:mongosh |
-| redis_valkey | ready | redis-valkey-ready:docker-container:gpu-web-db-redis-valkey-kv:redis-cli |
-| redis_benchmark | ready | redis-benchmark-ready:docker-container:gpu-web-db-redis-valkey-kv:redis-benchmark |
+| caddy | missing | caddy-not-installed |
+| h2o | missing | h2o-not-installed |
+| haproxy | missing | haproxy-not-installed |
+| envoy | missing | envoy-not-installed |
+| clickhouse | missing | clickhouse-not-installed |
+| duckdb | missing | duckdb-not-installed-or-DUCKDB_IMAGE-not-configured |
+| psql | missing | psql-not-installed |
+| pgbench | missing | pgbench-not-installed |
+| mongodb | missing | mongodb-not-installed |
+| redis_valkey | missing | redis_valkey-not-installed |
+| redis_benchmark | missing | redis_benchmark-not-installed |
 | simple_cached_proxy_url | missing | SIMPLE_CACHED_PROXY_URL-not-configured |
 | haproxy_cached_proxy_url | missing | HAPROXY_CACHED_PROXY_URL-not-configured |
 | envoy_cached_proxy_url | missing | ENVOY_CACHED_PROXY_URL-not-configured |
@@ -64,10 +64,10 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | simple_reference_plaintext_url | missing | SIMPLE_REFERENCE_PLAINTEXT_URL-not-configured |
 | uwebsockets_plaintext_url | missing | UWEBSOCKETS_PLAINTEXT_URL-not-configured |
 | seastar_plaintext_url | missing | SEASTAR_PLAINTEXT_URL-not-configured |
-| clickhouse_url | ready | CLICKHOUSE_URL-configured |
-| postgres_url | ready | POSTGRES_URL-configured |
-| mongo_url | ready | MONGO_URL-configured |
-| redis_url | ready | REDIS_URL-configured |
+| clickhouse_url | missing | CLICKHOUSE_URL-not-configured |
+| postgres_url | missing | POSTGRES_URL-not-configured |
+| mongo_url | missing | MONGO_URL-not-configured |
+| redis_url | missing | REDIS_URL-not-configured |
 
 ## Fixture Environment Template
 
@@ -83,7 +83,9 @@ Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --pri
 # DYNAMIC_CPU_JSON_URL=http://127.0.0.1:8081/json
 # SIMPLE_REFERENCE_PLAINTEXT_URL=http://127.0.0.1:8084/plaintext
 # UWEBSOCKETS_PLAINTEXT_URL=http://127.0.0.1:8085/plaintext
+# UWEBSOCKETS_PLAINTEXT_PROVENANCE=uwebsockets-binary-or-container:<image-or-commit>
 # SEASTAR_PLAINTEXT_URL=http://127.0.0.1:8086/plaintext
+# SEASTAR_PLAINTEXT_PROVENANCE=seastar-binary-or-container:<image-or-commit>
 # SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
 # HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
 # ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
@@ -127,7 +129,9 @@ DYNAMIC_GPU_JSON_URL=
 DYNAMIC_CPU_JSON_URL=
 SIMPLE_REFERENCE_PLAINTEXT_URL=
 UWEBSOCKETS_PLAINTEXT_URL=
+UWEBSOCKETS_PLAINTEXT_PROVENANCE=
 SEASTAR_PLAINTEXT_URL=
+SEASTAR_PLAINTEXT_PROVENANCE=
 CLICKHOUSE_URL=
 CLICKHOUSE_CONTAINER=
 POSTGRES_URL=
@@ -192,8 +196,9 @@ running live web, proxy, dynamic-route, or DB baseline producers.
 - [ ] Start optional Simple/uWebSockets/Seastar plaintext reference fixtures
       with workload parity.
 - [ ] Fill `SIMPLE_REFERENCE_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_URL`,
-      and `SEASTAR_PLAINTEXT_URL` when those optional reference baselines are
-      available.
+      `UWEBSOCKETS_PLAINTEXT_PROVENANCE`, `SEASTAR_PLAINTEXT_URL`, and
+      `SEASTAR_PLAINTEXT_PROVENANCE` when those optional reference baselines
+      are available. URL-only uWebSockets/Seastar values remain blocked.
 - [ ] Start or point to ClickHouse, PostgreSQL, MongoDB, and Redis/Valkey
       services.
 - [ ] Fill `CLICKHOUSE_URL`, `POSTGRES_URL`, `MONGO_URL`, and `REDIS_URL`.
