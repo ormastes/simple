@@ -149,8 +149,8 @@ emit_readiness() {
     tool_status "nginx" "nginx"
     compound_tool_or_container_status "caddy" "caddy-ready" "CADDY_STATIC_CONTAINER" "caddy"
     compound_tool_or_container_status "h2o" "h2o-ready" "H2O_STATIC_CONTAINER" "h2o"
-    tool_status "haproxy" "haproxy"
-    tool_status "envoy" "envoy"
+    compound_tool_or_container_status "haproxy" "haproxy-ready" "HAPROXY_CONTAINER" "haproxy"
+    compound_tool_or_container_status "envoy" "envoy-ready" "ENVOY_CONTAINER" "envoy"
     compound_tool_status "clickhouse" "clickhouse-ready" "clickhouse" "clickhouse-client"
     tool_status "duckdb" "duckdb"
     tool_status "psql" "psql"
@@ -219,10 +219,10 @@ emit_bootstrap_manifest() {
 fixture	kind	image_or_tool	default_port	fills	readiness_category	note
 caddy_static	container	caddy:2	8082	tool:caddy	web_proxy_tools	static-file baseline candidate; map generated static fixture root read-only
 h2o_static	manual_tool	h2o	8083	tool:h2o	web_proxy_tools	h2o packaging is host-specific; install tool or supply an equivalent fixture URL row
-haproxy_cached_proxy	container	haproxy:2.9	8091	tool:haproxy,HAPROXY_CACHED_PROXY_URL	proxy_fixture_urls	cached reverse-proxy baseline for Simple cached proxy comparison
+haproxy_cached_proxy	container	haproxy:2.9	8091	tool:haproxy,HAPROXY_CONTAINER,HAPROXY_CACHED_PROXY_URL	proxy_fixture_urls	cached reverse-proxy baseline for Simple cached proxy comparison
 haproxy_upload_proxy	container	haproxy:2.9	8091	HAPROXY_UPLOAD_PROXY_URL	proxy_fixture_urls	upload-streaming proxy baseline; may share HAProxy container with cached proxy route
 haproxy_tunnel_proxy	container	haproxy:2.9	8091	HAPROXY_TUNNEL_PROXY_URL	proxy_fixture_urls	upgrade-tunnel proxy baseline; may share HAProxy container with cached proxy route
-envoy_cached_proxy	container	envoyproxy/envoy:v1.30-latest	8092	tool:envoy,ENVOY_CACHED_PROXY_URL	proxy_fixture_urls	cached reverse-proxy baseline for Envoy comparison
+envoy_cached_proxy	container	envoyproxy/envoy:v1.30-latest	8092	tool:envoy,ENVOY_CONTAINER,ENVOY_CACHED_PROXY_URL	proxy_fixture_urls	cached reverse-proxy baseline for Envoy comparison
 clickhouse_olap	container	clickhouse/clickhouse-server:latest	9000	tool:clickhouse,CLICKHOUSE_URL	db_service_urls	ClickBench-style OLAP baseline service
 postgres_tpch	container	postgres:16	5432	tool:psql,tool:pgbench,POSTGRES_URL	db_service_urls	TPC-H-style relational baseline service
 mongo_ycsb	container	mongo:7	27017	tool:mongodb,MONGO_URL	db_service_urls	YCSB-style document-filter baseline service
@@ -530,6 +530,8 @@ HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
 HAPROXY_UPLOAD_PROXY_URL=http://127.0.0.1:8091/upload
 HAPROXY_TUNNEL_PROXY_URL=http://127.0.0.1:8091/tunnel
 ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
+HAPROXY_CONTAINER=gpu-web-db-haproxy-cached-proxy
+ENVOY_CONTAINER=gpu-web-db-envoy-cached-proxy
 CADDY_STATIC_CONTAINER=gpu-web-db-caddy-static
 H2O_STATIC_CONTAINER=gpu-web-db-h2o-static
 CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
@@ -869,6 +871,8 @@ emit_env_template() {
 # SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
 # HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
 # ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
+# HAPROXY_CONTAINER=gpu-web-db-haproxy-cached-proxy
+# ENVOY_CONTAINER=gpu-web-db-envoy-cached-proxy
 # CADDY_STATIC_CONTAINER=gpu-web-db-caddy-static
 # H2O_STATIC_CONTAINER=gpu-web-db-h2o-static
 # SIMPLE_UPLOAD_PROXY_URL=http://127.0.0.1:8090/upload
@@ -889,6 +893,8 @@ emit_env_template() {
 SIMPLE_CACHED_PROXY_URL=
 HAPROXY_CACHED_PROXY_URL=
 ENVOY_CACHED_PROXY_URL=
+HAPROXY_CONTAINER=
+ENVOY_CONTAINER=
 CADDY_STATIC_CONTAINER=
 H2O_STATIC_CONTAINER=
 SIMPLE_UPLOAD_PROXY_URL=
@@ -1052,7 +1058,7 @@ source_nonempty_readiness_env_file() {
             \'*\') value="${value#\'}"; value="${value%\'}" ;;
         esac
         case "$name" in
-            SIMPLE_CACHED_PROXY_URL|HAPROXY_CACHED_PROXY_URL|ENVOY_CACHED_PROXY_URL|CADDY_STATIC_CONTAINER|H2O_STATIC_CONTAINER|\
+            SIMPLE_CACHED_PROXY_URL|HAPROXY_CACHED_PROXY_URL|ENVOY_CACHED_PROXY_URL|HAPROXY_CONTAINER|ENVOY_CONTAINER|CADDY_STATIC_CONTAINER|H2O_STATIC_CONTAINER|\
 SIMPLE_UPLOAD_PROXY_URL|HAPROXY_UPLOAD_PROXY_URL|SIMPLE_TUNNEL_PROXY_URL|\
 HAPROXY_TUNNEL_PROXY_URL|DYNAMIC_GPU_PLAINTEXT_URL|DYNAMIC_CPU_PLAINTEXT_URL|\
 DYNAMIC_GPU_JSON_URL|DYNAMIC_CPU_JSON_URL|SIMPLE_REFERENCE_PLAINTEXT_URL|\
@@ -1452,6 +1458,8 @@ if [ "${1:-}" = "--self-test-env-template" ]; then
     printf '%s\n' "$template" | grep -q '^HAPROXY_UPLOAD_PROXY_URL='
     printf '%s\n' "$template" | grep -q '^SIMPLE_TUNNEL_PROXY_URL='
     printf '%s\n' "$template" | grep -q '^HAPROXY_TUNNEL_PROXY_URL='
+    printf '%s\n' "$template" | grep -q '^HAPROXY_CONTAINER='
+    printf '%s\n' "$template" | grep -q '^ENVOY_CONTAINER='
     printf '%s\n' "$template" | grep -q '^DYNAMIC_CPU_PLAINTEXT_URL='
     printf '%s\n' "$template" | grep -q '^DYNAMIC_GPU_JSON_URL='
     printf '%s\n' "$template" | grep -q '^DYNAMIC_CPU_JSON_URL='
@@ -1481,6 +1489,8 @@ if [ "${1:-}" = "--self-test-write-env-template" ]; then
     grep -q '^HAPROXY_UPLOAD_PROXY_URL=' "$env_file"
     grep -q '^SIMPLE_TUNNEL_PROXY_URL=' "$env_file"
     grep -q '^HAPROXY_TUNNEL_PROXY_URL=' "$env_file"
+    grep -q '^HAPROXY_CONTAINER=' "$env_file"
+    grep -q '^ENVOY_CONTAINER=' "$env_file"
     grep -q '^CLICKHOUSE_URL=' "$env_file"
     grep -q '^POSTGRES_URL=' "$env_file"
     grep -q '^MONGO_URL=' "$env_file"
@@ -1837,6 +1847,8 @@ fi
 if [ "${1:-}" = "--self-test-local-env-candidates" ]; then
     candidates="$(emit_local_env_candidates)"
     printf '%s\n' "$candidates" | grep -q '^HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable$'
+    printf '%s\n' "$candidates" | grep -q '^HAPROXY_CONTAINER=gpu-web-db-haproxy-cached-proxy$'
+    printf '%s\n' "$candidates" | grep -q '^ENVOY_CONTAINER=gpu-web-db-envoy-cached-proxy$'
     printf '%s\n' "$candidates" | grep -q '^CADDY_STATIC_CONTAINER=gpu-web-db-caddy-static$'
     printf '%s\n' "$candidates" | grep -q '^H2O_STATIC_CONTAINER=gpu-web-db-h2o-static$'
     printf '%s\n' "$candidates" | grep -q '^CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default$'
@@ -1855,6 +1867,8 @@ if [ "${1:-}" = "--self-test-write-local-env-candidates" ]; then
     test "$written_path" = "$candidates_file"
     test -f "$candidates_file"
     grep -q '^ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable$' "$candidates_file"
+    grep -q '^HAPROXY_CONTAINER=gpu-web-db-haproxy-cached-proxy$' "$candidates_file"
+    grep -q '^ENVOY_CONTAINER=gpu-web-db-envoy-cached-proxy$' "$candidates_file"
     grep -q '^CADDY_STATIC_CONTAINER=gpu-web-db-caddy-static$' "$candidates_file"
     grep -q '^H2O_STATIC_CONTAINER=gpu-web-db-h2o-static$' "$candidates_file"
     grep -q '^MONGO_URL=mongodb://127.0.0.1:27017/ycsb$' "$candidates_file"

@@ -8,7 +8,7 @@
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 24 |
+| bootstrap_missing_fixture_items | info | 22 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -20,8 +20,8 @@
 | nginx | ready | /usr/sbin/nginx |
 | caddy | ready | caddy-ready:docker-container:gpu-web-db-caddy-static:caddy |
 | h2o | ready | h2o-ready:docker-container:gpu-web-db-h2o-static:h2o |
-| haproxy | missing | haproxy-not-installed |
-| envoy | missing | envoy-not-installed |
+| haproxy | ready | haproxy-ready:docker-container:gpu-web-db-haproxy-cached-proxy:haproxy |
+| envoy | ready | envoy-ready:docker-container:gpu-web-db-envoy-cached-proxy:envoy |
 | clickhouse | missing | clickhouse-not-installed |
 | duckdb | missing | duckdb-not-installed |
 | psql | missing | psql-not-installed |

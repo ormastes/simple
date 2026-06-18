@@ -196,8 +196,8 @@ Implemented and verified on the current host:
   `--write-policy-json` persists
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
-  On this host after starting the generated Redis, Caddy, and H2O Docker fixtures, the split is
-  21 required missing fixtures and 3 optional
+  On this host after starting the generated Redis, Caddy, H2O, HAProxy, and
+  Envoy Docker fixtures, the split is 19 required missing fixtures and 3 optional
   reference fixture URLs.
 - The suite now also writes required-only handoff artifacts for resumed
   sessions that need to separate release-blocking fixture work from optional
@@ -235,8 +235,13 @@ Implemented and verified on the current host:
 
 Remaining blockers before this plan can be marked done:
 
-- Install/configure HAProxy and Envoy plus matching live proxy fixtures for
-  cached proxy, upload streaming, and upgrade tunnel rows.
+- Start or configure the matching live Simple proxy URLs for cached proxy,
+  upload streaming, and upgrade tunnel rows. The HAProxy and Envoy tool
+  containers are ready, but measured proxy rows still require
+  `SIMPLE_CACHED_PROXY_URL`, `HAPROXY_CACHED_PROXY_URL`,
+  `ENVOY_CACHED_PROXY_URL`, `SIMPLE_UPLOAD_PROXY_URL`,
+  `HAPROXY_UPLOAD_PROXY_URL`, `SIMPLE_TUNNEL_PROXY_URL`, and
+  `HAPROXY_TUNNEL_PROXY_URL`.
 - Start live CPU and GPU dynamic route servers and set
   `DYNAMIC_GPU_PLAINTEXT_URL`, `DYNAMIC_CPU_PLAINTEXT_URL`,
   `DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL`.
@@ -250,9 +255,10 @@ baselines, or provide their connection URLs where
 The current blocker list is machine-checkable with
 `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`. On the
 current host it reports `wrk`, `nginx`, Docker-backed Caddy, Docker-backed H2O,
-and Docker-backed Redis/Valkey ready, then `STATUS: WARN` with the missing HAProxy, Envoy,
-ClickHouse, DuckDB, `psql`, `pgbench`, MongoDB shell, live cached-proxy,
-upload-proxy, tunnel-proxy, dynamic-route, optional Seastar/uWebSockets
+Docker-backed HAProxy, Docker-backed Envoy, and Docker-backed Redis/Valkey
+ready, then `STATUS: WARN` with the missing ClickHouse, DuckDB, `psql`,
+`pgbench`, MongoDB shell, live cached-proxy, upload-proxy, tunnel-proxy,
+dynamic-route, optional Seastar/uWebSockets
 reference URLs, and non-Redis DB connection URL
 requirements. The
 same run writes durable readiness artifacts under `doc/09_report/perf/` and
@@ -352,8 +358,8 @@ Local benchmark fixture availability on 2026-06-18:
 |---|---|
 | `nginx` | available at `/usr/sbin/nginx` |
 | `wrk` | available at `/usr/bin/wrk` |
-| `haproxy` | missing |
-| `envoy` | missing |
+| `haproxy` | Docker-backed fixture ready: `gpu-web-db-haproxy-cached-proxy` |
+| `envoy` | Docker-backed fixture ready: `gpu-web-db-envoy-cached-proxy` |
 | `caddy` | Docker-backed fixture ready: `gpu-web-db-caddy-static` |
 | `h2o` | Docker-backed fixture ready: `gpu-web-db-h2o-static` |
 

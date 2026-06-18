@@ -5,8 +5,8 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 
 ## Summary
 
-- Ready fixtures: `7`
-- Missing fixtures: `24`
+- Ready fixtures: `9`
+- Missing fixtures: `22`
 - Verdict: `WARN`
 
 ## Category Summary
@@ -14,7 +14,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | category | ready | missing |
 |---|---:|---:|
 | core_load_tools | 2 | 0 |
-| web_proxy_tools | 2 | 2 |
+| web_proxy_tools | 4 | 0 |
 | db_tools | 2 | 5 |
 | proxy_fixture_urls | 0 | 7 |
 | dynamic_route_urls | 0 | 4 |
@@ -29,7 +29,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 24 |
+| bootstrap_missing_fixture_items | info | 22 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -41,8 +41,8 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | nginx | ready | /usr/sbin/nginx |
 | caddy | ready | caddy-ready:docker-container:gpu-web-db-caddy-static:caddy |
 | h2o | ready | h2o-ready:docker-container:gpu-web-db-h2o-static:h2o |
-| haproxy | missing | haproxy-not-installed |
-| envoy | missing | envoy-not-installed |
+| haproxy | ready | haproxy-ready:docker-container:gpu-web-db-haproxy-cached-proxy:haproxy |
+| envoy | ready | envoy-ready:docker-container:gpu-web-db-envoy-cached-proxy:envoy |
 | clickhouse | missing | clickhouse-not-installed |
 | duckdb | missing | duckdb-not-installed |
 | psql | missing | psql-not-installed |
@@ -87,6 +87,8 @@ Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --pri
 # SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable
 # HAPROXY_CACHED_PROXY_URL=http://127.0.0.1:8091/cacheable
 # ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable
+# HAPROXY_CONTAINER=gpu-web-db-haproxy-cached-proxy
+# ENVOY_CONTAINER=gpu-web-db-envoy-cached-proxy
 # CADDY_STATIC_CONTAINER=gpu-web-db-caddy-static
 # H2O_STATIC_CONTAINER=gpu-web-db-h2o-static
 # SIMPLE_UPLOAD_PROXY_URL=http://127.0.0.1:8090/upload
@@ -107,6 +109,8 @@ Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --pri
 SIMPLE_CACHED_PROXY_URL=
 HAPROXY_CACHED_PROXY_URL=
 ENVOY_CACHED_PROXY_URL=
+HAPROXY_CONTAINER=
+ENVOY_CONTAINER=
 CADDY_STATIC_CONTAINER=
 H2O_STATIC_CONTAINER=
 SIMPLE_UPLOAD_PROXY_URL=
