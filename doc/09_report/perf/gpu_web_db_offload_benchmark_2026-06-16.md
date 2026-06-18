@@ -19,14 +19,14 @@ CPU fallback accounting, backend timing provenance, tiny-batch rejection, a prod
 |---|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---|---|---|---|
 | db_vector_gpu_hit | host-safe-mock | oracle_vectors_1024x128 | 1024 | 0 | 128 | 8 | 1 | gpu_db_vector_search_batch | 1 | 0 | 0 | host-derived | false |  | none-host-safe-contract |
 | db_vector_native_timing_probe | native-device-probe | oracle_vectors_1024x128 | 1024 | 0 | 128 | 8 | 1 | gpu_db_vector_search_batch | 1 | 0 | 37 | native-device-timer | true |  | none-native-provenance-contract |
-| db_vector_cuda_measured | cuda | oracle_vectors_1024x128 | 1024 | 0 | 128 | 8 | 1 | gpu_db_vector_search_batch | 1 | 0 | 269 | cuda-measured-driver | true |  | native-device-measured |
-| db_columnar_scan_cuda_measured | cuda | pure_sql_scan_filter_project | 1024 | 0 | 0 | 8 | 1 | gpu_db_columnar_scan_batch | 1 | 0 | 153 | cuda-measured-driver | true |  | native-device-measured |
-| db_join_aggregate_cuda_measured | cuda | pure_sql_join_aggregate_group_count | 1024 | 0 | 0 | 8 | 1 | gpu_db_join_aggregate_batch | 1 | 0 | 204 | cuda-measured-driver | true |  | native-device-measured |
-| db_document_filter_cuda_measured | cuda | nosql_document_filter_metadata | 0 | 1024 | 0 | 8 | 1 | gpu_db_document_filter_batch | 1 | 0 | 168 | cuda-measured-driver | true |  | native-device-measured |
-| web_inference_cuda_measured | cuda | web_inference_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_inference_batch | 1 | 0 | 214 | cuda-measured-driver | true |  | native-device-measured |
-| web_embedding_cuda_measured | cuda | web_embedding_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_embedding_batch | 1 | 0 | 181 | cuda-measured-driver | true |  | native-device-measured |
-| web_rank_cuda_measured | cuda | web_rank_32x256_response_match | 0 | 32 | 0 | 32 | 1 | gpu_web_rank_batch | 1 | 0 | 189 | cuda-measured-driver | true |  | native-device-measured |
-| web_transform_cuda_measured | cuda | web_transform_8x2048_response_match | 0 | 8 | 0 | 8 | 1 | gpu_web_transform_batch | 1 | 0 | 181 | cuda-measured-driver | true |  | native-device-measured |
+| db_vector_cuda_measured | cuda | oracle_vectors_1024x128 | 1024 | 0 | 128 | 8 | 1 | gpu_db_vector_search_batch | 1 | 0 | 154 | cuda-measured-driver | true |  | native-device-measured |
+| db_columnar_scan_cuda_measured | cuda | pure_sql_scan_filter_project | 1024 | 0 | 0 | 8 | 1 | gpu_db_columnar_scan_batch | 1 | 0 | 166 | cuda-measured-driver | true |  | native-device-measured |
+| db_join_aggregate_cuda_measured | cuda | pure_sql_join_aggregate_group_count | 1024 | 0 | 0 | 8 | 1 | gpu_db_join_aggregate_batch | 1 | 0 | 203 | cuda-measured-driver | true |  | native-device-measured |
+| db_document_filter_cuda_measured | cuda | nosql_document_filter_metadata | 0 | 1024 | 0 | 8 | 1 | gpu_db_document_filter_batch | 1 | 0 | 170 | cuda-measured-driver | true |  | native-device-measured |
+| web_inference_cuda_measured | cuda | web_inference_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_inference_batch | 1 | 0 | 188 | cuda-measured-driver | true |  | native-device-measured |
+| web_embedding_cuda_measured | cuda | web_embedding_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_embedding_batch | 1 | 0 | 199 | cuda-measured-driver | true |  | native-device-measured |
+| web_rank_cuda_measured | cuda | web_rank_32x256_response_match | 0 | 32 | 0 | 32 | 1 | gpu_web_rank_batch | 1 | 0 | 194 | cuda-measured-driver | true |  | native-device-measured |
+| web_transform_cuda_measured | cuda | web_transform_8x2048_response_match | 0 | 8 | 0 | 8 | 1 | gpu_web_transform_batch | 1 | 0 | 223 | cuda-measured-driver | true |  | native-device-measured |
 | web_inference_device_validated_contract | cuda | web_inference_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_inference_batch | 1 | 0 | 41 | cuda-event-contract | true |  | production-device-validated-contract |
 | web_embedding_device_validated_contract | cuda | web_embedding_16x512_response_match | 0 | 16 | 0 | 16 | 1 | gpu_web_embedding_batch | 1 | 0 | 43 | cuda-event-contract | true |  | production-device-validated-contract |
 | web_rank_device_validated_contract | cuda | web_rank_32x256_response_match | 0 | 32 | 0 | 32 | 1 | gpu_web_rank_batch | 1 | 0 | 47 | cuda-event-contract | true |  | production-device-validated-contract |
@@ -38,13 +38,14 @@ CPU fallback accounting, backend timing provenance, tiny-batch rejection, a prod
 | db_batch_admission_policy_contract | host-safe-admission-policy | db_batch_admission_scan_join_document_policy | 2048 | 1 | 0 | 2049 | 3 | gpu_db_columnar_scan_batch | 1 | 2 | 0 | admission-policy-contract | false | queue-full+batch-too-small-covered | none-admission-policy-contract |
 | gpu_transfer_amortization_policy_contract | host-safe-transfer-policy | gpu_transfer_amortization_4x8x2048_batch | 0 | 32 | 0 | 32 | 4 | gpu_web_transform_batch | 1 | 0 | 0 | transfer-amortization-policy-contract | false | amortized-transfer-saved:3072 | none-transfer-amortization-policy-contract |
 | db_clickbench_clickhouse_external_baseline_status | external-db-baseline | clickbench_hits_scan_filter_project_1024_row_match | 0 | 0 | 0 | 0 | 0 | clickhouse_scan_filter_project | 0 | 0 | 0 | external-db-baseline-status | false | external-db-baseline-ready-measured:clickhouse_scan_filter_project | none-external-db-baseline-contract |
-| db_tpch_duckdb_external_baseline_status | external-db-baseline | tpch_q3_join_aggregate_group_count_1024_row_match | 0 | 0 | 0 | 0 | 0 | duckdb_tpch_q3_join_aggregate | 0 | 0 | 0 | external-db-baseline-status | false | external-db-baseline-unavailable:duckdb-not-installed | none-external-db-baseline-contract |
+| db_tpch_duckdb_external_baseline_status | external-db-baseline | tpch_q3_join_aggregate_group_count_1024_row_match | 0 | 0 | 0 | 0 | 0 | duckdb_tpch_q3_join_aggregate | 0 | 0 | 0 | external-db-baseline-status | false | external-db-baseline-ready-measured:duckdb_tpch_q3_join_aggregate | none-external-db-baseline-contract |
 | db_tpch_postgresql_external_baseline_status | external-db-baseline | tpch_q3_join_aggregate_group_count_1024_row_match | 0 | 0 | 0 | 0 | 0 | postgresql_tpch_q3_join_aggregate | 0 | 0 | 0 | external-db-baseline-status | false | external-db-baseline-ready-measured:postgresql_tpch_q3_join_aggregate | none-external-db-baseline-contract |
 | db_ycsb_mongo_external_baseline_status | external-db-baseline | benchbase_ycsb_document_filter_1024_doc_match | 0 | 0 | 0 | 0 | 0 | mongo_ycsb_document_filter | 0 | 0 | 0 | external-db-baseline-status | false | external-db-baseline-ready-measured:mongo_ycsb_document_filter | none-external-db-baseline-contract |
-| db_key_value_redis_valkey_external_measured | external-db-measured | redis_valkey_getset_1024_key_match | 0 | 0 | 0 | 0 | 1 | redis_valkey_key_value_getset | 0 | 0 | 120233 | external-db-baseline-driver | true |  | external-db-baseline-measured |
-| db_ycsb_mongo_external_measured | external-db-measured | benchbase_ycsb_document_filter_1024_doc_match | 0 | 0 | 0 | 0 | 1 | mongo_ycsb_document_filter | 0 | 0 | 535333 | external-db-baseline-driver | true |  | external-db-baseline-measured |
-| db_tpch_postgresql_external_measured | external-db-measured | tpch_q3_join_aggregate_group_count_1024_row_match | 0 | 0 | 0 | 0 | 1 | postgresql_tpch_q3_join_aggregate | 0 | 0 | 125797 | external-db-baseline-driver | true |  | external-db-baseline-measured |
-| db_clickbench_clickhouse_external_measured | external-db-measured | clickbench_hits_scan_filter_project_1024_row_match | 0 | 0 | 0 | 0 | 1 | clickhouse_scan_filter_project | 0 | 0 | 199418 | external-db-baseline-driver | true |  | external-db-baseline-measured |
+| db_key_value_redis_valkey_external_measured | external-db-measured | redis_valkey_getset_1024_key_match | 0 | 0 | 0 | 0 | 1 | redis_valkey_key_value_getset | 0 | 0 | 133746 | external-db-baseline-driver | true |  | external-db-baseline-measured |
+| db_ycsb_mongo_external_measured | external-db-measured | benchbase_ycsb_document_filter_1024_doc_match | 0 | 0 | 0 | 0 | 1 | mongo_ycsb_document_filter | 0 | 0 | 557789 | external-db-baseline-driver | true |  | external-db-baseline-measured |
+| db_tpch_postgresql_external_measured | external-db-measured | tpch_q3_join_aggregate_group_count_1024_row_match | 0 | 0 | 0 | 0 | 1 | postgresql_tpch_q3_join_aggregate | 0 | 0 | 131864 | external-db-baseline-driver | true |  | external-db-baseline-measured |
+| db_tpch_duckdb_external_measured | external-db-measured | tpch_q3_join_aggregate_group_count_1024_row_match | 0 | 0 | 0 | 0 | 1 | duckdb_tpch_q3_join_aggregate | 0 | 0 | 1199860 | external-db-baseline-driver | true |  | external-db-baseline-measured |
+| db_clickbench_clickhouse_external_measured | external-db-measured | clickbench_hits_scan_filter_project_1024_row_match | 0 | 0 | 0 | 0 | 1 | clickhouse_scan_filter_project | 0 | 0 | 150074 | external-db-baseline-driver | true |  | external-db-baseline-measured |
 | db_key_value_redis_valkey_external_baseline_status | external-db-baseline | redis_valkey_getset_1024_key_match | 0 | 0 | 0 | 0 | 0 | redis_valkey_key_value_getset | 0 | 0 | 0 | external-db-baseline-status | false | external-db-baseline-ready-measured:redis_valkey_key_value_getset | none-external-db-baseline-contract |
 | db_ann_vector_external_baseline_status | external-db-baseline | ann_vector_topk_1024x128_recall_id_match | 0 | 0 | 0 | 0 | 0 | ann_vector_topk_recall | 0 | 0 | 0 | external-db-baseline-status | false | external-db-baseline-unavailable:ann-fixture-not-configured | none-external-db-baseline-contract |
 | db_clickbench_olap_scan_shape_contract | host-safe-standard-shape | clickbench_hits_scan_filter_project_1024_row_match | 1024 | 0 | 0 | 8 | 1 | gpu_db_columnar_scan_batch | 0 | 1 | 0 | standard-shape-contract | false | standard-baseline-unavailable:clickhouse-duckdb-postgresql | none-standard-shape-contract |
@@ -89,8 +90,8 @@ GPU_WDB_DEVICE_NAME=cuda-device-0
 GPU_WDB_DEVICE_TARGET=gpu_db_vector_search_batch
 GPU_WDB_DEVICE_DATASET=oracle_vectors_1024x128
 GPU_WDB_DEVICE_TRANSFER_BYTES=8
-GPU_WDB_DEVICE_KERNEL_TIME_US=269
-GPU_WDB_DEVICE_COMPLETION_LATENCY_US=269
+GPU_WDB_DEVICE_KERNEL_TIME_US=154
+GPU_WDB_DEVICE_COMPLETION_LATENCY_US=154
 GPU_WDB_DEVICE_REASON=cuda-measured-sum-squares-oracle
 GPU_WDB_DEVICE_HARDWARE_CLAIM=native-device-measured
 ```
@@ -104,8 +105,8 @@ GPU_WDB_DEVICE_NAME=cuda-device-0
 GPU_WDB_DEVICE_TARGET=gpu_db_columnar_scan_batch
 GPU_WDB_DEVICE_DATASET=pure_sql_scan_filter_project
 GPU_WDB_DEVICE_TRANSFER_BYTES=8192
-GPU_WDB_DEVICE_KERNEL_TIME_US=153
-GPU_WDB_DEVICE_COMPLETION_LATENCY_US=153
+GPU_WDB_DEVICE_KERNEL_TIME_US=166
+GPU_WDB_DEVICE_COMPLETION_LATENCY_US=166
 GPU_WDB_DEVICE_REASON=cuda-measured-columnar-scan-oracle
 GPU_WDB_DEVICE_HARDWARE_CLAIM=native-device-measured
 ```
@@ -119,8 +120,8 @@ GPU_WDB_DEVICE_NAME=cuda-device-0
 GPU_WDB_DEVICE_TARGET=gpu_db_join_aggregate_batch
 GPU_WDB_DEVICE_DATASET=pure_sql_join_aggregate_group_count
 GPU_WDB_DEVICE_TRANSFER_BYTES=8192
-GPU_WDB_DEVICE_KERNEL_TIME_US=204
-GPU_WDB_DEVICE_COMPLETION_LATENCY_US=204
+GPU_WDB_DEVICE_KERNEL_TIME_US=203
+GPU_WDB_DEVICE_COMPLETION_LATENCY_US=203
 GPU_WDB_DEVICE_REASON=cuda-measured-join-aggregate-oracle
 GPU_WDB_DEVICE_HARDWARE_CLAIM=native-device-measured
 ```
@@ -134,8 +135,8 @@ GPU_WDB_DEVICE_NAME=cuda-device-0
 GPU_WDB_DEVICE_TARGET=gpu_db_document_filter_batch
 GPU_WDB_DEVICE_DATASET=nosql_document_filter_metadata
 GPU_WDB_DEVICE_TRANSFER_BYTES=8192
-GPU_WDB_DEVICE_KERNEL_TIME_US=168
-GPU_WDB_DEVICE_COMPLETION_LATENCY_US=168
+GPU_WDB_DEVICE_KERNEL_TIME_US=170
+GPU_WDB_DEVICE_COMPLETION_LATENCY_US=170
 GPU_WDB_DEVICE_REASON=cuda-measured-document-filter-oracle
 GPU_WDB_DEVICE_HARDWARE_CLAIM=native-device-measured
 ```
@@ -149,8 +150,8 @@ GPU_WDB_DEVICE_NAME=cuda-device-0
 GPU_WDB_DEVICE_TARGET=gpu_web_inference_batch
 GPU_WDB_DEVICE_DATASET=web_inference_16x512_response_match
 GPU_WDB_DEVICE_TRANSFER_BYTES=8192
-GPU_WDB_DEVICE_KERNEL_TIME_US=214
-GPU_WDB_DEVICE_COMPLETION_LATENCY_US=214
+GPU_WDB_DEVICE_KERNEL_TIME_US=188
+GPU_WDB_DEVICE_COMPLETION_LATENCY_US=188
 GPU_WDB_DEVICE_REASON=cuda-measured-web-inference-oracle
 GPU_WDB_DEVICE_HARDWARE_CLAIM=native-device-measured
 ```
@@ -164,8 +165,8 @@ GPU_WDB_DEVICE_NAME=cuda-device-0
 GPU_WDB_DEVICE_TARGET=gpu_web_embedding_batch
 GPU_WDB_DEVICE_DATASET=web_embedding_16x512_response_match
 GPU_WDB_DEVICE_TRANSFER_BYTES=8192
-GPU_WDB_DEVICE_KERNEL_TIME_US=181
-GPU_WDB_DEVICE_COMPLETION_LATENCY_US=181
+GPU_WDB_DEVICE_KERNEL_TIME_US=199
+GPU_WDB_DEVICE_COMPLETION_LATENCY_US=199
 GPU_WDB_DEVICE_REASON=cuda-measured-web-embedding-oracle
 GPU_WDB_DEVICE_HARDWARE_CLAIM=native-device-measured
 ```
@@ -179,8 +180,8 @@ GPU_WDB_DEVICE_NAME=cuda-device-0
 GPU_WDB_DEVICE_TARGET=gpu_web_rank_batch
 GPU_WDB_DEVICE_DATASET=web_rank_32x256_response_match
 GPU_WDB_DEVICE_TRANSFER_BYTES=8192
-GPU_WDB_DEVICE_KERNEL_TIME_US=189
-GPU_WDB_DEVICE_COMPLETION_LATENCY_US=189
+GPU_WDB_DEVICE_KERNEL_TIME_US=194
+GPU_WDB_DEVICE_COMPLETION_LATENCY_US=194
 GPU_WDB_DEVICE_REASON=cuda-measured-web-rank-oracle
 GPU_WDB_DEVICE_HARDWARE_CLAIM=native-device-measured
 ```
@@ -194,8 +195,8 @@ GPU_WDB_DEVICE_NAME=cuda-device-0
 GPU_WDB_DEVICE_TARGET=gpu_web_transform_batch
 GPU_WDB_DEVICE_DATASET=web_transform_8x2048_response_match
 GPU_WDB_DEVICE_TRANSFER_BYTES=16384
-GPU_WDB_DEVICE_KERNEL_TIME_US=181
-GPU_WDB_DEVICE_COMPLETION_LATENCY_US=181
+GPU_WDB_DEVICE_KERNEL_TIME_US=223
+GPU_WDB_DEVICE_COMPLETION_LATENCY_US=223
 GPU_WDB_DEVICE_REASON=cuda-measured-web-transform-oracle
 GPU_WDB_DEVICE_HARDWARE_CLAIM=native-device-measured
 ```

@@ -258,6 +258,31 @@ EOF
     exit 0
 fi
 
+if [ "${1:-}" = "--self-test-duckdb-docker-image-source" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    mkdir -p "$tmpdir/bin"
+    cat > "$tmpdir/bin/docker" <<'EOF'
+#!/usr/bin/env sh
+test "$1" = "run"
+test "$2" = "--rm"
+test "$3" = "duckdb/duckdb:latest"
+test "$4" = "duckdb"
+test "$5" = "-c"
+test "$6" != ""
+exit 0
+EOF
+    chmod +x "$tmpdir/bin/docker"
+    env_file="$tmpdir/external-fixtures.env"
+    cat > "$env_file" <<'EOF'
+DUCKDB_IMAGE=duckdb/duckdb:latest
+EOF
+    output="$(DB_FIXTURE_ENV_FILE="$env_file" PATH="$tmpdir/bin:$PATH" sh "$0")"
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_tpch_duckdb_external_measured|tpch_q3_join_aggregate_group_count_1024_row_match|duckdb_tpch_q3_join_aggregate|[1-9][0-9]*$'
+    echo "STATUS: PASS external DB baseline DuckDB Docker image source self-test"
+    exit 0
+fi
+
 if [ "${1:-}" = "--self-test-postgres-docker-container-source" ]; then
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' EXIT INT TERM
@@ -356,6 +381,14 @@ fi
 
 if command -v duckdb >/dev/null 2>&1; then
     if elapsed="$(time_command_us duckdb -c "$DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY")"; then
+        emit_measured_row \
+            'db_tpch_duckdb_external_measured' \
+            'tpch_q3_join_aggregate_group_count_1024_row_match' \
+            'duckdb_tpch_q3_join_aggregate' \
+            "$elapsed"
+    fi
+elif command -v docker >/dev/null 2>&1 && [ "${DUCKDB_IMAGE:-}" != "" ]; then
+    if elapsed="$(time_command_us docker run --rm "$DUCKDB_IMAGE" duckdb -c "$DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY")"; then
         emit_measured_row \
             'db_tpch_duckdb_external_measured' \
             'tpch_q3_join_aggregate_group_count_1024_row_match' \

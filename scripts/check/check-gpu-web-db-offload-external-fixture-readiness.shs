@@ -144,6 +144,20 @@ compound_tool_or_container_status() {
     status_line "$key" "missing" "$key-not-installed"
 }
 
+duckdb_status() {
+    path="$(tool_path duckdb)"
+    if [ "$path" != "" ]; then
+        status_line "duckdb" "ready" "duckdb:duckdb:$path"
+        return 0
+    fi
+    if [ "${DUCKDB_IMAGE:-}" != "" ] && command -v docker >/dev/null 2>&1 \
+        && docker run --rm "$DUCKDB_IMAGE" duckdb -c 'SELECT 1;' >/dev/null 2>&1; then
+        status_line "duckdb" "ready" "duckdb-ready:docker-image:$DUCKDB_IMAGE:duckdb"
+        return 0
+    fi
+    status_line "duckdb" "missing" "duckdb-not-installed-or-DUCKDB_IMAGE-not-configured"
+}
+
 emit_readiness() {
     tool_status "wrk" "wrk"
     tool_status "nginx" "nginx"
@@ -152,7 +166,7 @@ emit_readiness() {
     compound_tool_or_container_status "haproxy" "haproxy-ready" "HAPROXY_CONTAINER" "haproxy"
     compound_tool_or_container_status "envoy" "envoy-ready" "ENVOY_CONTAINER" "envoy"
     compound_tool_or_container_status "clickhouse" "clickhouse-ready" "CLICKHOUSE_CONTAINER" "clickhouse" "clickhouse-client"
-    tool_status "duckdb" "duckdb"
+    duckdb_status
     compound_tool_or_container_status "psql" "psql-ready" "POSTGRES_CONTAINER" "psql"
     compound_tool_or_container_status "pgbench" "pgbench-ready" "POSTGRES_CONTAINER" "pgbench"
     compound_tool_or_container_status "mongodb" "mongodb-ready" "MONGO_CONTAINER" "mongosh" "mongo"
@@ -542,6 +556,7 @@ MONGO_URL=mongodb://127.0.0.1:27017/ycsb
 MONGO_CONTAINER=gpu-web-db-mongo-ycsb
 REDIS_URL=redis://127.0.0.1:6379/0
 REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv
+DUCKDB_IMAGE=duckdb/duckdb:latest
 EOF
 }
 
@@ -709,7 +724,7 @@ tool_actions = {
     "haproxy": "Install or start HAProxy.",
     "envoy": "Install or start Envoy.",
     "clickhouse": "Install ClickHouse client tooling.",
-    "duckdb": "Install DuckDB.",
+    "duckdb": "Install DuckDB or set DUCKDB_IMAGE to a runnable DuckDB CLI container image.",
     "psql": "Install PostgreSQL psql.",
     "pgbench": "Install PostgreSQL pgbench.",
     "mongodb": "Install Mongo shell tooling.",
@@ -890,6 +905,7 @@ emit_env_template() {
 # MONGO_CONTAINER=gpu-web-db-mongo-ycsb
 # REDIS_URL=redis://127.0.0.1:6379/0
 # REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv
+# DUCKDB_IMAGE=duckdb/duckdb:latest
 # Optional standard-shape query overrides. Leave empty to use producer defaults.
 # CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=SELECT sum(number) FROM numbers(1024) WHERE number % 2 = 0
 # DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=SELECT b.range AS segment, count(*) AS order_count, sum(a.range) AS revenue FROM range(1024) a JOIN range(16) b ON a.range % 16 = b.range GROUP BY b.range ORDER BY revenue DESC LIMIT 8
@@ -922,6 +938,7 @@ MONGO_URL=
 MONGO_CONTAINER=
 REDIS_URL=
 REDIS_BENCHMARK_CONTAINER=
+DUCKDB_IMAGE=
 CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
 DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
 POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=
@@ -959,7 +976,7 @@ running live web, proxy, dynamic-route, or DB baseline producers.
 ## DB Baseline Tools And Services
 
 - [ ] `clickhouse` or `clickhouse-client`: ClickBench-style OLAP baseline.
-- [ ] `duckdb`: local TPC-H-style baseline.
+- [ ] `duckdb` or `DUCKDB_IMAGE`: local/Docker TPC-H-style baseline.
 - [ ] `psql`: PostgreSQL connection probe and query client.
 - [ ] `pgbench`: PostgreSQL load helper for TPC-H-style baseline preparation.
 - [ ] `mongosh` or `mongo`: MongoDB/YCSB document-filter baseline.
@@ -1071,7 +1088,7 @@ source_nonempty_readiness_env_file() {
 SIMPLE_UPLOAD_PROXY_URL|HAPROXY_UPLOAD_PROXY_URL|SIMPLE_TUNNEL_PROXY_URL|\
 HAPROXY_TUNNEL_PROXY_URL|DYNAMIC_GPU_PLAINTEXT_URL|DYNAMIC_CPU_PLAINTEXT_URL|\
 DYNAMIC_GPU_JSON_URL|DYNAMIC_CPU_JSON_URL|SIMPLE_REFERENCE_PLAINTEXT_URL|\
-UWEBSOCKETS_PLAINTEXT_URL|SEASTAR_PLAINTEXT_URL|CLICKHOUSE_URL|CLICKHOUSE_CONTAINER|POSTGRES_URL|POSTGRES_CONTAINER|MONGO_URL|MONGO_CONTAINER|REDIS_URL|REDIS_BENCHMARK_CONTAINER|\
+UWEBSOCKETS_PLAINTEXT_URL|SEASTAR_PLAINTEXT_URL|CLICKHOUSE_URL|CLICKHOUSE_CONTAINER|POSTGRES_URL|POSTGRES_CONTAINER|MONGO_URL|MONGO_CONTAINER|REDIS_URL|REDIS_BENCHMARK_CONTAINER|DUCKDB_IMAGE|\
 ANN_VECTOR_SEARCH_SHAPE)
                 export "$name=$value"
                 ;;
@@ -1480,6 +1497,7 @@ if [ "${1:-}" = "--self-test-env-template" ]; then
     printf '%s\n' "$template" | grep -q '^MONGO_CONTAINER='
     printf '%s\n' "$template" | grep -q '^REDIS_URL='
     printf '%s\n' "$template" | grep -q '^REDIS_BENCHMARK_CONTAINER='
+    printf '%s\n' "$template" | grep -q '^DUCKDB_IMAGE='
     printf '%s\n' "$template" | grep -q '^H2O_STATIC_CONTAINER='
     printf '%s\n' "$template" | grep -q '^ANN_VECTOR_SEARCH_SHAPE='
     echo "STATUS: PASS gpu web/db external fixture env template self-test"
@@ -1511,6 +1529,7 @@ if [ "${1:-}" = "--self-test-write-env-template" ]; then
     grep -q '^MONGO_CONTAINER=' "$env_file"
     grep -q '^REDIS_URL=' "$env_file"
     grep -q '^REDIS_BENCHMARK_CONTAINER=' "$env_file"
+    grep -q '^DUCKDB_IMAGE=' "$env_file"
     grep -q '^H2O_STATIC_CONTAINER=' "$env_file"
     grep -q '^CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=' "$env_file"
     grep -q '^DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=' "$env_file"
@@ -1873,6 +1892,7 @@ if [ "${1:-}" = "--self-test-local-env-candidates" ]; then
     printf '%s\n' "$candidates" | grep -q '^MONGO_CONTAINER=gpu-web-db-mongo-ycsb$'
     printf '%s\n' "$candidates" | grep -q '^REDIS_URL=redis://127.0.0.1:6379/0$'
     printf '%s\n' "$candidates" | grep -q '^REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv$'
+    printf '%s\n' "$candidates" | grep -q '^DUCKDB_IMAGE=duckdb/duckdb:latest$'
     echo "STATUS: PASS gpu web/db external fixture local env candidates self-test"
     exit 0
 fi
@@ -1895,6 +1915,7 @@ if [ "${1:-}" = "--self-test-write-local-env-candidates" ]; then
     grep -q '^MONGO_CONTAINER=gpu-web-db-mongo-ycsb$' "$candidates_file"
     grep -q '^REDIS_URL=redis://127.0.0.1:6379/0$' "$candidates_file"
     grep -q '^REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv$' "$candidates_file"
+    grep -q '^DUCKDB_IMAGE=duckdb/duckdb:latest$' "$candidates_file"
     echo "STATUS: PASS gpu web/db external fixture local env candidates file self-test"
     exit 0
 fi

@@ -8,7 +8,7 @@
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 15 |
+| bootstrap_missing_fixture_items | info | 14 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -23,7 +23,7 @@
 | haproxy | ready | haproxy-ready:docker-container:gpu-web-db-haproxy-cached-proxy:haproxy |
 | envoy | ready | envoy-ready:docker-container:gpu-web-db-envoy-cached-proxy:envoy |
 | clickhouse | ready | clickhouse-ready:docker-container:gpu-web-db-clickhouse-olap:clickhouse |
-| duckdb | missing | duckdb-not-installed |
+| duckdb | ready | duckdb-ready:docker-image:duckdb/duckdb:latest:duckdb |
 | psql | ready | psql-ready:docker-container:gpu-web-db-postgres-tpch:psql |
 | pgbench | ready | pgbench-ready:docker-container:gpu-web-db-postgres-tpch:pgbench |
 | mongodb | ready | mongodb-ready:docker-container:gpu-web-db-mongo-ycsb:mongosh |

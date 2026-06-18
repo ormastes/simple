@@ -5,8 +5,8 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 
 ## Summary
 
-- Ready fixtures: `16`
-- Missing fixtures: `15`
+- Ready fixtures: `17`
+- Missing fixtures: `14`
 - Verdict: `WARN`
 
 ## Category Summary
@@ -15,7 +15,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 |---|---:|---:|
 | core_load_tools | 2 | 0 |
 | web_proxy_tools | 4 | 0 |
-| db_tools | 6 | 1 |
+| db_tools | 7 | 0 |
 | proxy_fixture_urls | 0 | 7 |
 | dynamic_route_urls | 0 | 4 |
 | reference_fixture_urls | 0 | 3 |
@@ -29,7 +29,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 15 |
+| bootstrap_missing_fixture_items | info | 14 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -44,7 +44,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | haproxy | ready | haproxy-ready:docker-container:gpu-web-db-haproxy-cached-proxy:haproxy |
 | envoy | ready | envoy-ready:docker-container:gpu-web-db-envoy-cached-proxy:envoy |
 | clickhouse | ready | clickhouse-ready:docker-container:gpu-web-db-clickhouse-olap:clickhouse |
-| duckdb | missing | duckdb-not-installed |
+| duckdb | ready | duckdb-ready:docker-image:duckdb/duckdb:latest:duckdb |
 | psql | ready | psql-ready:docker-container:gpu-web-db-postgres-tpch:psql |
 | pgbench | ready | pgbench-ready:docker-container:gpu-web-db-postgres-tpch:pgbench |
 | mongodb | ready | mongodb-ready:docker-container:gpu-web-db-mongo-ycsb:mongosh |
@@ -103,6 +103,7 @@ Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --pri
 # MONGO_CONTAINER=gpu-web-db-mongo-ycsb
 # REDIS_URL=redis://127.0.0.1:6379/0
 # REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv
+# DUCKDB_IMAGE=duckdb/duckdb:latest
 # Optional standard-shape query overrides. Leave empty to use producer defaults.
 # CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=SELECT sum(number) FROM numbers(1024) WHERE number % 2 = 0
 # DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=SELECT b.range AS segment, count(*) AS order_count, sum(a.range) AS revenue FROM range(1024) a JOIN range(16) b ON a.range % 16 = b.range GROUP BY b.range ORDER BY revenue DESC LIMIT 8
@@ -135,6 +136,7 @@ MONGO_URL=
 MONGO_CONTAINER=
 REDIS_URL=
 REDIS_BENCHMARK_CONTAINER=
+DUCKDB_IMAGE=
 CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
 DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
 POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=
@@ -166,7 +168,7 @@ running live web, proxy, dynamic-route, or DB baseline producers.
 ## DB Baseline Tools And Services
 
 - [ ] `clickhouse` or `clickhouse-client`: ClickBench-style OLAP baseline.
-- [ ] `duckdb`: local TPC-H-style baseline.
+- [ ] `duckdb` or `DUCKDB_IMAGE`: local/Docker TPC-H-style baseline.
 - [ ] `psql`: PostgreSQL connection probe and query client.
 - [ ] `pgbench`: PostgreSQL load helper for TPC-H-style baseline preparation.
 - [ ] `mongosh` or `mongo`: MongoDB/YCSB document-filter baseline.
