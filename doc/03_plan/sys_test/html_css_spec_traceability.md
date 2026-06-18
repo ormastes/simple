@@ -91,6 +91,20 @@ RenderDoc `.rdc` evidence, macOS portability probe, and external-host capture
 gate. It exits nonzero until original RenderDoc+Chrome HTML/CSS evidence passes
 with `RDOC` magic.
 
+GUI/rendering feature coverage status command:
+
+```sh
+sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
+```
+
+This lightweight audit does not launch Electron, Chrome, or RenderDoc. It
+checks that every `WidgetKind` has `app.ui.render.html_widgets` dispatch,
+summarizes the Electron Simple Web layout manifest cases, points at the
+production GUI/web parity wrapper, and embeds the current HTML/CSS RenderDoc
+goal status. It may report `incomplete` while coverage is structurally mapped
+but durable `.rdc` evidence is missing from the local `build/` tree or the
+external Chrome/Vulkan gate has not passed.
+
 Already completed:
 
 - HTML inventory traceability exists for the current WHATWG element set used by
@@ -109,10 +123,15 @@ Already completed:
   That report is supplemental evidence for this macOS host: Metal is present,
   Homebrew `vulkan-tools` verifies Apple M4 through MoltenVK, and
   `renderdoccmd` is unavailable, so no macOS `.rdc` capture was produced.
+- The GUI/rendering feature coverage audit maps all current
+  `src/lib/common/ui/widget_kind.spl` widget wires to HTML renderer dispatch and
+  records the current 18-case Electron Simple Web layout manifest as the
+  canonical pixel-parity fixture list.
 
 Do not repeat these completed checks unless a related file changed:
 
 - `sh scripts/check/check-html-css-sspec-traceability.shs`
+- `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
 - `scripts/tool/renderdoc-evidence.shs capture-simple`
 - local host/Docker/QEMU attempts to run Chrome under RenderDoc with the same
   Chrome, RenderDoc, GPU, and VM capability state documented in

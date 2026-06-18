@@ -1,0 +1,212 @@
+#!/bin/sh
+# Non-launching status audit for GUI item rendering, HTML/CSS traceability, and
+# RenderDoc gates. Heavy renderer/capture checks are referenced, not run here.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_renderdoc_feature_coverage_status}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_renderdoc_feature_coverage_status_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+python3 - <<'PY' >"$OUT_ENV"
+from pathlib import Path
+import os
+import re
+import subprocess
+
+ROOT = Path.cwd()
+
+def value_of(key: str, text: str) -> str:
+    out = ""
+    prefix = key + "="
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            out = line[len(prefix):]
+    return out
+
+def emit(key: str, value) -> None:
+    value = "" if value is None else str(value)
+    value = value.replace("\n", " ")
+    print(f"{key}={value}")
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+widget_kind_path = ROOT / "src/lib/common/ui/widget_kind.spl"
+html_widgets_path = ROOT / "src/app/ui.render/html_widgets.spl"
+manifest_path = ROOT / "tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt"
+production_env_path = ROOT / "build/production_gui_web_renderer_parity_evidence/evidence.env"
+
+widget_source = widget_kind_path.read_text(encoding="utf-8", errors="ignore")
+html_source = html_widgets_path.read_text(encoding="utf-8", errors="ignore")
+
+wire_pairs = re.findall(r"WidgetKind\.([A-Za-z0-9_]+)\s*=>\s*\"([^\"]+)\"", widget_source)
+widget_wires = []
+seen = set()
+for _, wire in wire_pairs:
+    if wire not in seen:
+        widget_wires.append(wire)
+        seen.add(wire)
+
+match = re.search(r"fn render_html_widget\(.*?\n(.*?)\nfn render_html_tree_widget", html_source, re.S)
+dispatch_block = match.group(1) if match else ""
+dispatch_wires = sorted(set(re.findall(r"^\s*\"([^\"]+)\"\s*=>", dispatch_block, re.M)))
+missing_dispatch = [wire for wire in widget_wires if wire not in dispatch_wires]
+extra_dispatch = [wire for wire in dispatch_wires if wire not in widget_wires and wire not in {"vbox", "hbox"}]
+
+manifest_cases = []
+manifest_exact = 0
+manifest_tracked = 0
+if manifest_path.exists():
+    for line in manifest_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("|", 5)
+        if len(parts) < 5:
+            continue
+        case_id, scene, width, height, policy = parts[:5]
+        manifest_cases.append(case_id)
+        if policy == "exact":
+            manifest_exact += 1
+        elif policy == "track-text-divergence":
+            manifest_tracked += 1
+
+traceability_status = "recorded"
+traceability_reason = "not-run"
+if Path("scripts/check/check-html-css-sspec-traceability.shs").exists():
+    traceability_status = "available"
+    traceability_reason = "run sh scripts/check/check-html-css-sspec-traceability.shs"
+
+goal_output = ""
+goal_code = 127
+if Path("scripts/check/check-html-css-renderdoc-goal-status.shs").exists():
+    nested_env = os.environ.copy()
+    nested_env["BUILD_DIR"] = str(ROOT / "build/gui_renderdoc_feature_coverage_status/renderdoc-goal-status")
+    nested_env["REPORT_PATH"] = str(ROOT / "build/gui_renderdoc_feature_coverage_status/renderdoc-goal-status/report.md")
+    proc = subprocess.run(
+        ["sh", "scripts/check/check-html-css-renderdoc-goal-status.shs"],
+        cwd=ROOT,
+        env=nested_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=120,
+        check=False,
+    )
+    goal_output = proc.stdout
+    goal_code = proc.returncode
+
+production_env = production_env_path.read_text(encoding="utf-8", errors="ignore") if production_env_path.exists() else ""
+production_status = value_of("production_gui_web_renderer_parity_status", production_env)
+production_reason = value_of("production_gui_web_renderer_parity_reason", production_env)
+layout_count = value_of("production_gui_web_renderer_parity_layout_manifest_case_count", production_env)
+layout_pass = value_of("production_gui_web_renderer_parity_layout_manifest_pass_count", production_env)
+layout_tracked = value_of("production_gui_web_renderer_parity_layout_manifest_tracked_count", production_env)
+layout_fail = value_of("production_gui_web_renderer_parity_layout_manifest_fail_count", production_env)
+if production_env_path.exists() and not production_status:
+    production_status = "missing-status"
+    production_reason = "existing-evidence-env-missing-production-status"
+
+renderdoc_status = value_of("html_css_renderdoc_goal_status", goal_output)
+renderdoc_reason = value_of("html_css_renderdoc_goal_reason", goal_output)
+simple_status = value_of("simple_renderdoc_status", goal_output)
+simple_reason = value_of("simple_renderdoc_reason", goal_output)
+external_status = value_of("external_renderdoc_status", goal_output)
+external_reason = value_of("external_renderdoc_reason", goal_output)
+macos_status = value_of("macos_portability_status", goal_output)
+macos_reason = value_of("macos_portability_reason", goal_output)
+
+coverage_status = "pass"
+coverage_reason = "pass"
+if missing_dispatch:
+    coverage_status = "fail"
+    coverage_reason = "missing-widget-html-renderer-dispatch"
+elif not manifest_cases:
+    coverage_status = "fail"
+    coverage_reason = "missing-electron-layout-manifest"
+elif renderdoc_status != "pass":
+    coverage_status = "incomplete"
+    coverage_reason = renderdoc_reason or "renderdoc-goal-incomplete"
+elif production_status and production_status != "pass":
+    coverage_status = "incomplete"
+    coverage_reason = production_reason or "production-gui-web-renderer-parity-incomplete"
+
+emit("gui_renderdoc_feature_coverage_status", coverage_status)
+emit("gui_renderdoc_feature_coverage_reason", coverage_reason)
+emit("widget_kind_source", rel(widget_kind_path))
+emit("widget_kind_count", len(widget_wires))
+emit("widget_html_renderer_source", rel(html_widgets_path))
+emit("widget_html_renderer_dispatch_count", len([wire for wire in widget_wires if wire in dispatch_wires]))
+emit("widget_html_renderer_missing", ",".join(missing_dispatch))
+emit("widget_html_renderer_extra", ",".join(extra_dispatch))
+emit("electron_layout_manifest", rel(manifest_path))
+emit("electron_layout_manifest_case_count", len(manifest_cases))
+emit("electron_layout_manifest_exact_case_count", manifest_exact)
+emit("electron_layout_manifest_tracked_text_case_count", manifest_tracked)
+emit("electron_layout_manifest_cases", ",".join(manifest_cases))
+emit("html_css_traceability_status", traceability_status)
+emit("html_css_traceability_reason", traceability_reason)
+emit("html_css_traceability_command", "sh scripts/check/check-html-css-sspec-traceability.shs")
+emit("production_gui_web_renderer_parity_command", "ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
+emit("production_gui_web_renderer_parity_existing_env", rel(production_env_path) if production_env_path.exists() else "")
+emit("production_gui_web_renderer_parity_existing_status", production_status)
+emit("production_gui_web_renderer_parity_existing_reason", production_reason)
+emit("production_gui_web_renderer_parity_existing_layout_case_count", layout_count)
+emit("production_gui_web_renderer_parity_existing_layout_pass_count", layout_pass)
+emit("production_gui_web_renderer_parity_existing_layout_tracked_count", layout_tracked)
+emit("production_gui_web_renderer_parity_existing_layout_fail_count", layout_fail)
+emit("renderdoc_goal_status_command", "sh scripts/check/check-html-css-renderdoc-goal-status.shs")
+emit("renderdoc_goal_status_exit_code", goal_code)
+emit("renderdoc_goal_status", renderdoc_status)
+emit("renderdoc_goal_reason", renderdoc_reason)
+emit("simple_renderdoc_status", simple_status)
+emit("simple_renderdoc_reason", simple_reason)
+emit("external_renderdoc_status", external_status)
+emit("external_renderdoc_reason", external_reason)
+emit("macos_portability_status", macos_status)
+emit("macos_portability_reason", macos_reason)
+emit("simple_renderdoc_capture_command", "RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
+emit("html_renderdoc_capture_command", "RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
+emit("blocked_completion_gate", "original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic")
+PY
+
+status="$(sed -n 's/^gui_renderdoc_feature_coverage_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^gui_renderdoc_feature_coverage_reason=//p' "$OUT_ENV" | tail -n 1)"
+
+{
+    echo "# GUI RenderDoc Feature Coverage Status"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- widget HTML renderer dispatch: $(sed -n 's/^widget_html_renderer_dispatch_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- Electron layout manifest cases: $(sed -n 's/^electron_layout_manifest_case_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- RenderDoc goal: $(sed -n 's/^renderdoc_goal_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^renderdoc_goal_reason=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- Simple RenderDoc: $(sed -n 's/^simple_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^simple_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- External Chrome/Vulkan RenderDoc: $(sed -n 's/^external_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^external_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
+    echo
+    echo "## Commands"
+    echo
+    echo "- HTML/CSS traceability: \`$(sed -n 's/^html_css_traceability_command=//p' "$OUT_ENV" | tail -n 1)\`"
+    echo "- Production GUI/web parity: \`$(sed -n 's/^production_gui_web_renderer_parity_command=//p' "$OUT_ENV" | tail -n 1)\`"
+    echo "- Simple RenderDoc: \`$(sed -n 's/^simple_renderdoc_capture_command=//p' "$OUT_ENV" | tail -n 1)\`"
+    echo "- Original Chrome/Vulkan RenderDoc: \`$(sed -n 's/^html_renderdoc_capture_command=//p' "$OUT_ENV" | tail -n 1)\`"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$status" = "fail" ]; then
+    exit 1
+fi
+if [ "${GUI_RENDERDOC_STATUS_STRICT:-0}" = "1" ] && [ "$status" != "pass" ]; then
+    exit 1
+fi

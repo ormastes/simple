@@ -136,6 +136,14 @@ Host input
   source / checksum row plus DirectX native verdict and gate fields.
   Linux Metal and ROCm/HIP remain typed unavailable without matching host
   runtimes.
+- GUI item/rendering coverage status is summarized by
+  `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs`. The wrapper
+  does not launch Electron, Chrome, or RenderDoc; it checks current
+  `WidgetKind` -> HTML renderer dispatch coverage, summarizes the 18-case
+  Electron Simple Web layout manifest, points at the production parity wrapper,
+  and reports the active RenderDoc completion gate. Use strict mode
+  `GUI_RENDERDOC_STATUS_STRICT=1` only when a host is expected to have durable
+  Simple and original Chrome/Vulkan `.rdc` evidence.
 - Current runtime gaps: compiler/interpreter GPU packets consume the active
   backend handle, submit at lane begin, and complete after lane end, but still
   complete as typed `UNAVAILABLE` when none is registered; `SUBMITTED` is
