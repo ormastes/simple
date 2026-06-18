@@ -2559,16 +2559,53 @@ SplArray* rt_process_run(const char* cmd, SplArray* args) {
     if (!stdout_buf) stdout_buf = spl_strdup("");
     if (stdout_buf) stdout_buf[0] = '\0';
     char chunk[512];
-    while (fgets(chunk, sizeof(chunk), pipe)) {
-        size_t chunk_len = strlen(chunk);
-        if (len + chunk_len + 1 > cap) {
-            while (len + chunk_len + 1 > cap) cap *= 2;
-            stdout_buf = (char*)realloc(stdout_buf, cap);
-            if (!stdout_buf) break;
+    /* Read via poll() with an idle timeout rather than fgets()-until-EOF.
+     * popen()'s direct child (a shell) exits as soon as its foreground command
+     * finishes, and pclose() then reaps it cleanly. But if that command spawned
+     * a detached/reparented descendant (e.g. `simple check` spawning a delegate
+     * driver), the descendant keeps the stdout pipe write-end open, so EOF never
+     * arrives and a plain fgets()/read() loop would block forever — the historic
+     * rt_process_run deadlock. Stopping after IDLE_LIMIT_MS of no further data
+     * captures the command's output and returns even when a descendant still
+     * holds the pipe. Real EOF (all write-ends closed) still breaks immediately,
+     * so the common no-descendant case has no added latency. */
+    int out_fd = pipe ? fileno(pipe) : -1;
+    if (out_fd >= 0 && stdout_buf) {
+        struct pollfd pfd;
+        pfd.fd = out_fd;
+        pfd.events = POLLIN;
+        const int POLL_MS = 200;
+        const int IDLE_LIMIT_MS = 3000;
+        int idle_ms = 0;
+        while (1) {
+            pfd.revents = 0;
+            int pr = poll(&pfd, 1, POLL_MS);
+            if (pr < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (pr == 0) {
+                idle_ms += POLL_MS;
+                if (idle_ms >= IDLE_LIMIT_MS) break; /* descendant likely holds the pipe */
+                continue;
+            }
+            ssize_t n = read(out_fd, chunk, sizeof(chunk));
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (n == 0) break; /* real EOF: all write-ends closed */
+            idle_ms = 0;
+            if (len + (size_t)n + 1 > cap) {
+                while (len + (size_t)n + 1 > cap) cap *= 2;
+                char* grown = (char*)realloc(stdout_buf, cap);
+                if (!grown) break;
+                stdout_buf = grown;
+            }
+            memcpy(stdout_buf + len, chunk, (size_t)n);
+            len += (size_t)n;
+            stdout_buf[len] = '\0';
         }
-        memcpy(stdout_buf + len, chunk, chunk_len);
-        len += chunk_len;
-        stdout_buf[len] = '\0';
     }
     int status = pclose(pipe);
     int exit_code = status == -1 ? -1 : (status >> 8);
