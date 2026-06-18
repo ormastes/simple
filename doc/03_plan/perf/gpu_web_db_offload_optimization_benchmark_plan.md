@@ -246,7 +246,8 @@ Implemented and verified on the current host:
 - The local required-suite bridge now exists at
   `scripts/check/check-gpu-web-db-offload-local-required-suite.shs`. It writes
   `build/perf/gpu_web_db_offload/external-fixtures.local-required.env` with the
-  repo-local proxy and dynamic route fixture URLs, proves
+  repo-local proxy and dynamic route fixture URLs plus the generated local DB
+  and proxy container candidate values, proves
   `--require-required-ready` against that env file, runs the local proxy and
   dynamic route measured producers, refreshes web and DB reports, and runs the
   recovery artifact guard. This is the canonical host-local path for required
@@ -288,8 +289,8 @@ Remaining blockers before this plan can be marked done:
   suite run. Do not mark the suite complete from the default empty env file.
 - Use `scripts/check/check-gpu-web-db-offload-local-required-suite.shs` to run
   the required suite path with repo-local proxy and dynamic fixtures. It uses a
-  generated local-required env file instead of mutating the default empty env
-  template.
+  generated local-required env file with local DB/proxy candidate values
+  instead of mutating the default empty env template.
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_PROVENANCE`,

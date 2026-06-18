@@ -166,6 +166,11 @@ implementation-in-progress-recovered
   the external suite `--refresh-status` and `--preflight` commands before the
   full suite command, so fixture operators can re-check readiness without
   opening plan artifacts or launching live producers prematurely.
+- implementation: The local required-suite wrapper now writes its separate
+  `build/perf/gpu_web_db_offload/external-fixtures.local-required.env` with
+  repo-local proxy/dynamic URLs and generated local DB/proxy container
+  candidate values. It does not mutate the default blank strict fixture env and
+  still leaves optional uWebSockets/Seastar reference rows to the strict suite.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are
