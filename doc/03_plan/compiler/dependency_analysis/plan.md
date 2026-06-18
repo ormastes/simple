@@ -83,7 +83,7 @@ Phase 1 (parallel now):
       signature extraction vs full parse over a fixed sample of real
       modules — same fn/class/export surface; (b) parse-time benchmark
       outline-vs-full (pattern: `test/05_perf/mcp_json_perf_spec.spl`).
-- [ ] W2-A2 (full-strength, new module only) — lazy loader bridge in NEW
+- [x] W2-A2 (full-strength, new module only) — lazy loader bridge in NEW
       `src/compiler/10.frontend/core/interpreter/module_loader_lazy.spl`:
       outline-parse module, register body spans for on-first-call
       materialization via the existing deferred-module system, gated by
