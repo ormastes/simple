@@ -89,6 +89,12 @@ STATUS: PASS gpu web/db external suite require-ready
 ```text
 STATUS: PASS gpu web/db fastest comparator evidence require-ready
 ```
+- a reference-comparator env validation pass before copying values into the
+  strict fixture env:
+
+```text
+STATUS: PASS gpu web/db reference comparator env file
+```
 
 ## Acceptance
 
@@ -104,3 +110,6 @@ STATUS: PASS gpu web/db fastest comparator evidence require-ready
 - `build/perf/gpu_web_db_offload/fastest-comparator-coverage.md` shows all
   comparator rows ready, including uWebSockets, Seastar, and strict external
   suite readiness.
+- `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --check-env-file`
+  rejects blank or placeholder reference comparator fields and passes for the
+  verified strict comparator env file.

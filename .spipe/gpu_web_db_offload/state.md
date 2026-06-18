@@ -206,6 +206,9 @@ implementation-in-progress-recovered
   gives the exact producer, report, strict suite, and fastest-comparator audit
   sequence for real uWebSockets/Seastar plaintext endpoint evidence. These
   artifacts are side-effect-free and do not mark optional reference readiness.
+  The `--check-env-file` mode rejects blank reference URLs, non-HTTP(S) URLs,
+  and placeholder uWebSockets/Seastar provenance before values are copied into
+  the strict external fixture env.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

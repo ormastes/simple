@@ -201,6 +201,11 @@ Implemented and verified on the current host:
   fastest-comparator audit commands together. Generating these artifacts does
   not mark reference readiness; operators must fill verified live endpoints and
   provenance before running the strict gates.
+- The reference-comparator handoff now includes
+  `--check-env-file`, a side-effect-free guard that rejects blank reference
+  env files, non-HTTP(S) reference URLs, and placeholder uWebSockets/Seastar
+  provenance before values are copied into the strict
+  `external-fixtures.env`.
 - The readiness handoff now writes
   `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv`, a
   side-effect-free machine-readable map from URL-backed readiness items to the
@@ -342,7 +347,9 @@ Remaining blockers before this plan can be marked done:
   The provenance variables must identify the real comparator binary, image, or
   commit; URL-only placeholders remain blocked. Use
   `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs` to
-  refresh the blank env template and exact strict evidence command sequence.
+  refresh the blank env template and exact strict evidence command sequence,
+  then run `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --check-env-file build/perf/gpu_web_db_offload/reference-comparator-fixtures.env`
+  before copying values into the strict external fixture env.
   The open tracking note is
   `doc/08_tracking/bug/gpu_web_db_external_comparator_fixture_gap_2026-06-18.md`.
 The current blocker list is machine-checkable with
