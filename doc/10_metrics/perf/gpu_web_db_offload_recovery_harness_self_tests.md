@@ -26,6 +26,7 @@
 | external DB baseline producer | pass | host-safe-self-test |
 | external DB baseline env file source | pass | host-safe-self-test |
 | external DB baseline Redis Valkey env file source | pass | host-safe-self-test |
+| external DB baseline Redis Docker container source | pass | host-safe-self-test |
 | external DB baseline no-row status | pass | host-safe-self-test |
 | external DB baseline standard shape manifest | pass | host-safe-self-test |
 | external DB baseline empty query env defaults | pass | host-safe-self-test |

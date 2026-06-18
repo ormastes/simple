@@ -119,6 +119,31 @@ compound_tool_status() {
     status_line "$key" "missing" "$key-not-installed"
 }
 
+compound_tool_or_container_status() {
+    key="$1"
+    ready_reason="$2"
+    container_var="$3"
+    shift 3
+    for tool in "$@"; do
+        path="$(tool_path "$tool")"
+        if [ "$path" != "" ]; then
+            status_line "$key" "ready" "$ready_reason:$tool:$path"
+            return 0
+        fi
+    done
+    eval container_name=\"\${$container_var:-}\"
+    if [ "$container_name" != "" ] && command -v docker >/dev/null 2>&1; then
+        for tool in "$@"; do
+            if docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null | grep -q '^true$' \
+                && docker exec "$container_name" sh -c "command -v $tool >/dev/null 2>&1" 2>/dev/null; then
+                status_line "$key" "ready" "$ready_reason:docker-container:$container_name:$tool"
+                return 0
+            fi
+        done
+    fi
+    status_line "$key" "missing" "$key-not-installed"
+}
+
 emit_readiness() {
     tool_status "wrk" "wrk"
     tool_status "nginx" "nginx"
@@ -131,8 +156,8 @@ emit_readiness() {
     tool_status "psql" "psql"
     tool_status "pgbench" "pgbench"
     compound_tool_status "mongodb" "mongodb-ready" "mongosh" "mongo"
-    compound_tool_status "redis_valkey" "redis-valkey-ready" "redis-cli" "valkey-cli"
-    tool_status "redis_benchmark" "redis-benchmark"
+    compound_tool_or_container_status "redis_valkey" "redis-valkey-ready" "REDIS_BENCHMARK_CONTAINER" "redis-cli" "valkey-cli"
+    compound_tool_or_container_status "redis_benchmark" "redis-benchmark-ready" "REDIS_BENCHMARK_CONTAINER" "redis-benchmark"
     url_status "simple_cached_proxy_url" "SIMPLE_CACHED_PROXY_URL"
     url_status "haproxy_cached_proxy_url" "HAPROXY_CACHED_PROXY_URL"
     url_status "envoy_cached_proxy_url" "ENVOY_CACHED_PROXY_URL"
@@ -509,6 +534,7 @@ CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
 POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
 MONGO_URL=mongodb://127.0.0.1:27017/ycsb
 REDIS_URL=redis://127.0.0.1:6379/0
+REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv
 EOF
 }
 
@@ -848,6 +874,8 @@ emit_env_template() {
 # CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
 # POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
 # MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+# REDIS_URL=redis://127.0.0.1:6379/0
+# REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv
 # Optional standard-shape query overrides. Leave empty to use producer defaults.
 # CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=SELECT sum(number) FROM numbers(1024) WHERE number % 2 = 0
 # DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=SELECT b.range AS segment, count(*) AS order_count, sum(a.range) AS revenue FROM range(1024) a JOIN range(16) b ON a.range % 16 = b.range GROUP BY b.range ORDER BY revenue DESC LIMIT 8
@@ -872,6 +900,7 @@ CLICKHOUSE_URL=
 POSTGRES_URL=
 MONGO_URL=
 REDIS_URL=
+REDIS_BENCHMARK_CONTAINER=
 CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
 DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
 POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=
@@ -1021,7 +1050,7 @@ source_nonempty_readiness_env_file() {
 SIMPLE_UPLOAD_PROXY_URL|HAPROXY_UPLOAD_PROXY_URL|SIMPLE_TUNNEL_PROXY_URL|\
 HAPROXY_TUNNEL_PROXY_URL|DYNAMIC_GPU_PLAINTEXT_URL|DYNAMIC_CPU_PLAINTEXT_URL|\
 DYNAMIC_GPU_JSON_URL|DYNAMIC_CPU_JSON_URL|SIMPLE_REFERENCE_PLAINTEXT_URL|\
-UWEBSOCKETS_PLAINTEXT_URL|SEASTAR_PLAINTEXT_URL|CLICKHOUSE_URL|POSTGRES_URL|MONGO_URL|REDIS_URL|\
+UWEBSOCKETS_PLAINTEXT_URL|SEASTAR_PLAINTEXT_URL|CLICKHOUSE_URL|POSTGRES_URL|MONGO_URL|REDIS_URL|REDIS_BENCHMARK_CONTAINER|\
 ANN_VECTOR_SEARCH_SHAPE)
                 export "$name=$value"
                 ;;
@@ -1424,6 +1453,7 @@ if [ "${1:-}" = "--self-test-env-template" ]; then
     printf '%s\n' "$template" | grep -q '^POSTGRES_URL='
     printf '%s\n' "$template" | grep -q '^MONGO_URL='
     printf '%s\n' "$template" | grep -q '^REDIS_URL='
+    printf '%s\n' "$template" | grep -q '^REDIS_BENCHMARK_CONTAINER='
     printf '%s\n' "$template" | grep -q '^ANN_VECTOR_SEARCH_SHAPE='
     echo "STATUS: PASS gpu web/db external fixture env template self-test"
     exit 0
@@ -1448,6 +1478,7 @@ if [ "${1:-}" = "--self-test-write-env-template" ]; then
     grep -q '^POSTGRES_URL=' "$env_file"
     grep -q '^MONGO_URL=' "$env_file"
     grep -q '^REDIS_URL=' "$env_file"
+    grep -q '^REDIS_BENCHMARK_CONTAINER=' "$env_file"
     grep -q '^CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=' "$env_file"
     grep -q '^DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=' "$env_file"
     grep -q '^POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=' "$env_file"
@@ -1801,6 +1832,7 @@ if [ "${1:-}" = "--self-test-local-env-candidates" ]; then
     printf '%s\n' "$candidates" | grep -q '^CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default$'
     printf '%s\n' "$candidates" | grep -q '^POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres$'
     printf '%s\n' "$candidates" | grep -q '^REDIS_URL=redis://127.0.0.1:6379/0$'
+    printf '%s\n' "$candidates" | grep -q '^REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv$'
     echo "STATUS: PASS gpu web/db external fixture local env candidates self-test"
     exit 0
 fi
@@ -1815,6 +1847,7 @@ if [ "${1:-}" = "--self-test-write-local-env-candidates" ]; then
     grep -q '^ENVOY_CACHED_PROXY_URL=http://127.0.0.1:8092/cacheable$' "$candidates_file"
     grep -q '^MONGO_URL=mongodb://127.0.0.1:27017/ycsb$' "$candidates_file"
     grep -q '^REDIS_URL=redis://127.0.0.1:6379/0$' "$candidates_file"
+    grep -q '^REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv$' "$candidates_file"
     echo "STATUS: PASS gpu web/db external fixture local env candidates file self-test"
     exit 0
 fi

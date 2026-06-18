@@ -194,7 +194,8 @@ Implemented and verified on the current host:
   `--write-policy-json` persists
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
-  On this host the split is 26 required missing fixtures and 3 optional
+  On this host after starting the generated Redis Docker fixture, the split is
+  23 required missing fixtures and 3 optional
   reference fixture URLs.
 - The suite now also writes required-only handoff artifacts for resumed
   sessions that need to separate release-blocking fixture work from optional
@@ -221,11 +222,14 @@ Implemented and verified on the current host:
   before a full external-suite run. It refreshes readiness, prints the same
   status/category rows, and emits `STATUS: PASS ... preflight ready` or
   `STATUS: WARN ... preflight missing:N`.
-- DB baseline rows remain unavailable on this host because the external DB tools
-  and/or service connection URLs are not installed/configured. Redis/Valkey is
-  included in that readiness handoff as `redis_valkey` CLI readiness,
-  `redis_benchmark` measured SET/GET readiness, and `REDIS_URL`, matching the
-  report's Redis/Valkey row without treating a CLI ping as throughput evidence.
+- Most DB baseline rows remain unavailable on this host because the external DB
+  tools and/or service connection URLs are not installed/configured. Redis/Valkey
+  now has a live Docker-backed measured SET/GET row when
+  `REDIS_URL=redis://127.0.0.1:6379/0` and
+  `REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv` are set in the fixture
+  env file. The readiness handoff treats that container as both Redis/Valkey CLI
+  readiness and `redis_benchmark` readiness without treating a CLI ping alone as
+  throughput evidence.
 
 Remaining blockers before this plan can be marked done:
 
@@ -322,7 +326,7 @@ non-mutating parser, producer, and readiness self-tests without rerunning native
 builds, live servers, or heavyweight benchmark specs. The command writes
 durable PASS artifacts under `doc/09_report/perf/` and `doc/10_metrics/perf/`
 with one row per syntax/self-test gate; the current recovery artifacts record
-72 passed host-safe gates. `--self-test-artifacts` verifies that same
+73 passed host-safe gates. `--self-test-artifacts` verifies that same
 artifact-writing path with temporary report and metrics files. The harness also
 validates the fixture environment template, safe-default behavior, setup
 checklist, env-file validation, category summary, missing-by-category output,
@@ -480,11 +484,12 @@ producer/parser contract as the other external DB baselines:
 `db_key_value_redis_valkey_external_measured` with
 `redis_valkey_getset_1024_key_match` and `redis_valkey_key_value_getset`.
 Current local artifacts still do not claim Redis throughput or latency parity
-because `redis-benchmark` and `REDIS_URL` are not configured on this host.
-`redis-cli` and `valkey-cli` readiness is status-only; it does not emit a
-measured Redis/Valkey SET/GET row. When a supported DB tool is installed, the
-status row changes to `external-db-baseline-ready-unmeasured:*` until a
-measured wrapper fills real throughput and latency. The report gate now has a measured-row input contract:
+unless either host `redis-benchmark` or a running generated Docker fixture named
+by `REDIS_BENCHMARK_CONTAINER` is available alongside `REDIS_URL`. `redis-cli`
+and `valkey-cli` readiness is status-only; it does not emit a measured
+Redis/Valkey SET/GET row. When a supported DB tool is installed, the status row
+changes to `external-db-baseline-ready-unmeasured:*` until a measured wrapper
+fills real throughput and latency. The report gate now has a measured-row input contract:
 external DB wrappers may provide
 `GPU_WDB_EXTERNAL_DB_MEASURED=name|dataset|target|time_us` lines through
 `GPU_WDB_EXTERNAL_DB_BASELINE_OUTPUT`, and only known DB baseline names with

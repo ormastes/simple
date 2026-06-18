@@ -5,8 +5,8 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 
 ## Summary
 
-- Ready fixtures: `2`
-- Missing fixtures: `29`
+- Ready fixtures: `5`
+- Missing fixtures: `26`
 - Verdict: `WARN`
 
 ## Category Summary
@@ -15,11 +15,11 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 |---|---:|---:|
 | core_load_tools | 2 | 0 |
 | web_proxy_tools | 0 | 4 |
-| db_tools | 0 | 7 |
+| db_tools | 2 | 5 |
 | proxy_fixture_urls | 0 | 7 |
 | dynamic_route_urls | 0 | 4 |
 | reference_fixture_urls | 0 | 3 |
-| db_service_urls | 0 | 4 |
+| db_service_urls | 1 | 3 |
 
 ## Bootstrap Status
 
@@ -29,7 +29,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | bootstrap_container_engine | ready | docker-info |
 | bootstrap_package_manager | ready | apt:/usr/bin/apt |
 | bootstrap_compose | optional-missing | docker-compose-not-installed |
-| bootstrap_missing_fixture_items | info | 29 |
+| bootstrap_missing_fixture_items | info | 26 |
 | bootstrap_local_fixture_bootstrap | possible | container-engine-ready |
 | bootstrap_side_effects | none | status-only-no-install-no-container-start |
 
@@ -48,8 +48,8 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | psql | missing | psql-not-installed |
 | pgbench | missing | pgbench-not-installed |
 | mongodb | missing | mongodb-not-installed |
-| redis_valkey | missing | redis_valkey-not-installed |
-| redis_benchmark | missing | redis-benchmark-not-installed |
+| redis_valkey | ready | redis-valkey-ready:docker-container:gpu-web-db-redis-valkey-kv:redis-cli |
+| redis_benchmark | ready | redis-benchmark-ready:docker-container:gpu-web-db-redis-valkey-kv:redis-benchmark |
 | simple_cached_proxy_url | missing | SIMPLE_CACHED_PROXY_URL-not-configured |
 | haproxy_cached_proxy_url | missing | HAPROXY_CACHED_PROXY_URL-not-configured |
 | envoy_cached_proxy_url | missing | ENVOY_CACHED_PROXY_URL-not-configured |
@@ -67,7 +67,7 @@ It records host readiness for external web, proxy, dynamic-route, and DB baselin
 | clickhouse_url | missing | CLICKHOUSE_URL-not-configured |
 | postgres_url | missing | POSTGRES_URL-not-configured |
 | mongo_url | missing | MONGO_URL-not-configured |
-| redis_url | missing | REDIS_URL-not-configured |
+| redis_url | ready | REDIS_URL-configured |
 
 ## Fixture Environment Template
 
@@ -94,6 +94,8 @@ Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --pri
 # CLICKHOUSE_URL=clickhouse://127.0.0.1:9000/default
 # POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
 # MONGO_URL=mongodb://127.0.0.1:27017/ycsb
+# REDIS_URL=redis://127.0.0.1:6379/0
+# REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv
 # Optional standard-shape query overrides. Leave empty to use producer defaults.
 # CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=SELECT sum(number) FROM numbers(1024) WHERE number % 2 = 0
 # DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=SELECT b.range AS segment, count(*) AS order_count, sum(a.range) AS revenue FROM range(1024) a JOIN range(16) b ON a.range % 16 = b.range GROUP BY b.range ORDER BY revenue DESC LIMIT 8
@@ -118,6 +120,7 @@ CLICKHOUSE_URL=
 POSTGRES_URL=
 MONGO_URL=
 REDIS_URL=
+REDIS_BENCHMARK_CONTAINER=
 CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
 DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
 POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=

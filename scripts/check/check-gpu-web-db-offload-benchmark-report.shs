@@ -342,15 +342,34 @@ def external_db_measured_row(value):
     )
 
 seen_external_db_measured = set()
+measured_external_db_targets = set()
 for line in external_db_output.splitlines():
     if not line.startswith("GPU_WDB_EXTERNAL_DB_MEASURED="):
         continue
     if line in seen_external_db_measured:
         continue
     seen_external_db_measured.add(line)
-    measured_row = external_db_measured_row(line.split("=", 1)[1])
+    measured_value = line.split("=", 1)[1]
+    measured_row = external_db_measured_row(measured_value)
     if measured_row:
+        measured_external_db_targets.add(measured_value.split("|")[2].strip())
         rows.insert(16, measured_row)
+
+measured_status_replacements = {
+    "clickhouse_scan_filter_project": "external-db-baseline-unavailable:clickhouse-not-installed",
+    "duckdb_tpch_q3_join_aggregate": "external-db-baseline-unavailable:duckdb-not-installed",
+    "postgresql_tpch_q3_join_aggregate": "external-db-baseline-unavailable:postgresql-not-installed",
+    "mongo_ycsb_document_filter": "external-db-baseline-unavailable:mongo-not-installed",
+    "redis_valkey_key_value_getset": "external-db-baseline-unavailable:redis-valkey-not-installed",
+    "ann_vector_topk_recall": "external-db-baseline-unavailable:ann-fixture-not-configured",
+}
+for target in measured_external_db_targets:
+    unavailable = measured_status_replacements.get(target)
+    if unavailable:
+        rows = [
+            row.replace(unavailable, f"external-db-baseline-ready-measured:{target}")
+            for row in rows
+        ]
 
 def command_output(args):
     try:
@@ -658,7 +677,7 @@ grep -Eq 'external-db-baseline-(unavailable:clickhouse-not-installed|ready-unmea
 grep -Eq 'external-db-baseline-(unavailable:duckdb-not-installed|ready-unmeasured:duckdb_tpch_q3_join_aggregate)' "$TABLE"
 grep -Eq 'external-db-baseline-(unavailable:postgresql-not-installed|ready-unmeasured:postgresql_tpch_q3_join_aggregate)' "$TABLE"
 grep -Eq 'external-db-baseline-(unavailable:mongo-not-installed|ready-unmeasured:mongo_ycsb_document_filter)' "$TABLE"
-grep -Eq 'external-db-baseline-(unavailable:redis-valkey-not-installed|ready-unmeasured:redis_valkey_key_value_getset)' "$TABLE"
+grep -Eq 'external-db-baseline-(unavailable:redis-valkey-not-installed|ready-unmeasured:redis_valkey_key_value_getset|ready-measured:redis_valkey_key_value_getset)' "$TABLE"
 grep -q 'external-db-baseline-unavailable:ann-fixture-not-configured' "$TABLE"
 grep -q 'standard-baseline-unavailable:clickhouse-duckdb-postgresql' "$TABLE"
 grep -q 'batch-too-small' "$TABLE"

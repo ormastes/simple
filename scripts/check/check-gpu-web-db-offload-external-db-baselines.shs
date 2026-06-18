@@ -203,6 +203,37 @@ EOF
     exit 0
 fi
 
+if [ "${1:-}" = "--self-test-redis-docker-container-source" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    mkdir -p "$tmpdir/bin"
+    cat > "$tmpdir/bin/docker" <<'EOF'
+#!/usr/bin/env sh
+test "$1" = "exec"
+test "$2" = "gpu-web-db-redis-valkey-kv"
+test "$3" = "redis-benchmark"
+test "$4" = "-u"
+test "$5" = "redis://127.0.0.1:6379/0"
+test "$6" = "-t"
+test "$7" = "set,get"
+test "$8" = "-n"
+test "$9" = "1024"
+test "${10}" = "-d"
+test "${11}" = "1024"
+exit 0
+EOF
+    chmod +x "$tmpdir/bin/docker"
+    env_file="$tmpdir/external-fixtures.env"
+    cat > "$env_file" <<'EOF'
+REDIS_URL=redis://127.0.0.1:6379/0
+REDIS_BENCHMARK_CONTAINER=gpu-web-db-redis-valkey-kv
+EOF
+    output="$(DB_FIXTURE_ENV_FILE="$env_file" PATH="$tmpdir/bin:$PATH" sh "$0")"
+    printf '%s\n' "$output" | grep -q '^GPU_WDB_EXTERNAL_DB_MEASURED=db_key_value_redis_valkey_external_measured|redis_valkey_getset_1024_key_match|redis_valkey_key_value_getset|[1-9][0-9]*$'
+    echo "STATUS: PASS external DB baseline Redis/Valkey Docker container source self-test"
+    exit 0
+fi
+
 if [ "${1:-}" = "--self-test-no-rows-status" ]; then
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' EXIT INT TERM
@@ -277,6 +308,14 @@ fi
 
 if command -v redis-benchmark >/dev/null 2>&1 && [ "${REDIS_URL:-}" != "" ]; then
     if elapsed="$(time_command_us redis-benchmark -u "$REDIS_URL" -t set,get -n 1024 -d 1024)"; then
+        emit_measured_row \
+            'db_key_value_redis_valkey_external_measured' \
+            'redis_valkey_getset_1024_key_match' \
+            'redis_valkey_key_value_getset' \
+            "$elapsed"
+    fi
+elif command -v docker >/dev/null 2>&1 && [ "${REDIS_BENCHMARK_CONTAINER:-}" != "" ] && [ "${REDIS_URL:-}" != "" ]; then
+    if elapsed="$(time_command_us docker exec "$REDIS_BENCHMARK_CONTAINER" redis-benchmark -u "$REDIS_URL" -t set,get -n 1024 -d 1024)"; then
         emit_measured_row \
             'db_key_value_redis_valkey_external_measured' \
             'redis_valkey_getset_1024_key_match' \

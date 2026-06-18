@@ -3,7 +3,7 @@
 | metric | value |
 |---|---:|
 | suite_steps | 31 |
-| missing_fixture_items | 29 |
+| missing_fixture_items | 26 |
 | missing_data_source | fixture-env-file:build/perf/gpu_web_db_offload/external-fixtures.env |
 | strict_readiness_command | scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready |
 
