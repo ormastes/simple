@@ -504,20 +504,27 @@ if [ "${deploy}" -eq 1 ]; then
     [ "${out}" = "2" ]
   }
   seed_delegate="${deploy_dir}/simple_seed"
-  if ! seed_probe "${seed_delegate}"; then
-    seed_src=""
-    for cand in src/compiler_rust/target/bootstrap/simple \
-                src/compiler_rust/target/release/simple; do
-      if seed_probe "${cand}"; then seed_src="${cand}"; break; fi
-    done
-    if [ -z "${seed_src}" ]; then
-      echo "ERROR: deploy refused — no working seed driver for ${seed_delegate}." >&2
-      echo "  Build one first: cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" >&2
-      exit 1
-    fi
-    install -m755 "${seed_src}" "${seed_delegate}"
-    echo "Installed probed seed delegate: ${seed_src} -> ${seed_delegate}"
+  # ALWAYS refresh the delegate from the freshly-built seed that produced this
+  # stage4 — never keep a pre-existing delegate just because it still passes the
+  # `-c` probe. A stale delegate (one that evaluates `print(1+1)` fine but lacks
+  # the current seed's codegen/runtime fixes) would silently mis-run everything
+  # stage4 delegates (run/test/check), which is exactly how a seed-codegen fix
+  # failed to reach `bin/simple` post-deploy on 2026-06-18. Prefer ${seed_bin}
+  # (rebuilt from current sources every deploy); fall back across known build
+  # paths; refuse deploy if none is a working driver.
+  seed_src=""
+  for cand in "${seed_bin}" \
+              src/compiler_rust/target/bootstrap/simple \
+              src/compiler_rust/target/release/simple; do
+    if seed_probe "${cand}"; then seed_src="${cand}"; break; fi
+  done
+  if [ -z "${seed_src}" ]; then
+    echo "ERROR: deploy refused — no working seed driver for ${seed_delegate}." >&2
+    echo "  Build one first: cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all" >&2
+    exit 1
   fi
+  install -m755 "${seed_src}" "${seed_delegate}"
+  echo "Refreshed seed delegate: ${seed_src} -> ${seed_delegate}"
 
   prev_bin="${deploy_dir}/simple.pre_deploy"
   [ -x "${deploy_dir}/simple" ] && cp "${deploy_dir}/simple" "${prev_bin}"

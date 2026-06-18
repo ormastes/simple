@@ -1196,10 +1196,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Process execution
     // =========================================================================
     // Native libsimple_runtime.a process functions use C strings and SplArray pointers.
-    RuntimeFuncSpec::new("rt_process_run", &[I64, I64], &[I64]),
+    // rt_process_run(cmd_ptr, cmd_len, args: RuntimeValue) -> RuntimeValue — the
+    // Rust runtime (env_process.rs) takes a ptr+len command + a tagged args
+    // array, NOT the legacy C-runtime (const char*, SplArray*) shape. Marshaled
+    // via expand_text_args (text index [0]), not the C-runtime cstr path.
+    RuntimeFuncSpec::new("rt_process_run", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_execute", &[I64, I64], &[I32]),
-    RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64], &[I64]),
+    // rt_process_run_timeout(cmd_ptr, cmd_len, args: RuntimeValue, timeout_ms) ->
+    // RuntimeValue — same ptr+len/tagged-args Rust ABI as rt_process_run.
+    RuntimeFuncSpec::new("rt_process_run_timeout", &[I64, I64, I64, I64], &[I64]),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code

@@ -2250,6 +2250,13 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Print/IO (text → ptr, len)
         "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
 
+        // Process run: the linked Rust runtime (env_process.rs) takes
+        // (cmd_ptr, cmd_len, args: RuntimeValue) — ptr+len command, tagged args
+        // array — NOT the C-runtime (const char*, SplArray*) shape. Marshal the
+        // command text as a (ptr, len) pair and leave args as a tagged
+        // RuntimeValue (do NOT route through the cstr / C-runtime paths).
+        "rt_process_run" | "rt_process_run_timeout" => Some(&[0]),
+
         // Environment variables
         "rt_env_get" | "rt_env_get_i64" | "rt_get_env" | "rt_env_exists" | "rt_env_remove" => Some(&[0]),
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
@@ -2356,7 +2363,7 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         // Native process functions in libsimple_runtime.a use C strings and
         // SplArray pointers, not Rust RuntimeValue string ptr/len pairs.
-        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => Some(&[0]),
+        "rt_process_spawn" | "rt_process_execute" => Some(&[0]),
         "rt_file_write_text" | "rt_file_append_text" => Some(&[0, 1]),
         "rt_dir_create" | "rt_dir_create_all" => Some(&[0]),
         "rt_cuda_launch_kernel" => Some(&[1]),
@@ -2377,7 +2384,7 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
 fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
     match func_name {
-        "rt_process_run" | "rt_process_spawn" | "rt_process_execute" | "rt_process_run_timeout" => {
+        "rt_process_spawn" | "rt_process_execute" => {
             Some((&[0], &[1]))
         }
         _ => None,
