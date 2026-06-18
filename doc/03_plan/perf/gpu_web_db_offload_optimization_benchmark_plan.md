@@ -204,11 +204,15 @@ Implemented and verified on the current host:
 - The reference-comparator handoff now includes
   `--check-env-file`, a side-effect-free guard that rejects blank reference
   env files, non-HTTP(S) reference URLs, and placeholder uWebSockets/Seastar
-  provenance before values are copied into the strict
-  `external-fixtures.env`.
+  provenance before values are copied into the strict `external-fixtures.env`.
 - `--write-env-check-report` persists the reference-comparator validation
   state at `build/perf/gpu_web_db_offload/reference-comparator-env-check.md`
   for crash-session handoff.
+- `--write-validated-env-fragment` fails closed on the same validation and only
+  writes `build/perf/gpu_web_db_offload/reference-comparator-validated-external.env`
+  after the Simple/uWebSockets/Seastar URLs and uWebSockets/Seastar provenance
+  are ready, so the strict suite no longer depends on manually copying
+  unvalidated reference fields.
 - The readiness handoff now writes
   `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv`, a
   side-effect-free machine-readable map from URL-backed readiness items to the

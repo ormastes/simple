@@ -57,6 +57,11 @@ sh scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --wri
 The generated report is
 `build/perf/gpu_web_db_offload/reference-comparator-env-check.md`; with the
 default blank reference env it reports five missing fields.
+After that report is `READY`,
+`scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --write-validated-env-fragment`
+emits
+`build/perf/gpu_web_db_offload/reference-comparator-validated-external.env`
+for guarded transfer into the strict external fixture env.
 
 ## Why This Matters
 

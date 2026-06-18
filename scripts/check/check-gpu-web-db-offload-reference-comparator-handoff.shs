@@ -5,6 +5,7 @@ BUILD_DIR="${BUILD_DIR:-build/perf/gpu_web_db_offload}"
 ENV_TEMPLATE="${ENV_TEMPLATE:-$BUILD_DIR/reference-comparator-fixtures.env}"
 ENV_FIELDS_TSV="${ENV_FIELDS_TSV:-$BUILD_DIR/reference-comparator-env-fields.tsv}"
 ENV_CHECK_REPORT="${ENV_CHECK_REPORT:-$BUILD_DIR/reference-comparator-env-check.md}"
+VALIDATED_ENV_FRAGMENT="${VALIDATED_ENV_FRAGMENT:-$BUILD_DIR/reference-comparator-validated-external.env}"
 HANDOFF="${HANDOFF:-$BUILD_DIR/reference-comparator-handoff.md}"
 PROXY_PRODUCER="${PROXY_PRODUCER:-scripts/check/check-web-server-proxy-external-live-compare.shs}"
 WEB_REPORT="${WEB_REPORT:-scripts/check/check-web-server-nginx-compare-report.shs}"
@@ -84,6 +85,34 @@ check_env_file() {
         echo "STATUS: FAIL gpu web/db reference comparator env file"
     fi
     return "$status"
+}
+
+shell_double_quote_value() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\$/\\$/g; s/`/\\`/g'
+}
+
+write_validated_env_fragment() {
+    file="${1:-$ENV_TEMPLATE}"
+    out="${2:-$VALIDATED_ENV_FRAGMENT}"
+    if ! check_env_file "$file" >/dev/null; then
+        return 1
+    fi
+    simple_url="$(env_value SIMPLE_REFERENCE_PLAINTEXT_URL "$file")"
+    uwebsockets_url="$(env_value UWEBSOCKETS_PLAINTEXT_URL "$file")"
+    uwebsockets_provenance="$(env_value UWEBSOCKETS_PLAINTEXT_PROVENANCE "$file")"
+    seastar_url="$(env_value SEASTAR_PLAINTEXT_URL "$file")"
+    seastar_provenance="$(env_value SEASTAR_PLAINTEXT_PROVENANCE "$file")"
+    mkdir -p "$(dirname "$out")"
+    {
+        echo "# Validated GPU Web/DB reference comparator env fragment."
+        echo "# Generated only after reference-comparator env validation passes."
+        printf 'SIMPLE_REFERENCE_PLAINTEXT_URL="%s"\n' "$(shell_double_quote_value "$simple_url")"
+        printf 'UWEBSOCKETS_PLAINTEXT_URL="%s"\n' "$(shell_double_quote_value "$uwebsockets_url")"
+        printf 'UWEBSOCKETS_PLAINTEXT_PROVENANCE="%s"\n' "$(shell_double_quote_value "$uwebsockets_provenance")"
+        printf 'SEASTAR_PLAINTEXT_URL="%s"\n' "$(shell_double_quote_value "$seastar_url")"
+        printf 'SEASTAR_PLAINTEXT_PROVENANCE="%s"\n' "$(shell_double_quote_value "$seastar_provenance")"
+    } > "$out"
+    printf '%s\n' "$out"
 }
 
 env_check_rows() {
@@ -196,17 +225,19 @@ values, and does not claim fastest-server evidence.
 
 The machine-readable field map is \`$ENV_FIELDS_TSV\`.
 The latest side-effect-free env validation report is \`$ENV_CHECK_REPORT\`.
+The guarded sourceable reference env fragment is \`$VALIDATED_ENV_FRAGMENT\`.
 
 ## Strict Evidence Sequence
 
 1. Fill \`$ENV_TEMPLATE\` with verified live endpoint URLs and provenance.
 2. Run \`scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --check-env-file $ENV_TEMPLATE\`.
-3. Copy only verified values into \`build/perf/gpu_web_db_offload/external-fixtures.env\`.
-4. Run \`EXTERNAL_FIXTURE_ENV_FILE=build/perf/gpu_web_db_offload/external-fixtures.env $CANONICAL_PROXY_PRODUCER\`.
-5. Run \`$CANONICAL_WEB_REPORT\`.
-6. Run \`$CANONICAL_EXTERNAL_SUITE --refresh-status\`.
-7. Run \`$CANONICAL_EXTERNAL_SUITE --require-ready\`.
-8. Run \`$CANONICAL_FASTEST_AUDIT --require-ready\`.
+3. Run \`scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --write-validated-env-fragment $ENV_TEMPLATE $VALIDATED_ENV_FRAGMENT\`.
+4. Copy or source only the generated validated fragment into \`build/perf/gpu_web_db_offload/external-fixtures.env\`.
+5. Run \`EXTERNAL_FIXTURE_ENV_FILE=build/perf/gpu_web_db_offload/external-fixtures.env $CANONICAL_PROXY_PRODUCER\`.
+6. Run \`$CANONICAL_WEB_REPORT\`.
+7. Run \`$CANONICAL_EXTERNAL_SUITE --refresh-status\`.
+8. Run \`$CANONICAL_EXTERNAL_SUITE --require-ready\`.
+9. Run \`$CANONICAL_FASTEST_AUDIT --require-ready\`.
 
 The final two gates must pass before claiming strict fastest-comparator
 coverage for uWebSockets or Seastar.
@@ -259,6 +290,14 @@ if [ "${1:-}" = "--write-env-check-report" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--write-validated-env-fragment" ]; then
+    src="${2:-$ENV_TEMPLATE}"
+    dest="${3:-$VALIDATED_ENV_FRAGMENT}"
+    write_validated_env_fragment "$src" "$dest"
+    echo "STATUS: PASS gpu web/db reference comparator validated env fragment"
+    exit 0
+fi
+
 if [ "${1:-}" = "--check-env-file" ]; then
     check_env_file "${2:-$ENV_TEMPLATE}"
     exit $?
@@ -295,11 +334,20 @@ EOF
     fi
     check_env_file "$ready" | grep -q '^STATUS: PASS gpu web/db reference comparator env file$'
     report="$tmpdir/report.md"
+    fragment="$tmpdir/validated.env"
     write_env_check_report "$report" "$missing" >/dev/null
     grep -q 'WAITING_ON_REFERENCE_COMPARATOR_ENV' "$report"
     grep -q '| SIMPLE_REFERENCE_PLAINTEXT_URL | missing | missing-or-invalid-url |' "$report"
     write_env_check_report "$report" "$ready" >/dev/null
     grep -q 'Verdict: `READY`' "$report"
+    if write_validated_env_fragment "$missing" "$fragment" >/dev/null 2>&1; then
+        echo "ERROR: blank reference env produced a validated fragment" >&2
+        exit 1
+    fi
+    write_validated_env_fragment "$ready" "$fragment" >/dev/null
+    grep -q '^SIMPLE_REFERENCE_PLAINTEXT_URL="http://127.0.0.1:8084/plaintext"$' "$fragment"
+    grep -q '^UWEBSOCKETS_PLAINTEXT_PROVENANCE="uwebsockets-image-sha256:abc123"$' "$fragment"
+    grep -q '^SEASTAR_PLAINTEXT_PROVENANCE="seastar-commit-deadbeef"$' "$fragment"
     echo "STATUS: PASS gpu web/db reference comparator env check self-test"
     exit 0
 fi
@@ -327,7 +375,9 @@ if [ "${1:-}" = "--self-test" ]; then
     grep -q '^SEASTAR_PLAINTEXT_PROVENANCE	seastar_plaintext	' "$ENV_FIELDS_TSV"
     grep -q 'reference-env-fields.tsv' "$HANDOFF"
     grep -q 'reference-comparator-env-check.md' "$HANDOFF"
+    grep -q 'reference-comparator-validated-external.env' "$HANDOFF"
     grep -q -- '--check-env-file' "$HANDOFF"
+    grep -q -- '--write-validated-env-fragment' "$HANDOFF"
     grep -q 'EXTERNAL_FIXTURE_ENV_FILE=build/perf/gpu_web_db_offload/external-fixtures.env scripts/check/check-web-server-proxy-external-live-compare.shs' "$HANDOFF"
     grep -q 'scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready' "$HANDOFF"
     grep -q 'scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --require-ready' "$HANDOFF"
