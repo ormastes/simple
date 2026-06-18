@@ -161,6 +161,24 @@ Create a pure-Simple implementation of the narrow host ABI already defined by th
 - `scripts/check/check-simple-core-runtime-smoke.shs` now builds `build/simple-core/libsimple_runtime.a` from `src/runtime/simple_core` with `--emit-archive --no-mangle` (falling back to the current Rust CLI if `bin/simple` is stale), then verifies hello, standalone TUI, interactive TUI, and closure cleanliness on the selectable `simple-core` lane.
 - Pure-Simple source coverage is now 41 of 41 `core-required` symbols.
 
+### Progress 2026-06-18
+
+- The simple-core runtime smoke is green again on Linux:
+  `timeout 180 sh scripts/check/check-simple-core-runtime-smoke.shs` reported
+  `simple_core_hello=true`, `simple_core_standalone_tui=true`,
+  `simple_core_tui_app=true`, and `simple_core_closure_clean=true`.
+- The pure-Simple core archive now exports the string-builder ABI required by
+  the current core-required symbol set:
+  `rt_string_builder_new`, `rt_string_builder_push`,
+  `rt_string_builder_finish`, `rt_string_builder_len`, and
+  `rt_string_builder_free`.
+- The simple-core loop safepoint boundary is explicit:
+  `rt_pool_safepoint` is a no-op in the bootstrap/simple-core lane so compiler
+  inserted loop safepoints do not null-jump in runtime helpers such as
+  `rt_file_exists`.
+- `SIMPLE_LIB=src bin/simple check src/runtime/simple_core` passed for all 14
+  simple-core source files.
+
 ## Workstream 2: Keep MCP/LSP Off Removed Hosted Lanes
 
 ### Objective
@@ -268,6 +286,22 @@ Port the runtime and service dependencies used by `src/app/mcp` and `src/app/sim
 - These symbols remain classified `HostedOnly` in `src/compiler_rust/common/src/runtime_symbols.rs` — the Rust classifier is deliberately unchanged. The pure-Simple implementations provide simple-core archive coverage for MCP/LSP startup diagnostics and read-only workspace tools without requiring `libsimple_native_all.a`.
 - MCP startup_log's full extern set (`rt_env_get`, `rt_env_cwd`, `rt_file_append_text`, `rt_file_exists`, `rt_time_now_unix_micros`, `rt_dir_create_all`) now has pure-Simple implementations in the simple-core tree.
 - Process execution (`rt_process_run`) and async process/session control remain explicitly hosted-only per the inventory classification.
+
+### Progress 2026-06-18
+
+- `timeout 120 sh scripts/check/check-mcp-native-smoke.shs` still fails, so the
+  MCP/LSP slice is not done. Current evidence: direct-rt gates are all true and
+  startup is within budget (`mcp_startup_ms=348`,
+  `lsp_mcp_startup_ms=92`, both under 5000 ms), but
+  `mcp_stale_stamp_reprobe_ok=false`; the validator also reports
+  `mcp_tools_json_valid=false`, `mcp_framing_valid=false`,
+  `mcp_tools_schema_valid=false`, `mcp_tools_count=0`,
+  `lsp_tools_json_valid=false`, `lsp_framing_valid=false`,
+  `lsp_tools_schema_valid=false`, and `lsp_tools_count=0`.
+- Next closure action: fix the stale-stamp re-probe/full-tools capture path and
+  LSP/MCP framing validator failure in `scripts/check/check-mcp-native-smoke.shs`
+  or the native server outputs, then rerun this smoke before marking the
+  MCP/LSP and package slices done.
 
 ## Workstream 3: Package MCP/LSP Binaries On Core Lanes
 
