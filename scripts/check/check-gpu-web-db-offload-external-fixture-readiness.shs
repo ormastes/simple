@@ -130,7 +130,8 @@ emit_readiness() {
     tool_status "psql" "psql"
     tool_status "pgbench" "pgbench"
     compound_tool_status "mongodb" "mongodb-ready" "mongosh" "mongo"
-    compound_tool_status "redis_valkey" "redis-valkey-ready" "redis-cli" "valkey-cli" "redis-benchmark"
+    compound_tool_status "redis_valkey" "redis-valkey-ready" "redis-cli" "valkey-cli"
+    tool_status "redis_benchmark" "redis-benchmark"
     url_status "simple_cached_proxy_url" "SIMPLE_CACHED_PROXY_URL"
     url_status "haproxy_cached_proxy_url" "HAPROXY_CACHED_PROXY_URL"
     url_status "envoy_cached_proxy_url" "ENVOY_CACHED_PROXY_URL"
@@ -199,7 +200,7 @@ envoy_cached_proxy	container	envoyproxy/envoy:v1.30-latest	8092	tool:envoy,ENVOY
 clickhouse_olap	container	clickhouse/clickhouse-server:latest	9000	tool:clickhouse,CLICKHOUSE_URL	db_service_urls	ClickBench-style OLAP baseline service
 postgres_tpch	container	postgres:16	5432	tool:psql,tool:pgbench,POSTGRES_URL	db_service_urls	TPC-H-style relational baseline service
 mongo_ycsb	container	mongo:7	27017	tool:mongodb,MONGO_URL	db_service_urls	YCSB-style document-filter baseline service
-redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	Redis/Valkey-compatible key/value baseline service
+redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:valkey-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	Redis/Valkey-compatible key/value baseline service; redis-benchmark is required for measured SET/GET rows
 simple_cached_proxy	external_url	repo-local-simple-web	8090	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	Simple cached proxy fixture must come from the Simple server/proxy lane
 simple_upload_proxy	external_url	repo-local-simple-web	8090	SIMPLE_UPLOAD_PROXY_URL	proxy_fixture_urls	Simple upload streaming fixture must come from the Simple server/proxy lane
 simple_tunnel_proxy	external_url	repo-local-simple-web	8090	SIMPLE_TUNNEL_PROXY_URL	proxy_fixture_urls	Simple upgrade tunnel fixture must come from the Simple server/proxy lane
@@ -647,7 +648,8 @@ tool_actions = {
     "psql": "Install PostgreSQL psql.",
     "pgbench": "Install PostgreSQL pgbench.",
     "mongodb": "Install Mongo shell tooling.",
-    "redis_valkey": "Install Redis/Valkey CLI or benchmark tooling.",
+    "redis_valkey": "Install Redis/Valkey CLI tooling for readiness probes.",
+    "redis_benchmark": "Install redis-benchmark for measured Redis/Valkey SET/GET rows.",
 }
 
 print("source\tcategory\treadiness_item\tenv_variable\taction")
@@ -704,7 +706,7 @@ for line in os.environ["NEXT_ACTIONS_MISSING"].splitlines():
 actions = [
     ("core_load_tools", "Install `wrk` and `nginx`; these are required before web baseline rows can be measured."),
     ("web_proxy_tools", "Install or start Caddy, H2O, HAProxy, and Envoy baselines; generated Compose/docker-run templates can cover Caddy, HAProxy, and Envoy."),
-    ("db_tools", "Install ClickHouse client, DuckDB, PostgreSQL `psql`/`pgbench`, Mongo shell tooling, and Redis/Valkey CLI or benchmark tooling before DB producers can emit measured/status rows."),
+    ("db_tools", "Install ClickHouse client, DuckDB, PostgreSQL `psql`/`pgbench`, Mongo shell tooling, Redis/Valkey CLI tooling, and `redis-benchmark` before DB producers can emit measured/status rows."),
     ("proxy_fixture_urls", "Start the Simple proxy fixture and HAProxy/Envoy proxy fixtures, then fill cached, upload, and tunnel proxy URLs in `external-fixtures.env`."),
     ("dynamic_route_urls", "Start paired CPU and GPU dynamic route servers and fill plaintext and JSON route URLs in `external-fixtures.env`."),
     ("reference_fixture_urls", "Start optional Simple/uWebSockets/Seastar plaintext reference servers with workload parity, then fill their URLs in `external-fixtures.env`."),
@@ -877,8 +879,9 @@ running live web, proxy, dynamic-route, or DB baseline producers.
 - [ ] `psql`: PostgreSQL connection probe and query client.
 - [ ] `pgbench`: PostgreSQL load helper for TPC-H-style baseline preparation.
 - [ ] `mongosh` or `mongo`: MongoDB/YCSB document-filter baseline.
-- [ ] `redis-cli`, `valkey-cli`, or `redis-benchmark`: Redis/Valkey
-      key/value baseline status probe.
+- [ ] `redis-cli` or `valkey-cli`: Redis/Valkey key/value baseline status
+      probe.
+- [ ] `redis-benchmark`: Redis/Valkey measured SET/GET baseline producer.
 
 ## URL And Service Configuration
 
@@ -1012,7 +1015,7 @@ emit_missing_by_category() {
         function category_for(key) {
             if (key == "wrk" || key == "nginx") return "core_load_tools"
             if (key == "caddy" || key == "h2o" || key == "haproxy" || key == "envoy") return "web_proxy_tools"
-            if (key == "clickhouse" || key == "duckdb" || key == "psql" || key == "pgbench" || key == "mongodb" || key == "redis_valkey") return "db_tools"
+            if (key == "clickhouse" || key == "duckdb" || key == "psql" || key == "pgbench" || key == "mongodb" || key == "redis_valkey" || key == "redis_benchmark") return "db_tools"
             if (key == "simple_cached_proxy_url" || key == "haproxy_cached_proxy_url" || key == "envoy_cached_proxy_url" || key == "simple_upload_proxy_url" || key == "haproxy_upload_proxy_url" || key == "simple_tunnel_proxy_url" || key == "haproxy_tunnel_proxy_url") return "proxy_fixture_urls"
             if (key == "dynamic_gpu_plaintext_url" || key == "dynamic_cpu_plaintext_url" || key == "dynamic_gpu_json_url" || key == "dynamic_cpu_json_url") return "dynamic_route_urls"
             if (key == "simple_reference_plaintext_url" || key == "uwebsockets_plaintext_url" || key == "seastar_plaintext_url") return "reference_fixture_urls"
@@ -1100,7 +1103,7 @@ bootstrap_body = "".join(
 categories = [
     ("core_load_tools", {"wrk", "nginx"}),
     ("web_proxy_tools", {"caddy", "h2o", "haproxy", "envoy"}),
-    ("db_tools", {"clickhouse", "duckdb", "psql", "pgbench", "mongodb", "redis_valkey"}),
+    ("db_tools", {"clickhouse", "duckdb", "psql", "pgbench", "mongodb", "redis_valkey", "redis_benchmark"}),
     (
         "proxy_fixture_urls",
         {
@@ -1533,7 +1536,7 @@ if [ "${1:-}" = "--self-test-bootstrap-manifest" ]; then
     printf '%s\n' "$manifest" | grep -q '^fixture	kind	image_or_tool	default_port	fills	readiness_category	note$'
     printf '%s\n' "$manifest" | grep -q '^caddy_static	container	caddy:2	8082	tool:caddy	web_proxy_tools	'
     printf '%s\n' "$manifest" | grep -q '^clickhouse_olap	container	clickhouse/clickhouse-server:latest	9000	tool:clickhouse,CLICKHOUSE_URL	db_service_urls	'
-    printf '%s\n' "$manifest" | grep -q '^redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	'
+    printf '%s\n' "$manifest" | grep -q '^redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:valkey-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	'
     printf '%s\n' "$manifest" | grep -q '^dynamic_gpu_plaintext	external_url	repo-local-simple-web	8080	DYNAMIC_GPU_PLAINTEXT_URL	dynamic_route_urls	'
     echo "STATUS: PASS gpu web/db external fixture bootstrap manifest self-test"
     exit 0
@@ -1548,7 +1551,7 @@ if [ "${1:-}" = "--self-test-write-bootstrap-manifest" ]; then
     test -f "$manifest_file"
     grep -q '^fixture	kind	image_or_tool	default_port	fills	readiness_category	note$' "$manifest_file"
     grep -q '^simple_cached_proxy	external_url	repo-local-simple-web	8090	SIMPLE_CACHED_PROXY_URL	proxy_fixture_urls	' "$manifest_file"
-    grep -q '^redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	' "$manifest_file"
+    grep -q '^redis_valkey_kv	container	redis:7	6379	tool:redis-cli,tool:valkey-cli,tool:redis-benchmark,REDIS_URL	db_service_urls	' "$manifest_file"
     echo "STATUS: PASS gpu web/db external fixture bootstrap manifest file self-test"
     exit 0
 fi
@@ -1685,6 +1688,7 @@ if [ "${1:-}" = "--self-test-blocker-manifest" ]; then
     printf '%s\n' "$manifest" | grep -q '^ambient-environment	dynamic_route_urls	dynamic_gpu_plaintext_url	DYNAMIC_GPU_PLAINTEXT_URL	Start the GPU plaintext dynamic route and fill the URL\.$'
     printf '%s\n' "$manifest" | grep -q '^ambient-environment	db_service_urls	postgres_url	POSTGRES_URL	Start or point to PostgreSQL and fill the service URL\.$'
     printf '%s\n' "$manifest" | grep -q '^ambient-environment	db_service_urls	redis_url	REDIS_URL	Start or point to Redis/Valkey and fill the service URL\.$'
+    printf '%s\n' "$manifest" | grep -q '^ambient-environment	db_tools	redis_benchmark		Install redis-benchmark for measured Redis/Valkey SET/GET rows\.$'
     echo "STATUS: PASS gpu web/db external fixture blocker manifest self-test"
     exit 0
 fi
@@ -1707,6 +1711,7 @@ EOF
     grep -q "^fixture-env-file:$env_file	dynamic_route_urls	dynamic_cpu_plaintext_url	DYNAMIC_CPU_PLAINTEXT_URL	Start the CPU plaintext dynamic route and fill the URL\\.$" "$manifest_file"
     grep -q "^fixture-env-file:$env_file	db_service_urls	mongo_url	MONGO_URL	Start or point to MongoDB and fill the service URL\\.$" "$manifest_file"
     grep -q "^fixture-env-file:$env_file	db_service_urls	redis_url	REDIS_URL	Start or point to Redis/Valkey and fill the service URL\\.$" "$manifest_file"
+    grep -q "^fixture-env-file:$env_file	db_tools	redis_benchmark		Install redis-benchmark for measured Redis/Valkey SET/GET rows\\.$" "$manifest_file"
     if grep -q 'simple_cached_proxy_url' "$manifest_file"; then
         echo "ERROR: filled proxy URL should not be a blocker" >&2
         exit 1
@@ -1783,10 +1788,11 @@ fi
 if [ "${1:-}" = "--self-test-next-actions" ]; then
     actions="$(emit_next_actions)"
     printf '%s\n' "$actions" | grep -q 'GPU Web/DB External Fixture Next Actions'
-    printf '%s\n' "$actions" | grep -q 'Missing fixture items: `28`'
+    printf '%s\n' "$actions" | grep -q 'Missing fixture items: `29`'
     printf '%s\n' "$actions" | grep -q 'Missing data source: `ambient-environment`'
     printf '%s\n' "$actions" | grep -q '| web_proxy_tools | caddy, h2o, haproxy, envoy |'
     printf '%s\n' "$actions" | grep -q '| reference_fixture_urls | simple_reference_plaintext_url, uwebsockets_plaintext_url, seastar_plaintext_url |'
+    printf '%s\n' "$actions" | grep -q '| db_tools | clickhouse, duckdb, psql, pgbench, mongodb, redis_valkey, redis_benchmark |'
     printf '%s\n' "$actions" | grep -q '| db_service_urls | clickhouse_url, postgres_url, mongo_url, redis_url |'
     printf '%s\n' "$actions" | grep -q 'Fixture Env Fields'
     printf '%s\n' "$actions" | grep -q '| dynamic_gpu_plaintext_url | `DYNAMIC_GPU_PLAINTEXT_URL` | GPU plaintext dynamic route URL |'
@@ -1869,7 +1875,7 @@ if [ "${1:-}" = "--self-test-missing-by-category" ]; then
     output="$(emit_missing_by_category)"
     printf '%s\n' "$output" | grep -q '^core_load_tools=$'
     printf '%s\n' "$output" | grep -q '^web_proxy_tools=caddy,h2o,haproxy,envoy$'
-    printf '%s\n' "$output" | grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb,redis_valkey$'
+    printf '%s\n' "$output" | grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb,redis_valkey,redis_benchmark$'
     printf '%s\n' "$output" | grep -q '^proxy_fixture_urls=simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$'
     printf '%s\n' "$output" | grep -q '^dynamic_route_urls=dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$'
     printf '%s\n' "$output" | grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$'
@@ -1887,7 +1893,7 @@ if [ "${1:-}" = "--self-test-write-missing-by-category" ]; then
     test -f "$missing_file"
     grep -q '^core_load_tools=$' "$missing_file"
     grep -q '^web_proxy_tools=caddy,h2o,haproxy,envoy$' "$missing_file"
-    grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb,redis_valkey$' "$missing_file"
+    grep -q '^db_tools=clickhouse,duckdb,psql,pgbench,mongodb,redis_valkey,redis_benchmark$' "$missing_file"
     grep -q '^proxy_fixture_urls=simple_cached_proxy_url,haproxy_cached_proxy_url,envoy_cached_proxy_url,simple_upload_proxy_url,haproxy_upload_proxy_url,simple_tunnel_proxy_url,haproxy_tunnel_proxy_url$' "$missing_file"
     grep -q '^dynamic_route_urls=dynamic_gpu_plaintext_url,dynamic_cpu_plaintext_url,dynamic_gpu_json_url,dynamic_cpu_json_url$' "$missing_file"
     grep -q '^reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url$' "$missing_file"

@@ -213,8 +213,9 @@ Implemented and verified on the current host:
   `STATUS: WARN ... preflight missing:N`.
 - DB baseline rows remain unavailable on this host because the external DB tools
   and/or service connection URLs are not installed/configured. Redis/Valkey is
-  included in that readiness handoff as `redis_valkey` tool readiness plus
-  `REDIS_URL`, matching the report's Redis/Valkey row.
+  included in that readiness handoff as `redis_valkey` CLI readiness,
+  `redis_benchmark` measured SET/GET readiness, and `REDIS_URL`, matching the
+  report's Redis/Valkey row without treating a CLI ping as throughput evidence.
 
 Remaining blockers before this plan can be marked done:
 
@@ -228,14 +229,14 @@ Remaining blockers before this plan can be marked done:
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_URL` when available.
 - Install/configure ClickHouse, DuckDB, PostgreSQL/pgbench, MongoDB shell, and
-  Redis/Valkey CLI/benchmark baselines, or provide their connection URLs where
+Redis/Valkey CLI and benchmark baselines, or provide their connection URLs where
   required.
 
 The current blocker list is machine-checkable with
 `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`. On the
 current host it reports `wrk` and `nginx` ready, then `STATUS: WARN` with the
 missing Caddy, H2O, HAProxy, Envoy, ClickHouse, DuckDB, `psql`, `pgbench`,
-MongoDB shell, Redis/Valkey CLI or benchmark tooling, live cached-proxy,
+MongoDB shell, Redis/Valkey CLI tooling, Redis benchmark tooling, live cached-proxy,
 upload-proxy, tunnel-proxy, dynamic-route, optional Seastar/uWebSockets
 reference URLs, and DB connection URL
 requirements. The
