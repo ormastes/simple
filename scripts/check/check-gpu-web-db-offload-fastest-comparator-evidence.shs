@@ -6,6 +6,7 @@ DB_TABLE="${DB_TABLE:-doc/10_metrics/perf/gpu_web_db_offload_benchmark.md}"
 STATUS_JSON="${STATUS_JSON:-build/perf/gpu_web_db_offload/external-suite-status.json}"
 FASTEST_COMPARATOR_STATUS_JSON="${FASTEST_COMPARATOR_STATUS_JSON:-build/perf/gpu_web_db_offload/fastest-comparator-status.json}"
 FASTEST_COMPARATOR_NEXT_ACTIONS="${FASTEST_COMPARATOR_NEXT_ACTIONS:-build/perf/gpu_web_db_offload/fastest-comparator-next-actions.md}"
+FASTEST_COMPARATOR_NEXT_ACTIONS_TSV="${FASTEST_COMPARATOR_NEXT_ACTIONS_TSV:-build/perf/gpu_web_db_offload/fastest-comparator-next-actions.tsv}"
 
 audit_json() {
     python3 - "$WEB_TABLE" "$DB_TABLE" "$STATUS_JSON" <<'PY'
@@ -171,6 +172,49 @@ PY
     exit 0
 fi
 
+if [ "${1:-}" = "--write-next-actions-tsv" ]; then
+    mkdir -p "$(dirname "$FASTEST_COMPARATOR_NEXT_ACTIONS_TSV")"
+    json="$(audit_json)"
+    AUDIT_JSON="$json" python3 - "$FASTEST_COMPARATOR_NEXT_ACTIONS_TSV" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(os.environ["AUDIT_JSON"])
+actions = {
+    "uwebsockets_plaintext": (
+        "SIMPLE_REFERENCE_PLAINTEXT_URL,UWEBSOCKETS_PLAINTEXT_URL,UWEBSOCKETS_PLAINTEXT_PROVENANCE",
+        "scripts/check/check-web-server-proxy-external-live-compare.shs; scripts/check/check-web-server-nginx-compare-report.shs",
+        "Start real uWebSockets plaintext reference with workload parity, fill URL and provenance, then refresh measured web rows.",
+    ),
+    "seastar_plaintext": (
+        "SIMPLE_REFERENCE_PLAINTEXT_URL,SEASTAR_PLAINTEXT_URL,SEASTAR_PLAINTEXT_PROVENANCE",
+        "scripts/check/check-web-server-proxy-external-live-compare.shs; scripts/check/check-web-server-nginx-compare-report.shs",
+        "Start real Seastar plaintext reference with workload parity, fill URL and provenance, then refresh measured web rows.",
+    ),
+    "strict_external_suite_ready": (
+        "build/perf/gpu_web_db_offload/external-fixtures.env",
+        "scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status; scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready",
+        "Make all required and optional external fixture rows ready before claiming fastest-comparator coverage.",
+    ),
+}
+lines = ["missing_item\tfields\tcommands\tnext_action"]
+missing = data.get("missing", [])
+if missing:
+    for item in missing:
+        fields, commands, action = actions.get(item, ("", "", "Inspect fastest comparator status JSON."))
+        lines.append(f"{item}\t{fields}\t{commands}\t{action}")
+else:
+    lines.append("none\t\t\tFastest comparator evidence is ready.")
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+print(path)
+PY
+    echo "STATUS: PASS gpu web/db fastest comparator next actions tsv"
+    exit 0
+fi
+
 if [ "${1:-}" = "--require-ready" ]; then
     json="$(audit_json)"
     AUDIT_JSON="$json" python3 - <<'PY'
@@ -212,7 +256,9 @@ EOF
     out="$tmpdir/fastest-status.json"
     FASTEST_COMPARATOR_STATUS_JSON="$out" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-status-json >/dev/null
     actions="$tmpdir/fastest-actions.md"
+    actions_tsv="$tmpdir/fastest-actions.tsv"
     FASTEST_COMPARATOR_NEXT_ACTIONS="$actions" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-next-actions >/dev/null
+    FASTEST_COMPARATOR_NEXT_ACTIONS_TSV="$actions_tsv" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-next-actions-tsv >/dev/null
     python3 - "$out" <<'PY'
 import json
 import sys
@@ -223,14 +269,18 @@ assert data["verdict"] == "READY"
 assert data["missing"] == []
 PY
     grep -q '| none |' "$actions"
+    grep -q '^none	' "$actions_tsv"
     printf '%s\n' '| reference_plaintext | native_simple_reference_plaintext | seastar_plaintext | wrk | live-fixture-unavailable |' >> "$web"
     sed -i '/uwebsockets_plaintext/d' "$web"
     output="$(WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0")"
     FASTEST_COMPARATOR_NEXT_ACTIONS="$actions" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-next-actions >/dev/null
+    FASTEST_COMPARATOR_NEXT_ACTIONS_TSV="$actions_tsv" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-next-actions-tsv >/dev/null
     printf '%s\n' "$output" | grep -q '^fastest-comparator-item=uwebsockets_plaintext|missing|web$'
     printf '%s\n' "$output" | grep -q '^STATUS: WARN gpu web/db fastest comparator evidence missing:1$'
     grep -q '| uwebsockets_plaintext |' "$actions"
     grep -q 'UWEBSOCKETS_PLAINTEXT_PROVENANCE' "$actions"
+    grep -q '^uwebsockets_plaintext	' "$actions_tsv"
+    grep -q 'UWEBSOCKETS_PLAINTEXT_PROVENANCE' "$actions_tsv"
     echo "STATUS: PASS gpu web/db fastest comparator evidence self-test"
     exit 0
 fi

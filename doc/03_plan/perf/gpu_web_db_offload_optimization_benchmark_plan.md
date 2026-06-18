@@ -238,7 +238,7 @@ Implemented and verified on the current host:
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
   With the default sourceable `external-fixtures.env` template left blank, the
-  current strict status is 35 suite steps, 29 missing fixture items, 26
+  current strict status is 36 suite steps, 29 missing fixture items, 26
   required missing fixture items, and 3 optional reference fixture URLs. Local
   Docker-backed fixture candidates must be copied into a separate verified env
   file or exported for the suite run before those rows can become ready.
@@ -260,7 +260,9 @@ Implemented and verified on the current host:
   `--write-status-json` persists it at
   `build/perf/gpu_web_db_offload/fastest-comparator-status.json`,
   `--write-next-actions` persists the missing-comparator action table at
-  `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.md`, and
+  `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.md`,
+  `--write-next-actions-tsv` persists the same actions for automation at
+  `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.tsv`, and
   `--require-ready` is the strict gate for a future fastest-server claim. On
   the current artifacts it reports NGINX static rows and Redis/Valkey measured
   evidence as ready, while uWebSockets plaintext, Seastar plaintext, and strict
