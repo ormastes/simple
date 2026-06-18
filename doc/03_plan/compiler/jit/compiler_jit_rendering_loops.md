@@ -1,7 +1,7 @@
 # Plan: JIT-Compile Pure-Simple Software Rendering Loops (FR-COMPILER-012)
 
 - **Date:** 2026-05-30
-- **Status:** Implemented (2026-05-30) — Phase 1-3 code landed, bootstrap build passes, pending end-to-end verification
+- **Status:** Phase 1-3 code landed; Phase 4 validation blocked by JIT symbol coverage
 - **Priority:** P2
 - **FR:** `doc/08_tracking/feature/compiler_requests.md` (FR-COMPILER-012)
 - **Effort:** L (2-3 weeks)
@@ -56,6 +56,13 @@ software exporter smoke:
   `--warmup-count 0 --sample-count 1` emits `valid: true`,
   `checksum: "sum32:1027061180046"`, and
   `pixel_proof: "nonzero_pixels:3072"` at 64x48.
+
+- Targeted cleanup verification on 2026-06-18:
+  `env SIMPLE_EXECUTION_MODE=jit bin/simple run examples/06_io/ui/engine2d_shapes_gui.spl`
+  still fell back to interpreter with `JIT compilation failed, falling back to interpreter:
+  Cranelift JIT compile: Module error: unresolved external symbol 'rt_len'`
+  before timing out. This keeps the lane in needs-implementation and requires
+  another cleanup pass on symbol-table coverage before AC checks can proceed.
 
 Next patch direction:
 
