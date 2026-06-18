@@ -2,7 +2,7 @@
 
 | metric | value |
 |---|---:|
-| suite_steps | 38 |
+| suite_steps | 39 |
 | missing_fixture_items | 29 |
 | missing_data_source | fixture-env-file:build/perf/gpu_web_db_offload/external-fixtures.env |
 | strict_readiness_command | scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready |
@@ -36,6 +36,7 @@
 | reference_comparator_handoff | `build/perf/gpu_web_db_offload/reference-comparator-handoff.md` |
 | fastest_comparator_status_json | `build/perf/gpu_web_db_offload/fastest-comparator-status.json` |
 | fastest_comparator_coverage_tsv | `build/perf/gpu_web_db_offload/fastest-comparator-coverage.tsv` |
+| fastest_comparator_coverage_md | `build/perf/gpu_web_db_offload/fastest-comparator-coverage.md` |
 | fastest_comparator_next_actions | `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.md` |
 | fastest_comparator_next_actions_tsv | `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.tsv` |
 
@@ -89,6 +90,7 @@
 | db-report | `scripts/check/check-gpu-web-db-offload-benchmark-report.shs` |
 | write-fastest-comparator-status-json | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --write-status-json` |
 | write-fastest-comparator-coverage-tsv | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --write-coverage-tsv` |
+| write-fastest-comparator-coverage-md | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --write-coverage-md` |
 | write-fastest-comparator-next-actions | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --write-next-actions` |
 | write-fastest-comparator-next-actions-tsv | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --write-next-actions-tsv` |
 | fastest-comparator-audit | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs` |

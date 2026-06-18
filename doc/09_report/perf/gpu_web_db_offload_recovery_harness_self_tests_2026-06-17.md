@@ -5,7 +5,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 
 ## Summary
 
-- Passed gates: `98`
+- Passed gates: `99`
 - Verdict: `PASS`
 
 ## Gates
@@ -105,6 +105,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 | fastest comparator evidence | pass | host-safe-self-test |
 | fastest comparator status json | pass | host-safe-self-test |
 | fastest comparator coverage tsv | pass | host-safe-self-test |
+| fastest comparator coverage markdown | pass | host-safe-self-test |
 | fastest comparator next actions | pass | host-safe-self-test |
 | fastest comparator next actions tsv | pass | host-safe-self-test |
 | reference comparator handoff | pass | host-safe-self-test |
