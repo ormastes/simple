@@ -1,5 +1,9 @@
 # Runtime Large ArrayBuffer Probe Resume Plan
 
+Status: EVIDENCE REFRESHED (2026-06-18) — focused regression rechecked; not
+marked done because normal review found the broader cleanup evidence rule still
+needs explicit requirements/NFR and guide-applicability evidence.
+
 ## Context
 
 Fresh session continuation for crashed rollout
@@ -64,6 +68,17 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 Results: doc generated, `STATUS: PASS spipe-dev-command wiring`, and `0`.
 
 ## Next Session Scope
+
+Completion note 2026-06-18:
+
+- Re-ran the focused large-buffer regression:
+  `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_large_arraybuffer_spec.spl --mode=interpreter`
+- Result: PASS from unchanged-test cache, 1 file passed, 0 failed.
+- The implementation and generated manual listed above already existed, and no
+  backing-buffer or WASM memory behavior changed in this cleanup lane, so the
+  optional WASM host check was not required.
+- Normal review rejected a `DONE` mark until the lane also cites requirements,
+  NFR, and guide-update applicability evidence.
 
 Use this plan to resume with a small, bounded follow-up. Treat unrelated dirty
 files as other-lane work.

@@ -36,3 +36,6 @@ dev-done
 - integrator: Added discovery cutoff/query, exclusion notes, review-discovered wave rows, and exact next closure actions.
 - verify: `sh scripts/setup/install-spipe-dev-command.shs --check` passed with `STATUS: PASS spipe-dev-command wiring`.
 - verify: `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
+- runtime: Refreshed `doc/03_plan/agent_tasks/runtime_large_arraybuffer_probe_resume.md` evidence after `SIMPLE_LIB=src bin/simple test test/01_unit/lib/common/web/browser_session_large_arraybuffer_spec.spl --mode=interpreter` reported 1 passed file and 0 failures from the unchanged-test cache.
+- review: Normal LLM review rejected marking the large-ArrayBuffer plan done until the lane cites requirements/NFR and guide-update applicability evidence, so the cleanup row remains `needs-evidence`.
+- integrator: Searched `doc/02_requirements`, `doc/07_guide`, `doc/08_tracking/bug`, and the generated spec for large ArrayBuffer/Uint8Array evidence. Generated spec and bug context exist, but no final requirements/NFR artifact was found for this lane.
