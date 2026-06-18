@@ -4,17 +4,23 @@
 
 ## Quick Stats
 
-- **Total Features:** 1
-- **Complete Documentation:** 1 (100%)
-- **Stubs Remaining:** 0
-- **Total Lines:** 43
-- **Warnings:** 1
+- **Total Features:** 2
+- **Complete Documentation:** 1 (50%)
+- **Stubs Remaining:** 1
+- **Total Lines:** 27
+- **Warnings:** 2
 
 ---
+
+## Application (1 features)
+
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Main Specification](app/spipe_docgen/main.md) | Auto-generated | N/A | 0 | 0% | 0 lines |
 
 ## Other (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [RenderDoc HTML external host gate](test/03_system/check/renderdoc_html_external_host_gate_spec.md) | Minimal | N/A | 1 | 20% | 43 lines |
+| [RenderDoc external host capture wrapper](test/03_system/check/renderdoc_external_host_capture_spec.md) | Minimal | N/A | 2 | 20% | 27 lines |
 

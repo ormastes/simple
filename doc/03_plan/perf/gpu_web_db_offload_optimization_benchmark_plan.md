@@ -114,12 +114,13 @@ Implemented and verified on the current host:
   is required.
 - The GPU Web/DB benchmark report now embeds the external DB producer's
   standard-shape manifest under `External DB Standard Shape Manifest`, so each
-  report carries the exact ClickBench/TPC-H/YCSB-style command shapes alongside
-  the external baseline status or measured rows.
+  report carries the exact ClickBench/TPC-H/YCSB/Redis/ANN-style command shapes
+  alongside the external baseline status or measured rows.
 - The generated external fixture env template now includes optional
   standard-shape query override variables for ClickHouse, DuckDB, PostgreSQL,
-  and Mongo/YCSB. Empty override variables are safe: the DB producer reapplies
-  the default ClickBench/TPC-H/YCSB shapes after sourcing the env file.
+  Mongo/YCSB, Redis/Valkey, and ANN/vector. Empty override variables are safe:
+  the DB producer reapplies the default ClickBench/TPC-H/YCSB/Redis/ANN shapes
+  after sourcing the env file.
 - The external producer sequence is now canonicalized by
   `scripts/check/check-gpu-web-db-offload-external-suite.shs`. Use `--dry-run`
   to print the exact ordered steps. The default suite command runs preflight
@@ -456,6 +457,7 @@ the next DB lane:
 | DuckDB TPC-H baseline | `db_tpch_duckdb_external_baseline_status` | `duckdb_tpch_q3_join_aggregate` | unavailable or ready-unmeasured |
 | PostgreSQL TPC-H baseline | `db_tpch_postgresql_external_baseline_status` | `postgresql_tpch_q3_join_aggregate` | unavailable or ready-unmeasured |
 | MongoDB/YCSB baseline | `db_ycsb_mongo_external_baseline_status` | `mongo_ycsb_document_filter` | unavailable or ready-unmeasured |
+| ANN/vector baseline | `db_ann_vector_external_baseline_status` | `ann_vector_topk_recall` | unavailable until fixture/tool is configured |
 
 The admission row proves the DB queue decision surface before dispatch: a coarse
 scan batch is admitted to GPU, a join/aggregate batch falls back when the queue
@@ -481,9 +483,9 @@ matching datasets, matching targets, and positive timings are accepted.
 `scripts/check/check-gpu-web-db-offload-external-db-baselines.shs` is the local
 producer for those lines; it measures only real external commands that are
 available locally or configured by connection URL and emits nothing otherwise.
-Its `--self-test` mode validates the timing helper and the five strict measured
-line shapes, including Redis/Valkey key/value, without requiring any external
-DB installation.
+Its `--self-test` mode validates the timing helper and the six strict measured
+line shapes, including Redis/Valkey key/value and ANN/vector top-k, without
+requiring any external DB installation.
 The producer now sources
 `build/perf/gpu_web_db_offload/external-fixtures.env` by default before probing
 URL-backed DB baselines, so values written by
