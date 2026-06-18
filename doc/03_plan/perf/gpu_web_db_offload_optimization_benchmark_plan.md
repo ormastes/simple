@@ -251,8 +251,9 @@ Implemented and verified on the current host:
   `--require-required-ready` against that env file, runs the local proxy and
   dynamic route measured producers, refreshes web and DB reports, and runs the
   recovery artifact guard. This is the canonical host-local path for required
-  fixture evidence while optional uWebSockets/Seastar reference URLs remain
-  absent.
+  fixture evidence. It explicitly clears optional Simple/uWebSockets/Seastar
+  reference URL and provenance fields so local-required evidence cannot be
+  mistaken for strict fastest-server comparator evidence.
 - Use `scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status`
   after installing tools or exporting fixture URLs; it refreshes
   `build/perf/gpu_web_db_offload/external-fixture-missing-by-category.env`
@@ -290,7 +291,8 @@ Remaining blockers before this plan can be marked done:
 - Use `scripts/check/check-gpu-web-db-offload-local-required-suite.shs` to run
   the required suite path with repo-local proxy and dynamic fixtures. It uses a
   generated local-required env file with local DB/proxy candidate values
-  instead of mutating the default empty env template.
+  instead of mutating the default empty env template, and it blanks optional
+  Simple/uWebSockets/Seastar reference fields.
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_PROVENANCE`,

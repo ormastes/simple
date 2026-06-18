@@ -170,7 +170,8 @@ implementation-in-progress-recovered
   `build/perf/gpu_web_db_offload/external-fixtures.local-required.env` with
   repo-local proxy/dynamic URLs and generated local DB/proxy container
   candidate values. It does not mutate the default blank strict fixture env and
-  still leaves optional uWebSockets/Seastar reference rows to the strict suite.
+  explicitly clears optional Simple/uWebSockets/Seastar reference URL and
+  provenance fields so those rows remain strict-suite-only evidence.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are
