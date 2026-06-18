@@ -185,7 +185,7 @@ Implemented and verified on the current host:
   `--write-policy-json` persists
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
-  On this host the split is 25 required missing fixtures and 3 optional
+  On this host the split is 26 required missing fixtures and 3 optional
   reference fixture URLs.
 - The suite now also writes required-only handoff artifacts for resumed
   sessions that need to separate release-blocking fixture work from optional
@@ -651,7 +651,7 @@ No benchmark row may claim GPU acceleration unless all are true:
    The DB external-baseline status slice is materialized in
    `test/05_perf/web_db_offload/gpu_web_db_offload_bench_spec.spl` and
    `scripts/check/check-gpu-web-db-offload-benchmark-report.shs`: ClickHouse,
-   DuckDB, PostgreSQL, and MongoDB/YCSB baselines now have explicit
+   DuckDB, PostgreSQL, MongoDB/YCSB, Redis/Valkey, and ANN/vector baselines now have explicit
    `external-db-baseline` rows with unavailable-tool reasons on this host and
    ready-unmeasured reasons when matching tools are installed. They still make
    no speedup claim until a measured wrapper fills real values through the
