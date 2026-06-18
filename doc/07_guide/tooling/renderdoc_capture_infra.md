@@ -94,6 +94,7 @@ The shared CLI remains the preferred interface:
 scripts/setup/setup-renderdoc-env.shs --check
 scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
+sh scripts/check/check-renderdoc-macos-portability-probe.shs
 ```
 
 Treat macOS results as portability evidence unless they produce the same
@@ -102,3 +103,7 @@ original RenderDoc+Chrome `.rdc` contract required by
 through Metal/ANGLE or Vulkan-over-Metal, record that distinction in
 `doc/09_report/`. Use Xcode GPU Frame Capture for Metal-level inspection when
 RenderDoc cannot capture the macOS path.
+
+By default the macOS probe records availability only. Set
+`RDOC_MACOS_RUN_CAPTURES=1` on a prepared macOS host to run the Simple
+RenderDoc capture and exploratory Chrome capture through the shared CLI.

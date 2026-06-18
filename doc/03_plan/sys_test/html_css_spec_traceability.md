@@ -118,6 +118,8 @@ Valid restart paths:
 - macOS portability probe: run the macOS checks below and write a new
   `doc/09_report/` entry. Treat the result as supplemental unless it satisfies
   the same original RenderDoc+Chrome `.rdc` gate.
+  Canonical wrapper:
+  `sh scripts/check/check-renderdoc-macos-portability-probe.shs`.
 - Privileged local GPU passthrough: only after operator approval to bind an
   isolated GPU group to `vfio-pci`; then run a desktop guest with real GPU
   Vulkan, Chrome, and RenderDoc.
@@ -173,6 +175,10 @@ native Linux/NVIDIA Vulkan IO-level behavior.
 
 Planned macOS checks:
 
+- Run `sh scripts/check/check-renderdoc-macos-portability-probe.shs` to record
+  host, GPU, Vulkan, RenderDoc, and evidence status into
+  `build/renderdoc/macos-portability-probe/evidence.env` and
+  `doc/09_report/renderdoc_macos_portability_probe_<date>.md`.
 - Install the current LunarG Vulkan SDK for macOS and verify `vulkaninfo`
   reports a MoltenVK or other Metal-backed Vulkan portability device.
 - Run `scripts/setup/setup-renderdoc-env.shs --check` on macOS if an official
@@ -186,6 +192,10 @@ Planned macOS checks:
   not completion evidence for the original gate.
 - Use Xcode GPU Frame Capture for Metal-level inspection when the observed path
   is Metal/MoltenVK and RenderDoc cannot provide useful capture evidence.
+- Set `RDOC_MACOS_RUN_CAPTURES=1` only on a macOS host that already has
+  Vulkan/MoltenVK and RenderDoc CLI available. The wrapper will then call the
+  shared `capture-simple` and exploratory `capture-html` paths and run the
+  external-host gate against any HTML evidence file.
 
 Any macOS result must write a report under `doc/09_report/` with:
 
