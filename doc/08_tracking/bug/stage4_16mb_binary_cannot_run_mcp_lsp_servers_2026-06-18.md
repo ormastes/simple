@@ -75,10 +75,25 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 ## Fix options
 
 1. **LLVM native-build route** — build the full CLI via
-   `simple compile --native --backend llvm` of `src/app/cli/main.spl` (the
-   ~461MB-class capable binary) and deploy that. Blocker tracked in
-   `mcp_full_program_native_codegen_and_arg_extract_2026-06-16.md` (folded builtin
-   string methods in LLVM `MethodCallStatic`).
+   `simple compile --native --backend=llvm` of `src/app/cli/main.spl` (the
+   ~461MB-class capable binary) and deploy that.
+   - The route is ALIVE: a trivial program compiles+runs via the 144MB LLVM seed
+     (`src/compiler_rust/target/bootstrap/simple`, built with `--features llvm`,
+     `LLVM_SYS_180_PREFIX=/usr/lib/llvm-18`).
+   - **NEW blocker found 2026-06-18 (fails before the string-method one):**
+     `error: semantic: HIR lowering: Unsupported feature: cannot infer field type
+     while lowering BTree.delete_from_node: struct 'BTreePredEntry' field 'val'`
+     (`src/lib/nogc_sync_mut/storage/shared/btree.spl`). `BTreePredEntry<V>` has
+     `val: V`; `delete_from_node` accesses `pred.val` (line ~637) where
+     `pred = me.get_max_leaf_entry(...)` returns `BTreePredEntry<V>`. The LLVM HIR
+     lowering does not propagate the monomorphized `V` to the field access, so it
+     can't resolve the field type. An explicit local annotation (`val pv: V = pred.val`)
+     does NOT help — it's a generic-field-type-inference limitation in the LLVM
+     lowering path, needs a Rust compiler fix (generic monomorphization propagation
+     for nested generic returns), not a source workaround. The folded-builtin-string-method
+     blocker (`mcp_full_program_native_codegen_and_arg_extract_2026-06-16.md`,
+     `MethodCallStatic`) is still pending behind it. So the LLVM route is a
+     multi-blocker compiler-development effort, not a quick win.
 2. **Fix stage-3 self-host (LIM-010)** so the bootstrap produces a self-hosted
    stage-4 capable of large programs.
 
