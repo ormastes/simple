@@ -5,7 +5,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 
 ## Summary
 
-- Suite steps: `31`
+- Suite steps: `32`
 - Missing fixture items: `29`
 - Verdict: `WAITING_ON_FIXTURES`
 
@@ -72,6 +72,7 @@ It records the ordered external-fixture suite and the current missing fixture ca
 | web-report | `scripts/check/check-web-server-nginx-compare-report.shs` |
 | db-baselines | `scripts/check/check-gpu-web-db-offload-external-db-baselines.shs` |
 | db-report | `scripts/check/check-gpu-web-db-offload-benchmark-report.shs` |
+| fastest-comparator-audit | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs` |
 | artifact-consistency | `scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts` |
 
 ## Bootstrap Status

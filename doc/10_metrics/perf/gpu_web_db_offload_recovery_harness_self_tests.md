@@ -14,6 +14,7 @@
 | syntax external fixture readiness | pass | host-safe-self-test |
 | syntax external suite | pass | host-safe-self-test |
 | syntax local required suite | pass | host-safe-self-test |
+| syntax fastest comparator evidence | pass | host-safe-self-test |
 | web comparison tool row classification | pass | host-safe-self-test |
 | web comparison measured-row parser | pass | host-safe-self-test |
 | nginx live parser | pass | host-safe-self-test |
@@ -90,4 +91,5 @@
 | local required suite status json | pass | host-safe-self-test |
 | local required suite require required ready | pass | host-safe-self-test |
 | local required suite dry run | pass | host-safe-self-test |
+| fastest comparator evidence | pass | host-safe-self-test |
 | external suite plan artifacts | pass | host-safe-self-test |

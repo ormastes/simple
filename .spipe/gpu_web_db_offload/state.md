@@ -141,7 +141,7 @@ implementation-in-progress-recovered
 - evidence: `scripts/check/check-gpu-web-db-offload-external-suite.shs --status`
   prints the suite-step count, missing-fixture item count, and verdict directly.
   With the default generated `external-fixtures.env` template left blank, the
-  current status reports 31 steps, 29 missing fixture items, 26 required
+  current status reports 32 steps, 29 missing fixture items, 26 required
   missing items, 3 optional missing reference items, and
   `WAITING_ON_FIXTURES`.
   It also prints `external-suite-missing=<category>|...`
@@ -180,6 +180,13 @@ implementation-in-progress-recovered
   ordered local-required evidence sequence. This remains narrower than the
   strict fastest-server comparator suite because Simple/uWebSockets/Seastar
   reference endpoints stay blank in the local-required env.
+- implementation: The fastest-comparator evidence audit now exists at
+  `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs`.
+  It reads the web and DB metrics tables plus the external-suite status JSON,
+  reports current fastest-comparator readiness, and offers `--require-ready`
+  for the final strict claim gate. Current artifacts show NGINX static and
+  Redis/Valkey measured evidence ready, while uWebSockets plaintext, Seastar
+  plaintext, and strict external-suite readiness are still missing.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

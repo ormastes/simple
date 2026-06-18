@@ -2,7 +2,7 @@
 
 | metric | value |
 |---|---:|
-| suite_steps | 31 |
+| suite_steps | 32 |
 | missing_fixture_items | 29 |
 | missing_data_source | fixture-env-file:build/perf/gpu_web_db_offload/external-fixtures.env |
 | strict_readiness_command | scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready |
@@ -78,4 +78,5 @@
 | web-report | `scripts/check/check-web-server-nginx-compare-report.shs` |
 | db-baselines | `scripts/check/check-gpu-web-db-offload-external-db-baselines.shs` |
 | db-report | `scripts/check/check-gpu-web-db-offload-benchmark-report.shs` |
+| fastest-comparator-audit | `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs` |
 | artifact-consistency | `scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts` |

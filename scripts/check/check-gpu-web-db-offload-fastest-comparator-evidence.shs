@@ -1,0 +1,150 @@
+#!/usr/bin/env sh
+set -eu
+
+WEB_TABLE="${WEB_TABLE:-doc/10_metrics/perf/web_server_nginx_compare.md}"
+DB_TABLE="${DB_TABLE:-doc/10_metrics/perf/gpu_web_db_offload_benchmark.md}"
+STATUS_JSON="${STATUS_JSON:-build/perf/gpu_web_db_offload/external-suite-status.json}"
+
+audit_json() {
+    python3 - "$WEB_TABLE" "$DB_TABLE" "$STATUS_JSON" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+web_table = Path(sys.argv[1])
+db_table = Path(sys.argv[2])
+status_json = Path(sys.argv[3])
+
+requirements = [
+    ("nginx_static_1024", "web", "nginx_static_1024", "measured"),
+    ("nginx_static_1048576", "web", "nginx_static_1048576", "measured"),
+    ("uwebsockets_plaintext", "web", "uwebsockets_plaintext", "measured"),
+    ("seastar_plaintext", "web", "seastar_plaintext", "measured"),
+    ("redis_valkey_key_value_getset", "db", "db_key_value_redis_valkey_external_measured", "external-db-measured"),
+]
+
+def table_text(path):
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+def row_cells(line):
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+web = table_text(web_table)
+db = table_text(db_table)
+items = []
+missing = []
+for name, source, needle, status in requirements:
+    text = web if source == "web" else db
+    found = False
+    for line in text.splitlines():
+        if needle not in line:
+            continue
+        cells = row_cells(line)
+        if status in cells:
+            found = True
+            break
+    item = {"name": name, "source": source, "status": "ready" if found else "missing"}
+    items.append(item)
+    if not found:
+        missing.append(name)
+
+suite_ready = False
+suite_status = "missing-status-json"
+if status_json.exists():
+    try:
+        data = json.loads(status_json.read_text(encoding="utf-8"))
+        suite_status = data.get("verdict", "unknown")
+        suite_ready = data.get("verdict") == "READY" and data.get("optional_missing_fixture_items") == 0
+    except json.JSONDecodeError:
+        suite_status = "invalid-status-json"
+if not suite_ready:
+    missing.append("strict_external_suite_ready")
+
+result = {
+    "verdict": "READY" if not missing else "WAITING_ON_FASTEST_COMPARATORS",
+    "missing": missing,
+    "items": items,
+    "strict_external_suite_status": suite_status,
+    "web_table": str(web_table),
+    "db_table": str(db_table),
+    "status_json": str(status_json),
+}
+print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+emit_status() {
+    json="$(audit_json)"
+    AUDIT_JSON="$json" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["AUDIT_JSON"])
+print(f"fastest-comparator-status=verdict|{data['verdict']}")
+print(f"fastest-comparator-status=strict_external_suite_status|{data['strict_external_suite_status']}")
+print(f"fastest-comparator-status=missing|{','.join(data['missing'])}")
+for item in data["items"]:
+    print(f"fastest-comparator-item={item['name']}|{item['status']}|{item['source']}")
+if data["verdict"] == "READY":
+    print("STATUS: PASS gpu web/db fastest comparator evidence audit")
+else:
+    print(f"STATUS: WARN gpu web/db fastest comparator evidence missing:{len(data['missing'])}")
+PY
+}
+
+if [ "${1:-}" = "--status-json" ]; then
+    audit_json
+    exit 0
+fi
+
+if [ "${1:-}" = "--require-ready" ]; then
+    json="$(audit_json)"
+    AUDIT_JSON="$json" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["AUDIT_JSON"])
+if data["verdict"] != "READY":
+    print(f"STATUS: FAIL gpu web/db fastest comparator evidence missing:{len(data['missing'])}")
+    print("missing=" + ",".join(data["missing"]))
+    raise SystemExit(1)
+print("STATUS: PASS gpu web/db fastest comparator evidence require-ready")
+PY
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    web="$tmpdir/web.md"
+    db="$tmpdir/db.md"
+    status="$tmpdir/status.json"
+    cat > "$web" <<'EOF'
+| workload | simple_target | external_baseline | load_tool | status |
+|---|---|---|---|---|
+| static_1kb | native_simple_static_1024 | nginx_static_1024 | wrk | measured |
+| static_1mb | native_simple_static_1048576 | nginx_static_1048576 | wrk | measured |
+| reference_plaintext | native_simple_reference_plaintext | uwebsockets_plaintext | wrk | measured |
+| reference_plaintext | native_simple_reference_plaintext | seastar_plaintext | wrk | measured |
+EOF
+    cat > "$db" <<'EOF'
+| name | backend | dataset |
+|---|---|---|
+| db_key_value_redis_valkey_external_measured | external-db-measured | redis_valkey_getset_1024_key_match |
+EOF
+    printf '%s\n' '{"verdict":"READY","optional_missing_fixture_items":0}' > "$status"
+    WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --require-ready >/dev/null
+    printf '%s\n' '| reference_plaintext | native_simple_reference_plaintext | seastar_plaintext | wrk | live-fixture-unavailable |' >> "$web"
+    sed -i '/uwebsockets_plaintext/d' "$web"
+    output="$(WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0")"
+    printf '%s\n' "$output" | grep -q '^fastest-comparator-item=uwebsockets_plaintext|missing|web$'
+    printf '%s\n' "$output" | grep -q '^STATUS: WARN gpu web/db fastest comparator evidence missing:1$'
+    echo "STATUS: PASS gpu web/db fastest comparator evidence self-test"
+    exit 0
+fi
+
+emit_status
