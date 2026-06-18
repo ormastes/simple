@@ -56,12 +56,30 @@ index/rank/ANN work.
 Staged subset: exact single+multi, glob, literal/trigram prefilter, SIMD memchr.
 Enforce the core rule: **prefilter → candidate → regex/fuzzy verify → rank**.
 
+Status 2026-06-18: Phase 1 is partially complete with focused evidence. Present
+modules: `src/lib/common/search/exact.spl`, `multi.spl`, `prefilter.spl`, and
+`simd_scan.spl`. Generated manuals exist under
+`doc/06_spec/test/01_unit/lib/common/search/`. Focused interpreter checks passed:
+`exact_spec.spl` 31 tests, `multi_spec.spl` 10 tests, `prefilter_spec.spl` 5
+tests, and `simd_scan_spec.spl` 23 tests. The SIMD seam currently reports
+scalar fallback and proves dispatch equals the scalar oracle; no AVX2/NEON
+specialization is wired yet. No `glob` module/spec is present in the current
+checkout.
+
 ### Phase 2 — Index + rank + ANN (deferred-heavy)
 Inverted index + positional postings (`PostingList<Id>` merge), BM25 `Score`
 ranking, roaring bitmap filters (CRoaring oracle), one ANN index (HNSW via
 hnswlib oracle, `Embedding<D>`/`AnnNode<V>`). GPU vector search deferred to a
 follow-up. DB index families (B+tree/LSM/GIN) stay with the database plan, not
 duplicated here.
+
+Status 2026-06-18: Phase 2 is partially complete with Simple-side oracle
+evidence. Present modules: `inverted_index.spl`, `ranking.spl`, `roaring.spl`,
+and `ann.spl`. Focused interpreter checks passed: `inverted_index_spec.spl` 17
+tests, `ranking_spec.spl` 15 tests, `roaring_spec.spl` 15 tests, and
+`ann_spec.spl` 14 tests. These specs use independent Simple or exact-oracle
+fixtures, but the external CRoaring/HNSW/C-oracle alpha parity gates are not
+recorded as green.
 
 ## Multi-agent structure
 Orchestrator (Opus) owns barrier + merges + language-item triage + commits.
@@ -79,3 +97,13 @@ verification per memory until fixed). File each via `bin/simple bug-add` /
 ## Gates
 `bin/simple test`, `bin/simple build lint`, search + foundation specs green,
 alpha SIMD-vs-scalar and C-oracle parity green, `verify` → `STATUS: PASS`.
+
+Current remaining closure gates as of 2026-06-18:
+
+- Add or explicitly defer the staged `glob` search slice.
+- Wire real SIMD specializations or keep the scalar-only fallback documented as
+  the current alpha boundary.
+- Record external C-oracle parity decisions/evidence for the search backends
+  that named permissive libraries in the research plan.
+- Run the broader `bin/simple test`, `bin/simple build lint`, and verify gates
+  before this plan can be marked done.
