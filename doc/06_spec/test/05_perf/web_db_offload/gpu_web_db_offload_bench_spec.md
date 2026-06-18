@@ -737,7 +737,7 @@ expect(row.backend_timing_valid).to_be(false)
 
 #### should report external DB baseline status rows before DB speedup claims
 
-- Record unavailable ClickHouse, DuckDB, PostgreSQL, MongoDB, and Redis/Valkey baseline tools as explicit report rows
+- Record unavailable ClickHouse, DuckDB, PostgreSQL, MongoDB, Redis/Valkey, and ANN/vector baseline tools as explicit report rows
    - Expected: clickhouse.name equals `db_clickbench_clickhouse_external_baseline_status`
    - Expected: clickhouse.backend equals `external-db-baseline`
    - Expected: clickhouse.dataset equals `clickbench_hits_scan_filter_project_1024_row_match`
@@ -760,21 +760,27 @@ expect(row.backend_timing_valid).to_be(false)
    - Expected: redis_valkey.fallback_reason equals `external-db-baseline-unavailable:redis-valkey-not-installed`
    - Expected: redis_valkey.device_timing_source equals `external-db-baseline-status`
    - Expected: redis_valkey.gpu_hits equals `0`
+   - Expected: ann.name equals `db_ann_vector_external_baseline_status`
+   - Expected: ann.dataset equals `ann_vector_topk_1024x128_recall_id_match`
+   - Expected: ann.dispatch_target equals `ann_vector_topk_recall`
+   - Expected: ann.fallback_reason equals `external-db-baseline-unavailable:ann-fixture-not-configured`
+   - Expected: ann.device_timing_source equals `external-db-baseline-status`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Record unavailable ClickHouse, DuckDB, PostgreSQL, MongoDB, and Redis/Valkey baseline tools as explicit report rows")
+step("Record unavailable ClickHouse, DuckDB, PostgreSQL, MongoDB, Redis/Valkey, and ANN/vector baseline tools as explicit report rows")
 val clickhouse = make_clickhouse_clickbench_external_baseline_status_row()
 val duckdb = make_duckdb_tpch_external_baseline_status_row()
 val postgresql = make_postgresql_tpch_external_baseline_status_row()
 val mongo = make_mongo_ycsb_external_baseline_status_row()
 val redis_valkey = make_redis_valkey_external_baseline_status_row()
+val ann = make_ann_vector_external_baseline_status_row()
 expect(clickhouse.name).to_equal("db_clickbench_clickhouse_external_baseline_status")
 expect(clickhouse.backend).to_equal("external-db-baseline")
 expect(clickhouse.dataset).to_equal("clickbench_hits_scan_filter_project_1024_row_match")
@@ -799,6 +805,12 @@ expect(redis_valkey.fallback_reason).to_equal("external-db-baseline-unavailable:
 expect(redis_valkey.device_timing_source).to_equal("external-db-baseline-status")
 expect(redis_valkey.backend_timing_valid).to_be(false)
 expect(redis_valkey.gpu_hits).to_equal(0)
+expect(ann.name).to_equal("db_ann_vector_external_baseline_status")
+expect(ann.dataset).to_equal("ann_vector_topk_1024x128_recall_id_match")
+expect(ann.dispatch_target).to_equal("ann_vector_topk_recall")
+expect(ann.fallback_reason).to_equal("external-db-baseline-unavailable:ann-fixture-not-configured")
+expect(ann.device_timing_source).to_equal("external-db-baseline-status")
+expect(ann.backend_timing_valid).to_be(false)
 ```
 
 </details>
@@ -1021,13 +1033,14 @@ expect(row.backend_timing_valid).to_be(true)
    - Expected: postgresql_external_status equals `measured`
    - Expected: mongo_external_status equals `measured`
    - Expected: redis_valkey_external_status equals `measured`
+   - Expected: ann_external_status equals `measured`
    - Expected: external_wrong_source_status equals `invalid_measured`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 253 lines folded for reproduction.
+Runnable source: 262 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1248,6 +1261,14 @@ val redis_valkey_external_status = gpu_wdb_benchmark_measured_row_status(
     "external-db-baseline-driver",
     "external-db-baseline-measured"
 )
+val ann_external_status = gpu_wdb_benchmark_measured_row_status(
+    "db_ann_vector_external_measured",
+    "ann_vector_topk_1024x128_recall_id_match",
+    "ann_vector_topk_recall",
+    906,
+    "external-db-baseline-driver",
+    "external-db-baseline-measured"
+)
 val external_wrong_source_status = gpu_wdb_benchmark_measured_row_status(
     "db_tpch_duckdb_external_measured",
     "tpch_q3_join_aggregate_group_count_1024_row_match",
@@ -1283,6 +1304,7 @@ expect(duckdb_external_status).to_equal("measured")
 expect(postgresql_external_status).to_equal("measured")
 expect(mongo_external_status).to_equal("measured")
 expect(redis_valkey_external_status).to_equal("measured")
+expect(ann_external_status).to_equal("measured")
 expect(external_wrong_source_status).to_equal("invalid_measured")
 ```
 

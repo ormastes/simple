@@ -99,6 +99,7 @@ Run `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --pri
 # DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=SELECT b.range AS segment, count(*) AS order_count, sum(a.range) AS revenue FROM range(1024) a JOIN range(16) b ON a.range % 16 = b.range GROUP BY b.range ORDER BY revenue DESC LIMIT 8
 # POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=SELECT b AS segment, count(*) AS order_count, sum(a) AS revenue FROM generate_series(1, 1024) a JOIN generate_series(1, 16) b ON a % 16 = b GROUP BY b ORDER BY revenue DESC LIMIT 8
 # MONGO_YCSB_DOCUMENT_FILTER_EVAL=const c=db.ycsb || db.getSiblingDB("ycsb").usertable; c.find({field0:{$gte:0}},{_id:1,field0:1}).limit(1024).itcount()
+# ANN_VECTOR_SEARCH_SHAPE=top-k 8 vector search over 1024x128 vectors with recall/id match
 SIMPLE_CACHED_PROXY_URL=
 HAPROXY_CACHED_PROXY_URL=
 ENVOY_CACHED_PROXY_URL=
@@ -121,6 +122,7 @@ CLICKHOUSE_SCAN_FILTER_PROJECT_QUERY=
 DUCKDB_TPCH_Q3_JOIN_AGGREGATE_QUERY=
 POSTGRES_TPCH_Q3_JOIN_AGGREGATE_QUERY=
 MONGO_YCSB_DOCUMENT_FILTER_EVAL=
+ANN_VECTOR_SEARCH_SHAPE=
 ```
 
 ## Fixture Setup Checklist
