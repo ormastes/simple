@@ -128,6 +128,14 @@ possible so they are runner-verifiable.
    the 3 substrate-backed apps as live. Emits a LibreOffice-branded plugin
    manifest. Spec `test/01_unit/app/office/libreoffice_spec.spl` 6/6. (Branding
    layer, not a repo-wide symbol sweep — the right minimal interpretation.)
+10. DONE (local 2026-06-18) — **Markdown WYSIWYG + PPT render hardening**:
+   Markdown now exposes a CSS-backed WYSIWYG document wrapper
+   (`wysiwyg_preview_css` / `wysiwyg_preview_document_html`) consumed by the GUI
+   markdown renderer. Slide HTML rendering now escapes element text, sanitizes
+   CSS colors to `#RGB`/`#RRGGBB`, falls back on unsafe values, clamps negative
+   element geometry to `0px`, and emits a fixed 960x540 relative slide with
+   absolute element boxes. IDE feature checks expose `css_doc`, `escaped`,
+   `ppt_html`, `safe_css`, and `positioned` markers in both TUI and GUI modes.
 
 ## Log
 
@@ -147,3 +155,31 @@ possible so they are runner-verifiable.
   it + word/ppt/excel as separate registered plugins. Remaining: slice 3 (IDE
   WYSIWYG view), 5 (deeper Excel, f64-blocked), 7 (db/draw/math), 8 (game
   connect), 9 (rename to LibreOffice, last/minimal).
+- 2026-06-18 dev: Added local research and design for LLM-readable access to
+  LibreOffice-like app features. Implemented `app.office.llm_catalog` as a pure
+  metadata catalog for Markdown, Writer, Calc, Impress, Draw, Base, Math, and
+  Counter with owner modules, feature lists, edit/action names, and evidence
+  keys. Exposed the catalog through the IDE feature-check report for both TUI and
+  GUI modes. Focused checks passed: `bin/simple check` on the new catalog,
+  feature report, and IDE office system spec; `ide_office_plugin_suite_spec`
+  passed 19/0; docgen refreshed the mirrored manual with one length warning and
+  pre-existing docgen dependency warnings only; direct TUI/GUI feature checks report `llm-catalog: apps=8
+  features=34 actions=8`; `find doc/06_spec -name '*_spec.spl' | wc -l`
+  returned `0`.
+- 2026-06-18 dev: Hardened the active Markdown WYSIWYG and PPT-like rendering
+  slice. Updated `app.office.md_wysiwyg`, `app.office.md_wysiwyg_gui`,
+  `app.office.slides.html_render`, `app.ide.markdown_render`, and
+  `app.ide.slides_compat`; refreshed the focused unit specs and IDE system
+  spec/manual. Evidence: touched-file `bin/simple check` passed 8/8;
+  `md_wysiwyg_spec` passed 9/0; `slides/html_render_spec` passed 6/0;
+  `ide_office_plugin_suite_spec` passed 19/0; direct TUI and GUI feature checks
+  report `css_doc=true escaped=true` and
+  `ppt_html=true safe_css=true positioned=true`; docgen generated 1 complete
+  manual and 0 stubs with the pre-existing doc-length/dependency warnings only;
+  `find doc/06_spec -name '*_spec.spl' | wc -l` returned `0`.
+- 2026-06-18 dev: Aligned `md_wysiwyg_render_spec` with the same
+  CSS-backed document helper used by `md_wysiwyg_gui`. The graphical spec passed
+  7/0 after updating the fenced-code oracle to assert preserved indentation in
+  HTML plus nonblank framebuffer evidence; the renderer currently paints the
+  styled `<pre>` block background but does not expose stable black glyph pixels
+  for that path.

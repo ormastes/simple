@@ -28,7 +28,7 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,9 +82,28 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val view = build_wysiwyg_view("hello")
 val pane = wysiwyg_preview_pane(view)
-expect(pane).to_start_with("<div class=\"wysiwyg-preview\">")
+expect(pane).to_start_with("<div class=\"wysiwyg-preview\"")
 expect(pane).to_contain("line-height: 1.5;")
 expect(pane).to_contain(">hello</p>")
+```
+
+</details>
+
+#### exposes a CSS-backed document wrapper for GUI WYSIWYG rendering
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = wysiwyg_preview_document_html("# Title\n<script>alert(1)</script>")
+expect(wysiwyg_preview_css()).to_contain(".wysiwyg-preview")
+expect(html).to_start_with("<style>.wysiwyg-preview")
+expect(html).to_contain("box-sizing: border-box")
+expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+expect(html).to_contain("style=\"font-family:")
 ```
 
 </details>
@@ -205,8 +224,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

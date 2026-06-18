@@ -9,19 +9,58 @@
 # widget stack.
 
 use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, SlideLayout}
+use std.common.markdown.inline.{markdown_escape_html}
 use std.common.render_scene.office_style_resolver.{resolve_style, style_to_css_text}
+
+fn _is_hex_digit(ch: text) -> bool:
+    "0123456789abcdefABCDEF".contains(ch)
+
+fn slide_safe_css_color(value: text, fallback: text) -> text:
+    """Allow only simple #RGB/#RRGGBB colors in slide CSS values."""
+    val trimmed = value.trim()
+    if not trimmed.starts_with("#"):
+        return fallback
+    if trimmed.len() != 4 and trimmed.len() != 7:
+        return fallback
+    var i = 1
+    while i < trimmed.len():
+        if not _is_hex_digit(trimmed.char_at(i)):
+            return fallback
+        i = i + 1
+    trimmed
 
 fn _slide_element_text(element: SlideElement) -> text:
     """Display text for a slide element based on its kind."""
     match element.kind:
         SlideElementKind.TextBox(content):
-            return content
+            return markdown_escape_html(content)
         SlideElementKind.ImageEl(src: src, alt: alt):
             if alt != "":
-                return "[Image: {alt}]"
-            return "[Image: {src}]"
+                return "[Image: " + markdown_escape_html(alt) + "]"
+            return "[Image: " + markdown_escape_html(src) + "]"
         SlideElementKind.ShapeEl(shape_type: shape_type, fill_color: fill_color):
-            return "[{shape_type}]"
+            return "[" + markdown_escape_html(shape_type) + "]"
+
+fn _css_px(value: i32) -> text:
+    if value < 0:
+        return "0px"
+    value.to_text() + "px"
+
+fn _slide_element_box_css(element: SlideElement) -> text:
+    var css = "position: absolute; "
+    css = css + "left: " + _css_px(element.x) + "; "
+    css = css + "top: " + _css_px(element.y) + "; "
+    css = css + "width: " + _css_px(element.width) + "; "
+    css = css + "height: " + _css_px(element.height) + "; "
+    css + "box-sizing: border-box; overflow: hidden;"
+
+fn _slide_shape_css(element: SlideElement) -> text:
+    match element.kind:
+        SlideElementKind.ShapeEl(shape_type: shape_type, fill_color: fill_color):
+            val fill = slide_safe_css_color(fill_color, "#E5E7EB")
+            return "background: " + fill + "; border: 1px solid #6B7280;"
+        _:
+            return ""
 
 fn _slide_element_style_tag(layout: SlideLayout, index: i32) -> text:
     """Map an element's position within its slide layout to a resolver style
@@ -41,16 +80,14 @@ fn render_slide_html(slide: Slide) -> text:
     resolver's slide theme, so the PPT surface renders with Word-level
     typography (centered bold title, subtitle, body) rather than primitive
     empty widgets."""
-    var bg = slide.background
-    if bg == "":
-        bg = "#ffffff"
-    var out = "<section class=\"slide\" style=\"background: {bg};\">"
+    val bg = slide_safe_css_color(slide.background, "#ffffff")
+    var out = "<section class=\"slide\" style=\"position: relative; width: 960px; height: 540px; overflow: hidden; background: {bg};\">"
     var index = 0
     for el in slide.elements:
         val tag = _slide_element_style_tag(slide.layout, index)
         val content = _slide_element_text(el)
         val style = resolve_style(tag, [])
-        val css = style_to_css_text(style)
+        val css = style_to_css_text(style) + " " + _slide_element_box_css(el) + " " + _slide_shape_css(el)
         out = "{out}<div class=\"{tag}\" style=\"{css}\">{content}</div>"
         index = index + 1
     "{out}</section>"

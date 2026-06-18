@@ -1,6 +1,21 @@
 """
 IDE office plugin suite system specification.
-Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, and database surfaces reuse existing app modules.
+
+## Overview
+
+Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard,
+database, and LibreOffice-like app catalog surfaces reuse existing app modules.
+
+## Examples
+
+`simple ide --feature-check --tui` and `simple ide --feature-check --gui` expose
+the same app catalog, edit-command checks, plugin manifest, and LLM-readable app
+feature list.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/sys_test/ide_office_plugin_suite.md
+**Design:** doc/05_design/app/office/libreoffice_llm_access.md
+**Research:** doc/01_research/app/office/libreoffice_llm_access.md
 
 **TUI Captures:** build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt
 """
@@ -20,6 +35,7 @@ use app.ide.launch_sanity.{ide_launch_sanity, ide_launch_sanity_summary}
 use app.ide.plugin_manifest.{ide_plugin_manifest_probe, ide_plugin_manifest_summary}
 use app.ide.gui_sanity.{ide_gui_sanity, ide_gui_sanity_summary}
 use app.ide.tui_sanity.{ide_tui_sanity, ide_tui_sanity_summary}
+use app.office.llm_catalog.{office_llm_feature_catalog, office_llm_catalog_app_names, office_llm_catalog_summary}
 use app.office.slides.slide.{SlideElement, SlideElementKind, SlideLayout, add_slide_element, slide_layout_display_name, slide_layout_short_name, slide_with_elements}
 use common.office.number.{office_parse_non_negative_i32, office_parse_signed_decimal_f64, office_parse_unsigned_decimal_f64, office_pow10_f64, office_pow10_i64}
 
@@ -86,10 +102,12 @@ describe "IDE office plugin suite capabilities":
         expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
         expect(tui_report).to_contain("agent-dashboard: tools=")
         expect(tui_report).to_contain("status=degraded-review-required")
+        expect(tui_report).to_contain("llm-catalog: apps=8")
+        expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter")
 
     it "keeps the feature-check manual surface complete and ordered":
         val lines = ide_feature_check_report("tui")
-        expect(lines.len()).to_equal(20)
+        expect(lines.len()).to_equal(22)
         expect(lines[0]).to_equal("Simple IDE feature check")
         expect(lines[1]).to_equal("mode: tui")
         expect(lines[2]).to_equal("capabilities: 5")
@@ -102,6 +120,8 @@ describe "IDE office plugin suite capabilities":
         expect(lines[13]).to_start_with("agent-dashboard:")
         expect(lines[15]).to_start_with("db-admin:")
         expect(lines[19]).to_start_with("  plugin-manifest:")
+        expect(lines[20]).to_start_with("  llm-catalog:")
+        expect(lines[21]).to_start_with("  llm-apps:")
 
     it "keeps the TUI feature-check layout within terminal width and captures it":
         val lines = ide_feature_check_report("tui")
@@ -129,6 +149,29 @@ describe "IDE office plugin suite capabilities":
         expect(tui_lines[12]).to_equal(gui_lines[12])
         expect(tui_lines[14]).to_equal(gui_lines[14])
         expect(tui_lines[18]).to_equal(gui_lines[18])
+        expect(tui_lines[20]).to_equal(gui_lines[20])
+        expect(tui_lines[21]).to_equal(gui_lines[21])
+
+    it "exposes a complete LLM-readable app feature catalog":
+        val catalog = office_llm_feature_catalog()
+        val names = office_llm_catalog_app_names().join(",")
+        expect(catalog.len()).to_equal(8)
+        expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter")
+        expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=8 features=34 actions=8")
+
+        expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
+        expect(catalog[0].features.join(",")).to_contain("guarded-edit")
+        expect(catalog[0].actions.join(",")).to_contain("md-edit")
+        expect(catalog[2].owner_module).to_equal("app.office.sheets")
+        expect(catalog[2].features.join(",")).to_contain("formulas")
+        expect(catalog[2].actions.join(",")).to_contain("sheet-edit")
+        expect(catalog[3].owner_module).to_equal("app.office.slides")
+        expect(catalog[3].features.join(",")).to_contain("css-like-design")
+        expect(catalog[3].actions.join(",")).to_contain("slide-edit")
+        expect(catalog[4].owner_module).to_equal("common.drawing.vector_shapes")
+        expect(catalog[5].owner_module).to_equal("app.office.base_db")
+        expect(catalog[6].features.join(",")).to_contain("mathml")
+        expect(catalog[7].actions.join(",")).to_contain("counter-action")
 
     it "checks slide rendering outline and page design through existing office modules":
         val probe = ide_slide_compat_probe()
@@ -141,7 +184,13 @@ describe "IDE office plugin suite capabilities":
         expect(probe.design_count).to_equal(2)
         assert_true(probe.has_css_like_design)
         assert_true(probe.has_outline_transform)
+        assert_true(probe.has_ppt_html_render)
+        assert_true(probe.has_safe_css_color)
+        assert_true(probe.has_positioned_elements)
         expect(summary).to_contain("transform=true")
+        expect(summary).to_contain("ppt_html=true")
+        expect(summary).to_contain("safe_css=true")
+        expect(summary).to_contain("positioned=true")
 
     it "checks slide constructor helpers used by IDE presentation previews":
         val el = SlideElement(
@@ -299,7 +348,11 @@ describe "IDE office plugin suite capabilities":
         expect(probe.preview_line_count).to_be_greater_than(2)
         assert_true(probe.contains_heading)
         assert_true(probe.contains_table)
+        assert_true(probe.css_document)
+        assert_true(probe.escapes_html)
         expect(summary).to_contain("preview=")
+        expect(summary).to_contain("css_doc=true")
+        expect(summary).to_contain("escaped=true")
 
     it "checks TUI GUI and SDL launch modes through the shared editor launch contract":
         val sanity = ide_launch_sanity()

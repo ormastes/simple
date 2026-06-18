@@ -28,7 +28,7 @@ html_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,12 +44,13 @@ html_render_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_slide_html(title_slide("s1", "My Talk", "A subtitle"))
 expect(html).to_start_with("<section class=\"slide\"")
+expect(html).to_contain("position: relative; width: 960px; height: 540px;")
 expect(html).to_end_with("</section>")
 ```
 
@@ -109,6 +110,73 @@ expect(html).to_contain(">First point</div>")
 
 </details>
 
+#### positions slide elements with deterministic CSS boxes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_slide_html(content_slide("s2", "Agenda", "First point"))
+expect(html).to_contain("left: 50px; top: 30px; width: 860px; height: 60px;")
+expect(html).to_contain("left: 50px; top: 110px; width: 860px; height: 400px;")
+```
+
+</details>
+
+#### escapes text and sanitizes CSS colors in malformed presentation input
+
+- kind: SlideElementKind TextBox
+- kind: SlideElementKind ShapeEl
+   - Expected: slide_safe_css_color("#0F766E", "#ffffff") equals `#0F766E`
+   - Expected: slide_safe_css_color("#fff; color:red", "#ffffff") equals `#ffffff`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val unsafe = Slide(
+    id: "unsafe",
+    layout: SlideLayout.TitleContent,
+    elements: [
+        SlideElement(
+            id: "title",
+            kind: SlideElementKind.TextBox(content: "<b onclick='x'>Title</b>"),
+            x: -10,
+            y: -20,
+            width: 300,
+            height: 60
+        ),
+        SlideElement(
+            id: "shape",
+            kind: SlideElementKind.ShapeEl(shape_type: "rect<script>", fill_color: "red; background:url(js)"),
+            x: 20,
+            y: 90,
+            width: 200,
+            height: 80
+        )
+    ],
+    notes: "",
+    background: "#fff; color:red"
+)
+val html = render_slide_html(unsafe)
+expect(slide_safe_css_color("#0F766E", "#ffffff")).to_equal("#0F766E")
+expect(slide_safe_css_color("#fff; color:red", "#ffffff")).to_equal("#ffffff")
+expect(html).to_contain("background: #ffffff;")
+expect(html).to_contain("&lt;b onclick=&#39;x&#39;&gt;Title&lt;/b&gt;")
+expect(html).to_contain("[rect&lt;script&gt;]")
+expect(html).to_contain("background: #E5E7EB;")
+expect(html).to_contain("left: 0px; top: 0px;")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -129,8 +197,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

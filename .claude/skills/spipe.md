@@ -143,6 +143,15 @@ available non-raster oracle. Keep executable specs under `test/...`; generated
 manual docs and evidence assets belong under `doc/06_spec/...`, and
 `doc/06_spec` must never contain executable `.spl` specs.
 
+For IDE Office Markdown/PPT rendering hardening, keep the canonical guide at
+`doc/07_guide/app/ide_office_plugin_suite.md` current. Specs should prove the
+Markdown GUI path uses `wysiwyg_preview_document_html` with escaped content and
+CSS, while slide/PPT HTML render specs should prove escaped text, sanitized
+`#RGB`/`#RRGGBB` colors, clamped geometry, and positioned slide boxes. The IDE
+feature-check report must expose these markers in both TUI and GUI modes:
+`css_doc=true escaped=true` for Markdown and
+`ppt_html=true safe_css=true positioned=true` for slides.
+
 ### Simple Web production hardening
 
 For Simple Web/browser production-boundary work, keep the selected Feature

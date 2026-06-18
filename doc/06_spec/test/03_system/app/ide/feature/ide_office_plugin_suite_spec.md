@@ -1,6 +1,6 @@
 # ide_office_plugin_suite_spec
 
-> IDE office plugin suite system specification.
+> Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, database, and LibreOffice-like app catalog surfaces reuse existing app modules.
 
 <!-- sdn-diagram:id=ide_office_plugin_suite_spec.arch -->
 <details class="sdn-source">
@@ -29,14 +29,14 @@ ide_office_plugin_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # ide_office_plugin_suite_spec
 
-IDE office plugin suite system specification.
+Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, database, and LibreOffice-like app catalog surfaces reuse existing app modules.
 
 ## At a Glance
 
@@ -44,12 +44,31 @@ IDE office plugin suite system specification.
 |-------|-------|
 | Category | Application |
 | Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/sys_test/ide_office_plugin_suite.md |
+| Design | doc/05_design/app/office/libreoffice_llm_access.md |
+| Research | doc/01_research/app/office/libreoffice_llm_access.md |
 | Source | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-IDE office plugin suite system specification.
-Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, and database surfaces reuse existing app modules.
+## Overview
+
+Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard,
+database, and LibreOffice-like app catalog surfaces reuse existing app modules.
+
+## Examples
+
+`simple ide --feature-check --tui` and `simple ide --feature-check --gui` expose
+the same app catalog, edit-command checks, plugin manifest, and LLM-readable app
+feature list.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/sys_test/ide_office_plugin_suite.md
+**Design:** doc/05_design/app/office/libreoffice_llm_access.md
+**Research:** doc/01_research/app/office/libreoffice_llm_access.md
+
+**TUI Captures:** build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt
 
 ## Evidence
 
@@ -75,10 +94,10 @@ Simple IDE feature check
 mode: tui
 capabilities: 5
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
-  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true
+  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true css_doc=true escaped=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
-  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true
+  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
@@ -91,6 +110,8 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
+  llm-catalog: apps=8 features=34 actions=8
+  llm-apps: Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter
 ```
 
 </details>
@@ -145,7 +166,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -162,6 +183,8 @@ expect(tui_report).to_contain("edit-command: slide-edit=true stale-reject=true")
 expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
+expect(tui_report).to_contain("llm-catalog: apps=8")
+expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter")
 ```
 
 </details>
@@ -171,12 +194,12 @@ expect(tui_report).to_contain("status=degraded-review-required")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(20)
+expect(lines.len()).to_equal(22)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
 expect(lines[2]).to_equal("capabilities: 5")
@@ -189,6 +212,8 @@ expect(lines[11]).to_start_with("  edit-command:")
 expect(lines[13]).to_start_with("agent-dashboard:")
 expect(lines[15]).to_start_with("db-admin:")
 expect(lines[19]).to_start_with("  plugin-manifest:")
+expect(lines[20]).to_start_with("  llm-catalog:")
+expect(lines[21]).to_start_with("  llm-apps:")
 ```
 
 </details>
@@ -221,7 +246,7 @@ expect(_capture_file_state(capture)).to_equal("matched")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -238,6 +263,40 @@ expect(tui_lines[10]).to_equal(gui_lines[10])
 expect(tui_lines[12]).to_equal(gui_lines[12])
 expect(tui_lines[14]).to_equal(gui_lines[14])
 expect(tui_lines[18]).to_equal(gui_lines[18])
+expect(tui_lines[20]).to_equal(gui_lines[20])
+expect(tui_lines[21]).to_equal(gui_lines[21])
+```
+
+</details>
+
+#### exposes a complete LLM-readable app feature catalog
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val catalog = office_llm_feature_catalog()
+val names = office_llm_catalog_app_names().join(",")
+expect(catalog.len()).to_equal(8)
+expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=8 features=34 actions=8")
+
+expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
+expect(catalog[0].features.join(",")).to_contain("guarded-edit")
+expect(catalog[0].actions.join(",")).to_contain("md-edit")
+expect(catalog[2].owner_module).to_equal("app.office.sheets")
+expect(catalog[2].features.join(",")).to_contain("formulas")
+expect(catalog[2].actions.join(",")).to_contain("sheet-edit")
+expect(catalog[3].owner_module).to_equal("app.office.slides")
+expect(catalog[3].features.join(",")).to_contain("css-like-design")
+expect(catalog[3].actions.join(",")).to_contain("slide-edit")
+expect(catalog[4].owner_module).to_equal("common.drawing.vector_shapes")
+expect(catalog[5].owner_module).to_equal("app.office.base_db")
+expect(catalog[6].features.join(",")).to_contain("mathml")
+expect(catalog[7].actions.join(",")).to_contain("counter-action")
 ```
 
 </details>
@@ -246,12 +305,15 @@ expect(tui_lines[18]).to_equal(gui_lines[18])
 
 - assert true
 - assert true
+- assert true
+- assert true
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -265,7 +327,13 @@ expect(probe.outline_line_count).to_equal(2)
 expect(probe.design_count).to_equal(2)
 assert_true(probe.has_css_like_design)
 assert_true(probe.has_outline_transform)
+assert_true(probe.has_ppt_html_render)
+assert_true(probe.has_safe_css_color)
+assert_true(probe.has_positioned_elements)
 expect(summary).to_contain("transform=true")
+expect(summary).to_contain("ppt_html=true")
+expect(summary).to_contain("safe_css=true")
+expect(summary).to_contain("positioned=true")
 ```
 
 </details>
@@ -544,12 +612,14 @@ expect(spoofed_surface.ready_for_integration).to_be(false)
 
 - assert true
 - assert true
+- assert true
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -561,7 +631,11 @@ expect(probe.rendered_line_count).to_be_greater_than(2)
 expect(probe.preview_line_count).to_be_greater_than(2)
 assert_true(probe.contains_heading)
 assert_true(probe.contains_table)
+assert_true(probe.css_document)
+assert_true(probe.escapes_html)
 expect(summary).to_contain("preview=")
+expect(summary).to_contain("css_doc=true")
+expect(summary).to_contain("escaped=true")
 ```
 
 </details>
@@ -667,11 +741,18 @@ expect(summary).to_contain("roundtrip=5")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/sys_test/ide_office_plugin_suite.md](doc/03_plan/sys_test/ide_office_plugin_suite.md)
+- **Design:** [doc/05_design/app/office/libreoffice_llm_access.md](doc/05_design/app/office/libreoffice_llm_access.md)
+- **Research:** [doc/01_research/app/office/libreoffice_llm_access.md](doc/01_research/app/office/libreoffice_llm_access.md)
 
 
 </details>
