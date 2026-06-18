@@ -58,7 +58,7 @@ to avoid import-chain issues.
 
 #### starts with one pane
 
-1. expect layout panes len
+- expect layout panes len
 
 
 <details>
@@ -76,9 +76,9 @@ expect layout.panes.len() == 1
 
 #### split adds a new pane
 
-1. var layout = test layout new
-2. layout = test layout split
-3. expect layout panes len
+- var layout = test layout new
+- layout = test layout split
+- expect layout panes len
 
 
 <details>
@@ -97,12 +97,12 @@ expect layout.panes.len() == 2
 
 #### close_others reduces to one pane
 
-1. var layout = test layout new
-2. layout = test layout split
-3. layout = test layout split
-4. expect layout panes len
-5. layout = test layout close others
-6. expect layout panes len
+- var layout = test layout new
+- layout = test layout split
+- layout = test layout split
+- expect layout panes len
+- layout = test layout close others
+- expect layout panes len
 
 
 <details>
@@ -124,10 +124,10 @@ expect layout.panes.len() == 1
 
 #### focus_next cycles through panes
 
-1. var layout = test layout new
-2. layout = test layout split
-3. layout = test layout focus next
-4. layout = test layout focus next
+- var layout = test layout new
+- layout = test layout split
+- layout = test layout focus next
+- layout = test layout focus next
 
 
 <details>
@@ -150,10 +150,10 @@ expect layout.active_pane_id == second_id
 
 #### focus_prev wraps around
 
-1. var layout = test layout new
-2. layout = test layout split
-3. layout = test layout focus prev
-4. layout = test layout focus prev
+- var layout = test layout new
+- layout = test layout split
+- layout = test layout focus prev
+- layout = test layout focus prev
 
 
 <details>
@@ -178,9 +178,9 @@ expect layout.active_pane_id == second_id
 
 #### add buffer updates active index
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
+- var bm = test bm new
+- bm = test bm add
+- bm = test bm add
 
 
 <details>
@@ -201,10 +201,10 @@ expect bm.active == 1
 
 #### switch_next wraps around
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. bm = test bm switch next
+- var bm = test bm new
+- bm = test bm add
+- bm = test bm add
+- bm = test bm switch next
 
 
 <details>
@@ -226,11 +226,11 @@ expect bm.active == 0
 
 #### switch_prev wraps around
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. bm = test bm switch prev
-5. bm = test bm switch prev
+- var bm = test bm new
+- bm = test bm add
+- bm = test bm add
+- bm = test bm switch prev
+- bm = test bm switch prev
 
 
 <details>
@@ -253,10 +253,10 @@ expect bm.active == 1
 
 #### switch_by_name finds matching buffer
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. bm = test bm switch by name
+- var bm = test bm new
+- bm = test bm add
+- bm = test bm add
+- bm = test bm switch by name
 
 
 <details>
@@ -277,9 +277,9 @@ expect bm.active == 0
 
 #### switch_by_index rejects invalid index
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm switch by index
+- var bm = test bm new
+- bm = test bm add
+- bm = test bm switch by index
 
 
 <details>
@@ -301,7 +301,7 @@ expect bm.active == 0
 
 #### single pane fills entire area
 
-1. expect regions len
+- expect regions len
 
 
 <details>
@@ -321,7 +321,7 @@ expect regions[0].h == 24
 
 #### vertical split creates side-by-side regions
 
-1. expect regions len
+- expect regions len
 
 
 <details>
@@ -341,7 +341,7 @@ expect regions[1].x > regions[0].x
 
 #### horizontal split creates stacked regions
 
-1. expect regions len
+- expect regions len
 
 
 <details>
@@ -379,8 +379,8 @@ expect left_end < regions[1].x
 
 #### shows buffer and pane counts
 
-1. expect status contains
-2. expect status contains
+- expect status contains
+- expect status contains
 
 
 <details>
@@ -399,7 +399,7 @@ expect status.contains("pane 1/3")
 
 #### shows modified flag
 
-1. expect status contains
+- expect status contains
 
 
 <details>
@@ -419,12 +419,12 @@ expect status.contains("[+]")
 
 #### list shows active marker
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. expect listing contains
-5. expect listing contains
-6. expect listing contains
+- var bm = test bm new
+- bm = test bm add
+- bm = test bm add
+- expect listing contains
+- expect listing contains
+- expect listing contains
 
 
 <details>
@@ -447,11 +447,11 @@ expect listing.contains("file_b.spl")
 
 #### list marks correct active buffer
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. bm = test bm switch by index
-5. expect listing contains
+- var bm = test bm new
+- bm = test bm add
+- bm = test bm add
+- bm = test bm switch by index
+- expect listing contains
 
 
 <details>

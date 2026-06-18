@@ -232,8 +232,8 @@ expect(qt.current_index).to_equal(0)
 
 #### next advances to second entry
 
-1. QfEntry
-2. QfEntry
+- QfEntry
+- QfEntry
    - Expected: moved is true
    - Expected: qt.current_index equals `1`
 
@@ -258,9 +258,9 @@ expect(qt.current_index).to_equal(1)
 
 #### prev returns to previous entry
 
-1. QfEntry
-2. QfEntry
-3. qt next entry
+- QfEntry
+- QfEntry
+- qt next entry
    - Expected: moved is true
    - Expected: qt.current_index equals `0`
 
@@ -286,9 +286,9 @@ expect(qt.current_index).to_equal(0)
 
 #### jump_index sets current index
 
-1. QfEntry
-2. QfEntry
-3. QfEntry
+- QfEntry
+- QfEntry
+- QfEntry
    - Expected: ok is true
    - Expected: qt.current_entry().message equals `c`
 
@@ -314,9 +314,9 @@ expect(qt.current_entry().message).to_equal("c")
 
 #### qf_filter_severity returns only matching severity
 
-1. QfEntry
-2. QfEntry
-3. QfEntry
+- QfEntry
+- QfEntry
+- QfEntry
    - Expected: errors.len() equals `2`
 
 
@@ -377,8 +377,8 @@ expect(bq.label).to_equal("myfile.spl:1:1: error")
 
 #### bridge_all_diags converts list
 
-1. ParseDiag
-2. ParseDiag
+- ParseDiag
+- ParseDiag
    - Expected: bds.len() equals `2`
    - Expected: bds[1].row equals `1`
 
@@ -403,8 +403,8 @@ expect(bds[1].row).to_equal(1)
 
 #### bridge_has_errors returns true when errors present
 
-1. ParseDiag
-2. ParseDiag
+- ParseDiag
+- ParseDiag
    - Expected: has is true
 
 
@@ -427,7 +427,7 @@ expect(has).to_equal(true)
 
 #### bridge_has_errors returns false with no errors
 
-1. ParseDiag
+- ParseDiag
    - Expected: has == false is true
 
 

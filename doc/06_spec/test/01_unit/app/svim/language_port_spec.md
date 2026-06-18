@@ -1,6 +1,6 @@
 # Language Port Specification
 
-> 1. var session = SvimSession new
+> <details>
 
 <!-- sdn-diagram:id=language_port_spec.arch -->
 <details class="sdn-source">
@@ -41,8 +41,8 @@ language_port_spec -> app
 
 #### reads buffer text through the shared session
 
-1. var session = SvimSession new
-2. expect port buffer text
+- var session = SvimSession new
+- expect port buffer text
 
 
 <details>
@@ -62,10 +62,10 @@ expect port.buffer_text(session, buffer_id) to_equal "class Broken(\n"
 
 #### publishes parser diagnostics into the quickfix list
 
-1. var session = SvimSession new
-2. session focus buffer
+- var session = SvimSession new
+- session focus buffer
    - Expected: count > 0 is true
-3. expect session quickfix items len
+- expect session quickfix items len
 
 
 <details>

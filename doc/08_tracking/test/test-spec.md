@@ -1,12 +1,12 @@
 # Test Specification
 
-*Generated: 2026-06-17 10:04:10*
+*Generated: 2026-06-18 10:05:22*
 
-## test/01_unit/app/ui
+## test/01_unit/app/svim
 
-❌ **async_ipc_spec.spl** (185ms)
-  - Source: `test/01_unit/app/ui/async_ipc_spec.spl`
-  - Generated doc: `doc/06_spec/async_ipc_spec.md`
+❌ **core_spec.spl** (498ms)
+  - Source: `test/01_unit/app/svim/core_spec.spl`
+  - Generated doc: `doc/06_spec/core_spec.md`
 
 
 ---
@@ -14,6 +14,6 @@
 ## Summary
 
 - **Total:** 1 tests
-- **Passed:** 17 ✅
+- **Passed:** 21 ✅
 - **Failed:** 4 ❌
-- **Duration:** 193ms
+- **Duration:** 509ms

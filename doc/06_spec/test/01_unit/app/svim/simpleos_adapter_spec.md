@@ -1,6 +1,6 @@
 # Simpleos Adapter Specification
 
-> 1. var session = SvimSession new
+> <details>
 
 <!-- sdn-diagram:id=simpleos_adapter_spec.arch -->
 <details class="sdn-source">
@@ -41,10 +41,10 @@ simpleos_adapter_spec -> app
 
 #### dispatches host-style aliases through the shared session
 
-1. var session = SvimSession new
-2. session execute named
-3. session execute named
-4. expect session current cursor
+- var session = SvimSession new
+- session execute named
+- session execute named
+- expect session current cursor
 
 
 <details>
@@ -68,9 +68,9 @@ expect session.current_cursor().col to_equal 0
 
 #### returns the shared session snapshot for rendering surfaces
 
-1. var session = SvimSession new
-2. session execute named
-3. session execute named
+- var session = SvimSession new
+- session execute named
+- session execute named
 
 
 <details>

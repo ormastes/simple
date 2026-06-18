@@ -1,6 +1,6 @@
 # Tui Shell Specification
 
-> 1. expect help contains
+> <details>
 
 <!-- sdn-diagram:id=tui_shell_spec.arch -->
 <details class="sdn-source">
@@ -41,9 +41,9 @@ tui_shell_spec -> app
 
 #### renders help text with shared and host commands
 
-1. expect help contains
-2. expect help contains
-3. expect help contains
+- expect help contains
+- expect help contains
+- expect help contains
 
 
 <details>
@@ -63,9 +63,9 @@ expect help.contains(".buffers") to_equal true
 
 #### formats pending prompts for open save and search flows
 
-1. expect svim shell prompt
-2. expect svim shell prompt
-3. expect svim shell prompt
+- expect svim shell prompt
+- expect svim shell prompt
+- expect svim shell prompt
 
 
 <details>
@@ -129,12 +129,12 @@ expect insert_commandline.1 to_equal ":w"
 
 #### renders session status and buffer listings
 
-1. var session = SvimSession new
-2. session open text
-3. expect tui contains
-4. expect tui contains
-5. expect buffers contains
-6. expect buffers contains
+- var session = SvimSession new
+- session open text
+- expect tui contains
+- expect tui contains
+- expect buffers contains
+- expect buffers contains
 
 
 <details>

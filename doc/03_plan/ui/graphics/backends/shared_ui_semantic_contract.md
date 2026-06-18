@@ -7,6 +7,20 @@ Status: Candidate plan pending requirement selection
 Agents are not alone in the codebase. Each agent owns a disjoint write scope and
 must not revert edits outside that scope.
 
+## Cleanup Selection Blocker (2026-06-18)
+
+This plan is blocked before implementation closure because final feature/NFR
+requirements do not exist yet. Requirement option artifacts are also missing, so
+the next closure action is to create options, get user selection, and only then
+write final selected requirements.
+
+Missing artifacts:
+
+- `doc/02_requirements/feature/shared_ui_semantic_contract_options.md`
+- `doc/02_requirements/nfr/shared_ui_semantic_contract_options.md`
+- `doc/02_requirements/feature/shared_ui_semantic_contract.md`
+- `doc/02_requirements/nfr/shared_ui_semantic_contract.md`
+
 ## Agent A: Contract Types
 
 Ownership:
