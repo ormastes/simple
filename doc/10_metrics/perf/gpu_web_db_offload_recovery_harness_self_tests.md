@@ -101,4 +101,5 @@
 | reference comparator handoff | pass | host-safe-self-test |
 | reference comparator env check | pass | host-safe-self-test |
 | reference comparator env fields tsv | pass | host-safe-self-test |
+| reference comparator env check report | pass | host-safe-self-test |
 | external suite plan artifacts | pass | host-safe-self-test |

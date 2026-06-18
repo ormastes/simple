@@ -141,7 +141,7 @@ implementation-in-progress-recovered
 - evidence: `scripts/check/check-gpu-web-db-offload-external-suite.shs --status`
   prints the suite-step count, missing-fixture item count, and verdict directly.
   With the default generated `external-fixtures.env` template left blank, the
-  current status reports 39 steps, 29 missing fixture items, 26 required
+  current status reports 40 steps, 29 missing fixture items, 26 required
   missing items, 3 optional missing reference items, and
   `WAITING_ON_FIXTURES`.
   It also prints `external-suite-missing=<category>|...`
@@ -208,7 +208,9 @@ implementation-in-progress-recovered
   artifacts are side-effect-free and do not mark optional reference readiness.
   The `--check-env-file` mode rejects blank reference URLs, non-HTTP(S) URLs,
   and placeholder uWebSockets/Seastar provenance before values are copied into
-  the strict external fixture env.
+  the strict external fixture env. `--write-env-check-report` persists the
+  same validation state at
+  `build/perf/gpu_web_db_offload/reference-comparator-env-check.md`.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

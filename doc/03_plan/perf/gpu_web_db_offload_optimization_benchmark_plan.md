@@ -206,6 +206,9 @@ Implemented and verified on the current host:
   env files, non-HTTP(S) reference URLs, and placeholder uWebSockets/Seastar
   provenance before values are copied into the strict
   `external-fixtures.env`.
+- `--write-env-check-report` persists the reference-comparator validation
+  state at `build/perf/gpu_web_db_offload/reference-comparator-env-check.md`
+  for crash-session handoff.
 - The readiness handoff now writes
   `build/perf/gpu_web_db_offload/external-fixture-env-fields.tsv`, a
   side-effect-free machine-readable map from URL-backed readiness items to the
@@ -245,7 +248,7 @@ Implemented and verified on the current host:
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
   With the default sourceable `external-fixtures.env` template left blank, the
-  current strict status is 39 suite steps, 29 missing fixture items, 26
+  current strict status is 40 suite steps, 29 missing fixture items, 26
   required missing fixture items, and 3 optional reference fixture URLs. Local
   Docker-backed fixture candidates must be copied into a separate verified env
   file or exported for the suite run before those rows can become ready.
