@@ -35,6 +35,13 @@ extern fn rt_riscv_read_vlenb() -> i32
 # Check whether the V extension misa bit is set (RISC-V only; returns 0 elsewhere)
 extern fn rt_riscv_has_v_ext() -> bool
 
+# Arch-gate: returns 1 if compiled for x86_64, 0 otherwise
+extern fn rt_cpu_is_x86_64() -> i32
+# Arch-gate: returns 1 if compiled for AArch64, 0 otherwise
+extern fn rt_cpu_is_aarch64() -> i32
+# Arch-gate: returns 1 if compiled for RISC-V 64, 0 otherwise
+extern fn rt_cpu_is_riscv64() -> i32
+
 # CUDA: query SM version from cuDeviceGetAttribute (returns 0 if CUDA unavailable)
 extern fn rt_cuda_sm_version(device: i32) -> i32
 
@@ -378,30 +385,12 @@ fn detect_capabilities() -> SimdFeatureSet:
     Note: PTX/CUDA is not included here — use ptx_compute_capability(device)
     separately since it requires a device index.
     """
-    # Architecture dispatch via /proc/cpuinfo flags (same approach as simd_platform.spl)
-    # to avoid compile-time #[cfg] which doesn't exist in Simple.
-    var cpuinfo = rt_file_read_text("/proc/cpuinfo")
-    var has_sse_flag  = _text_contains_word(cpuinfo, "sse")
-    var has_asimd     = _text_contains_word(cpuinfo, "asimd")
-    var has_neon_flag = _text_contains_word(cpuinfo, "neon")
-    var has_riscv     = _text_contains_word(cpuinfo, "rv32") or _text_contains_word(cpuinfo, "rv64")
-
-    if has_sse_flag:
+    if rt_cpu_is_x86_64() != 0:
         return detect_x86_capabilities()
-
-    var is_arm = has_asimd or has_neon_flag
-    if is_arm:
+    if rt_cpu_is_aarch64() != 0:
         return detect_aarch64_capabilities()
-
-    if has_riscv:
+    if rt_cpu_is_riscv64() != 0:
         return detect_riscv_capabilities()
-
-    # macOS ARM: /proc/cpuinfo absent; check via rt_is_darwin_arm64
-    var is_darwin_arm = rt_is_darwin_arm64()
-    if is_darwin_arm:
-        return detect_aarch64_capabilities()
-
-    # No SIMD detected
     _simd_features_none()
 
 # ============================================================================

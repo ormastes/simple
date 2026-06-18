@@ -3364,6 +3364,62 @@ int64_t rt_channel_is_closed(int64_t id) { (void)id; return 1; }
 #endif
 
 /* ================================================================
+ * CPUID and architecture-gate helpers
+ * ================================================================ */
+
+#if defined(__x86_64__) || defined(_M_X64)
+#  if defined(_MSC_VER)
+#    include <intrin.h>
+#  else
+#    include <cpuid.h>
+#  endif
+#endif
+
+typedef struct { int32_t a, b, c, d; } RtCpuidResult;
+
+RtCpuidResult rt_cpuid(int32_t leaf, int32_t subleaf) {
+    RtCpuidResult r = {0, 0, 0, 0};
+#if defined(__x86_64__) || defined(_M_X64)
+#  if defined(_MSC_VER)
+    int regs[4];
+    __cpuidex(regs, (int)leaf, (int)subleaf);
+    r.a = regs[0]; r.b = regs[1]; r.c = regs[2]; r.d = regs[3];
+#  else
+    __cpuid_count((unsigned int)leaf, (unsigned int)subleaf,
+                  *(unsigned int*)&r.a, *(unsigned int*)&r.b,
+                  *(unsigned int*)&r.c, *(unsigned int*)&r.d);
+#  endif
+#else
+    (void)leaf; (void)subleaf;
+#endif
+    return r;
+}
+
+int32_t rt_cpu_is_x86_64(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int32_t rt_cpu_is_aarch64(void) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int32_t rt_cpu_is_riscv64(void) {
+#if defined(__riscv) && (__riscv_xlen == 64)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/* ================================================================
  * Runtime Lifecycle (called by entry point)
  * ================================================================ */
 

@@ -27,23 +27,51 @@ use build_native_types.{BuildOutputFormat, BuildLinkConfig, BuildLinkStats, Buil
 use compiler.driver.driver.{CompilerDriver}
 use compiler.common.driver_core_types.{CompileOptions, CompileMode, CompileResult, OutputFormat as DriverOutputFormat}
 use compiler.driver.driver_api.{aot_native_file_with_backend}
+use compiler.types.simd_capabilities.{SimdFeatureSet, detect_capabilities}
 
 extern fn rt_time_now_unix_millis() -> i64
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # ============================================================================
 # Build Pipeline
 # ============================================================================
 
+fn _simd_features_to_sdn(f: SimdFeatureSet) -> text:
+    """Serialize SimdFeatureSet to SDN format for sidecar file."""
+    var lines = "simd_capabilities {\n"
+    lines = lines + "  has_sse: {f.has_sse}\n"
+    lines = lines + "  has_sse2: {f.has_sse2}\n"
+    lines = lines + "  has_sse3: {f.has_sse3}\n"
+    lines = lines + "  has_ssse3: {f.has_ssse3}\n"
+    lines = lines + "  has_sse41: {f.has_sse41}\n"
+    lines = lines + "  has_sse42: {f.has_sse42}\n"
+    lines = lines + "  has_avx: {f.has_avx}\n"
+    lines = lines + "  has_avx2: {f.has_avx2}\n"
+    lines = lines + "  has_avx512f: {f.has_avx512f}\n"
+    lines = lines + "  has_avx512bw: {f.has_avx512bw}\n"
+    lines = lines + "  has_avx512dq: {f.has_avx512dq}\n"
+    lines = lines + "  has_avx512vl: {f.has_avx512vl}\n"
+    lines = lines + "  has_neon: {f.has_neon}\n"
+    lines = lines + "  has_neon_fp16: {f.has_neon_fp16}\n"
+    lines = lines + "  has_bf16: {f.has_bf16}\n"
+    lines = lines + "  has_sve: {f.has_sve}\n"
+    lines = lines + "  has_sve2: {f.has_sve2}\n"
+    lines = lines + "  has_v: {f.has_v}\n"
+    lines = lines + "  vlen: {f.vlen}\n"
+    lines = lines + "}\n"
+    lines
+
 fn build_native(config: BuildConfig) -> BuildResult:
     """Build a native binary from Simple source files.
 
     Pipeline:
-    1. Discover all source files (entry + dependencies)
-    2. Compile each source file to SMF
-    3. Link all SMFs with the Simple linker
-    4. Generate native binary via mold
+    1. Detect host SIMD capabilities (when target_cpu = "native" or nil)
+    2. Discover all source files (entry + dependencies)
+    3. Compile each source file to SMF
+    4. Link all SMFs with the Simple linker
+    5. Generate native binary via mold; write .simd.sdn sidecar
     """
     val start_time = current_time_ms()
 
@@ -51,6 +79,18 @@ fn build_native(config: BuildConfig) -> BuildResult:
         print "[build] Starting native build"
         print "[build] Entry point: {config.entry_point}"
         print "[build] Output: {config.output}"
+
+    # Detect host SIMD capabilities for native target and persist as sidecar
+    var active_config = config
+    val is_native_target = config.target_cpu.is_nil() or config.target_cpu == Some("native")
+    if is_native_target:
+        val detected = detect_capabilities()
+        active_config = BuildConfig(..config, host_simd: Some(detected))
+        val sdn_path = config.output + ".simd.sdn"
+        rt_file_write_text(sdn_path, _simd_features_to_sdn(detected))
+        if config.verbose:
+            print "[build] Host SIMD: {detected.to_text()}"
+            print "[build] SIMD capabilities written to: {sdn_path}"
 
     # 1. Collect all source files
     var source_files: [text] = [config.entry_point]
