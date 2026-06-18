@@ -27,7 +27,7 @@ renderdoc_external_host_capture_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -118,12 +118,41 @@ expect(report).to_contain("# RenderDoc External Host Capture")
 
 </details>
 
+#### passes when supplied original RDOC evidence from an external host
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-external-host-capture-pass && mkdir -p build/test-renderdoc-external-host-capture-pass/source && printf 'RDOCsynthetic external host capture\\n' > build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc && printf 'rdoc_backend=original\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-external-host-capture-pass/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-external-host-capture-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-external-host-capture-pass REPORT_PATH=build/test-renderdoc-external-host-capture-pass/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-external-host-capture-pass/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_external_host_capture_status=pass")
+expect(evidence).to_contain("rdoc_external_host_capture_reason=pass")
+expect(evidence).to_contain("rdoc_external_host_gate_status=pass")
+expect(evidence).to_contain("rdoc_external_host_required_backend=original")
+expect(evidence).to_contain("rdoc_external_host_required_status=pass")
+expect(evidence).to_contain("rdoc_external_host_required_magic=RDOC")
+
+val status = _value_of(evidence, "rdoc_external_host_capture_status")
+val gate_status = _value_of(evidence, "rdoc_external_host_gate_status")
+expect(status).to_equal("pass")
+expect(gate_status).to_equal("pass")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
