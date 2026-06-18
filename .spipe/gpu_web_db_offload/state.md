@@ -141,7 +141,7 @@ implementation-in-progress-recovered
 - evidence: `scripts/check/check-gpu-web-db-offload-external-suite.shs --status`
   prints the suite-step count, missing-fixture item count, and verdict directly.
   With the default generated `external-fixtures.env` template left blank, the
-  current status reports 37 steps, 29 missing fixture items, 26 required
+  current status reports 38 steps, 29 missing fixture items, 26 required
   missing items, 3 optional missing reference items, and
   `WAITING_ON_FIXTURES`.
   It also prints `external-suite-missing=<category>|...`
@@ -186,6 +186,8 @@ implementation-in-progress-recovered
   reports current fastest-comparator readiness, persists
   `build/perf/gpu_web_db_offload/fastest-comparator-status.json` through
   `--write-status-json`, persists
+  `build/perf/gpu_web_db_offload/fastest-comparator-coverage.tsv` through
+  `--write-coverage-tsv`, persists
   `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.md` through
   `--write-next-actions`, persists
   `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.tsv` through
