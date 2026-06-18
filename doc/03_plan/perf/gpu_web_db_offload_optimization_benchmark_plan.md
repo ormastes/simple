@@ -32,8 +32,9 @@ overclaiming GPU acceleration.
 Local green evidence already recorded:
 
 - `sh scripts/check/check-proxy-live-httpserver-reliable-suite.shs`
-- `sh scripts/check/check-proxy-live-socket-benchmark.shs` (historical; current
-  rerun on 2026-06-18 fails before the native backend ready marker, tracked in
+- `sh scripts/check/check-proxy-live-socket-benchmark.shs` (rerun on
+  2026-06-18 passes after the wrapper builds the native TCP fixtures with
+  `--runtime-bundle core-c-bootstrap`; root cause and evidence are tracked in
   `doc/08_tracking/bug/proxy_native_tcp_fixture_no_ready_2026-06-18.md`)
 - `sh scripts/check/check-gpu-web-db-offload-native-device-probe.shs`
 - `sh scripts/check/check-gpu-web-db-offload-benchmark-report.shs`
@@ -66,10 +67,12 @@ Current metrics live in:
 
 These prove reliability, selected CUDA kernel/device-contract rows, measured
 static HTTP rows against NGINX/Caddy/H2O, and measured external DB baseline
-rows for ClickHouse, DuckDB, PostgreSQL, MongoDB/YCSB, and Redis/Valkey. They
-do not yet prove end-to-end parity for live proxy/dynamic web workloads against
-HAProxy, Envoy, Seastar, uWebSockets, or complete TechEmpower-style route
-fixtures.
+rows for ClickHouse, DuckDB, PostgreSQL, MongoDB/YCSB, and Redis/Valkey. In
+other words: parts of this lane are already tested against fast external
+servers such as NGINX and Redis/Valkey, but those rows are baseline evidence,
+not speedup claims. They do not yet prove end-to-end parity for live
+proxy/dynamic web workloads against HAProxy, Envoy, Seastar, uWebSockets, or
+complete TechEmpower-style route fixtures.
 
 ## Current Implementation State
 
@@ -245,10 +248,11 @@ Remaining blockers before this plan can be marked done:
   `SIMPLE_CACHED_PROXY_URL`, `HAPROXY_CACHED_PROXY_URL`,
   `ENVOY_CACHED_PROXY_URL`, `SIMPLE_UPLOAD_PROXY_URL`,
   `HAPROXY_UPLOAD_PROXY_URL`, `SIMPLE_TUNNEL_PROXY_URL`, and
-  `HAPROXY_TUNNEL_PROXY_URL`. The immediate cached-proxy sub-blocker is that
-  the current native Simple TCP proxy fixture does not reach its backend ready
-  marker under `sh scripts/check/check-proxy-live-socket-benchmark.shs`; see
-  `doc/08_tracking/bug/proxy_native_tcp_fixture_no_ready_2026-06-18.md`.
+  `HAPROXY_TUNNEL_PROXY_URL`. The previous local cached-proxy sub-blocker was
+  fixed by building the native Simple TCP fixtures with
+  `--runtime-bundle core-c-bootstrap`; the remaining work is to expose a
+  sustained fixture on the external-suite URLs rather than only the local
+  50-request loopback benchmark.
 - Start live CPU and GPU dynamic route servers and set
   `DYNAMIC_GPU_PLAINTEXT_URL`, `DYNAMIC_CPU_PLAINTEXT_URL`,
   `DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL`.
