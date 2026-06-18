@@ -289,19 +289,36 @@ Port the runtime and service dependencies used by `src/app/mcp` and `src/app/sim
 
 ### Progress 2026-06-18
 
-- `timeout 120 sh scripts/check/check-mcp-native-smoke.shs` still fails, so the
-  MCP/LSP slice is not done. Current evidence: direct-rt gates are all true and
-  startup is within budget (`mcp_startup_ms=348`,
-  `lsp_mcp_startup_ms=92`, both under 5000 ms), but
-  `mcp_stale_stamp_reprobe_ok=false`; the validator also reports
-  `mcp_tools_json_valid=false`, `mcp_framing_valid=false`,
-  `mcp_tools_schema_valid=false`, `mcp_tools_count=0`,
-  `lsp_tools_json_valid=false`, `lsp_framing_valid=false`,
-  `lsp_tools_schema_valid=false`, and `lsp_tools_count=0`.
-- Next closure action: fix the stale-stamp re-probe/full-tools capture path and
-  LSP/MCP framing validator failure in `scripts/check/check-mcp-native-smoke.shs`
-  or the native server outputs, then rerun this smoke before marking the
-  MCP/LSP and package slices done.
+- `scripts/check/check-mcp-native-smoke.shs` now explicitly opts the wrappers
+  into native mode for the package-handshake smoke. This keeps the production
+  wrapper default source fallback for real `tools/call` safety, while making the
+  smoke validate the native initialize/tools-list path it is named for.
+- `timeout 120 sh scripts/check/check-mcp-native-smoke.shs` now passes on
+  Linux. Current evidence: all direct-rt gates are true,
+  `mcp_startup_ms=72`, `lsp_mcp_startup_ms=45`, both startup gates are under
+  5000 ms, `mcp_second_start_ok=true`, `mcp_stale_stamp_reprobe_ok=true`,
+  `mcp_tools_json_valid=true`, `mcp_framing_valid=true`,
+  `mcp_tools_schema_valid=true`, `mcp_tools_count=151`,
+  `mcp_wm_text_tools_present=true`, `lsp_tools_json_valid=true`,
+  `lsp_framing_valid=true`, `lsp_tools_schema_valid=true`, and
+  `lsp_tools_count=11`.
+- The validator now treats `mcp_framing_valid` and `lsp_framing_valid` as exact
+  content-length stream checks: extracted top-level JSON payloads must rebuild
+  the raw output with matching declared byte lengths and no trailing data
+  (accepting CRLF or file-read-normalized LF separators).
+- The default package-shape native-build commands for MCP and Simple LSP MCP
+  also completed to temporary binaries without explicit hosted runtime
+  selection:
+  `bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output <tmp>/simple_mcp_server`
+  and
+  `bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output <tmp>/simple_lsp_mcp_server`.
+  A string scan of the resulting stripped binaries found no
+  `libsimple_native_all`, `rust-hosted`, `_Unwind`, or `unwind` markers.
+- The row is still not done: both package builds emitted unresolved-stub
+  warnings, and the production wrappers still document native `tools/call`
+  blockers. Next closure action: remove or intentionally classify the remaining
+  package stubs and fix/prove native `tools/call` before claiming full
+  MCP/LSP package parity.
 
 ## Workstream 3: Package MCP/LSP Binaries On Core Lanes
 

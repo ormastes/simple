@@ -219,6 +219,32 @@ without conflating it with the timing gate:
   full-set assertions (`mcp_tools_count` = 151, schema valid, `play_wm_text_*`
   present) and the stale-stamp re-probe check all read this functional capture.
 
+## 2026-06-18 — native smoke wrapper selection
+
+Production wrappers currently default to source mode for real `tools/call`
+safety while native full-program arg extraction remains blocked. The native
+smoke is deliberately narrower: it now sets `SIMPLE_MCP_PREFER_NATIVE=1` and
+`SIMPLE_LSP_MCP_PREFER_NATIVE=1` for its package-handshake runs so the check
+validates native `initialize` + `tools/list`, stale-stamp reprobe, direct-rt
+guards, and framed output instead of silently exercising the source fallback.
+
+Latest local smoke:
+
+- `mcp_startup_ms=72`
+- `lsp_mcp_startup_ms=45`
+- `mcp_second_start_ok=true`
+- `mcp_stale_stamp_reprobe_ok=true`
+- `mcp_tools_count=151`
+- `lsp_tools_count=11`
+- MCP/LSP framing, JSON, schema, and direct-rt gates all true. Framing is
+  checked by reconstructing the exact content-length stream from extracted
+  top-level JSON payloads with declared byte lengths and no trailing data.
+
+Default package-shape MCP/LSP native-build commands also produce stripped
+binaries without hosted/unwind markers, but the builds still emit unresolved
+stubs and native `tools/call` remains blocked. Treat this as package-handshake
+evidence, not full native tool parity.
+
 A validator that assumes the tools/list response is the final frame reports
 `mcp_tools_count=0` against a core-first server even though the output is valid;
 the content-based frame selection above is the robust fix.
