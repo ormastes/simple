@@ -61,6 +61,13 @@ and sometimes semantically wrong. Options:
 
 Recommendation: **A + build the 8 general wrappers now**, defer B/C per domain.
 
+**DECISION (2026-06-18): Option C chosen + build the 8 wrappers now.** The
+`@runtime_intrinsics` / `#[runtime_intrinsics]` file-level opt-out marker is
+implemented and live in both the Rust seed and pure-Simple `raw_rt_access` lint
+(whitelisted as a known decorator/attribute; verified: marked file → 0 findings,
+unmarked → warns). Low-level modules (emulators, baremetal, crypto/protocol
+impls) declare the marker to keep raw `rt_*`; everything else still migrates.
+
 ## Suggested Stage-2 order
 
 1. Build the 8 general-purpose wrappers (bounded, no design dependency).

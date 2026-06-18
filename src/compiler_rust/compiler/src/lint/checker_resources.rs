@@ -610,8 +610,11 @@ impl LintChecker {
     /// `examples/**`, and external user projects) must route through a std
     /// wrapper (e.g. `std.io_runtime`) instead of declaring the intrinsic.
     pub fn check_raw_rt_access(&mut self, items: &[Node], source_file: &Path) {
-        // Privileged tiers may declare raw intrinsics directly.
-        if source_path_is_privileged(source_file) {
+        // Privileged tiers may declare raw intrinsics directly. A module outside
+        // those tiers may also opt in with a file-level `@runtime_intrinsics` /
+        // `#[runtime_intrinsics]` marker — for code that legitimately implements or
+        // bridges the runtime (emulators, baremetal MMIO, crypto/protocol impls).
+        if source_path_is_privileged(source_file) || file_marks_runtime_intrinsics(items, source_file) {
             return;
         }
 
@@ -840,6 +843,35 @@ fn source_path_is_privileged(source_file: &Path) -> bool {
     components.windows(2).any(|pair| {
         pair[0] == "src" && (pair[1] == "lib" || pair[1] == "runtime" || pair[1] == "compiler")
     })
+}
+
+/// Returns true when a module opts out of the `raw_rt_access` lint via a
+/// file-level `@runtime_intrinsics` decorator or `#[runtime_intrinsics]`
+/// attribute. Used by code that legitimately implements/bridges the runtime
+/// (emulators, baremetal, crypto/protocol implementations). Mirrors the
+/// detection style of `runtime_family_from_attributes`.
+fn file_marks_runtime_intrinsics(items: &[Node], source_file: &Path) -> bool {
+    // AST ModDecl attributes (e.g. parsed `#[runtime_intrinsics]`).
+    for node in items {
+        if let Node::ModDecl(decl) = node {
+            if decl.attributes.iter().any(|attr| attr.name == "runtime_intrinsics") {
+                return true;
+            }
+        }
+    }
+    // Fall back to raw source-text scan for a file-level marker near the top.
+    if let Ok(source) = std::fs::read_to_string(source_file) {
+        for line in source.lines().take(30) {
+            let trimmed = line.trim();
+            if trimmed == "@runtime_intrinsics"
+                || trimmed.starts_with("@runtime_intrinsics ")
+                || trimmed == "#[runtime_intrinsics]"
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn runtime_family_from_source_path(source_file: &Path) -> Option<RuntimeFamily> {

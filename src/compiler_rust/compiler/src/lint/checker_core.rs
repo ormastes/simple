@@ -574,6 +574,9 @@ impl LintChecker {
         // Determinism guard (GAME-DET-LINT-001)
         "deterministic",
         "name_checked",
+        // rt-encapsulation: module legitimately implements/bridges rt_* intrinsics
+        // (exempts the file from the raw_rt_access lint).
+        "runtime_intrinsics",
     ];
 
     /// Known attribute names (whitelist)
@@ -601,5 +604,7 @@ impl LintChecker {
         // Determinism guard (GAME-DET-LINT-001): #[deterministic]
         "deterministic",
         "name_checked",
+        // rt-encapsulation: #[runtime_intrinsics] exempts the file from raw_rt_access.
+        "runtime_intrinsics",
     ];
 }
