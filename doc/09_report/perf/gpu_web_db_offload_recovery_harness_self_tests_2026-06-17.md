@@ -5,7 +5,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 
 ## Summary
 
-- Passed gates: `79`
+- Passed gates: `80`
 - Verdict: `PASS`
 
 ## Gates
@@ -16,6 +16,7 @@ It records syntax checks plus non-mutating parser, producer, and readiness self-
 | syntax nginx live comparison | pass | host-safe-self-test |
 | syntax static external comparison | pass | host-safe-self-test |
 | syntax proxy external comparison | pass | host-safe-self-test |
+| syntax proxy external local fixture | pass | host-safe-self-test |
 | syntax dynamic route comparison | pass | host-safe-self-test |
 | syntax gpu web/db benchmark report | pass | host-safe-self-test |
 | syntax external DB baseline producer | pass | host-safe-self-test |

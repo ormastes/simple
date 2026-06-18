@@ -51,6 +51,7 @@ Local green evidence already recorded:
 - `sh scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs --self-test-write-setup-checklist`
 - `sh scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs`
 - `sh scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts`
+- `sh scripts/check/check-web-server-proxy-external-local-fixture.shs`
 
 Current metrics live in:
 
@@ -101,7 +102,17 @@ Implemented and verified on the current host:
   `HAPROXY_TUNNEL_PROXY_URL` are configured. It now sources
   `build/perf/gpu_web_db_offload/external-fixtures.env` by default and also
   emits dynamic CPU/GPU route rows when the plaintext or JSON URL pairs are
-  configured.
+  configured. Empty assignments in the generated fixture env template no longer
+  overwrite already-exported live URL values.
+- Local proxy fixture comparison now has a repo-owned wrapper at
+  `scripts/check/check-web-server-proxy-external-local-fixture.shs`. It
+  native-builds `test/05_perf/web/proxy_external_fixture_server.spl` with
+  `--runtime-bundle core-c-bootstrap`, starts the Simple fixture on
+  `0.0.0.0:8090`, exports the matching Simple/HAProxy/Envoy URLs, and delegates
+  to the URL-driven producer. On this host, with the generated HAProxy and Envoy
+  containers already running on ports `8091` and `8092`, it produced measured
+  zero-failure rows for cached reverse proxy against HAProxy and Envoy, upload
+  streaming against HAProxy, and upgrade tunnel against HAProxy.
 - The base web comparison report now records measured Docker-backed Caddy and
   H2O static rows on this host, and explicit unavailable rows for missing
   HAProxy and Envoy baselines.
@@ -242,17 +253,12 @@ Implemented and verified on the current host:
 
 Remaining blockers before this plan can be marked done:
 
-- Start or configure the matching live Simple proxy URLs for cached proxy,
-  upload streaming, and upgrade tunnel rows. The HAProxy and Envoy tool
-  containers are ready, but measured proxy rows still require
-  `SIMPLE_CACHED_PROXY_URL`, `HAPROXY_CACHED_PROXY_URL`,
-  `ENVOY_CACHED_PROXY_URL`, `SIMPLE_UPLOAD_PROXY_URL`,
-  `HAPROXY_UPLOAD_PROXY_URL`, `SIMPLE_TUNNEL_PROXY_URL`, and
-  `HAPROXY_TUNNEL_PROXY_URL`. The previous local cached-proxy sub-blocker was
-  fixed by building the native Simple TCP fixtures with
-  `--runtime-bundle core-c-bootstrap`; the remaining work is to expose a
-  sustained fixture on the external-suite URLs rather than only the local
-  50-request loopback benchmark.
+- Proxy rows now have local measured evidence through
+  `scripts/check/check-web-server-proxy-external-local-fixture.shs`, but the
+  strict external-suite preflight still reports proxy fixture URLs missing until
+  those values are written into the selected
+  `build/perf/gpu_web_db_offload/external-fixtures.env` or exported for the
+  suite run. Do not mark the suite complete from the default empty env file.
 - Start live CPU and GPU dynamic route servers and set
   `DYNAMIC_GPU_PLAINTEXT_URL`, `DYNAMIC_CPU_PLAINTEXT_URL`,
   `DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL`.

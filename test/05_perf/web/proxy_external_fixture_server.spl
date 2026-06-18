@@ -1,0 +1,82 @@
+# External-suite Simple HTTP fixture for proxy comparison rows.
+
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> i64
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_read_line(fd: i64) -> text?
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64) -> bool
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+
+val EXTERNAL_PROXY_FIXTURE_ADDR: text = "0.0.0.0:8090"
+val EXTERNAL_PROXY_FIXTURE_MAX_REQUESTS: i64 = 20000
+val TUNNEL_PAYLOAD: text = "simple-proxy-tunnel-ping"
+
+fn drain_headers(fd: i64):
+    var done = false
+    while not done:
+        val line = rt_io_tcp_read_line(fd)
+        if line == nil:
+            done = true
+        else:
+            val text_line = line as text
+            if text_line == "" or text_line == "\n" or text_line == "\r\n":
+                done = true
+
+fn write_cached_response(fd: i64):
+    val body = "simple-cache-ok\n"
+    val response = "HTTP/1.1 200 OK\r\nServer: SimpleExternalProxyFixture\r\nContent-Type: text/plain\r\nCache-Control: public, max-age=60\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{body}"
+    val _written = rt_io_tcp_write_text(fd, response)
+
+fn write_upload_response(fd: i64):
+    val body = "simple-upload-ok\n"
+    val response = "HTTP/1.1 200 OK\r\nServer: SimpleExternalProxyFixture\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{body}"
+    val _written = rt_io_tcp_write_text(fd, response)
+
+fn write_tunnel_response(fd: i64):
+    val response = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: FuybmwdDMTFlgO+SMaAqBCQa/i4=\r\n\r\n"
+    val _written = rt_io_tcp_write_text(fd, response)
+    val _timeout = rt_io_tcp_set_read_timeout(fd, 2000)
+    val payload = rt_io_tcp_read(fd, 4096)
+    if payload.len() > 0:
+        val _echoed = rt_io_tcp_write_text(fd, TUNNEL_PAYLOAD)
+
+fn handle_client(fd: i64):
+    val request_line = rt_io_tcp_read_line(fd)
+    if request_line == nil:
+        return
+
+    val line = request_line as text
+    drain_headers(fd)
+    if line.starts_with("GET /tunnel "):
+        write_tunnel_response(fd)
+    else:
+        if line.starts_with("POST /upload "):
+            write_upload_response(fd)
+        else:
+            write_cached_response(fd)
+
+fn main():
+    val listener = rt_io_tcp_bind(EXTERNAL_PROXY_FIXTURE_ADDR)
+    if listener < 0:
+        print "[simple-proxy-external-fixture-error] bind"
+        return
+
+    val listening = rt_io_tcp_listen(listener, 128)
+    if listening <= 0:
+        val _listener_closed = rt_io_tcp_close(listener)
+        print "[simple-proxy-external-fixture-error] listen"
+        return
+
+    print "[simple-proxy-external-fixture-ready] addr={EXTERNAL_PROXY_FIXTURE_ADDR} requests={EXTERNAL_PROXY_FIXTURE_MAX_REQUESTS}"
+    var served: i64 = 0
+    while served < EXTERNAL_PROXY_FIXTURE_MAX_REQUESTS:
+        val client = rt_io_tcp_accept(listener)
+        if client >= 0:
+            handle_client(client)
+            val _client_closed = rt_io_tcp_close(client)
+            served = served + 1
+
+    val _listener_closed = rt_io_tcp_close(listener)
+    print "[simple-proxy-external-fixture-done] served={served}"

@@ -1,0 +1,74 @@
+#!/usr/bin/env sh
+set -eu
+
+BUILD_DIR="build/perf/web_server_nginx_compare"
+LOG_DIR="$BUILD_DIR/logs"
+FIXTURE_SRC="test/05_perf/web/proxy_external_fixture_server.spl"
+FIXTURE_BIN="$BUILD_DIR/proxy_external_fixture_server"
+FIXTURE_LOG="$LOG_DIR/simple-proxy-external-fixture.log"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+
+if [ -z "$SIMPLE_BIN" ]; then
+    if [ -x "bin/simple" ]; then
+        SIMPLE_BIN="bin/simple"
+    else
+        SIMPLE_BIN="$(command -v simple)"
+    fi
+fi
+
+mkdir -p "$BUILD_DIR" "$LOG_DIR"
+
+"$SIMPLE_BIN" check "$FIXTURE_SRC"
+SIMPLE_LIB=src "$SIMPLE_BIN" native-build \
+  --runtime-bundle core-c-bootstrap \
+  --source src/lib \
+  --source test/05_perf/web \
+  --entry "$FIXTURE_SRC" \
+  --entry-closure \
+  --strip \
+  --output "$FIXTURE_BIN"
+
+wait_for_ready() {
+    log="$1"
+    attempts=0
+    while [ "$attempts" -lt 100 ]; do
+        if grep -q '\[simple-proxy-external-fixture-ready\]' "$log" 2>/dev/null; then
+            return 0
+        fi
+        if [ -n "${fixture_pid:-}" ] && ! kill -0 "$fixture_pid" 2>/dev/null; then
+            cat "$log" 2>/dev/null || true
+            echo "STATUS: FAIL simple proxy external fixture exited before ready"
+            exit 1
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.1
+    done
+    cat "$log" 2>/dev/null || true
+    echo "STATUS: FAIL simple proxy external fixture missing ready marker"
+    exit 1
+}
+
+cleanup() {
+    if [ -n "${fixture_pid:-}" ] && kill -0 "$fixture_pid" 2>/dev/null; then
+        kill "$fixture_pid" 2>/dev/null || true
+        wait "$fixture_pid" 2>/dev/null || true
+    fi
+}
+
+rm -f "$FIXTURE_LOG"
+"$FIXTURE_BIN" > "$FIXTURE_LOG" 2>&1 &
+fixture_pid="$!"
+trap cleanup EXIT INT TERM
+
+wait_for_ready "$FIXTURE_LOG"
+
+SIMPLE_CACHED_PROXY_URL="${SIMPLE_CACHED_PROXY_URL:-http://127.0.0.1:8090/cacheable}" \
+HAPROXY_CACHED_PROXY_URL="${HAPROXY_CACHED_PROXY_URL:-http://127.0.0.1:8091/cacheable}" \
+ENVOY_CACHED_PROXY_URL="${ENVOY_CACHED_PROXY_URL:-http://127.0.0.1:8092/cacheable}" \
+SIMPLE_UPLOAD_PROXY_URL="${SIMPLE_UPLOAD_PROXY_URL:-http://127.0.0.1:8090/upload}" \
+HAPROXY_UPLOAD_PROXY_URL="${HAPROXY_UPLOAD_PROXY_URL:-http://127.0.0.1:8091/upload}" \
+SIMPLE_TUNNEL_PROXY_URL="${SIMPLE_TUNNEL_PROXY_URL:-http://127.0.0.1:8090/tunnel}" \
+HAPROXY_TUNNEL_PROXY_URL="${HAPROXY_TUNNEL_PROXY_URL:-http://127.0.0.1:8091/tunnel}" \
+sh scripts/check/check-web-server-proxy-external-live-compare.shs
+
+echo "STATUS: PASS web server proxy external local fixture"
