@@ -174,8 +174,8 @@ implementation-in-progress-recovered
   provenance fields so those rows remain strict-suite-only evidence. The
   `--write-local-required-env` mode writes only that isolated env file for
   resumed handoff checks without starting fixtures or measured producers,
-  `--status` prints local-required readiness with that env selected, and
-  `--dry-run` prints the ordered local-required evidence sequence.
+  `--status` and `--status-json` print local-required readiness with that env
+  selected, and `--dry-run` prints the ordered local-required evidence sequence.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

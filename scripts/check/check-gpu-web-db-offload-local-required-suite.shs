@@ -82,6 +82,7 @@ emit_dry_run() {
     cat <<EOF
 local-required-step=write-local-required-env|scripts/check/check-gpu-web-db-offload-local-required-suite.shs --write-local-required-env
 local-required-step=status|scripts/check/check-gpu-web-db-offload-local-required-suite.shs --status
+local-required-step=status-json|scripts/check/check-gpu-web-db-offload-local-required-suite.shs --status-json
 local-required-step=require-required-ready|FIXTURE_ENV_FILE=$LOCAL_ENV EXTERNAL_FIXTURE_ENV_FILE=$LOCAL_ENV $SUITE --require-required-ready
 local-required-step=proxy-local|$PROXY_LOCAL
 local-required-step=dynamic-local|$DYNAMIC_LOCAL
@@ -108,6 +109,23 @@ if [ "${1:-}" = "--status" ]; then
         EXTERNAL_FIXTURE_ENV_FILE="$LOCAL_ENV" \
         sh "$SUITE" --refresh-status
     echo "STATUS: PASS gpu web/db local required suite status"
+    exit 0
+fi
+
+if [ "${1:-}" = "--status-json" ]; then
+    write_local_required_env >/dev/null
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    MISSING_BY_CATEGORY="$tmpdir/missing.env" \
+        MISSING_BY_CATEGORY_SOURCE="$tmpdir/source.env" \
+        FIXTURE_ENV_FILE="$LOCAL_ENV" \
+        EXTERNAL_FIXTURE_ENV_FILE="$LOCAL_ENV" \
+        sh "$SUITE" --refresh-status >/dev/null
+    MISSING_BY_CATEGORY="$tmpdir/missing.env" \
+        MISSING_BY_CATEGORY_SOURCE="$tmpdir/source.env" \
+        FIXTURE_ENV_FILE="$LOCAL_ENV" \
+        EXTERNAL_FIXTURE_ENV_FILE="$LOCAL_ENV" \
+        sh "$SUITE" --status-json
     exit 0
 fi
 
@@ -165,6 +183,7 @@ if [ "${1:-}" = "--self-test-dry-run" ]; then
     output="$(emit_dry_run)"
     printf '%s\n' "$output" | grep -q '^local-required-step=write-local-required-env|scripts/check/check-gpu-web-db-offload-local-required-suite.shs --write-local-required-env$'
     printf '%s\n' "$output" | grep -q '^local-required-step=status|scripts/check/check-gpu-web-db-offload-local-required-suite.shs --status$'
+    printf '%s\n' "$output" | grep -q '^local-required-step=status-json|scripts/check/check-gpu-web-db-offload-local-required-suite.shs --status-json$'
     printf '%s\n' "$output" | grep -q "^local-required-step=require-required-ready|FIXTURE_ENV_FILE=$LOCAL_ENV EXTERNAL_FIXTURE_ENV_FILE=$LOCAL_ENV $SUITE --require-required-ready$"
     printf '%s\n' "$output" | grep -q '^local-required-step=artifact-consistency|scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts$'
     printf '%s\n' "$output" | grep -q '^STATUS: PASS gpu web/db local required suite dry run$'
@@ -203,6 +222,66 @@ EOF
     printf '%s\n' "$output" | grep -q "^fake-external-env=$LOCAL_ENV$"
     printf '%s\n' "$output" | grep -q '^STATUS: PASS gpu web/db local required suite status$'
     echo "STATUS: PASS gpu web/db local required suite status self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-status-json" ]; then
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT INT TERM
+    BASE_ENV="$tmpdir/base.env"
+    LOCAL_ENV="$tmpdir/local.env"
+    SUITE="$tmpdir/fake-external-suite.sh"
+    cat > "$BASE_ENV" <<'EOF'
+SIMPLE_CACHED_PROXY_URL=
+SIMPLE_REFERENCE_PLAINTEXT_URL=http://127.0.0.1:8084/plaintext
+UWEBSOCKETS_PLAINTEXT_URL=http://127.0.0.1:8085/plaintext
+UWEBSOCKETS_PLAINTEXT_PROVENANCE=must-be-cleared
+SEASTAR_PLAINTEXT_URL=http://127.0.0.1:8086/plaintext
+SEASTAR_PLAINTEXT_PROVENANCE=must-be-cleared
+EOF
+    cat > "$SUITE" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+if [ "${1:-}" = "--refresh-status" ]; then
+    grep -q '^SIMPLE_CACHED_PROXY_URL=http://127.0.0.1:8090/cacheable$' "$FIXTURE_ENV_FILE"
+    grep -q '^SIMPLE_REFERENCE_PLAINTEXT_URL=$' "$FIXTURE_ENV_FILE"
+    cat > "$MISSING_BY_CATEGORY" <<MISSING
+core_load_tools=
+reference_fixture_urls=simple_reference_plaintext_url,uwebsockets_plaintext_url,seastar_plaintext_url
+MISSING
+    echo "missing_data_source=fixture-env-file:$FIXTURE_ENV_FILE" > "$MISSING_BY_CATEGORY_SOURCE"
+    echo "STATUS: PASS fake external suite refresh status"
+    exit 0
+fi
+test "${1:-}" = "--status-json"
+grep -q "^missing_data_source=fixture-env-file:$FIXTURE_ENV_FILE$" "$MISSING_BY_CATEGORY_SOURCE"
+python3 - "$FIXTURE_ENV_FILE" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "missing_data_source": f"fixture-env-file:{sys.argv[1]}",
+    "required_missing_fixture_items": 0,
+    "optional_missing_fixture_items": 3,
+    "required_verdict": "READY",
+}))
+PY
+EOF
+    chmod +x "$SUITE"
+    output="$(BASE_ENV="$BASE_ENV" LOCAL_ENV="$LOCAL_ENV" SUITE="$SUITE" sh "$0" --status-json)"
+    LOCAL_REQUIRED_STATUS_JSON="$output" python3 - "$LOCAL_ENV" <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["LOCAL_REQUIRED_STATUS_JSON"])
+expected_env = sys.argv[1]
+assert data["missing_data_source"] == f"fixture-env-file:{expected_env}"
+assert data["required_missing_fixture_items"] == 0
+assert data["optional_missing_fixture_items"] == 3
+assert data["required_verdict"] == "READY"
+PY
+    echo "STATUS: PASS gpu web/db local required suite status json self-test"
     exit 0
 fi
 
