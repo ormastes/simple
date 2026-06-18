@@ -9,7 +9,9 @@ Lane: gpu_web_db_offload
 The GPU Web/DB benchmark lane has a passing repo-local required suite, but the
 strict external suite still cannot be used for fastest-server parity claims.
 The default fixture environment is intentionally empty for live proxy,
-dynamic-route, and optional reference comparator URLs.
+dynamic-route, DB service, and optional reference comparator URLs, and it does
+not treat local Docker candidate values as ready until a fixture operator copies
+verified values into a selected env file or exports them for the suite run.
 
 Current strict status:
 
@@ -18,17 +20,18 @@ sh scripts/check/check-gpu-web-db-offload-external-suite.shs --status
 ```
 
 ```text
-external-suite-status=missing_fixture_items|14
-external-suite-status=required_missing_fixture_items|11
+external-suite-status=suite_steps|31
+external-suite-status=missing_fixture_items|29
+external-suite-status=required_missing_fixture_items|26
 external-suite-status=optional_missing_fixture_items|3
 external-suite-status=verdict|WAITING_ON_FIXTURES
 external-suite-status=required_verdict|WAITING_ON_REQUIRED_FIXTURES
 ```
 
-The missing required items are the selected fixture URLs for cached proxy,
-upload proxy, tunnel proxy, and dynamic CPU/GPU plaintext/JSON routes. The
-missing optional items are the real plaintext reference comparator URLs for
-Simple, uWebSockets, and Seastar.
+With the default blank fixture env, the missing required items are web proxy
+tools, DB tools, DB service URLs, cached/upload/tunnel proxy URLs, and dynamic
+CPU/GPU plaintext/JSON route URLs. The missing optional items are the real
+plaintext reference comparator URLs for Simple, uWebSockets, and Seastar.
 
 ## Why This Matters
 
@@ -40,9 +43,10 @@ sh scripts/check/check-gpu-web-db-offload-local-required-suite.shs
 ```
 
 That is valid required-suite evidence, but it is not a substitute for real
-uWebSockets or Seastar comparator services. Fastest-server claims require the
-strict suite to run with production-shape comparator endpoints and the real
-external reference URLs filled.
+uWebSockets or Seastar comparator services, and it does not make the default
+blank `external-fixtures.env` ready. Fastest-server claims require the strict
+suite to run with production-shape comparator endpoints and the real external
+reference URLs filled.
 
 ## Expected
 
@@ -54,6 +58,10 @@ A completed strict external comparator lane should provide:
   `SIMPLE_TUNNEL_PROXY_URL`, and `HAPROXY_TUNNEL_PROXY_URL` endpoints.
 - real `DYNAMIC_GPU_PLAINTEXT_URL`, `DYNAMIC_CPU_PLAINTEXT_URL`,
   `DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL` endpoints.
+- real DB service/tool readiness for ClickHouse, DuckDB, PostgreSQL/pgbench,
+  MongoDB shell tooling, Redis/Valkey CLI tooling, and `redis-benchmark`, with
+  `CLICKHOUSE_URL`, `POSTGRES_URL`, `MONGO_URL`, and `REDIS_URL` pointing at
+  the measured services used for report generation.
 - real `SIMPLE_REFERENCE_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_URL`, and
   `SEASTAR_PLAINTEXT_URL` endpoints with workload parity.
 - real `UWEBSOCKETS_PLAINTEXT_PROVENANCE` and
