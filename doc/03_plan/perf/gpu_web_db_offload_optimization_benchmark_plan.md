@@ -256,8 +256,9 @@ Implemented and verified on the current host:
   mistaken for strict fastest-server comparator evidence. Use
   `scripts/check/check-gpu-web-db-offload-local-required-suite.shs --write-local-required-env`
   to write only the isolated env file without starting fixtures or running
-  producers. Use `--dry-run` to print the ordered local-required evidence
-  sequence without running any producer.
+  producers. Use `--status` to print the selected local-required readiness
+  status without running producers, and `--dry-run` to print the ordered
+  local-required evidence sequence.
 - Use `scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status`
   after installing tools or exporting fixture URLs; it refreshes
   `build/perf/gpu_web_db_offload/external-fixture-missing-by-category.env`
@@ -297,9 +298,9 @@ Remaining blockers before this plan can be marked done:
   generated local-required env file with local DB/proxy candidate values
   instead of mutating the default empty env template, and it blanks optional
   Simple/uWebSockets/Seastar reference fields. Use `--write-local-required-env`
-  for a side-effect-light env handoff refresh before running the measured
-  local-required suite, and `--dry-run` to inspect the exact local-required
-  producer/report order.
+  for a side-effect-light env handoff refresh, `--status` to inspect readiness
+  with the local-required env selected, and `--dry-run` to inspect the exact
+  local-required producer/report order.
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_PROVENANCE`,
