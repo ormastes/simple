@@ -79,7 +79,7 @@ must not revert concurrent changes, and must preserve unrelated worktree edits.
 | `doc/03_plan/ui/web_browser/simple_browser_chromium_html_parity.md` | `needs-implementation` | App/UI Spark | Extend beyond the current geometry lane by closing deeper layout/lattice coverage and remaining objective-scope fixtures. |
 | `doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md` | `needs-implementation` | Review-Discovered Spark | Finish R1 step 3 by reconciling the two lint surfaces on one `LintConfig`, then continue the remaining reliable-mode rungs. |
 | `doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md` | `needs-implementation` | Review-Discovered Spark | Phase 0 complete; Phase 1 exact/multi/prefilter/SIMD and Phase 2 inverted-index/ranking/roaring/ANN have focused passing evidence as of 2026-06-18, but glob, real SIMD, C-oracle parity, broad test/lint, and verify gates remain open. |
-| `doc/03_plan/lib/compress/custom_type_alpha_compression_team_plan_2026-06-15.md` | `needs-implementation` | Review-Discovered Spark | Phase 0 type barrier marked complete 2026-06-18 with checksum barrier, typed exports, and 28-test `compress/typed/types_spec.spl` evidence; next step is Phase 1 codec refactors. |
+| `doc/03_plan/lib/compress/custom_type_alpha_compression_team_plan_2026-06-15.md` | `needs-implementation` | Review-Discovered Spark | Phase 0 complete; typed LZ4/DEFLATE+gzip/Zstd/LZMA2 slices have focused passing evidence as of 2026-06-18, but facade unification, C-oracle parity, deferred FSE/LZMA closures, broad test/lint, runtime smoke, and verify gates remain open. |
 
 ## Spark Audit Result
 

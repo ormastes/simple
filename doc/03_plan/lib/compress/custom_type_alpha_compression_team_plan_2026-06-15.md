@@ -67,6 +67,20 @@ LZMA2/XZ frame — full round-trip, real levels, checksum, framed dictionary
 (`dictionary_id`). bzip2/Brotli-complete/PPMd/ZPAQ deferred. Strict `block_mode`
 semantics per existing research (lz4 block+frame; zstd/lzma2 frame-only).
 
+Status 2026-06-18: The typed codec slice has focused passing evidence. Present
+modules: `src/lib/common/compress/typed/lz4_typed.spl`,
+`deflate_typed.spl`, `zstd_typed.spl`, and `lzma2_typed.spl`. Focused
+interpreter checks passed: `types_spec.spl` 28 tests, `lz4_typed_spec.spl` 11
+tests, `deflate_typed_spec.spl` 20 tests, `zstd_typed_spec.spl` 33 tests, and
+`lzma2_typed_spec.spl` 30 tests. Generated manuals exist under
+`doc/06_spec/test/01_unit/lib/common/compress/typed/`.
+
+Current limitations: LZ4 typed evidence is block-level while the facade owns
+frame-level behavior; Zstd typed evidence covers raw/RLE frame blocks and keeps
+full FSE compressed-block decode deferred; LZMA2 typed evidence covers
+uncompressed chunks, XZ framing, and range-coder scaffolding while the full range
+model remains deferred; external C-oracle parity is not recorded as green.
+
 ### Phase 2 — Hardening & parity
 Corruption handling + typed `CompressionError`, duplicate-path unification
 (consumers call `common.compress` only), SIMD helper specialization with scalar
@@ -91,3 +105,14 @@ No items produced = red flag.
 (full round-trip, not subset), alpha scalar-vs-SIMD and C-oracle parity green,
 `sh scripts/check/check-core-runtime-smoke.shs bin/simple`, `verify` →
 `STATUS: PASS`.
+
+Current remaining closure gates as of 2026-06-18:
+
+- Connect the typed codec slices to the public `common.compress` facade where
+  they are still parallel implementations.
+- Record or explicitly defer C-oracle parity for zlib/libdeflate, libzstd/FSE,
+  liblz4, and liblzma.
+- Close the deferred full FSE compressed-block and full LZMA range-model items,
+  or move them to explicit follow-up plans outside this staged subset.
+- Run the broader `bin/simple test`, `bin/simple build lint`,
+  `check-core-runtime-smoke`, and verify gates before marking this plan done.
