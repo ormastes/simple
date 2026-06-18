@@ -56,6 +56,9 @@ A completed strict external comparator lane should provide:
   `DYNAMIC_GPU_JSON_URL`, and `DYNAMIC_CPU_JSON_URL` endpoints.
 - real `SIMPLE_REFERENCE_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_URL`, and
   `SEASTAR_PLAINTEXT_URL` endpoints with workload parity.
+- real `UWEBSOCKETS_PLAINTEXT_PROVENANCE` and
+  `SEASTAR_PLAINTEXT_PROVENANCE` values identifying the comparator binary,
+  container image, or source commit. URL-only placeholders must remain blocked.
 - a strict readiness pass:
 
 ```text
@@ -73,4 +76,3 @@ STATUS: PASS gpu web/db external suite require-ready
   rows for dynamic plaintext and JSON CPU/GPU route pairs.
 - The generated reports clearly distinguish scoped local fixture evidence from
   real fastest-server comparator evidence.
-

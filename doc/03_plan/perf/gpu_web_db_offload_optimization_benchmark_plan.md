@@ -291,7 +291,10 @@ Remaining blockers before this plan can be marked done:
   template.
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
-  `UWEBSOCKETS_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_URL` when available.
+  `UWEBSOCKETS_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_PROVENANCE`,
+  `SEASTAR_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_PROVENANCE` when available.
+  The provenance variables must identify the real comparator binary, image, or
+  commit; URL-only placeholders remain blocked.
   The open tracking note is
   `doc/08_tracking/bug/gpu_web_db_external_comparator_fixture_gap_2026-06-18.md`.
 The current blocker list is machine-checkable with
@@ -323,8 +326,9 @@ HAProxy upload-streaming and upgrade-tunnel fixture URLs:
 `HAPROXY_UPLOAD_PROXY_URL`, `SIMPLE_TUNNEL_PROXY_URL`, and
 `HAPROXY_TUNNEL_PROXY_URL`.
 The `reference_fixture_urls` category covers the optional plaintext reference
-baselines: `SIMPLE_REFERENCE_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_URL`, and
-`SEASTAR_PLAINTEXT_URL`.
+baselines: `SIMPLE_REFERENCE_PLAINTEXT_URL`, `UWEBSOCKETS_PLAINTEXT_URL` plus
+`UWEBSOCKETS_PLAINTEXT_PROVENANCE`, and `SEASTAR_PLAINTEXT_URL` plus
+`SEASTAR_PLAINTEXT_PROVENANCE`.
 `--missing-by-category`
 prints those same blockers as stable `category=item,item` lines for scripts;
 `--write-missing-by-category` persists them to

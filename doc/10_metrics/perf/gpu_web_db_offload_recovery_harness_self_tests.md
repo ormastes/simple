@@ -50,6 +50,7 @@
 | external fixture missing by category | pass | host-safe-self-test |
 | external fixture missing by category file | pass | host-safe-self-test |
 | external fixture missing by category env file | pass | host-safe-self-test |
+| external fixture reference provenance | pass | host-safe-self-test |
 | external fixture missing by category env file writer | pass | host-safe-self-test |
 | external fixture setup checklist | pass | host-safe-self-test |
 | external fixture setup checklist file | pass | host-safe-self-test |
