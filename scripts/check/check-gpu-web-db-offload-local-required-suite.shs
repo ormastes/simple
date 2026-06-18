@@ -78,6 +78,25 @@ PY
     printf '%s\n' "$LOCAL_ENV"
 }
 
+emit_dry_run() {
+    cat <<EOF
+local-required-step=write-local-required-env|scripts/check/check-gpu-web-db-offload-local-required-suite.shs --write-local-required-env
+local-required-step=require-required-ready|FIXTURE_ENV_FILE=$LOCAL_ENV EXTERNAL_FIXTURE_ENV_FILE=$LOCAL_ENV $SUITE --require-required-ready
+local-required-step=proxy-local|$PROXY_LOCAL
+local-required-step=dynamic-local|$DYNAMIC_LOCAL
+local-required-step=web-report|$WEB_REPORT
+local-required-step=db-baselines|EXTERNAL_FIXTURE_ENV_FILE=$LOCAL_ENV $DB_BASELINES
+local-required-step=db-report|EXTERNAL_FIXTURE_ENV_FILE=$LOCAL_ENV $DB_REPORT
+local-required-step=artifact-consistency|$RECOVERY --check-current-artifacts
+STATUS: PASS gpu web/db local required suite dry run
+EOF
+}
+
+if [ "${1:-}" = "--dry-run" ]; then
+    emit_dry_run
+    exit 0
+fi
+
 if [ "${1:-}" = "--self-test-local-required-env" ]; then
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' EXIT INT TERM
@@ -125,6 +144,16 @@ EOF
     grep -q '^SEASTAR_PLAINTEXT_URL=$' "$LOCAL_ENV"
     grep -q '^SEASTAR_PLAINTEXT_PROVENANCE=$' "$LOCAL_ENV"
     echo "STATUS: PASS gpu web/db local required suite env self-test"
+    exit 0
+fi
+
+if [ "${1:-}" = "--self-test-dry-run" ]; then
+    output="$(emit_dry_run)"
+    printf '%s\n' "$output" | grep -q '^local-required-step=write-local-required-env|scripts/check/check-gpu-web-db-offload-local-required-suite.shs --write-local-required-env$'
+    printf '%s\n' "$output" | grep -q "^local-required-step=require-required-ready|FIXTURE_ENV_FILE=$LOCAL_ENV EXTERNAL_FIXTURE_ENV_FILE=$LOCAL_ENV $SUITE --require-required-ready$"
+    printf '%s\n' "$output" | grep -q '^local-required-step=artifact-consistency|scripts/check/check-gpu-web-db-offload-recovery-harness-self-tests.shs --check-current-artifacts$'
+    printf '%s\n' "$output" | grep -q '^STATUS: PASS gpu web/db local required suite dry run$'
+    echo "STATUS: PASS gpu web/db local required suite dry-run self-test"
     exit 0
 fi
 
