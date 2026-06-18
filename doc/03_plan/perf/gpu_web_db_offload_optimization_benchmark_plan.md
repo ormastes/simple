@@ -292,6 +292,8 @@ Remaining blockers before this plan can be marked done:
 - Start optional Simple/uWebSockets/Seastar plaintext reference fixtures with
   workload parity and set `SIMPLE_REFERENCE_PLAINTEXT_URL`,
   `UWEBSOCKETS_PLAINTEXT_URL`, and `SEASTAR_PLAINTEXT_URL` when available.
+  The open tracking note is
+  `doc/08_tracking/bug/gpu_web_db_external_comparator_fixture_gap_2026-06-18.md`.
 The current blocker list is machine-checkable with
 `scripts/check/check-gpu-web-db-offload-external-fixture-readiness.shs`. On the
 current host it reports `wrk`, `nginx`, Docker-backed Caddy, Docker-backed H2O,
