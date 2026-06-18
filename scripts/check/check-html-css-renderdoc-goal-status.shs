@@ -1,0 +1,139 @@
+#!/bin/sh
+# Aggregate status gate for the HTML/CSS traceability + RenderDoc goal.
+# This does not launch Chrome. It reports whether the existing evidence is
+# enough to close the goal and points at the missing external capture gate.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/html-css-goal-status}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/html_css_renderdoc_goal_status_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+traceability_status="recorded"
+traceability_reason="see-check-html-css-sspec-traceability"
+if [ "${HTML_CSS_GOAL_RUN_TRACEABILITY:-0}" = "1" ]; then
+    if sh scripts/check/check-html-css-sspec-traceability.shs >"$BUILD_DIR/traceability.out" 2>&1; then
+        traceability_status="pass"
+        traceability_reason="pass"
+    else
+        traceability_status="fail"
+        traceability_reason="traceability-check-failed"
+    fi
+fi
+
+simple_env="${RDOC_SIMPLE_EVIDENCE_ENV:-build/renderdoc/canonical-probe/simple/evidence.env}"
+simple_capture_status="$(value_of rdoc_capture_status "$simple_env")"
+simple_capture_magic="$(value_of rdoc_capture_magic "$simple_env")"
+simple_capture_file="$(value_of rdoc_capture_file "$simple_env")"
+simple_status="fail"
+simple_reason="missing-simple-rdoc"
+if [ "$simple_capture_status" = "pass" ] && [ "$simple_capture_magic" = "RDOC" ] && [ -s "$simple_capture_file" ]; then
+    simple_status="pass"
+    simple_reason="pass"
+fi
+
+external_env="${RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV:-build/renderdoc/html-external-host-capture/evidence.env}"
+external_status="$(value_of rdoc_external_host_capture_status "$external_env")"
+external_reason="$(value_of rdoc_external_host_capture_reason "$external_env")"
+if [ "$external_status" = "" ]; then
+    if BUILD_DIR="$BUILD_DIR/external-readiness" \
+        REPORT_PATH="$BUILD_DIR/external-readiness/report.md" \
+        sh scripts/check/check-renderdoc-external-host-capture.shs >"$BUILD_DIR/external-readiness.out" 2>&1; then
+        external_env="$BUILD_DIR/external-readiness/evidence.env"
+        external_status="$(value_of rdoc_external_host_capture_status "$external_env")"
+        external_reason="$(value_of rdoc_external_host_capture_reason "$external_env")"
+    else
+        external_env="$BUILD_DIR/external-readiness/evidence.env"
+        external_status="$(value_of rdoc_external_host_capture_status "$external_env")"
+        external_reason="$(value_of rdoc_external_host_capture_reason "$external_env")"
+    fi
+fi
+if [ "$external_status" = "" ]; then
+    external_status="unavailable"
+    external_reason="missing-external-capture-evidence"
+fi
+
+macos_env="${RDOC_MACOS_EVIDENCE_ENV:-build/renderdoc/macos-portability-probe/evidence.env}"
+macos_status="$(value_of rdoc_macos_probe_status "$macos_env")"
+macos_reason="$(value_of rdoc_macos_probe_reason "$macos_env")"
+if [ "$macos_status" = "" ]; then
+    if BUILD_DIR="$BUILD_DIR/macos-probe" \
+        REPORT_PATH="$BUILD_DIR/macos-probe/report.md" \
+        sh scripts/check/check-renderdoc-macos-portability-probe.shs >"$BUILD_DIR/macos-probe.out" 2>&1; then
+        macos_env="$BUILD_DIR/macos-probe/evidence.env"
+        macos_status="$(value_of rdoc_macos_probe_status "$macos_env")"
+        macos_reason="$(value_of rdoc_macos_probe_reason "$macos_env")"
+    else
+        macos_env="$BUILD_DIR/macos-probe/evidence.env"
+        macos_status="$(value_of rdoc_macos_probe_status "$macos_env")"
+        macos_reason="$(value_of rdoc_macos_probe_reason "$macos_env")"
+    fi
+fi
+if [ "$macos_status" = "" ]; then
+    macos_status="unavailable"
+    macos_reason="missing-macos-probe-evidence"
+fi
+
+overall_status="fail"
+overall_reason="original-renderdoc-evidence-missing"
+if { [ "$traceability_status" = "pass" ] || [ "$traceability_status" = "recorded" ]; } \
+    && [ "$simple_status" = "pass" ] \
+    && [ "$external_status" = "pass" ]; then
+    overall_status="pass"
+    overall_reason="pass"
+elif [ "$traceability_status" = "fail" ]; then
+    overall_reason="$traceability_reason"
+elif [ "$simple_status" != "pass" ]; then
+    overall_reason="$simple_reason"
+fi
+
+{
+    echo "html_css_renderdoc_goal_status=$overall_status"
+    echo "html_css_renderdoc_goal_reason=$overall_reason"
+    echo "html_css_traceability_status=$traceability_status"
+    echo "html_css_traceability_reason=$traceability_reason"
+    echo "simple_renderdoc_status=$simple_status"
+    echo "simple_renderdoc_reason=$simple_reason"
+    echo "simple_renderdoc_evidence_env=$simple_env"
+    echo "external_renderdoc_status=$external_status"
+    echo "external_renderdoc_reason=$external_reason"
+    echo "external_renderdoc_evidence_env=$external_env"
+    echo "macos_portability_status=$macos_status"
+    echo "macos_portability_reason=$macos_reason"
+    echo "macos_portability_evidence_env=$macos_env"
+    echo "required_external_backend=original"
+    echo "required_external_status=pass"
+    echo "required_external_magic=RDOC"
+} >"$OUT_ENV"
+
+{
+    echo "# HTML/CSS RenderDoc Goal Status"
+    echo
+    echo "- status: $overall_status"
+    echo "- reason: $overall_reason"
+    echo "- HTML/CSS traceability: $traceability_status ($traceability_reason)"
+    echo "- Simple RenderDoc: $simple_status ($simple_reason)"
+    echo "- External RenderDoc: $external_status ($external_reason)"
+    echo "- macOS portability: $macos_status ($macos_reason)"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$overall_status" = "pass" ]; then
+    exit 0
+fi
+
+exit 1

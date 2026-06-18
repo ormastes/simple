@@ -80,6 +80,17 @@ then verifies:
 
 Use this section when restarting the goal from this plan doc.
 
+Goal status command:
+
+```sh
+sh scripts/check/check-html-css-renderdoc-goal-status.shs
+```
+
+The status command aggregates the completed traceability evidence, Simple
+RenderDoc `.rdc` evidence, macOS portability probe, and external-host capture
+gate. It exits nonzero until original RenderDoc+Chrome HTML/CSS evidence passes
+with `RDOC` magic.
+
 Already completed:
 
 - HTML inventory traceability exists for the current WHATWG element set used by
