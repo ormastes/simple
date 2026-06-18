@@ -4,6 +4,7 @@ set -eu
 WEB_TABLE="${WEB_TABLE:-doc/10_metrics/perf/web_server_nginx_compare.md}"
 DB_TABLE="${DB_TABLE:-doc/10_metrics/perf/gpu_web_db_offload_benchmark.md}"
 STATUS_JSON="${STATUS_JSON:-build/perf/gpu_web_db_offload/external-suite-status.json}"
+ENV_CHECK_REPORT="${ENV_CHECK_REPORT:-build/perf/gpu_web_db_offload/reference-comparator-env-check.md}"
 FASTEST_COMPARATOR_STATUS_JSON="${FASTEST_COMPARATOR_STATUS_JSON:-build/perf/gpu_web_db_offload/fastest-comparator-status.json}"
 FASTEST_COMPARATOR_COVERAGE_TSV="${FASTEST_COMPARATOR_COVERAGE_TSV:-build/perf/gpu_web_db_offload/fastest-comparator-coverage.tsv}"
 FASTEST_COMPARATOR_COVERAGE_MD="${FASTEST_COMPARATOR_COVERAGE_MD:-build/perf/gpu_web_db_offload/fastest-comparator-coverage.md}"
@@ -11,7 +12,7 @@ FASTEST_COMPARATOR_NEXT_ACTIONS="${FASTEST_COMPARATOR_NEXT_ACTIONS:-build/perf/g
 FASTEST_COMPARATOR_NEXT_ACTIONS_TSV="${FASTEST_COMPARATOR_NEXT_ACTIONS_TSV:-build/perf/gpu_web_db_offload/fastest-comparator-next-actions.tsv}"
 
 audit_json() {
-    python3 - "$WEB_TABLE" "$DB_TABLE" "$STATUS_JSON" <<'PY'
+    python3 - "$WEB_TABLE" "$DB_TABLE" "$STATUS_JSON" "$ENV_CHECK_REPORT" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ from pathlib import Path
 web_table = Path(sys.argv[1])
 db_table = Path(sys.argv[2])
 status_json = Path(sys.argv[3])
+env_check_report = Path(sys.argv[4])
 
 requirements = [
     ("nginx_static_1024", "web", "nginx_static_1024", "measured"),
@@ -67,14 +69,30 @@ if status_json.exists():
 if not suite_ready:
     missing.append("strict_external_suite_ready")
 
+env_check_status = "missing-env-check-report"
+env_check_ready = False
+if env_check_report.exists():
+    env_text = env_check_report.read_text(encoding="utf-8")
+    for line in env_text.splitlines():
+        if line.startswith("- Verdict: `") and line.endswith("`"):
+            env_check_status = line.split("`", 2)[1]
+            env_check_ready = env_check_status == "READY"
+            break
+    else:
+        env_check_status = "missing-env-check-verdict"
+if not env_check_ready:
+    missing.append("reference_comparator_env_ready")
+
 result = {
     "verdict": "READY" if not missing else "WAITING_ON_FASTEST_COMPARATORS",
     "missing": missing,
     "items": items,
     "strict_external_suite_status": suite_status,
+    "reference_comparator_env_status": env_check_status,
     "web_table": str(web_table),
     "db_table": str(db_table),
     "status_json": str(status_json),
+    "env_check_report": str(env_check_report),
 }
 print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 PY
@@ -90,6 +108,7 @@ import sys
 data = json.loads(os.environ["AUDIT_JSON"])
 print(f"fastest-comparator-status=verdict|{data['verdict']}")
 print(f"fastest-comparator-status=strict_external_suite_status|{data['strict_external_suite_status']}")
+print(f"fastest-comparator-status=reference_comparator_env_status|{data['reference_comparator_env_status']}")
 print(f"fastest-comparator-status=missing|{','.join(data['missing'])}")
 for item in data["items"]:
     print(f"fastest-comparator-item={item['name']}|{item['status']}|{item['source']}")
@@ -141,6 +160,11 @@ lines.append(
     "strict_external_suite_ready\texternal_suite\t"
     f"{suite_status}\t{data['status_json']} verdict {data['strict_external_suite_status']} with optional_missing_fixture_items=0 required"
 )
+env_status = "ready" if "reference_comparator_env_ready" not in data["missing"] else "missing"
+lines.append(
+    "reference_comparator_env_ready\treference_env\t"
+    f"{env_status}\t{data['env_check_report']} verdict {data['reference_comparator_env_status']}"
+)
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 print(path)
 PY
@@ -181,6 +205,7 @@ lines = [
     "",
     f"- Verdict: `{data['verdict']}`",
     f"- Strict external suite status: `{data['strict_external_suite_status']}`",
+    f"- Reference comparator env status: `{data['reference_comparator_env_status']}`",
     f"- Missing: `{', '.join(data['missing']) if data['missing'] else 'none'}`",
     "",
     "| comparator | source | status | evidence required |",
@@ -193,6 +218,11 @@ suite_status = "ready" if "strict_external_suite_ready" not in data["missing"] e
 lines.append(
     f"| Strict external suite ready | external_suite | {suite_status} | "
     f"`{data['status_json']}` verdict `READY` with `optional_missing_fixture_items=0` |"
+)
+env_status = "ready" if "reference_comparator_env_ready" not in data["missing"] else "missing"
+lines.append(
+    f"| Reference comparator env ready | reference_env | {env_status} | "
+    f"`{data['env_check_report']}` verdict `READY` |"
 )
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 print(path)
@@ -226,6 +256,10 @@ actions = {
     "strict_external_suite_ready": (
         "`build/perf/gpu_web_db_offload/external-fixtures.env`",
         "Run external-suite `--refresh-status`, then `--require-ready`; all required and optional fixture rows must be ready.",
+    ),
+    "reference_comparator_env_ready": (
+        "`build/perf/gpu_web_db_offload/reference-comparator-fixtures.env`",
+        "Fill and validate Simple/uWebSockets/Seastar plaintext URLs and uWebSockets/Seastar provenance with `check-gpu-web-db-offload-reference-comparator-handoff.shs --check-env-file`, then regenerate the env check report.",
     ),
 }
 lines = [
@@ -289,6 +323,11 @@ actions = {
         "scripts/check/check-gpu-web-db-offload-external-suite.shs --refresh-status; scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready",
         "Make all required and optional external fixture rows ready before claiming fastest-comparator coverage.",
     ),
+    "reference_comparator_env_ready": (
+        "build/perf/gpu_web_db_offload/reference-comparator-fixtures.env",
+        "scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --check-env-file build/perf/gpu_web_db_offload/reference-comparator-fixtures.env; scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs --write-env-check-report",
+        "Validate Simple/uWebSockets/Seastar plaintext URLs and uWebSockets/Seastar provenance before copying values into strict external fixtures.",
+    ),
 }
 lines = ["missing_item\tfields\tcommands\tnext_action"]
 missing = data.get("missing", [])
@@ -328,6 +367,7 @@ if [ "${1:-}" = "--self-test" ]; then
     web="$tmpdir/web.md"
     db="$tmpdir/db.md"
     status="$tmpdir/status.json"
+    env_check="$tmpdir/env-check.md"
     cat > "$web" <<'EOF'
 | workload | simple_target | external_baseline | load_tool | status |
 |---|---|---|---|---|
@@ -342,17 +382,23 @@ EOF
 | db_key_value_redis_valkey_external_measured | external-db-measured | redis_valkey_getset_1024_key_match |
 EOF
     printf '%s\n' '{"verdict":"READY","optional_missing_fixture_items":0}' > "$status"
-    WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --require-ready >/dev/null
+    cat > "$env_check" <<'EOF'
+# GPU Web/DB Reference Comparator Env Check
+
+- Verdict: `READY`
+- Missing fields: `0`
+EOF
+    WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --require-ready >/dev/null
     out="$tmpdir/fastest-status.json"
-    FASTEST_COMPARATOR_STATUS_JSON="$out" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-status-json >/dev/null
+    FASTEST_COMPARATOR_STATUS_JSON="$out" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-status-json >/dev/null
     coverage="$tmpdir/fastest-coverage.tsv"
     coverage_md="$tmpdir/fastest-coverage.md"
     actions="$tmpdir/fastest-actions.md"
     actions_tsv="$tmpdir/fastest-actions.tsv"
-    FASTEST_COMPARATOR_COVERAGE_TSV="$coverage" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-coverage-tsv >/dev/null
-    FASTEST_COMPARATOR_COVERAGE_MD="$coverage_md" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-coverage-md >/dev/null
-    FASTEST_COMPARATOR_NEXT_ACTIONS="$actions" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-next-actions >/dev/null
-    FASTEST_COMPARATOR_NEXT_ACTIONS_TSV="$actions_tsv" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-next-actions-tsv >/dev/null
+    FASTEST_COMPARATOR_COVERAGE_TSV="$coverage" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-coverage-tsv >/dev/null
+    FASTEST_COMPARATOR_COVERAGE_MD="$coverage_md" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-coverage-md >/dev/null
+    FASTEST_COMPARATOR_NEXT_ACTIONS="$actions" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-next-actions >/dev/null
+    FASTEST_COMPARATOR_NEXT_ACTIONS_TSV="$actions_tsv" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-next-actions-tsv >/dev/null
     python3 - "$out" <<'PY'
 import json
 import sys
@@ -369,16 +415,18 @@ PY
     grep -q '^nginx_static_1048576	web	ready	' "$coverage"
     grep -q '^redis_valkey_key_value_getset	db	ready	' "$coverage"
     grep -q '^strict_external_suite_ready	external_suite	ready	' "$coverage"
+    grep -q '^reference_comparator_env_ready	reference_env	ready	' "$coverage"
     grep -q '| NGINX static 1KB | web | ready |' "$coverage_md"
     grep -q '| Redis/Valkey key/value | db | ready |' "$coverage_md"
     grep -q '| Strict external suite ready | external_suite | ready |' "$coverage_md"
+    grep -q '| Reference comparator env ready | reference_env | ready |' "$coverage_md"
     printf '%s\n' '| reference_plaintext | native_simple_reference_plaintext | seastar_plaintext | wrk | live-fixture-unavailable |' >> "$web"
     sed -i '/uwebsockets_plaintext/d' "$web"
-    output="$(WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0")"
-    FASTEST_COMPARATOR_NEXT_ACTIONS="$actions" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-next-actions >/dev/null
-    FASTEST_COMPARATOR_NEXT_ACTIONS_TSV="$actions_tsv" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-next-actions-tsv >/dev/null
-    FASTEST_COMPARATOR_COVERAGE_TSV="$coverage" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-coverage-tsv >/dev/null
-    FASTEST_COMPARATOR_COVERAGE_MD="$coverage_md" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" sh "$0" --write-coverage-md >/dev/null
+    output="$(WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0")"
+    FASTEST_COMPARATOR_NEXT_ACTIONS="$actions" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-next-actions >/dev/null
+    FASTEST_COMPARATOR_NEXT_ACTIONS_TSV="$actions_tsv" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-next-actions-tsv >/dev/null
+    FASTEST_COMPARATOR_COVERAGE_TSV="$coverage" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-coverage-tsv >/dev/null
+    FASTEST_COMPARATOR_COVERAGE_MD="$coverage_md" WEB_TABLE="$web" DB_TABLE="$db" STATUS_JSON="$status" ENV_CHECK_REPORT="$env_check" sh "$0" --write-coverage-md >/dev/null
     printf '%s\n' "$output" | grep -q '^fastest-comparator-item=uwebsockets_plaintext|missing|web$'
     printf '%s\n' "$output" | grep -q '^STATUS: WARN gpu web/db fastest comparator evidence missing:1$'
     grep -q '| uwebsockets_plaintext |' "$actions"

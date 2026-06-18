@@ -278,10 +278,14 @@ Implemented and verified on the current host:
   `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.md`,
   `--write-next-actions-tsv` persists the same actions for automation at
   `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.tsv`, and
-  `--require-ready` is the strict gate for a future fastest-server claim. On
-  the current artifacts it reports NGINX static rows and Redis/Valkey measured
-  evidence as ready, while uWebSockets plaintext, Seastar plaintext, and strict
-  external suite readiness remain missing.
+  `--require-ready` is the strict gate for a future fastest-server claim. The
+  audit also consumes
+  `build/perf/gpu_web_db_offload/reference-comparator-env-check.md` so blank or
+  placeholder uWebSockets/Seastar reference setup remains visible in the
+  fastest-comparator status. On the current artifacts it reports NGINX static
+  rows and Redis/Valkey measured evidence as ready, while uWebSockets
+  plaintext, Seastar plaintext, strict external suite readiness, and reference
+  comparator env readiness remain missing.
 - The local required-suite bridge now exists at
   `scripts/check/check-gpu-web-db-offload-local-required-suite.shs`. It writes
   `build/perf/gpu_web_db_offload/external-fixtures.local-required.env` with the
@@ -682,7 +686,10 @@ does not replace real uWebSockets or Seastar reference services. The
 local-required `--require-required-ready` gate is intentionally narrower than
 strict `--require-ready`: it proves required fixture readiness only, while
 strict fastest-server evidence still requires the optional reference endpoints
-and provenance to be populated. Use
+and provenance to be populated. The fastest-comparator audit also requires the
+generated reference-comparator env check report to have verdict `READY`, so a
+missing or placeholder reference env cannot be hidden behind absent measured
+rows. Use
 `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --require-ready`
 as the final machine-checkable proof that the fastest-comparator report rows
 and strict suite status are all present before making any fastest-server claim.

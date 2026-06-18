@@ -193,10 +193,11 @@ implementation-in-progress-recovered
   `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.md` through
   `--write-next-actions`, persists
   `build/perf/gpu_web_db_offload/fastest-comparator-next-actions.tsv` through
-  `--write-next-actions-tsv`, and offers `--require-ready` for the final
-  strict claim gate. Current artifacts show NGINX static and Redis/Valkey
-  measured evidence ready, while uWebSockets plaintext, Seastar plaintext, and
-  strict external-suite readiness are still missing.
+  `--write-next-actions-tsv`, consumes the reference-comparator env check
+  report, and offers `--require-ready` for the final strict claim gate. Current
+  artifacts show NGINX static and Redis/Valkey measured evidence ready, while
+  uWebSockets plaintext, Seastar plaintext, strict external-suite readiness,
+  and reference comparator env readiness are still missing.
 - implementation: The reference-comparator handoff now exists at
   `scripts/check/check-gpu-web-db-offload-reference-comparator-handoff.shs`.
   It writes the blank
