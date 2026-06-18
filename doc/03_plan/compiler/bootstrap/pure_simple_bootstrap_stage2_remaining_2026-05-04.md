@@ -255,28 +255,41 @@ parameter typing blocker.
 
 ## Next Steps
 
-### A. Route the pure-stage2 probe through the full Simple driver
+## 2026-06-18 Cleanup Refresh
 
-The current direct `target/bootstrap/simple native-build ...` probe stops before
-the older parse/HIR failure because the bootstrap entry refuses to emit a
-seed-wrapper fallback. The next probe must first ensure the command is running
-the full Simple driver path that owns real Simple lowering/codegen.
+Status: still blocked for the pure-Simple stage2 payload.
+
+A Spark refresh of the current direct probe found that the command still exits
+without emitting `/tmp/simple_stage2_probe`. The latest concrete blocker is:
+
+```text
+HIR lowering error: Unsupported feature: enum 'CodegenTarget' has no variant named 'Host'
+```
+
+Current next blocker: fix the stale or invalid `CodegenTarget.Host` enum use,
+rerun the same direct stage2 probe, and record either the emitted artifact or
+the next exact lowering/codegen failure.
+
+### A. Fix the current `CodegenTarget.Host` lowering blocker
+
+The current direct `target/bootstrap/simple native-build ...` probe now reaches
+the Simple-first lowering path and fails on the `CodegenTarget.Host` enum
+mismatch above. The seed-wrapper fallback blocker is historical evidence, not
+the current stop point.
 
 Acceptance:
-- the command no longer fails with `bootstrap_main cannot emit a seed-wrapper fallback`
-- either `/tmp/simple_stage2` is emitted
+- the command no longer fails with the `CodegenTarget.Host` enum mismatch
+- either the diagnostic probe emits `/tmp/simple_stage2_probe`
 - or the next exact lowering/codegen failure is captured
-- if using `SIMPLE_NATIVE_BUILD_RUST=1`, the selected seed must include the
-  requested backend or the probe must explicitly switch to a supported backend
 
-### B. Capture the next post-parse-start failure cleanly
+### B. Capture the next direct-probe failure cleanly
 
-Once the full-driver path is active, use a file-backed run so the final exit
-code and trailing diagnostics are preserved:
+Use a file-backed run so the final exit code and trailing diagnostics are
+preserved:
 
 ```bash
 cd src/compiler_rust
-rm -f /tmp/stage2_bootstrap.log /tmp/simple_stage2
+rm -f /tmp/stage2_bootstrap.log /tmp/simple_stage2_probe
 target/bootstrap/simple native-build \
   --backend llvm-lib \
   --source ../compiler \
@@ -284,15 +297,15 @@ target/bootstrap/simple native-build \
   --source ../lib \
   --source ../compiler_shared \
   --entry ../app/cli/bootstrap_main.spl \
-  -o /tmp/simple_stage2 \
+  -o /tmp/simple_stage2_probe \
   >/tmp/stage2_bootstrap.log 2>&1
 echo $?
 tail -n 200 /tmp/stage2_bootstrap.log
 ```
 
 Acceptance:
-- either `/tmp/simple_stage2` is emitted
-- or the next exact failure line is captured after `phase2:parse:start`
+- either `/tmp/simple_stage2_probe` is emitted
+- or the next exact failure line is captured
 
 ### C. If parse-phase failure remains opaque, tighten phase-2 instrumentation
 
