@@ -68,7 +68,7 @@ implementation-in-progress-recovered
   `scripts/check/check-web-server-static-external-live-compare.shs`,
   `scripts/check/check-web-server-proxy-external-live-compare.shs`, and
   `scripts/check/check-web-server-dynamic-gpu-route-compare.shs`.
-- evidence: Recovery harness self-test artifacts currently record 68 passed
+- evidence: Recovery harness self-test artifacts currently record 74 passed
   host-safe gates in
   `doc/09_report/perf/gpu_web_db_offload_recovery_harness_self_tests_2026-06-17.md`
   and `doc/10_metrics/perf/gpu_web_db_offload_recovery_harness_self_tests.md`.
@@ -139,9 +139,11 @@ implementation-in-progress-recovered
   env hints, runbook, next-actions file, persisted status JSON, readiness
   policy JSON, and missing-category files.
 - evidence: `scripts/check/check-gpu-web-db-offload-external-suite.shs --status`
-  prints the suite-step count, missing-fixture item count, and verdict directly;
-  on this host it reports 25 steps, 26 missing fixture items, 23 required
-  missing items, 3 optional missing reference items, and `WAITING_ON_FIXTURES`.
+  prints the suite-step count, missing-fixture item count, and verdict directly.
+  With the default generated `external-fixtures.env` template left blank, the
+  current status reports 31 steps, 29 missing fixture items, 26 required
+  missing items, 3 optional missing reference items, and
+  `WAITING_ON_FIXTURES`.
   It also prints `external-suite-missing=<category>|...`
   rows for the current blocker categories and
   `external-suite-handoff=<name>|<path>` rows for generated handoff files. The
@@ -158,7 +160,8 @@ implementation-in-progress-recovered
   without relying on stale status artifacts.
 - evidence: `scripts/check/check-gpu-web-db-offload-external-suite.shs --preflight`
   refreshes readiness and emits a final PASS/WARN line before a full external
-  suite run; on this host it reports `STATUS: WARN ... missing:26`.
+  suite run; with the default blank fixture env it reports
+  `STATUS: WARN ... missing:29`.
 - implementation: The generated external fixture setup checklist now includes
   the external suite `--refresh-status` and `--preflight` commands before the
   full suite command, so fixture operators can re-check readiness without

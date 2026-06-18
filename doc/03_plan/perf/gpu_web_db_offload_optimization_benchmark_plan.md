@@ -227,10 +227,11 @@ Implemented and verified on the current host:
   `--write-policy-json` persists
   `build/perf/gpu_web_db_offload/external-suite-readiness-policy.json`, which
   separates required fixture blockers from optional reference-baseline gaps.
-  On this host after starting the generated Redis, Caddy, H2O, HAProxy, Envoy,
-  ClickHouse, PostgreSQL, and MongoDB Docker fixtures and configuring the
-  DuckDB CLI image, the split is 11 required missing fixtures and 3 optional
-  reference fixture URLs.
+  With the default sourceable `external-fixtures.env` template left blank, the
+  current strict status is 31 suite steps, 29 missing fixture items, 26
+  required missing fixture items, and 3 optional reference fixture URLs. Local
+  Docker-backed fixture candidates must be copied into a separate verified env
+  file or exported for the suite run before those rows can become ready.
 - The suite now also writes required-only handoff artifacts for resumed
   sessions that need to separate release-blocking fixture work from optional
   reference baselines:
