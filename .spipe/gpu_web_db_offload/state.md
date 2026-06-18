@@ -223,6 +223,10 @@ implementation-in-progress-recovered
   `build/perf/gpu_web_db_offload/reference-comparator-applied-env-check.md`.
   The external suite handoff map now advertises the guarded transfer and
   verification paths.
+- decision: The strict fastest-server comparator benchmark is postponed until
+  real Simple/uWebSockets/Seastar plaintext endpoints and uWebSockets/Seastar
+  provenance are available. Use the repo-local required suite for casual
+  host-local benchmark refreshes; do not treat it as fastest-server evidence.
 - implementation: The default external suite command now runs the preflight
   gate first and stops with a WARN status when fixture rows are missing. Use
   `--allow-partial` only for explicit local artifact refresh on hosts that are

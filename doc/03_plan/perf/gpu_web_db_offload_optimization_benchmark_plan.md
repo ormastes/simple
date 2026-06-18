@@ -705,6 +705,9 @@ rows. Use
 `scripts/check/check-gpu-web-db-offload-fastest-comparator-evidence.shs --require-ready`
 as the final machine-checkable proof that the fastest-comparator report rows
 and strict suite status are all present before making any fastest-server claim.
+The strict fastest-server benchmark is intentionally postponed until those
+external comparator services are available; use the local-required suite only
+for casual host-local benchmark refreshes in the meantime.
 
 ## Benchmark Matrix
 

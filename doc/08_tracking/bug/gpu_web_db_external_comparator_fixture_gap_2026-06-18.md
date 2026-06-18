@@ -120,6 +120,9 @@ STATUS: PASS gpu web/db reference comparator env file
 
 ## Acceptance
 
+- Strict fastest-server benchmarking remains postponed until real comparator
+  services are available; casual/local refreshes use the local-required suite
+  and must not be reported as fastest-server evidence.
 - `sh scripts/check/check-gpu-web-db-offload-external-suite.shs --require-ready`
   passes with real comparator URLs.
 - `scripts/check/check-web-server-proxy-external-live-compare.shs` emits
