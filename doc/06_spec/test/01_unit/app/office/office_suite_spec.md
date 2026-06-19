@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 108 | 108 | 0 | 0 |
+| 109 | 109 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -666,6 +666,24 @@ Reproduction: this block contains the complete executable scenario source.
 val result = office_action_dispatch("render-base-table-html", "table: Bad\\ncolumns: id,status\\nrow: 1")
 expect(result.ok).to_be(false)
 expect(result.reason).to_equal("row-width-mismatch")
+```
+
+</details>
+
+#### renders Base table HTML with escaped cell coordinates
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("render-base-table-html", "table: Feature\\ncolumns: id,status\\nrow: 1,<open>")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("scope=\"col\" data-column=\"status\"")
+expect(result.output).to_contain("<tr data-row-index=\"0\">")
+expect(result.output).to_contain("<td data-column=\"status\">&lt;open&gt;</td>")
 ```
 
 </details>
@@ -2006,8 +2024,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 108 |
-| Active scenarios | 108 |
+| Total scenarios | 109 |
+| Active scenarios | 109 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

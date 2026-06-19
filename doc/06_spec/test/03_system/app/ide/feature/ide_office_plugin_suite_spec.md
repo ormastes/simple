@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 710 lines folded for reproduction.
+Runnable source: 713 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1030,6 +1030,9 @@ expect(base_blank_query_column_action.reason).to_equal("invalid-args")
 expect(base_html_action.output).to_contain("data-format=\"base-table\"")
 expect(base_html_action.output).to_contain("data-column-count=\"2\"")
 expect(base_html_action.output).to_contain("data-row-count=\"2\"")
+expect(base_html_action.output).to_contain("scope=\"col\" data-column=\"status\"")
+expect(base_html_action.output).to_contain("<tr data-row-index=\"0\">")
+expect(base_html_action.output).to_contain("<td data-column=\"status\">&lt;open&gt;</td>")
 expect(base_html_action.output).to_contain("&lt;open&gt;")
 expect(base_duplicate_column_action.reason).to_equal("duplicate-column")
 expect(base_blank_column_action.reason).to_equal("blank-column")
