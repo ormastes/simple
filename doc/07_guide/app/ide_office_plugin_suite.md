@@ -109,7 +109,7 @@ and rejects duplicate IDs, blank IDs, missing parent IDs, malformed geometry, an
 Blank SDD order node ids are rejected as `invalid-args`.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text; `css`, `target`, and `key` are required, and `extends` must be `none`, empty, or an existing non-self CSS rule.
 `delete-sdd-style-rule` uses `css|key` and returns canonical SDD text with that reusable rule removed.
-`inspect-sdd-style-rule` uses `css|key` and returns compact style-rule readback text.
+`inspect-sdd-style-rule` uses `css|key`, rejects malformed css/key tokens as `invalid-args`, and returns compact style-rule readback text.
 Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`; `x` and `y` are signed integers, and size fields are non-negative integers.
 Blank SDD geometry node ids are rejected as `invalid-args`.
@@ -130,7 +130,7 @@ Node, edge, canvas, layout, and connector edit actions return rendered SDD HTML
 for the updated document. Style-rule edit/delete actions return canonical SDD
 text for round-trip persistence.
 `inspect-sdd-node` uses `node_id`; `inspect-sdd-edge` uses `edge_index`;
-`inspect-sdd-style-rule` uses `css|key`. Inspectors return compact readback
+`inspect-sdd-style-rule` uses `css|key`. Malformed node IDs and style-rule tokens are `invalid-args`. Inspectors return compact readback
 text for geometry, style, group child metadata, route, rendered path metadata,
 and style-rule fields.
 

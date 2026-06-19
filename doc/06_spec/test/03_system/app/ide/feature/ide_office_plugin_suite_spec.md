@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 657 lines folded for reproduction.
+Runnable source: 661 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -531,6 +531,7 @@ val sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-ru
 val deleted_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|fill\n" + sdd_style_rule_delete_action.output)
 val missing_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|stroke\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val blank_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|   \ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
+val invalid_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent,bad|fill\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val blank_sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-style-rule", "accent|   \n" + sdd_style_rule_action.output)
 val blank_sdd_style_rule_edit_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none|   |#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val invalid_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|canvas|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
@@ -606,6 +607,7 @@ val missing_sdd_edge_endpoint_action = office_action_dispatch("edit-sdd-edge-end
 val missing_sdd_edge_delete_action = office_action_dispatch("delete-sdd-edge", "1\ngraph: Edge Delete\nA: A\nB: B\nA -> B: link")
 val missing_sdd_edge_action = office_action_dispatch("reroute-sdd-connector", "1|orthogonal|60x10|right|left\ngraph: Route\nA: A\nB: B\nA -> B: link")
 val sdd_inspect_node_action = office_action_dispatch("inspect-sdd-node", "A\ngraph: Inspect\nA: Alpha @accent role: actor shape: diamond x: 4 y: 8 width: 80 height: 24 layer: front\nB: Beta x: 12 y: 16 width: 20 height: 10 parent: A")
+val invalid_sdd_inspect_node_action = office_action_dispatch("inspect-sdd-node", "A bad\ngraph: Inspect\nA: Alpha")
 val sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "0\ngraph: Inspect\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 80 y: 0 width: 20 height: 20\nA -> B: link route: orthogonal waypoints: 40x10 start: right end: left")
 val missing_sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "1\ngraph: Inspect\nA: A\nB: B\nA -> B: link")
 expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
@@ -691,6 +693,7 @@ expect(sdd_style_rule_inspect_action.output).to_contain("target=node")
 expect(missing_sdd_style_rule_inspect_action.reason).to_equal("missing-style-rule")
 expect(missing_sdd_style_rule_delete_action.reason).to_equal("missing-style-rule")
 expect(blank_sdd_style_rule_inspect_action.reason).to_equal("invalid-args")
+expect(invalid_sdd_style_rule_inspect_action.reason).to_equal("invalid-args")
 expect(blank_sdd_style_rule_delete_action.reason).to_equal("invalid-args")
 expect(blank_sdd_style_rule_edit_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_style_rule_action.reason).to_equal("invalid-target")
@@ -777,6 +780,7 @@ expect(missing_sdd_edge_endpoint_action.reason).to_equal("missing-node")
 expect(missing_sdd_edge_delete_action.reason).to_equal("missing-edge")
 expect(missing_sdd_edge_action.reason).to_equal("missing-edge")
 expect(sdd_inspect_node_action.output).to_contain("shape=diamond")
+expect(invalid_sdd_inspect_node_action.reason).to_equal("invalid-args")
 expect(sdd_inspect_node_action.output).to_contain("x=4")
 expect(sdd_inspect_edge_action.output).to_contain("route=orthogonal")
 expect(sdd_inspect_edge_action.output).to_contain("path=M")

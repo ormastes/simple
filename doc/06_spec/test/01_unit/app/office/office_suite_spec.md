@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 103 | 103 | 0 | 0 |
+| 104 | 104 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1748,6 +1748,23 @@ expect(delete_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed SDD inspect ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val node_result = office_action_dispatch("inspect-sdd-node", "A bad\ngraph: Inspect\nA: A")
+val style_result = office_action_dispatch("inspect-sdd-style-rule", "accent,bad|fill\ngraph: Style\nstyle accent |node| fill: #eeeeee\nA: A @accent")
+expect(node_result.reason).to_equal("invalid-args")
+expect(style_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank SDD style rule edit fields
 
 <details>
@@ -1909,8 +1926,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 103 |
-| Active scenarios | 103 |
+| Total scenarios | 104 |
+| Active scenarios | 104 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
