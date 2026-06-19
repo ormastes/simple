@@ -121,12 +121,14 @@ expect(cells[7].value).to_equal("5")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = md_document_render_sheet_html("| Name | Q1 | Q2 | Total |\n|---|---:|---:|---:|\n| Sales | 2 | 3 | =B2+C2 |")
 expect(html).to_contain("class=\"md-sheet\"")
+expect(html).to_contain("data-format=\"markdown-sheet\"")
+expect(html).to_contain("data-format-name=\"Calc Markdown Sheet\"")
 expect(html).to_contain("data-cell=\"D2\"")
 expect(html).to_contain("data-raw=\"=B2+C2\"")
 expect(html).to_contain(">5</td>")
