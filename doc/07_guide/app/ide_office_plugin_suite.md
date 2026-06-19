@@ -124,7 +124,7 @@ Blank or malformed SDD geometry node ids are rejected as `invalid-args`.
 `edit-sdd-edge-style` uses `edge_index|css_labels`; labels are space-separated safe tokens.
 `edit-sdd-edge-kind` uses `edge_index|kind`; kind is empty or one safe token.
 `edit-sdd-edge-endpoints` uses `edge_index|from_id|to_id`; endpoint IDs must exist.
-Blank SDD edge endpoint IDs are rejected as `invalid-args`.
+Blank or malformed SDD edge endpoint IDs are rejected as `invalid-args`.
 `delete-sdd-edge` uses `edge_index` and rejects missing connector indexes.
 `reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`; route is empty, `simple`, or `orthogonal`, anchors are empty or cardinal, waypoints use semicolon-separated integer `x` pairs, and malformed route fields are `invalid-args`.
 Node, edge, canvas, layout, and connector edit actions return rendered SDD HTML

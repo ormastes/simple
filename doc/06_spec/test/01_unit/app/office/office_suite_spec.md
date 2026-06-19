@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 105 | 105 | 0 | 0 |
+| 106 | 106 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1827,6 +1827,23 @@ expect(edit_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed SDD edge endpoint ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val add_result = office_action_dispatch("add-sdd-edge", "A bad|B|link|primary|flow|simple||right|left\ngraph: Edge\nA: A\nB: B")
+val edit_result = office_action_dispatch("edit-sdd-edge-endpoints", "0|A|B bad\ngraph: Edge\nA: A\nB: B\nA -> B: link")
+expect(add_result.reason).to_equal("invalid-args")
+expect(edit_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects malformed SDD add edge route fields
 
 <details>
@@ -1953,8 +1970,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 105 |
-| Active scenarios | 105 |
+| Total scenarios | 106 |
+| Active scenarios | 106 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
