@@ -163,7 +163,7 @@ expect(html).to_contain("print &quot;hi&quot;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -178,6 +178,8 @@ expect(deck).to_contain("class=\"md-ppt-slide\"")
 
 val sheet = md_document_render_office_html("---\nlayout: excel\n---\n| A | B |\n|---|---:|\n| 2 | =A2+3 |")
 expect(sheet).to_contain("class=\"md-sheet-layout\"")
+expect(sheet).to_contain("data-format=\"markdown-sheet-layout\"")
+expect(sheet).to_contain("data-format-name=\"Calc Markdown Sheet Layout\"")
 expect(sheet).to_contain("data-cell=\"B2\"")
 expect(sheet).to_contain(">5</td>")
 ```
