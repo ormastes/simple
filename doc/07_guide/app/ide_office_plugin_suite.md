@@ -43,6 +43,9 @@ older rich-text `WordApp` remains only as a compatibility UI module.
 - Calc: spreadsheet editor; aliases `calc`, `sheets`, `excel`, `ods`, `xlsx`.
 - Impress: Markdown-backed slide editor; aliases `impress`, `slides`, `ppt`, `odp`, `pptx`.
 - Draw: SDD Diagram Draw over the SDN graph substrate; aliases `draw`, `diagram`, `sdd`, `sdn`.
+  Selected connector handles expose edit actions, stable handle indexes,
+  endpoint/opposite-node ids, anchors, and coordinates for Draw-style reconnect,
+  label, and waypoint editing.
 - Base: text-table database editor; aliases `base`, `db`, `database`.
 - Math: MathML formula editor; aliases `math`, `formula`, `mathml`.
 - Designer: HTML UI design editor; aliases `designer`, `ui`, `html-ui`, `figma`.

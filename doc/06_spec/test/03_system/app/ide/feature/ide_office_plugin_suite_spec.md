@@ -29,7 +29,7 @@ ide_office_plugin_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -358,6 +358,26 @@ expect(ide_draw_sanity_summary()).to_contain("reconnect=true")
 expect(ide_draw_sanity_summary()).to_contain("delete=true")
 expect(ide_draw_sanity_summary()).to_contain("node_delete=true")
 expect(ide_draw_sanity_summary()).to_contain("canvas=true")
+```
+
+</details>
+
+#### documents the SDD connector handle metadata contract
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val glossary = file_read("doc/glossary.md")
+val guide = file_read("doc/07_guide/app/ide_office_plugin_suite.md")
+expect(glossary).to_contain("selected connector handle edit actions")
+expect(glossary).to_contain("stable handle indexes")
+expect(glossary).to_contain("endpoint/opposite-node ids")
+expect(guide).to_contain("Selected connector handles expose edit actions")
+expect(guide).to_contain("endpoint/opposite-node ids")
 ```
 
 </details>
@@ -1643,8 +1663,8 @@ expect(summary).to_contain("libre_roundtrip=6")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
