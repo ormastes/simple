@@ -76,7 +76,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 - The audit writes stable `gui_renderdoc_feature_coverage_*` evidence keys.
 - Every `WidgetKind` wire value has an HTML renderer dispatch entry.
-- The Electron Simple Web layout manifest remains visible with its 18 cases.
+- The Electron Simple Web layout manifest remains visible with its 19 cases.
 - The audit includes current production parity evidence status when present.
 - The audit reports the active RenderDoc goal, Simple `.rdc`, and external
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
@@ -96,7 +96,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: widget_count equals `43`
    - Expected: missing equals ``
 - Assert the Electron layout manifest and RenderDoc gates remain visible
-   - Expected: manifest_cases equals `18`
+   - Expected: manifest_cases equals `19`
 - Verify the restart-audit report was written
 
 
@@ -109,11 +109,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Run the GUI RenderDoc feature coverage audit without launching heavy renderers")
 val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status && BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
-val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 step("Read the emitted GUI coverage evidence contract")
-val evidence = rt_file_read_text("build/test-gui-renderdoc-feature-coverage-status/evidence.env") ?? ""
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status/evidence.env")
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=")
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=")
 expect(evidence).to_contain("widget_kind_source=src/lib/common/ui/widget_kind.spl")
@@ -140,16 +140,16 @@ expect(widget_count).to_equal("43")
 expect(missing).to_equal("")
 
 step("Assert the Electron layout manifest and RenderDoc gates remain visible")
-expect(manifest_cases).to_equal("18")
+expect(manifest_cases).to_equal("19")
 expect(renderdoc_status.len()).to_be_greater_than(0)
 expect(simple_status.len()).to_be_greater_than(0)
 expect(external_status.len()).to_be_greater_than(0)
 
 step("Verify the restart-audit report was written")
-val report = rt_file_read_text("build/test-gui-renderdoc-feature-coverage-status/report.md") ?? ""
+val report = file_read("build/test-gui-renderdoc-feature-coverage-status/report.md")
 expect(report).to_contain("# GUI RenderDoc Feature Coverage Status")
 expect(report).to_contain("- widget HTML renderer dispatch:")
-expect(report).to_contain("- Electron layout manifest cases: 18")
+expect(report).to_contain("- Electron layout manifest cases: 19")
 ```
 
 </details>
@@ -172,11 +172,11 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Run the GUI coverage audit in strict mode and capture its exit code")
 val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-strict; BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-strict REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-strict/report.md GUI_RENDERDOC_STATUS_STRICT=1 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs; printf 'strict_exit=%s\\n' \"$?\""
-val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
 step("Assert strict mode passes only when the aggregate audit is complete")
-val evidence = rt_file_read_text("build/test-gui-renderdoc-feature-coverage-status-strict/evidence.env") ?? ""
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-strict/evidence.env")
 val status = _value_of(evidence, "gui_renderdoc_feature_coverage_status")
 val reason = _value_of(evidence, "gui_renderdoc_feature_coverage_reason")
 
