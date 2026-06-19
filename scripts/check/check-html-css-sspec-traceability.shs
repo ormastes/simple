@@ -1,10 +1,19 @@
 #!/bin/sh
+# Trace WHATWG HTML elements and W3C CSS property inventory to SSpec coverage.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-python3 - <<'PY'
+BUILD_DIR="${BUILD_DIR:-build/html_css_sspec_traceability}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/html_css_sspec_traceability_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+tmp_env="$OUT_ENV.tmp"
+
+set +e
+python3 - <<'PY' >"$tmp_env"
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -114,37 +123,108 @@ def text_has_css_property(blob: str, prop: str) -> bool:
     return re.search(rf"(^|[^a-zA-Z-]){esc}\s*:|['\"]{esc}['\"]|\b{esc}\b", blob, re.I | re.M) is not None
 
 
-html = html_tags(fetch(HTML_URL))
-css = css_properties(fetch(CSS_URL))
+def emit(key: str, value) -> None:
+    text = "" if value is None else str(value)
+    print(f"{key}={text.replace(chr(10), ' ')}")
 
-html_blob = read_roots(HTML_TEST_ROOTS)
-css_blob = read_roots(CSS_TEST_ROOTS)
 
-missing_html = [tag for tag in html if not text_has_html_tag(html_blob, tag)]
+def main() -> int:
+    html = html_tags(fetch(HTML_URL))
+    css = css_properties(fetch(CSS_URL))
 
-missing_css_assignment = []
-for prop in css:
-    if prop in CSS_SUPPORTED:
-        if not text_has_css_property(css_blob, prop):
-            missing_css_assignment.append(prop)
-    else:
-        if CSS_INVENTORY_SPEC not in css_blob and not text_has_css_property(css_blob, prop):
-            missing_css_assignment.append(prop)
+    html_blob = read_roots(HTML_TEST_ROOTS)
+    css_blob = read_roots(CSS_TEST_ROOTS)
 
-if len(html) != 105:
-    print(f"FAIL: expected 105 WHATWG HTML elements, got {len(html)}", file=sys.stderr)
+    missing_html = [tag for tag in html if not text_has_html_tag(html_blob, tag)]
+
+    missing_css_assignment = []
+    for prop in css:
+        if prop in CSS_SUPPORTED:
+            if not text_has_css_property(css_blob, prop):
+                missing_css_assignment.append(prop)
+        else:
+            if CSS_INVENTORY_SPEC not in css_blob and not text_has_css_property(css_blob, prop):
+                missing_css_assignment.append(prop)
+
+    status = "pass"
+    reason = "pass"
+    if len(html) != 105:
+        status = "fail"
+        reason = "unexpected-html-tag-count"
+    elif len(css) < 390:
+        status = "fail"
+        reason = "unexpected-css-property-count"
+    elif missing_html:
+        status = "fail"
+        reason = "html-tags-missing-sspec-assignment"
+    elif missing_css_assignment:
+        status = "fail"
+        reason = "css-properties-missing-sspec-assignment"
+
+    emit("html_css_sspec_traceability_status", status)
+    emit("html_css_sspec_traceability_reason", reason)
+    emit("html_css_sspec_traceability_html_url", HTML_URL)
+    emit("html_css_sspec_traceability_css_url", CSS_URL)
+    emit("html_css_sspec_traceability_html_tag_count", len(html))
+    emit("html_css_sspec_traceability_required_html_tag_count", 105)
+    emit("html_css_sspec_traceability_html_tag_missing", ",".join(missing_html))
+    emit("html_css_sspec_traceability_css_property_count", len(css))
+    emit("html_css_sspec_traceability_required_css_property_min_count", 390)
+    emit("html_css_sspec_traceability_css_property_missing_count", len(missing_css_assignment))
+    emit("html_css_sspec_traceability_css_property_missing", ",".join(missing_css_assignment[:120]))
+    emit("html_css_sspec_traceability_implemented_css_property_count", len(CSS_SUPPORTED))
+    emit("html_css_sspec_traceability_implemented_css_subset_spec", CSS_IMPLEMENTED_SPEC)
+    emit("html_css_sspec_traceability_unsupported_css_inventory_spec", CSS_INVENTORY_SPEC)
+    return 0 if status == "pass" else 1
+
+
+try:
+    sys.exit(main())
+except Exception as exc:
+    emit("html_css_sspec_traceability_status", "fail")
+    emit("html_css_sspec_traceability_reason", "traceability-exception")
+    emit("html_css_sspec_traceability_error", f"{type(exc).__name__}:{exc}")
+    emit("html_css_sspec_traceability_html_url", HTML_URL)
+    emit("html_css_sspec_traceability_css_url", CSS_URL)
+    emit("html_css_sspec_traceability_required_html_tag_count", 105)
+    emit("html_css_sspec_traceability_required_css_property_min_count", 390)
     sys.exit(1)
-if len(css) < 390:
-    print(f"FAIL: expected at least 390 W3C CSS property-like entries, got {len(css)}", file=sys.stderr)
-    sys.exit(1)
-if missing_html:
-    print("FAIL: HTML tags without SSpec assignment: " + ", ".join(missing_html), file=sys.stderr)
-    sys.exit(1)
-if missing_css_assignment:
-    print("FAIL: CSS properties without SSpec assignment: " + ", ".join(missing_css_assignment[:80]), file=sys.stderr)
-    sys.exit(1)
-
-print(f"PASS: HTML/CSS SSpec traceability html_tags={len(html)} css_properties={len(css)}")
-print(f"PASS: implemented CSS subset spec={CSS_IMPLEMENTED_SPEC}")
-print(f"PASS: unsupported CSS inventory spec={CSS_INVENTORY_SPEC}")
 PY
+code=$?
+set -e
+
+mv "$tmp_env" "$OUT_ENV"
+
+status="$(sed -n 's/^html_css_sspec_traceability_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^html_css_sspec_traceability_reason=//p' "$OUT_ENV" | tail -n 1)"
+html_count="$(sed -n 's/^html_css_sspec_traceability_html_tag_count=//p' "$OUT_ENV" | tail -n 1)"
+css_count="$(sed -n 's/^html_css_sspec_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+implemented_css_count="$(sed -n 's/^html_css_sspec_traceability_implemented_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+implemented_css_spec="$(sed -n 's/^html_css_sspec_traceability_implemented_css_subset_spec=//p' "$OUT_ENV" | tail -n 1)"
+inventory_css_spec="$(sed -n 's/^html_css_sspec_traceability_unsupported_css_inventory_spec=//p' "$OUT_ENV" | tail -n 1)"
+
+{
+    echo "# HTML/CSS SSpec Traceability"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- WHATWG HTML elements: $html_count/105"
+    echo "- W3C CSS property-like entries: $css_count >= 390"
+    echo "- implemented Simple Web CSS properties: $implemented_css_count"
+    echo "- implemented CSS subset spec: $implemented_css_spec"
+    echo "- unsupported CSS inventory spec: $inventory_css_spec"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    echo "PASS: HTML/CSS SSpec traceability html_tags=$html_count css_properties=$css_count"
+    echo "PASS: implemented CSS subset spec=$implemented_css_spec"
+    echo "PASS: unsupported CSS inventory spec=$inventory_css_spec"
+    exit 0
+fi
+
+exit "$code"

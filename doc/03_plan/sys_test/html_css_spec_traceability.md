@@ -100,11 +100,24 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 
 This lightweight audit does not launch Electron, Chrome, or RenderDoc. It
 checks that every `WidgetKind` has `app.ui.render.html_widgets` dispatch and
-renderer fixture/spec coverage, summarizes the Electron Simple Web layout
-manifest cases, points at the production GUI/web parity wrapper, and embeds the
-current HTML/CSS RenderDoc goal status. It may report `incomplete` while
-coverage is structurally mapped but durable `.rdc` evidence is missing from the
-local `build/` tree or the external Chrome/Vulkan gate has not passed.
+renderer fixture/spec coverage, runs the typed HTML/CSS SSpec traceability
+gate, summarizes the Electron Simple Web layout manifest cases, points at the
+production GUI/web parity wrapper, and embeds the current HTML/CSS RenderDoc
+goal status. It may report `incomplete` while coverage is structurally mapped
+but durable `.rdc` evidence is missing from the local `build/` tree or the
+external Chrome/Vulkan gate has not passed.
+
+HTML/CSS SSpec inventory traceability command:
+
+```sh
+sh scripts/check/check-html-css-sspec-traceability.shs
+```
+
+This non-rendering gate now emits
+`build/html_css_sspec_traceability/evidence.env` by default. It proves the
+current 105 WHATWG HTML elements and at least 390 W3C CSS property-like entries
+are assigned to the SSpec corpus before the rendered fixture manifest and
+RenderDoc gates can pass.
 
 GUI widget renderer fixture/spec coverage command:
 
@@ -135,9 +148,9 @@ assignment.
 
 Already completed:
 
-- HTML inventory traceability exists for the current WHATWG element set used by
-  this audit, including `selectedcontent`.
-- CSS traceability exists for the implemented Simple Web subset and for
+- Typed HTML inventory traceability exists for the current WHATWG element set
+  used by this audit, including `selectedcontent`.
+- Typed CSS traceability exists for the implemented Simple Web subset and for
   unsupported W3C CSS properties through the inventory SSpec.
 - Common generated GUI HTML/CSS combinations have executable SSpec coverage.
 - Simple in-application Vulkan/RenderDoc evidence has passed locally with a
@@ -169,7 +182,6 @@ Already completed:
 
 Do not repeat these completed checks unless a related file changed:
 
-- `sh scripts/check/check-html-css-sspec-traceability.shs`
 - `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
 - `scripts/tool/renderdoc-evidence.shs capture-simple`
 - local host/Docker/QEMU attempts to run Chrome under RenderDoc with the same

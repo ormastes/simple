@@ -75,6 +75,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ## Acceptance
 
 - The audit writes stable `gui_renderdoc_feature_coverage_*` evidence keys.
+- The audit requires typed HTML/CSS SSpec traceability evidence to pass.
 - Every `WidgetKind` wire value has an HTML renderer dispatch entry.
 - Every `WidgetKind` wire value has renderer class/spec coverage evidence.
 - The Electron Simple Web layout manifest remains visible with its 50 cases.
@@ -116,6 +117,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: flex_safe_unsafe_center_cases equals `1`
    - Expected: rendering_manifest_status equals `pass`
    - Expected: rendering_manifest_reason equals `pass`
+   - Expected: traceability_status equals `pass`
+   - Expected: traceability_html_count equals `105`
    - Expected: electron_api equals `vulkan`
    - Expected: electron_angle equals `vulkan`
    - Expected: electron_api equals `vulkan`
@@ -126,7 +129,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 123 lines folded for reproduction.
+Runnable source: 136 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -144,6 +147,13 @@ expect(evidence).to_contain("widget_html_renderer_source=src/app/ui.render/html_
 expect(evidence).to_contain("electron_layout_manifest=tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt")
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_command=sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs")
+expect(evidence).to_contain("html_css_traceability_status=pass")
+expect(evidence).to_contain("html_css_traceability_reason=pass")
+expect(evidence).to_contain("html_css_traceability_exit_code=0")
+expect(evidence).to_contain("html_css_traceability_evidence_env=build/gui_renderdoc_feature_coverage_status/sspec-traceability/evidence.env")
+expect(evidence).to_contain("html_css_traceability_required_html_tag_count=105")
+expect(evidence).to_contain("html_css_traceability_required_css_property_min_count=390")
+expect(evidence).to_contain("html_css_traceability_implemented_css_property_count=62")
 expect(evidence).to_contain("production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_command=PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env sh scripts/check/check-production-gui-web-renderer-parity-gate.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
@@ -193,6 +203,9 @@ val flex_wrap_reverse_cases = _value_of(evidence, "electron_layout_manifest_trac
 val flex_safe_unsafe_center_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_flex_safe_unsafe_center_case_count")
 val rendering_manifest_status = _value_of(evidence, "html_css_rendering_manifest_traceability_status")
 val rendering_manifest_reason = _value_of(evidence, "html_css_rendering_manifest_traceability_reason")
+val traceability_status = _value_of(evidence, "html_css_traceability_status")
+val traceability_html_count = _value_of(evidence, "html_css_traceability_html_tag_count")
+val traceability_css_count = _value_of(evidence, "html_css_traceability_css_property_count")
 val production_gate_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_status")
 val production_gate_reason = _value_of(evidence, "production_gui_web_renderer_parity_gate_reason")
 val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
@@ -226,6 +239,9 @@ expect(flex_wrap_reverse_cases).to_equal("1")
 expect(flex_safe_unsafe_center_cases).to_equal("1")
 expect(rendering_manifest_status).to_equal("pass")
 expect(rendering_manifest_reason).to_equal("pass")
+expect(traceability_status).to_equal("pass")
+expect(traceability_html_count).to_equal("105")
+expect(traceability_css_count.to_i64()).to_be_greater_than(389)
 expect(production_gate_status.len()).to_be_greater_than(0)
 expect(production_gate_reason.len()).to_be_greater_than(0)
 expect(renderdoc_status.len()).to_be_greater_than(0)
