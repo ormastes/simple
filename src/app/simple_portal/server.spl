@@ -6,6 +6,7 @@ use std.http_server.response.{
 }
 use std.http_server.types.{HttpResponseData}
 use std.json.builder.{escape_json}
+use std.io_runtime.{file_read, file_exists, file_write, dir_create}
 use app.simple_portal.content_db.{
     PortalContentDb, PortalPageRecord, PortalExampleRecord,
     portal_content_db_load_resolved, portal_page_by_slug,
@@ -14,10 +15,6 @@ use app.simple_portal.content_db.{
     portal_read_example_source
 }
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
 var g_simple_portal_run_seq: i64 = 0
 
@@ -162,24 +159,24 @@ class SimplePortalServer:
 
     fn _serve_index(head_only: bool) -> text:
         val index_path = "{self.app_root}/public/index.html"
-        if not rt_file_exists(index_path):
+        if not file_exists(index_path):
             return self._error("Missing portal shell", 500)
-        self._finalize(build_html(rt_file_read_text(index_path)), head_only, false)
+        self._finalize(build_html(file_read(index_path)), head_only, false)
 
     fn _serve_static(clean_path: text, head_only: bool) -> text:
         val rel = clean_path["/static/".length():]
         if rel == "" or rel.contains("..") or rel.contains("\\") or rel.starts_with("/"):
             return self._error("Static path traversal rejected", 404)
         val full_path = "{self.app_root}/public/{rel}"
-        if not rt_file_exists(full_path):
+        if not file_exists(full_path):
             return self._finalize(_build_error(404, "Not Found"), false, false)
         val mime = _mime_type(full_path)
         val resp = if mime == "text/html":
-            build_html(rt_file_read_text(full_path))
+            build_html(file_read(full_path))
         elif mime == "application/json":
-            build_json(rt_file_read_text(full_path))
+            build_json(file_read(full_path))
         else:
-            build_text(rt_file_read_text(full_path))
+            build_text(file_read(full_path))
         self._finalize(resp, head_only, false)
 
     fn _serve_page(slug: text, head_only: bool) -> text:
@@ -213,8 +210,8 @@ class SimplePortalServer:
         g_simple_portal_run_seq = g_simple_portal_run_seq + 1
         val audit_id = "run-" + g_simple_portal_run_seq.to_string()
         val envelope = _execution_envelope(body, body_kind, audit_id)
-        val _ = rt_dir_create(self.data_root, true)
-        val _ = rt_file_write_text("{self.data_root}/{audit_id}.json", envelope)
+        val _ = dir_create(self.data_root, true)
+        val _ = file_write("{self.data_root}/{audit_id}.json", envelope)
         self._finalize(build_json(envelope), false, true)
 
     fn _method_not_allowed(clean_path: text) -> text:
