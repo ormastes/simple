@@ -160,7 +160,8 @@ metadata for IDE/readback parity with the other Office renderers.
 
 Counter actions use `value|counter_increment`, `value|counter_decrement`, or
 `value|counter_reset` and return `value=...`, `status=...`, and
-`changed=...`. Unsupported actions fail closed and preserve the original value.
+`changed=...`. Blank action names are `invalid-args`; unsupported named actions
+fail closed and preserve the original value.
 
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable

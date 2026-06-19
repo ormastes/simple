@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 93 | 93 | 0 | 0 |
+| 94 | 94 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -747,6 +747,22 @@ val result = office_action_dispatch("unknown-action", "")
 expect(result.ok).to_be(false)
 expect(result.code).to_equal(1)
 expect(result.reason).to_equal("unknown-action")
+```
+
+</details>
+
+#### rejects blank counter action names
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("counter-action", "5|   ")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
 ```
 
 </details>
@@ -1723,8 +1739,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 93 |
-| Active scenarios | 93 |
+| Total scenarios | 94 |
+| Active scenarios | 94 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

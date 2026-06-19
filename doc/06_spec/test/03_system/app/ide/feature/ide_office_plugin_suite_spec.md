@@ -373,13 +373,14 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
    - Expected: math_to_mathml_checked("a +").reason equals `syntax-error`
    - Expected: counter_inc_action.reason equals `incremented`
    - Expected: counter_bad_action.reason equals `unsupported`
+   - Expected: counter_blank_action.reason equals `invalid-args`
    - Expected: counter_overflow_action.reason equals `invalid-args`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 617 lines folded for reproduction.
+Runnable source: 619 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -992,6 +993,7 @@ val counter_inc_action = office_action_dispatch("counter-action", "41|counter_in
 val counter_dec_action = office_action_dispatch("counter-action", "41|counter_decrement")
 val counter_reset_action = office_action_dispatch("counter-action", "5|counter_reset")
 val counter_bad_action = office_action_dispatch("counter-action", "5|counter_spin")
+val counter_blank_action = office_action_dispatch("counter-action", "5|   ")
 val counter_overflow_action = office_action_dispatch("counter-action", "9223372036854775808|counter_increment")
 expect(counter_inc_action.output).to_contain("value=42")
 expect(counter_inc_action.reason).to_equal("incremented")
@@ -999,6 +1001,7 @@ expect(counter_dec_action.output).to_contain("value=40")
 expect(counter_reset_action.output).to_contain("value=0")
 expect(counter_bad_action.reason).to_equal("unsupported")
 expect(counter_bad_action.output).to_contain("changed=false")
+expect(counter_blank_action.reason).to_equal("invalid-args")
 expect(counter_overflow_action.reason).to_equal("invalid-args")
 ```
 
