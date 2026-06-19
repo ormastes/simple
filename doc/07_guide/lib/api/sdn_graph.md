@@ -228,6 +228,8 @@ metadata div has:
   `x1,y1-x2,y2`, derived from the path for drag handles and hit testing.
 - `data-segment-midpoints`: semicolon-separated `x,y` segment centers for
   handle placement.
+- `data-segment-orientations`: semicolon-separated `h`, `v`, or `d` flags for
+  each rendered segment.
 - `data-start-x`, `data-start-y`, `data-end-x`, and `data-end-y`: numeric
   endpoint coordinates derived from the rendered path for connector handles.
 - `data-label-x` and `data-label-y`: explicit connector label point from the
