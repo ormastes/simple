@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -697,6 +697,30 @@ expect(ambiguous.reason).to_equal("ambiguous-source")
 
 </details>
 
+#### duplicates a connector by index
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: connector copy\nA: Alpha\nB: Beta\nA -> B: submit @primary kind: action route: orthogonal waypoints: 10x20 start: right end: left")
+val copied = sdn_graph_duplicate_edge_checked(graph, 0)
+val missing = sdn_graph_duplicate_edge_checked(graph, 3)
+expect(copied.accepted).to_be(true)
+expect(copied.graph.edges.len()).to_equal(2)
+expect(copied.graph.edges[1].label).to_equal("submit")
+expect(copied.graph.edges[1].css).to_equal("primary")
+expect(copied.graph.edges[1].route).to_equal("orthogonal")
+expect(sdn_graph_render_html(copied.graph)).to_contain("data-edge-index=\"1\"")
+expect(missing.accepted).to_be(false)
+expect(missing.reason).to_equal("missing-edge")
+```
+
+</details>
+
 #### aligns selected SDD nodes with guarded geometry signatures
 
 <details>
@@ -785,8 +809,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

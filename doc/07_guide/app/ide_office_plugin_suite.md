@@ -90,6 +90,7 @@ SDD node edit actions use `node_id|value` for label, parent, shape, style, layer
 `delete-sdd-node` uses `node_id` and removes attached connectors.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`.
 `add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start|end`.
+`duplicate-sdd-edge` uses `edge_index`.
 `edit-sdd-edge-label` uses `edge_index|new_label`.
 `edit-sdd-edge-style` uses `edge_index|css_labels`.
 `edit-sdd-edge-kind` uses `edge_index|kind`.
@@ -186,13 +187,13 @@ modes:
 
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
-- Draw: `html=true route=true select=true inspect=true edit=true geometry=true layer=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
+- Draw: `html=true route=true select=true inspect=true edit=true geometry=true layer=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
-  `edit-sdd-edge-label`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,
+  `duplicate-sdd-edge`, `edit-sdd-edge-label`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
   `edit-sdd-node-style`, `edit-sdd-node-layer`, `edit-sdd-node-role`,

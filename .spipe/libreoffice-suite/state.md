@@ -458,3 +458,7 @@ possible so they are runner-verifiable.
   one `css|key` pair while preserving the class definition for round-trip node
   references. `delete-sdd-style-rule` exposes the same canonical-SDD persistence
   bridge through the headless Office action surface.
+- 2026-06-19 dev: Added Draw/SDD connector duplication.
+  `sdn_graph_duplicate_edge_checked` appends an exact connector copy by index,
+  `duplicate-sdd-edge` exposes it through the headless Office action bridge,
+  and IDE feature checks now report `edge_duplicate=true`.
