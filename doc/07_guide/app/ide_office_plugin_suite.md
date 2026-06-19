@@ -118,7 +118,7 @@ Blank SDD geometry node ids are rejected as `invalid-args`.
 `duplicate-sdd-edge` uses `edge_index`.
 `edit-sdd-node-label` uses `node_id|new_label` and rejects missing node IDs.
 `edit-sdd-edge-label` uses `edge_index|new_label` and rejects missing edge indexes.
-`edit-sdd-edge-label-point` uses `edge_index|label_x|label_y`; label coordinates must be signed integers.
+`edit-sdd-edge-label-point` uses `edge_index|label_x|label_y`; label coordinates are required signed integers.
 `edit-sdd-edge-style` uses `edge_index|css_labels`; labels are space-separated safe tokens.
 `edit-sdd-edge-kind` uses `edge_index|kind`; kind is empty or one safe token.
 `edit-sdd-edge-endpoints` uses `edge_index|from_id|to_id`; endpoint IDs must exist.

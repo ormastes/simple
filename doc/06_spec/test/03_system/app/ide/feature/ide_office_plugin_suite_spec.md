@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 603 lines folded for reproduction.
+Runnable source: 605 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -567,6 +567,7 @@ val missing_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|Nope
 val missing_sdd_duplicate_edge_action = office_action_dispatch("duplicate-sdd-edge", "8\ngraph: Edge Copy\nA: A\nB: B\nA -> B: flow")
 val sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "0|approved\ngraph: Edge Label\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|66|12\ngraph: Edge Label Point\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val blank_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|   |12\ngraph: Edge Label Point\nA: A\nB: B\nA -> B: link")
 val sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style", "0|warning dashed\ngraph: Edge Style\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style", "0|warning,bad\ngraph: Edge Style\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_kind_action = office_action_dispatch("edit-sdd-edge-kind", "0|async\ngraph: Edge Kind\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link kind: request route: simple start: right end: left")
@@ -714,6 +715,7 @@ expect(missing_sdd_add_edge_action.reason).to_equal("missing-node")
 expect(missing_sdd_duplicate_edge_action.reason).to_equal("missing-edge")
 expect(sdd_edge_label_action.output).to_contain(">approved</div>")
 expect(sdd_edge_label_point_action.output).to_contain("data-label-x=\"66\" data-label-y=\"12\"")
+expect(blank_sdd_edge_label_point_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_edge_label_point_action.reason).to_equal("invalid-label-point")
 expect(sdd_edge_style_action.output).to_contain("sdn-css-warning sdn-css-dashed")
 expect(invalid_sdd_edge_style_action.reason).to_equal("invalid-style-token")
