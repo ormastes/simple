@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
-  llm-catalog: apps=9 features=100 actions=59
+  llm-catalog: apps=9 features=101 actions=60
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 701 lines folded for reproduction.
+Runnable source: 710 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -389,10 +389,10 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=100 actions=59")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=101 actions=60")
 val dispatch_probe = office_catalog_dispatch_probe()
-expect(dispatch_probe.advertised_count).to_equal(59)
-expect(dispatch_probe.recognized_count).to_equal(59)
+expect(dispatch_probe.advertised_count).to_equal(60)
+expect(dispatch_probe.recognized_count).to_equal(60)
 expect(dispatch_probe.missing_actions.len()).to_equal(0)
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
@@ -510,6 +510,9 @@ val blank_field_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-e
 val invalid_mode_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|diagonal|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val invalid_gap_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|wide|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val invalid_padding_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|8|4,bad,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
+val ui_resolve_layout_action = office_action_dispatch("ui-resolve-auto-layout", "frame:,vertical,8,4,4,4,4,left,top,0,0,200,120;button:frame,off,0,0,0,0,left,top,16,16,80,32\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container||vertical|8|4,4,4,4\nnode button|Run|button|16|16|80|32|primary|frame|action")
+val stale_ui_resolve_layout_action = office_action_dispatch("ui-resolve-auto-layout", "stale-signature\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container||vertical|8|4,4,4,4\nnode button|Run|button|16|16|80|32|primary|frame|action")
+val blank_ui_resolve_layout_action = office_action_dispatch("ui-resolve-auto-layout", "   \ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "   |left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_field_ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|   |top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -681,6 +684,10 @@ expect(blank_field_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(invalid_mode_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(invalid_gap_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(invalid_padding_ui_auto_layout_action.reason).to_equal("invalid-args")
+expect(ui_resolve_layout_action.output).to_contain("left: 4px")
+expect(ui_resolve_layout_action.output).to_contain("top: 4px")
+expect(stale_ui_resolve_layout_action.reason).to_equal("stale-layout")
+expect(blank_ui_resolve_layout_action.reason).to_equal("invalid-args")
 expect(ui_constraints_action.output).to_contain("data-constraint-h=\"stretch\"")
 expect(blank_ui_constraints_action.reason).to_equal("invalid-args")
 expect(blank_field_ui_constraints_action.reason).to_equal("invalid-args")
@@ -919,6 +926,7 @@ expect(catalog[5].features.join(",")).to_contain("selection")
 expect(catalog[5].features.join(",")).to_contain("inspector")
 expect(catalog[5].features.join(",")).to_contain("style-tokens")
 expect(catalog[5].features.join(",")).to_contain("auto-layout")
+expect(catalog[5].features.join(",")).to_contain("auto-layout-resolve")
 expect(catalog[5].features.join(",")).to_contain("constraints")
 expect(catalog[5].features.join(",")).to_contain("parent-edit")
 expect(catalog[5].features.join(",")).to_contain("layout-edit")
@@ -931,6 +939,7 @@ expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-duplicate-node")
 expect(catalog[5].actions.join(",")).to_contain("ui-auto-layout-edit")
+expect(catalog[5].actions.join(",")).to_contain("ui-resolve-auto-layout")
 expect(catalog[5].actions.join(",")).to_contain("ui-constraints-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-parent-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-align-selection")

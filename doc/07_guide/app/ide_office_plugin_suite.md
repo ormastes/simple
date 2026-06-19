@@ -266,7 +266,8 @@ modes:
   Counter has `counter-action`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
-  `ui-duplicate-node` / `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
+  `ui-resolve-auto-layout` / `ui-duplicate-node` /
+  `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`.
 
