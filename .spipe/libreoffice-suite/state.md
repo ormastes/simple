@@ -242,3 +242,8 @@ possible so they are runner-verifiable.
   draw.io-like node shape/style/geometry edits, updated Draw catalog metadata
   with `node-shape-edit`, `node-style-edit`, `edit-sdd-node-shape`, and
   `edit-sdd-node-style`, and refreshed glossary/guide language.
+- 2026-06-19 dev: Advanced Calc formula hardening on the display-safe path.
+  Added runner-verifiable `COUNTA`, `LEN`, `LOWER`, `UPPER`, and `TRIM` support
+  through `evaluate_formula_display_text`, with catalog features
+  `formula-counta` and `formula-text-functions`; full f64 formula parity remains
+  gated by the tracked backend blocker.

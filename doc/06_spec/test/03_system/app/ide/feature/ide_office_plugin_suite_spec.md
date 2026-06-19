@@ -110,7 +110,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=9 features=52 actions=20
+  llm-catalog: apps=9 features=54 actions=20
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -274,7 +274,7 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 71 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,7 +282,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=52 actions=20")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=54 actions=20")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -291,6 +291,8 @@ expect(catalog[1].features.join(",")).to_contain("markdown-source")
 expect(catalog[1].actions.join(",")).to_contain("render-writer-markdown-html")
 expect(catalog[2].owner_module).to_equal("app.office.sheets")
 expect(catalog[2].features.join(",")).to_contain("formulas")
+expect(catalog[2].features.join(",")).to_contain("formula-counta")
+expect(catalog[2].features.join(",")).to_contain("formula-text-functions")
 expect(catalog[2].actions.join(",")).to_contain("sheet-edit")
 expect(catalog[3].owner_module).to_equal("app.office.slides")
 expect(catalog[3].features.join(",")).to_contain("markdown-source")
