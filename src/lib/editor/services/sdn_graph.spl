@@ -28,6 +28,36 @@ struct SdnGraphEdge:
     start_anchor: text
     end_anchor: text
 
+struct SdnGraphNodeInspector:
+    found: bool
+    reason: text
+    id: text
+    label: text
+    css: text
+    role: text
+    shape: text
+    x: text
+    y: text
+    width: text
+    height: text
+    layer: text
+    parent: text
+
+struct SdnGraphEdgeInspector:
+    found: bool
+    reason: text
+    edge_index: i64
+    from_id: text
+    to_id: text
+    label: text
+    css: text
+    kind: text
+    route: text
+    waypoints: text
+    start_anchor: text
+    end_anchor: text
+    path: text
+
 struct SdnGraphCss:
     name: text
     parent_css: text
@@ -324,21 +354,43 @@ fn sdn_graph_update_node_parent_at(graph: SdnGraph, node_index: i64, parent: tex
         i = i + 1
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
+fn sdn_graph_inspect_node(graph: SdnGraph, node_id: text) -> SdnGraphNodeInspector:
+    val node_index = _sg_find_node_index(graph, node_id)
+    if node_index < 0:
+        return SdnGraphNodeInspector(found: false, reason: "missing-node", id: node_id, label: "", css: "", role: "", shape: "", x: "", y: "", width: "", height: "", layer: "", parent: "")
+    val node = graph.nodes[node_index]
+    SdnGraphNodeInspector(found: true, reason: "selected", id: node.id, label: node.label, css: node.css, role: node.role, shape: node.shape, x: node.x, y: node.y, width: node.width, height: node.height, layer: node.layer, parent: node.parent)
+
+fn sdn_graph_inspect_edge(graph: SdnGraph, edge_index: i64) -> SdnGraphEdgeInspector:
+    if edge_index < 0 or edge_index >= graph.edges.len():
+        return SdnGraphEdgeInspector(found: false, reason: "missing-edge", edge_index: edge_index, from_id: "", to_id: "", label: "", css: "", kind: "", route: "", waypoints: "", start_anchor: "", end_anchor: "", path: "")
+    val edge = graph.edges[edge_index]
+    SdnGraphEdgeInspector(found: true, reason: "selected", edge_index: edge_index, from_id: edge.from_id, to_id: edge.to_id, label: edge.label, css: edge.css, kind: edge.kind, route: edge.route, waypoints: edge.waypoints, start_anchor: edge.start_anchor, end_anchor: edge.end_anchor, path: _sg_edge_svg_path(graph, edge))
+
 fn sdn_graph_render_html(graph: SdnGraph) -> text:
+    sdn_graph_render_html_with_selection(graph, "", -1)
+
+fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text, selected_edge_index: i64) -> text:
     var html: [text] = []
-    html.push("<div class=\"sdn-graph sdd-diagram\" data-format=\"sdd\" data-format-name=\"" + sdn_graph_format_name() + "\" data-graph=\"" + _sg_escape_html(graph.name) + "\" data-direction=\"" + _sg_escape_html(graph.direction) + "\" data-theme=\"" + _sg_escape_html(graph.theme) + "\" data-css-file=\"" + _sg_escape_html(graph.css_file) + "\">")
+    html.push("<div class=\"sdn-graph sdd-diagram\" data-format=\"sdd\" data-format-name=\"" + sdn_graph_format_name() + "\" data-graph=\"" + _sg_escape_html(graph.name) + "\" data-direction=\"" + _sg_escape_html(graph.direction) + "\" data-theme=\"" + _sg_escape_html(graph.theme) + "\" data-css-file=\"" + _sg_escape_html(graph.css_file) + "\" data-selected-node-id=\"" + _sg_escape_html(selected_node_id) + "\" data-selected-edge-index=\"" + selected_edge_index.to_text() + "\">")
     if graph.edges.len() > 0:
         html.push("<svg class=\"sdd-connector-layer\" aria-hidden=\"true\" focusable=\"false\">")
         var edge_index = 0
         for edge in graph.edges:
             val path = _sg_edge_svg_path(graph, edge)
+            val edge_selected = edge_index == selected_edge_index
+            val edge_selected_text = _sg_bool_text(edge_selected)
+            val edge_selected_class = if edge_selected then " sdd-selected" else: ""
             if path != "":
-                html.push("<path class=\"sdd-connector-path " + _sg_css_classes(edge.css) + "\" data-edge-index=\"" + edge_index.to_text() + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\" d=\"" + path + "\" fill=\"none\" stroke=\"currentColor\"><title>" + _sg_escape_html(edge.label) + "</title></path>")
+                html.push("<path class=\"sdd-connector-path " + _sg_css_classes(edge.css) + edge_selected_class + "\" data-edge-index=\"" + edge_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\" d=\"" + path + "\" fill=\"none\" stroke=\"currentColor\"><title>" + _sg_escape_html(edge.label) + "</title></path>")
             edge_index = edge_index + 1
         html.push("</svg>")
     var i = 0
     while i < graph.nodes.len():
         val node = graph.nodes[i]
+        val node_selected = selected_node_id != "" and node.id == selected_node_id
+        val node_selected_text = _sg_bool_text(node_selected)
+        val node_selected_class = if node_selected then " sdd-selected" else: ""
         val auto_x = (8 + (i % 4) * 23).to_text() + "%"
         val auto_y = (12 + (i / 4) * 22).to_text() + "%"
         val x = if node.x != "" then _sg_safe_length(node.x) else: auto_x
@@ -348,15 +400,23 @@ fn sdn_graph_render_html(graph: SdnGraph) -> text:
             style = style + ";width:" + _sg_safe_length(node.width)
         if node.height != "":
             style = style + ";height:" + _sg_safe_length(node.height)
-        html.push("<button type=\"button\" class=\"sdn-graph-node sdd-node " + _sg_css_classes(node.css) + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" data-layer=\"" + _sg_escape_html(node.layer) + "\" data-parent=\"" + _sg_escape_html(node.parent) + "\" data-x=\"" + _sg_escape_html(node.x) + "\" data-y=\"" + _sg_escape_html(node.y) + "\" data-width=\"" + _sg_escape_html(node.width) + "\" data-height=\"" + _sg_escape_html(node.height) + "\" style=\"" + style + "\">" + _sg_escape_html(node.label) + "</button>")
+        html.push("<button type=\"button\" class=\"sdn-graph-node sdd-node " + _sg_css_classes(node.css) + node_selected_class + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-selected=\"" + node_selected_text + "\" aria-selected=\"" + node_selected_text + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" data-layer=\"" + _sg_escape_html(node.layer) + "\" data-parent=\"" + _sg_escape_html(node.parent) + "\" data-x=\"" + _sg_escape_html(node.x) + "\" data-y=\"" + _sg_escape_html(node.y) + "\" data-width=\"" + _sg_escape_html(node.width) + "\" data-height=\"" + _sg_escape_html(node.height) + "\" style=\"" + style + "\">" + _sg_escape_html(node.label) + "</button>")
         i = i + 1
     var edge_div_index = 0
     for edge in graph.edges:
         val path = _sg_edge_svg_path(graph, edge)
-        html.push("<div class=\"sdn-graph-edge sdd-connector " + _sg_css_classes(edge.css) + "\" data-edge-index=\"" + edge_div_index.to_text() + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\">" + _sg_escape_html(edge.label) + "</div>")
+        val edge_selected = edge_div_index == selected_edge_index
+        val edge_selected_text = _sg_bool_text(edge_selected)
+        val edge_selected_class = if edge_selected then " sdd-selected" else: ""
+        html.push("<div class=\"sdn-graph-edge sdd-connector " + _sg_css_classes(edge.css) + edge_selected_class + "\" data-edge-index=\"" + edge_div_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\">" + _sg_escape_html(edge.label) + "</div>")
         edge_div_index = edge_div_index + 1
     html.push("</div>")
     html.join("")
+
+fn _sg_bool_text(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
 
 fn _sg_edge_svg_path(graph: SdnGraph, edge: SdnGraphEdge) -> text:
     val from_idx = _sg_find_node_index(graph, edge.from_id)

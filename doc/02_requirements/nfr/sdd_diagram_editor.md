@@ -15,3 +15,6 @@
 - SDD-NFR-006: Parent/group membership must remain deterministic metadata. The
   canonical field is `parent`; user-facing "group" terminology must not create
   a second source of truth.
+- SDD-NFR-007: Selection rendering and inspector reads must be pure derived
+  views. Missing targets report `found=false` with a deterministic reason and
+  must not mutate graph state.

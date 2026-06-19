@@ -280,3 +280,8 @@ possible so they are runner-verifiable.
   parent/layout/constraint metadata with stale, missing-parent, cycle, and
   invalid-layout rejection. Catalog metadata now exposes `auto-layout`,
   `constraints`, `ui-auto-layout-edit`, and `ui-constraints-edit`.
+- 2026-06-19 dev: Advanced SDD Draw selection and inspector support. Added
+  transient selected-node/selected-connector HTML metadata plus pure
+  `sdn_graph_inspect_node` / `sdn_graph_inspect_edge` snapshots for draw.io-like
+  sidebars. Catalog metadata now exposes `selection`, `inspector`,
+  `render-sdd-html-with-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`.

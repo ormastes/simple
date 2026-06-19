@@ -15,6 +15,11 @@
 - SDD-009: Parent/container membership is parsed from dense syntax and canonical
   tables, rendered as deterministic HTML metadata, canonicalized, and editable
   through a pure parent update helper.
+- SDD-010: Selected node and connector rendering adds deterministic
+  `data-selected` / `aria-selected` metadata while preserving existing SDD
+  geometry and connector attributes.
+- SDD-011: Node and connector inspectors return pure found/missing snapshots
+  with geometry, grouping, route, waypoint, anchor, and computed path metadata.
 
 ## Evidence
 

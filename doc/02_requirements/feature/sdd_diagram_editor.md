@@ -25,6 +25,11 @@ First production slice for the SDN-backed diagram editor dialect.
 - SDD-009: Diagram nodes preserve parent/container membership from dense SDN and
   canonical tables so draw.io-like grouping can be represented without a
   separate file format.
+- SDD-010: HTML rendering can project transient node and connector selection
+  metadata without storing selection in the `SdnGraph` model.
+- SDD-011: Diagram nodes and connectors expose pure inspector snapshots for
+  editor sidebars, including geometry, style labels, grouping, route, anchor,
+  waypoint, and computed path metadata.
 
 ## Out of Scope
 

@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -244,6 +244,105 @@ expect(sdn_graph_render_edge_path(graph.edges[0], graph.nodes[0], graph.nodes[1]
 
 </details>
 
+#### renders transient selected node metadata without changing graph state
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: select\nA: Alpha @plain role: box shape: rect x: 10 y: 20 width: 80 height: 20 layer: base\nB: Beta @target role: box shape: rounded x: 220 y: 20 width: 80 height: 20 layer: front\nA -> B: c route: simple start: right end: left")
+val html = sdn_graph_render_html_with_selection(graph, "B", -1)
+expect(html).to_contain("data-selected-node-id=\"B\"")
+expect(html).to_contain("data-selected-edge-index=\"-1\"")
+expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-target sdd-selected\"")
+expect(html).to_contain("data-node=\"B\" data-selected=\"true\" aria-selected=\"true\"")
+expect(sdn_graph_render_html(graph)).to_contain("data-selected-node-id=\"\"")
+expect(graph.nodes[1].css).to_equal("target")
+```
+
+</details>
+
+#### renders transient selected connector metadata and ignores invalid connector selection
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: select-edge\nA: Alpha x: 10 y: 20 width: 80 height: 20\nB: Beta x: 220 y: 20 width: 80 height: 20\nA -> B: c @primary route: simple start: right end: left")
+val selected = sdn_graph_render_html_with_selection(graph, "", 0)
+val invalid = sdn_graph_render_html_with_selection(graph, "", 99)
+expect(selected).to_contain("data-selected-edge-index=\"0\"")
+expect(selected).to_contain("class=\"sdd-connector-path sdn-css-primary sdd-selected\"")
+expect(selected).to_contain("data-edge-index=\"0\" data-selected=\"true\" aria-selected=\"true\"")
+expect(selected).to_contain("class=\"sdn-graph-edge sdd-connector sdn-css-primary sdd-selected\"")
+expect(invalid).to_contain("data-selected-edge-index=\"99\"")
+expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-selected=\"false\"")
+```
+
+</details>
+
+#### inspects selected nodes and connectors as pure snapshots
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: inspect\nA: Alpha @panel role: source shape: rounded x: 10 y: 20 width: 80 height: 20 layer: base parent: Group\nB: Beta x: 220 y: 20 width: 80 height: 20\nA -> B: c @primary kind: action route: orthogonal waypoints: 140x30;200x80 start: right end: left")
+val node = sdn_graph_inspect_node(graph, "A")
+val edge = sdn_graph_inspect_edge(graph, 0)
+expect(node.found).to_be(true)
+expect(node.reason).to_equal("selected")
+expect(node.id).to_equal("A")
+expect(node.css).to_equal("panel")
+expect(node.role).to_equal("source")
+expect(node.shape).to_equal("rounded")
+expect(node.x).to_equal("10")
+expect(node.parent).to_equal("Group")
+expect(edge.found).to_be(true)
+expect(edge.reason).to_equal("selected")
+expect(edge.edge_index).to_equal(0)
+expect(edge.from_id).to_equal("A")
+expect(edge.to_id).to_equal("B")
+expect(edge.css).to_equal("primary")
+expect(edge.kind).to_equal("action")
+expect(edge.route).to_equal("orthogonal")
+expect(edge.waypoints).to_equal("140x30;200x80")
+expect(edge.path).to_equal("M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30")
+```
+
+</details>
+
+#### reports missing node and connector inspection targets
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: missing\nA: Alpha\nB: Beta\nA -> B: c")
+val node = sdn_graph_inspect_node(graph, "Nope")
+val edge = sdn_graph_inspect_edge(graph, -1)
+expect(node.found).to_be(false)
+expect(node.reason).to_equal("missing-node")
+expect(node.id).to_equal("Nope")
+expect(edge.found).to_be(false)
+expect(edge.reason).to_equal("missing-edge")
+expect(edge.edge_index).to_equal(-1)
+```
+
+</details>
+
 #### updates edge routing through a pure edit operation
 
 <details>
@@ -332,8 +431,8 @@ expect(regrouped.nodes[1].parent).to_equal("Container")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

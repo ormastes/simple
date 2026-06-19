@@ -208,3 +208,23 @@ style-label-only actions.
 updates one node's `parent` field by index while preserving geometry, style,
 shape, label, and connector metadata. The field is allowed to be empty for an
 ungrouped node.
+
+## Selection And Inspection
+
+Selection is a transient render projection, not model state. Use
+`sdn_graph_render_html_with_selection(graph, selected_node_id,
+selected_edge_index)` when an editor surface needs selected-node or
+selected-connector metadata. The base `sdn_graph_render_html(graph)` keeps the
+same signature and delegates to the unselected projection.
+
+Selected renders add root `data-selected-node-id` and
+`data-selected-edge-index` attributes. Nodes and connectors keep their existing
+SDD metadata and additionally expose `data-selected`, `aria-selected`, and the
+`sdd-selected` class when selected. Connector selection is index-based and uses
+the existing `data-edge-index` canonical graph order.
+
+Use `sdn_graph_inspect_node(graph, node_id)` and
+`sdn_graph_inspect_edge(graph, edge_index)` for read-only editor sidebars.
+Inspectors return deterministic found/missing snapshots without mutating the
+graph. Edge inspection includes the computed SVG path when both endpoints can
+be resolved.

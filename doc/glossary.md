@@ -603,7 +603,8 @@ files use `.sdd.sdn`. SDD extends relationship graphs with diagram-editor
 metadata: node shape, x/y position, width/height, layer, connector route,
 parent/container membership for draw.io-like groups, waypoints, start/end
 anchors, rendered SVG connector paths, reusable CSS labels, direct node
-shape/style/parent edit operations, and weave-based batch style or layout edits.
+shape/style/parent edit operations, transient selection rendering, pure
+node/connector inspector snapshots, and weave-based batch style or layout edits.
 Implemented in
 `src/lib/editor/services/sdn_graph.spl`; guide:
 `doc/07_guide/lib/api/sdn_graph.md`.
