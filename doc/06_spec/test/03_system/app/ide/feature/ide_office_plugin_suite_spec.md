@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -188,6 +188,8 @@ expect(tui_report).to_contain("extension=.sdd.sdn")
 expect(tui_report).to_contain("draw: sdn_graph")
 expect(tui_report).to_contain("layout=true")
 expect(tui_report).to_contain("canvas=true")
+expect(tui_report).to_contain("handle_meta=true")
+expect(gui_report).to_contain("handle_meta=true")
 expect(gui_report).to_contain("Database Admin")
 expect(tui_report).to_contain("tui-panels:")
 expect(tui_report).to_contain("slides: app.office.slides")
