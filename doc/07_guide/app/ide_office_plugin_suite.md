@@ -206,7 +206,7 @@ relationship-only graph format, for geometry, layers, connector routes,
 waypoints, anchors, rendered SVG connector paths, pure edge reroute operations,
 parent/group metadata, transient selection rendering, pure node/edge inspector
 snapshots, pure node shape/style/parent edit operations, guarded multi-node
-alignment/distribution, visible selected-node resize handles, selected connector endpoint and waypoint handles, rendered shape CSS, and rendered canvas/page background and grid metadata. `src/app/ide/draw_sanity.spl`
+alignment/distribution, visible selected-node resize handles, selected connector endpoint/waypoint/label handles, rendered shape CSS, and rendered canvas/page background and grid metadata. `src/app/ide/draw_sanity.spl`
 is the product feature-check bridge:
 it proves render, selection, inspection, reroute, node edit, multi-node layout,
 and canvas metadata without starting GUI/browser/host APIs. Legacy SVG shape helpers remain
