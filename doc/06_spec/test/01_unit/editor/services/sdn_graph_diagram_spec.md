@@ -418,7 +418,7 @@ expect(graph.nodes[2].shape).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -428,6 +428,8 @@ val html = sdn_graph_render_html(graph)
 expect(path).to_equal("M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30")
 expect(html).to_contain("data-edge-index=\"0\"")
 expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")
+expect(html).to_contain("data-path-bounds=\"90,30,220,80\"")
+expect(html.split("data-path-bounds=\"90,30,220,80\"").len()).to_equal(3)
 expect(html).to_contain("data-waypoints=\"140x30;200x80\"")
 ```
 

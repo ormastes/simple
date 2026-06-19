@@ -219,6 +219,8 @@ Each rendered connector path has:
 
 - `data-edge-index`: stable edge index in canonical graph order.
 - `data-path`: the exact SVG path string used in `d`.
+- `data-path-bounds`: `min_x,min_y,max_x,max_y` derived from the rendered path
+  points when numeric.
 - `data-kind`: connector kind metadata, also reflected as `sdd-kind-<kind>` for
   non-`normal` kinds.
 - `data-route`, `data-waypoints`, `data-start-anchor`, and `data-end-anchor`:
