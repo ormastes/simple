@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 31 | 31 | 0 | 0 |
+| 32 | 32 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -330,6 +330,24 @@ val graph = sdn_graph_parse("graph: unsafe-kind\nA: A x: 10 y: 20 width: 80 heig
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("data-kind=\"bad&amp;quot;onclick=1\"")
 expect(html.contains("sdd-kind-bad")).to_be(false)
+```
+
+</details>
+
+#### drops unsafe parsed style class tokens from rendered HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: unsafe-style\nA: A @panel @bad&quot;onclick=1 x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c @primary @bad&quot;edge=1 route: simple start: right end: left")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("sdn-css-panel")
+expect(html).to_contain("sdn-css-primary")
+expect(html.contains("sdn-css-bad")).to_be(false)
 ```
 
 </details>
@@ -1107,8 +1125,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 31 |
-| Active scenarios | 31 |
+| Total scenarios | 32 |
+| Active scenarios | 32 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
