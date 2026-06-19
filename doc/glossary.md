@@ -1,6 +1,7 @@
 # Key words and key points
 
 ## Sub-Glossaries
+- [SDD Diagram Draw](#sdd-diagram-draw) / [SDD (Simple Diagram Document)](#sdd-simple-diagram-document) — Office Draw and Markdown diagram format, stored as `.sdd.sdn` and backed by SDN graph data with geometry, connectors, canvas metadata, grouping, and style rules.
 - [Simple Feature Module (SFM)](simple_feature_module_glossary.md) — `.sfm` feature-module format, layers, DI/AOP, security level, profiles, VERSION.md ([tldr](simple_feature_module_glossary_tldr.md)).
 
 ## Calc Display-Safe Recalc
