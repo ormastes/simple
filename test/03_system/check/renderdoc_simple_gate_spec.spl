@@ -27,7 +27,8 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 - Missing or failed Simple RenderDoc evidence produces typed non-pass gate
   evidence.
 - Passing gate evidence requires Simple backend, `vulkan-engine2d` scene, pass
-  status, `RDOC` magic, and an existing `.rdc` file.
+  status, `RDOC` magic, an existing `.rdc` file, and the canonical
+  `src/app/test/renderdoc_vulkan_capture.spl` probe program.
 """
 
 # @tag: system, gpu, renderdoc, simple, vulkan, evidence
@@ -59,6 +60,7 @@ describe "RenderDoc Simple gate":
         expect(evidence).to_contain("rdoc_simple_gate_source_env=")
         expect(evidence).to_contain("rdoc_simple_gate_required_backend=simple")
         expect(evidence).to_contain("rdoc_simple_gate_required_scene=vulkan-engine2d")
+        expect(evidence).to_contain("rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl")
         expect(evidence).to_contain("rdoc_simple_gate_required_status=pass")
         expect(evidence).to_contain("rdoc_simple_gate_required_magic=RDOC")
 
@@ -66,12 +68,14 @@ describe "RenderDoc Simple gate":
         val reason = _value_of(evidence, "rdoc_simple_gate_reason")
         val backend = _value_of(evidence, "rdoc_simple_gate_backend")
         val scene = _value_of(evidence, "rdoc_simple_gate_scene")
+        val program = _value_of(evidence, "rdoc_simple_gate_program")
         val capture_status = _value_of(evidence, "rdoc_simple_gate_capture_status")
         val magic = _value_of(evidence, "rdoc_simple_gate_capture_magic")
 
         if status == "pass":
             expect(backend).to_equal("simple")
             expect(scene).to_equal("vulkan-engine2d")
+            expect(program).to_contain("src/app/test/renderdoc_vulkan_capture.spl")
             expect(capture_status).to_equal("pass")
             expect(magic).to_equal("RDOC")
         else:
@@ -87,4 +91,14 @@ describe "RenderDoc Simple gate":
         expect(evidence).to_contain("rdoc_simple_gate_reason=pass")
         expect(evidence).to_contain("rdoc_simple_gate_backend=simple")
         expect(evidence).to_contain("rdoc_simple_gate_scene=vulkan-engine2d")
+        expect(evidence).to_contain("rdoc_simple_gate_program=src/app/test/renderdoc_vulkan_capture.spl")
         expect(evidence).to_contain("rdoc_simple_gate_capture_magic=RDOC")
+
+    it "rejects Simple captures from the wrong probe program":
+        val command = "rm -rf build/test-renderdoc-simple-gate-wrong-program && mkdir -p build/test-renderdoc-simple-gate-wrong-program/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/other_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-wrong-program/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-wrong-program/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-wrong-program/out REPORT_PATH=build/test-renderdoc-simple-gate-wrong-program/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+        val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = rt_file_read_text("build/test-renderdoc-simple-gate-wrong-program/out/evidence.env") ?? ""
+        expect(evidence).to_contain("rdoc_simple_gate_status=fail")
+        expect(evidence).to_contain("rdoc_simple_gate_reason=unexpected-program")

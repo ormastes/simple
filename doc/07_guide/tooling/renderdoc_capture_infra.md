@@ -94,10 +94,11 @@ The current canonical evidence contract is:
 - Simple in-application path:
   `build/renderdoc/canonical-probe/simple/evidence.env` must report
   `rdoc_backend=simple`, `rdoc_scene=vulkan-engine2d`,
+  `rdoc_program=src/app/test/renderdoc_vulkan_capture.spl`,
   `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`, and an existing
   `.rdc` file. The aggregate RenderDoc goal requires this through
   `scripts/check/check-renderdoc-simple-gate.shs`; if that env/file is missing
-  or not the Simple Vulkan Engine2D path, the GUI RenderDoc goal remains
+  or not the Simple Vulkan Engine2D probe path, the GUI RenderDoc goal remains
   incomplete.
 - Original Chrome HTML/CSS path:
   `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
@@ -107,12 +108,17 @@ The current canonical evidence contract is:
   failed capture or missing env is not completion evidence.
 - Electron Chromium HTML/CSS path:
   `build/renderdoc/canonical-probe/electron-html/evidence.env` should report
-  `rdoc_backend=electron`, `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`,
+  `rdoc_backend=electron`, `rdoc_scene=html-css-electron`,
+  `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`,
+  `rdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`,
+  `rdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js`,
   `rdoc_chromium_requested_api=vulkan`,
-  `rdoc_chromium_requested_angle=vulkan`, and an existing `.rdc` file when
-  proving the Electron-backed GUI path. The GUI RenderDoc feature audit requires
-  this through `scripts/check/check-renderdoc-electron-html-gate.shs` before it
-  can report `pass`.
+  `rdoc_chromium_requested_angle=vulkan`, launch flags containing
+  `--enable-features=Vulkan` and `--use-angle=vulkan`, and an existing `.rdc`
+  file when proving the Electron-backed GUI path. The GUI RenderDoc feature
+  audit requires this through
+  `scripts/check/check-renderdoc-electron-html-gate.shs` before it can report
+  `pass`.
 - Production GUI/web renderer parity path:
   `build/production_gui_web_renderer_parity_evidence/evidence.env` must report
   the top-level parity status and component statuses as `pass`, including the
@@ -173,12 +179,13 @@ The gate passes only when the source evidence contains:
 
 - `rdoc_backend=simple`
 - `rdoc_scene=vulkan-engine2d`
+- `rdoc_program` ending in `src/app/test/renderdoc_vulkan_capture.spl`
 - `rdoc_capture_status=pass`
 - `rdoc_capture_magic=RDOC`
 - an existing `.rdc` path in `rdoc_capture_file`
 
-Missing RenderDoc, non-Simple backend evidence, wrong scene metadata, or a
-missing `.rdc` file all keep the gate out of `pass`.
+Missing RenderDoc, non-Simple backend evidence, wrong scene/program metadata,
+or a missing `.rdc` file all keep the gate out of `pass`.
 
 ## Electron Chromium/Vulkan Gate
 

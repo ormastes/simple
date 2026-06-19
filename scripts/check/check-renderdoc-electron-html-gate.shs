@@ -27,6 +27,7 @@ write_evidence() {
         echo "rdoc_electron_html_gate_reason=$reason"
         echo "rdoc_electron_html_gate_source_env=$SOURCE_ENV"
         echo "rdoc_electron_html_gate_backend=${backend:-}"
+        echo "rdoc_electron_html_gate_scene=${scene:-}"
         echo "rdoc_electron_html_gate_capture_status=${capture_status:-}"
         echo "rdoc_electron_html_gate_capture_reason=${capture_reason:-}"
         echo "rdoc_electron_html_gate_capture_file=${capture_file:-}"
@@ -39,10 +40,15 @@ write_evidence() {
         echo "rdoc_electron_html_gate_requested_features=${requested_features:-}"
         echo "rdoc_electron_html_gate_launch_flags=${launch_flags:-}"
         echo "rdoc_electron_html_gate_required_backend=electron"
+        echo "rdoc_electron_html_gate_required_scene=html-css-electron"
         echo "rdoc_electron_html_gate_required_status=pass"
         echo "rdoc_electron_html_gate_required_magic=RDOC"
         echo "rdoc_electron_html_gate_required_api=vulkan"
         echo "rdoc_electron_html_gate_required_angle=vulkan"
+        echo "rdoc_electron_html_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html"
+        echo "rdoc_electron_html_gate_required_capture_script_suffix=tools/electron-live-bitmap/capture_html_argb.js"
+        echo "rdoc_electron_html_gate_required_launch_flag_enable_features=--enable-features=Vulkan"
+        echo "rdoc_electron_html_gate_required_launch_flag_use_angle=--use-angle=vulkan"
     } >"$OUT_ENV"
     {
         echo "# RenderDoc Electron HTML Gate"
@@ -51,6 +57,7 @@ write_evidence() {
         echo "- reason: $reason"
         echo "- source evidence: $SOURCE_ENV"
         echo "- backend: ${backend:-}"
+        echo "- scene: ${scene:-}"
         echo "- capture status: ${capture_status:-}"
         echo "- capture reason: ${capture_reason:-}"
         echo "- capture file: ${capture_file:-}"
@@ -66,6 +73,7 @@ write_evidence() {
 
 if [ ! -s "$SOURCE_ENV" ]; then
     backend=""
+    scene=""
     capture_status=""
     capture_reason="missing-source-evidence"
     capture_file=""
@@ -82,6 +90,7 @@ if [ ! -s "$SOURCE_ENV" ]; then
 fi
 
 backend="$(value_of rdoc_backend "$SOURCE_ENV")"
+scene="$(value_of rdoc_scene "$SOURCE_ENV")"
 capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
 capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
 capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
@@ -94,12 +103,53 @@ requested_angle="$(value_of rdoc_chromium_requested_angle "$SOURCE_ENV")"
 requested_features="$(value_of rdoc_chromium_requested_features "$SOURCE_ENV")"
 launch_flags="$(value_of rdoc_chromium_launch_flags "$SOURCE_ENV")"
 
+case "$html_path" in
+    *test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html)
+        html_path_matches="1"
+        ;;
+    *)
+        html_path_matches="0"
+        ;;
+esac
+
+case "$capture_script" in
+    *tools/electron-live-bitmap/capture_html_argb.js)
+        capture_script_matches="1"
+        ;;
+    *)
+        capture_script_matches="0"
+        ;;
+esac
+
+case " $launch_flags " in
+    *" --enable-features=Vulkan "*)
+        launch_flags_enable_features="1"
+        ;;
+    *)
+        launch_flags_enable_features="0"
+        ;;
+esac
+
+case " $launch_flags " in
+    *" --use-angle=vulkan "*)
+        launch_flags_use_angle="1"
+        ;;
+    *)
+        launch_flags_use_angle="0"
+        ;;
+esac
+
 if [ "$backend" = "electron" ] \
+    && [ "$scene" = "html-css-electron" ] \
     && [ "$capture_status" = "pass" ] \
     && [ "$capture_magic" = "RDOC" ] \
     && [ -s "$capture_file" ] \
     && [ "$requested_api" = "vulkan" ] \
-    && [ "$requested_angle" = "vulkan" ]; then
+    && [ "$requested_angle" = "vulkan" ] \
+    && [ "$html_path_matches" = "1" ] \
+    && [ "$capture_script_matches" = "1" ] \
+    && [ "$launch_flags_enable_features" = "1" ] \
+    && [ "$launch_flags_use_angle" = "1" ]; then
     write_evidence "pass" "pass"
     exit 0
 fi
@@ -108,6 +158,8 @@ if [ "$capture_status" = "" ]; then
     write_evidence "unavailable" "missing-capture-status"
 elif [ "$backend" != "electron" ]; then
     write_evidence "fail" "unexpected-backend"
+elif [ "$scene" != "html-css-electron" ]; then
+    write_evidence "fail" "unexpected-scene"
 elif [ "$capture_status" != "pass" ]; then
     write_evidence "fail" "${capture_reason:-capture-not-pass}"
 elif [ "$capture_magic" != "RDOC" ]; then
@@ -118,6 +170,14 @@ elif [ "$requested_api" != "vulkan" ]; then
     write_evidence "fail" "missing-vulkan-api"
 elif [ "$requested_angle" != "vulkan" ]; then
     write_evidence "fail" "missing-vulkan-angle"
+elif [ "$html_path_matches" != "1" ]; then
+    write_evidence "fail" "unexpected-html-fixture"
+elif [ "$capture_script_matches" != "1" ]; then
+    write_evidence "fail" "unexpected-capture-script"
+elif [ "$launch_flags_enable_features" != "1" ]; then
+    write_evidence "fail" "missing-vulkan-feature-flag"
+elif [ "$launch_flags_use_angle" != "1" ]; then
+    write_evidence "fail" "missing-vulkan-angle-flag"
 else
     write_evidence "fail" "electron-renderdoc-gate-failed"
 fi

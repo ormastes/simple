@@ -280,6 +280,15 @@ The gate passes only for original RenderDoc+Chrome evidence with
 `test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`, and a
 real `.rdc` file.
 
+The Simple-side RenderDoc gate is also canonical: it accepts only
+`rdoc_backend=simple`, `rdoc_scene=vulkan-engine2d`, the
+`src/app/test/renderdoc_vulkan_capture.spl` probe program, pass status,
+`RDOC` magic, and a real `.rdc` file. The Electron-side gate accepts only
+`rdoc_backend=electron`, `rdoc_scene=html-css-electron`, the generated HTML/CSS
+RenderDoc fixture, the `tools/electron-live-bitmap/capture_html_argb.js`
+capture script, Vulkan requested API/ANGLE fields, Vulkan launch flags, and a
+real `.rdc` file.
+
 ## macOS Portability Probe
 
 macOS is a separate portability investigation lane, not a replacement for the
