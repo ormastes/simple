@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 97 | 97 | 0 | 0 |
+| 98 | 98 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1700,6 +1700,25 @@ expect(edit_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed SDD add edge route fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val route_result = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|curve||left|right\ngraph: Edge\nA: A\nB: B")
+val waypoint_result = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|orthogonal|60xbad|left|right\ngraph: Edge\nA: A\nB: B")
+val anchor_result = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|orthogonal|60x10|side|right\ngraph: Edge\nA: A\nB: B")
+expect(route_result.reason).to_equal("invalid-args")
+expect(waypoint_result.reason).to_equal("invalid-args")
+expect(anchor_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank SDD edge label point coordinates
 
 <details>
@@ -1807,8 +1826,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 97 |
-| Active scenarios | 97 |
+| Total scenarios | 98 |
+| Active scenarios | 98 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
