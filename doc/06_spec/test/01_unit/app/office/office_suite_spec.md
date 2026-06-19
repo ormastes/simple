@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 74 | 74 | 0 | 0 |
+| 75 | 75 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1371,6 +1371,22 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank UI style-token action target ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-style-token-edit", "   |primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### replaces the first office search match
 
 <details>
@@ -1407,8 +1423,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 74 |
-| Active scenarios | 74 |
+| Total scenarios | 75 |
+| Active scenarios | 75 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

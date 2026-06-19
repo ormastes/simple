@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 575 lines folded for reproduction.
+Runnable source: 577 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -504,6 +504,7 @@ val ui_layer_action = office_action_dispatch("ui-layer-edit", "button|controls|9
 val blank_ui_layer_action = office_action_dispatch("ui-layer-edit", "   |controls|9\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_read_action = office_action_dispatch("ui-style-token-read", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button|primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val blank_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "   |primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_inspect_action = office_action_dispatch("ui-inspect-node", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|A_copy|20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20")
@@ -621,6 +622,7 @@ expect(ui_layer_action.output).to_contain("data-z-index=\"9\"")
 expect(blank_ui_layer_action.reason).to_equal("invalid-args")
 expect(ui_style_read_action.output).to_equal("primary")
 expect(ui_style_edit_action.output).to_contain("office-ui-css-accent")
+expect(blank_ui_style_edit_action.reason).to_equal("invalid-args")
 expect(ui_inspect_action.output).to_contain("z_index=0")
 expect(ui_inspect_action.output).to_contain("x=16")
 expect(ui_inspect_action.output).to_contain("component=action")
