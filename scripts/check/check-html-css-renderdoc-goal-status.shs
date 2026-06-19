@@ -31,6 +31,26 @@ if [ "${HTML_CSS_GOAL_RUN_TRACEABILITY:-0}" = "1" ]; then
     fi
 fi
 
+rendering_manifest_status="unavailable"
+rendering_manifest_reason="missing-rendering-manifest-traceability-check"
+if [ -x "scripts/check/check-html-css-rendering-manifest-traceability.shs" ]; then
+    if BUILD_DIR="$BUILD_DIR/rendering-manifest" \
+        REPORT_PATH="$BUILD_DIR/rendering-manifest/report.md" \
+        sh scripts/check/check-html-css-rendering-manifest-traceability.shs >"$BUILD_DIR/rendering-manifest.out" 2>&1; then
+        rendering_manifest_status="$(value_of html_css_rendering_manifest_traceability_status "$BUILD_DIR/rendering-manifest/evidence.env")"
+        rendering_manifest_reason="$(value_of html_css_rendering_manifest_traceability_reason "$BUILD_DIR/rendering-manifest/evidence.env")"
+    else
+        rendering_manifest_status="$(value_of html_css_rendering_manifest_traceability_status "$BUILD_DIR/rendering-manifest/evidence.env")"
+        rendering_manifest_reason="$(value_of html_css_rendering_manifest_traceability_reason "$BUILD_DIR/rendering-manifest/evidence.env")"
+    fi
+fi
+if [ "$rendering_manifest_status" = "" ]; then
+    rendering_manifest_status="fail"
+fi
+if [ "$rendering_manifest_reason" = "" ]; then
+    rendering_manifest_reason="rendering-manifest-traceability-check-failed"
+fi
+
 simple_env="${RDOC_SIMPLE_EVIDENCE_ENV:-build/renderdoc/canonical-probe/simple/evidence.env}"
 simple_capture_status="$(value_of rdoc_capture_status "$simple_env")"
 simple_capture_magic="$(value_of rdoc_capture_magic "$simple_env")"
@@ -87,12 +107,15 @@ fi
 overall_status="fail"
 overall_reason="original-renderdoc-evidence-missing"
 if { [ "$traceability_status" = "pass" ] || [ "$traceability_status" = "recorded" ]; } \
+    && [ "$rendering_manifest_status" = "pass" ] \
     && [ "$simple_status" = "pass" ] \
     && [ "$external_status" = "pass" ]; then
     overall_status="pass"
     overall_reason="pass"
 elif [ "$traceability_status" = "fail" ]; then
     overall_reason="$traceability_reason"
+elif [ "$rendering_manifest_status" != "pass" ]; then
+    overall_reason="$rendering_manifest_reason"
 elif [ "$simple_status" != "pass" ]; then
     overall_reason="$simple_reason"
 fi
@@ -102,6 +125,9 @@ fi
     echo "html_css_renderdoc_goal_reason=$overall_reason"
     echo "html_css_traceability_status=$traceability_status"
     echo "html_css_traceability_reason=$traceability_reason"
+    echo "html_css_rendering_manifest_traceability_status=$rendering_manifest_status"
+    echo "html_css_rendering_manifest_traceability_reason=$rendering_manifest_reason"
+    echo "html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs"
     echo "simple_renderdoc_status=$simple_status"
     echo "simple_renderdoc_reason=$simple_reason"
     echo "simple_renderdoc_evidence_env=$simple_env"
@@ -122,6 +148,7 @@ fi
     echo "- status: $overall_status"
     echo "- reason: $overall_reason"
     echo "- HTML/CSS traceability: $traceability_status ($traceability_reason)"
+    echo "- HTML/CSS rendering manifest traceability: $rendering_manifest_status ($rendering_manifest_reason)"
     echo "- Simple RenderDoc: $simple_status ($simple_reason)"
     echo "- External RenderDoc: $external_status ($external_reason)"
     echo "- macOS portability: $macos_status ($macos_reason)"

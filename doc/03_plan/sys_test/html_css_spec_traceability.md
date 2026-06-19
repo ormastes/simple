@@ -106,6 +106,19 @@ goal status. It may report `incomplete` while coverage is structurally mapped
 but durable `.rdc` evidence is missing from the local `build/` tree or the
 external Chrome/Vulkan gate has not passed.
 
+HTML/CSS rendering manifest traceability command:
+
+```sh
+sh scripts/check/check-html-css-rendering-manifest-traceability.shs
+```
+
+This lightweight gate parses the 50-case Electron/Simple layout capture
+manifest and the actual fixture HTML emitted by
+`scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs`. It proves
+that all 105 WHATWG HTML elements and all 62 implemented Simple Web CSS
+properties are covered by rendered fixture HTML, not only by text-only SSpec
+assignment.
+
 Already completed:
 
 - HTML inventory traceability exists for the current WHATWG element set used by
@@ -133,6 +146,12 @@ Already completed:
   compositor-rounding case, and 0 hard failures. The status gate still remains
   incomplete until local Simple RenderDoc and original Chrome/Vulkan RenderDoc
   `.rdc` evidence exist.
+- 2026-06-19 follow-up: the rendering manifest traceability gate passes with
+  105/105 HTML elements, 62/62 implemented CSS properties, and all 50 manifest
+  scenes mapped to fixture HTML. The `border_side_matrix` and
+  `flex_grow_shrink_wrap_matrix` exact bitmap scenes were re-run after adding
+  missing longhand border and `flex` shorthand coverage; both remained exact
+  with zero mismatches.
 
 Do not repeat these completed checks unless a related file changed:
 

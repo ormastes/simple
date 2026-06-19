@@ -75,6 +75,8 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 
 - The gate writes stable `html_css_*`, `simple_renderdoc_*`,
   `external_renderdoc_*`, and `macos_portability_*` evidence keys.
+- The gate includes the rendering manifest traceability proof for the 50-case
+  Electron/Simple layout fixture matrix.
 - Simple RenderDoc evidence is accepted only when `.rdc` magic is `RDOC`.
 - The full goal remains failed until the original external RenderDoc gate
   passes.
@@ -105,7 +107,7 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -118,6 +120,8 @@ step("Read the current evidence contract emitted by the gate")
 val evidence = rt_file_read_text("build/test-html-css-renderdoc-goal-status/evidence.env") ?? ""
 expect(evidence).to_contain("html_css_renderdoc_goal_status=")
 expect(evidence).to_contain("html_css_traceability_status=")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_status=pass")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs")
 expect(evidence).to_contain("simple_renderdoc_status=")
 expect(evidence).to_contain("external_renderdoc_status=")
 expect(evidence).to_contain("macos_portability_status=")
@@ -148,6 +152,7 @@ else:
 step("Verify the operator report was written")
 val report = rt_file_read_text("build/test-html-css-renderdoc-goal-status/report.md") ?? ""
 expect(report).to_contain("# HTML/CSS RenderDoc Goal Status")
+expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pass)")
 ```
 
 </details>
@@ -162,7 +167,7 @@ expect(report).to_contain("# HTML/CSS RenderDoc Goal Status")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -175,6 +180,7 @@ step("Assert the aggregate gate accepts only the complete controlled evidence se
 val evidence = rt_file_read_text("build/test-html-css-renderdoc-goal-status-pass/out/evidence.env") ?? ""
 expect(evidence).to_contain("html_css_renderdoc_goal_status=pass")
 expect(evidence).to_contain("html_css_renderdoc_goal_reason=pass")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_status=pass")
 expect(evidence).to_contain("simple_renderdoc_status=pass")
 expect(evidence).to_contain("external_renderdoc_status=pass")
 expect(evidence).to_contain("required_external_backend=original")

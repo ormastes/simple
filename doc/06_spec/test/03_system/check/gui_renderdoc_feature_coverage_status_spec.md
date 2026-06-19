@@ -77,6 +77,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - The audit writes stable `gui_renderdoc_feature_coverage_*` evidence keys.
 - Every `WidgetKind` wire value has an HTML renderer dispatch entry.
 - The Electron Simple Web layout manifest remains visible with its 50 cases.
+- The HTML/CSS rendering manifest traceability gate is included and passing.
 - The audit includes current production parity evidence status when present.
 - The audit reports the active RenderDoc goal, Simple `.rdc`, and external
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
@@ -102,13 +103,15 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: flex_column_cases equals `1`
    - Expected: flex_wrap_reverse_cases equals `1`
    - Expected: flex_safe_unsafe_center_cases equals `1`
+   - Expected: rendering_manifest_status equals `pass`
+   - Expected: rendering_manifest_reason equals `pass`
 - Verify the restart-audit report was written
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -124,6 +127,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=")
 expect(evidence).to_contain("widget_kind_source=src/lib/common/ui/widget_kind.spl")
 expect(evidence).to_contain("widget_html_renderer_source=src/app/ui.render/html_widgets.spl")
 expect(evidence).to_contain("electron_layout_manifest=tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
 expect(evidence).to_contain("renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs")
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
@@ -140,6 +144,8 @@ val flex_justify_variant_cases = _value_of(evidence, "electron_layout_manifest_t
 val flex_column_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_flex_column_case_count")
 val flex_wrap_reverse_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_flex_wrap_reverse_case_count")
 val flex_safe_unsafe_center_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_flex_safe_unsafe_center_case_count")
+val rendering_manifest_status = _value_of(evidence, "html_css_rendering_manifest_traceability_status")
+val rendering_manifest_reason = _value_of(evidence, "html_css_rendering_manifest_traceability_reason")
 val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
 val simple_status = _value_of(evidence, "simple_renderdoc_status")
 val external_status = _value_of(evidence, "external_renderdoc_status")
@@ -157,6 +163,8 @@ expect(flex_justify_variant_cases).to_equal("1")
 expect(flex_column_cases).to_equal("1")
 expect(flex_wrap_reverse_cases).to_equal("1")
 expect(flex_safe_unsafe_center_cases).to_equal("1")
+expect(rendering_manifest_status).to_equal("pass")
+expect(rendering_manifest_reason).to_equal("pass")
 expect(renderdoc_status.len()).to_be_greater_than(0)
 expect(simple_status.len()).to_be_greater_than(0)
 expect(external_status.len()).to_be_greater_than(0)
@@ -166,6 +174,7 @@ val report = file_read("build/test-gui-renderdoc-feature-coverage-status/report.
 expect(report).to_contain("# GUI RenderDoc Feature Coverage Status")
 expect(report).to_contain("- widget HTML renderer dispatch:")
 expect(report).to_contain("- Electron layout manifest cases: 50")
+expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pass)")
 expect(report).to_contain("- Electron Chromium RenderDoc:")
 ```
 
