@@ -211,7 +211,10 @@ The IDE capability registry must also carry non-empty `feature_check` marker tex
 for every capability so plugin metadata cannot silently drift from the report.
 Plugin manifest and LLM catalog entries must keep non-empty libraries/modules,
 evidence keys, and action/function names; duplicate app, action, or function
-symbols are invalid. Every LLM catalog action must be recognized by
+symbols are invalid. The Office plugin registry is derived from the LLM catalog
+and registers Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, and
+Counter as separate plugin entries over the shared Markdown, HTML/CSS, and SDN
+substrates. Every LLM catalog action must be recognized by
 `office_action_dispatch`; blank input may fail with `invalid-args`, but never
 `unknown-action`. IDE manifest entries must advertise exactly
 `ide_capability_<capability>` and `ide_feature_check_<capability>` symbols for

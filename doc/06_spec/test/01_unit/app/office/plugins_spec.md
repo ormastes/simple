@@ -1,6 +1,6 @@
 # Plugins Specification
 
-> _Word, PPT, and Excel are registered as distinct plugin entries._
+> _Each cataloged Office app is registered as a distinct plugin entry._
 
 <!-- sdn-diagram:id=plugins_spec.arch -->
 <details class="sdn-source">
@@ -37,10 +37,10 @@ plugins_spec -> app
 
 ## Scenarios
 
-### office plugins: three separate plugins on the shared module
-_Word, PPT, and Excel are registered as distinct plugin entries._
+### office plugins: suite plugins on shared substrates
+_Each cataloged Office app is registered as a distinct plugin entry._
 
-#### registers exactly three office plugins
+#### registers each cataloged office app
 
 <details>
 <summary>Executable SSpec</summary>
@@ -49,24 +49,30 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(office_plugin_names().len()).to_equal(3)
+expect(office_plugin_names().len()).to_equal(9)
 ```
 
 </details>
 
-#### names the word, ppt, and excel plugins
+#### names the document, design, data, math, and utility plugins
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val names = office_plugin_names()
-expect(names).to_contain("office-word")
-expect(names).to_contain("office-ppt")
-expect(names).to_contain("office-excel")
+expect(names).to_contain("office-markdown")
+expect(names).to_contain("office-writer")
+expect(names).to_contain("office-calc")
+expect(names).to_contain("office-impress")
+expect(names).to_contain("office-draw")
+expect(names).to_contain("office-designer")
+expect(names).to_contain("office-base")
+expect(names).to_contain("office-math")
+expect(names).to_contain("office-counter")
 ```
 
 </details>
@@ -83,9 +89,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # plugin_count is the number of entries parsed back out of the manifest;
-# equalling the 3 input entries proves the manifest round-trips.
+# equalling the 9 input entries proves the manifest round-trips.
 val probe = office_plugin_manifest_probe()
-expect(probe.plugin_count).to_equal(3)
+expect(probe.plugin_count).to_equal(9)
 ```
 
 </details>
@@ -110,15 +116,18 @@ expect(err).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = office_plugin_manifest_probe()
 val manifest = probe.manifest_text
-expect(manifest).to_contain("office-word")
-expect(manifest).to_contain("office-ppt")
-expect(manifest).to_contain("office-excel")
+expect(manifest).to_contain("office-writer")
+expect(manifest).to_contain("office-draw")
+expect(manifest).to_contain("office-designer")
+expect(manifest).to_contain("render-writer-markdown-html")
+expect(manifest).to_contain("render-sdd-html-with-selection")
+expect(manifest).to_contain("render-ui-html")
 ```
 
 </details>
@@ -169,7 +178,7 @@ expect(office_plugin_validate([word, ppt])).to_equal("manifest error: duplicate 
 ## Overview
 
 Tests covering:
-- office plugins: three separate plugins on the shared module
+- office plugins: suite plugins on shared substrates
 - office plugins: manifest round-trips and validates
 
 ## Scenario Summary
