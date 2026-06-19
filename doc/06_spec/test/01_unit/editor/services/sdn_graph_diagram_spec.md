@@ -296,14 +296,16 @@ expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: style\ncss base:\n    fill: #ffffff\n    stroke: #334455\n    radius: 8\ncss accent:\n    extends: base\n    text: #111111\n    shape: person\ncss primary:\n    target: edge\n    stroke: #224466\n    stroke_width: 3\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20\nB: Beta x: 120 y: 0 width: 80 height: 20\nA -> B: link @primary route: simple start: right end: left")
+val graph = sdn_graph_parse("graph: style\ncss base:\n    fill: #ffffff\n    stroke: #334455\n    stroke_width: 2\n    radius: 8\ncss accent:\n    extends: base\n    text: #111111\n    shape: person\ncss primary:\n    target: edge\n    stroke: #224466\n    stroke_width: 3\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20\nB: Beta x: 120 y: 0 width: 80 height: 20\nA -> B: link @primary route: simple start: right end: left")
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("background-color:#ffffff")
 expect(html).to_contain("border-color:#334455")
+expect(html).to_contain("border-width:2px")
+expect(html).to_contain("border-style:solid")
 expect(html).to_contain("border-radius:8")
 expect(html).to_contain("color:#111111")
 expect(html).to_contain("box-shadow:inset 0 16px 0 rgba(15,23,42,0.10)")
@@ -315,7 +317,7 @@ expect(sdn_graph_to_canonical_sdn(updated.graph)).to_contain("accent, fill, #eee
 expect(sdn_graph_render_html(updated.graph)).to_contain("background-color:#eeeeee")
 val reparsed = sdn_graph_parse(sdn_graph_to_canonical_sdn(updated.graph))
 expect(reparsed.css_defs.len()).to_equal(4)
-expect(reparsed.styles.len()).to_equal(7)
+expect(reparsed.styles.len()).to_equal(8)
 expect(sdn_graph_render_html(reparsed)).to_contain("background-color:#eeeeee")
 val inspected = sdn_graph_inspect_style_rule(reparsed, "accent", "fill")
 val missing = sdn_graph_inspect_style_rule(reparsed, "accent", "opacity")
