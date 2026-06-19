@@ -136,8 +136,8 @@ the updated table text.
 
 Calc and Impress edit actions use `target_id|expected|replacement` followed by
 the compact `A1=value;B1=value` or `element_id=value;...` body. `sheet-edit`
-rejects malformed, invalid, or duplicate source cell refs. `slide-edit` rejects
-blank target ids and malformed, missing, or duplicate source element ids.
+rejects blank target refs and malformed, invalid, or duplicate source cell refs.
+`slide-edit` rejects blank target ids and malformed, missing, or duplicate source element ids.
 `sheet-edit` and `slide-edit` return the updated target assignment and reject stale
 values with deterministic diffs.
 

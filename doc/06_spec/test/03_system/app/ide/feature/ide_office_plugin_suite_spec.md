@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 563 lines folded for reproduction.
+Runnable source: 565 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -479,6 +479,7 @@ val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n#
 val sheet_edit_action = office_action_dispatch("sheet-edit", "A1|old|new\nA1=old")
 val sheet_stale_edit_action = office_action_dispatch("sheet-edit", "A1|missing|new\nA1=old")
 val sheet_duplicate_source_action = office_action_dispatch("sheet-edit", "A1|new|next\nA1=old;A01=new")
+val sheet_blank_target_action = office_action_dispatch("sheet-edit", "   |old|new\nA1=old")
 val slide_edit_action = office_action_dispatch("slide-edit", "title|Old|New\ntitle=Old")
 val slide_stale_edit_action = office_action_dispatch("slide-edit", "title|Missing|New\ntitle=Old")
 val slide_duplicate_source_action = office_action_dispatch("slide-edit", "title|New|Next\ntitle=Old;title=New")
@@ -581,6 +582,7 @@ expect(ppt_action.output).to_contain("data-format=\"markdown-ppt\"")
 expect(sheet_edit_action.output).to_equal("A1=new")
 expect(sheet_edit_action.reason).to_equal("updated")
 expect(sheet_duplicate_source_action.reason).to_equal("duplicate-source-ref")
+expect(sheet_blank_target_action.reason).to_equal("invalid-args")
 expect(sheet_stale_edit_action.reason).to_equal("stale-cell")
 expect(slide_edit_action.output).to_equal("title=New")
 expect(slide_edit_action.reason).to_equal("updated")
