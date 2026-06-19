@@ -394,13 +394,14 @@ expect(guide).to_contain("handle_meta=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val guide = file_read("doc/07_guide/app/ide_office_plugin_suite.md")
 expect(guide).to_contain("visible `data-resize-handle` corner handles tagged with `data-node`")
 expect(guide).to_contain("`data-node-index`")
+expect(guide).to_contain("Designer has `selected-resize-handles`")
 ```
 
 </details>
