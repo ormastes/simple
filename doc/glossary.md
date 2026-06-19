@@ -603,7 +603,7 @@ files use `.sdd.sdn`. SDD keeps compact graph syntax and adds diagram-editor
 metadata: node shape, x/y position, width/height, layer, document/render order, connector route,
 parent/container membership for draw.io-like groups, node duplication with
 offset geometry, waypoints, start/end anchors, rendered endpoint handle
-coordinates, connector segment counts, connector label points, draw canvas/page metadata,
+coordinates, connector segment counts/endpoints, connector label points, draw canvas/page metadata,
 rendered SVG connector paths, reusable CSS labels, connector duplication, style-rule delete/inspection, and resolved style-table paint
 rules, direct node create/label/shape/style/layer/role/parent/geometry/canvas/delete and connector
 create/label/style/kind/reconnect/delete edit operations, transient
