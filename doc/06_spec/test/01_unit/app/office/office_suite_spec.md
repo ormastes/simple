@@ -44,7 +44,7 @@ Office suite unit specification.
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `test/01_unit/app/office/office_suite_spec.spl` |
+| Source | `/tmp/simple-office-next2/test/01_unit/app/office/office_suite_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
@@ -507,12 +507,13 @@ expect(result.reason).to_equal("unknown-action")
 
 - RecentFile
    - Expected: ui.root_id equals `root`
+   - Expected: ui.title_text() equals `LibreOffice`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -521,6 +522,7 @@ val recent = [
 ]
 val ui = build_launcher_ui(recent)
 expect(ui.root_id).to_equal("root")
+expect(ui.title_text()).to_equal("LibreOffice")
 ```
 
 </details>

@@ -387,3 +387,7 @@ possible so they are runner-verifiable.
   `target_id|expected|replacement` followed by compact source bodies, return
   updated assignments, and reject stale values with existing deterministic
   diffs.
+- 2026-06-19 dev: Aligned the launcher-visible product surface with the
+  LibreOffice suite name. The launcher now presents Writer, Calc, and Impress
+  labels plus a LibreOffice window/status title while preserving existing
+  `open_word`/`open_sheets`/`open_slides` compatibility actions.

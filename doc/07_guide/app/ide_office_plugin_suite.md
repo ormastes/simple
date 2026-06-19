@@ -26,6 +26,10 @@ sheets, dashboard, DB admin, and LibreOffice-like app catalog checks through
 Markdown is the product source format for both Writer and PPT/Impress. HTML is
 the generated render target.
 
+The launcher-visible product name is `LibreOffice`; cards should use the
+LibreOffice app names Writer, Calc, and Impress even while the legacy compatible
+actions remain `open_word`, `open_sheets`, and `open_slides`.
+
 Markdown GUI rendering must use `wysiwyg_preview_document_html`, not a bare
 preview pane. The document helper owns the stable `.wysiwyg-preview` CSS wrapper
 and the escaped styled HTML generated from source lines.
