@@ -151,7 +151,8 @@ horizontal/vertical child placement from integer gap/padding metadata, and
 parent/constraint edits materialize deterministic Figma-like child geometry
 without delegating to a browser layout engine.
 
-Draw/diagram editing should prefer the SDD substrate in
+Draw/diagram editing should use the product-facing name `SDD Diagram Draw` and
+prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
 waypoints, anchors, rendered SVG connector paths, pure edge reroute operations,
 parent/group metadata, transient selection rendering, pure node/edge inspector
@@ -205,7 +206,7 @@ modes:
 
 - Markdown: `css_doc=true escaped=true metadata=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
-- Draw: `html=true route=true select=true inspect=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
+- Draw: `format=sdd name="SDD: Simple Diagram Document" html=true route=true select=true inspect=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with

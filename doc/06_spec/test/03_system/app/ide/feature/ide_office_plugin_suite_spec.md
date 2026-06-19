@@ -99,8 +99,8 @@ markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer 
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
-draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph nodes=3 edges=2 html=true route=true select=true inspect=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
+draw: SDD Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
+  check: draw: sdn_graph format=sdd name="SDD: Simple Diagram Document" nodes=3 edges=2 html=true route=true select=true inspect=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -182,7 +182,8 @@ for cap in ide_capabilities():
 expect(tui_report).to_contain("mode: tui")
 expect(gui_report).to_contain("mode: gui")
 expect(tui_report).to_contain("Presentation Slides")
-expect(tui_report).to_contain("draw: Diagram Draw")
+expect(tui_report).to_contain("draw: SDD Diagram Draw")
+expect(tui_report).to_contain("name=\"SDD: Simple Diagram Document\"")
 expect(tui_report).to_contain("draw: sdn_graph")
 expect(tui_report).to_contain("layout=true")
 expect(tui_report).to_contain("canvas=true")
@@ -250,7 +251,7 @@ val capture = lines.join("\n")
 expect(_max_line_width(lines)).to_be_less_than(121)
 expect(capture).to_contain("markdown: Markdown Preview")
 expect(capture).to_contain("slides: Presentation Slides")
-expect(capture).to_contain("draw: Diagram Draw")
+expect(capture).to_contain("draw: SDD Diagram Draw")
 expect(capture).to_contain("sheets: Spreadsheet")
 expect(capture).to_contain("db-admin: Database Admin")
 expect(capture).to_contain("  tui: tui-panels:")
@@ -294,7 +295,7 @@ expect(tui_lines[23]).to_equal(gui_lines[23])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -327,6 +328,8 @@ expect(probe.connector_path_metadata).to_be(true)
 expect(probe.layout_edit).to_be(true)
 expect(probe.canvas_metadata).to_be(true)
 expect(ide_draw_sanity_summary()).to_contain("path_meta=true")
+expect(ide_draw_sanity_summary()).to_contain("format=sdd")
+expect(ide_draw_sanity_summary()).to_contain("name=\"SDD: Simple Diagram Document\"")
 expect(ide_draw_sanity_summary()).to_contain("layout=true")
 expect(ide_draw_sanity_summary()).to_contain("geometry=true")
 expect(ide_draw_sanity_summary()).to_contain("layer=true")
