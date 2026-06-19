@@ -96,7 +96,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: widget_count equals `43`
    - Expected: missing equals ``
 - Assert the Electron layout manifest and RenderDoc gates remain visible
-   - Expected: manifest_cases equals `46`
+   - Expected: manifest_cases equals `47`
    - Expected: display_none_flow_cases equals `1`
    - Expected: flex_justify_variant_cases equals `1`
    - Expected: flex_column_cases equals `1`
@@ -150,7 +150,7 @@ expect(widget_count).to_equal("43")
 expect(missing).to_equal("")
 
 step("Assert the Electron layout manifest and RenderDoc gates remain visible")
-expect(manifest_cases).to_equal("46")
+expect(manifest_cases).to_equal("47")
 expect(display_none_flow_cases).to_equal("1")
 expect(flex_justify_variant_cases).to_equal("1")
 expect(flex_column_cases).to_equal("1")
@@ -164,7 +164,7 @@ step("Verify the restart-audit report was written")
 val report = file_read("build/test-gui-renderdoc-feature-coverage-status/report.md")
 expect(report).to_contain("# GUI RenderDoc Feature Coverage Status")
 expect(report).to_contain("- widget HTML renderer dispatch:")
-expect(report).to_contain("- Electron layout manifest cases: 46")
+expect(report).to_contain("- Electron layout manifest cases: 47")
 ```
 
 </details>

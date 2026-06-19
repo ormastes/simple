@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 63 | 63 | 0 | 0 |
+| 64 | 64 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -667,6 +667,31 @@ expect(_count_color(pixels, 0xFFA855F7u32)).to_equal(90)
 expect(_count_color(pixels, 0xFF14B8A6u32)).to_equal(110)
 expect(_count_color(pixels, 0xFF84CC16u32)).to_equal(140)
 expect(_count_color(pixels, 0xFF64748Bu32)).to_equal(150)
+```
+
+</details>
+
+#### matches Chrome flow and text-adjacent tag box geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}blockquote,pre,bdi,bdo,hr{display:block;box-sizing:content-box;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}blockquote{background-color:#dbeafe;width:32px;height:10px;padding:2px}pre{background-color:#1d4ed8;width:28px;height:6px;margin-top:2px}bdi{background-color:#22c55e;width:24px;height:5px;margin-top:2px}bdo{background-color:#f59e0b;width:20px;height:5px;margin-top:2px}hr{background-color:#ef4444;width:30px;height:4px;margin-top:2px}.bar{display:block;background-color:#334155;width:26px;height:6px}.tile{display:block;background-color:#14b8a6;width:30px;height:6px;margin-top:2px}.chip{display:block;background-color:#a855f7;width:28px;height:6px;margin-top:2px}</style></head><body><section class='stage'><div class='left'><blockquote></blockquote><pre></pre><bdi></bdi><bdo dir='rtl'></bdo><hr></div><div class='right'><div class='bar'></div><div class='tile'></div><div class='chip'></div></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(4628)
+expect(_count_color(pixels, 0xFFDBEAFEu32)).to_equal(504)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(168)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(120)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(100)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(120)
+expect(_count_color(pixels, 0xFF334155u32)).to_equal(156)
+expect(_count_color(pixels, 0xFF14B8A6u32)).to_equal(180)
+expect(_count_color(pixels, 0xFFA855F7u32)).to_equal(168)
 ```
 
 </details>
@@ -1396,8 +1421,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 63 |
-| Active scenarios | 63 |
+| Total scenarios | 64 |
+| Active scenarios | 64 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
