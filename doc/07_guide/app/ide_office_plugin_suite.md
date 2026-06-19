@@ -285,6 +285,10 @@ modes:
   `ui-constraints-edit` / `ui-parent-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`.
+  `office_llm_action_input_schema(action)` must return a non-empty compact
+  source grammar for every advertised action so agents can call Draw, Designer,
+  Base, Math, Markdown, Writer, Calc, Impress, and Counter without scraping this
+  guide.
 
 ## Verification
 

@@ -28,7 +28,7 @@ llm_catalog_harden_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -147,12 +147,52 @@ expect(office_llm_catalog_validate([_row("Markdown", ["render-md"]), _row("Write
 
 </details>
 
+#### documents an input schema for every shipped action
+
+- missing push
+   - Expected: missing.join(",") equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var missing: [text] = []
+for row in office_llm_feature_catalog():
+    for action in row.actions:
+        if office_llm_action_input_schema(action) == "":
+            missing.push(action)
+expect(missing.join(",")).to_equal("")
+```
+
+</details>
+
+#### documents compact schemas for high-risk edit actions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(office_llm_action_input_schema("ui-layout-edit")).to_contain("node_id|expected_x|expected_y")
+expect(office_llm_action_input_schema("reroute-sdd-connector")).to_contain("edge_index|route|waypoints")
+expect(office_llm_action_input_schema("db-edit")).to_contain("update-where|match_col")
+expect(office_llm_action_input_schema("md-edit")).to_contain("line_no|expected_source|new_source")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
