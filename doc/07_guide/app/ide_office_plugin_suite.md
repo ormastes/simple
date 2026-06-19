@@ -199,8 +199,10 @@ Selection and inspection are read-only derived views: selected renders add
 visible `data-resize-handle` corner handles, and `ui-inspect-node` returns a node
 snapshot without mutating the design document. Style-token reads and guarded
 style-token edits expose the node `css` token as a deterministic visual class;
-they do not accept arbitrary CSS blocks. Multi-node alignment and distribution
-use geometry signatures as stale-selection guards and remain integer-only,
+they do not accept arbitrary CSS blocks. Rendered Designer classes are emitted
+only for safe space-separated style tokens as `office-ui-css-*`; unsafe parsed
+tokens remain inspectable metadata but do not become CSS classes. Multi-node
+alignment and distribution use geometry signatures as stale-selection guards and remain integer-only,
 all-or-nothing edits over selected nodes. Frame-level auto-layout resolves
 horizontal/vertical child placement from integer gap/padding metadata, and
 parent/constraint edits materialize deterministic Figma-like child geometry

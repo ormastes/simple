@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -413,6 +413,25 @@ expect(missing.reason).to_equal("missing-node")
 
 </details>
 
+#### renders safe UI style tokens and drops unsafe parsed class tokens
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Style Tokens\nnode button|Run|button|16|16|80|32|primary bad&quot;onclick=1 accent_1|2|action")
+val html = office_ui_design_render_html(design)
+expect(html).to_contain("office-ui-css-primary")
+expect(html).to_contain("office-ui-css-accent_1")
+expect(html.contains("office-ui-css-bad")).to_be(false)
+expect(office_ui_design_inspect_node(design, "button").css).to_equal("primary bad&quot;onclick=1 accent_1")
+```
+
+</details>
+
 #### aligns multiple nodes with guarded geometry signatures
 
 <details>
@@ -580,8 +599,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
