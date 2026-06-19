@@ -1,0 +1,105 @@
+#!/bin/sh
+# Validate Simple in-application Vulkan RenderDoc capture evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/simple-gate}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_simple_gate_$(date -u +%F).md}"
+SOURCE_ENV="${RDOC_SIMPLE_EVIDENCE_ENV:-build/renderdoc/canonical-probe/simple/evidence.env}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_evidence() {
+    status="$1"
+    reason="$2"
+    {
+        echo "rdoc_simple_gate_status=$status"
+        echo "rdoc_simple_gate_reason=$reason"
+        echo "rdoc_simple_gate_source_env=$SOURCE_ENV"
+        echo "rdoc_simple_gate_backend=${backend:-}"
+        echo "rdoc_simple_gate_scene=${scene:-}"
+        echo "rdoc_simple_gate_program=${program:-}"
+        echo "rdoc_simple_gate_capture_status=${capture_status:-}"
+        echo "rdoc_simple_gate_capture_reason=${capture_reason:-}"
+        echo "rdoc_simple_gate_capture_file=${capture_file:-}"
+        echo "rdoc_simple_gate_capture_magic=${capture_magic:-}"
+        echo "rdoc_simple_gate_required_backend=simple"
+        echo "rdoc_simple_gate_required_scene=vulkan-engine2d"
+        echo "rdoc_simple_gate_required_status=pass"
+        echo "rdoc_simple_gate_required_magic=RDOC"
+    } >"$OUT_ENV"
+    {
+        echo "# RenderDoc Simple Gate"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- source evidence: $SOURCE_ENV"
+        echo "- backend: ${backend:-}"
+        echo "- scene: ${scene:-}"
+        echo "- program: ${program:-}"
+        echo "- capture status: ${capture_status:-}"
+        echo "- capture reason: ${capture_reason:-}"
+        echo "- capture file: ${capture_file:-}"
+        echo "- capture magic: ${capture_magic:-}"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+    cat "$OUT_ENV"
+}
+
+if [ ! -s "$SOURCE_ENV" ]; then
+    backend=""
+    scene=""
+    program=""
+    capture_status=""
+    capture_reason="missing-source-evidence"
+    capture_file=""
+    capture_magic=""
+    write_evidence "unavailable" "missing-source-evidence"
+    exit 1
+fi
+
+backend="$(value_of rdoc_backend "$SOURCE_ENV")"
+scene="$(value_of rdoc_scene "$SOURCE_ENV")"
+program="$(value_of rdoc_program "$SOURCE_ENV")"
+capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
+capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
+capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
+capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
+
+if [ "$backend" = "simple" ] \
+    && [ "$scene" = "vulkan-engine2d" ] \
+    && [ "$capture_status" = "pass" ] \
+    && [ "$capture_magic" = "RDOC" ] \
+    && [ -s "$capture_file" ]; then
+    write_evidence "pass" "pass"
+    exit 0
+fi
+
+if [ "$capture_status" = "" ]; then
+    write_evidence "unavailable" "missing-capture-status"
+elif [ "$backend" != "simple" ]; then
+    write_evidence "fail" "unexpected-backend"
+elif [ "$scene" != "vulkan-engine2d" ]; then
+    write_evidence "fail" "unexpected-scene"
+elif [ "$capture_status" != "pass" ]; then
+    write_evidence "fail" "${capture_reason:-capture-not-pass}"
+elif [ "$capture_magic" != "RDOC" ]; then
+    write_evidence "fail" "missing-rdoc-magic"
+elif [ ! -s "$capture_file" ]; then
+    write_evidence "fail" "missing-rdc-file"
+else
+    write_evidence "fail" "simple-renderdoc-gate-failed"
+fi
+exit 1

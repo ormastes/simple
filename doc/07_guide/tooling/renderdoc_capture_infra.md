@@ -8,6 +8,8 @@ scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
 scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
 scripts/tool/renderdoc-evidence.shs capture-electron-html
+RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
+  sh scripts/check/check-renderdoc-simple-gate.shs
 RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env \
   sh scripts/check/check-renderdoc-electron-html-gate.shs
@@ -89,9 +91,12 @@ The current canonical evidence contract is:
 
 - Simple in-application path:
   `build/renderdoc/canonical-probe/simple/evidence.env` must report
+  `rdoc_backend=simple`, `rdoc_scene=vulkan-engine2d`,
   `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`, and an existing
-  `.rdc` file. If that env/file is missing, the GUI RenderDoc goal remains
-  incomplete with `missing-simple-rdoc`.
+  `.rdc` file. The aggregate RenderDoc goal requires this through
+  `scripts/check/check-renderdoc-simple-gate.shs`; if that env/file is missing
+  or not the Simple Vulkan Engine2D path, the GUI RenderDoc goal remains
+  incomplete.
 - Original Chrome HTML/CSS path:
   `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
   evidence env, must pass the original-backend gate with `RDOC` magic. A local
@@ -131,6 +136,30 @@ Otherwise it writes fail-closed evidence under
 Without `RDOC_EXTERNAL_RUN_CAPTURE=1`, the wrapper performs a readiness-only
 run and writes `rdoc_external_host_capture_status=unavailable` with
 `rdoc_external_host_capture_reason=capture-not-requested`.
+
+## Simple Vulkan Gate
+
+Use the Simple gate when the canonical Simple in-application capture or a CI
+host supplies the Simple Vulkan `.rdc`:
+
+```sh
+RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe \
+  scripts/tool/renderdoc-evidence.shs capture-simple
+
+RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
+  sh scripts/check/check-renderdoc-simple-gate.shs
+```
+
+The gate passes only when the source evidence contains:
+
+- `rdoc_backend=simple`
+- `rdoc_scene=vulkan-engine2d`
+- `rdoc_capture_status=pass`
+- `rdoc_capture_magic=RDOC`
+- an existing `.rdc` path in `rdoc_capture_file`
+
+Missing RenderDoc, non-Simple backend evidence, wrong scene metadata, or a
+missing `.rdc` file all keep the gate out of `pass`.
 
 ## Electron Chromium/Vulkan Gate
 

@@ -1,0 +1,90 @@
+"""
+# RenderDoc Simple gate
+
+## Overview
+
+Validates the fail-closed gate for Simple in-application Vulkan RenderDoc
+evidence. The local host may not have RenderDoc installed, but the gate must
+record a deterministic non-pass state and accept only Simple `vulkan-engine2d`
+`.rdc` evidence.
+
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Requirements:** N/A
+**Research:** doc/09_report/html_css_vulkan_renderdoc_probe_2026-06-17.md
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
+BUILD_DIR=build/test-renderdoc-simple-gate \
+REPORT_PATH=build/test-renderdoc-simple-gate/report.md \
+sh scripts/check/check-renderdoc-simple-gate.shs || true
+```
+
+## Acceptance
+
+- Missing or failed Simple RenderDoc evidence produces typed non-pass gate
+  evidence.
+- Passing gate evidence requires Simple backend, `vulkan-engine2d` scene, pass
+  status, `RDOC` magic, and an existing `.rdc` file.
+"""
+
+# @tag: system, gpu, renderdoc, simple, vulkan, evidence
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _value_of(lines: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = lines.split("\n")
+    var found = ""
+    for line in parts:
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+    found
+
+describe "RenderDoc Simple gate":
+
+    it "writes typed non-pass evidence for missing or failed Simple capture":
+        val command = "rm -rf build/test-renderdoc-simple-gate && RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate REPORT_PATH=build/test-renderdoc-simple-gate/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+        val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = rt_file_read_text("build/test-renderdoc-simple-gate/evidence.env") ?? ""
+        expect(evidence).to_contain("rdoc_simple_gate_status=")
+        expect(evidence).to_contain("rdoc_simple_gate_reason=")
+        expect(evidence).to_contain("rdoc_simple_gate_source_env=")
+        expect(evidence).to_contain("rdoc_simple_gate_required_backend=simple")
+        expect(evidence).to_contain("rdoc_simple_gate_required_scene=vulkan-engine2d")
+        expect(evidence).to_contain("rdoc_simple_gate_required_status=pass")
+        expect(evidence).to_contain("rdoc_simple_gate_required_magic=RDOC")
+
+        val status = _value_of(evidence, "rdoc_simple_gate_status")
+        val reason = _value_of(evidence, "rdoc_simple_gate_reason")
+        val backend = _value_of(evidence, "rdoc_simple_gate_backend")
+        val scene = _value_of(evidence, "rdoc_simple_gate_scene")
+        val capture_status = _value_of(evidence, "rdoc_simple_gate_capture_status")
+        val magic = _value_of(evidence, "rdoc_simple_gate_capture_magic")
+
+        if status == "pass":
+            expect(backend).to_equal("simple")
+            expect(scene).to_equal("vulkan-engine2d")
+            expect(capture_status).to_equal("pass")
+            expect(magic).to_equal("RDOC")
+        else:
+            expect(reason.len()).to_be_greater_than(0)
+
+    it "passes with controlled Simple Vulkan RDOC evidence":
+        val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
+        val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = rt_file_read_text("build/test-renderdoc-simple-gate-pass/out/evidence.env") ?? ""
+        expect(evidence).to_contain("rdoc_simple_gate_status=pass")
+        expect(evidence).to_contain("rdoc_simple_gate_reason=pass")
+        expect(evidence).to_contain("rdoc_simple_gate_backend=simple")
+        expect(evidence).to_contain("rdoc_simple_gate_scene=vulkan-engine2d")
+        expect(evidence).to_contain("rdoc_simple_gate_capture_magic=RDOC")
