@@ -94,7 +94,7 @@ Simple IDE feature check
 mode: tui
 capabilities: 6
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
-  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true css_doc=true escaped=true
+  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -187,6 +187,7 @@ expect(gui_report).to_contain("Database Admin")
 expect(tui_report).to_contain("tui-panels:")
 expect(tui_report).to_contain("slides: app.office.slides")
 expect(tui_report).to_contain("edit-command: md-edit=true stale-reject=true")
+expect(tui_report).to_contain("metadata=true")
 expect(tui_report).to_contain("edit-command: slide-edit=true stale-reject=true")
 expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
@@ -358,7 +359,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 476 lines folded for reproduction.
+Runnable source: 478 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -516,6 +517,8 @@ val sdd_inspect_node_action = office_action_dispatch("inspect-sdd-node", "A\ngra
 val sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "0\ngraph: Inspect\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 80 y: 0 width: 20 height: 20\nA -> B: link route: orthogonal waypoints: 40x10 start: right end: left")
 val missing_sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "1\ngraph: Inspect\nA: A\nB: B\nA -> B: link")
 expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
+expect(md_action.output).to_contain("data-format=\"markdown-wysiwyg\"")
+expect(md_action.output).to_contain("data-line-count=\"1\"")
 expect(md_action.output).to_contain("<h1>Markdown</h1>")
 expect(md_edit_action.output).to_contain("new")
 expect(md_edit_action.reason).to_equal("updated")
@@ -1155,12 +1158,13 @@ expect(spoofed_surface.ready_for_integration).to_be(false)
 - assert true
 - assert true
 - assert true
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1174,9 +1178,11 @@ assert_true(probe.contains_heading)
 assert_true(probe.contains_table)
 assert_true(probe.css_document)
 assert_true(probe.escapes_html)
+assert_true(probe.preview_metadata)
 expect(summary).to_contain("preview=")
 expect(summary).to_contain("css_doc=true")
 expect(summary).to_contain("escaped=true")
+expect(summary).to_contain("metadata=true")
 ```
 
 </details>

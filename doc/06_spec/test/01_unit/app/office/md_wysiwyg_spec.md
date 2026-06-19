@@ -76,13 +76,15 @@ expect(pane).to_equal("alpha\nbeta")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val view = build_wysiwyg_view("hello")
 val pane = wysiwyg_preview_pane(view)
 expect(pane).to_start_with("<div class=\"wysiwyg-preview\"")
+expect(pane).to_contain("data-format=\"markdown-wysiwyg\"")
+expect(pane).to_contain("data-line-count=\"1\"")
 expect(pane).to_contain("line-height: 1.5;")
 expect(pane).to_contain(">hello</p>")
 ```
@@ -94,7 +96,7 @@ expect(pane).to_contain(">hello</p>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -103,6 +105,7 @@ expect(wysiwyg_preview_css()).to_contain(".wysiwyg-preview")
 expect(html).to_start_with("<style>.wysiwyg-preview")
 expect(html).to_contain("box-sizing: border-box")
 expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+expect(html).to_contain("data-line-count=\"2\"")
 expect(html).to_contain("style=\"font-family:")
 ```
 
