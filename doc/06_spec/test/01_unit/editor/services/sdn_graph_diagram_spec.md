@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 29 | 29 | 0 | 0 |
+| 30 | 30 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -142,7 +142,7 @@ expect(graph.edges[0].end_anchor).to_equal("left")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -150,8 +150,27 @@ val graph = sdn_graph_parse("graph: actor\nUser: User shape: person x: 10 y: 10 
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("data-shape=\"person\"")
 expect(html).to_contain("data-shape=\"actor\"")
+expect(html).to_contain("sdd-shape-person")
+expect(html).to_contain("sdd-shape-actor")
 expect(html).to_contain("border-radius:50% 50% 42% 42%")
 expect(html).to_contain("box-shadow:inset 0 16px 0 rgba(15,23,42,0.10)")
+```
+
+</details>
+
+#### drops unsafe shape class tokens while preserving escaped shape metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: unsafe-shape\nBad: Bad shape: bad&quot;onclick=1 x: 10 y: 10 width: 48 height: 32")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-shape=\"bad&amp;quot;onclick=1\"")
+expect(html.contains("sdd-shape-bad")).to_be(false)
 ```
 
 </details>
@@ -1071,8 +1090,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 29 |
-| Active scenarios | 29 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
