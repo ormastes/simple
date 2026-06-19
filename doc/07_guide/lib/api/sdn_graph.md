@@ -211,6 +211,7 @@ vertical to waypoint y, then horizontal/vertical to the target anchor.
 `sdn_graph_update_edge_at` is the pure reroute operation for editor event
 wiring. It updates an edge's route, waypoint string, and anchors by index while
 leaving node geometry and graph metadata untouched.
+`sdn_graph_update_edge_label_at` updates only the visible connector label.
 
 `sdn_graph_update_node_at` is the broad pure node edit operation for editor
 event wiring. It updates one node's CSS labels, role, shape, x/y geometry,

@@ -399,3 +399,7 @@ possible so they are runner-verifiable.
   edits the visible node label without changing shape/style/geometry, and
   `edit-sdd-node-label` exposes it through the headless Office action bridge
   for draw.io-like node rename workflows.
+- 2026-06-19 dev: Added Draw/SDD connector label editing.
+  `sdn_graph_update_edge_label_at` edits the visible connector label without
+  changing route/waypoint/anchor geometry, and `edit-sdd-edge-label` exposes it
+  through the headless Office action bridge.

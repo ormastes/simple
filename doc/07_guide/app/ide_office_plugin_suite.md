@@ -83,6 +83,7 @@ geometry signature and return rendered HTML for the updated document.
 
 SDD node edit actions use `node_id|value` for label, parent, shape, and style edits.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`.
+`edit-sdd-edge-label` uses `edge_index|new_label`.
 `reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`.
 All return rendered SDD HTML for the updated document.
 `inspect-sdd-node` uses `node_id`; `inspect-sdd-edge` uses `edge_index`.
@@ -176,6 +177,7 @@ modes:
   `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`,
+  `edit-sdd-edge-label`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
   `edit-sdd-node-style`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `align-sdd-selection`,
