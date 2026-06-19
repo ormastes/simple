@@ -700,7 +700,7 @@ expect(result.ok).to_be(true)
 expect(result.output).to_contain("data-format-name=\"Base Table\"")
 expect(result.output).to_contain("scope=\"col\" data-column=\"status\"")
 expect(result.output).to_contain("<tr data-row-index=\"0\">")
-expect(result.output).to_contain("<td data-column=\"status\">&lt;open&gt;</td>")
+expect(result.output).to_contain("<td data-row-index=\"0\" data-column=\"status\">&lt;open&gt;</td>")
 ```
 
 </details>
