@@ -117,7 +117,7 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 111 lines folded for reproduction.
+Runnable source: 120 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -159,6 +159,10 @@ expect(evidence).to_contain("external_renderdoc_capture_html_path=")
 expect(evidence).to_contain("external_renderdoc_gate_status=")
 expect(evidence).to_contain("external_renderdoc_gate_reason=")
 expect(evidence).to_contain("external_renderdoc_gate_capture_file_magic=")
+expect(evidence).to_contain("external_renderdoc_gate_requested_api=")
+expect(evidence).to_contain("external_renderdoc_gate_requested_angle=")
+expect(evidence).to_contain("external_renderdoc_gate_requested_features=")
+expect(evidence).to_contain("external_renderdoc_gate_launch_flags=")
 expect(evidence).to_contain("macos_portability_status=")
 expect(evidence).to_contain("macos_portability_reason=")
 expect(evidence).to_contain("macos_portability_evidence_env=")
@@ -178,7 +182,12 @@ expect(evidence).to_contain("required_external_backend=original")
 expect(evidence).to_contain("required_external_scene=html-css-chrome")
 expect(evidence).to_contain("required_external_status=pass")
 expect(evidence).to_contain("required_external_magic=RDOC")
+expect(evidence).to_contain("required_external_api=vulkan")
+expect(evidence).to_contain("required_external_angle=vulkan")
+expect(evidence).to_contain("required_external_features=Vulkan")
 expect(evidence).to_contain("required_external_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("required_external_launch_flag_enable_features=--enable-features=Vulkan")
+expect(evidence).to_contain("required_external_launch_flag_use_angle=--use-angle=vulkan")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate=")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=")
 expect(evidence).to_contain("renderdoc_goal_blocked_gates=")
@@ -246,12 +255,12 @@ expect(report).to_contain("- blocked completion gates:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create controlled Simple and external-host RenderDoc evidence fixtures")
-val command = "rm -rf build/test-html-css-renderdoc-goal-status-pass && mkdir -p build/test-html-css-renderdoc-goal-status-pass/simple build/test-html-css-renderdoc-goal-status-pass/external/capture/html && printf 'RDOCsynthetic simple capture\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc && printf 'RDOCsynthetic external capture\\n' > build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_capture_env=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/evidence.env\\nrdoc_external_host_capture_status_raw=pass\\nrdoc_external_host_capture_reason_raw=pass\\nrdoc_external_host_capture_file=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc\\nrdoc_external_host_capture_magic=RDOC\\nrdoc_external_host_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_scene=html-css-chrome\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\nrdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-html-css-renderdoc-goal-status-pass/external/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/external/evidence.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-pass/out REPORT_PATH=build/test-html-css-renderdoc-goal-status-pass/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs"
+val command = "rm -rf build/test-html-css-renderdoc-goal-status-pass && mkdir -p build/test-html-css-renderdoc-goal-status-pass/simple build/test-html-css-renderdoc-goal-status-pass/external/capture/html && printf 'RDOCsynthetic simple capture\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc && printf 'RDOCsynthetic external capture\\n' > build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_capture_env=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/evidence.env\\nrdoc_external_host_capture_status_raw=pass\\nrdoc_external_host_capture_reason_raw=pass\\nrdoc_external_host_capture_file=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc\\nrdoc_external_host_capture_magic=RDOC\\nrdoc_external_host_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_requested_api=vulkan\\nrdoc_external_host_gate_requested_angle=vulkan\\nrdoc_external_host_gate_requested_features=Vulkan\\nrdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_scene=html-css-chrome\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\nrdoc_external_host_required_api=vulkan\\nrdoc_external_host_required_angle=vulkan\\nrdoc_external_host_required_features=Vulkan\\nrdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan\\nrdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan\\n' > build/test-html-css-renderdoc-goal-status-pass/external/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/external/evidence.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-pass/out REPORT_PATH=build/test-html-css-renderdoc-goal-status-pass/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs"
 val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -275,11 +284,20 @@ expect(evidence).to_contain("external_renderdoc_gate_status=pass")
 expect(evidence).to_contain("external_renderdoc_gate_scene=html-css-chrome")
 expect(evidence).to_contain("external_renderdoc_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("external_renderdoc_gate_capture_file_magic=RDOC")
+expect(evidence).to_contain("external_renderdoc_gate_requested_api=vulkan")
+expect(evidence).to_contain("external_renderdoc_gate_requested_angle=vulkan")
+expect(evidence).to_contain("external_renderdoc_gate_requested_features=Vulkan")
+expect(evidence).to_contain("external_renderdoc_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan")
 expect(evidence).to_contain("required_external_backend=original")
 expect(evidence).to_contain("required_external_scene=html-css-chrome")
 expect(evidence).to_contain("required_external_status=pass")
 expect(evidence).to_contain("required_external_magic=RDOC")
+expect(evidence).to_contain("required_external_api=vulkan")
+expect(evidence).to_contain("required_external_angle=vulkan")
+expect(evidence).to_contain("required_external_features=Vulkan")
 expect(evidence).to_contain("required_external_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("required_external_launch_flag_enable_features=--enable-features=Vulkan")
+expect(evidence).to_contain("required_external_launch_flag_use_angle=--use-angle=vulkan")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate=")
 expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=0")
 expect(evidence).to_contain("renderdoc_goal_blocked_gates=")

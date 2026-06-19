@@ -74,7 +74,8 @@ sh scripts/check/check-renderdoc-external-host-capture.shs
 - Readiness-only mode writes stable `rdoc_external_host_*` evidence keys.
 - Readiness-only mode records `capture-not-requested`.
 - The pass requirement is explicit: original backend, `html-css-chrome` scene,
-  pass status, `RDOC` magic, and canonical HTML fixture metadata.
+  pass status, `RDOC` magic, canonical HTML fixture metadata, and Chromium
+  Vulkan/ANGLE launch metadata.
 
 ## Scenarios
 
@@ -85,7 +86,7 @@ sh scripts/check/check-renderdoc-external-host-capture.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -102,7 +103,12 @@ expect(evidence).to_contain("rdoc_external_host_required_backend=original")
 expect(evidence).to_contain("rdoc_external_host_required_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_external_host_required_status=pass")
 expect(evidence).to_contain("rdoc_external_host_required_magic=RDOC")
+expect(evidence).to_contain("rdoc_external_host_required_api=vulkan")
+expect(evidence).to_contain("rdoc_external_host_required_angle=vulkan")
+expect(evidence).to_contain("rdoc_external_host_required_features=Vulkan")
 expect(evidence).to_contain("rdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("rdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan")
+expect(evidence).to_contain("rdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan")
 expect(evidence).to_contain("rdoc_external_host_capture_file_magic=")
 expect(evidence).to_contain("rdoc_external_host_gate_capture_file_magic=")
 
@@ -127,11 +133,11 @@ expect(report).to_contain("# RenderDoc External Host Capture")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-external-host-capture-pass && mkdir -p build/test-renderdoc-external-host-capture-pass/source && printf 'RDOCsynthetic external host capture\\n' > build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc && printf 'rdoc_backend=original\\nrdoc_scene=html-css-chrome\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-renderdoc-external-host-capture-pass/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-external-host-capture-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-external-host-capture-pass REPORT_PATH=build/test-renderdoc-external-host-capture-pass/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
+val command = "rm -rf build/test-renderdoc-external-host-capture-pass && mkdir -p build/test-renderdoc-external-host-capture-pass/source && printf 'RDOCsynthetic external host capture\\n' > build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc && printf 'rdoc_backend=original\\nrdoc_scene=html-css-chrome\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-external-host-capture-pass/source/synthetic.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-renderdoc-external-host-capture-pass/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-external-host-capture-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-external-host-capture-pass REPORT_PATH=build/test-renderdoc-external-host-capture-pass/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
 val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -143,11 +149,20 @@ expect(evidence).to_contain("rdoc_external_host_gate_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("rdoc_external_host_capture_file_magic=RDOC")
 expect(evidence).to_contain("rdoc_external_host_gate_capture_file_magic=RDOC")
+expect(evidence).to_contain("rdoc_external_host_gate_requested_api=vulkan")
+expect(evidence).to_contain("rdoc_external_host_gate_requested_angle=vulkan")
+expect(evidence).to_contain("rdoc_external_host_gate_requested_features=Vulkan")
+expect(evidence).to_contain("rdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan")
 expect(evidence).to_contain("rdoc_external_host_required_backend=original")
 expect(evidence).to_contain("rdoc_external_host_required_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_external_host_required_status=pass")
 expect(evidence).to_contain("rdoc_external_host_required_magic=RDOC")
+expect(evidence).to_contain("rdoc_external_host_required_api=vulkan")
+expect(evidence).to_contain("rdoc_external_host_required_angle=vulkan")
+expect(evidence).to_contain("rdoc_external_host_required_features=Vulkan")
 expect(evidence).to_contain("rdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("rdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan")
+expect(evidence).to_contain("rdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan")
 
 val status = _value_of(evidence, "rdoc_external_host_capture_status")
 val gate_status = _value_of(evidence, "rdoc_external_host_gate_status")

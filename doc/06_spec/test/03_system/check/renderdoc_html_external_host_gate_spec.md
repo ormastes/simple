@@ -27,7 +27,7 @@ renderdoc_html_external_host_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,10 @@ rdoc_scene=html-css-chrome
 rdoc_capture_status=pass
 rdoc_capture_magic=RDOC
 rdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html
+rdoc_chromium_requested_api=vulkan
+rdoc_chromium_requested_angle=vulkan
+rdoc_chromium_requested_features=Vulkan
+rdoc_chromium_launch_flags=--enable-features=Vulkan --use-angle=vulkan
 ```
 
 Local unavailable/fail evidence is acceptable only when it records a concrete
@@ -94,6 +98,8 @@ reason and keeps the gate status out of `pass`.
 - Passing gate evidence requires original backend, the `html-css-chrome` scene,
   pass status, `RDOC` magic, the canonical HTML fixture path, and an existing
   `.rdc` file.
+- Passing gate evidence requires Chromium Vulkan/ANGLE request metadata and
+  launch flags.
 
 ## Scenarios
 
@@ -104,7 +110,7 @@ reason and keeps the gate status out of `pass`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -120,7 +126,12 @@ expect(evidence).to_contain("rdoc_html_external_gate_required_backend=original")
 expect(evidence).to_contain("rdoc_html_external_gate_required_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_html_external_gate_required_status=pass")
 expect(evidence).to_contain("rdoc_html_external_gate_required_magic=RDOC")
+expect(evidence).to_contain("rdoc_html_external_gate_required_api=vulkan")
+expect(evidence).to_contain("rdoc_html_external_gate_required_angle=vulkan")
+expect(evidence).to_contain("rdoc_html_external_gate_required_features=Vulkan")
 expect(evidence).to_contain("rdoc_html_external_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("rdoc_html_external_gate_required_launch_flag_enable_features=--enable-features=Vulkan")
+expect(evidence).to_contain("rdoc_html_external_gate_required_launch_flag_use_angle=--use-angle=vulkan")
 expect(evidence).to_contain("rdoc_html_external_gate_capture_file_magic=")
 
 val status = _value_of(evidence, "rdoc_html_external_gate_status")
@@ -130,6 +141,10 @@ val scene = _value_of(evidence, "rdoc_html_external_gate_scene")
 val capture_status = _value_of(evidence, "rdoc_html_external_gate_capture_status")
 val magic = _value_of(evidence, "rdoc_html_external_gate_capture_magic")
 val html_path = _value_of(evidence, "rdoc_html_external_gate_html_path")
+val api = _value_of(evidence, "rdoc_html_external_gate_requested_api")
+val angle = _value_of(evidence, "rdoc_html_external_gate_requested_angle")
+val features = _value_of(evidence, "rdoc_html_external_gate_requested_features")
+val flags = _value_of(evidence, "rdoc_html_external_gate_launch_flags")
 
 if status == "pass":
     expect(backend).to_equal("original")
@@ -137,6 +152,11 @@ if status == "pass":
     expect(capture_status).to_equal("pass")
     expect(magic).to_equal("RDOC")
     expect(html_path).to_contain("test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+    expect(api).to_equal("vulkan")
+    expect(angle).to_equal("vulkan")
+    expect(features).to_contain("Vulkan")
+    expect(flags).to_contain("--enable-features=Vulkan")
+    expect(flags).to_contain("--use-angle=vulkan")
 else:
     expect(reason.len()).to_be_greater_than(0)
 ```
@@ -148,11 +168,11 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-html-external-gate-pass && mkdir -p build/test-renderdoc-html-external-gate-pass/source && printf 'RDOCsynthetic original html capture\\n' > build/test-renderdoc-html-external-gate-pass/source/html.rdc && printf 'rdoc_backend=original\\nrdoc_scene=html-css-chrome\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-html-external-gate-pass/source/html.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-renderdoc-html-external-gate-pass/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-html-external-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-html-external-gate-pass/out REPORT_PATH=build/test-renderdoc-html-external-gate-pass/report.md sh scripts/check/check-renderdoc-html-external-host-gate.shs"
+val command = "rm -rf build/test-renderdoc-html-external-gate-pass && mkdir -p build/test-renderdoc-html-external-gate-pass/source && printf 'RDOCsynthetic original html capture\\n' > build/test-renderdoc-html-external-gate-pass/source/html.rdc && printf 'rdoc_backend=original\\nrdoc_scene=html-css-chrome\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-html-external-gate-pass/source/html.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-renderdoc-html-external-gate-pass/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-html-external-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-html-external-gate-pass/out REPORT_PATH=build/test-renderdoc-html-external-gate-pass/report.md sh scripts/check/check-renderdoc-html-external-host-gate.shs"
 val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -164,6 +184,10 @@ expect(evidence).to_contain("rdoc_html_external_gate_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_html_external_gate_capture_magic=RDOC")
 expect(evidence).to_contain("rdoc_html_external_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("rdoc_html_external_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("rdoc_html_external_gate_requested_api=vulkan")
+expect(evidence).to_contain("rdoc_html_external_gate_requested_angle=vulkan")
+expect(evidence).to_contain("rdoc_html_external_gate_requested_features=Vulkan")
+expect(evidence).to_contain("rdoc_html_external_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan")
 ```
 
 </details>
@@ -211,12 +235,33 @@ expect(evidence).to_contain("rdoc_html_external_gate_required_scene=html-css-chr
 
 </details>
 
+#### rejects Chrome captures missing the Vulkan ANGLE launch flag
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-html-external-gate-missing-angle && mkdir -p build/test-renderdoc-html-external-gate-missing-angle/source && printf 'RDOCsynthetic original html capture\\n' > build/test-renderdoc-html-external-gate-missing-angle/source/html.rdc && printf 'rdoc_backend=original\\nrdoc_scene=html-css-chrome\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-html-external-gate-missing-angle/source/html.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan\\n' > build/test-renderdoc-html-external-gate-missing-angle/source/evidence.env && RDOC_HTML_EVIDENCE_ENV=build/test-renderdoc-html-external-gate-missing-angle/source/evidence.env BUILD_DIR=build/test-renderdoc-html-external-gate-missing-angle/out REPORT_PATH=build/test-renderdoc-html-external-gate-missing-angle/report.md sh scripts/check/check-renderdoc-html-external-host-gate.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-html-external-gate-missing-angle/out/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_html_external_gate_status=fail")
+expect(evidence).to_contain("rdoc_html_external_gate_reason=missing-vulkan-angle-flag")
+expect(evidence).to_contain("rdoc_html_external_gate_required_launch_flag_use_angle=--use-angle=vulkan")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
