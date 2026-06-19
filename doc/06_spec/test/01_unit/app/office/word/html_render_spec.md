@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -236,6 +236,23 @@ expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
 
 </details>
 
+#### renders Writer Markdown blockquotes as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("> First **quote**\n> Second <safe>")
+expect(html).to_contain("<blockquote class=\"md-writer-quote\">")
+expect(html).to_contain("<p>First <strong>quote</strong></p>")
+expect(html).to_contain("<p>Second &lt;safe&gt;</p>")
+```
+
+</details>
+
 #### preserves Markdown table alignment markers in Writer HTML
 
 <details>
@@ -274,8 +291,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

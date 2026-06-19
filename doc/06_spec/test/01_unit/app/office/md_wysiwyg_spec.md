@@ -28,7 +28,7 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -238,6 +238,22 @@ expect(html).to_contain("<li>First <strong>item</strong></li>")
 
 </details>
 
+#### renders Markdown blockquote lines as quote HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = wysiwyg_preview_document_html("> Quote **safe** <x>")
+expect(html).to_contain("<blockquote class=\"markdown-quote\"")
+expect(html).to_contain(">Quote <strong>safe</strong> &lt;x&gt;</blockquote>")
+```
+
+</details>
+
 ### markdown WYSIWYG view: beside-the-line editing
 _Editing one line updates only that row's source and preview._
 
@@ -376,8 +392,8 @@ expect(wysiwyg_source_pane(result.view)).to_equal("first")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
