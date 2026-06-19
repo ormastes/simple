@@ -81,7 +81,7 @@ document body. `ui-align-selection`, `ui-distribute-selection`,
 `align-sdd-selection`, and `distribute-sdd-selection` compute the current
 geometry signature and return rendered HTML for the updated document.
 
-SDD node edit actions use `node_id|value` for parent, shape, and style edits.
+SDD node edit actions use `node_id|value` for label, parent, shape, and style edits.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`.
 `reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`.
 All return rendered SDD HTML for the updated document.
@@ -176,7 +176,8 @@ modes:
   `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`,
-  `edit-sdd-node-parent`, `edit-sdd-node-shape`, `edit-sdd-node-style`,
+  `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
+  `edit-sdd-node-style`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,

@@ -469,7 +469,7 @@ expect(html).to_contain("data-canvas-grid=\"24\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -498,6 +498,11 @@ expect(styled.nodes[1].shape).to_equal("cylinder")
 expect(styled.nodes[1].css).to_equal("storage highlight")
 expect(styled.nodes[1].x).to_equal("220")
 expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highlight")
+val labeled = sdn_graph_update_node_label_at(styled, 1, "Data Store")
+expect(labeled.nodes[1].label).to_equal("Data Store")
+expect(labeled.nodes[1].shape).to_equal("cylinder")
+expect(labeled.nodes[1].css).to_equal("storage highlight")
+expect(sdn_graph_render_html(labeled)).to_contain(">Data Store</button>")
 ```
 
 </details>

@@ -395,3 +395,7 @@ possible so they are runner-verifiable.
   surface. `word` and the new `writer` alias now load the existing WYSIWYG
   Markdown model (`source=markdown`, `render=html`), while the older rich-text
   `WordApp` remains available as a compatibility UI module.
+- 2026-06-19 dev: Added Draw/SDD label editing. `sdn_graph_update_node_label_at`
+  edits the visible node label without changing shape/style/geometry, and
+  `edit-sdd-node-label` exposes it through the headless Office action bridge
+  for draw.io-like node rename workflows.
