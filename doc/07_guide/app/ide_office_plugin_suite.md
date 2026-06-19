@@ -112,7 +112,9 @@ text for geometry, style, route, rendered path metadata, and style-rule fields.
 Base table actions use a compact text table body:
 `table: Name`, `columns: id,status`, then `row: 1,open` lines. `query-table`
 uses `count-where|column|value`, `select-where|column|value`, or
-`project-column|column`. `db-edit` uses `insert|v1,v2`,
+`project-column|column`. `render-base-table-html` renders that same table body
+as escaped HTML with `data-format="base-table"`, `data-column-count`, and
+`data-row-count`. `db-edit` uses `insert|v1,v2`,
 `update-where|match_column|match_value|update_column|new_value`, or
 `delete-where|match_column|match_value`, and returns the updated table text.
 
@@ -206,9 +208,9 @@ modes:
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
-  `formula-display-recalc`; Base has `schema-validation`, `query-table`,
+  `formula-display-recalc`; Base has `schema-validation`, `html-render`, `query-table`,
   `count-where`, `select-where`, `project-column`, `update-where`,
-  `delete-where`, and `db-edit`; Math has `fraction`,
+  `delete-where`, `render-base-table-html`, and `db-edit`; Math has `fraction`,
   `subscript`, `fenced-group`, `precedence-parser`, `checked-rendering`,
   `render-mathml`, `render-math-structure`, and `render-mathml-checked`;
   Counter has `counter-action`; Designer has

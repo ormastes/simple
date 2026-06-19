@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=96 actions=55
+  llm-catalog: apps=9 features=97 actions=56
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -359,7 +359,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 485 lines folded for reproduction.
+Runnable source: 492 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -778,14 +778,17 @@ expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("label, Label,
 expect(office_ui_design_to_sdd(duplicated_ui.design)).to_contain("button_copy, Run, accent, action, rounded, 144, 32, 96, 40, 3")
 expect(catalog[6].owner_module).to_equal("app.office.base_db")
 expect(catalog[6].features.join(",")).to_contain("schema-validation")
+expect(catalog[6].features.join(",")).to_contain("html-render")
 expect(catalog[6].features.join(",")).to_contain("count-where")
 expect(catalog[6].features.join(",")).to_contain("update-where")
 expect(catalog[6].features.join(",")).to_contain("delete-where")
 expect(catalog[6].actions.join(",")).to_contain("query-table")
+expect(catalog[6].actions.join(",")).to_contain("render-base-table-html")
 expect(catalog[6].actions.join(",")).to_contain("db-edit")
 val base_query_count_action = office_action_dispatch("query-table", "count-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_query_select_action = office_action_dispatch("query-table", "select-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_query_project_action = office_action_dispatch("query-table", "project-column|status\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
+val base_html_action = office_action_dispatch("render-base-table-html", "table: Feature\ncolumns: id,status\nrow: 1,<open>\nrow: 2,done")
 val base_insert_action = office_action_dispatch("db-edit", "insert|3,open\ntable: Feature\ncolumns: id,status\nrow: 1,done")
 val base_update_action = office_action_dispatch("db-edit", "update-where|status|open|status|done\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
 val base_delete_action = office_action_dispatch("db-edit", "delete-where|status|open\ntable: Feature\ncolumns: id,status\nrow: 1,open\nrow: 2,done")
@@ -794,6 +797,10 @@ val base_empty_cell_action = office_action_dispatch("db-edit", "insert|3,\ntable
 expect(base_query_count_action.output).to_equal("1")
 expect(base_query_select_action.output).to_contain("row: 1,open")
 expect(base_query_project_action.output).to_contain("open")
+expect(base_html_action.output).to_contain("data-format=\"base-table\"")
+expect(base_html_action.output).to_contain("data-column-count=\"2\"")
+expect(base_html_action.output).to_contain("data-row-count=\"2\"")
+expect(base_html_action.output).to_contain("&lt;open&gt;")
 expect(base_insert_action.output).to_contain("row: 3,open")
 expect(base_update_action.output).to_contain("row: 1,done")
 expect(base_delete_action.output).to_contain("row: 2,done")
