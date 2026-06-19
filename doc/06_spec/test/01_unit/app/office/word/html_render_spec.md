@@ -147,8 +147,8 @@ expect(html).to_contain("data-format=\"markdown-paper\"")
 expect(html).to_contain("data-format-name=\"Writer Markdown\"")
 expect(html).to_contain("data-line-count=\"3\"")
 expect(html).to_contain("<header class=\"md-page-header\">Draft</header>")
-expect(html).to_contain("<h1>Title</h1>")
-expect(html).to_contain("<p>Body</p>")
+expect(html).to_contain("<h1 data-source-line=\"1\">Title</h1>")
+expect(html).to_contain("<p data-source-line=\"3\">Body</p>")
 ```
 
 </details>
@@ -179,7 +179,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val html = render_writer_markdown_html("---\ncss_file: javascript:alert(1)\n---\n\nBody")
 expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
-expect(html).to_contain("<p>Body</p>")
+expect(html).to_contain("<p data-source-line=\"1\">Body</p>")
 ```
 
 </details>
@@ -194,10 +194,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("| Name | Status |\n| --- | --- |\n| Alpha | Ready |\n\n![Diagram](diagram.png)")
-expect(html).to_contain("<table class=\"md-writer-table\">")
+expect(html).to_contain("<table class=\"md-writer-table\" data-source-line=\"1\">")
 expect(html).to_contain("<th>Name</th>")
 expect(html).to_contain("<td>Ready</td>")
-expect(html).to_contain("<figure class=\"md-writer-image\">")
+expect(html).to_contain("<figure class=\"md-writer-image\" data-source-line=\"5\">")
 expect(html).to_contain("<img src=\"diagram.png\" alt=\"Diagram\">")
 ```
 
@@ -229,10 +229,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("# [Docs](docs.md)\n\nSee [Guide <x>](guide.md?a=1&b=2)\n\nFormula [Calc](calc(sum(1,2)))\n\nNo [Script](javascript:alert(1))")
-expect(html).to_contain("<h1><a href=\"docs.md\">Docs</a></h1>")
-expect(html).to_contain("<p>See <a href=\"guide.md?a=1&amp;b=2\">Guide &lt;x&gt;</a></p>")
-expect(html).to_contain("<p>Formula <a href=\"calc(sum(1,2))\">Calc</a></p>")
-expect(html).to_contain("<p>No <a href=\"#\">Script</a></p>")
+expect(html).to_contain("<h1 data-source-line=\"1\"><a href=\"docs.md\">Docs</a></h1>")
+expect(html).to_contain("<p data-source-line=\"3\">See <a href=\"guide.md?a=1&amp;b=2\">Guide &lt;x&gt;</a></p>")
+expect(html).to_contain("<p data-source-line=\"5\">Formula <a href=\"calc(sum(1,2))\">Calc</a></p>")
+expect(html).to_contain("<p data-source-line=\"7\">No <a href=\"#\">Script</a></p>")
 ```
 
 </details>
@@ -247,7 +247,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("- First **item**\n* Second <safe>")
-expect(html).to_contain("<ul class=\"md-writer-list\">")
+expect(html).to_contain("<ul class=\"md-writer-list\" data-source-line=\"1\">")
 expect(html).to_contain("<li>First <strong>item</strong></li>")
 expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
 ```
@@ -264,7 +264,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("- [x] Done **safe**\n- [ ] Open <x>")
-expect(html).to_contain("<ul class=\"md-writer-task-list\">")
+expect(html).to_contain("<ul class=\"md-writer-task-list\" data-source-line=\"1\">")
 expect(html).to_contain("data-task=\"true\" data-checked=\"true\"")
 expect(html).to_contain("<input type=\"checkbox\" disabled checked>")
 expect(html).to_contain("Done <strong>safe</strong>")
@@ -285,7 +285,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("1. First **item**\n10. Second <safe>")
-expect(html).to_contain("<ol class=\"md-writer-list md-writer-ordered-list\">")
+expect(html).to_contain("<ol class=\"md-writer-list md-writer-ordered-list\" data-source-line=\"1\">")
 expect(html).to_contain("<li>First <strong>item</strong></li>")
 expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
 ```
@@ -302,7 +302,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("> First **quote**\n> Second <safe>")
-expect(html).to_contain("<blockquote class=\"md-writer-quote\">")
+expect(html).to_contain("<blockquote class=\"md-writer-quote\" data-source-line=\"1\">")
 expect(html).to_contain("<p>First <strong>quote</strong></p>")
 expect(html).to_contain("<p>Second &lt;safe&gt;</p>")
 ```
@@ -319,7 +319,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("Before\n---\nAfter")
-expect(html).to_contain("<p>Before</p><hr class=\"md-writer-rule\"><p>After</p>")
+expect(html).to_contain("<p data-source-line=\"1\">Before</p><hr class=\"md-writer-rule\" data-source-line=\"2\"><p data-source-line=\"3\">After</p>")
 ```
 
 </details>
@@ -334,7 +334,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("```python\nprint(\"<x>\")\n```")
-expect(html).to_contain("<pre class=\"md-writer-code\" data-language=\"python\"><code>print(&quot;&lt;x&gt;&quot;)</code></pre>")
+expect(html).to_contain("<pre class=\"md-writer-code\" data-source-line=\"1\" data-language=\"python\"><code>print(&quot;&lt;x&gt;&quot;)</code></pre>")
 ```
 
 </details>

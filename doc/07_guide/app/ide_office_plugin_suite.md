@@ -65,7 +65,7 @@ Writer rendering must expose Markdown source -> paper/document HTML through
 `render_writer_markdown_html`, with root metadata for format and source line
 count. Writer paper HTML renders Markdown headings, paragraphs, fenced code,
 thematic breaks, blockquotes, task lists, ordered and unordered lists, tables, images, and inline links as
-document HTML while escaping user text and attributes. Unsafe Markdown image and
+document HTML with body-relative `data-source-line` block anchors while escaping user text and attributes. Unsafe Markdown image and
 stylesheet URLs render as `#`; Markdown table separator
 alignment markers (`:---`, `---:`, `:-:`) become stable `data-align` and
 `text-align` cell metadata, and table cells expose `data-row-index` /
