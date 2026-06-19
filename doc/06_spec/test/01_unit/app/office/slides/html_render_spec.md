@@ -198,10 +198,10 @@ expect(html).to_contain("data-layout=\"presentation\"")
 expect(html).to_contain("data-format=\"markdown-ppt\"")
 expect(html).to_contain("data-format-name=\"Impress Markdown\"")
 expect(html).to_contain("data-slide-count=\"2\"")
-expect(html).to_contain("data-slide=\"1\"")
+expect(html).to_contain("data-slide=\"1\" data-source-line=\"1\"")
 expect(html).to_contain("<h2>Slide One</h2>")
 expect(html).to_contain("<p>Body</p>")
-expect(html).to_contain("data-slide=\"2\"")
+expect(html).to_contain("data-slide=\"2\" data-source-line=\"5\"")
 ```
 
 </details>

@@ -77,7 +77,8 @@ PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
 object-model slide renderer remains a
 compatibility path and should escape element text, sanitize CSS colors to simple
 `#RGB` or `#RRGGBB` values, drop unsafe Markdown slide class tokens, clamp negative geometry to `0px`, and emit a fixed
-960x540 relative slide with stable slide/element metadata and absolutely
+960x540 relative slide with stable slide/element metadata, Markdown body
+`data-source-line` slide anchors, and absolutely
 positioned element boxes.
 
 Headless Office actions are exposed through
