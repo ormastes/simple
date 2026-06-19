@@ -138,7 +138,10 @@ renderer class markers in `src/app/ui.render/html_widgets.spl`, and verifies
 that the renderer spec corpus covers all 43 widget markers. It specifically
 guards newer direct widget classes such as `radio`, `heading`,
 `navigation_bar`, `tab_bar`, `card`, `switch`, `segmented_control`, and
-`search_bar`.
+`search_bar`. The top-level GUI RenderDoc feature audit re-emits the same
+missing dispatch/class/spec lists, expected widget-to-class mapping, spec source
+inventory, and covered widget list so all GUI item coverage can be inspected
+from one restart evidence env.
 
 HTML/CSS rendering manifest traceability command:
 
