@@ -28,7 +28,7 @@ ide_plugin_manifest_harden_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -156,6 +156,21 @@ expect(ide_plugin_manifest_validate([malformed])).to_equal("manifest error: entr
 
 </details>
 
+#### manifest validation rejects empty plugin libraries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val malformed = plugin_entry_new("ide.markdown", "", "0.1.0", ["ide_capability_markdown", "ide_feature_check_markdown"])
+expect(ide_plugin_manifest_validate([malformed])).to_equal("manifest error: entry 'ide.markdown' has empty library")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -175,8 +190,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
