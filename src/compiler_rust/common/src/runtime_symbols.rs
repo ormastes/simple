@@ -434,6 +434,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_index_set",
     "rt_slice",
     "rt_contains",
+    "rt_len",
     // String operations
     "rt_string_new",
     "rt_string_concat",
@@ -465,6 +466,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_utf8_validate",
     "rt_utf8_find_invalid",
     "rt_text_count_codepoints",
+    // Time operations backed by src/runtime/runtime_time.c
+    "rt_time_now_nanos",
+    "rt_time_now_micros",
+    "rt_time_now_unix_micros",
     "rt_swi_build",
     "rt_swi_char_to_byte",
     "rt_swi_byte_to_char",
@@ -1507,6 +1512,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_mutex_new",
     "rt_mutex_try_lock",
     "rt_mutex_unlock",
+    "rt_native_profile_count",
+    "rt_native_profile_event",
     "rt_net_free_addr_string",
     "rt_object_class_id",
     "rt_object_field_count",
@@ -1893,6 +1900,8 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_len"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
     }
 
