@@ -8,3 +8,6 @@
 - CALC-FUNC-NFR-003: Unsupported or malformed display function calls must fail
   closed to an empty display string instead of throwing or recursing without a
   depth bound.
+- CALC-FUNC-NFR-004: `VLOOKUP` display evaluation must be deterministic and
+  bounded by the supplied table range; missing keys, invalid result columns, and
+  unsupported approximate-match mode return an empty display string.

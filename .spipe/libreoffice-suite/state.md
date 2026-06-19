@@ -91,8 +91,10 @@ possible so they are runner-verifiable.
    Spec `test/01_unit/app/office/slides/html_render_spec.spl` 4/4. Follow-up:
    wire `slides/render.spl` WidgetNode path + `slides/design.spl` once the
    ui/style parser bug is fixed.
-5. TODO — **Excel deeper**: dependency-graph recalc, cell-ref numeric path
-   (gated on the f64 blocker), more functions (COUNTA/VLOOKUP/text fns).
+5. PARTIAL — **Excel deeper**: display-safe COUNTA, exact-match VLOOKUP, and
+   text functions are verified through `evaluate_formula_display_text`;
+   dependency-graph recalc and the cell-ref numeric path remain gated on the
+   f64 blocker.
 6. DONE (landed origin d4323508) — **Plugin split**: `app.office.plugins`
    registers office-word/office-ppt/office-excel as three separate `PluginEntry`
    manifests over the shared md/CSS substrate, via the project's plugin registry
@@ -247,3 +249,8 @@ possible so they are runner-verifiable.
   through `evaluate_formula_display_text`, with catalog features
   `formula-counta` and `formula-text-functions`; full f64 formula parity remains
   gated by the tracked backend blocker.
+- 2026-06-19 dev: Advanced Calc display formula lookup coverage. Added
+  exact-match `VLOOKUP` support to `evaluate_formula_display_text`, returning
+  matched-row display text while failing closed for missing keys, invalid result
+  columns, and unsupported approximate mode. Catalog metadata now exposes
+  `formula-vlookup`; focused formula hardening and IDE office specs passed.

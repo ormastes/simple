@@ -28,7 +28,7 @@ formula_harden_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,7 +59,8 @@ an empty display instead of recursing until the stack overflows.
 
 These examples run on the integer-safe display path
 (`evaluate_formula_display_text`) and pass under the test runner's compiled
-execution. Display-safe COUNTA plus LEN/LOWER/UPPER/TRIM are verified here.
+execution. Display-safe COUNTA, exact-match VLOOKUP, and LEN/LOWER/UPPER/TRIM
+are verified here.
 The float-returning additions in the same change — ROUND (half away from zero),
 SQRT, POWER, MOD, INT, PRODUCT, FLOOR, CEILING, SIGN, the AND/OR/NOT logical
 functions, and the '&' string-concatenation operator — are implemented but NOT
@@ -74,7 +75,8 @@ must be fixed before these functions can be asserted.
 ## Examples
 
 `=COUNTA(A1:A4,B1,"x","")` counts non-empty display values across ranges and
-literal arguments. `=lower(A1)` and `=TRIM(A1)` transform cell display text.
+literal arguments. `=VLOOKUP(D1,A2:B3,2,FALSE)` returns display text from the
+matched row. `=lower(A1)` and `=TRIM(A1)` transform cell display text.
 
 **Requirements:** doc/02_requirements/feature/calc_formula_display_functions.md
 **NFR:** doc/02_requirements/nfr/calc_formula_display_functions.md
@@ -211,12 +213,53 @@ expect(evaluate_formula_display_text("=UNKNOWN(\"x\")", sheet)).to_equal("")
 
 </details>
 
+#### VLOOKUP returns exact-match display text and fails closed
+
+- var sheet = Sheet new
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+   - Expected: evaluate_formula_display_text("=VLOOKUP(\"B-2\",A2:C3,2)", sheet) equals `Nut`
+   - Expected: evaluate_formula_display_text("=VLOOKUP(D1,A2:C3,3,FALSE)", sheet) equals `2`
+   - Expected: evaluate_formula_display_text("=VLOOKUP(\"missing\",A2:C3,2)", sheet) equals ``
+   - Expected: evaluate_formula_display_text("=VLOOKUP(\"A-1\",A2:C3,4)", sheet) equals ``
+   - Expected: evaluate_formula_display_text("=VLOOKUP(\"A-1\",A2:C3,2,TRUE)", sheet) equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var sheet = Sheet.new("S1")
+sheet.set_value("A2", "A-1")
+sheet.set_value("B2", "Bolt")
+sheet.set_value("C2", "=LEN(\"xx\")")
+sheet.set_value("A3", "B-2")
+sheet.set_value("B3", "Nut")
+sheet.set_value("C3", "9")
+sheet.set_value("D1", "A-1")
+expect(evaluate_formula_display_text("=VLOOKUP(\"B-2\",A2:C3,2)", sheet)).to_equal("Nut")
+expect(evaluate_formula_display_text("=VLOOKUP(D1,A2:C3,3,FALSE)", sheet)).to_equal("2")
+expect(evaluate_formula_display_text("=VLOOKUP(\"missing\",A2:C3,2)", sheet)).to_equal("")
+expect(evaluate_formula_display_text("=VLOOKUP(\"A-1\",A2:C3,4)", sheet)).to_equal("")
+expect(evaluate_formula_display_text("=VLOOKUP(\"A-1\",A2:C3,2,TRUE)", sheet)).to_equal("")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

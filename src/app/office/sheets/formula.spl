@@ -873,6 +873,8 @@ fn _eval_display_function_call(name: text, tokens: [text], pos: i32, sheet: Shee
         if arg.ok:
             return DisplayTextResult(ok: true, value: arg.value.trim())
         return DisplayTextResult(ok: false, value: "")
+    if name == "VLOOKUP":
+        return _display_vlookup(tokens, pos, close_pos, sheet, depth)
     DisplayTextResult(ok: false, value: "")
 
 fn _display_find_close_paren(tokens: [text], pos: i32) -> i32:
@@ -936,6 +938,68 @@ fn _display_first_arg_text(tokens: [text], start_pos: i32, end_pos: i32, sheet: 
             i = i + 1
     _display_arg_text(tokens, start_pos, arg_end, sheet, depth)
 
+fn _display_find_arg_end(tokens: [text], start_pos: i32, end_pos: i32) -> i32:
+    var i = start_pos
+    while i < end_pos:
+        if tokens[i] == ",":
+            return i
+        i = i + 1
+    end_pos
+
+fn _display_vlookup(tokens: [text], start_pos: i32, end_pos: i32, sheet: Sheet, depth: i32) -> DisplayTextResult:
+    val lookup_end = _display_find_arg_end(tokens, start_pos, end_pos)
+    if lookup_end >= end_pos:
+        return DisplayTextResult(ok: false, value: "")
+    val table_start = lookup_end + 1
+    val table_end = _display_find_arg_end(tokens, table_start, end_pos)
+    if table_end >= end_pos:
+        return DisplayTextResult(ok: false, value: "")
+    val column_start = table_end + 1
+    val column_end = _display_find_arg_end(tokens, column_start, end_pos)
+    if column_start >= column_end:
+        return DisplayTextResult(ok: false, value: "")
+    if column_end < end_pos:
+        val mode = _display_arg_text(tokens, column_end + 1, end_pos, sheet, depth)
+        if not mode.ok:
+            return DisplayTextResult(ok: false, value: "")
+        val normalized_mode = mode.value.trim().upper()
+        if normalized_mode != "FALSE" and normalized_mode != "0":
+            return DisplayTextResult(ok: false, value: "")
+    val lookup = _display_arg_text(tokens, start_pos, lookup_end, sheet, depth)
+    if not lookup.ok:
+        return DisplayTextResult(ok: false, value: "")
+    if table_end - table_start != 3 or tokens[table_start + 1] != ":":
+        return DisplayTextResult(ok: false, value: "")
+    val range_str = tokens[table_start].upper() + ":" + tokens[table_start + 2].upper()
+    val range = parse_range(range_str)
+    if range == nil:
+        return DisplayTextResult(ok: false, value: "")
+    val column_index = _display_arg_i64(tokens, column_start, column_end, sheet, depth)
+    if not column_index.ok or column_index.value < 1:
+        return DisplayTextResult(ok: false, value: "")
+    val min_col = _display_min_i32(range.start.col, range.end_ref.col)
+    val max_col = _display_max_i32(range.start.col, range.end_ref.col)
+    val min_row = _display_min_i32(range.start.row, range.end_ref.row)
+    val max_row = _display_max_i32(range.start.row, range.end_ref.row)
+    val target_col = min_col + column_index.value.to_i32() - 1
+    if target_col > max_col:
+        return DisplayTextResult(ok: false, value: "")
+    var row = min_row
+    while row <= max_row:
+        val key_ref = cell_ref_to_string(CellRef(col: min_col, row: row))
+        val key = _resolve_cell_display_text(key_ref, sheet, depth + 1)
+        if key.ok and key.value == lookup.value:
+            val value_ref = cell_ref_to_string(CellRef(col: target_col, row: row))
+            return _resolve_cell_display_text(value_ref, sheet, depth + 1)
+        row = row + 1
+    DisplayTextResult(ok: false, value: "")
+
+fn _display_arg_i64(tokens: [text], start_pos: i32, end_pos: i32, sheet: Sheet, depth: i32) -> DisplayEvalResult:
+    val text_value = _display_arg_text(tokens, start_pos, end_pos, sheet, depth)
+    if text_value.ok:
+        return _parse_i64_text(text_value.value)
+    _eval_display_sum_range(tokens, start_pos, end_pos, sheet, depth)
+
 fn _display_arg_text(tokens: [text], start_pos: i32, end_pos: i32, sheet: Sheet, depth: i32) -> DisplayTextResult:
     if start_pos >= end_pos:
         return DisplayTextResult(ok: false, value: "")
@@ -982,6 +1046,16 @@ fn _eval_display_sum_range(tokens: [text], start_pos: i32, end_pos: i32, sheet: 
     if expecting_value:
         return DisplayEvalResult(ok: false, value: 0)
     DisplayEvalResult(ok: true, value: total)
+
+fn _display_min_i32(a: i32, b: i32) -> i32:
+    if a < b:
+        return a
+    b
+
+fn _display_max_i32(a: i32, b: i32) -> i32:
+    if a > b:
+        return a
+    b
 
 fn _parse_i64_text(s: text) -> DisplayEvalResult:
     val trimmed = s.trim()

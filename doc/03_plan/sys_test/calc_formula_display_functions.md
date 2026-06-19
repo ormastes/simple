@@ -8,6 +8,10 @@
   ignores empty string literals.
 - `LEN`, `LOWER`, `UPPER`, and `TRIM` return deterministic text through
   `evaluate_formula_display_text`.
+- `VLOOKUP` finds an exact first-column match, returns display text from the
+  requested result column, resolves formula-valued return cells through the
+  display path, and fails closed for missing keys, out-of-range columns, and
+  unsupported approximate-match mode.
 - Existing circular-reference display tests remain the regression gate for
   depth-bounded formula resolution.
 
