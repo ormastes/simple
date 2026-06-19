@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6 libre=6 libre_roundtrip=6
-  llm-catalog: apps=9 features=111 actions=60
+  llm-catalog: apps=9 features=118 actions=60
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 719 lines folded for reproduction.
+Runnable source: 722 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -389,7 +389,7 @@ val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 expect(office_llm_catalog_is_valid()).to_be(true)
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=111 actions=60")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=118 actions=60")
 val dispatch_probe = office_catalog_dispatch_probe()
 expect(dispatch_probe.advertised_count).to_equal(60)
 expect(dispatch_probe.recognized_count).to_equal(60)
@@ -415,6 +415,9 @@ expect(catalog[2].actions.join(",")).to_contain("sheet-edit")
 expect(catalog[3].owner_module).to_equal("app.office.slides")
 expect(catalog[3].features.join(",")).to_contain("markdown-source")
 expect(catalog[3].features.join(",")).to_contain("css-like-design")
+expect(catalog[3].features.join(",")).to_contain("ppt-html")
+expect(catalog[3].features.join(",")).to_contain("safe-css")
+expect(catalog[3].features.join(",")).to_contain("element-metadata")
 expect(catalog[3].actions.join(",")).to_contain("render-ppt-markdown-html")
 expect(catalog[3].actions.join(",")).to_contain("slide-edit")
 expect(catalog[4].owner_module).to_equal("std.editor.services.sdn_graph")

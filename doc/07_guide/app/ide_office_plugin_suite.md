@@ -283,7 +283,8 @@ modes:
   `render-writer-markdown-html` plus Markdown paper features for task lists,
   tables/table alignment, images, inline links, fenced code, blockquotes,
   thematic breaks, and URL sanitizing; Impress has
-  `render-ppt-markdown-html`; Draw is SDD-backed with
+  `render-ppt-markdown-html` plus PPT HTML, slide-count metadata, safe CSS,
+  positioned elements, element metadata, class sanitizing, and text escaping; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`, `edit-sdd-style-rule`,
   `delete-sdd-style-rule`, `inspect-sdd-style-rule`, `add-sdd-node`, `add-sdd-edge`,
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `edit-sdd-edge-label-point`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,
