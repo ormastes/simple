@@ -2,7 +2,7 @@
 "use strict";
 
 const fs = require("fs");
-const { applyWebkitGtkExpectedOverlay } = require("./webkitgtk_expected_overlays");
+const { applyWebkitGtkExpectedOverlay, applyMacosWebkitExpectedOverlay } = require("./webkitgtk_expected_overlays");
 
 const rawPath = process.env.TAURI_CAPTURE_RAW_RGBA || "";
 const width = Number(process.env.TAURI_CAPTURE_WIDTH || 0);
@@ -12,6 +12,7 @@ const expectedPath = process.env.TAURI_CAPTURE_EXPECTED_ARGB_PATH || "";
 const expectedProfile = process.env.TAURI_CAPTURE_EXPECTED_PROFILE || "";
 const proofPath = process.env.TAURI_CAPTURE_PROOF_PATH || "";
 const frameUs = Number(process.env.TAURI_CAPTURE_FRAME_US || 0);
+const producer = process.env.TAURI_CAPTURE_PRODUCER || "tauri-x11-window-screenshot";
 
 function checksum(pixels) {
   let sum = 0n;
@@ -81,6 +82,11 @@ if (expectedPath && fs.existsSync(expectedPath)) {
     ep = overlaid.pixels;
     appliedExpectedProfile = overlaid.profile;
     expectedOverlayPixelCount = overlaid.overlayPixelCount;
+  } else if (expectedProfile === "macos-webkit") {
+    const overlaid = applyMacosWebkitExpectedOverlay(expectedPath, ep);
+    ep = overlaid.pixels;
+    appliedExpectedProfile = overlaid.profile;
+    expectedOverlayPixelCount = overlaid.overlayPixelCount;
   }
   expectedChecksum = checksum(ep);
   expectedWeighted = weightedChecksum(ep);
@@ -97,7 +103,7 @@ if (outputPath) {
     width,
     height,
     format: "argb-u32",
-    producer: "tauri-x11-window-screenshot",
+    producer,
     pixels,
   }));
 }

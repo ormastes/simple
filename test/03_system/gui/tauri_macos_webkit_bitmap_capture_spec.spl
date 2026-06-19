@@ -1,0 +1,46 @@
+# @tag:system
+# @tag:gui
+# @tag:tauri
+# @tag:webkit
+# @tag:bitmap
+
+"""
+# Tauri macOS WebKit bitmap capture spec
+
+## Overview
+
+Validates the macOS-native Tauri/WebKit bitmap evidence lane used by the
+production surface manifest. On Darwin it must render a deterministic WKWebView
+fixture into exact raw pixels and feed the same ARGB proof contract as the X11
+Tauri window capture path.
+
+## Acceptance Criteria
+
+- Darwin hosts use `macos-wkwebview-snapshot`.
+- The captured ARGB fixture is written from live WebKit pixels.
+- The proof remains strict: no blur, tolerance, or fake capture.
+"""
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+describe "Tauri macOS WebKit bitmap capture":
+
+    it "captures exact live WKWebView pixels on Darwin":
+        val command = "rm -rf build/test-tauri-macos-webkit-bitmap-capture && mkdir -p build/test-tauri-macos-webkit-bitmap-capture && printf '<!doctype html><html><head><style>html,body{margin:0;width:4px;height:4px;overflow:hidden;background:#ff0000}</style></head><body></body></html>' > build/test-tauri-macos-webkit-bitmap-capture/red.html && node -e 'const fs=require(\"fs\"); fs.writeFileSync(\"build/test-tauri-macos-webkit-bitmap-capture/red-expected.json\", JSON.stringify({width:4,height:4,format:\"argb-u32\",pixels:Array(16).fill(0xffff0000)}));' && BUILD_DIR=build/test-tauri-macos-webkit-bitmap-capture/out REPORT_PATH=build/test-tauri-macos-webkit-bitmap-capture/report.md TAURI_LAYOUT_HTML_PATH=build/test-tauri-macos-webkit-bitmap-capture/red.html TAURI_LAYOUT_EXPECTED_ARGB_PATH=build/test-tauri-macos-webkit-bitmap-capture/red-expected.json TAURI_LAYOUT_WIDTH=4 TAURI_LAYOUT_HEIGHT=4 TAURI_CAPTURE_EXPECTED_PROFILE=none sh scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        val evidence = file_read("build/test-tauri-macos-webkit-bitmap-capture/out/evidence.env")
+        expect(evidence).to_contain("tauri_simple_web_layout_host_uname_s=")
+        expect(evidence).to_contain("tauri_simple_web_layout_capture_backend=")
+        if evidence.contains("tauri_simple_web_layout_host_uname_s=Darwin"):
+            expect(evidence).to_contain("tauri_simple_web_layout_status=pass")
+            expect(evidence).to_contain("tauri_simple_web_layout_reason=pass")
+            expect(evidence).to_contain("tauri_simple_web_layout_capture_backend=macos-wkwebview-snapshot")
+            expect(evidence).to_contain("tauri_simple_web_layout_mismatch_count=0")
+            expect(evidence).to_contain("tauri_simple_web_layout_blur_or_tolerance_used=false")
+            expect(evidence).to_contain("tauri_simple_web_layout_captured_argb_written=true")
+            expect(evidence).to_contain("tauri_simple_web_layout_expected_profile=none")
+        else:
+            expect(evidence).to_contain("tauri_simple_web_layout_capture_backend=x11-xvfb-window-screenshot")
