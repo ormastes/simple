@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 98 | 98 | 0 | 0 |
+| 99 | 99 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1440,6 +1440,25 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed UI auto-layout replacement fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val mode_result = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|diagonal|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
+val gap_result = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|wide|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
+val padding_result = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|8|4,bad,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
+expect(mode_result.reason).to_equal("invalid-args")
+expect(gap_result.reason).to_equal("invalid-args")
+expect(padding_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank UI constraints action target ids
 
 <details>
@@ -1826,8 +1845,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 98 |
-| Active scenarios | 98 |
+| Total scenarios | 99 |
+| Active scenarios | 99 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
