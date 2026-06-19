@@ -501,13 +501,15 @@ expect(result.output).to_contain("Slide")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = "design: Feature\\nsize: 640x480\\nnode button|Run|button|16|20|96|32|primary|controls|action"
 val html = office_action_dispatch("render-ui-html", source)
 val sdd = office_action_dispatch("export-ui-sdd", source)
+val legacy_html = office_action_dispatch("ui-render", source)
+val legacy_sdd = office_action_dispatch("ui-export-sdd", source)
 expect(html.ok).to_be(true)
 expect(html.output).to_contain("data-format=\"html-ui\"")
 expect(html.output).to_contain("data-node-count=\"1\"")
@@ -515,6 +517,10 @@ expect(html.output).to_contain("Run")
 expect(sdd.ok).to_be(true)
 expect(sdd.output).to_contain("graph: Feature")
 expect(sdd.output).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent")
+expect(legacy_html.action).to_equal("render-ui-html")
+expect(legacy_html.output).to_contain("data-format=\"html-ui\"")
+expect(legacy_sdd.action).to_equal("export-ui-sdd")
+expect(legacy_sdd.output).to_contain("graph: Feature")
 ```
 
 </details>
@@ -524,16 +530,19 @@ expect(sdd.output).to_contain("nodes |id, label, css, role, shape, x, y, width, 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val legacy = office_action_dispatch("render-sdd", "graph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 expect(result.ok).to_be(true)
 expect(result.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(result.output).to_contain("data-node=\"A\"")
 expect(result.output).to_contain("data-selected-node-id=\"\"")
 expect(result.output).to_contain("data-selected-edge-index=\"-1\"")
+expect(legacy.action).to_equal("render-sdd-html")
+expect(legacy.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 ```
 
 </details>

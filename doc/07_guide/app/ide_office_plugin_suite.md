@@ -57,7 +57,8 @@ non-GUI bridge for cataloged render/export actions:
 `render-ppt-markdown-html`, `render-ui-html`, `export-ui-sdd`, and
 `render-sdd-html-with-selection`. The bridge delegates to the canonical
 Markdown, Writer, Impress, Designer, and SDD renderers rather than
-duplicating rendering logic.
+duplicating rendering logic. Legacy aliases `ui-render`, `ui-export-sdd`, and
+`render-sdd` normalize to those canonical action names.
 
 `render-markdown-preview-html` exposes the Markdown editor's own
 `wysiwyg_preview_document_html` route through the same headless bridge, so the
