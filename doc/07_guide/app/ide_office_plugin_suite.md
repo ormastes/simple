@@ -27,9 +27,10 @@ Markdown is the product source format for both Writer and PPT/Impress. HTML is
 the generated render target.
 
 The launcher-visible product name is `LibreOffice`; cards should use the
-LibreOffice app names Writer, Calc, and Impress even while the legacy compatible
-actions remain `open_word`, `open_sheets`, and `open_slides`. `run_office`
-accepts those launcher action names and normalizes them to the same app routes.
+LibreOffice app names Writer, Calc, Impress, Draw, Base, and Math while
+compatible actions remain `open_word`, `open_sheets`, `open_slides`,
+`open_draw`, `open_db`, and `open_math`. `run_office` accepts those launcher
+action names and normalizes them to the same app routes.
 The CLI `word` and `writer` routes load the Markdown-backed Writer surface; the
 older rich-text `WordApp` remains only as a compatibility UI module.
 

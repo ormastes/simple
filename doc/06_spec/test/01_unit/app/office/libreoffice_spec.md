@@ -114,7 +114,7 @@ expect(route.component).to_equal("counter")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -124,6 +124,15 @@ expect(sheets.unwrap()).to_equal("sheets")
 val counter = office_component_for_action("open_counter")
 expect(counter.is_some()).to_be(true)
 expect(counter.unwrap()).to_equal("counter")
+val draw = office_component_for_action("open_draw")
+expect(draw.is_some()).to_be(true)
+expect(draw.unwrap()).to_equal("draw")
+val db = office_component_for_action("open_db")
+expect(db.is_some()).to_be(true)
+expect(db.unwrap()).to_equal("db")
+val math = office_component_for_action("open_math")
+expect(math.is_some()).to_be(true)
+expect(math.unwrap()).to_equal("math")
 expect(office_component_for_action("open_writer").is_none()).to_be(true)
 ```
 
