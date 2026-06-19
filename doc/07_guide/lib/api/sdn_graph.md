@@ -222,6 +222,11 @@ node ids.
 `sdn_graph_delete_node_at` removes one node by canonical node index, drops
 attached connectors, and clears child parent references to that node id.
 
+`sdn_graph_add_node_checked(graph, id, label, css, role, shape, x, y, width,
+height, layer, parent)` appends one diagram node with caller-provided SDD
+metadata. It fails closed with `invalid-id` or `duplicate-id` so node ids remain
+stable for selection, connectors, and inspectors.
+
 `sdn_graph_update_node_at` is the broad pure node edit operation for editor
 event wiring. It updates one node's CSS labels, role, shape, x/y geometry,
 width/height, and layer by index while leaving node id/label, connectors, CSS

@@ -439,3 +439,8 @@ possible so they are runner-verifiable.
   `sdn_graph_add_edge` appends a connector with endpoint, label, style, kind,
   route, waypoint, and anchor metadata, and `add-sdd-edge` exposes it through
   the headless Office action bridge with existing-node validation.
+- 2026-06-19 dev: Added Draw/SDD node creation.
+  `sdn_graph_add_node_checked` appends a node with label, style, role, shape,
+  geometry, layer, and parent metadata while rejecting empty or duplicate ids;
+  `add-sdd-node` exposes it through the headless Office action bridge and IDE
+  Draw sanity probe.

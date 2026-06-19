@@ -506,11 +506,34 @@ expect(html).to_contain("data-canvas-grid=\"24\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: edit-node\nA: Alpha @plain role: box shape: rect x: 10 y: 20 width: 80 height: 20 layer: base\nB: Beta @plain role: box shape: rect x: 220 y: 20 width: 80 height: 20 layer: base\nA -> B: c route: simple start: right end: left")
+val added = sdn_graph_add_node_checked(graph, "C", "Choice", "accent selected", "decision", "diamond", "120", "80", "64", "48", "front", "A")
+expect(added.accepted).to_be(true)
+expect(added.reason).to_equal("updated")
+expect(added.graph.nodes.len()).to_equal(3)
+expect(added.graph.nodes[2].id).to_equal("C")
+expect(added.graph.nodes[2].label).to_equal("Choice")
+expect(added.graph.nodes[2].css).to_equal("accent selected")
+expect(added.graph.nodes[2].role).to_equal("decision")
+expect(added.graph.nodes[2].shape).to_equal("diamond")
+expect(added.graph.nodes[2].x).to_equal("120")
+expect(added.graph.nodes[2].parent).to_equal("A")
+expect(sdn_graph_render_html(added.graph)).to_contain("data-node=\"C\"")
+expect(sdn_graph_render_html(added.graph)).to_contain("data-role=\"decision\"")
+expect(sdn_graph_render_html(added.graph)).to_contain("data-shape=\"diamond\"")
+expect(sdn_graph_render_html(added.graph)).to_contain("data-layer=\"front\"")
+expect(sdn_graph_render_html(added.graph)).to_contain("data-parent=\"A\"")
+expect(sdn_graph_render_html(added.graph)).to_contain("sdn-css-accent sdn-css-selected")
+val duplicate_added = sdn_graph_add_node_checked(graph, "A", "Again", "", "", "", "", "", "", "", "", "")
+val invalid_added = sdn_graph_add_node_checked(graph, "", "Blank", "", "", "", "", "", "", "", "", "")
+expect(duplicate_added.accepted).to_be(false)
+expect(duplicate_added.reason).to_equal("duplicate-id")
+expect(invalid_added.accepted).to_be(false)
+expect(invalid_added.reason).to_equal("invalid-id")
 val updated = sdn_graph_update_node_at(graph, 0, "accent selected", "decision", "diamond", "32", "48", "96", "64", "foreground")
 val html = sdn_graph_render_html(updated)
 val canon = sdn_graph_to_canonical_sdn(updated)
