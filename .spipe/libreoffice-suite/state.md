@@ -285,3 +285,8 @@ possible so they are runner-verifiable.
   `sdn_graph_inspect_node` / `sdn_graph_inspect_edge` snapshots for draw.io-like
   sidebars. Catalog metadata now exposes `selection`, `inspector`,
   `render-sdd-html-with-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`.
+- 2026-06-19 dev: Advanced LibreOffice Base CRUD hardening. Added checked row
+  insertion with schema-width validation plus pure exact-match `count_where`,
+  `update_where`, and `delete_where` helpers over the text-table substrate.
+  Catalog metadata now exposes `schema-validation`, `count-where`,
+  `update-where`, `delete-where`, and `db-edit`.

@@ -68,6 +68,12 @@ display-safe results into formula `cached_display` so the visible grid renders
 those values after app-level recalc; full numeric formula parity remains gated
 on the tracked f64 backend blocker.
 
+Base editing uses `app.office.base_db` as a pure text-table substrate. Checked
+row insertion validates schema width before appending, while `update_where`,
+`delete_where`, and `count_where` apply exact-match predicates without
+filesystem, SQL parser, or GUI dependencies. These helpers preserve the
+iteration-based row access workaround used for non-first columns.
+
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
 
@@ -79,7 +85,8 @@ modes:
   `edit-sdd-node-parent`, `edit-sdd-node-shape`, `edit-sdd-node-style`,
   `inspect-sdd-node`, and `inspect-sdd-edge`; Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
-  `formula-display-recalc`; Designer has
+  `formula-display-recalc`; Base has `schema-validation`, `count-where`,
+  `update-where`, `delete-where`, and `db-edit`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
   `ui-constraints-edit` / `ui-align-selection` /

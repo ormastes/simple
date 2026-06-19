@@ -1,20 +1,38 @@
-"""LibreOffice Base — relational table spec.
+"""
+LibreOffice Base relational table specification.
+
+## Overview
 
 Verifies the Base database component: an in-memory text table with row
-insertion, exact-match filtering (`select_where`), and column projection
-(`project_column`). Inner-row cells are read via iteration to avoid the
+insertion, checked insertion, exact-match filtering (`select_where`), filtered
+counting, update/delete by predicate, and column projection (`project_column`).
+Inner-row cells are read via iteration to avoid the
 interpreter's `.get(>=1)` array-element corruption, so filtering by a non-first
 column works correctly.
+
+## Examples
+
+`insert_row_checked(table, ["1", "open"])` appends a row only when the row width
+matches the table schema. `update_where(table, "status", "open", "status",
+"done")` updates every matching row through an immutable result wrapper, and
+`delete_where(table, "status", "done")` returns a new table with those rows
+removed.
+
+**Requirements:** doc/02_requirements/feature/base_db.md
+**NFR:** doc/02_requirements/nfr/base_db.md
+**Plan:** doc/03_plan/sys_test/base_db.md
+**Design:** doc/07_guide/app/ide_office_plugin_suite.md
+**Research:** N/A
 """
 
 use std.spec
-use app.office.base_db.{DbTable, new_table, insert_row, row_count, select_where, project_column, column_index}
+use app.office.base_db.{DbTable, column_index, count_where, delete_where, insert_row, insert_row_checked, new_table, project_column, row_count, select_where, update_where}
 
 fn _sample() -> DbTable:
-    var t = new_table("enemies", ["name", "type"])
-    t = insert_row(t, ["goblin", "melee"])
-    t = insert_row(t, ["archer", "ranged"])
-    t = insert_row(t, ["orc", "melee"])
+    var t = new_table("tasks", ["name", "type"])
+    t = insert_row(t, ["alpha", "melee"])
+    t = insert_row(t, ["beta", "ranged"])
+    t = insert_row(t, ["gamma", "melee"])
     t
 
 describe "Base table: rows and columns":
@@ -50,3 +68,67 @@ describe "Base table: query":
         val types = project_column(t, "type")
         expect(types.len()).to_equal(3)
         expect(types).to_contain("ranged")
+
+    it "counts rows by exact match":
+        val t = _sample()
+        expect(count_where(t, "type", "melee")).to_equal(2)
+        expect(count_where(t, "type", "missing")).to_equal(0)
+        expect(count_where(t, "nope", "melee")).to_equal(0)
+
+describe "Base table: checked edits":
+    """Checked Base edits preserve table invariants and reject no-op predicates."""
+
+    it "accepts checked inserts with matching schema width":
+        val t = new_table("tasks", ["id", "status"])
+        val result = insert_row_checked(t, ["1", "open"])
+        expect(result.accepted).to_be(true)
+        expect(result.reason).to_equal("inserted")
+        expect(result.affected_count).to_equal(1)
+        expect(row_count(result.table)).to_equal(1)
+        expect(row_count(t)).to_equal(0)
+
+    it "rejects short and long checked inserts without changing the table":
+        val t = new_table("tasks", ["id", "status"])
+        val short_row = insert_row_checked(t, ["1"])
+        val long_row = insert_row_checked(t, ["1", "open", "extra"])
+        expect(short_row.accepted).to_be(false)
+        expect(short_row.reason).to_equal("row-width-mismatch")
+        expect(short_row.affected_count).to_equal(0)
+        expect(row_count(short_row.table)).to_equal(0)
+        expect(long_row.accepted).to_be(false)
+        expect(long_row.reason).to_equal("row-width-mismatch")
+        expect(row_count(long_row.table)).to_equal(0)
+
+    it "updates matching rows by a non-first column predicate":
+        val t = _sample()
+        val result = update_where(t, "type", "melee", "type", "frontline")
+        expect(result.accepted).to_be(true)
+        expect(result.reason).to_equal("updated")
+        expect(result.affected_count).to_equal(2)
+        expect(count_where(result.table, "type", "frontline")).to_equal(2)
+        expect(count_where(t, "type", "melee")).to_equal(2)
+
+    it "deletes matching rows by a non-first column predicate":
+        val t = _sample()
+        val result = delete_where(t, "type", "melee")
+        expect(result.accepted).to_be(true)
+        expect(result.reason).to_equal("deleted")
+        expect(result.affected_count).to_equal(2)
+        expect(row_count(result.table)).to_equal(1)
+        expect(project_column(result.table, "name")).to_contain("beta")
+        expect(row_count(t)).to_equal(3)
+
+    it "rejects missing columns and no-match edits without changing the table":
+        val t = _sample()
+        val missing_match = update_where(t, "missing", "melee", "type", "frontline")
+        val missing_update = update_where(t, "type", "melee", "missing", "frontline")
+        val no_update = update_where(t, "type", "flying", "type", "air")
+        val no_delete = delete_where(t, "type", "flying")
+        expect(missing_match.reason).to_equal("missing-match-column")
+        expect(missing_update.reason).to_equal("missing-update-column")
+        expect(no_update.reason).to_equal("no-matching-rows")
+        expect(no_delete.reason).to_equal("no-matching-rows")
+        expect(row_count(missing_match.table)).to_equal(3)
+        expect(row_count(missing_update.table)).to_equal(3)
+        expect(row_count(no_update.table)).to_equal(3)
+        expect(row_count(no_delete.table)).to_equal(3)

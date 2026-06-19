@@ -15,6 +15,12 @@ struct DbTable:
     columns: [text]
     rows: [[text]]
 
+struct DbEditResult:
+    accepted: bool
+    reason: text
+    affected_count: i32
+    table: DbTable
+
 fn new_table(name: text, columns: [text]) -> DbTable:
     """An empty table with the given column names."""
     DbTable(name: name, columns: columns, rows: [])
@@ -26,6 +32,12 @@ fn insert_row(table: DbTable, row: [text]) -> DbTable:
         rows.push(r)
     rows.push(row)
     DbTable(name: table.name, columns: table.columns, rows: rows)
+
+fn insert_row_checked(table: DbTable, row: [text]) -> DbEditResult:
+    """Append one row only when its width matches the table schema."""
+    if row.len() != table.columns.len():
+        return DbEditResult(accepted: false, reason: "row-width-mismatch", affected_count: 0, table: table)
+    DbEditResult(accepted: true, reason: "inserted", affected_count: 1, table: insert_row(table, row))
 
 fn row_count(table: DbTable) -> i32:
     """Number of rows in the table."""
@@ -49,6 +61,18 @@ fn _row_get(row: [text], idx: i32) -> text:
         i = i + 1
     ""
 
+fn _row_set(row: [text], idx: i32, value: text) -> [text]:
+    """Return a copy of a row with one cell replaced, using iteration for reads."""
+    var out: [text] = []
+    var i = 0
+    for cell in row:
+        if i == idx:
+            out.push(value)
+        else:
+            out.push(cell)
+        i = i + 1
+    out
+
 fn select_where(table: DbTable, col: text, value: text) -> [[text]]:
     """All rows whose `col` equals `value` (exact match)."""
     var out: [[text]] = []
@@ -69,3 +93,50 @@ fn project_column(table: DbTable, col: text) -> [text]:
     for r in table.rows:
         out.push(_row_get(r, idx))
     out
+
+fn count_where(table: DbTable, col: text, value: text) -> i32:
+    """Count rows whose `col` equals `value`."""
+    var count = 0
+    val idx = column_index(table, col)
+    if idx < 0:
+        return 0
+    for r in table.rows:
+        if _row_get(r, idx) == value:
+            count = count + 1
+    count
+
+fn update_where(table: DbTable, match_col: text, match_value: text, update_col: text, new_value: text) -> DbEditResult:
+    """Update one column on rows matching an exact-value predicate."""
+    val match_idx = column_index(table, match_col)
+    if match_idx < 0:
+        return DbEditResult(accepted: false, reason: "missing-match-column", affected_count: 0, table: table)
+    val update_idx = column_index(table, update_col)
+    if update_idx < 0:
+        return DbEditResult(accepted: false, reason: "missing-update-column", affected_count: 0, table: table)
+    var rows: [[text]] = []
+    var affected = 0
+    for r in table.rows:
+        if _row_get(r, match_idx) == match_value:
+            rows.push(_row_set(r, update_idx, new_value))
+            affected = affected + 1
+        else:
+            rows.push(r)
+    if affected == 0:
+        return DbEditResult(accepted: false, reason: "no-matching-rows", affected_count: 0, table: table)
+    DbEditResult(accepted: true, reason: "updated", affected_count: affected, table: DbTable(name: table.name, columns: table.columns, rows: rows))
+
+fn delete_where(table: DbTable, match_col: text, match_value: text) -> DbEditResult:
+    """Delete rows matching an exact-value predicate."""
+    val match_idx = column_index(table, match_col)
+    if match_idx < 0:
+        return DbEditResult(accepted: false, reason: "missing-match-column", affected_count: 0, table: table)
+    var rows: [[text]] = []
+    var affected = 0
+    for r in table.rows:
+        if _row_get(r, match_idx) == match_value:
+            affected = affected + 1
+        else:
+            rows.push(r)
+    if affected == 0:
+        return DbEditResult(accepted: false, reason: "no-matching-rows", affected_count: 0, table: table)
+    DbEditResult(accepted: true, reason: "deleted", affected_count: affected, table: DbTable(name: table.name, columns: table.columns, rows: rows))

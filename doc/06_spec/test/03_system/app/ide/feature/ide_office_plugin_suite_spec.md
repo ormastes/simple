@@ -110,7 +110,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=9 features=63 actions=28
+  llm-catalog: apps=9 features=67 actions=29
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -271,10 +271,17 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
 
 #### exposes a complete LLM-readable app feature catalog
 
+- var base table = new table
+- base table = insert row checked
+   - Expected: updated_base.affected_count equals `2`
+   - Expected: count_where(updated_base.table, "status", "done") equals `2`
+   - Expected: row_count(deleted_base.table) equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 118 lines folded for reproduction.
+Runnable source: 134 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,7 +289,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=63 actions=28")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=67 actions=29")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -394,6 +401,22 @@ expect(office_ui_design_read_style_token(distributed_ui.design, "button").css).t
 expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("button, Run, accent, action, rounded, 24, 28, 96, 40, 3, , vertical, 4")
 expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("label, Label, secondary, copy, rounded")
 expect(catalog[6].owner_module).to_equal("app.office.base_db")
+expect(catalog[6].features.join(",")).to_contain("schema-validation")
+expect(catalog[6].features.join(",")).to_contain("count-where")
+expect(catalog[6].features.join(",")).to_contain("update-where")
+expect(catalog[6].features.join(",")).to_contain("delete-where")
+expect(catalog[6].actions.join(",")).to_contain("db-edit")
+var base_table = new_table("Feature", ["id", "status"])
+val inserted_base = insert_row_checked(base_table, ["1", "open"])
+base_table = inserted_base.table
+base_table = insert_row_checked(base_table, ["2", "open"]).table
+val updated_base = update_where(base_table, "status", "open", "status", "done")
+val deleted_base = delete_where(updated_base.table, "status", "done")
+expect(inserted_base.accepted).to_be(true)
+expect(updated_base.affected_count).to_equal(2)
+expect(count_where(updated_base.table, "status", "done")).to_equal(2)
+expect(deleted_base.accepted).to_be(true)
+expect(row_count(deleted_base.table)).to_equal(0)
 expect(catalog[7].features.join(",")).to_contain("mathml")
 expect(catalog[8].actions.join(",")).to_contain("counter-action")
 ```
