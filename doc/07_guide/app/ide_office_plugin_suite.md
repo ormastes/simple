@@ -37,6 +37,18 @@ card counts so launcher metadata cannot drift from the product surface.
 The CLI `word` and `writer` routes load the Markdown-backed Writer surface; the
 older rich-text `WordApp` remains only as a compatibility UI module.
 
+## Glossary
+
+- Writer: Markdown-backed document editor; aliases `writer`, `word`, `markdown`, `md`.
+- Calc: spreadsheet editor; aliases `calc`, `sheets`, `excel`, `ods`, `xlsx`.
+- Impress: Markdown-backed slide editor; aliases `impress`, `slides`, `ppt`, `odp`, `pptx`.
+- Draw: SDD Diagram Draw over the SDN graph substrate; aliases `draw`, `diagram`, `sdd`, `sdn`.
+- Base: text-table database editor; aliases `base`, `db`, `database`.
+- Math: MathML formula editor; aliases `math`, `formula`, `mathml`.
+- Designer: HTML UI design editor; aliases `designer`, `ui`, `html-ui`, `figma`.
+- SDD: Simple Diagram Document, the Office Draw file model stored as SDN text.
+- SDN: Simple Data Notation, the table-oriented substrate used by SDD and Simple docs.
+
 Markdown GUI rendering must use `wysiwyg_preview_document_html`, not a bare
 preview pane. The document helper owns the stable `.wysiwyg-preview` CSS wrapper
 and line-addressable `.wysiwyg-preview-line` rows for the escaped styled HTML

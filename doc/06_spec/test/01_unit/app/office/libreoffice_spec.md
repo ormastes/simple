@@ -28,7 +28,7 @@ libreoffice_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -181,6 +181,28 @@ expect(libreoffice_apps().len()).to_equal(6)
 
 </details>
 
+#### normalizes glossary aliases for Office apps and formats
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(office_canonical_app_name("md")).to_equal("Writer")
+expect(office_canonical_app_name("xlsx")).to_equal("Calc")
+expect(office_canonical_app_name("pptx")).to_equal("Impress")
+expect(office_canonical_app_name("sdn")).to_equal("Draw")
+expect(office_canonical_app_name("html-ui")).to_equal("Designer")
+expect(office_app_aliases("draw")).to_contain("sdd")
+expect(office_app_aliases("designer")).to_contain("figma")
+expect(office_format_name("sdd")).to_equal("SDD: Simple Diagram Document")
+expect(office_format_name("sdn")).to_equal("SDN: Simple Data Notation")
+```
+
+</details>
+
 ### LibreOffice branding: implemented status
 _All six LibreOffice apps now render/compute through the suite._
 
@@ -245,8 +267,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
