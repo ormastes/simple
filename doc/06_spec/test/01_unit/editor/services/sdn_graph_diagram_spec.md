@@ -592,7 +592,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 61 lines folded for reproduction.
+Runnable source: 69 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -601,6 +601,8 @@ val created = sdn_graph_add_edge(graph, "B", "A", "return", "secondary", "reply"
 val bad_create_route = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "curve", "", "left", "right")
 val bad_create_anchor = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "simple", "", "east", "right")
 val bad_create_waypoint = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply", "simple", "10,20", "left", "right")
+val bad_create_style = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary,bad", "reply", "simple", "", "left", "right")
+val bad_create_kind = sdn_graph_add_edge_checked(graph, "B", "A", "return", "secondary", "reply bad", "simple", "", "left", "right")
 val updated = sdn_graph_update_edge_at(created, 0, "orthogonal", "140x30;200x80", "right", "left")
 val bad_route = sdn_graph_update_edge_checked(created, 0, "curve", "140x30", "right", "left")
 val bad_anchor = sdn_graph_update_edge_checked(created, 0, "orthogonal", "140x30", "east", "left")
@@ -609,7 +611,9 @@ val missing_edge = sdn_graph_update_edge_checked(created, 8, "orthogonal", "140x
 val labeled = sdn_graph_update_edge_label_at(updated, 0, "approved")
 val label_pointed = sdn_graph_update_edge_label_point_at(labeled, 0, "155", "55")
 val styled = sdn_graph_update_edge_style_at(labeled, 0, "warning dashed")
+val bad_style = sdn_graph_update_edge_style_checked(labeled, 0, "warning,bad")
 val kinded = sdn_graph_update_edge_kind_at(styled, 0, "async")
+val bad_kind = sdn_graph_update_edge_kind_checked(styled, 0, "async bad")
 val reconnected = sdn_graph_update_edge_endpoints_at(kinded, 0, "B", "A")
 val deleted = sdn_graph_delete_edge_at(reconnected, 0)
 val html = sdn_graph_render_html(updated)
@@ -628,6 +632,8 @@ expect(created.edges[1].end_anchor).to_equal("right")
 expect(bad_create_route.reason).to_equal("invalid-route")
 expect(bad_create_anchor.reason).to_equal("invalid-anchor")
 expect(bad_create_waypoint.reason).to_equal("invalid-waypoints")
+expect(bad_create_style.reason).to_equal("invalid-style-token")
+expect(bad_create_kind.reason).to_equal("invalid-kind-token")
 expect(sdn_graph_render_html(created)).to_contain(">return</div>")
 expect(sdn_graph_render_html(created)).to_contain("sdn-css-secondary")
 expect(sdn_graph_render_html(created)).to_contain("data-kind=\"reply\"")
@@ -648,8 +654,10 @@ expect(label_pointed.edges[0].label_y).to_equal("55")
 expect(sdn_graph_render_html(label_pointed)).to_contain("data-label-x=\"155\" data-label-y=\"55\"")
 expect(styled.edges[0].css).to_equal("warning dashed")
 expect(styled.edges[0].route).to_equal("orthogonal")
+expect(bad_style.reason).to_equal("invalid-style-token")
 expect(styled_html).to_contain("sdn-css-warning sdn-css-dashed")
 expect(kinded.edges[0].kind).to_equal("async")
+expect(bad_kind.reason).to_equal("invalid-kind-token")
 expect(sdn_graph_render_html(kinded)).to_contain("data-kind=\"async\"")
 expect(reconnected.edges[0].from_id).to_equal("B")
 expect(reconnected.edges[0].to_id).to_equal("A")

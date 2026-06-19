@@ -109,8 +109,8 @@ and rejects duplicate IDs, blank IDs, and missing parent IDs.
 `duplicate-sdd-edge` uses `edge_index`.
 `edit-sdd-edge-label` uses `edge_index|new_label`.
 `edit-sdd-edge-label-point` uses `edge_index|label_x|label_y`.
-`edit-sdd-edge-style` uses `edge_index|css_labels`.
-`edit-sdd-edge-kind` uses `edge_index|kind`.
+`edit-sdd-edge-style` uses `edge_index|css_labels`; labels are space-separated safe tokens.
+`edit-sdd-edge-kind` uses `edge_index|kind`; kind is empty or one safe token.
 `edit-sdd-edge-endpoints` uses `edge_index|from_id|to_id`.
 `delete-sdd-edge` uses `edge_index`.
 `reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`; route is empty, `simple`, or `orthogonal`, anchors are empty or cardinal, and waypoints use semicolon-separated integer `x` pairs.
