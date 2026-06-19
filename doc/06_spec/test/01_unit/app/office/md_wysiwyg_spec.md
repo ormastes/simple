@@ -28,7 +28,7 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -206,6 +206,22 @@ expect(html).to_contain("<a href=\"docs.md?a=1&amp;b=2\">Docs &lt;x&gt;</a>")
 
 </details>
 
+#### renders Markdown bullet list lines as HTML lists
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = wysiwyg_preview_document_html("- First **item**")
+expect(html).to_contain("<ul class=\"markdown-list\"")
+expect(html).to_contain("<li>First <strong>item</strong></li>")
+```
+
+</details>
+
 ### markdown WYSIWYG view: beside-the-line editing
 _Editing one line updates only that row's source and preview._
 
@@ -344,8 +360,8 @@ expect(wysiwyg_source_pane(result.view)).to_equal("first")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
