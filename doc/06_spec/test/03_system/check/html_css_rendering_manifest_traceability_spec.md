@@ -27,7 +27,7 @@ html_css_rendering_manifest_traceability_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +80,8 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 - All 62 implemented Simple Web CSS properties appear in actual rendered
   fixture CSS.
 - Every scene in the 50-case manifest has a fixture HTML assignment.
+- The manifest must keep the required 50-case render matrix, not just enough
+  cases to cover the currently known tag/property names.
 
 ## Scenarios
 
@@ -100,6 +102,7 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
    - Expected: css_covered equals `62`
    - Expected: css_missing equals ``
    - Expected: manifest_cases equals `50`
+   - Expected: required_manifest_cases equals `50`
    - Expected: missing_fixture equals ``
 - Verify the operator report was written
 
@@ -107,7 +110,7 @@ sh scripts/check/check-html-css-rendering-manifest-traceability.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -130,6 +133,7 @@ val css_count = _value_of(evidence, "html_css_rendering_manifest_traceability_cs
 val css_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_covered_count")
 val css_missing = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_missing")
 val manifest_cases = _value_of(evidence, "html_css_rendering_manifest_traceability_manifest_case_count")
+val required_manifest_cases = _value_of(evidence, "html_css_rendering_manifest_traceability_required_manifest_case_count")
 val missing_fixture = _value_of(evidence, "html_css_rendering_manifest_traceability_manifest_missing_fixture")
 
 expect(tag_count).to_equal("105")
@@ -139,6 +143,7 @@ expect(css_count).to_equal("62")
 expect(css_covered).to_equal("62")
 expect(css_missing).to_equal("")
 expect(manifest_cases).to_equal("50")
+expect(required_manifest_cases).to_equal("50")
 expect(missing_fixture).to_equal("")
 
 step("Verify the operator report was written")
@@ -153,12 +158,42 @@ expect(report).to_contain("- implemented CSS properties: 62/62")
 
 </details>
 
+#### rejects a truncated render manifest even when fixture HTML still exists
+
+- Create a manifest missing one render case and run the gate against it
+   - Expected: code equals `0`
+- Assert the gate fails on case count instead of silently accepting partial coverage
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a manifest missing one render case and run the gate against it")
+val command = "rm -rf build/test-html-css-rendering-manifest-traceability-truncated && mkdir -p build/test-html-css-rendering-manifest-traceability-truncated/source && head -n 50 tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt > build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt && BUILD_DIR=build/test-html-css-rendering-manifest-traceability-truncated/out REPORT_PATH=build/test-html-css-rendering-manifest-traceability-truncated/report.md HTML_CSS_RENDERING_MANIFEST_FETCH=0 HTML_CSS_RENDERING_MANIFEST_PATH=build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt sh scripts/check/check-html-css-rendering-manifest-traceability.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the gate fails on case count instead of silently accepting partial coverage")
+val evidence = rt_file_read_text("build/test-html-css-rendering-manifest-traceability-truncated/out/evidence.env") ?? ""
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_status=fail")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_reason=unexpected-manifest-case-count")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest=build/test-html-css-rendering-manifest-traceability-truncated/source/truncated_manifest.txt")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest_case_count=49")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_required_manifest_case_count=50")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

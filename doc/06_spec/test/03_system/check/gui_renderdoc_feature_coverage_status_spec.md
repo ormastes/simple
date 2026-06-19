@@ -127,6 +127,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
    - Expected: rendering_manifest_css_covered equals `62`
    - Expected: rendering_manifest_css_missing equals ``
    - Expected: rendering_manifest_case_count equals `50`
+   - Expected: rendering_manifest_required_case_count equals `50`
    - Expected: rendering_manifest_missing_fixture equals ``
    - Expected: traceability_status equals `pass`
    - Expected: traceability_html_count equals `105`
@@ -146,7 +147,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 343 lines folded for reproduction.
+Runnable source: 346 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -171,6 +172,7 @@ expect(evidence).to_contain("html_css_rendering_manifest_traceability_html_tag_c
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_count=62")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_css_property_covered_count=62")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_manifest_case_count=50")
+expect(evidence).to_contain("html_css_rendering_manifest_traceability_required_manifest_case_count=50")
 expect(evidence).to_contain("html_css_traceability_status=pass")
 expect(evidence).to_contain("html_css_traceability_reason=pass")
 expect(evidence).to_contain("html_css_traceability_exit_code=0")
@@ -372,6 +374,7 @@ val rendering_manifest_css_count = _value_of(evidence, "html_css_rendering_manif
 val rendering_manifest_css_covered = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_covered_count")
 val rendering_manifest_css_missing = _value_of(evidence, "html_css_rendering_manifest_traceability_css_property_missing")
 val rendering_manifest_case_count = _value_of(evidence, "html_css_rendering_manifest_traceability_manifest_case_count")
+val rendering_manifest_required_case_count = _value_of(evidence, "html_css_rendering_manifest_traceability_required_manifest_case_count")
 val rendering_manifest_fixture_scene_count = _value_of(evidence, "html_css_rendering_manifest_traceability_fixture_scene_count")
 val rendering_manifest_missing_fixture = _value_of(evidence, "html_css_rendering_manifest_traceability_manifest_missing_fixture")
 val traceability_status = _value_of(evidence, "html_css_traceability_status")
@@ -433,6 +436,7 @@ expect(rendering_manifest_css_count).to_equal("62")
 expect(rendering_manifest_css_covered).to_equal("62")
 expect(rendering_manifest_css_missing).to_equal("")
 expect(rendering_manifest_case_count).to_equal("50")
+expect(rendering_manifest_required_case_count).to_equal("50")
 expect(rendering_manifest_fixture_scene_count.to_i64()).to_be_greater_than(49)
 expect(rendering_manifest_missing_fixture).to_equal("")
 expect(traceability_status).to_equal("pass")
