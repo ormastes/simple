@@ -1059,7 +1059,7 @@ expect(office_ui_design_render_html(distributed_ui.design)).to_contain("data-con
 expect(office_ui_design_render_html_with_selection(distributed_ui.design, "button")).to_contain("data-selected=\"true\"")
 expect(selected_ui_action.ok).to_be(true)
 expect(selected_ui_action.output).to_contain("data-selected-node-id=\"button\"")
-expect(selected_ui_action.output).to_contain("data-resize-handle=\"se\"")
+expect(selected_ui_action.output).to_contain("data-resize-handle=\"se\" data-node=\"button\" data-node-index=\"0\"")
 val inspected_ui = office_ui_design_inspect_node(distributed_ui.design, "button")
 expect(inspected_ui.found).to_be(true)
 expect(inspected_ui.reason).to_equal("selected")
