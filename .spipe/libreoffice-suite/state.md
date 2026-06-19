@@ -423,3 +423,7 @@ possible so they are runner-verifiable.
   `edit-sdd-node-geometry` exposes `node_id|x|y|width|height` through the
   headless Office action bridge while preserving node label/style/shape/layer,
   and the IDE Draw sanity probe now reports `geometry=true`.
+- 2026-06-19 dev: Added Draw/SDD node layer editing.
+  `sdn_graph_update_node_layer_at` edits stacking layer metadata without
+  changing label/style/shape/geometry, and `edit-sdd-node-layer` exposes
+  `node_id|layer` through the headless Office action bridge.
