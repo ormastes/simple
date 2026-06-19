@@ -212,7 +212,8 @@ edits with expected-value checks. Numeric layer values render as deterministic `
 Selection and inspection are read-only derived views: selected renders add
 `data-selected`/`aria-selected` metadata plus deterministic
 visible `data-resize-handle` corner handles tagged with stable
-`data-handle-index`, `data-node`, and `data-node-index`, and `ui-inspect-node` returns a node
+`data-edit-action="resize-node"`, `data-handle-index`, `data-node`, and
+`data-node-index`, and `ui-inspect-node` returns a node
 snapshot without mutating the design document. Style-token reads and guarded
 style-token edits expose the node `css` token as a deterministic visual class;
 they do not accept arbitrary CSS blocks. Rendered Designer classes are emitted
