@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 52 | 52 | 0 | 0 |
+| 53 | 53 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -184,6 +184,22 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(run_office(["counter"])).to_equal(0)
+```
+
+</details>
+
+#### loads apps through launcher open actions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["open_word"])).to_equal(0)
+expect(run_office(["open_sheets"])).to_equal(0)
+expect(run_office(["open_counter"])).to_equal(0)
 ```
 
 </details>
@@ -1043,8 +1059,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 52 |
-| Active scenarios | 52 |
+| Total scenarios | 53 |
+| Active scenarios | 53 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
