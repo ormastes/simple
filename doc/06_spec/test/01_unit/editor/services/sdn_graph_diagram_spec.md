@@ -204,7 +204,7 @@ expect(html).to_contain("data-canvas-grid=\"16\"")
 expect(html).to_contain("data-canvas-snap=\"true\"")
 expect(html).to_contain("data-canvas-zoom=\"125\"")
 expect(html).to_contain("data-canvas-background=\"#ffffff\"")
-expect(html).to_contain("style=\"width:1200px;height:800px;\"")
+expect(html).to_contain("style=\"width:1200px;height:800px;background-color:#ffffff;\"")
 ```
 
 </details>
@@ -533,7 +533,7 @@ expect(sdn_graph_render_html(deleted)).to_contain("data-selected-edge-index=\"-1
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -550,6 +550,7 @@ expect(updated.nodes[0].id).to_equal("A")
 expect(updated.edges[0].from_id).to_equal("A")
 expect(html).to_contain("data-canvas-width=\"1440\"")
 expect(html).to_contain("data-canvas-grid=\"24\"")
+expect(html).to_contain("style=\"width:1440px;height:960px;background-color:#f8fafc;\"")
 ```
 
 </details>

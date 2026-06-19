@@ -197,7 +197,8 @@ classes derived from `@name`. Nodes also expose `data-parent` for group or
 container membership. The root exposes optional canvas metadata as
 `data-canvas-width`, `data-canvas-height`, `data-canvas-grid`,
 `data-canvas-snap`, `data-canvas-zoom`, and `data-canvas-background`, and maps
-canvas width/height to deterministic root style lengths when present.
+canvas width/height to deterministic root style lengths when present. Safe
+canvas background colors are also rendered as root `background-color` CSS.
 
 ## Rendered Connector Contract
 

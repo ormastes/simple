@@ -306,6 +306,9 @@ possible so they are runner-verifiable.
   attributes and pure `sdn_graph_update_canvas` edits canvas state without
   mutating nodes or connectors. Catalog metadata now exposes
   `canvas-metadata` and `edit-sdd-canvas`.
+- 2026-06-19 dev: Rendered SDD Draw canvas backgrounds. Safe
+  `canvas_background` values now paint the deterministic HTML root
+  `background-color` while preserving the `data-canvas-background` metadata.
 - 2026-06-19 dev: Promoted SDD Draw to the IDE feature-check surface. Added a
   pure `app.ide.draw_sanity` probe and registered Draw as a first-class IDE
   capability, so `simple ide --feature-check --tui|--gui` now reports six
