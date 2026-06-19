@@ -1,0 +1,158 @@
+#!/bin/sh
+# Fail-closed coverage audit for GUI widget HTML rendering fixtures/specs.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_widget_rendering_fixture_coverage}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_widget_rendering_fixture_coverage_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+python3 - <<'PY' >"$OUT_ENV"
+from pathlib import Path
+import re
+
+ROOT = Path.cwd()
+
+WIDGET_KIND = ROOT / "src/lib/common/ui/widget_kind.spl"
+HTML_RENDERER = ROOT / "src/app/ui.render/html_widgets.spl"
+SPEC_ROOTS = [
+    ROOT / "test/01_unit/app/ui/html_render_spec.spl",
+    ROOT / "test/01_unit/app/ui/gui_widgets_spec.spl",
+    ROOT / "test/03_system/gui/widget_rendering_spec.spl",
+    ROOT / "test/03_system/gui/ui/widget_coverage_spec.spl",
+]
+SPEC_ROOTS.extend(sorted((ROOT / "test/01_unit/app/ui").glob("widget*_spec.spl")))
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def emit(key: str, value) -> None:
+    value = "" if value is None else str(value)
+    value = value.replace("\n", " ")
+    print(f"{key}={value}")
+
+
+def expected_class(wire: str) -> str:
+    if wire == "treenode":
+        return "tree-node"
+    if wire == "label":
+        return "widget-text"
+    return "widget-" + wire.replace("_", "-")
+
+
+widget_source = WIDGET_KIND.read_text(encoding="utf-8", errors="ignore")
+renderer_source = HTML_RENDERER.read_text(encoding="utf-8", errors="ignore")
+
+wire_pairs = re.findall(r"WidgetKind\.([A-Za-z0-9_]+)\s*=>\s*\"([^\"]+)\"", widget_source)
+widgets = []
+seen_wires = set()
+for enum_name, wire in wire_pairs:
+    if wire not in seen_wires:
+        widgets.append((enum_name, wire))
+        seen_wires.add(wire)
+
+match = re.search(r"fn render_html_widget\(.*?\n(.*?)\nfn render_html_tree_widget", renderer_source, re.S)
+dispatch_block = match.group(1) if match else ""
+dispatch_wires = set(re.findall(r"^\s*\"([^\"]+)\"\s*=>", dispatch_block, re.M))
+
+spec_text_by_path = {}
+for path in SPEC_ROOTS:
+    if path.exists():
+        spec_text_by_path[path] = path.read_text(encoding="utf-8", errors="ignore")
+
+missing_dispatch = []
+missing_renderer_class = []
+missing_spec = []
+covered_specs = {}
+covered_renderer_classes = []
+covered_dispatch = []
+
+for enum_name, wire in widgets:
+    css_class = expected_class(wire)
+    if wire in dispatch_wires:
+        covered_dispatch.append(wire)
+    else:
+        missing_dispatch.append(wire)
+
+    if css_class in renderer_source:
+        covered_renderer_classes.append(wire)
+    else:
+        missing_renderer_class.append(f"{wire}:{css_class}")
+
+    matching_specs = []
+    for path, text in spec_text_by_path.items():
+        if css_class not in text:
+            continue
+        if wire == "label":
+            if not (
+                "WidgetKind.Label" in text
+                or '"label"' in text
+                or "label(" in text
+                or "label widget" in text
+            ):
+                continue
+        matching_specs.append(rel(path))
+    if matching_specs:
+        covered_specs[wire] = matching_specs
+    else:
+        missing_spec.append(f"{wire}:{css_class}")
+
+status = "pass"
+reason = "pass"
+if missing_dispatch:
+    status = "fail"
+    reason = "missing-render-html-widget-dispatch"
+elif missing_renderer_class:
+    status = "fail"
+    reason = "missing-renderer-class-marker"
+elif missing_spec:
+    status = "fail"
+    reason = "missing-widget-rendering-spec-marker"
+
+emit("gui_widget_rendering_fixture_coverage_status", status)
+emit("gui_widget_rendering_fixture_coverage_reason", reason)
+emit("gui_widget_rendering_fixture_coverage_widget_kind_source", rel(WIDGET_KIND))
+emit("gui_widget_rendering_fixture_coverage_renderer_source", rel(HTML_RENDERER))
+emit("gui_widget_rendering_fixture_coverage_widget_kind_count", len(widgets))
+emit("gui_widget_rendering_fixture_coverage_dispatch_covered_count", len(covered_dispatch))
+emit("gui_widget_rendering_fixture_coverage_renderer_class_covered_count", len(covered_renderer_classes))
+emit("gui_widget_rendering_fixture_coverage_spec_covered_count", len(covered_specs))
+emit("gui_widget_rendering_fixture_coverage_missing_dispatch_widgets", ",".join(missing_dispatch))
+emit("gui_widget_rendering_fixture_coverage_missing_renderer_classes", ",".join(missing_renderer_class))
+emit("gui_widget_rendering_fixture_coverage_missing_spec_widgets", ",".join(missing_spec))
+emit("gui_widget_rendering_fixture_coverage_expected_classes", ",".join(f"{wire}:{expected_class(wire)}" for _, wire in widgets))
+emit("gui_widget_rendering_fixture_coverage_spec_sources", ",".join(rel(path) for path in sorted(spec_text_by_path)))
+emit("gui_widget_rendering_fixture_coverage_covered_widgets", ",".join(wire for _, wire in widgets if wire in covered_specs))
+PY
+
+status="$(sed -n 's/^gui_widget_rendering_fixture_coverage_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^gui_widget_rendering_fixture_coverage_reason=//p' "$OUT_ENV" | tail -n 1)"
+
+{
+    echo "# GUI Widget Rendering Fixture Coverage"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- widget kinds: $(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- renderer dispatch covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_dispatch_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- renderer class markers covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderer_class_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- spec markers covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_spec_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$status" != "pass" ]; then
+    exit 1
+fi

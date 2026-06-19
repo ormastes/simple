@@ -99,12 +99,26 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
 This lightweight audit does not launch Electron, Chrome, or RenderDoc. It
-checks that every `WidgetKind` has `app.ui.render.html_widgets` dispatch,
-summarizes the Electron Simple Web layout manifest cases, points at the
-production GUI/web parity wrapper, and embeds the current HTML/CSS RenderDoc
-goal status. It may report `incomplete` while coverage is structurally mapped
-but durable `.rdc` evidence is missing from the local `build/` tree or the
-external Chrome/Vulkan gate has not passed.
+checks that every `WidgetKind` has `app.ui.render.html_widgets` dispatch and
+renderer fixture/spec coverage, summarizes the Electron Simple Web layout
+manifest cases, points at the production GUI/web parity wrapper, and embeds the
+current HTML/CSS RenderDoc goal status. It may report `incomplete` while
+coverage is structurally mapped but durable `.rdc` evidence is missing from the
+local `build/` tree or the external Chrome/Vulkan gate has not passed.
+
+GUI widget renderer fixture/spec coverage command:
+
+```sh
+sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs
+```
+
+This fail-closed gate derives the current 43 GUI widget wire kinds from
+`src/lib/common/ui/widget_kind.spl`, checks `render_html_widget` dispatch and
+renderer class markers in `src/app/ui.render/html_widgets.spl`, and verifies
+that the renderer spec corpus covers all 43 widget markers. It specifically
+guards newer direct widget classes such as `radio`, `heading`,
+`navigation_bar`, `tab_bar`, `card`, `switch`, `segmented_control`, and
+`search_bar`.
 
 HTML/CSS rendering manifest traceability command:
 

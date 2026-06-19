@@ -28,7 +28,7 @@ html_render_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 47 | 47 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -42,7 +42,7 @@ html_render_spec -> app
 #### renders div with class widget-text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -60,7 +60,7 @@ expect html to_contain "widget-text"
 #### renders content inside the div
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -77,11 +77,11 @@ expect html to_contain "Some content"
 
 #### renders as a div tag
 
-1. expect html starts with
+- expect html starts with
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -101,7 +101,7 @@ expect html.starts_with("<div") to_equal true
 #### renders button tag with class widget-button
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -118,11 +118,11 @@ expect html to_contain "widget-button"
 
 #### renders as a button tag
 
-1. expect html starts with
+- expect html starts with
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -140,7 +140,7 @@ expect html.starts_with("<button") to_equal true
 #### includes data-action attribute
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -158,7 +158,7 @@ expect html to_contain "data-action=\"save_file\""
 #### includes label text as content
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -178,7 +178,7 @@ expect html to_contain "Submit"
 #### renders div with class widget-panel
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -196,7 +196,7 @@ expect html to_contain "widget-panel"
 #### renders children inside panel
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -218,7 +218,7 @@ expect html to_contain "widget-text"
 #### renders div with class widget-progress
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -236,7 +236,7 @@ expect html to_contain "widget-progress"
 #### includes percentage in style
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -254,7 +254,7 @@ expect html to_contain "width: 42%"
 #### includes percentage text
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -274,7 +274,7 @@ expect html to_contain "90%"
 #### renders label with class widget-checkbox
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -292,7 +292,7 @@ expect html to_contain "widget-checkbox"
 #### renders input with type checkbox
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -309,11 +309,11 @@ expect html to_contain "type=\"checkbox\""
 
 #### renders as a div tag
 
-1. expect html starts with
+- expect html starts with
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -331,7 +331,7 @@ expect html.starts_with("<div") to_equal true
 #### includes checked attribute when checked is true
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -349,7 +349,7 @@ expect html to_contain " checked"
 #### omits checked attribute when checked is false
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -372,7 +372,7 @@ expect has_checked_attr to_equal false
 #### renders img tag with class widget-image
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -389,11 +389,11 @@ expect html to_contain "widget-image"
 
 #### renders as an img tag
 
-1. expect html starts with
+- expect html starts with
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -411,7 +411,7 @@ expect html.starts_with("<img") to_equal true
 #### includes src attribute
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -429,7 +429,7 @@ expect html to_contain "src=\"banner.png\""
 #### includes alt attribute
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -449,7 +449,7 @@ expect html to_contain "alt=\"App Icon\""
 #### renders hr tag with class widget-divider
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -466,11 +466,11 @@ expect html to_contain "widget-divider"
 
 #### renders as an hr tag
 
-1. expect html starts with
+- expect html starts with
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -490,7 +490,7 @@ expect html.starts_with("<hr") to_equal true
 #### adds focused class when widget is focused
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -510,11 +510,11 @@ expect html to_contain " focused"
 
 #### does not add focused class when widget is not focused
 
-1. var parent = panel
+- var parent = panel
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -541,7 +541,7 @@ expect html to_contain class_segment
 #### recursively renders full tree with nested elements
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -558,6 +558,610 @@ expect html to_contain "widget-text"
 expect html to_contain "Hello from tree"
 expect html to_contain "widget-button"
 expect html to_contain "Go"
+```
+
+</details>
+
+### render_html_widget full catalog direct widgets
+
+#### renders radio with checked state
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node set prop
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("radio_direct", "radio")
+node = node.set_prop("label", "Choice A")
+node = node.set_prop("checked", "true")
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-radio"
+expect html to_contain "checked"
+expect html to_contain "Choice A"
+```
+
+</details>
+
+#### renders heading with requested level
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node set prop
+- expect html starts with
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("heading_direct", "heading")
+node = node.set_prop("content", "Section Title")
+node = node.set_prop("level", "3")
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-heading"
+expect html.starts_with("<h3") to_equal true
+expect html to_contain "Section Title"
+```
+
+</details>
+
+#### renders navigation_bar with title and action children
+
+- var left = WidgetNode new
+- left = left add child
+- var title = WidgetNode new
+- title = title set prop
+- var right = WidgetNode new
+- right = right add child
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+- node = node add child
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var left = WidgetNode.new("nav_left", "panel")
+left = left.add_child(button("back_btn", "Back", "go_back"))
+var title = WidgetNode.new("nav_title", "text")
+title = title.set_prop("label", "Ignored")
+var right = WidgetNode.new("nav_right", "panel")
+right = right.add_child(button("done_btn", "Done", "done"))
+var node = WidgetNode.new("nav_direct", "navigation_bar")
+node = node.set_prop("title", "Inbox")
+node = node.add_child(left)
+node = node.add_child(title)
+node = node.add_child(right)
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-navigation-bar"
+expect html to_contain "nav-left"
+expect html to_contain "Inbox"
+expect html to_contain "Back"
+expect html to_contain "Done"
+```
+
+</details>
+
+#### renders tab_bar active item and badge
+
+- var first = shell opt
+- first = first set prop
+- var second = shell opt
+- second = second set prop
+- second = second set prop
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var first = shell_opt("tab_first", "Files")
+first = first.set_prop("icon", "F")
+var second = shell_opt("tab_second", "Issues")
+second = second.set_prop("icon", "I")
+second = second.set_prop("badge", "3")
+var node = WidgetNode.new("tabs_direct", "tab_bar")
+node = node.set_prop("active_index", "1")
+node = node.add_child(first)
+node = node.add_child(second)
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-tab-bar"
+expect html to_contain "tab-bar-item-active"
+expect html to_contain "tab-bar-badge"
+expect html to_contain "Issues"
+```
+
+</details>
+
+#### renders card with header and child content
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node set prop
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("card_direct", "card")
+node = node.set_prop("title", "Summary")
+node = node.set_prop("subtitle", "Today")
+node = node.add_child(text_widget("card_body", "Rendered body"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-card"
+expect html to_contain "card-title"
+expect html to_contain "Summary"
+expect html to_contain "Rendered body"
+```
+
+</details>
+
+#### renders switch with on state and action
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node set prop
+- node = node set prop
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("switch_direct", "switch")
+node = node.set_prop("label", "Notifications")
+node = node.set_prop("on", "true")
+node = node.set_prop("action", "toggle_notifications")
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-switch"
+expect html to_contain "switch-on"
+expect html to_contain "toggle_notifications"
+expect html to_contain "Notifications"
+```
+
+</details>
+
+#### renders segmented_control with active segment
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("segment_direct", "segmented_control")
+node = node.set_prop("active_index", "1")
+node = node.add_child(shell_opt("segment_all", "All"))
+node = node.add_child(shell_opt("segment_open", "Open"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-segmented-control"
+expect html to_contain "segment-active"
+expect html to_contain "segment_segment_direct_1"
+expect html to_contain "Open"
+```
+
+</details>
+
+#### renders search_bar with cancel action
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node set prop
+- node = node set prop
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("search_direct", "search_bar")
+node = node.set_prop("placeholder", "Search")
+node = node.set_prop("value", "term")
+node = node.set_prop("show_cancel", "true")
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-search-bar"
+expect html to_contain "search-input"
+expect html to_contain "cancel_search_direct"
+expect html to_contain "term"
+```
+
+</details>
+
+### render_html_widget glass/shell widgets
+
+#### renders glass_title_bar with title
+
+- var node = WidgetNode new
+- node = node set prop
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("gtb", "glass_title_bar")
+node = node.set_prop("title", "My Window")
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-glass-title-bar"
+expect html to_contain "titlebar-title"
+expect html to_contain "My Window"
+```
+
+</details>
+
+#### renders sidebar containing its children
+
+- var node = WidgetNode new
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("sb", "sidebar")
+node = node.add_child(button("nav1", "Home", "go_home"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-sidebar"
+expect html to_contain "widget-button"
+expect html to_contain "Home"
+```
+
+</details>
+
+#### renders command_bar containing its children
+
+- var node = WidgetNode new
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("cb", "command_bar")
+node = node.add_child(button("run", "Run", "do_run"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-command-bar"
+expect html to_contain "Run"
+```
+
+</details>
+
+#### renders workspace_tabs with active tab and action
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("wt", "workspace_tabs")
+node = node.set_prop("active_index", "1")
+node = node.add_child(shell_opt("t0", "One"))
+node = node.add_child(shell_opt("t1", "Two"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-workspace-tabs"
+expect html to_contain "ws-tab active"
+expect html to_contain "ws_tab_wt_1"
+expect html to_contain "Two"
+```
+
+</details>
+
+#### renders command_palette with input and results
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("cp", "command_palette")
+node = node.set_prop("placeholder", "Type a command")
+node = node.add_child(shell_opt("r0", "Open File"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-command-palette"
+expect html to_contain "palette-input"
+expect html to_contain "palette-item"
+expect html to_contain "Open File"
+```
+
+</details>
+
+#### renders toast with status variant
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node set prop
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("to", "toast")
+node = node.set_prop("message", "Saved")
+node = node.set_prop("status", "success")
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-toast success"
+expect html to_contain "Saved"
+```
+
+</details>
+
+#### renders sheet_modal with handle, title and content
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("sm", "sheet_modal")
+node = node.set_prop("title", "Details")
+node = node.add_child(text_widget("body", "Info"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-sheet-modal"
+expect html to_contain "sheet-handle"
+expect html to_contain "sheet-title"
+expect html to_contain "Details"
+expect html to_contain "Info"
+```
+
+</details>
+
+#### renders context_menu items with actions
+
+- var item = shell opt
+- item = item set prop
+- var node = WidgetNode new
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var item = shell_opt("c0", "Cut")
+item = item.set_prop("action", "do_cut")
+var node = WidgetNode.new("cm", "context_menu")
+node = node.add_child(item)
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-context-menu"
+expect html to_contain "context-item"
+expect html to_contain "do_cut"
+expect html to_contain "Cut"
+```
+
+</details>
+
+#### renders inspector with title and content
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("ins", "inspector")
+node = node.set_prop("title", "Properties")
+node = node.add_child(text_widget("p", "Width: 100"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-inspector"
+expect html to_contain "inspector-title"
+expect html to_contain "inspector-content"
+expect html to_contain "Properties"
+```
+
+</details>
+
+#### renders utility_rail icons with active
+
+- var icon = shell opt
+- icon = icon set prop
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var icon = shell_opt("i0", "A")
+icon = icon.set_prop("icon", "G")
+var node = WidgetNode.new("ur", "utility_rail")
+node = node.set_prop("active_index", "0")
+node = node.add_child(icon)
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-utility-rail"
+expect html to_contain "rail-icon active"
+expect html to_contain "rail_ur_0"
+```
+
+</details>
+
+#### renders status_chip with status variant
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node set prop
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("sc", "status_chip")
+node = node.set_prop("label", "Active")
+node = node.set_prop("status", "success")
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-status-chip success"
+expect html to_contain "Active"
+```
+
+</details>
+
+#### renders selection_pill with active option and action
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node add child
+- node = node add child
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("sp", "selection_pill")
+node = node.set_prop("selected_index", "1")
+node = node.add_child(shell_opt("p0", "All"))
+node = node.add_child(shell_opt("p1", "Mine"))
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-selection-pill"
+expect html to_contain "pill-item active"
+expect html to_contain "pill_sp_1"
+expect html to_contain "Mine"
+```
+
+</details>
+
+#### renders empty_state with title and subtitle
+
+- var node = WidgetNode new
+- node = node set prop
+- node = node set prop
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var node = WidgetNode.new("es", "empty_state")
+node = node.set_prop("title", "No Items")
+node = node.set_prop("subtitle", "Add one to begin")
+val state = init_state(UITree.new(node))
+val html = render_html_widget(node, state)
+expect html to_contain "widget-empty-state"
+expect html to_contain "empty-title"
+expect html to_contain "empty-subtitle"
+expect html to_contain "No Items"
+expect html to_contain "Add one to begin"
 ```
 
 </details>
@@ -584,13 +1188,15 @@ Tests covering:
 - render_html_widget divider
 - render_html_widget focus
 - render_html_tree
+- render_html_widget full catalog direct widgets
+- render_html_widget glass/shell widgets
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 47 |
+| Active scenarios | 47 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
