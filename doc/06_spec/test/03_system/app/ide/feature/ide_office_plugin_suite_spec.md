@@ -110,7 +110,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=9 features=72 actions=31
+  llm-catalog: apps=9 features=73 actions=32
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -282,7 +282,7 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 147 lines folded for reproduction.
+Runnable source: 152 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -290,7 +290,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=72 actions=31")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=73 actions=32")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -315,6 +315,7 @@ expect(catalog[4].features.join(",")).to_contain("connector-paths")
 expect(catalog[4].features.join(",")).to_contain("group-containers")
 expect(catalog[4].features.join(",")).to_contain("node-shape-edit")
 expect(catalog[4].features.join(",")).to_contain("node-style-edit")
+expect(catalog[4].features.join(",")).to_contain("canvas-metadata")
 expect(catalog[4].features.join(",")).to_contain("selection")
 expect(catalog[4].features.join(",")).to_contain("inspector")
 expect(catalog[4].actions.join(",")).to_contain("render-sdd-html-with-selection")
@@ -322,14 +323,16 @@ expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-parent")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-shape")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-style")
+expect(catalog[4].actions.join(",")).to_contain("edit-sdd-canvas")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-edge")
-val draw_graph = sdn_graph_parse("graph: Feature\nA: A x: 0 y: 0 width: 80 height: 20\nB: B x: 160 y: 0 width: 80 height: 20\nA -> B: flow route: simple start: right end: left")
+val draw_graph = sdn_graph_parse("graph: Feature\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 0 y: 0 width: 80 height: 20\nB: B x: 160 y: 0 width: 80 height: 20\nA -> B: flow route: simple start: right end: left")
 val rerouted = sdn_graph_update_edge_at(draw_graph, 0, "orthogonal", "120x10;120x40", "right", "left")
 val shaped = sdn_graph_update_node_at(rerouted, 0, "accent", "decision", "diamond", "12", "8", "96", "48", "front")
 val grouped = sdn_graph_update_node_parent_at(shaped, 1, "A")
 val draw_shape_only = sdn_graph_update_node_shape_at(grouped, 1, "cylinder")
 val draw_style_only = sdn_graph_update_node_style_at(draw_shape_only, 1, "storage")
+val draw_canvas = sdn_graph_update_canvas(draw_style_only, "1440", "960", "24", "true", "150", "#f8fafc")
 val inspected_draw_node = sdn_graph_inspect_node(draw_style_only, "B")
 val inspected_draw_edge = sdn_graph_inspect_edge(draw_style_only, 0)
 expect(sdn_graph_render_html(rerouted)).to_contain("data-path=\"M 80,10 L 120,10 L 120,40 L 160,40 L 160,10\"")
@@ -338,6 +341,8 @@ expect(sdn_graph_render_html(grouped)).to_contain("sdn-css-accent")
 expect(sdn_graph_render_html(grouped)).to_contain("data-parent=\"A\"")
 expect(sdn_graph_render_html(draw_style_only)).to_contain("data-shape=\"cylinder\"")
 expect(sdn_graph_render_html(draw_style_only)).to_contain("sdn-css-storage")
+expect(sdn_graph_render_html(draw_canvas)).to_contain("data-canvas-grid=\"24\"")
+expect(sdn_graph_render_html(draw_canvas)).to_contain("style=\"width:1440px;height:960px;\"")
 expect(sdn_graph_render_html_with_selection(draw_style_only, "B", 0)).to_contain("data-selected=\"true\" aria-selected=\"true\"")
 expect(inspected_draw_node.found).to_be(true)
 expect(inspected_draw_node.parent).to_equal("A")

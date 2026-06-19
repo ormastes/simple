@@ -300,3 +300,9 @@ possible so they are runner-verifiable.
   slash fractions, caret superscripts, unary minus, and `+`/`-`/`*` operators.
   Catalog metadata now exposes `precedence-parser`, `checked-rendering`, and
   `render-mathml-checked`.
+- 2026-06-19 dev: Advanced SDD Draw canvas metadata. SDD graphs now preserve
+  optional draw.io-like canvas/page width, height, grid, snap, zoom, and
+  background metadata; HTML render roots expose deterministic `data-canvas-*`
+  attributes and pure `sdn_graph_update_canvas` edits canvas state without
+  mutating nodes or connectors. Catalog metadata now exposes
+  `canvas-metadata` and `edit-sdd-canvas`.

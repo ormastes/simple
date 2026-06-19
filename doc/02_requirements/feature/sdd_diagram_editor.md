@@ -30,8 +30,13 @@ First production slice for the SDN-backed diagram editor dialect.
 - SDD-011: Diagram nodes and connectors expose pure inspector snapshots for
   editor sidebars, including geometry, style labels, grouping, route, anchor,
   waypoint, and computed path metadata.
+- SDD-012: Diagram documents preserve draw.io-like canvas/page metadata:
+  width, height, grid size, snap mode, zoom, and background. HTML rendering,
+  canonical SDN output, and pure edit operations expose the canvas metadata
+  without changing node or connector state.
 
 ## Out of Scope
 
-Interactive drag handles, draw.io XML import/export, cycle-validating group
-trees, and a full browser editor remain follow-up slices.
+Interactive drag handles, draw.io XML import/export, multi-page diagrams,
+cycle-validating group trees, and a full browser editor remain follow-up
+slices.

@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -135,6 +135,26 @@ expect(graph.edges[0].end_anchor).to_equal("left")
 
 </details>
 
+#### parses draw canvas metadata from dense SDN
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: canvas\ncanvas: width: 1200 height: 800 grid: 16 snap: true zoom: 125 background: #ffffff\nA: A")
+expect(graph.canvas_width).to_equal("1200")
+expect(graph.canvas_height).to_equal("800")
+expect(graph.canvas_grid).to_equal("16")
+expect(graph.canvas_snap).to_equal("true")
+expect(graph.canvas_zoom).to_equal("125")
+expect(graph.canvas_background).to_equal("#ffffff")
+```
+
+</details>
+
 #### renders deterministic HTML editor metadata for geometry and connectors
 
 <details>
@@ -167,6 +187,45 @@ expect(html).to_contain("data-end-anchor=\"left\"")
 
 </details>
 
+#### renders deterministic HTML editor metadata for the draw canvas
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: editor\ncanvas: width: 1200 height: 800 grid: 16 snap: true zoom: 125 background: #ffffff\nCard: Card x: 10 y: 20 width: 200 height: 100")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-canvas-width=\"1200\"")
+expect(html).to_contain("data-canvas-height=\"800\"")
+expect(html).to_contain("data-canvas-grid=\"16\"")
+expect(html).to_contain("data-canvas-snap=\"true\"")
+expect(html).to_contain("data-canvas-zoom=\"125\"")
+expect(html).to_contain("data-canvas-background=\"#ffffff\"")
+expect(html).to_contain("style=\"width:1200px;height:800px;\"")
+```
+
+</details>
+
+#### escapes draw canvas metadata in HTML attributes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_update_canvas(sdn_graph_parse("graph: escaped\nA: A"), "100", "80", "10", "true", "100", "\"<bg>&")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-canvas-background=\"&quot;&lt;bg&gt;&amp;\"")
+expect(html).to_contain("style=\"width:100px;height:80px;\"")
+```
+
+</details>
+
 #### canonicalizes geometry and connector route tables
 
 <details>
@@ -182,6 +241,23 @@ expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, heigh
 expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base, ")
 expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
 expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
+```
+
+</details>
+
+#### canonicalizes draw canvas metadata before graph tables
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: flow\ncanvas: width: 1024 height: 768 grid: 8 snap: false zoom: 90 background: transparent\nA: Start")
+val canon = sdn_graph_to_canonical_sdn(graph)
+expect(canon).to_contain("canvas: width: 1024 height: 768 grid: 8 snap: false zoom: 90 background: transparent")
+expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent|")
 ```
 
 </details>
@@ -362,6 +438,32 @@ expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80
 
 </details>
 
+#### updates canvas metadata through a pure edit operation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: edit-canvas\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
+val updated = sdn_graph_update_canvas(graph, "1440", "960", "24", "true", "150", "#f8fafc")
+val html = sdn_graph_render_html(updated)
+expect(updated.canvas_width).to_equal("1440")
+expect(updated.canvas_height).to_equal("960")
+expect(updated.canvas_grid).to_equal("24")
+expect(updated.canvas_snap).to_equal("true")
+expect(updated.canvas_zoom).to_equal("150")
+expect(updated.canvas_background).to_equal("#f8fafc")
+expect(updated.nodes[0].id).to_equal("A")
+expect(updated.edges[0].from_id).to_equal("A")
+expect(html).to_contain("data-canvas-width=\"1440\"")
+expect(html).to_contain("data-canvas-grid=\"24\"")
+```
+
+</details>
+
 #### updates node shape style and geometry through a pure edit operation
 
 <details>
@@ -431,8 +533,8 @@ expect(regrouped.nodes[1].parent).to_equal("Container")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

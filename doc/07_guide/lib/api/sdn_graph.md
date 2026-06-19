@@ -15,6 +15,7 @@ graph: login_flow
 direction: right
 theme: modern
 css_file: "./modern.css"
+canvas: width: 1200 height: 800 grid: 16 snap: true zoom: 100 background: #ffffff
 
 User: User @person
 Auth: Auth Service @card @important
@@ -37,6 +38,9 @@ Rules:
   draw.io-like group/container membership.
 - Edge metadata `route:`, `waypoints:`, `start:`, and `end:` attach connector
   path and anchor metadata.
+- `canvas:` attaches optional draw.io-like document canvas metadata: page
+  width, page height, grid size, snap mode, zoom, and background. Canvas values
+  are document state, not node state.
 - `css foo:` defines style, shape, or layout hints for `@foo`.
 - `weave @:` injects `@foo` names and selected layout/group fields into
   matching nodes or edges by selector.
@@ -49,6 +53,12 @@ Rules:
 The dense graph above normalizes to SDN tables:
 
 ```sdn
+graph: login_flow
+direction: right
+theme: modern
+css_file: "./modern.css"
+canvas: width: 1200 height: 800 grid: 16 snap: true zoom: 100 background: #ffffff
+
 nodes |id, label, css, role, shape, x, y, width, height, layer, parent|
     User, User, person, actor, , , , , , ,
     Auth, Auth Service, "card important", service, , , , , , ,
@@ -176,7 +186,10 @@ deterministic HTML with `sdn-graph`, `sdn-graph-node`, and `sdn-graph-edge`
 classes plus `sdd-diagram`, `sdd-node`, `sdd-connector`, `data-format="sdd"`,
 geometry attributes, connector route/waypoint attributes, and `sdn-css-<name>`
 classes derived from `@name`. Nodes also expose `data-parent` for group or
-container membership.
+container membership. The root exposes optional canvas metadata as
+`data-canvas-width`, `data-canvas-height`, `data-canvas-grid`,
+`data-canvas-snap`, `data-canvas-zoom`, and `data-canvas-background`, and maps
+canvas width/height to deterministic root style lengths when present.
 
 ## Rendered Connector Contract
 
@@ -208,6 +221,10 @@ style-label-only actions.
 updates one node's `parent` field by index while preserving geometry, style,
 shape, label, and connector metadata. The field is allowed to be empty for an
 ungrouped node.
+
+`sdn_graph_update_canvas` is the pure canvas/page edit operation. It updates
+document-level width, height, grid, snap, zoom, and background metadata while
+preserving all node, connector, CSS, and weave state.
 
 ## Selection And Inspection
 

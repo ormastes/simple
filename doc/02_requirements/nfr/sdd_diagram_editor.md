@@ -18,3 +18,6 @@
 - SDD-NFR-007: Selection rendering and inspector reads must be pure derived
   views. Missing targets report `found=false` with a deterministic reason and
   must not mutate graph state.
+- SDD-NFR-008: Canvas metadata must remain optional and backward compatible.
+  Relationship-only graph blocks without `canvas:` fields must parse and render
+  with empty canvas attributes rather than defaulting to hidden mutable state.

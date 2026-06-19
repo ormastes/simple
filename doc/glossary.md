@@ -602,8 +602,9 @@ SDN-backed diagram dialect for Markdown docs and IDE diagram previews. Preferred
 files use `.sdd.sdn`. SDD extends relationship graphs with diagram-editor
 metadata: node shape, x/y position, width/height, layer, connector route,
 parent/container membership for draw.io-like groups, waypoints, start/end
-anchors, rendered SVG connector paths, reusable CSS labels, direct node
-shape/style/parent edit operations, transient selection rendering, pure
+anchors, draw canvas/page metadata, rendered SVG connector paths, reusable CSS
+labels, direct node shape/style/parent/canvas edit operations, transient
+selection rendering, pure
 node/connector inspector snapshots, and weave-based batch style or layout edits.
 Implemented in
 `src/lib/editor/services/sdn_graph.spl`; guide:
