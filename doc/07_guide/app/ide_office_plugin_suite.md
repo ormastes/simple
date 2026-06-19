@@ -84,9 +84,9 @@ Designer edit actions use compact first-line edit headers followed by the UI
 design body. `ui-label-edit` uses `node_id|expected_label|new_label`.
 `ui-layout-edit` uses `node_id|expected_x|expected_y|expected_width|expected_height|new_x|new_y|new_width|new_height`.
 `ui-auto-layout-edit` uses `node_id|expected_mode|expected_gap|expected_padding|new_mode|new_gap|new_padding`.
-Blank `ui-label-edit`, `ui-layout-edit`, and `ui-auto-layout-edit` node ids
-are rejected as `invalid-args`.
 `ui-constraints-edit` uses `node_id|expected_h|expected_v|new_h|new_v`;
+Blank `ui-label-edit`, `ui-layout-edit`, `ui-auto-layout-edit`, and
+`ui-constraints-edit` node ids are rejected as `invalid-args`.
 `ui-layer-edit` and `ui-style-token-edit` use `node_id|expected|new`.
 `ui-style-token-read` and `ui-inspect-node` use `node_id` and return compact
 readback text.
