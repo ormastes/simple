@@ -350,3 +350,8 @@ possible so they are runner-verifiable.
   `align-sdd-selection`, and `distribute-sdd-selection` accept
   `mode_or_axis|id1,id2,...` followed by the UI/SDD document body and return
   rendered HTML for the updated document.
+- 2026-06-19 dev: Wired remaining SDD edit actions into the headless Office
+  action bridge: `reroute-sdd-connector`, `edit-sdd-node-parent`,
+  `edit-sdd-node-shape`, `edit-sdd-node-style`, and `edit-sdd-canvas`.
+  Each accepts a compact first-line edit header followed by the SDD body and
+  returns rendered HTML for the updated document.

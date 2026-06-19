@@ -63,6 +63,11 @@ document body. `ui-align-selection`, `ui-distribute-selection`,
 `align-sdd-selection`, and `distribute-sdd-selection` compute the current
 geometry signature and return rendered HTML for the updated document.
 
+SDD node edit actions use `node_id|value` for parent, shape, and style edits.
+`edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`.
+`reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`.
+All return rendered SDD HTML for the updated document.
+
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
 `.office-ui-design` HTML surface with inspector metadata, exports nodes to
