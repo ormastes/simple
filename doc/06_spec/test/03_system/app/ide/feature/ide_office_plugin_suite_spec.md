@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 521 lines folded for reproduction.
+Runnable source: 525 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -504,6 +504,8 @@ val deleted_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-
 val missing_sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|stroke\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
 val invalid_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|canvas|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
 val invalid_sdd_style_token_action = office_action_dispatch("edit-sdd-style-rule", "accent,bad|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
+val self_parent_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|accent|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent")
+val indirect_parent_sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|base|fill|#eeeeee\ngraph: Style Rule\ncss base:\n    extends: accent\nA: Alpha @accent")
 val missing_sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-style-rule", "accent|stroke\n" + sdd_style_rule_action.output)
 val sdd_add_node_action = office_action_dispatch("add-sdd-node", "C|Choice|accent|decision|diamond|80|64|48|32|front|A\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val duplicate_sdd_add_node_action = office_action_dispatch("add-sdd-node", "A|Again|accent|decision|diamond|80|64|48|32|front|\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
@@ -604,6 +606,8 @@ expect(missing_sdd_style_rule_inspect_action.reason).to_equal("missing-style-rul
 expect(missing_sdd_style_rule_delete_action.reason).to_equal("missing-style-rule")
 expect(invalid_sdd_style_rule_action.reason).to_equal("invalid-target")
 expect(invalid_sdd_style_token_action.reason).to_equal("invalid-style-token")
+expect(self_parent_sdd_style_rule_action.reason).to_equal("style-parent-cycle")
+expect(indirect_parent_sdd_style_rule_action.reason).to_equal("style-parent-cycle")
 expect(sdd_add_node_action.output).to_contain("data-node=\"C\"")
 expect(sdd_add_node_action.output).to_contain("data-shape=\"diamond\"")
 expect(sdd_add_node_action.output).to_contain("data-parent=\"A\"")

@@ -303,7 +303,7 @@ expect(sdn_graph_render_html(unsafe).contains("bad\\\"x")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -345,10 +345,16 @@ expect(missing_delete.reason).to_equal("missing-style-rule")
 val bad_target = sdn_graph_set_style_rule_checked(graph, "accent", "canvas", "base", "fill", "#eeeeee")
 val bad_value = sdn_graph_set_style_rule_checked(graph, "accent", "node", "base", "fill", "red;position:absolute")
 val bad_token = sdn_graph_set_style_rule_checked(graph, "accent,bad", "node", "base", "fill", "#eeeeee")
+val self_parent = sdn_graph_set_style_rule_checked(graph, "accent", "node", "accent", "fill", "#eeeeee")
+val indirect_parent = sdn_graph_set_style_rule_checked(graph, "base", "node", "accent", "fill", "#eeeeee")
+val missing_parent = sdn_graph_set_style_rule_checked(graph, "accent", "node", "missing", "fill", "#eeeeee")
 val bad_delete = sdn_graph_delete_style_rule_checked(graph, "accent,bad", "fill")
 expect(bad_target.reason).to_equal("invalid-target")
 expect(bad_value.reason).to_equal("invalid-style-value")
 expect(bad_token.reason).to_equal("invalid-style-token")
+expect(self_parent.reason).to_equal("style-parent-cycle")
+expect(indirect_parent.reason).to_equal("style-parent-cycle")
+expect(missing_parent.reason).to_equal("missing-style-parent")
 expect(bad_delete.reason).to_equal("invalid-style-token")
 ```
 
