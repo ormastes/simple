@@ -424,12 +424,13 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val graph = sdn_graph_parse("graph: edit\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
-val updated = sdn_graph_update_edge_at(graph, 0, "orthogonal", "140x30;200x80", "right", "left")
+val created = sdn_graph_add_edge(graph, "B", "A", "return", "secondary", "reply", "simple", "", "left", "right")
+val updated = sdn_graph_update_edge_at(created, 0, "orthogonal", "140x30;200x80", "right", "left")
 val labeled = sdn_graph_update_edge_label_at(updated, 0, "approved")
 val styled = sdn_graph_update_edge_style_at(labeled, 0, "warning dashed")
 val kinded = sdn_graph_update_edge_kind_at(styled, 0, "async")
@@ -439,6 +440,20 @@ val html = sdn_graph_render_html(updated)
 val labeled_html = sdn_graph_render_html(labeled)
 val styled_html = sdn_graph_render_html(styled)
 val reconnected_html = sdn_graph_render_html(reconnected)
+expect(created.edges.len()).to_equal(2)
+expect(created.edges[1].from_id).to_equal("B")
+expect(created.edges[1].to_id).to_equal("A")
+expect(created.edges[1].css).to_equal("secondary")
+expect(created.edges[1].kind).to_equal("reply")
+expect(created.edges[1].route).to_equal("simple")
+expect(created.edges[1].waypoints).to_equal("")
+expect(created.edges[1].start_anchor).to_equal("left")
+expect(created.edges[1].end_anchor).to_equal("right")
+expect(sdn_graph_render_html(created)).to_contain(">return</div>")
+expect(sdn_graph_render_html(created)).to_contain("sdn-css-secondary")
+expect(sdn_graph_render_html(created)).to_contain("data-kind=\"reply\"")
+expect(sdn_graph_render_html(created)).to_contain("data-start-anchor=\"left\"")
+expect(sdn_graph_render_html(created)).to_contain("data-end-anchor=\"right\"")
 expect(updated.edges[0].route).to_equal("orthogonal")
 expect(updated.edges[0].waypoints).to_equal("140x30;200x80")
 expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")

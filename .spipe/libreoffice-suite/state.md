@@ -435,3 +435,7 @@ possible so they are runner-verifiable.
   `sdn_graph_update_edge_kind_at` edits connector kind metadata without
   changing label/style/route/anchors, and `edit-sdd-edge-kind` exposes
   `edge_index|kind` through the headless Office action bridge.
+- 2026-06-19 dev: Added Draw/SDD connector creation.
+  `sdn_graph_add_edge` appends a connector with endpoint, label, style, kind,
+  route, waypoint, and anchor metadata, and `add-sdd-edge` exposes it through
+  the headless Office action bridge with existing-node validation.
