@@ -102,7 +102,7 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
 draw: SDD Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
   check: draw: sdn_graph format=sdd name="SDD: Simple Diagram Document" nodes=3 edges=2 html=true route=true select=true inspect=true child_meta=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
-  check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
+  check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true display_recalc=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
   gui: gui-backend: theme=dark size=1200x800 md=true ppt=true sheet=true config=true
 agent-dashboard: Agent Dashboard [dashboard] -> app.editor.mcp_tools (agent, dashboard, mcp)
@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -194,6 +194,7 @@ expect(tui_report).to_contain("edit-command: md-edit=true stale-reject=true")
 expect(tui_report).to_contain("metadata=true")
 expect(tui_report).to_contain("edit-command: slide-edit=true stale-reject=true")
 expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
+expect(tui_report).to_contain("display_recalc=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=9")
@@ -201,6 +202,7 @@ expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Desig
 expect(registry_checks).to_contain("metadata=true")
 expect(registry_checks).to_contain("ppt_html=true")
 expect(registry_checks).to_contain("path_meta=true")
+expect(registry_checks).to_contain("display_recalc=true")
 expect(registry_checks).to_contain("contracts=true")
 ```
 
@@ -979,7 +981,7 @@ expect(next.background).to_equal("#FFFFFF")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -990,8 +992,10 @@ expect(compat.compatible_formats.join(",")).to_contain("xlsx")
 expect(compat.compatible_formats.join(",")).to_contain("tabular")
 expect(compat.sample_range).to_equal("A1:C1")
 assert_true(compat.formula_evaluator_ok)
+expect(compat.formula_display_recalc).to_be(true)
 expect(summary).to_contain("formula=5")
 expect(summary).to_contain("evaluator=true")
+expect(summary).to_contain("display_recalc=true")
 ```
 
 </details>

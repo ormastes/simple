@@ -7,6 +7,7 @@
 use app.office.sheets.spreadsheet.{Workbook}
 use app.office.sheets.cell.{Cell, cell_display_text, default_style, text_cell}
 use app.office.sheets.formula.{evaluate_formula, evaluate_formula_display_text}
+use app.office.sheets.sheets_app.{SheetsApp}
 
 struct IdeSheetCompat:
     app_id: text
@@ -15,6 +16,7 @@ struct IdeSheetCompat:
     sample_range: text
     formula_probe: text
     formula_evaluator_ok: bool
+    formula_display_recalc: bool
 
 fn ide_sheet_compat_probe() -> IdeSheetCompat:
     var workbook = Workbook.new("IDE Spreadsheet")
@@ -26,6 +28,7 @@ fn ide_sheet_compat_probe() -> IdeSheetCompat:
     val rendered_result = cell_display_text(Cell(value: result, style: default_style()))
     val display_result = evaluate_formula_display_text("2+3", sheet)
     val evaluator_ok = display_result == "5"
+    val display_recalc = _sheet_app_display_recalc_ok()
     val formula_probe = if evaluator_ok then display_result else: rendered_result
     IdeSheetCompat(
         app_id: "sheets",
@@ -33,12 +36,13 @@ fn ide_sheet_compat_probe() -> IdeSheetCompat:
         compatible_formats: ["excel", "xlsx", "csv", "tabular"],
         sample_range: sheet.used_range(),
         formula_probe: formula_probe,
-        formula_evaluator_ok: evaluator_ok
+        formula_evaluator_ok: evaluator_ok,
+        formula_display_recalc: display_recalc
     )
 
 fn ide_sheet_compat_summary() -> text:
     val compat = ide_sheet_compat_probe()
-    "sheets: {compat.owner_module} formats={compat.compatible_formats.join(\",\")} range={compat.sample_range} formula={compat.formula_probe} evaluator={compat.formula_evaluator_ok}"
+    "sheets: {compat.owner_module} formats={compat.compatible_formats.join(\",\")} range={compat.sample_range} formula={compat.formula_probe} evaluator={compat.formula_evaluator_ok} display_recalc={compat.formula_display_recalc}"
 
 # Probe on an empty (no cells set) workbook — must not crash.
 fn ide_sheet_compat_probe_empty() -> IdeSheetCompat:
@@ -50,7 +54,8 @@ fn ide_sheet_compat_probe_empty() -> IdeSheetCompat:
         compatible_formats: [],
         sample_range: sheet.used_range(),
         formula_probe: "",
-        formula_evaluator_ok: false
+        formula_evaluator_ok: false,
+        formula_display_recalc: false
     )
 
 # Probe with an empty formula string — must return a safe value.
@@ -59,3 +64,14 @@ fn ide_sheet_compat_empty_formula_safe() -> bool:
     var sheet = workbook.active()
     val result = evaluate_formula_display_text("", sheet)
     result != "#CRASH"
+
+fn _sheet_app_display_recalc_ok() -> bool:
+    var app = SheetsApp.new()
+    var sheet = app.workbook.active()
+    sheet.set_value("A1", "2")
+    sheet.set_value("B1", "3")
+    app.workbook.sheets = [sheet]
+    app.navigate_to(2, 0)
+    app.formula_text = "=A1+B1"
+    app.confirm_edit()
+    cell_display_text(app.workbook.active().get_cell("C1")) == "5"
