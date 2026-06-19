@@ -6,6 +6,11 @@
 # fenced groups) are produced by helper functions. Token processing uses for-in
 # iteration (not `.get(index)`) to avoid the array-element corruption.
 
+struct MathRenderResult:
+    accepted: bool
+    reason: text
+    mathml: text
+
 fn _math_escape(value: text) -> text:
     var out = ""
     var i = 0
@@ -93,6 +98,88 @@ fn _math_atom_to_mathml(value: text) -> text:
             return _token_to_mathml(token)
     "<mrow>{_math_row_body(value)}</mrow>"
 
+fn _math_previous_non_space(value: text, index: i32) -> text:
+    var i = index - 1
+    while i >= 0:
+        val ch = value.char_at(i)
+        if ch != " " and ch != "\t":
+            return ch
+        i = i - 1
+    ""
+
+fn _math_is_unary_operator(value: text, index: i32) -> bool:
+    val previous = _math_previous_non_space(value, index)
+    previous == "" or previous == "(" or previous == "," or previous == "+" or previous == "-" or previous == "*" or previous == "/" or previous == "^"
+
+fn _math_operator_in(ch: text, ops: text) -> bool:
+    var i = 0
+    while i < ops.len():
+        if ch == ops.char_at(i):
+            return true
+        i = i + 1
+    false
+
+fn _math_find_top_level_operator(value: text, ops: text) -> i32:
+    var depth = 0
+    var i = value.len() - 1
+    while i >= 0:
+        val ch = value.char_at(i)
+        if ch == ")":
+            depth = depth + 1
+        elif ch == "(":
+            depth = depth - 1
+        elif depth == 0 and _math_operator_in(ch, ops):
+            if ch != "-" or not _math_is_unary_operator(value, i):
+                return i
+        i = i - 1
+    0 - 1
+
+fn _math_find_top_level_operator_left(value: text, ops: text) -> i32:
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif depth == 0 and _math_operator_in(ch, ops):
+            if ch != "-" or not _math_is_unary_operator(value, i):
+                return i
+        i = i + 1
+    0 - 1
+
+fn _math_has_balanced_parentheses(value: text) -> bool:
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth < 0:
+                return false
+        i = i + 1
+    depth == 0
+
+fn _math_outer_parens_wrap(value: text) -> bool:
+    val trimmed = value.trim()
+    if not trimmed.starts_with("(") or not trimmed.ends_with(")"):
+        return false
+    var depth = 0
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0 and i < trimmed.len() - 1:
+                return false
+        i = i + 1
+    depth == 0
+
 fn _math_find_top_level_comma(value: text) -> i32:
     var depth = 0
     var i = 0
@@ -107,11 +194,43 @@ fn _math_find_top_level_comma(value: text) -> i32:
         i = i + 1
     0 - 1
 
+fn _math_top_level_comma_count(value: text) -> i32:
+    var count = 0
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif ch == "," and depth == 0:
+            count = count + 1
+        i = i + 1
+    count
+
+fn _math_flat_document(expr: text) -> text:
+    "<math xmlns=\"http://www.w3.org/1998/Math/MathML\"><mrow>{_math_row_body(expr)}</mrow></math>"
+
+fn _math_ends_with_operator(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return false
+    val ch = trimmed.char_at(trimmed.len() - 1)
+    ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "^" or ch == ","
+
+fn _math_starts_with_binary_operator(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return false
+    val ch = trimmed.char_at(0)
+    ch == "*" or ch == "/" or ch == "^" or ch == ","
+
 fn _math_fraction_shorthand(expr: text) -> text:
     val trimmed = expr.trim()
-    if not trimmed.starts_with("frac(") or not trimmed.ends_with(")"):
+    if not _math_is_exact_function_call(trimmed, "frac"):
         return ""
-    val body = trimmed.slice(5, trimmed.len() - 1)
+    val body = _math_function_body(trimmed, "frac")
     val comma = _math_find_top_level_comma(body)
     if comma < 0:
         return ""
@@ -119,29 +238,182 @@ fn _math_fraction_shorthand(expr: text) -> text:
     val denominator = body.slice(comma + 1, body.len()).trim()
     math_fraction(numerator, denominator)
 
+fn _math_validate_expr(expr: text) -> text:
+    val trimmed = expr.trim()
+    if trimmed == "":
+        return "missing-argument"
+    if not _math_has_balanced_parentheses(trimmed):
+        return "unbalanced-parentheses"
+    if _math_ends_with_operator(trimmed) or _math_starts_with_binary_operator(trimmed):
+        return "syntax-error"
+    if _math_outer_parens_wrap(trimmed):
+        return _math_validate_expr(trimmed.slice(1, trimmed.len() - 1))
+
+    if _math_is_exact_function_call(trimmed, "frac"):
+        val frac_body = _math_function_body(trimmed, "frac")
+        if _math_top_level_comma_count(frac_body) != 1:
+            return "frac-arity"
+        val comma = _math_find_top_level_comma(frac_body)
+        val numerator = frac_body.slice(0, comma).trim()
+        val denominator = frac_body.slice(comma + 1, frac_body.len()).trim()
+        if numerator == "" or denominator == "":
+            return "missing-argument"
+        val numerator_reason = _math_validate_expr(numerator)
+        if numerator_reason != "":
+            return numerator_reason
+        return _math_validate_expr(denominator)
+
+    if _math_is_exact_function_call(trimmed, "sqrt"):
+        val sqrt_body = _math_function_body(trimmed, "sqrt")
+        val inner = sqrt_body.trim()
+        if inner == "":
+            return "missing-argument"
+        return _math_validate_expr(inner)
+
+    val add_pos = _math_find_top_level_operator(trimmed, "+-")
+    if add_pos >= 0:
+        val left_reason = _math_validate_expr(trimmed.slice(0, add_pos))
+        if left_reason != "":
+            return left_reason
+        return _math_validate_expr(trimmed.slice(add_pos + 1, trimmed.len()))
+
+    val mul_pos = _math_find_top_level_operator(trimmed, "*/")
+    if mul_pos >= 0:
+        val left_reason = _math_validate_expr(trimmed.slice(0, mul_pos))
+        if left_reason != "":
+            return left_reason
+        return _math_validate_expr(trimmed.slice(mul_pos + 1, trimmed.len()))
+
+    val pow_pos = _math_find_top_level_operator_left(trimmed, "^")
+    if pow_pos >= 0:
+        val left_reason = _math_validate_expr(trimmed.slice(0, pow_pos))
+        if left_reason != "":
+            return left_reason
+        return _math_validate_expr(trimmed.slice(pow_pos + 1, trimmed.len()))
+
+    if trimmed.starts_with("-"):
+        return _math_validate_expr(trimmed.slice(1, trimmed.len()))
+    ""
+
+fn _math_function_body(expr: text, name: text) -> text:
+    val trimmed = expr.trim()
+    val prefix = name + "("
+    if not trimmed.starts_with(prefix) or not trimmed.ends_with(")"):
+        return ""
+    var depth = 0
+    var i = name.len()
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0 and i < trimmed.len() - 1:
+                return ""
+        i = i + 1
+    if depth != 0:
+        return ""
+    trimmed.slice(prefix.len(), trimmed.len() - 1)
+
+fn _math_is_exact_function_call(expr: text, name: text) -> bool:
+    val trimmed = expr.trim()
+    val prefix = name + "("
+    if not trimmed.starts_with(prefix) or not trimmed.ends_with(")"):
+        return false
+    var depth = 0
+    var i = name.len()
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0 and i < trimmed.len() - 1:
+                return false
+        i = i + 1
+    depth == 0
+
+fn _math_expr_to_mathml(expr: text) -> text:
+    val trimmed = expr.trim()
+    if trimmed == "":
+        return "<mrow></mrow>"
+    if _math_outer_parens_wrap(trimmed):
+        return _math_expr_to_mathml(trimmed.slice(1, trimmed.len() - 1))
+
+    val frac_body = _math_function_body(trimmed, "frac")
+    if frac_body != "":
+        val comma = _math_find_top_level_comma(frac_body)
+        if comma >= 0:
+            val numerator = frac_body.slice(0, comma).trim()
+            val denominator = frac_body.slice(comma + 1, frac_body.len()).trim()
+            return "<mfrac>{_math_expr_to_mathml(numerator)}{_math_expr_to_mathml(denominator)}</mfrac>"
+
+    val sqrt_body = _math_function_body(trimmed, "sqrt")
+    if sqrt_body != "":
+        return "<msqrt>{_math_expr_to_mathml(sqrt_body)}</msqrt>"
+
+    val add_pos = _math_find_top_level_operator(trimmed, "+-")
+    if add_pos >= 0:
+        val op = trimmed.char_at(add_pos)
+        val left = trimmed.slice(0, add_pos)
+        val right = trimmed.slice(add_pos + 1, trimmed.len())
+        return "<mrow>{_math_expr_to_mathml(left)}<mo>{_math_escape(op)}</mo>{_math_expr_to_mathml(right)}</mrow>"
+
+    val mul_pos = _math_find_top_level_operator(trimmed, "*/")
+    if mul_pos >= 0:
+        val op = trimmed.char_at(mul_pos)
+        val left = trimmed.slice(0, mul_pos)
+        val right = trimmed.slice(mul_pos + 1, trimmed.len())
+        if op == "/":
+            return "<mfrac>{_math_expr_to_mathml(left)}{_math_expr_to_mathml(right)}</mfrac>"
+        return "<mrow>{_math_expr_to_mathml(left)}<mo>*</mo>{_math_expr_to_mathml(right)}</mrow>"
+
+    val pow_pos = _math_find_top_level_operator_left(trimmed, "^")
+    if pow_pos >= 0:
+        val left = trimmed.slice(0, pow_pos)
+        val right = trimmed.slice(pow_pos + 1, trimmed.len())
+        return "<msup>{_math_expr_to_mathml(left)}{_math_expr_to_mathml(right)}</msup>"
+
+    if trimmed.starts_with("-"):
+        return "<mrow><mo>-</mo>{_math_expr_to_mathml(trimmed.slice(1, trimmed.len()))}</mrow>"
+
+    _math_atom_to_mathml(trimmed)
+
 fn math_to_mathml(expr: text) -> text:
-    """Render a flat math expression to a MathML document."""
+    """Render a math expression to a MathML document."""
+    math_to_mathml_checked(expr).mathml
+
+fn math_to_mathml_checked(expr: text) -> MathRenderResult:
+    """Render a math expression with deterministic malformed-input reporting."""
+    val trimmed = expr.trim()
+    if trimmed == "":
+        return MathRenderResult(accepted: false, reason: "empty-expression", mathml: "<math xmlns=\"http://www.w3.org/1998/Math/MathML\"><mrow></mrow></math>")
+    if _tokenize_math(trimmed).len() > 192:
+        return MathRenderResult(accepted: false, reason: "token-limit", mathml: _math_flat_document(expr))
+    val validation_reason = _math_validate_expr(trimmed)
+    if validation_reason != "":
+        return MathRenderResult(accepted: false, reason: validation_reason, mathml: _math_flat_document(expr))
     val shorthand = _math_fraction_shorthand(expr)
     if shorthand != "":
-        return "<math xmlns=\"http://www.w3.org/1998/Math/MathML\">{shorthand}</math>"
-    val body = _math_row_body(expr)
-    "<math xmlns=\"http://www.w3.org/1998/Math/MathML\"><mrow>{body}</mrow></math>"
+        return MathRenderResult(accepted: true, reason: "rendered", mathml: "<math xmlns=\"http://www.w3.org/1998/Math/MathML\">{shorthand}</math>")
+    val fragment = _math_expr_to_mathml(expr)
+    MathRenderResult(accepted: true, reason: "rendered", mathml: "<math xmlns=\"http://www.w3.org/1998/Math/MathML\"><mrow>{fragment}</mrow></math>")
 
 fn math_fraction(numerator: text, denominator: text) -> text:
     """A MathML fraction: numerator over denominator."""
-    "<mfrac>{_math_atom_to_mathml(numerator)}{_math_atom_to_mathml(denominator)}</mfrac>"
+    "<mfrac>{_math_expr_to_mathml(numerator)}{_math_expr_to_mathml(denominator)}</mfrac>"
 
 fn math_superscript(base: text, exp: text) -> text:
     """A MathML superscript (e.g. x squared): base^exp."""
-    "<msup>{_math_atom_to_mathml(base)}{_math_atom_to_mathml(exp)}</msup>"
+    "<msup>{_math_expr_to_mathml(base)}{_math_expr_to_mathml(exp)}</msup>"
 
 fn math_subscript(base: text, sub: text) -> text:
     """A MathML subscript (e.g. x_i): base_sub."""
-    "<msub>{_math_atom_to_mathml(base)}{_math_atom_to_mathml(sub)}</msub>"
+    "<msub>{_math_expr_to_mathml(base)}{_math_expr_to_mathml(sub)}</msub>"
 
 fn math_sqrt(inner: text) -> text:
     """A MathML square root of an identifier or number."""
-    "<msqrt>{_math_atom_to_mathml(inner)}</msqrt>"
+    "<msqrt>{_math_expr_to_mathml(inner)}</msqrt>"
 
 fn math_fenced(open: text, inner: text, close: text) -> text:
     """A MathML fenced group with explicit opening and closing operators."""

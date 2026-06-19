@@ -10,3 +10,5 @@
   text.
 - MATH-NFR-004: The LLM catalog advertises only Math structures backed by
   implemented and tested APIs.
+- MATH-NFR-005: Checked parsing enforces bounded token input and deterministic
+  fallback MathML rather than throwing on malformed expressions.

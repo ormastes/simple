@@ -294,3 +294,9 @@ possible so they are runner-verifiable.
   MathML tokens, `frac(a, b)` shorthand parsing, explicit fraction/subscript/
   fenced-group helpers, and catalog metadata for `fraction`, `subscript`,
   `fenced-group`, and `render-math-structure`.
+- 2026-06-19 dev: Advanced LibreOffice Math checked precedence rendering.
+  `math_to_mathml_checked` now reports deterministic fallback reasons for
+  malformed input and renders bounded precedence for parentheses, `sqrt(...)`,
+  slash fractions, caret superscripts, unary minus, and `+`/`-`/`*` operators.
+  Catalog metadata now exposes `precedence-parser`, `checked-rendering`, and
+  `render-mathml-checked`.

@@ -110,7 +110,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=9 features=70 actions=30
+  llm-catalog: apps=9 features=72 actions=31
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -276,12 +276,13 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
    - Expected: updated_base.affected_count equals `2`
    - Expected: count_where(updated_base.table, "status", "done") equals `2`
    - Expected: row_count(deleted_base.table) equals `0`
+   - Expected: math_to_mathml_checked("a +").reason equals `syntax-error`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 142 lines folded for reproduction.
+Runnable source: 147 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -289,7 +290,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=70 actions=30")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=72 actions=31")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -421,8 +422,13 @@ expect(catalog[7].features.join(",")).to_contain("mathml")
 expect(catalog[7].features.join(",")).to_contain("fraction")
 expect(catalog[7].features.join(",")).to_contain("subscript")
 expect(catalog[7].features.join(",")).to_contain("fenced-group")
+expect(catalog[7].features.join(",")).to_contain("precedence-parser")
+expect(catalog[7].features.join(",")).to_contain("checked-rendering")
 expect(catalog[7].actions.join(",")).to_contain("render-math-structure")
+expect(catalog[7].actions.join(",")).to_contain("render-mathml-checked")
 expect(math_to_mathml("frac(1, 2)")).to_contain("<mfrac><mn>1</mn><mn>2</mn></mfrac>")
+expect(math_to_mathml("a + b * c")).to_contain("<mi>a</mi><mo>+</mo><mrow><mi>b</mi><mo>*</mo><mi>c</mi></mrow>")
+expect(math_to_mathml_checked("a +").reason).to_equal("syntax-error")
 expect(math_fraction("x + 1", "y")).to_contain("<mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow>")
 expect(math_subscript("x", "i")).to_contain("<msub><mi>x</mi><mi>i</mi></msub>")
 expect(math_fenced("(", "x + y", ")")).to_contain("<mo>(</mo><mi>x</mi><mo>+</mo><mi>y</mi><mo>)</mo>")

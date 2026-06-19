@@ -19,8 +19,15 @@ LibreOffice Math-style editing.
   rendering without crashing.
 - MATH-006: Structured helpers render fraction, superscript, subscript, square
   root, and fenced-group MathML forms.
+- MATH-007: Core arithmetic operators render with deterministic precedence:
+  exponent, multiplication/division, then addition/subtraction.
+- MATH-008: Parenthesized groups alter precedence in the rendered MathML.
+- MATH-009: Checked rendering reports deterministic failure reasons for empty
+  expressions, unbalanced parentheses, malformed operator positions, malformed
+  fraction arity, missing square-root arguments, and token-limit rejection while
+  still returning fallback MathML.
 
 ## Out of Scope
 
-Full precedence parsing, CAS evaluation, equation editing UI commands, and
-LaTeX/LibreOffice formula import remain follow-up slices.
+CAS evaluation, equation editing UI commands, and LaTeX/LibreOffice formula
+import remain follow-up slices.

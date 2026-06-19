@@ -11,6 +11,11 @@
   output.
 - MATH-006: Structured helper scenarios cover fraction, superscript, subscript,
   square root, and fenced groups.
+- MATH-007 and MATH-008: Precedence scenarios cover multiplication under
+  addition, parenthesized groups, slash fractions, caret superscripts, unary
+  minus, and square-root shorthand.
+- MATH-009: Checked-rendering scenarios cover unbalanced parentheses, dangling
+  operators, malformed fraction arity, and missing square-root arguments.
 
 ## Evidence
 

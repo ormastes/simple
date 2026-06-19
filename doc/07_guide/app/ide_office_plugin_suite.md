@@ -79,7 +79,9 @@ The public renderer keeps flat token MathML for simple expressions, escapes
 XML-sensitive operator text, and recognizes `frac(a, b)` shorthand for the same
 fraction form used by the VS Code math preview. Structured helpers expose
 fractions, superscripts, subscripts, square roots, and fenced groups without a
-browser or CAS dependency.
+browser or CAS dependency. `math_to_mathml_checked` adds bounded checked
+rendering for core precedence (`^`, `*`, `/`, `+`, `-`), parentheses,
+`sqrt(...)`, and malformed-input fallback reasons.
 
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
@@ -94,7 +96,8 @@ modes:
   `formula-text-functions`, `formula-vlookup`, and
   `formula-display-recalc`; Base has `schema-validation`, `count-where`,
   `update-where`, `delete-where`, and `db-edit`; Math has `fraction`,
-  `subscript`, `fenced-group`, and `render-math-structure`; Designer has
+  `subscript`, `fenced-group`, `precedence-parser`, `checked-rendering`,
+  `render-math-structure`, and `render-mathml-checked`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
   `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
   `ui-constraints-edit` / `ui-align-selection` /
