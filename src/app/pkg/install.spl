@@ -7,23 +7,18 @@
 use app.pkg.manifest.{PackageManifest, Dependency, parse_manifest, parse_manifest_file, generate_manifest}
 use app.pkg.resolver.{resolve_all, ResolvedDep, ResolutionResult, get_cache_dir}
 use app.pkg.lock.{LockFile, LockEntry, parse_lock_file, write_lock_file, generate_lock_content}
-
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{file_exists, file_read, file_write, process_run, env_get}
 
 # Shell helper
 fn shell_run(command: text) -> (text, text, i64):
-    val os = rt_env_get("OS")
+    val os = env_get("OS")
     var is_windows = false
     if os != nil and os != "":
         is_windows = os.lower().contains("windows")
     if is_windows:
-        rt_process_run("cmd.exe", ["/c", command])
+        process_run("cmd.exe", ["/c", command])
     else:
-        rt_process_run("/bin/sh", ["-c", command])
+        process_run("/bin/sh", ["-c", command])
 
 
 # Get current working directory
@@ -36,7 +31,7 @@ fn get_cwd() -> text:
 fn create_package_link(packages_dir: text, name: text, target: text) -> bool:
     val link_path = "{packages_dir}/{name}"
     # Remove existing link/dir
-    if rt_file_exists(link_path):
+    if file_exists(link_path):
         val (_, _, rm_code) = shell_run("rm -rf \"{link_path}\"")
         if rm_code != 0:
             return false
@@ -55,7 +50,7 @@ fn create_package_link(packages_dir: text, name: text, target: text) -> bool:
 
 fn do_install(project_dir: text, frozen: bool, dry_run: bool, include_dev: bool) -> i64:
     val manifest_path = "{project_dir}/package.sdn"
-    if not rt_file_exists(manifest_path):
+    if not file_exists(manifest_path):
         print "pkg install: no package.sdn found in {project_dir}"
         print "Run 'simple pkg init' to create a project."
         return 1
@@ -165,7 +160,7 @@ fn do_install(project_dir: text, frozen: bool, dry_run: bool, include_dev: bool)
 fn do_add(project_dir: text, package_spec: text, git_url: text, git_branch: text,
           git_tag: text, path_dep: text, is_dev: bool) -> i64:
     val manifest_path = "{project_dir}/package.sdn"
-    if not rt_file_exists(manifest_path):
+    if not file_exists(manifest_path):
         print "pkg add: no package.sdn found in {project_dir}"
         print "Run 'simple pkg init' to create a project."
         return 1
@@ -180,7 +175,7 @@ fn do_add(project_dir: text, package_spec: text, git_url: text, git_branch: text
             version_constraint = parts[1]
 
     # Read and parse current manifest
-    val source = rt_file_read_text(manifest_path)
+    val source = file_read(manifest_path)
     val manifest_result = parse_manifest(source)
     var manifest: PackageManifest = PackageManifest.empty()
     match manifest_result:
@@ -239,7 +234,7 @@ fn do_add(project_dir: text, package_spec: text, git_url: text, git_branch: text
         # Add new section at end
         new_source = "{source}\n{section}:\n{dep_sdn}"
 
-    val wrote = rt_file_write_text(manifest_path, new_source)
+    val wrote = file_write(manifest_path, new_source)
     if not wrote:
         print "pkg add: failed to write {manifest_path}"
         return 1
@@ -262,11 +257,11 @@ fn do_add(project_dir: text, package_spec: text, git_url: text, git_branch: text
 
 fn do_remove(project_dir: text, package_name: text, dev_only: bool) -> i64:
     val manifest_path = "{project_dir}/package.sdn"
-    if not rt_file_exists(manifest_path):
+    if not file_exists(manifest_path):
         print "pkg remove: no package.sdn found in {project_dir}"
         return 1
 
-    val source = rt_file_read_text(manifest_path)
+    val source = file_read(manifest_path)
 
     # Remove the dependency from manifest text
     val lines = source.split("\n")
@@ -325,14 +320,14 @@ fn do_remove(project_dir: text, package_name: text, dev_only: bool) -> i64:
         return 1
 
     val new_source = result.join("\n")
-    val wrote = rt_file_write_text(manifest_path, new_source)
+    val wrote = file_write(manifest_path, new_source)
     if not wrote:
         print "pkg remove: failed to write {manifest_path}"
         return 1
 
     # Remove symlink from packages/
     val link_path = "{project_dir}/packages/{package_name}"
-    if rt_file_exists(link_path):
+    if file_exists(link_path):
         val (_, _, rm_code) = shell_run("rm -rf \"{link_path}\"")
         if rm_code == 0:
             print "Removed packages/{package_name} symlink"
@@ -347,7 +342,7 @@ fn do_remove(project_dir: text, package_name: text, dev_only: bool) -> i64:
 
 fn do_init(project_dir: text, name: text) -> i64:
     val manifest_path = "{project_dir}/package.sdn"
-    if rt_file_exists(manifest_path):
+    if file_exists(manifest_path):
         print "pkg init: package.sdn already exists"
         return 1
 
@@ -361,7 +356,7 @@ fn do_init(project_dir: text, name: text) -> i64:
             project_name = "my-project"
 
     val content = generate_manifest(project_name, "0.1.0", "", "", "MIT")
-    val wrote = rt_file_write_text(manifest_path, content)
+    val wrote = file_write(manifest_path, content)
     if not wrote:
         print "pkg init: failed to write package.sdn"
         return 1
