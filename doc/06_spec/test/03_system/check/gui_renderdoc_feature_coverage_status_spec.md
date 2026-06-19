@@ -146,7 +146,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 340 lines folded for reproduction.
+Runnable source: 341 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -293,6 +293,7 @@ expect(evidence).to_contain("electron_renderdoc_evidence_env=build/renderdoc/can
 expect(evidence).to_contain("electron_renderdoc_status=")
 expect(evidence).to_contain("electron_renderdoc_reason=")
 expect(evidence).to_contain("electron_renderdoc_scene=")
+expect(evidence).to_contain("electron_renderdoc_capture_file_magic=")
 expect(evidence).to_contain("electron_renderdoc_requested_api=")
 expect(evidence).to_contain("electron_renderdoc_requested_angle=")
 expect(evidence).to_contain("electron_renderdoc_gate_command=RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env sh scripts/check/check-renderdoc-electron-html-gate.shs")
@@ -594,7 +595,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-sourc
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -628,6 +629,7 @@ expect(evidence).to_contain("external_renderdoc_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("external_renderdoc_required_backend=original")
 expect(evidence).to_contain("external_renderdoc_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("electron_renderdoc_scene=html-css-electron")
+expect(evidence).to_contain("electron_renderdoc_capture_file_magic=RDOC")
 expect(evidence).to_contain("electron_renderdoc_gate_status=pass")
 expect(evidence).to_contain("electron_renderdoc_gate_source_env=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env")
 expect(evidence).to_contain("electron_renderdoc_gate_capture_status=pass")
