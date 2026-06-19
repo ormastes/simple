@@ -27,7 +27,7 @@ renderdoc_electron_html_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,7 +78,7 @@ sh scripts/check/check-renderdoc-electron-html-gate.shs || true
 - Passing gate evidence requires Electron backend, `html-css-electron` scene,
   pass status, `RDOC` magic, an existing `.rdc` file, the canonical HTML/CSS
   RenderDoc fixture, the live-bitmap capture script, and Vulkan requested
-  API/ANGLE launch fields.
+  API/ANGLE/features launch fields.
 
 ## Scenarios
 
@@ -89,7 +89,7 @@ sh scripts/check/check-renderdoc-electron-html-gate.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -107,6 +107,7 @@ expect(evidence).to_contain("rdoc_electron_html_gate_required_status=pass")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_magic=RDOC")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_api=vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_angle=vulkan")
+expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_capture_script_suffix=tools/electron-live-bitmap/capture_html_argb.js")
 expect(evidence).to_contain("rdoc_electron_html_gate_required_launch_flag_enable_features=--enable-features=Vulkan")
@@ -123,6 +124,7 @@ val html_path = _value_of(evidence, "rdoc_electron_html_gate_html_path")
 val capture_script = _value_of(evidence, "rdoc_electron_html_gate_capture_script")
 val api = _value_of(evidence, "rdoc_electron_html_gate_requested_api")
 val angle = _value_of(evidence, "rdoc_electron_html_gate_requested_angle")
+val features = _value_of(evidence, "rdoc_electron_html_gate_requested_features")
 val flags = _value_of(evidence, "rdoc_electron_html_gate_launch_flags")
 
 if status == "pass":
@@ -134,6 +136,7 @@ if status == "pass":
     expect(capture_script).to_contain("tools/electron-live-bitmap/capture_html_argb.js")
     expect(api).to_equal("vulkan")
     expect(angle).to_equal("vulkan")
+    expect(features).to_contain("Vulkan")
     expect(flags).to_contain("--enable-features=Vulkan")
     expect(flags).to_contain("--use-angle=vulkan")
 else:
@@ -147,7 +150,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -166,6 +169,8 @@ expect(evidence).to_contain("rdoc_electron_html_gate_capture_magic=RDOC")
 expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("rdoc_electron_html_gate_requested_api=vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_requested_angle=vulkan")
+expect(evidence).to_contain("rdoc_electron_html_gate_requested_features=Vulkan")
+expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
 expect(evidence).to_contain("rdoc_electron_html_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan")
 ```
 
@@ -213,12 +218,34 @@ expect(evidence).to_contain("rdoc_electron_html_gate_reason=missing-vulkan-angle
 
 </details>
 
+#### rejects Electron captures missing the Vulkan requested feature field
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-electron-html-gate-missing-feature && mkdir -p build/test-renderdoc-electron-html-gate-missing-feature/source && printf 'RDOCsynthetic electron capture\\n' > build/test-renderdoc-electron-html-gate-missing-feature/source/electron.rdc && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-electron-html-gate-missing-feature/source/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-renderdoc-electron-html-gate-missing-feature/source/evidence.env && RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-renderdoc-electron-html-gate-missing-feature/source/evidence.env BUILD_DIR=build/test-renderdoc-electron-html-gate-missing-feature/out REPORT_PATH=build/test-renderdoc-electron-html-gate-missing-feature/report.md sh scripts/check/check-renderdoc-electron-html-gate.shs || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = rt_file_read_text("build/test-renderdoc-electron-html-gate-missing-feature/out/evidence.env") ?? ""
+expect(evidence).to_contain("rdoc_electron_html_gate_status=fail")
+expect(evidence).to_contain("rdoc_electron_html_gate_reason=missing-vulkan-requested-feature")
+expect(evidence).to_contain("rdoc_electron_html_gate_requested_features=")
+expect(evidence).to_contain("rdoc_electron_html_gate_required_features=Vulkan")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

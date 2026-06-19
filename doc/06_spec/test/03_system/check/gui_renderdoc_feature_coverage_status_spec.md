@@ -146,7 +146,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 341 lines folded for reproduction.
+Runnable source: 343 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -312,12 +312,14 @@ expect(evidence).to_contain("electron_renderdoc_gate_binary=")
 expect(evidence).to_contain("electron_renderdoc_gate_capture_script=")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_api=")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_angle=")
+expect(evidence).to_contain("electron_renderdoc_gate_requested_features=")
 expect(evidence).to_contain("electron_renderdoc_gate_required_backend=electron")
 expect(evidence).to_contain("electron_renderdoc_gate_required_scene=html-css-electron")
 expect(evidence).to_contain("electron_renderdoc_gate_required_status=pass")
 expect(evidence).to_contain("electron_renderdoc_gate_required_magic=RDOC")
 expect(evidence).to_contain("electron_renderdoc_gate_required_api=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_angle=vulkan")
+expect(evidence).to_contain("electron_renderdoc_gate_required_features=Vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("electron_renderdoc_gate_required_capture_script_suffix=tools/electron-live-bitmap/capture_html_argb.js")
 expect(evidence).to_contain("electron_renderdoc_gate_required_launch_flag_enable_features=--enable-features=Vulkan")
@@ -595,7 +597,7 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-sourc
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -638,6 +640,8 @@ expect(evidence).to_contain("electron_renderdoc_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("electron_renderdoc_gate_capture_file=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron.rdc")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_api=vulkan")
 expect(evidence).to_contain("electron_renderdoc_gate_requested_angle=vulkan")
+expect(evidence).to_contain("electron_renderdoc_gate_requested_features=Vulkan")
+expect(evidence).to_contain("electron_renderdoc_gate_required_features=Vulkan")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=unavailable")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=missing-production-parity-evidence")
 expect(evidence).to_contain("blocked_completion_gate=production GUI/web parity evidence with live Tauri and Chrome captures")
