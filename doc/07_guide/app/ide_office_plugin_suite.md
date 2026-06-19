@@ -106,6 +106,7 @@ and rejects duplicate IDs, blank IDs, missing parent IDs, and unsafe style, role
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text; `extends` must be `none`, empty, or an existing non-self CSS rule.
 `delete-sdd-style-rule` uses `css|key` and returns canonical SDD text with that reusable rule removed.
 `inspect-sdd-style-rule` uses `css|key` and returns compact style-rule readback text.
+Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`; `x` and `y` are signed integers, and size fields are non-negative integers.
 Blank SDD geometry node ids are rejected as `invalid-args`.
 `delete-sdd-node` uses `node_id`, rejects missing IDs, and removes attached connectors.
