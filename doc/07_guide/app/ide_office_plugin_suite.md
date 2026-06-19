@@ -98,6 +98,7 @@ document body. `ui-align-selection`, `ui-distribute-selection`,
 geometry signature and return rendered HTML for the updated document.
 
 SDD node edit actions use `node_id|value` for label, parent, shape, style, layer, and role edits; style labels are space-separated safe tokens, and shape, layer, and role are empty or one safe token.
+Blank SDD node edit ids are rejected as `invalid-args`.
 Parent edits reject missing parent IDs and parent cycles.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`
 and rejects duplicate IDs, blank IDs, missing parent IDs, and unsafe style, role, shape, or layer tokens.

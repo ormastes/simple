@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 75 | 75 | 0 | 0 |
+| 76 | 76 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1387,6 +1387,22 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank SDD node value action target ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("edit-sdd-node-style", "   |accent\ngraph: Style\nA: A x: 0 y: 0 width: 20 height: 20")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### replaces the first office search match
 
 <details>
@@ -1423,8 +1439,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 75 |
-| Active scenarios | 75 |
+| Total scenarios | 76 |
+| Active scenarios | 76 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
