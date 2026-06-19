@@ -222,6 +222,8 @@ metadata div has:
 - `data-path`: the exact SVG path string used in `d`.
 - `data-path-bounds`: `min_x,min_y,max_x,max_y` derived from the rendered path
   points when numeric.
+- `data-start-x`, `data-start-y`, `data-end-x`, and `data-end-y`: numeric
+  endpoint coordinates derived from the rendered path for connector handles.
 - `data-label-x` and `data-label-y`: explicit connector label point from the
   edge row when present, otherwise the center derived from rendered path bounds
   when numeric.
