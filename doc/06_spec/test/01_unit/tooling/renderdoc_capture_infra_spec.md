@@ -69,6 +69,7 @@ facade.
 scripts/tool/renderdoc-evidence.shs env
 scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
+scripts/tool/renderdoc-evidence.shs capture-electron-html
 ```
 
 ## Examples
@@ -84,8 +85,8 @@ renderdoc_test_capture_html
 ## Acceptance
 
 - The shared CLI exposes `capture-simple`, `capture-html`, and
-  `register-layer`.
-- The shared library owns both capture implementations and `.rdc` magic
+  `capture-electron-html`, and `register-layer`.
+- The shared library owns all capture implementations and `.rdc` magic
   validation.
 - Capture commands write `evidence.env` with `rdoc_capture_status=` and
   `rdoc_capture_reason=`.
@@ -105,12 +106,12 @@ instead of destabilizing ordinary unit checks.
 
 ### RenderDoc capture infrastructure
 
-#### exposes one CLI for original HTML capture and Simple in-app capture
+#### exposes one CLI for original HTML capture, Electron capture, and Simple in-app capture
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -119,9 +120,12 @@ val common = source("scripts/lib/renderdoc-evidence-common.shs")
 
 expect(cli).to_contain("capture-simple")
 expect(cli).to_contain("capture-html")
+expect(cli).to_contain("capture-electron-html")
 expect(cli).to_contain("register-layer")
 expect(common).to_contain("rdoc_capture_simple_vulkan")
 expect(common).to_contain("rdoc_capture_html")
+expect(common).to_contain("rdoc_capture_electron_html")
+expect(common).to_contain("rdoc_find_electron")
 expect(common).to_contain("rdoc_validate_rdc_magic")
 expect(common).to_contain("rdoc_write_unavailable_capture")
 expect(common).to_contain("evidence.env")
@@ -138,19 +142,22 @@ expect(common).to_contain("/Applications/Chromium.app/Contents/MacOS/Chromium")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val helper = source("test/helpers/renderdoc_capture_helper.shs")
 val vulkan_wrapper = source("scripts/check/check-renderdoc-vulkan-capture.shs")
 val html_wrapper = source("scripts/check/check-renderdoc-html-capture.shs")
+val electron_wrapper = source("scripts/check/check-renderdoc-electron-html-capture.shs")
 
 expect(helper).to_contain("renderdoc_test_capture_simple")
 expect(helper).to_contain("renderdoc_test_capture_html")
+expect(helper).to_contain("renderdoc_test_capture_electron_html")
 expect(helper).to_contain("scripts/tool/renderdoc-evidence.shs")
 expect(vulkan_wrapper).to_contain("scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(html_wrapper).to_contain("scripts/tool/renderdoc-evidence.shs capture-html")
+expect(electron_wrapper).to_contain("scripts/tool/renderdoc-evidence.shs capture-electron-html")
 ```
 
 </details>

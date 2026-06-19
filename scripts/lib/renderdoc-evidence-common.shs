@@ -88,10 +88,30 @@ rdoc_find_chrome() {
     return 1
 }
 
+rdoc_find_electron() {
+    root="$1"
+    if [ "${RDOC_ELECTRON:-}" != "" ] && [ -x "$RDOC_ELECTRON" ]; then
+        printf '%s\n' "$RDOC_ELECTRON"
+        return 0
+    fi
+    for candidate in \
+        "$root/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" \
+        "$root/tools/electron-shell/node_modules/.bin/electron" \
+        "$root/tools/electron-shell/node_modules/electron/dist/electron"
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 rdoc_status_env() {
     root="$1"
     renderdoc_home="${2:-}"
     chrome_bin="${3:-}"
+    electron_bin="${4:-}"
     echo "rdoc_root=$root"
     echo "rdoc_home=$renderdoc_home"
     if [ "$renderdoc_home" != "" ]; then
@@ -102,6 +122,7 @@ rdoc_status_env() {
         echo "rdoc_lib="
     fi
     echo "rdoc_chrome=$chrome_bin"
+    echo "rdoc_electron=$electron_bin"
     echo "rdoc_output_dir=${RDOC_OUTPUT_DIR:-build/renderdoc/evidence}"
     echo "rdoc_timeout_secs=${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
 }
@@ -315,6 +336,94 @@ rdoc_capture_html() {
         fi
     fi
     sed -n '1,160p' "$out_dir/renderdoc-html.log"
+    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
+    tmp_env="$out_dir/evidence.status.env"
+    set +e
+    rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
+    validate_code=$?
+    set -e
+    cat "$tmp_env" >> "$env_path"
+    return "$validate_code"
+}
+
+rdoc_capture_electron_html() {
+    root="$1"
+    renderdoc_home="$2"
+    electron_bin="$3"
+    out_dir="$4"
+    html_path="${RDOC_HTML_PATH:-$root/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+    timeout_secs="${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
+    width="${RDOC_ELECTRON_WIDTH:-1280}"
+    height="${RDOC_ELECTRON_HEIGHT:-720}"
+    settle_ms="${RDOC_ELECTRON_SETTLE_MS:-1000}"
+    capture_script="$root/tools/electron-live-bitmap/capture_html_argb.js"
+    rdoc_prepare_output_dir "$out_dir"
+    env_path="$out_dir/evidence.env"
+    if [ ! -s "$html_path" ]; then
+        {
+            echo "rdoc_backend=electron"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-html-fixture"
+            echo "rdoc_html_path=$html_path"
+        } | tee "$env_path"
+        return 1
+    fi
+    if [ ! -s "$capture_script" ]; then
+        {
+            echo "rdoc_backend=electron"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-electron-capture-script"
+            echo "rdoc_html_path=$html_path"
+            echo "rdoc_electron_capture_script=$capture_script"
+        } | tee "$env_path"
+        return 1
+    fi
+    if [ "$electron_bin" = "" ]; then
+        {
+            echo "rdoc_backend=electron"
+            echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+            echo "rdoc_capture_status=unavailable"
+            echo "rdoc_capture_reason=missing-electron"
+            echo "rdoc_html_path=$html_path"
+        } | tee "$env_path"
+        return 1
+    fi
+    {
+        echo "rdoc_backend=electron"
+        echo "rdoc_scene=${RDOC_SCENE:-html-css-electron}"
+        echo "rdoc_html_path=$html_path"
+        echo "rdoc_electron=$electron_bin"
+        echo "rdoc_renderdoc_home=$renderdoc_home"
+        echo "rdoc_log=$out_dir/renderdoc-electron-html.log"
+        echo "rdoc_electron_argb=$out_dir/electron_argb.json"
+        echo "rdoc_electron_capture_script=$capture_script"
+    } | tee "$env_path"
+    rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+    if command -v xvfb-run >/dev/null 2>&1; then
+        electron_prefix="xvfb-run -a"
+    else
+        electron_prefix=""
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_prefix="timeout $timeout_secs"
+    else
+        timeout_prefix=""
+    fi
+    # shellcheck disable=SC2086
+    ELECTRON_CAPTURE_HTML="$html_path" \
+    ELECTRON_CAPTURE_WIDTH="$width" \
+    ELECTRON_CAPTURE_HEIGHT="$height" \
+    ELECTRON_CAPTURE_OUTPUT="$out_dir/electron_argb.json" \
+    ELECTRON_CAPTURE_SETTLE_MS="$settle_ms" \
+    $timeout_prefix "$rdoc_cmd" capture -w --opt-hook-children \
+        -c "$out_dir/electron_html" \
+        $electron_prefix "$electron_bin" \
+        --no-sandbox --disable-gpu-sandbox \
+        --enable-features=Vulkan --use-angle=vulkan \
+        "$capture_script" >"$out_dir/renderdoc-electron-html.log" 2>&1 || true
+    sed -n '1,160p' "$out_dir/renderdoc-electron-html.log"
     rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
     tmp_env="$out_dir/evidence.status.env"
     set +e

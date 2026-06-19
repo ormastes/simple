@@ -7,6 +7,7 @@ scripts/setup/setup-renderdoc-env.shs --check
 scripts/setup/setup-renderdoc-env.shs --register-vulkan-layer
 scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
+scripts/tool/renderdoc-evidence.shs capture-electron-html
 RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 ```
 
@@ -17,6 +18,9 @@ RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-captu
   in-application `rt_renderdoc_*` Vulkan Engine2D capture.
 - `scripts/tool/renderdoc-evidence.shs capture-html` runs original
   `renderdoccmd capture` around Chrome for the HTML/CSS fixture.
+- `scripts/tool/renderdoc-evidence.shs capture-electron-html` runs original
+  `renderdoccmd capture` around Electron's bundled Chromium for the HTML/CSS
+  fixture.
 - `test/helpers/renderdoc_capture_helper.shs` exposes the same interface for
   test scripts.
 
@@ -24,6 +28,7 @@ Compatibility wrappers remain:
 
 - `scripts/check/check-renderdoc-vulkan-capture.shs`
 - `scripts/check/check-renderdoc-html-capture.shs`
+- `scripts/check/check-renderdoc-electron-html-capture.shs`
 
 ## Environment
 
@@ -35,9 +40,13 @@ Common variables:
 - `RDOC_CHROME`: Chrome/Chromium binary for HTML capture. If unset, the helper
   checks common Playwright/Linux Chrome paths and macOS app bundles such as
   `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
+- `RDOC_ELECTRON`: Electron binary for Electron HTML capture. If unset, the
+  helper checks the repo-local `tools/electron-shell/node_modules` install.
 - `RDOC_OUTPUT_DIR`: base output directory.
 - `RDOC_CAPTURE_TIMEOUT_SECS`: bounded capture timeout.
 - `RDOC_HTML_PATH`: HTML fixture for `capture-html`.
+- `RDOC_ELECTRON_WIDTH`, `RDOC_ELECTRON_HEIGHT`, `RDOC_ELECTRON_SETTLE_MS`:
+  Electron capture viewport and settle controls.
 - `RDOC_SIMPLE_PROG`: Simple capture program for `capture-simple`.
 
 The helper validates `.rdc` files by checking the `RDOC` magic header. If a host
@@ -75,6 +84,10 @@ The current canonical evidence contract is:
   `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
   evidence env, must pass the original-backend gate with `RDOC` magic. A local
   failed capture or missing env is not completion evidence.
+- Electron Chromium HTML/CSS path:
+  `build/renderdoc/canonical-probe/electron-html/evidence.env` should report
+  `rdoc_backend=electron`, `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`,
+  and an existing `.rdc` file when proving the Electron-backed GUI path.
 
 ## External Host Gate
 
