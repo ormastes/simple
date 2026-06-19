@@ -599,7 +599,7 @@ Human-readable, version-control-friendly data format used by all Simple database
 ## SDD (Simple Diagram Document)
 
 SDN-backed diagram dialect for Markdown docs and IDE diagram previews. Preferred
-files use `.sdd.sdn`. SDD extends relationship graphs with diagram-editor
+files use `.sdd.sdn`. SDD keeps compact graph syntax and adds diagram-editor
 metadata: node shape, x/y position, width/height, layer, document/render order, connector route,
 parent/container membership for draw.io-like groups, node duplication with
 offset geometry, waypoints, start/end anchors, draw canvas/page metadata,
