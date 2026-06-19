@@ -394,13 +394,14 @@ expect(guide).to_contain("handle_meta=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val guide = file_read("doc/07_guide/app/ide_office_plugin_suite.md")
 expect(guide).to_contain("visible `data-resize-handle` corner handles tagged with stable")
 expect(guide).to_contain("`data-edit-action=\"resize-node\"`")
+expect(guide).to_contain("`data-cursor`")
 expect(guide).to_contain("stable `data-handle-index`")
 expect(guide).to_contain("`data-node-index`")
 expect(guide).to_contain("Designer has `selected-resize-handles`")
@@ -1080,7 +1081,7 @@ expect(office_ui_design_render_html(distributed_ui.design)).to_contain("data-con
 expect(office_ui_design_render_html_with_selection(distributed_ui.design, "button")).to_contain("data-selected=\"true\"")
 expect(selected_ui_action.ok).to_be(true)
 expect(selected_ui_action.output).to_contain("data-selected-node-id=\"button\"")
-expect(selected_ui_action.output).to_contain("data-resize-handle=\"se\" data-edit-action=\"resize-node\" data-handle-index=\"3\" data-node=\"button\" data-node-index=\"0\"")
+expect(selected_ui_action.output).to_contain("data-resize-handle=\"se\" data-edit-action=\"resize-node\" data-handle-index=\"3\" data-cursor=\"nwse-resize\" data-node=\"button\" data-node-index=\"0\"")
 val inspected_ui = office_ui_design_inspect_node(distributed_ui.design, "button")
 expect(inspected_ui.found).to_be(true)
 expect(inspected_ui.reason).to_equal("selected")
