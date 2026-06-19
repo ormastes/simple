@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 519 lines folded for reproduction.
+Runnable source: 521 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -508,6 +508,7 @@ val missing_sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-st
 val sdd_add_node_action = office_action_dispatch("add-sdd-node", "C|Choice|accent|decision|diamond|80|64|48|32|front|A\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val duplicate_sdd_add_node_action = office_action_dispatch("add-sdd-node", "A|Again|accent|decision|diamond|80|64|48|32|front|\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val invalid_sdd_add_node_action = office_action_dispatch("add-sdd-node", "|Blank|accent|decision|diamond|80|64|48|32|front|\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val self_parent_sdd_add_node_action = office_action_dispatch("add-sdd-node", "C|Choice|accent|decision|diamond|80|64|48|32|front|C\ngraph: Node Add\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val ui_align_action = office_action_dispatch("ui-align-selection", "left|a,b\ndesign: Align\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|20|20|20|secondary|2|action")
 val sdd_align_action = office_action_dispatch("align-sdd-selection", "left|A,B\ngraph: Align\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 20 width: 20 height: 20")
 val ui_distribute_action = office_action_dispatch("ui-distribute-selection", "horizontal|a,b,c\ndesign: Dist\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|0|20|20|secondary|2|action\nnode c|C|button|100|0|20|20|ghost|3|action")
@@ -608,6 +609,7 @@ expect(sdd_add_node_action.output).to_contain("data-shape=\"diamond\"")
 expect(sdd_add_node_action.output).to_contain("data-parent=\"A\"")
 expect(duplicate_sdd_add_node_action.reason).to_equal("duplicate-id")
 expect(invalid_sdd_add_node_action.reason).to_equal("invalid-id")
+expect(self_parent_sdd_add_node_action.reason).to_equal("missing-parent")
 expect(ui_align_action.output).to_contain("data-id=\"b\"")
 expect(ui_align_action.output).to_contain("left: 0px")
 expect(sdd_align_action.output).to_contain("data-node=\"B\"")

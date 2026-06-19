@@ -674,7 +674,7 @@ expect(html).to_contain("background-size:24px 24px")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 66 lines folded for reproduction.
+Runnable source: 69 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -698,10 +698,13 @@ expect(sdn_graph_render_html(added.graph)).to_contain("data-parent=\"A\"")
 expect(sdn_graph_render_html(added.graph)).to_contain("sdn-css-accent sdn-css-selected")
 val duplicate_added = sdn_graph_add_node_checked(graph, "A", "Again", "", "", "", "", "", "", "", "", "")
 val invalid_added = sdn_graph_add_node_checked(graph, "", "Blank", "", "", "", "", "", "", "", "", "")
+val missing_parent_added = sdn_graph_add_node_checked(graph, "D", "Detached", "", "", "", "", "", "", "", "", "Missing")
 expect(duplicate_added.accepted).to_be(false)
 expect(duplicate_added.reason).to_equal("duplicate-id")
 expect(invalid_added.accepted).to_be(false)
 expect(invalid_added.reason).to_equal("invalid-id")
+expect(missing_parent_added.accepted).to_be(false)
+expect(missing_parent_added.reason).to_equal("missing-parent")
 val updated = sdn_graph_update_node_at(graph, 0, "accent selected", "decision", "diamond", "32", "48", "96", "64", "foreground")
 val html = sdn_graph_render_html(updated)
 val canon = sdn_graph_to_canonical_sdn(updated)
