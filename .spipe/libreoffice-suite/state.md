@@ -411,3 +411,7 @@ possible so they are runner-verifiable.
   `sdn_graph_update_edge_endpoints_at` changes connector source/target node ids,
   and `edit-sdd-edge-endpoints` exposes it with missing-node validation through
   the headless Office action bridge and IDE Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD connector delete editing.
+  `sdn_graph_delete_edge_at` removes one connector by canonical edge index, and
+  `delete-sdd-edge` exposes it through the headless Office action bridge and IDE
+  Draw sanity probe.

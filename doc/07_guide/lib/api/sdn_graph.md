@@ -215,6 +215,7 @@ leaving node geometry and graph metadata untouched.
 `sdn_graph_update_edge_style_at` updates only connector CSS labels.
 `sdn_graph_update_edge_endpoints_at` reconnects a connector's source and target
 node ids.
+`sdn_graph_delete_edge_at` removes one connector by canonical edge index.
 
 `sdn_graph_update_node_at` is the broad pure node edit operation for editor
 event wiring. It updates one node's CSS labels, role, shape, x/y geometry,

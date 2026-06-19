@@ -424,7 +424,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -433,6 +433,7 @@ val updated = sdn_graph_update_edge_at(graph, 0, "orthogonal", "140x30;200x80", 
 val labeled = sdn_graph_update_edge_label_at(updated, 0, "approved")
 val styled = sdn_graph_update_edge_style_at(labeled, 0, "warning dashed")
 val reconnected = sdn_graph_update_edge_endpoints_at(styled, 0, "B", "A")
+val deleted = sdn_graph_delete_edge_at(reconnected, 0)
 val html = sdn_graph_render_html(updated)
 val labeled_html = sdn_graph_render_html(labeled)
 val styled_html = sdn_graph_render_html(styled)
@@ -450,6 +451,8 @@ expect(reconnected.edges[0].from_id).to_equal("B")
 expect(reconnected.edges[0].to_id).to_equal("A")
 expect(reconnected.edges[0].label).to_equal("approved")
 expect(reconnected_html).to_contain("data-from=\"B\" data-to=\"A\"")
+expect(deleted.edges.len()).to_equal(0)
+expect(sdn_graph_render_html(deleted)).to_contain("data-selected-edge-index=\"-1\"")
 ```
 
 </details>
