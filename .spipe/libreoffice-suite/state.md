@@ -151,8 +151,9 @@ possible so they are runner-verifiable.
 13. ACTIVE (local 2026-06-19) — **HTML UI editor substrate**:
    Added a pure `app.office.ui_editor` design-document layer for Figma-like
    positioned frames/components, inspector-ready HTML, SDD export, and guarded
-   label/layout/layer edits. This is the Office Designer surface; live browser
-   editing and collaborative constraints are future slices.
+   label/layout/alignment/distribution/layer edits. This is the Office Designer
+   surface; live browser editing, auto-layout, and collaborative constraints are
+   future slices.
 
 ## Log
 
@@ -254,3 +255,8 @@ possible so they are runner-verifiable.
   matched-row display text while failing closed for missing keys, invalid result
   columns, and unsupported approximate mode. Catalog metadata now exposes
   `formula-vlookup`; focused formula hardening and IDE office specs passed.
+- 2026-06-19 dev: Advanced Figma-like Designer multi-node layout operations.
+  Added geometry signatures plus guarded alignment and distribution helpers over
+  selected UI nodes, with all-or-nothing stale/missing/invalid-geometry
+  rejection. Catalog metadata now exposes `align-layout`,
+  `distribute-layout`, `ui-align-selection`, and `ui-distribute-selection`.

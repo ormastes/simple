@@ -12,3 +12,6 @@
   must not mutate node data or introduce persisted selection state.
 - NFR-UI-007: Style-token edits must remain token-based and deterministic; they
   must not introduce arbitrary CSS parsing or host rendering dependencies.
+- NFR-UI-008: Multi-node alignment and distribution must be all-or-nothing:
+  stale signatures, missing nodes, too-small selections, unsupported modes, or
+  non-integer geometry leave the original design unchanged.

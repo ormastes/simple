@@ -45,6 +45,10 @@ struct OfficeUiInspector:
     component: text
     z_index: text
 
+struct OfficeUiI64Result:
+    ok: bool
+    value: i64
+
 fn office_ui_editor_format_name() -> text:
     "HTML UI Design Document"
 
@@ -192,6 +196,85 @@ fn office_ui_design_update_style_token_checked(design: OfficeUiDesign, node_id: 
 fn office_ui_design_read_style_token(design: OfficeUiDesign, node_id: text) -> OfficeUiInspector:
     office_ui_design_inspect_node(design, node_id)
 
+fn office_ui_design_geometry_signature(design: OfficeUiDesign, node_ids: [text]) -> text:
+    var parts: [text] = []
+    for node in design.nodes:
+        if _office_ui_id_in_list(node.id, node_ids):
+            parts.push(node.id + ":" + node.x + "," + node.y + "," + node.width + "," + node.height)
+    parts.join(";")
+
+fn office_ui_design_align_checked(design: OfficeUiDesign, node_ids: [text], expected_signature: text, mode: text) -> OfficeUiEditResult:
+    val actual_signature = office_ui_design_geometry_signature(design, node_ids)
+    if actual_signature != expected_signature:
+        return OfficeUiEditResult(accepted: false, reason: "stale-selection", diff: "@@ ui-align " + mode + " @@\nexpected: " + expected_signature + "\nactual: " + actual_signature, design: design)
+    if node_ids.len() < 2:
+        return OfficeUiEditResult(accepted: false, reason: "invalid-selection", diff: "@@ ui-align " + mode + " @@\nexpected: at least 2 nodes\nactual: " + node_ids.len().to_text(), design: design)
+    val selected_count = _office_ui_selected_count(design, node_ids)
+    if selected_count != node_ids.len():
+        return OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-align " + mode + " @@\nexpected: " + node_ids.join(",") + "\nactual: " + actual_signature, design: design)
+    if not _office_ui_align_mode_supported(mode):
+        return OfficeUiEditResult(accepted: false, reason: "unsupported-align-mode", diff: "@@ ui-align " + mode + " @@\nexpected: left|center|right|top|middle|bottom\nactual: " + mode, design: design)
+    val bounds = _office_ui_selected_bounds(design, node_ids)
+    if not bounds.ok:
+        return OfficeUiEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ ui-align " + mode + " @@\nexpected: integer geometry\nactual: " + actual_signature, design: design)
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var i = 0
+    while i < out.nodes.len():
+        val node = out.nodes[i]
+        if _office_ui_id_in_list(node.id, node_ids):
+            val aligned = _office_ui_align_node(node, mode, bounds)
+            if not aligned.ok:
+                return OfficeUiEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ ui-align " + mode + " @@\nexpected: integer geometry\nactual: " + actual_signature, design: design)
+            out.nodes[i] = aligned.node
+        i = i + 1
+    val new_signature = office_ui_design_geometry_signature(out, node_ids)
+    OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-align " + mode + " @@\n- " + expected_signature + "\n+ " + new_signature, design: out)
+
+fn office_ui_design_distribute_checked(design: OfficeUiDesign, node_ids: [text], expected_signature: text, axis: text) -> OfficeUiEditResult:
+    val actual_signature = office_ui_design_geometry_signature(design, node_ids)
+    if actual_signature != expected_signature:
+        return OfficeUiEditResult(accepted: false, reason: "stale-selection", diff: "@@ ui-distribute " + axis + " @@\nexpected: " + expected_signature + "\nactual: " + actual_signature, design: design)
+    if node_ids.len() < 3:
+        return OfficeUiEditResult(accepted: false, reason: "invalid-selection", diff: "@@ ui-distribute " + axis + " @@\nexpected: at least 3 nodes\nactual: " + node_ids.len().to_text(), design: design)
+    val selected_count = _office_ui_selected_count(design, node_ids)
+    if selected_count != node_ids.len():
+        return OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-distribute " + axis + " @@\nexpected: " + node_ids.join(",") + "\nactual: " + actual_signature, design: design)
+    if axis != "horizontal" and axis != "vertical":
+        return OfficeUiEditResult(accepted: false, reason: "unsupported-distribute-axis", diff: "@@ ui-distribute " + axis + " @@\nexpected: horizontal|vertical\nactual: " + axis, design: design)
+    val bounds = _office_ui_selected_bounds(design, node_ids)
+    if not bounds.ok:
+        return OfficeUiEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ ui-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, design: design)
+    val total_span = _office_ui_selected_axis_size(design, node_ids, axis)
+    if not total_span.ok:
+        return OfficeUiEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ ui-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, design: design)
+    val available = if axis == "horizontal": bounds.max_x - bounds.min_x else: bounds.max_y - bounds.min_y
+    val gap = (available - total_span.value) / (selected_count - 1)
+    var cursor = if axis == "horizontal": bounds.min_x else: bounds.min_y
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var i = 0
+    while i < out.nodes.len():
+        val node = out.nodes[i]
+        if _office_ui_id_in_list(node.id, node_ids):
+            val size = if axis == "horizontal": _office_ui_parse_i64_result(node.width) else: _office_ui_parse_i64_result(node.height)
+            if not size.ok:
+                return OfficeUiEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ ui-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, design: design)
+            var updated = _office_ui_clone_node(node)
+            if axis == "horizontal":
+                updated.x = cursor.to_text()
+            else:
+                updated.y = cursor.to_text()
+            out.nodes[i] = updated
+            cursor = cursor + size.value + gap
+        i = i + 1
+    val new_signature = office_ui_design_geometry_signature(out, node_ids)
+    OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-distribute " + axis + " @@\n- " + expected_signature + "\n+ " + new_signature, design: out)
+
 fn office_ui_design_inspect_node(design: OfficeUiDesign, node_id: text) -> OfficeUiInspector:
     var index = 0
     while index < design.nodes.len():
@@ -214,6 +297,17 @@ fn office_ui_design_inspect_node(design: OfficeUiDesign, node_id: text) -> Offic
             )
         index = index + 1
     OfficeUiInspector(found: false, reason: "missing-node", id: node_id, label: "", kind: "", css: "", x: "", y: "", width: "", height: "", layer: "", component: "", z_index: "")
+
+struct OfficeUiBounds:
+    ok: bool
+    min_x: i64
+    min_y: i64
+    max_x: i64
+    max_y: i64
+
+struct OfficeUiAlignedNode:
+    ok: bool
+    node: OfficeUiNode
 
 fn _office_ui_clone_node(node: OfficeUiNode) -> OfficeUiNode:
     OfficeUiNode(
@@ -316,3 +410,105 @@ fn _office_ui_quote_if_space(value: text) -> text:
     if value.contains(" "):
         return "\"" + value + "\""
     value
+
+fn _office_ui_id_in_list(node_id: text, node_ids: [text]) -> bool:
+    for id in node_ids:
+        if id == node_id:
+            return true
+    false
+
+fn _office_ui_selected_count(design: OfficeUiDesign, node_ids: [text]) -> i64:
+    var count: i64 = 0
+    for node in design.nodes:
+        if _office_ui_id_in_list(node.id, node_ids):
+            count = count + 1
+    count
+
+fn _office_ui_selected_axis_size(design: OfficeUiDesign, node_ids: [text], axis: text) -> OfficeUiI64Result:
+    var total: i64 = 0
+    for node in design.nodes:
+        if _office_ui_id_in_list(node.id, node_ids):
+            val size = if axis == "horizontal": _office_ui_parse_i64_result(node.width) else: _office_ui_parse_i64_result(node.height)
+            if not size.ok:
+                return OfficeUiI64Result(ok: false, value: 0)
+            total = total + size.value
+    OfficeUiI64Result(ok: true, value: total)
+
+fn _office_ui_align_mode_supported(mode: text) -> bool:
+    mode == "left" or mode == "center" or mode == "right" or mode == "top" or mode == "middle" or mode == "bottom"
+
+fn _office_ui_selected_bounds(design: OfficeUiDesign, node_ids: [text]) -> OfficeUiBounds:
+    var initialized = false
+    var min_x: i64 = 0
+    var min_y: i64 = 0
+    var max_x: i64 = 0
+    var max_y: i64 = 0
+    for node in design.nodes:
+        if _office_ui_id_in_list(node.id, node_ids):
+            val x = _office_ui_parse_i64_result(node.x)
+            val y = _office_ui_parse_i64_result(node.y)
+            val w = _office_ui_parse_i64_result(node.width)
+            val h = _office_ui_parse_i64_result(node.height)
+            if not x.ok or not y.ok or not w.ok or not h.ok:
+                return OfficeUiBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+            val right = x.value + w.value
+            val bottom = y.value + h.value
+            if not initialized:
+                min_x = x.value
+                min_y = y.value
+                max_x = right
+                max_y = bottom
+                initialized = true
+            else:
+                if x.value < min_x:
+                    min_x = x.value
+                if y.value < min_y:
+                    min_y = y.value
+                if right > max_x:
+                    max_x = right
+                if bottom > max_y:
+                    max_y = bottom
+    if not initialized:
+        return OfficeUiBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+    OfficeUiBounds(ok: true, min_x: min_x, min_y: min_y, max_x: max_x, max_y: max_y)
+
+fn _office_ui_align_node(node: OfficeUiNode, mode: text, bounds: OfficeUiBounds) -> OfficeUiAlignedNode:
+    val x = _office_ui_parse_i64_result(node.x)
+    val y = _office_ui_parse_i64_result(node.y)
+    val w = _office_ui_parse_i64_result(node.width)
+    val h = _office_ui_parse_i64_result(node.height)
+    if not x.ok or not y.ok or not w.ok or not h.ok:
+        return OfficeUiAlignedNode(ok: false, node: node)
+    var updated = _office_ui_clone_node(node)
+    if mode == "left":
+        updated.x = bounds.min_x.to_text()
+    elif mode == "center":
+        val center = (bounds.min_x + bounds.max_x) / 2
+        updated.x = (center - (w.value / 2)).to_text()
+    elif mode == "right":
+        updated.x = (bounds.max_x - w.value).to_text()
+    elif mode == "top":
+        updated.y = bounds.min_y.to_text()
+    elif mode == "middle":
+        val middle = (bounds.min_y + bounds.max_y) / 2
+        updated.y = (middle - (h.value / 2)).to_text()
+    elif mode == "bottom":
+        updated.y = (bounds.max_y - h.value).to_text()
+    OfficeUiAlignedNode(ok: true, node: updated)
+
+fn _office_ui_parse_i64_result(value: text) -> OfficeUiI64Result:
+    val trimmed = value.trim()
+    if not _office_ui_is_i64_token(trimmed):
+        return OfficeUiI64Result(ok: false, value: 0)
+    var negative = false
+    var i = 0
+    if trimmed.char_at(0) == "-":
+        negative = true
+        i = 1
+    var out: i64 = 0
+    while i < trimmed.len():
+        out = out * 10 + (trimmed.char_at(i).char_code_at(0) - 48).to_i64()
+        i = i + 1
+    if negative:
+        out = 0 - out
+    OfficeUiI64Result(ok: true, value: out)

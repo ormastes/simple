@@ -46,7 +46,9 @@ Selection and inspection are read-only derived views: selected renders add
 `data-selected`/`aria-selected` metadata, and `ui-inspect-node` returns a node
 snapshot without mutating the design document. Style-token reads and guarded
 style-token edits expose the node `css` token as a deterministic visual class;
-they do not accept arbitrary CSS blocks.
+they do not accept arbitrary CSS blocks. Multi-node alignment and distribution
+use geometry signatures as stale-selection guards and remain integer-only,
+all-or-nothing edits over selected nodes.
 
 Draw/diagram editing should prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
@@ -71,7 +73,8 @@ modes:
   `edit-sdd-node-style`; Calc has `formula-counta`,
   `formula-text-functions`, and `formula-vlookup`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
-  `ui-label-edit` / `ui-layout-edit` / `ui-layer-edit` /
+  `ui-label-edit` / `ui-layout-edit` / `ui-align-selection` /
+  `ui-distribute-selection` / `ui-layer-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`.
 
 ## Verification

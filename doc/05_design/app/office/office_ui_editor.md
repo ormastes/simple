@@ -59,3 +59,19 @@ the same expected-value guard. Accepted edits change the rendered
 `office-ui-css-*` class and the SDD `css` column; stale or missing nodes return
 the original design unchanged. The compatibility helper
 `office_ui_design_update_css_checked` remains the lower-level implementation.
+
+`office_ui_design_geometry_signature` returns a stable design-order signature
+for selected node geometry. Multi-node operations use that signature as the
+stale-edit guard so LLM/tool callers can reject changes against outdated
+selection geometry before any node moves.
+
+`office_ui_design_align_checked` aligns selected nodes to the selection bounding
+box for `left`, `center`, `right`, `top`, `middle`, and `bottom`. It updates only
+`x` and/or `y`, preserves node size/style/layer metadata, and rejects stale
+selection signatures, missing nodes, unsupported modes, too-small selections, or
+non-integer geometry.
+
+`office_ui_design_distribute_checked` distributes three or more selected nodes
+on the `horizontal` or `vertical` axis using integer geometry and design-order
+selection traversal. Like alignment, it is all-or-nothing and returns the
+original design for stale, missing, unsupported, or non-integer inputs.

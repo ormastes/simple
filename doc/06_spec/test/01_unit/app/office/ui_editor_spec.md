@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -316,12 +316,100 @@ expect(missing.reason).to_equal("missing-node")
 
 </details>
 
+#### aligns multiple nodes with guarded geometry signatures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Align\nnode a|A|button|10|10|40|20|primary|1|action\nnode b|B|button|90|30|60|20|secondary|2|action\nnode c|C|button|60|80|30|20|ghost|3|action")
+val ids = ["a", "b", "c"]
+val signature = office_ui_design_geometry_signature(design, ids)
+expect(signature).to_equal("a:10,10,40,20;b:90,30,60,20;c:60,80,30,20")
+
+val left = office_ui_design_align_checked(design, ids, signature, "left")
+expect(left.accepted).to_be(true)
+expect(left.reason).to_equal("updated")
+expect(left.design.nodes[0].x).to_equal("10")
+expect(left.design.nodes[1].x).to_equal("10")
+expect(left.design.nodes[2].x).to_equal("10")
+expect(office_ui_design_render_html(left.design)).to_contain("left: 10px")
+expect(office_ui_design_to_sdd(left.design)).to_contain("b, B, secondary, action, rounded, 10, 30, 60, 20, 2")
+
+val middle = office_ui_design_align_checked(design, ids, signature, "middle")
+expect(middle.accepted).to_be(true)
+expect(middle.design.nodes[0].y).to_equal("45")
+expect(middle.design.nodes[1].y).to_equal("45")
+expect(middle.design.nodes[2].y).to_equal("45")
+
+val stale = office_ui_design_align_checked(design, ids, "a:0,0,1,1", "left")
+expect(stale.accepted).to_be(false)
+expect(stale.reason).to_equal("stale-selection")
+
+val missing = office_ui_design_align_checked(design, ["a", "missing"], office_ui_design_geometry_signature(design, ["a", "missing"]), "left")
+expect(missing.accepted).to_be(false)
+expect(missing.reason).to_equal("missing-node")
+
+val unsupported = office_ui_design_align_checked(design, ids, signature, "diagonal")
+expect(unsupported.accepted).to_be(false)
+expect(unsupported.reason).to_equal("unsupported-align-mode")
+```
+
+</details>
+
+#### distributes multiple nodes with guarded geometry signatures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Distribute\nnode a|A|button|0|10|20|20|primary|1|action\nnode b|B|button|40|20|20|20|secondary|2|action\nnode c|C|button|100|30|20|20|ghost|3|action")
+val ids = ["a", "b", "c"]
+val signature = office_ui_design_geometry_signature(design, ids)
+val distributed = office_ui_design_distribute_checked(design, ids, signature, "horizontal")
+expect(distributed.accepted).to_be(true)
+expect(distributed.reason).to_equal("updated")
+expect(distributed.design.nodes[0].x).to_equal("0")
+expect(distributed.design.nodes[1].x).to_equal("50")
+expect(distributed.design.nodes[2].x).to_equal("100")
+expect(distributed.design.nodes[1].y).to_equal("20")
+expect(office_ui_design_to_sdd(distributed.design)).to_contain("b, B, secondary, action, rounded, 50, 20, 20, 20, 2")
+
+val vertical = office_ui_design_distribute_checked(design, ids, signature, "vertical")
+expect(vertical.accepted).to_be(true)
+expect(vertical.design.nodes[0].y).to_equal("10")
+expect(vertical.design.nodes[1].y).to_equal("20")
+expect(vertical.design.nodes[2].y).to_equal("30")
+expect(vertical.design.nodes[1].x).to_equal("40")
+
+val unsupported = office_ui_design_distribute_checked(design, ids, signature, "diagonal")
+expect(unsupported.accepted).to_be(false)
+expect(unsupported.reason).to_equal("unsupported-distribute-axis")
+
+val too_few = office_ui_design_distribute_checked(design, ["a", "b"], office_ui_design_geometry_signature(design, ["a", "b"]), "horizontal")
+expect(too_few.accepted).to_be(false)
+expect(too_few.reason).to_equal("invalid-selection")
+
+val invalid = office_ui_design_parse("design: Invalid\nnode a|A|button|0|10|20|20|primary|1|action\nnode b|B|button|40px|20|20|20|secondary|2|action\nnode c|C|button|100|30|20|20|ghost|3|action")
+val invalid_result = office_ui_design_distribute_checked(invalid, ids, office_ui_design_geometry_signature(invalid, ids), "horizontal")
+expect(invalid_result.accepted).to_be(false)
+expect(invalid_result.reason).to_equal("invalid-geometry")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

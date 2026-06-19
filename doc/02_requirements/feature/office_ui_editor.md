@@ -18,8 +18,12 @@
   inspector snapshots without persisting selection into the design document.
 - REQ-UI-010: Support guarded style-token edits so component visual classes can
   change with stale-token rejection and deterministic render/SDD output.
+- REQ-UI-011: Support guarded multi-node alignment for left, center, right,
+  top, middle, and bottom operations over selected UI nodes.
+- REQ-UI-012: Support guarded multi-node horizontal and vertical distribution
+  over selected UI nodes.
 
 ## Out of Scope
 
-Live browser editing, collaborative cursors, constraints solving, and native
-Figma import are future slices.
+Live browser editing, collaborative cursors, constraints solving, auto-layout,
+and native Figma import are future slices.
