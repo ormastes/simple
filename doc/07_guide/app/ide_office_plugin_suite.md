@@ -121,9 +121,10 @@ and style-rule fields.
 Base table actions use a compact text table body:
 `table: Name`, `columns: id,status`, then `row: 1,open` lines. `query-table`
 uses `count-where|column|value`, `select-where|column|value`, or
-`project-column|column`. `render-base-table-html` renders that same table body
-as escaped HTML with `data-format="base-table"`, `data-column-count`, and
-`data-row-count`, and rejects missing columns or row-width mismatches. `db-edit` uses `insert|v1,v2`,
+`project-column|column`, and rejects missing columns or row-width mismatches.
+`render-base-table-html` renders that same table body as escaped HTML with
+`data-format="base-table"`, `data-column-count`, and `data-row-count`, and
+rejects missing columns or row-width mismatches. `db-edit` uses `insert|v1,v2`,
 `update-where|match_column|match_value|update_column|new_value`, or
 `delete-where|match_column|match_value`, and returns the updated table text.
 

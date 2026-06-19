@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 57 | 57 | 0 | 0 |
+| 58 | 58 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -614,6 +614,22 @@ expect(result.reason).to_equal("row-width-mismatch")
 
 </details>
 
+#### rejects malformed Base table queries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("query-table", "count-where|status|open\\ntable: Bad\\ncolumns: id,status\\nrow: 1")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("row-width-mismatch")
+```
+
+</details>
+
 #### rejects unknown headless office actions
 
 <details>
@@ -1143,8 +1159,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 57 |
-| Active scenarios | 57 |
+| Total scenarios | 58 |
+| Active scenarios | 58 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
