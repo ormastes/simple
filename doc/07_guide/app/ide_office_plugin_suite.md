@@ -103,7 +103,7 @@ SDD node edit actions use `node_id|value` for label, parent, shape, style, layer
 Blank SDD node edit ids are rejected as `invalid-args`.
 Parent edits reject missing parent IDs and parent cycles.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`
-and rejects duplicate IDs, blank IDs, missing parent IDs, and unsafe style, role, shape, or layer tokens.
+and rejects duplicate IDs, blank IDs, missing parent IDs, malformed geometry, and unsafe style, role, shape, or layer tokens.
 `order-sdd-node` uses `node_id|front` or `node_id|back` to change document/render order.
 Blank SDD order node ids are rejected as `invalid-args`.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text; `css`, `target`, and `key` are required, and `extends` must be `none`, empty, or an existing non-self CSS rule.

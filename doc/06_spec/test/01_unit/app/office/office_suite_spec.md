@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 85 | 85 | 0 | 0 |
+| 87 | 87 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1559,6 +1559,38 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank SDD add node geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("add-sdd-node", "C|Choice|accent|decision|diamond|   |64|48|32|front|\ngraph: Node Add\nA: Alpha")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
+#### keeps blank SDD add node ids as invalid ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("add-sdd-node", "   |Choice|accent|decision|diamond|   |64|48|32|front|\ngraph: Node Add\nA: Alpha")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-id")
+```
+
+</details>
+
 #### replaces the first office search match
 
 <details>
@@ -1595,8 +1627,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 85 |
-| Active scenarios | 85 |
+| Total scenarios | 87 |
+| Active scenarios | 87 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
