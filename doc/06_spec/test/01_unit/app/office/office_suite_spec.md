@@ -646,7 +646,7 @@ expect(legacy_sdd.output).to_contain("graph: Feature")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -664,6 +664,7 @@ expect(result.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(selected.ok).to_be(true)
 expect(selected.output).to_contain("data-selected-node-id=\"A\"")
 expect(selected.output).to_contain("data-selected=\"true\"")
+expect(selected.output).to_contain("data-resize-handle=\"se\" data-node=\"A\"")
 expect(invalid.ok).to_be(false)
 expect(invalid.reason).to_equal("invalid-args")
 expect(legacy.action).to_equal("render-sdd-html")
