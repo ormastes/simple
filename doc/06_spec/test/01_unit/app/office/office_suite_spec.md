@@ -691,12 +691,13 @@ expect(result.reason).to_equal("row-width-mismatch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("render-base-table-html", "table: Feature\\ncolumns: id,status\\nrow: 1,<open>")
 expect(result.ok).to_be(true)
+expect(result.output).to_contain("data-format-name=\"Base Table\"")
 expect(result.output).to_contain("scope=\"col\" data-column=\"status\"")
 expect(result.output).to_contain("<tr data-row-index=\"0\">")
 expect(result.output).to_contain("<td data-column=\"status\">&lt;open&gt;</td>")

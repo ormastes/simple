@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 758 lines folded for reproduction.
+Runnable source: 759 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1069,6 +1069,7 @@ expect(base_game_action.output).to_contain("spawn=gate")
 expect(base_game_missing_column_action.reason).to_equal("missing-column")
 expect(base_blank_query_column_action.reason).to_equal("invalid-args")
 expect(base_html_action.output).to_contain("data-format=\"base-table\"")
+expect(base_html_action.output).to_contain("data-format-name=\"Base Table\"")
 expect(base_html_action.output).to_contain("data-column-count=\"2\"")
 expect(base_html_action.output).to_contain("data-row-count=\"2\"")
 expect(base_html_action.output).to_contain("scope=\"col\" data-column=\"status\"")
