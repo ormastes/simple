@@ -4,15 +4,21 @@
 
 `OfficeUiDesign` is a text-backed document with a name, canvas dimensions, and
 positioned `OfficeUiNode` records. Nodes carry id, label, kind, css token,
-geometry, layer, and component role.
+geometry, layer, component role, parent id, auto-layout mode/gap/padding, and
+horizontal/vertical constraint metadata. Empty parent means top-level.
+`layout_mode` is `off`, `horizontal`, or `vertical`; constraints use
+`left`/`right`/`center`/`stretch` or `top`/`bottom`/`center`/`stretch`.
 
 ## Rendering
 
 `office_ui_design_render_html` emits a single relative `.office-ui-design`
 surface with absolutely positioned `.office-ui-node` children. The output is
 inspector-friendly: stable `data-format`, `data-id`, `data-kind`,
-`data-layer`, `data-z-index`, and `data-component` attributes are part of the
-contract.
+`data-layer`, `data-z-index`, `data-component`, `data-parent`,
+`data-layout-mode`, `data-layout-gap`, `data-layout-padding`,
+`data-constraint-h`, and `data-constraint-v` attributes are part of the
+contract. Rendering uses the pure auto-layout resolver before emitting absolute
+geometry so the HTML remains inspectable without a browser layout engine.
 
 `layer` is dual-purpose by design. Non-numeric values such as `base` and
 `controls` remain semantic layer names and render with document-order fallback
@@ -36,8 +42,9 @@ turning selection or inspection into persisted document state.
 ## SDD Bridge
 
 `office_ui_design_to_sdd` serializes nodes to the SDD table shape already used
-by `std.editor.services.sdn_graph`, preserving geometry and layers. This keeps
-Draw-style diagrams and UI design screens on one editable document substrate.
+by `std.editor.services.sdn_graph`, preserving resolved geometry, layers,
+parent ids, auto-layout metadata, and constraints. This keeps Draw-style
+diagrams and UI design screens on one editable document substrate.
 
 ## Editing
 
@@ -75,3 +82,21 @@ non-integer geometry.
 on the `horizontal` or `vertical` axis using integer geometry and design-order
 selection traversal. Like alignment, it is all-or-nothing and returns the
 original design for stale, missing, unsupported, or non-integer inputs.
+
+`office_ui_design_resolve_auto_layout` is the deterministic Figma-like layout
+step. Frame nodes with `layout_mode=horizontal` or `vertical` place direct child
+nodes in document order inside the frame's integer padding box, separated by an
+integer gap. Horizontal frames advance child `x`; vertical frames advance child
+`y`. Cross-axis constraints resolve the other axis: `left`/`top` pins to the
+padding edge, `right`/`bottom` pins to the far padding edge, `center` centers
+within the padded span, and `stretch` expands the child across the padded span.
+Invalid integer geometry, gap, or padding leaves the design unchanged.
+
+`office_ui_design_update_auto_layout_checked`,
+`office_ui_design_update_constraint_checked`, and
+`office_ui_design_set_parent_checked` extend the guarded-edit contract to
+layout metadata. Parent edits reject missing parents and parent cycles. Layout
+edits reject unsupported modes or malformed gap/padding. Constraint edits reject
+unsupported constraint tokens. `office_ui_design_auto_layout_signature` and
+`office_ui_design_resolve_layout_checked` give LLM/tool callers a stale-layout
+guard before materializing resolved geometry.

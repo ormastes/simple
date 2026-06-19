@@ -15,3 +15,9 @@
 - NFR-UI-008: Multi-node alignment and distribution must be all-or-nothing:
   stale signatures, missing nodes, too-small selections, unsupported modes, or
   non-integer geometry leave the original design unchanged.
+- NFR-UI-009: Auto-layout and constraint resolution must be pure, deterministic,
+  integer-only, and independent of browser/CSS layout engines.
+- NFR-UI-010: Parent/layout/constraint edits must be all-or-nothing:
+  stale-node guards, missing parents, parent cycles, unsupported layout modes,
+  unsupported constraints, invalid gap/padding, or non-integer geometry leave the
+  original design unchanged.

@@ -10,6 +10,12 @@ runner-verifiable formulas such as `COUNTA`, exact-match `VLOOKUP`, `LEN`,
 `LOWER`, `UPPER`, and `TRIM`. It is separate from full numeric formula parity,
 which still depends on the tracked f64 backend blocker.
 
+## Designer Auto-Layout
+Designer auto-layout is the pure `app.office.ui_editor` layout materialization
+path for HTML UI design documents. Frame nodes with horizontal or vertical
+layout metadata place child nodes using integer gap/padding and child
+constraints, then expose resolved absolute geometry in HTML and SDD output.
+
 ## Crate
 Package and module are used in many different meaning across different languages.
 Crate is simple.sdn exist deployment package unit.

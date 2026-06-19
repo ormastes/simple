@@ -19,9 +19,17 @@
   geometry.
 - Accept guarded horizontal/vertical distribution for 3+ nodes and reject too
   small selections or unsupported distribution axes.
+- Parse parent, auto-layout, gap, padding, and constraint metadata with
+  legacy-safe defaults.
+- Resolve horizontal and vertical frame auto-layout into deterministic absolute
+  geometry and expose the resolved values through HTML and SDD export.
+- Accept guarded parent, auto-layout, and constraint edits; reject stale nodes,
+  missing parents, parent cycles, invalid layout modes, invalid constraints, and
+  malformed integer gap/padding.
 
 ## System Coverage
 
 - IDE Office plugin suite verifies the LLM catalog includes Designer, the UI
-  editor owner module, UI editor label/layout/align/distribute/layer/style-token
-  actions, and the read-only `ui-inspect-node` / `ui-style-token-read` actions.
+  editor owner module, UI editor label/layout/auto-layout/constraint/
+  align/distribute/layer/style-token actions, and the read-only
+  `ui-inspect-node` / `ui-style-token-read` actions.

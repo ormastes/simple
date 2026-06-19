@@ -22,8 +22,14 @@
   top, middle, and bottom operations over selected UI nodes.
 - REQ-UI-012: Support guarded multi-node horizontal and vertical distribution
   over selected UI nodes.
+- REQ-UI-013: Support deterministic frame-level auto-layout for horizontal and
+  vertical child placement with integer gap and padding metadata.
+- REQ-UI-014: Support child parent and constraint metadata so Figma-like
+  contained components can resolve left/right/center/stretch or
+  top/bottom/center/stretch positioning without a browser layout engine.
 
 ## Out of Scope
 
-Live browser editing, collaborative cursors, constraints solving, auto-layout,
-and native Figma import are future slices.
+Live browser editing, collaborative cursors, arbitrary CSS/flexbox parity,
+constraint solving beyond deterministic parent/child formulas, and native Figma
+import are future slices.

@@ -110,7 +110,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=9 features=59 actions=23
+  llm-catalog: apps=9 features=61 actions=25
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -274,7 +274,7 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 90 lines folded for reproduction.
+Runnable source: 104 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,7 +282,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=59 actions=23")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=61 actions=25")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -327,6 +327,8 @@ expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
 expect(catalog[5].features.join(",")).to_contain("selection")
 expect(catalog[5].features.join(",")).to_contain("inspector")
 expect(catalog[5].features.join(",")).to_contain("style-tokens")
+expect(catalog[5].features.join(",")).to_contain("auto-layout")
+expect(catalog[5].features.join(",")).to_contain("constraints")
 expect(catalog[5].features.join(",")).to_contain("layout-edit")
 expect(catalog[5].features.join(",")).to_contain("align-layout")
 expect(catalog[5].features.join(",")).to_contain("distribute-layout")
@@ -334,6 +336,8 @@ expect(catalog[5].features.join(",")).to_contain("layer-edit")
 expect(catalog[5].features.join(",")).to_contain("style-token-edit")
 expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
+expect(catalog[5].actions.join(",")).to_contain("ui-auto-layout-edit")
+expect(catalog[5].actions.join(",")).to_contain("ui-constraints-edit")
 expect(catalog[5].actions.join(",")).to_contain("ui-align-selection")
 expect(catalog[5].actions.join(",")).to_contain("ui-distribute-selection")
 expect(catalog[5].actions.join(",")).to_contain("ui-layer-edit")
@@ -344,19 +348,28 @@ val ui_design = office_ui_design_parse("design: Feature Check\nnode button|Run|b
 val moved_ui = office_ui_design_update_layout_checked(ui_design, "button", "16", "16", "80", "32", "24", "32", "96", "40")
 val layered_ui = office_ui_design_update_layer_checked(moved_ui.design, "button", "controls", "3")
 val styled_ui = office_ui_design_update_style_token_checked(layered_ui.design, "button", "primary", "accent")
+val parented_ui = office_ui_design_set_parent_checked(styled_ui.design, "label", "", "button")
+val auto_layout_ui = office_ui_design_update_auto_layout_checked(parented_ui.design, "button", "off", "0", "0,0,0,0", "vertical", "4", "4,4,4,4")
+val constrained_ui = office_ui_design_update_constraint_checked(auto_layout_ui.design, "label", "left", "top", "stretch", "top")
+val resolved_auto_ui = office_ui_design_resolve_auto_layout(constrained_ui.design)
 val align_ids = ["button", "label", "icon"]
-val align_signature = office_ui_design_geometry_signature(styled_ui.design, align_ids)
-val aligned_ui = office_ui_design_align_checked(styled_ui.design, align_ids, align_signature, "middle")
+val align_signature = office_ui_design_geometry_signature(resolved_auto_ui, align_ids)
+val aligned_ui = office_ui_design_align_checked(resolved_auto_ui, align_ids, align_signature, "middle")
 val distribute_signature = office_ui_design_geometry_signature(aligned_ui.design, align_ids)
 val distributed_ui = office_ui_design_distribute_checked(aligned_ui.design, align_ids, distribute_signature, "horizontal")
 expect(moved_ui.reason).to_equal("updated")
 expect(office_ui_design_render_html(ui_design)).to_contain("data-format=\"html-ui\"")
 expect(layered_ui.reason).to_equal("updated")
 expect(styled_ui.reason).to_equal("updated")
+expect(parented_ui.reason).to_equal("updated")
+expect(auto_layout_ui.reason).to_equal("updated")
+expect(constrained_ui.reason).to_equal("updated")
 expect(aligned_ui.reason).to_equal("updated")
 expect(distributed_ui.reason).to_equal("updated")
 expect(office_ui_design_render_html(distributed_ui.design)).to_contain("data-z-index=\"3\"")
 expect(office_ui_design_render_html(distributed_ui.design)).to_contain("office-ui-css-accent")
+expect(office_ui_design_render_html(distributed_ui.design)).to_contain("data-layout-mode=\"vertical\"")
+expect(office_ui_design_render_html(distributed_ui.design)).to_contain("data-constraint-h=\"stretch\"")
 expect(office_ui_design_render_html_with_selection(distributed_ui.design, "button")).to_contain("data-selected=\"true\"")
 val inspected_ui = office_ui_design_inspect_node(distributed_ui.design, "button")
 expect(inspected_ui.found).to_be(true)
@@ -364,7 +377,8 @@ expect(inspected_ui.reason).to_equal("selected")
 expect(inspected_ui.css).to_equal("accent")
 expect(inspected_ui.z_index).to_equal("3")
 expect(office_ui_design_read_style_token(distributed_ui.design, "button").css).to_equal("accent")
-expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("button, Run, accent, action, rounded, 24, 28, 96, 40, 3")
+expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("button, Run, accent, action, rounded, 24, 28, 96, 40, 3, , vertical, 4")
+expect(office_ui_design_to_sdd(distributed_ui.design)).to_contain("label, Label, secondary, copy, rounded")
 expect(catalog[6].owner_module).to_equal("app.office.base_db")
 expect(catalog[7].features.join(",")).to_contain("mathml")
 expect(catalog[8].actions.join(",")).to_contain("counter-action")

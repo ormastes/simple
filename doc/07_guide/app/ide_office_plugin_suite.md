@@ -48,7 +48,10 @@ snapshot without mutating the design document. Style-token reads and guarded
 style-token edits expose the node `css` token as a deterministic visual class;
 they do not accept arbitrary CSS blocks. Multi-node alignment and distribution
 use geometry signatures as stale-selection guards and remain integer-only,
-all-or-nothing edits over selected nodes.
+all-or-nothing edits over selected nodes. Frame-level auto-layout resolves
+horizontal/vertical child placement from integer gap/padding metadata, and
+parent/constraint edits materialize deterministic Figma-like child geometry
+without delegating to a browser layout engine.
 
 Draw/diagram editing should prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
@@ -77,7 +80,8 @@ modes:
   `formula-text-functions`, `formula-vlookup`, and
   `formula-display-recalc`; Designer has
   `render-ui-html`, `export-ui-sdd`, and
-  `ui-label-edit` / `ui-layout-edit` / `ui-align-selection` /
+  `ui-label-edit` / `ui-layout-edit` / `ui-auto-layout-edit` /
+  `ui-constraints-edit` / `ui-align-selection` /
   `ui-distribute-selection` / `ui-layer-edit` /
   `ui-style-token-read` / `ui-style-token-edit` / `ui-inspect-node`.
 

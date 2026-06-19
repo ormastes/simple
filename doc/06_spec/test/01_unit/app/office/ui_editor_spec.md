@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -106,12 +106,40 @@ expect(design.nodes[1].component).to_equal("action")
 
 </details>
 
+#### parses auto-layout metadata with legacy-safe defaults
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val legacy = office_ui_design_parse("design: Legacy\nnode frame|Frame|frame|0|0|200|120|panel|base|container")
+expect(legacy.nodes[0].parent).to_equal("")
+expect(legacy.nodes[0].layout_mode).to_equal("off")
+expect(legacy.nodes[0].layout_gap).to_equal("0")
+expect(legacy.nodes[0].layout_padding).to_equal("0,0,0,0")
+expect(legacy.nodes[0].constraint_horizontal).to_equal("left")
+expect(legacy.nodes[0].constraint_vertical).to_equal("top")
+
+val design = office_ui_design_parse("design: Auto\nnode frame|Toolbar|frame|0|0|300|80|panel|1|container||horizontal|8|10,12,10,12|left|top\nnode ok|OK|button|0|0|40|20|primary|2|action|frame|off|0|0,0,0,0|center|stretch")
+expect(design.nodes[0].layout_mode).to_equal("horizontal")
+expect(design.nodes[0].layout_gap).to_equal("8")
+expect(design.nodes[0].layout_padding).to_equal("10,12,10,12")
+expect(design.nodes[1].parent).to_equal("frame")
+expect(design.nodes[1].constraint_horizontal).to_equal("center")
+expect(design.nodes[1].constraint_vertical).to_equal("stretch")
+```
+
+</details>
+
 #### renders inspector-ready positioned HTML
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -122,6 +150,9 @@ expect(html).to_contain("data-format=\"html-ui\"")
 expect(html).to_contain("data-format-name=\"HTML UI Design Document\"")
 expect(html).to_contain("data-id=\"submit\"")
 expect(html).to_contain("data-layer=\"controls\"")
+expect(html).to_contain("data-parent=\"\"")
+expect(html).to_contain("data-layout-mode=\"off\"")
+expect(html).to_contain("data-constraint-h=\"left\"")
 expect(html).to_contain("left: 72px")
 expect(html).to_contain("Sign &lt;in&gt;")
 ```
@@ -133,7 +164,7 @@ expect(html).to_contain("Sign &lt;in&gt;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -160,6 +191,9 @@ expect(info.height).to_equal("120")
 expect(info.layer).to_equal("1")
 expect(info.component).to_equal("container")
 expect(info.z_index).to_equal("1")
+expect(info.parent).to_equal("")
+expect(info.layout_mode).to_equal("off")
+expect(info.constraint_horizontal).to_equal("left")
 
 val missing = office_ui_design_inspect_node(design, "missing")
 expect(missing.found).to_be(false)
@@ -182,9 +216,9 @@ val design = office_ui_design_parse("design: Login\nnode card|Login Card|frame|4
 val sdd = office_ui_design_to_sdd(design)
 expect(sdd).to_contain("graph: Login")
 expect(sdd).to_contain("theme: office-ui")
-expect(sdd).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer|")
-expect(sdd).to_contain("card, \"Login Card\", panel, container, frame, 40, 32, 360, 240, base")
-expect(sdd).to_contain("submit, \"Sign in\", primary, action, rounded, 72, 200, 120, 36, controls")
+expect(sdd).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent, layout_mode, layout_gap, layout_padding, constraint_h, constraint_v|")
+expect(sdd).to_contain("card, \"Login Card\", panel, container, frame, 40, 32, 360, 240, base, , off, 0, 0,0,0,0, left, top")
+expect(sdd).to_contain("submit, \"Sign in\", primary, action, rounded, 72, 200, 120, 36, controls, , off, 0, 0,0,0,0, left, top")
 ```
 
 </details>
@@ -404,12 +438,87 @@ expect(invalid_result.reason).to_equal("invalid-geometry")
 
 </details>
 
+#### resolves horizontal and vertical auto-layout deterministically
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val horizontal = office_ui_design_parse("design: Auto\nnode frame|Toolbar|frame|10|20|300|80|panel|1|container||horizontal|8|10,12,10,12|left|top\nnode ok|OK|button|0|0|40|20|primary|2|action|frame|off|0|0,0,0,0|left|center\nnode cancel|Cancel|button|0|0|60|20|secondary|3|action|frame|off|0|0,0,0,0|left|stretch")
+val resolved = office_ui_design_resolve_auto_layout(horizontal)
+expect(resolved.nodes[1].x).to_equal("22")
+expect(resolved.nodes[1].y).to_equal("50")
+expect(resolved.nodes[2].x).to_equal("70")
+expect(resolved.nodes[2].y).to_equal("30")
+expect(resolved.nodes[2].height).to_equal("60")
+expect(office_ui_design_render_html(horizontal)).to_contain("data-layout-mode=\"horizontal\"")
+expect(office_ui_design_render_html(horizontal)).to_contain("left: 70px")
+expect(office_ui_design_to_sdd(horizontal)).to_contain("cancel, Cancel, secondary, action, rounded, 70, 30, 60, 60, 3, frame")
+
+val vertical = office_ui_design_parse("design: Stack\nnode frame|Panel|frame|0|0|120|160|panel|1|container||vertical|5|10,10,10,10|left|top\nnode title|Title|text|0|0|40|20|primary|2|copy|frame|off|0|0,0,0,0|center|top\nnode field|Field|input|0|0|30|24|secondary|3|field|frame|off|0|0,0,0,0|stretch|top")
+val stacked = office_ui_design_resolve_auto_layout(vertical)
+expect(stacked.nodes[1].x).to_equal("40")
+expect(stacked.nodes[1].y).to_equal("10")
+expect(stacked.nodes[2].x).to_equal("10")
+expect(stacked.nodes[2].y).to_equal("35")
+expect(stacked.nodes[2].width).to_equal("100")
+```
+
+</details>
+
+#### guards auto-layout parent and constraint edits
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Guard\nnode frame|Panel|frame|0|0|200|100|panel|1|container||off|0|0,0,0,0|left|top\nnode child|Child|button|10|10|40|20|primary|2|action||off|0|0,0,0,0|left|top")
+val parented = office_ui_design_set_parent_checked(design, "child", "", "frame")
+expect(parented.accepted).to_be(true)
+expect(parented.reason).to_equal("updated")
+expect(parented.design.nodes[1].parent).to_equal("frame")
+
+val layout = office_ui_design_update_auto_layout_checked(parented.design, "frame", "off", "0", "0,0,0,0", "horizontal", "6", "8,8,8,8")
+expect(layout.accepted).to_be(true)
+expect(layout.design.nodes[0].layout_mode).to_equal("horizontal")
+expect(layout.design.nodes[0].layout_gap).to_equal("6")
+
+val constrained = office_ui_design_update_constraint_checked(layout.design, "child", "left", "top", "left", "stretch")
+expect(constrained.accepted).to_be(true)
+expect(constrained.design.nodes[1].constraint_vertical).to_equal("stretch")
+expect(office_ui_design_render_html(constrained.design)).to_contain("height: 84px")
+
+val signature = office_ui_design_auto_layout_signature(constrained.design)
+val resolved = office_ui_design_resolve_layout_checked(constrained.design, signature)
+expect(resolved.accepted).to_be(true)
+expect(resolved.design.nodes[1].x).to_equal("8")
+expect(resolved.design.nodes[1].y).to_equal("8")
+
+val stale = office_ui_design_update_auto_layout_checked(parented.design, "frame", "vertical", "0", "0,0,0,0", "horizontal", "6", "8,8,8,8")
+expect(stale.accepted).to_be(false)
+expect(stale.reason).to_equal("stale-node")
+val invalid = office_ui_design_update_constraint_checked(layout.design, "child", "left", "top", "diagonal", "top")
+expect(invalid.accepted).to_be(false)
+expect(invalid.reason).to_equal("invalid-layout")
+val cycle = office_ui_design_set_parent_checked(parented.design, "frame", "", "child")
+expect(cycle.accepted).to_be(false)
+expect(cycle.reason).to_equal("cycle-parent")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

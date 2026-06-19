@@ -152,9 +152,10 @@ possible so they are runner-verifiable.
 13. ACTIVE (local 2026-06-19) — **HTML UI editor substrate**:
    Added a pure `app.office.ui_editor` design-document layer for Figma-like
    positioned frames/components, inspector-ready HTML, SDD export, and guarded
-   label/layout/alignment/distribution/layer edits. This is the Office Designer
-   surface; live browser editing, auto-layout, and collaborative constraints are
-   future slices.
+   label/layout/alignment/distribution/layer edits plus deterministic
+   frame-level auto-layout and parent/constraint metadata. This is the Office
+   Designer surface; live browser editing, collaborative cursors, and native
+   Figma import are future slices.
 
 ## Log
 
@@ -272,3 +273,10 @@ possible so they are runner-verifiable.
   selected UI nodes, with all-or-nothing stale/missing/invalid-geometry
   rejection. Catalog metadata now exposes `align-layout`,
   `distribute-layout`, `ui-align-selection`, and `ui-distribute-selection`.
+- 2026-06-19 dev: Advanced Figma-like Designer auto-layout. UI design nodes now
+  carry parent, frame auto-layout, gap/padding, and child constraint metadata;
+  `office_ui_design_resolve_auto_layout` materializes deterministic integer
+  geometry for horizontal/vertical frame layout, and guarded helpers update
+  parent/layout/constraint metadata with stale, missing-parent, cycle, and
+  invalid-layout rejection. Catalog metadata now exposes `auto-layout`,
+  `constraints`, `ui-auto-layout-edit`, and `ui-constraints-edit`.

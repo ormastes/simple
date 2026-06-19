@@ -17,6 +17,12 @@ struct OfficeUiNode:
     height: text
     layer: text
     component: text
+    parent: text
+    layout_mode: text
+    layout_gap: text
+    layout_padding: text
+    constraint_horizontal: text
+    constraint_vertical: text
 
 struct OfficeUiDesign:
     name: text
@@ -44,6 +50,10 @@ struct OfficeUiInspector:
     layer: text
     component: text
     z_index: text
+    parent: text
+    layout_mode: text
+    constraint_horizontal: text
+    constraint_vertical: text
 
 struct OfficeUiI64Result:
     ok: bool
@@ -56,7 +66,7 @@ fn office_ui_design_empty() -> OfficeUiDesign:
     OfficeUiDesign(name: "", width: "960", height: "540", nodes: [])
 
 fn office_ui_node(id: text, label: text, kind: text, x: text, y: text, width: text, height: text) -> OfficeUiNode:
-    OfficeUiNode(id: id, label: label, kind: kind, css: "", x: x, y: y, width: width, height: height, layer: "", component: "")
+    OfficeUiNode(id: id, label: label, kind: kind, css: "", x: x, y: y, width: width, height: height, layer: "", component: "", parent: "", layout_mode: "off", layout_gap: "0", layout_padding: "0,0,0,0", constraint_horizontal: "left", constraint_vertical: "top")
 
 fn office_ui_design_parse(source: text) -> OfficeUiDesign:
     var design = office_ui_design_empty()
@@ -83,31 +93,33 @@ fn office_ui_design_render_html(design: OfficeUiDesign) -> text:
     office_ui_design_render_html_with_selection(design, "")
 
 fn office_ui_design_render_html_with_selection(design: OfficeUiDesign, selected_id: text) -> text:
-    val w = _office_ui_safe_length(design.width)
-    val h = _office_ui_safe_length(design.height)
-    var out = "<div class=\"office-ui-design\" data-format=\"html-ui\" data-format-name=\"" + office_ui_editor_format_name() + "\" data-design=\"" + markdown_escape_html(design.name) + "\" data-selected-node-id=\"" + markdown_escape_html(selected_id) + "\" style=\"position: relative; width: " + w + "; height: " + h + "; box-sizing: border-box; background: #ffffff; border: 1px solid #d1d5db; overflow: hidden;\">"
+    val resolved = office_ui_design_resolve_auto_layout(design)
+    val w = _office_ui_safe_length(resolved.width)
+    val h = _office_ui_safe_length(resolved.height)
+    var out = "<div class=\"office-ui-design\" data-format=\"html-ui\" data-format-name=\"" + office_ui_editor_format_name() + "\" data-design=\"" + markdown_escape_html(resolved.name) + "\" data-selected-node-id=\"" + markdown_escape_html(selected_id) + "\" style=\"position: relative; width: " + w + "; height: " + h + "; box-sizing: border-box; background: #ffffff; border: 1px solid #d1d5db; overflow: hidden;\">"
     var z_index = 0
-    for node in design.nodes:
+    for node in resolved.nodes:
         val selected = node.id == selected_id
         val selected_class = if selected then " office-ui-selected" else: ""
         val selected_value = if selected then "true" else: "false"
         val class_name = "office-ui-node office-ui-" + _office_ui_safe_token(node.kind) + _office_ui_css_class(node.css) + selected_class
         val node_z = _office_ui_layer_z_index(node.layer, z_index)
         val style = "position: absolute; left: " + _office_ui_safe_length(node.x) + "; top: " + _office_ui_safe_length(node.y) + "; width: " + _office_ui_safe_length(node.width) + "; height: " + _office_ui_safe_length(node.height) + "; z-index: " + node_z + "; box-sizing: border-box; border: 1px solid #6b7280; background: #f9fafb; color: #111827; overflow: hidden;"
-        out = out + "<div class=\"" + class_name + "\" data-id=\"" + markdown_escape_html(node.id) + "\" data-kind=\"" + markdown_escape_html(node.kind) + "\" data-layer=\"" + markdown_escape_html(node.layer) + "\" data-z-index=\"" + node_z + "\" data-selected=\"" + selected_value + "\" aria-selected=\"" + selected_value + "\" data-component=\"" + markdown_escape_html(node.component) + "\" style=\"" + style + "\">" + markdown_escape_html(node.label) + "</div>"
+        out = out + "<div class=\"" + class_name + "\" data-id=\"" + markdown_escape_html(node.id) + "\" data-kind=\"" + markdown_escape_html(node.kind) + "\" data-layer=\"" + markdown_escape_html(node.layer) + "\" data-z-index=\"" + node_z + "\" data-selected=\"" + selected_value + "\" aria-selected=\"" + selected_value + "\" data-component=\"" + markdown_escape_html(node.component) + "\" data-parent=\"" + markdown_escape_html(node.parent) + "\" data-layout-mode=\"" + markdown_escape_html(node.layout_mode) + "\" data-layout-gap=\"" + markdown_escape_html(node.layout_gap) + "\" data-layout-padding=\"" + markdown_escape_html(node.layout_padding) + "\" data-constraint-h=\"" + markdown_escape_html(node.constraint_horizontal) + "\" data-constraint-v=\"" + markdown_escape_html(node.constraint_vertical) + "\" style=\"" + style + "\">" + markdown_escape_html(node.label) + "</div>"
         z_index = z_index + 1
     out + "</div>"
 
 fn office_ui_design_to_sdd(design: OfficeUiDesign) -> text:
+    val resolved = office_ui_design_resolve_auto_layout(design)
     var out: [text] = []
-    out.push("graph: " + design.name)
+    out.push("graph: " + resolved.name)
     out.push("theme: office-ui")
     out.push("")
-    out.push("nodes |id, label, css, role, shape, x, y, width, height, layer|")
-    for node in design.nodes:
+    out.push("nodes |id, label, css, role, shape, x, y, width, height, layer, parent, layout_mode, layout_gap, layout_padding, constraint_h, constraint_v|")
+    for node in resolved.nodes:
         val shape = if node.kind == "frame" then "frame" else: "rounded"
         val role = if node.component != "" then node.component else: node.kind
-        out.push("    " + node.id + ", " + _office_ui_quote_if_space(node.label) + ", " + _office_ui_quote_if_space(node.css) + ", " + role + ", " + shape + ", " + node.x + ", " + node.y + ", " + node.width + ", " + node.height + ", " + node.layer)
+        out.push("    " + node.id + ", " + _office_ui_quote_if_space(node.label) + ", " + _office_ui_quote_if_space(node.css) + ", " + role + ", " + shape + ", " + node.x + ", " + node.y + ", " + node.width + ", " + node.height + ", " + node.layer + ", " + node.parent + ", " + node.layout_mode + ", " + node.layout_gap + ", " + _office_ui_quote_if_space(node.layout_padding) + ", " + node.constraint_horizontal + ", " + node.constraint_vertical)
     out.push("")
     out.push("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
     out.join("\n") + "\n"
@@ -275,6 +287,104 @@ fn office_ui_design_distribute_checked(design: OfficeUiDesign, node_ids: [text],
     val new_signature = office_ui_design_geometry_signature(out, node_ids)
     OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-distribute " + axis + " @@\n- " + expected_signature + "\n+ " + new_signature, design: out)
 
+fn office_ui_design_auto_layout_signature(design: OfficeUiDesign) -> text:
+    var parts: [text] = []
+    for node in design.nodes:
+        parts.push(node.id + ":" + node.parent + "," + node.layout_mode + "," + node.layout_gap + "," + node.layout_padding + "," + node.constraint_horizontal + "," + node.constraint_vertical + "," + node.x + "," + node.y + "," + node.width + "," + node.height)
+    parts.join(";")
+
+fn office_ui_design_resolve_auto_layout(design: OfficeUiDesign) -> OfficeUiDesign:
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var i = 0
+    while i < design.nodes.len():
+        val container = out.nodes[i]
+        if container.kind == "frame" and _office_ui_layout_mode_supported(container.layout_mode) and container.layout_mode != "off":
+            out = _office_ui_apply_container_layout(out, container)
+        i = i + 1
+    out
+
+fn office_ui_design_update_auto_layout_checked(design: OfficeUiDesign, node_id: text, expected_mode: text, expected_gap: text, expected_padding: text, new_mode: text, new_gap: text, new_padding: text) -> OfficeUiEditResult:
+    if not _office_ui_layout_mode_supported(new_mode) or not _office_ui_parse_i64_result(new_gap).ok or not _office_ui_parse_padding(new_padding).ok:
+        return OfficeUiEditResult(accepted: false, reason: "invalid-layout", diff: "@@ ui-auto-layout " + node_id + " @@\nexpected: off|horizontal|vertical and integer gap/padding\nactual: " + new_mode + "," + new_gap + "," + new_padding, design: design)
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var i = 0
+    while i < design.nodes.len():
+        val current = design.nodes[i]
+        if current.id == node_id:
+            val actual = current.layout_mode + "," + current.layout_gap + "," + current.layout_padding
+            val expected = expected_mode + "," + expected_gap + "," + expected_padding
+            val replacement = new_mode + "," + new_gap + "," + new_padding
+            if actual != expected:
+                return OfficeUiEditResult(accepted: false, reason: "stale-node", diff: "@@ ui-auto-layout " + node_id + " @@\nexpected: " + expected + "\nactual: " + actual + "\nrejected: " + replacement, design: design)
+            var updated = _office_ui_clone_node(current)
+            updated.layout_mode = new_mode
+            updated.layout_gap = new_gap
+            updated.layout_padding = new_padding
+            out.nodes[i] = updated
+            return OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-auto-layout " + node_id + " @@\n- " + expected + "\n+ " + replacement, design: out)
+        i = i + 1
+    OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-auto-layout " + node_id + " @@\nexpected: " + expected_mode + "," + expected_gap + "," + expected_padding + "\nactual: <missing>\nrejected: " + new_mode + "," + new_gap + "," + new_padding, design: design)
+
+fn office_ui_design_update_constraint_checked(design: OfficeUiDesign, node_id: text, expected_horizontal: text, expected_vertical: text, new_horizontal: text, new_vertical: text) -> OfficeUiEditResult:
+    if not _office_ui_constraint_horizontal_supported(new_horizontal) or not _office_ui_constraint_vertical_supported(new_vertical):
+        return OfficeUiEditResult(accepted: false, reason: "invalid-layout", diff: "@@ ui-constraints " + node_id + " @@\nexpected: left|right|center|stretch\nactual: " + new_horizontal + "," + new_vertical, design: design)
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var i = 0
+    while i < design.nodes.len():
+        val current = design.nodes[i]
+        if current.id == node_id:
+            val actual = current.constraint_horizontal + "," + current.constraint_vertical
+            val expected = expected_horizontal + "," + expected_vertical
+            val replacement = new_horizontal + "," + new_vertical
+            if actual != expected:
+                return OfficeUiEditResult(accepted: false, reason: "stale-node", diff: "@@ ui-constraints " + node_id + " @@\nexpected: " + expected + "\nactual: " + actual + "\nrejected: " + replacement, design: design)
+            var updated = _office_ui_clone_node(current)
+            updated.constraint_horizontal = new_horizontal
+            updated.constraint_vertical = new_vertical
+            out.nodes[i] = updated
+            return OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-constraints " + node_id + " @@\n- " + expected + "\n+ " + replacement, design: out)
+        i = i + 1
+    OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-constraints " + node_id + " @@\nexpected: " + expected_horizontal + "," + expected_vertical + "\nactual: <missing>\nrejected: " + new_horizontal + "," + new_vertical, design: design)
+
+fn office_ui_design_set_parent_checked(design: OfficeUiDesign, node_id: text, expected_parent: text, new_parent: text) -> OfficeUiEditResult:
+    if new_parent != "" and _office_ui_find_node_index(design, new_parent) < 0:
+        return OfficeUiEditResult(accepted: false, reason: "missing-parent", diff: "@@ ui-parent " + node_id + " @@\nexpected-parent: " + expected_parent + "\nactual-parent: <missing " + new_parent + ">", design: design)
+    if new_parent == node_id or _office_ui_parent_chain_contains(design, new_parent, node_id):
+        return OfficeUiEditResult(accepted: false, reason: "cycle-parent", diff: "@@ ui-parent " + node_id + " @@\nrejected-cycle: " + new_parent, design: design)
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var i = 0
+    while i < design.nodes.len():
+        val current = design.nodes[i]
+        if current.id == node_id:
+            if current.parent != expected_parent:
+                return OfficeUiEditResult(accepted: false, reason: "stale-node", diff: "@@ ui-parent " + node_id + " @@\nexpected: " + expected_parent + "\nactual: " + current.parent + "\nrejected: " + new_parent, design: design)
+            var updated = _office_ui_clone_node(current)
+            updated.parent = new_parent
+            out.nodes[i] = updated
+            return OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-parent " + node_id + " @@\n- " + expected_parent + "\n+ " + new_parent, design: out)
+        i = i + 1
+    OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-parent " + node_id + " @@\nexpected: " + expected_parent + "\nactual: <missing>\nrejected: " + new_parent, design: design)
+
+fn office_ui_design_resolve_layout_checked(design: OfficeUiDesign, expected_signature: text) -> OfficeUiEditResult:
+    val actual_signature = office_ui_design_auto_layout_signature(design)
+    if actual_signature != expected_signature:
+        return OfficeUiEditResult(accepted: false, reason: "stale-layout", diff: "@@ ui-auto-layout-resolve @@\nexpected: " + expected_signature + "\nactual: " + actual_signature, design: design)
+    val resolved = office_ui_design_resolve_auto_layout(design)
+    val new_signature = office_ui_design_geometry_signature(resolved, _office_ui_all_node_ids(resolved))
+    OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-auto-layout-resolve @@\n- " + actual_signature + "\n+ " + new_signature, design: resolved)
+
 fn office_ui_design_inspect_node(design: OfficeUiDesign, node_id: text) -> OfficeUiInspector:
     var index = 0
     while index < design.nodes.len():
@@ -293,10 +403,14 @@ fn office_ui_design_inspect_node(design: OfficeUiDesign, node_id: text) -> Offic
                 height: node.height,
                 layer: node.layer,
                 component: node.component,
-                z_index: _office_ui_layer_z_index(node.layer, index)
+                z_index: _office_ui_layer_z_index(node.layer, index),
+                parent: node.parent,
+                layout_mode: node.layout_mode,
+                constraint_horizontal: node.constraint_horizontal,
+                constraint_vertical: node.constraint_vertical
             )
         index = index + 1
-    OfficeUiInspector(found: false, reason: "missing-node", id: node_id, label: "", kind: "", css: "", x: "", y: "", width: "", height: "", layer: "", component: "", z_index: "")
+    OfficeUiInspector(found: false, reason: "missing-node", id: node_id, label: "", kind: "", css: "", x: "", y: "", width: "", height: "", layer: "", component: "", z_index: "", parent: "", layout_mode: "", constraint_horizontal: "", constraint_vertical: "")
 
 struct OfficeUiBounds:
     ok: bool
@@ -309,6 +423,13 @@ struct OfficeUiAlignedNode:
     ok: bool
     node: OfficeUiNode
 
+struct OfficeUiPadding:
+    ok: bool
+    top: i64
+    right: i64
+    bottom: i64
+    left: i64
+
 fn _office_ui_clone_node(node: OfficeUiNode) -> OfficeUiNode:
     OfficeUiNode(
         id: node.id,
@@ -320,7 +441,13 @@ fn _office_ui_clone_node(node: OfficeUiNode) -> OfficeUiNode:
         width: node.width,
         height: node.height,
         layer: node.layer,
-        component: node.component
+        component: node.component,
+        parent: node.parent,
+        layout_mode: node.layout_mode,
+        layout_gap: node.layout_gap,
+        layout_padding: node.layout_padding,
+        constraint_horizontal: node.constraint_horizontal,
+        constraint_vertical: node.constraint_vertical
     )
 
 fn _office_ui_parse_dense_node(line: text) -> OfficeUiNode:
@@ -346,6 +473,28 @@ fn _office_ui_parse_dense_node(line: text) -> OfficeUiNode:
         node.layer = parts[8].trim()
     if parts.len() >= 10:
         node.component = parts[9].trim()
+    if parts.len() >= 11:
+        node.parent = parts[10].trim()
+    if parts.len() >= 12:
+        val mode = parts[11].trim()
+        if _office_ui_layout_mode_supported(mode):
+            node.layout_mode = mode
+    if parts.len() >= 13:
+        val gap = parts[12].trim()
+        if _office_ui_parse_i64_result(gap).ok:
+            node.layout_gap = gap
+    if parts.len() >= 14:
+        val padding = parts[13].trim()
+        if _office_ui_parse_padding(padding).ok:
+            node.layout_padding = padding
+    if parts.len() >= 15:
+        val h = parts[14].trim()
+        if _office_ui_constraint_horizontal_supported(h):
+            node.constraint_horizontal = h
+    if parts.len() >= 16:
+        val v = parts[15].trim()
+        if _office_ui_constraint_vertical_supported(v):
+            node.constraint_vertical = v
     node
 
 fn _office_ui_safe_token(value: text) -> text:
@@ -423,6 +572,129 @@ fn _office_ui_selected_count(design: OfficeUiDesign, node_ids: [text]) -> i64:
         if _office_ui_id_in_list(node.id, node_ids):
             count = count + 1
     count
+
+fn _office_ui_all_node_ids(design: OfficeUiDesign) -> [text]:
+    var ids: [text] = []
+    for node in design.nodes:
+        ids.push(node.id)
+    ids
+
+fn _office_ui_layout_mode_supported(mode: text) -> bool:
+    mode == "off" or mode == "horizontal" or mode == "vertical"
+
+fn _office_ui_constraint_horizontal_supported(value: text) -> bool:
+    value == "left" or value == "right" or value == "center" or value == "stretch"
+
+fn _office_ui_constraint_vertical_supported(value: text) -> bool:
+    value == "top" or value == "bottom" or value == "center" or value == "stretch"
+
+fn _office_ui_find_node_index(design: OfficeUiDesign, node_id: text) -> i64:
+    var i: i64 = 0
+    for node in design.nodes:
+        if node.id == node_id:
+            return i
+        i = i + 1
+    -1
+
+fn _office_ui_parent_chain_contains(design: OfficeUiDesign, start_parent: text, target_id: text) -> bool:
+    var current = start_parent
+    var depth = 0
+    while current != "" and depth < 64:
+        if current == target_id:
+            return true
+        val idx = _office_ui_find_node_index(design, current)
+        if idx < 0:
+            return false
+        current = design.nodes[idx].parent
+        depth = depth + 1
+    false
+
+fn _office_ui_parse_padding(value: text) -> OfficeUiPadding:
+    val parts = value.split(",")
+    if parts.len() != 4:
+        return OfficeUiPadding(ok: false, top: 0, right: 0, bottom: 0, left: 0)
+    val top = _office_ui_parse_i64_result(parts[0].trim())
+    val right = _office_ui_parse_i64_result(parts[1].trim())
+    val bottom = _office_ui_parse_i64_result(parts[2].trim())
+    val left = _office_ui_parse_i64_result(parts[3].trim())
+    if not top.ok or not right.ok or not bottom.ok or not left.ok:
+        return OfficeUiPadding(ok: false, top: 0, right: 0, bottom: 0, left: 0)
+    OfficeUiPadding(ok: true, top: top.value, right: right.value, bottom: bottom.value, left: left.value)
+
+fn _office_ui_apply_container_layout(design: OfficeUiDesign, container: OfficeUiNode) -> OfficeUiDesign:
+    val cx = _office_ui_parse_i64_result(container.x)
+    val cy = _office_ui_parse_i64_result(container.y)
+    val cw = _office_ui_parse_i64_result(container.width)
+    val ch = _office_ui_parse_i64_result(container.height)
+    val gap = _office_ui_parse_i64_result(container.layout_gap)
+    val padding = _office_ui_parse_padding(container.layout_padding)
+    if not cx.ok or not cy.ok or not cw.ok or not ch.ok or not gap.ok or not padding.ok:
+        return design
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var cursor = if container.layout_mode == "horizontal": cx.value + padding.left else: cy.value + padding.top
+    var i = 0
+    while i < out.nodes.len():
+        val node = out.nodes[i]
+        if node.parent == container.id:
+            val resolved = _office_ui_resolve_child_in_container(node, container, cx.value, cy.value, cw.value, ch.value, padding, cursor)
+            if resolved.ok:
+                out.nodes[i] = resolved.node
+                val size = if container.layout_mode == "horizontal": _office_ui_parse_i64_result(resolved.node.width) else: _office_ui_parse_i64_result(resolved.node.height)
+                if size.ok:
+                    cursor = cursor + size.value + gap.value
+            else:
+                return design
+        i = i + 1
+    out
+
+fn _office_ui_resolve_child_in_container(node: OfficeUiNode, container: OfficeUiNode, cx: i64, cy: i64, cw: i64, ch: i64, padding: OfficeUiPadding, cursor: i64) -> OfficeUiAlignedNode:
+    val w = _office_ui_parse_i64_result(node.width)
+    val h = _office_ui_parse_i64_result(node.height)
+    if not w.ok or not h.ok:
+        return OfficeUiAlignedNode(ok: false, node: node)
+    var updated = _office_ui_clone_node(node)
+    val inner_x = cx + padding.left
+    val inner_y = cy + padding.top
+    val inner_w = cw - padding.left - padding.right
+    val inner_h = ch - padding.top - padding.bottom
+    if inner_w < 0 or inner_h < 0:
+        return OfficeUiAlignedNode(ok: false, node: node)
+    if container.layout_mode == "horizontal":
+        updated.x = cursor.to_text()
+        updated = _office_ui_apply_cross_axis_constraint(updated, "vertical", inner_x, inner_y, inner_w, inner_h)
+    elif container.layout_mode == "vertical":
+        updated.y = cursor.to_text()
+        updated = _office_ui_apply_cross_axis_constraint(updated, "horizontal", inner_x, inner_y, inner_w, inner_h)
+    OfficeUiAlignedNode(ok: true, node: updated)
+
+fn _office_ui_apply_cross_axis_constraint(node: OfficeUiNode, axis: text, inner_x: i64, inner_y: i64, inner_w: i64, inner_h: i64) -> OfficeUiNode:
+    var updated = _office_ui_clone_node(node)
+    val w = _office_ui_parse_i64_result(node.width)
+    val h = _office_ui_parse_i64_result(node.height)
+    if axis == "horizontal":
+        if node.constraint_horizontal == "right":
+            updated.x = (inner_x + inner_w - w.value).to_text()
+        elif node.constraint_horizontal == "center":
+            updated.x = (inner_x + ((inner_w - w.value) / 2)).to_text()
+        elif node.constraint_horizontal == "stretch":
+            updated.x = inner_x.to_text()
+            updated.width = inner_w.to_text()
+        else:
+            updated.x = inner_x.to_text()
+    else:
+        if node.constraint_vertical == "bottom":
+            updated.y = (inner_y + inner_h - h.value).to_text()
+        elif node.constraint_vertical == "center":
+            updated.y = (inner_y + ((inner_h - h.value) / 2)).to_text()
+        elif node.constraint_vertical == "stretch":
+            updated.y = inner_y.to_text()
+            updated.height = inner_h.to_text()
+        else:
+            updated.y = inner_y.to_text()
+    updated
 
 fn _office_ui_selected_axis_size(design: OfficeUiDesign, node_ids: [text], axis: text) -> OfficeUiI64Result:
     var total: i64 = 0
