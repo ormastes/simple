@@ -56,10 +56,26 @@ Recommendation: (2) — null-safe the pointer-deref lowering — is the correct,
 general fix. It is a codegen/interpreter change, not a one-liner; do it as a
 focused change with its own verification (re-run Test C → clean error).
 
-## NOT a separate bug
-`rt_file_list_dir` is registered (`interpreter_extern/mod.rs:1059` → `file_io::rt_dir_list`,
-the same impl as the working `rt_dir_list`/`dir_list`). It only appeared to
-"core-dump" during Stage-2 scoping because the **deployed binary was stale** (lacked
-that registration) AND it returns `[text]` — so it hit exactly this bug. After a
-rebuild it resolves normally. (Corrects the misstatement in the Stage-2 plan /
-revert commit `4c7986171bb`.)
+## The real discriminator: missing `runtime_sffi` spec (corrected 2026-06-18)
+Initial guess (stale binary) was DISPROVEN — a freshly rebuilt binary still cores on
+direct `rt_file_list_dir(".")`. The actual discriminator:
+- `rt_dir_list` **has a `runtime_sffi.rs` spec** → the JIT lowers it as a *direct*
+  call to the real C/runtime function → returns a valid `RuntimeValue` array → works
+  (`dir_list` wrapper is fine).
+- `rt_file_list_dir` is registered in the **interpreter** (`mod.rs:1059`) but has **no
+  `runtime_sffi` spec** → JIT-compiled callers route it through `rt_interp_call`, and
+  that path's **pointer/array return ABI to JIT code is broken** → the caller derefs a
+  bad pointer → SIGSEGV.
+
+So the crash class is: **a pointer-returning extern that the JIT must route through
+`rt_interp_call`** (either because it is unregistered → returns NIL, or registered-
+but-spec-less → returns an array that `rt_interp_call` mis-marshals to the JIT ABI).
+Value-returning ones are fine because the integer return ABI matches.
+
+Bounded per-extern mitigation: add a `runtime_sffi` spec for the extern (mirrors
+`rt_dir_list`) so the JIT calls it directly. Systemic fix (candidate 2 above): make
+`rt_interp_call`'s pointer-return path produce a JIT-valid heap value / NIL-guard the
+JIT `.len()`/index lowering. For the rt-encapsulation migration this is largely moot:
+app code must use the *wrapper* (`dir_list`, backed by spec'd `rt_dir_list`), never the
+spec-less `rt_file_list_dir` directly. (Corrects the "stale binary" misstatement in the
+Stage-2 plan / revert commit `4c7986171bb`.)

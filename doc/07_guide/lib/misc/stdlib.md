@@ -4,6 +4,47 @@ Covers SDN format, string utilities, database access (DB + SQP), and atomic text
 
 ---
 
+## Runtime intrinsics (`rt_*`) are internal — use std aliases
+
+`rt_*` functions are **runtime intrinsics**: the low-level bridge between Simple and
+the native runtime. They are **not part of the application API**. App and library
+developers must **never** declare `extern fn rt_*` or call `rt_*` directly — use the
+**std aliases** (thin wrappers) instead:
+
+| Instead of raw `rt_*` | Use the std alias |
+|------------------------|-------------------|
+| `rt_file_read_text(p)` | `std.io_runtime.file_read(p)` (returns `text`, `""` if missing) |
+| `rt_file_write_text(p, c)` | `std.io_runtime.file_write(p, c)` |
+| `rt_file_exists(p)` | `std.io_runtime.file_exists(p)` |
+| `rt_env_get(k)` | `std.io_runtime.env_get(k)` |
+| `rt_process_run(cmd, args)` | `std.io_runtime.process_run(...)` / `shell(...)` |
+| `rt_cli_get_args()` | `std.io_runtime.get_args()` |
+| `rt_getpid()` | `std.io_runtime.getpid()` |
+| `rt_dir_list(p)` | `std.io_runtime.dir_list(p)` |
+
+```simple
+# WRONG — app code must not touch rt_* directly
+extern fn rt_file_read_text(path: text) -> text
+val c = rt_file_read_text("x.txt") ?? ""
+
+# RIGHT — use the std alias
+use std.io_runtime.{file_read}
+val c = file_read("x.txt")
+```
+
+**Why:** intrinsics are unstable, backend-specific, and some are unimplemented in a
+given backend (calling a spec-less pointer-returning `rt_*` can even crash — see
+`doc/08_tracking/bug/interp_missing_pointer_extern_nil_deref_sigsegv_2026-06-18.md`).
+The std aliases are stable, documented, and backed by registered intrinsics.
+
+**Enforcement:** the compiler's `raw_rt_access` lint (RAW-RT-001, default *warn*)
+flags any `extern fn rt_*` declared outside the privileged tiers (`src/lib`,
+`src/runtime`, `src/compiler`). Genuinely low-level modules (emulators, baremetal
+MMIO, crypto/protocol implementations) may opt out with a file-level
+`@runtime_intrinsics` / `#[runtime_intrinsics]` marker. See `doc/07_guide/app/lint.md`.
+
+---
+
 ## SDN (Simple Data Notation)
 
 SDN is Simple's native configuration format, replacing TOML. It is 30-50% more token-efficient and integrates natively with Simple tooling.
