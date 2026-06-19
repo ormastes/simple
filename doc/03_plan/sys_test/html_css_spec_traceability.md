@@ -22,12 +22,13 @@ covered by:
 CSS has two coverage levels:
 
 - Functional renderer coverage for the Simple Web implemented subset:
-  `background`, `background-color`, `border`, side border widths/colors,
-  `box-sizing`, `color`, `display`, `flex`, `flex-*`, `gap`, `row-gap`,
-  `column-gap`, `font-size`, `font-weight`, `height`, `line-height`, `margin`,
-  side margins, `max-*`, `min-*`, `opacity`, `overflow`, `overflow-x`,
-  `overflow-y`, `padding`, side padding, `position`, `left`, `top`, `right`,
-  `bottom`, `text-align`, `visibility`, `white-space`, `width`, and `z-index`.
+  `align-*`, `background`, `background-color`, `border`, side border
+  widths/colors, `box-sizing`, `color`, `display`, `flex`, `flex-*`,
+  `flex-basis`, `gap`, `row-gap`, `column-gap`, `font-size`, `font-weight`,
+  `height`, `justify-content`, `line-height`, `margin`, side margins, `max-*`,
+  `min-*`, `opacity`, `order`, `overflow`, `overflow-x`, `overflow-y`,
+  `padding`, side padding, `position`, `left`, `top`, `right`, `bottom`,
+  `text-align`, `visibility`, `white-space`, `width`, and `z-index`.
 - Traceability inventory coverage for the wider W3C CSS index. Unsupported CSS
   properties are tracked as inventory entries, not claimed as implemented
   rendering behavior. The SSpec owner for those inventory-only entries is
