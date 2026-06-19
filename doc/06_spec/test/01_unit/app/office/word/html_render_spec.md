@@ -349,9 +349,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = render_writer_markdown_html("| Name | Score | Note |\n| :--- | ---: | :-: |\n| Alpha | 42 | ok |")
-expect(html).to_contain("<th data-align=\"left\" style=\"text-align:left\">Name</th>")
-expect(html).to_contain("<th data-align=\"right\" style=\"text-align:right\">Score</th>")
-expect(html).to_contain("<td data-align=\"center\" style=\"text-align:center\">ok</td>")
+expect(html).to_contain("<th data-row-index=\"0\" data-column-index=\"0\" data-align=\"left\" style=\"text-align:left\">Name</th>")
+expect(html).to_contain("<th data-row-index=\"0\" data-column-index=\"1\" data-align=\"right\" style=\"text-align:right\">Score</th>")
+expect(html).to_contain("<td data-row-index=\"1\" data-column-index=\"2\" data-align=\"center\" style=\"text-align:center\">ok</td>")
 ```
 
 </details>

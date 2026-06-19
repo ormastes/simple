@@ -68,7 +68,8 @@ thematic breaks, blockquotes, task lists, ordered and unordered lists, tables, i
 document HTML while escaping user text and attributes. Unsafe Markdown image and
 stylesheet URLs render as `#`; Markdown table separator
 alignment markers (`:---`, `---:`, `:-:`) become stable `data-align` and
-`text-align` cell metadata. The rich-text compatibility adapter must also escape
+`text-align` cell metadata, and table cells expose `data-row-index` /
+`data-column-index` coordinates for selection and range-copy tooling. The rich-text compatibility adapter must also escape
 block text before emitting HTML.
 
 PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
