@@ -93,6 +93,7 @@ renderdoc_test_capture_html
   instead of leaving missing evidence.
 - Compatibility wrappers route through the shared CLI.
 - The setup script owns path discovery and Vulkan layer registration.
+- Chrome discovery covers both Linux/Playwright paths and macOS app bundles.
 
 ## Notes
 
@@ -109,7 +110,7 @@ instead of destabilizing ordinary unit checks.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -126,6 +127,8 @@ expect(common).to_contain("rdoc_write_unavailable_capture")
 expect(common).to_contain("evidence.env")
 expect(common).to_contain("rdoc_capture_status=")
 expect(common).to_contain("rdoc_capture_reason=")
+expect(common).to_contain("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+expect(common).to_contain("/Applications/Chromium.app/Contents/MacOS/Chromium")
 ```
 
 </details>

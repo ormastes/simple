@@ -32,7 +32,9 @@ Common variables:
 - `RDOC_HOME`: RenderDoc install root containing `bin/renderdoccmd`.
   On macOS, this may also be a `RenderDoc.app` bundle containing
   `Contents/MacOS/renderdoccmd`.
-- `RDOC_CHROME`: Chrome/Chromium binary for HTML capture.
+- `RDOC_CHROME`: Chrome/Chromium binary for HTML capture. If unset, the helper
+  checks common Playwright/Linux Chrome paths and macOS app bundles such as
+  `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
 - `RDOC_OUTPUT_DIR`: base output directory.
 - `RDOC_CAPTURE_TIMEOUT_SECS`: bounded capture timeout.
 - `RDOC_HTML_PATH`: HTML fixture for `capture-html`.
