@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -219,6 +219,27 @@ expect(html).to_contain("<li>Second &lt;safe&gt;</li>")
 
 </details>
 
+#### renders Writer Markdown task lists as document HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("- [x] Done **safe**\n- [ ] Open <x>")
+expect(html).to_contain("<ul class=\"md-writer-task-list\">")
+expect(html).to_contain("data-task=\"true\" data-checked=\"true\"")
+expect(html).to_contain("<input type=\"checkbox\" disabled checked>")
+expect(html).to_contain("Done <strong>safe</strong>")
+expect(html).to_contain("data-task=\"true\" data-checked=\"false\"")
+expect(html).to_contain("<input type=\"checkbox\" disabled>")
+expect(html).to_contain("Open &lt;x&gt;")
+```
+
+</details>
+
 #### renders Writer Markdown ordered lists as document HTML
 
 <details>
@@ -306,8 +327,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
