@@ -224,13 +224,14 @@ expect(html).to_contain("<figcaption>Bad &lt;x&gt;</figcaption>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = render_writer_markdown_html("# [Docs](docs.md)\n\nSee [Guide <x>](guide.md?a=1&b=2)")
+val html = render_writer_markdown_html("# [Docs](docs.md)\n\nSee [Guide <x>](guide.md?a=1&b=2)\n\nNo [Script](javascript:evil)")
 expect(html).to_contain("<h1><a href=\"docs.md\">Docs</a></h1>")
 expect(html).to_contain("<p>See <a href=\"guide.md?a=1&amp;b=2\">Guide &lt;x&gt;</a></p>")
+expect(html).to_contain("<p>No <a href=\"#\">Script</a></p>")
 ```
 
 </details>
