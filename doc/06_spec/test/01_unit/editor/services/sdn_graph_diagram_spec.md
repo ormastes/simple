@@ -488,7 +488,7 @@ expect(html).to_contain("data-canvas-grid=\"24\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -522,6 +522,10 @@ expect(labeled.nodes[1].label).to_equal("Data Store")
 expect(labeled.nodes[1].shape).to_equal("cylinder")
 expect(labeled.nodes[1].css).to_equal("storage highlight")
 expect(sdn_graph_render_html(labeled)).to_contain(">Data Store</button>")
+val node_deleted = sdn_graph_delete_node_at(labeled, 1)
+expect(node_deleted.nodes.len()).to_equal(1)
+expect(node_deleted.nodes[0].id).to_equal("A")
+expect(node_deleted.edges.len()).to_equal(0)
 ```
 
 </details>
@@ -531,7 +535,7 @@ expect(sdn_graph_render_html(labeled)).to_contain(">Data Store</button>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -549,6 +553,10 @@ expect(ungrouped.nodes[0].id).to_equal("Container")
 
 val regrouped = sdn_graph_update_node_parent_at(ungrouped, 1, "Container")
 expect(regrouped.nodes[1].parent).to_equal("Container")
+val deleted_parent = sdn_graph_delete_node_at(regrouped, 0)
+expect(deleted_parent.nodes.len()).to_equal(1)
+expect(deleted_parent.nodes[0].id).to_equal("Child")
+expect(deleted_parent.nodes[0].parent).to_equal("")
 ```
 
 </details>

@@ -100,7 +100,7 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true edge_style=true reconnect=true delete=true layout=true canvas=true
+  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true edge_style=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=83 actions=42
+  llm-catalog: apps=9 features=84 actions=43
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -286,7 +286,7 @@ expect(tui_lines[23]).to_equal(gui_lines[23])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -301,6 +301,7 @@ expect(probe.node_edit).to_be(true)
 expect(probe.edge_style_edit).to_be(true)
 expect(probe.reconnect_edit).to_be(true)
 expect(probe.delete_edit).to_be(true)
+expect(probe.node_delete_edit).to_be(true)
 expect(probe.inspector).to_be(true)
 expect(probe.layout_edit).to_be(true)
 expect(probe.canvas_metadata).to_be(true)
@@ -308,6 +309,7 @@ expect(ide_draw_sanity_summary()).to_contain("layout=true")
 expect(ide_draw_sanity_summary()).to_contain("edge_style=true")
 expect(ide_draw_sanity_summary()).to_contain("reconnect=true")
 expect(ide_draw_sanity_summary()).to_contain("delete=true")
+expect(ide_draw_sanity_summary()).to_contain("node_delete=true")
 expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 ```
 
@@ -330,7 +332,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 345 lines folded for reproduction.
+Runnable source: 355 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -338,7 +340,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=83 actions=42")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=84 actions=43")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("html-render")
@@ -364,6 +366,7 @@ expect(catalog[4].features.join(",")).to_contain("sdd-source")
 expect(catalog[4].features.join(",")).to_contain("connector-paths")
 expect(catalog[4].features.join(",")).to_contain("group-containers")
 expect(catalog[4].features.join(",")).to_contain("node-label-edit")
+expect(catalog[4].features.join(",")).to_contain("node-delete")
 expect(catalog[4].features.join(",")).to_contain("edge-label-edit")
 expect(catalog[4].features.join(",")).to_contain("edge-style-edit")
 expect(catalog[4].features.join(",")).to_contain("edge-reconnect-edit")
@@ -382,6 +385,7 @@ expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-label")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-style")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-edge-endpoints")
 expect(catalog[4].actions.join(",")).to_contain("delete-sdd-edge")
+expect(catalog[4].actions.join(",")).to_contain("delete-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-label")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-parent")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-shape")
@@ -423,6 +427,8 @@ val sdd_shape_action = office_action_dispatch("edit-sdd-node-shape", "A|diamond\
 val sdd_style_action = office_action_dispatch("edit-sdd-node-style", "A|accent\ngraph: Style\nA: A x: 0 y: 0 width: 20 height: 20")
 val sdd_label_action = office_action_dispatch("edit-sdd-node-label", "A|Renamed\ngraph: Label\nA: Old x: 0 y: 0 width: 20 height: 20")
 val sdd_parent_action = office_action_dispatch("edit-sdd-node-parent", "B|A\ngraph: Parent\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20")
+val sdd_node_delete_action = office_action_dispatch("delete-sdd-node", "B\ngraph: Node Delete\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val missing_sdd_node_delete_action = office_action_dispatch("delete-sdd-node", "Nope\ngraph: Node Delete\nA: A")
 val sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
 val sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10;60x40|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "0|approved\ngraph: Edge Label\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
@@ -477,6 +483,9 @@ expect(sdd_shape_action.output).to_contain("data-shape=\"diamond\"")
 expect(sdd_style_action.output).to_contain("sdn-css-accent")
 expect(sdd_label_action.output).to_contain(">Renamed</button>")
 expect(sdd_parent_action.output).to_contain("data-parent=\"A\"")
+expect(sdd_node_delete_action.reason).to_equal("updated")
+expect(sdd_node_delete_action.output).to_contain("data-node=\"A\"")
+expect(missing_sdd_node_delete_action.reason).to_equal("missing-node")
 expect(sdd_canvas_action.output).to_contain("data-canvas-width=\"640\"")
 expect(sdd_reroute_action.output).to_contain("data-route=\"orthogonal\"")
 expect(sdd_edge_label_action.output).to_contain(">approved</div>")
@@ -500,6 +509,7 @@ val edge_labeled = sdn_graph_update_edge_label_at(rerouted, 0, "approved")
 val edge_styled = sdn_graph_update_edge_style_at(edge_labeled, 0, "warning dashed")
 val edge_reconnected = sdn_graph_update_edge_endpoints_at(edge_styled, 0, "B", "A")
 val edge_deleted = sdn_graph_delete_edge_at(edge_reconnected, 0)
+val node_deleted = sdn_graph_delete_node_at(edge_styled, 1)
 val shaped = sdn_graph_update_node_at(edge_styled, 0, "accent", "decision", "diamond", "12", "8", "96", "48", "front")
 val grouped = sdn_graph_update_node_parent_at(shaped, 1, "A")
 val draw_shape_only = sdn_graph_update_node_shape_at(grouped, 1, "cylinder")
@@ -519,6 +529,8 @@ expect(sdn_graph_render_html(edge_labeled)).to_contain(">approved</div>")
 expect(sdn_graph_render_html(edge_styled)).to_contain("sdn-css-warning sdn-css-dashed")
 expect(sdn_graph_render_html(edge_reconnected)).to_contain("data-from=\"B\" data-to=\"A\"")
 expect(edge_deleted.edges.len()).to_equal(0)
+expect(node_deleted.nodes.len()).to_equal(1)
+expect(node_deleted.edges.len()).to_equal(0)
 expect(sdn_graph_render_html(grouped)).to_contain("data-shape=\"diamond\"")
 expect(sdn_graph_render_html(grouped)).to_contain("sdn-css-accent")
 expect(sdn_graph_render_html(grouped)).to_contain("data-parent=\"A\"")

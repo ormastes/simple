@@ -415,3 +415,7 @@ possible so they are runner-verifiable.
   `sdn_graph_delete_edge_at` removes one connector by canonical edge index, and
   `delete-sdd-edge` exposes it through the headless Office action bridge and IDE
   Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD node delete editing.
+  `sdn_graph_delete_node_at` removes one node, prunes attached connectors, and
+  clears child parent references; `delete-sdd-node` exposes it through the
+  headless Office action bridge and IDE Draw sanity probe.
