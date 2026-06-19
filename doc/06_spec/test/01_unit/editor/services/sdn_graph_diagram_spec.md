@@ -200,7 +200,7 @@ expect(graph.canvas_background).to_equal("#ffffff")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -224,6 +224,7 @@ expect(html).to_contain("border-radius:999px")
 expect(html).to_contain("class=\"sdd-connector-layer\"")
 expect(html).to_contain("class=\"sdd-connector-path \"")
 expect(html).to_contain("data-edge-index=\"0\"")
+expect(html).to_contain("data-label=\"opens\"")
 expect(html).to_contain("data-path=\"M 110,120 L 20,120 L 20,40 L 40,40 L 40,74\"")
 expect(html).to_contain("d=\"M 110,120 L 20,120 L 20,40 L 40,40 L 40,74\"")
 expect(html).to_contain("class=\"sdn-graph-edge sdd-connector")
@@ -340,12 +341,14 @@ expect(sdn_graph_render_html(unsafe).contains("bad\\\"x")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: unsafe-kind\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, c, , bad&quot;onclick=1, simple, , right, left, , ")
+val graph = sdn_graph_parse("graph: unsafe-kind\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, \"c <go> & \\\"now\\\"\", , bad&quot;onclick=1, simple, , right, left, , ")
 val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-label=\"c &lt;go&gt; &amp; &quot;now&quot;\"")
+expect(html).to_contain("c &lt;go&gt; &amp; &quot;now&quot;")
 expect(html).to_contain("data-kind=\"bad&amp;quot;onclick=1\"")
 expect(html.contains("sdd-kind-bad")).to_be(false)
 ```
