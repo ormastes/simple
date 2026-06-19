@@ -58,15 +58,17 @@ text and marker interiors before returning `<code>`, `<strong>`, `<em>`,
 Markdown task-list lines (`- [x]` / `- [ ]`) render as escaped disabled
 checkbox rows inside the same WYSIWYG document wrapper. Markdown bullet and
 ordered list lines render as HTML lists, and blockquote lines render as quote
-blocks with escaped inline content.
+blocks with escaped inline content. Fenced code blocks render as escaped
+`<pre><code>` content.
 
 Writer rendering must expose Markdown source -> paper/document HTML through
 `render_writer_markdown_html`, with root metadata for format and source line
-count. Writer paper HTML renders Markdown headings, paragraphs, blockquotes,
-ordered and unordered lists, tables, images, and inline links as document HTML while escaping user text and
-attributes; Markdown table separator alignment markers (`:---`, `---:`, `:-:`)
-become stable `data-align` and `text-align` cell metadata. The rich-text
-compatibility adapter must also escape block text before emitting HTML.
+count. Writer paper HTML renders Markdown headings, paragraphs, fenced code,
+blockquotes, ordered and unordered lists, tables, images, and inline links as
+document HTML while escaping user text and attributes; Markdown table separator
+alignment markers (`:---`, `---:`, `:-:`) become stable `data-align` and
+`text-align` cell metadata. The rich-text compatibility adapter must also escape
+block text before emitting HTML.
 
 PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
 `render_ppt_markdown_html`, with root metadata for format and slide count. The
@@ -264,7 +266,7 @@ rendering for core precedence (`^`, `*`, `/`, `+`, `-`), parentheses,
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
 
-- Markdown: `task_list=true strike=true link=true list=true ordered_list=true quote=true css_doc=true escaped=true metadata=true`
+- Markdown: `task_list=true strike=true link=true list=true ordered_list=true quote=true code=true css_doc=true escaped=true metadata=true`
 - Slides: `ppt_html=true safe_css=true positioned=true element_meta=true`
 - Draw: `format=sdd name="SDD: Simple Diagram Document" html=true route=true select=true inspect=true child_meta=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - Calc: `display_recalc=true`

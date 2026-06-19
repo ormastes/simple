@@ -94,7 +94,7 @@ Simple IDE feature check
 mode: tui
 capabilities: 6
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
-  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true task_list=true strike=true link=true list=true ordered_list=true quote=true css_doc=true escaped=true metadata=true
+  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true task_list=true strike=true link=true list=true ordered_list=true quote=true code=true css_doc=true escaped=true metadata=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true element_meta=true
@@ -1423,12 +1423,13 @@ expect(spoofed_surface.ready_for_integration).to_be(false)
 - assert true
 - assert true
 - assert true
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1446,6 +1447,7 @@ assert_true(probe.contains_link)
 assert_true(probe.contains_list)
 assert_true(probe.contains_ordered_list)
 assert_true(probe.contains_blockquote)
+assert_true(probe.contains_code_block)
 assert_true(probe.css_document)
 assert_true(probe.escapes_html)
 assert_true(probe.preview_metadata)
@@ -1456,6 +1458,7 @@ expect(summary).to_contain("link=true")
 expect(summary).to_contain("list=true")
 expect(summary).to_contain("ordered_list=true")
 expect(summary).to_contain("quote=true")
+expect(summary).to_contain("code=true")
 expect(summary).to_contain("css_doc=true")
 expect(summary).to_contain("escaped=true")
 expect(summary).to_contain("metadata=true")
