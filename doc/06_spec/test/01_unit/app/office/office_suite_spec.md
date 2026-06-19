@@ -637,17 +637,24 @@ expect(legacy_sdd.output).to_contain("graph: Feature")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val selected = office_action_dispatch("render-sdd-html-with-selection", "select|A|\\ngraph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val invalid = office_action_dispatch("render-sdd-html-with-selection", "select|A bad|\\ngraph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val legacy = office_action_dispatch("render-sdd", "graph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 expect(result.ok).to_be(true)
 expect(result.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(result.output).to_contain("data-node=\"A\"")
 expect(result.output).to_contain("data-selected-node-id=\"\"")
 expect(result.output).to_contain("data-selected-edge-index=\"-1\"")
+expect(selected.ok).to_be(true)
+expect(selected.output).to_contain("data-selected-node-id=\"A\"")
+expect(selected.output).to_contain("data-selected=\"true\"")
+expect(invalid.ok).to_be(false)
+expect(invalid.reason).to_equal("invalid-args")
 expect(legacy.action).to_equal("render-sdd-html")
 expect(legacy.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 ```

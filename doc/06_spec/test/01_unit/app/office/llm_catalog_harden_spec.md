@@ -175,11 +175,12 @@ expect(missing.join(",")).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(office_llm_action_input_schema("ui-layout-edit")).to_contain("node_id|expected_x|expected_y")
+expect(office_llm_action_input_schema("render-sdd-html-with-selection")).to_contain("select|node_id|edge_index")
 expect(office_llm_action_input_schema("reroute-sdd-connector")).to_contain("edge_index|route|waypoints")
 expect(office_llm_action_input_schema("db-edit")).to_contain("update-where|match_col")
 expect(office_llm_action_input_schema("md-edit")).to_contain("line_no|expected_source|new_source")

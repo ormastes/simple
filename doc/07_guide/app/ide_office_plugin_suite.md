@@ -88,6 +88,9 @@ non-GUI bridge for cataloged render/export actions:
 Markdown, Writer, Impress, Designer, and SDD renderers rather than
 duplicating rendering logic. Legacy aliases `ui-render`, `ui-export-sdd`, and
 `render-sdd` normalize to those canonical action names.
+`render-sdd-html-with-selection` accepts either raw SDD source or a first-line
+`select|node_id|edge_index` header followed by SDD source; leave `edge_index`
+blank to select only a node.
 
 `render-markdown-preview-html` exposes the Markdown editor's own
 `wysiwyg_preview_document_html` route through the same headless bridge, so the

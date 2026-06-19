@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 713 lines folded for reproduction.
+Runnable source: 716 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -490,6 +490,7 @@ val slide_blank_target_action = office_action_dispatch("slide-edit", "   |Old|Ne
 val ui_action = office_action_dispatch("render-ui-html", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val selected_sdd_action = office_action_dispatch("render-sdd-html-with-selection", "select|A|\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val sdd_game_action = office_action_dispatch("export-sdd-game-sprites", "graph: Level\nplayer: Player @hero shape: circle x: 10 y: 20 width: 16 height: 16 layer: 2")
 val legacy_ui_action = office_action_dispatch("ui-render", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val legacy_ui_sdd_action = office_action_dispatch("ui-export-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -659,6 +660,8 @@ expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
 expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-node-count=\"1\"")
 expect(sdd_action.output).to_contain("data-edge-count=\"0\"")
+expect(selected_sdd_action.output).to_contain("data-selected-node-id=\"A\"")
+expect(selected_sdd_action.output).to_contain("data-selected=\"true\"")
 expect(sdd_game_action.output).to_contain("sprite player")
 expect(sdd_game_action.output).to_contain("rect=10,20,16,16")
 expect(legacy_ui_action.action).to_equal("render-ui-html")
