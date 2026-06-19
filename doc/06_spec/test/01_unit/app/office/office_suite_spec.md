@@ -1705,13 +1705,17 @@ expect(edit_result.reason).to_equal("invalid-args")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val result = office_action_dispatch("edit-sdd-edge-label-point", "0|   |12\ngraph: Edge\nA: A\nB: B\nA -> B: link")
-expect(result.ok).to_be(false)
-expect(result.reason).to_equal("invalid-args")
+val blank_result = office_action_dispatch("edit-sdd-edge-label-point", "0|   |12\ngraph: Edge\nA: A\nB: B\nA -> B: link")
+val malformed_result = office_action_dispatch("edit-sdd-edge-label-point", "0|bad\"x|12\ngraph: Edge\nA: A\nB: B\nA -> B: link")
+val negative_result = office_action_dispatch("edit-sdd-edge-label-point", "0|-4|12\ngraph: Edge\nA: A\nB: B\nA -> B: link")
+expect(blank_result.ok).to_be(false)
+expect(blank_result.reason).to_equal("invalid-args")
+expect(malformed_result.reason).to_equal("invalid-args")
+expect(negative_result.ok).to_be(true)
 ```
 
 </details>
