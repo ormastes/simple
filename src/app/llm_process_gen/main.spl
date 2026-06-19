@@ -3,13 +3,8 @@
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use std.io_runtime.{file_read, file_write, file_exists, file_delete, process_run, getpid}
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_getpid() -> i64
 
 struct GeneratedFile:
     id: text
@@ -254,9 +249,9 @@ fn generate_all(root: text, dry_run: bool, force: bool) -> ResultSummary:
 
 fn read_manifest(root: text) -> text:
     val path = manifest_path(root)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return ""
-    rt_file_read_text(path)
+    file_read(path)
 
 fn validate_tables(manifest: text) -> [text]:
     val tables = ["skills", "commands", "subagents", "tools", "expert_routes", "generated_files"]
@@ -344,16 +339,16 @@ fn check_record(root: text, rec: GeneratedFile) -> [text]:
     val target = path_join(root, rec.target_path)
     if rec.id == "":
         failures.push("generated_files record missing id")
-    if rec.source_path == "" or not rt_file_exists(source):
+    if rec.source_path == "" or not file_exists(source):
         failures.push("{rec.id}: missing source {rec.source_path}")
-    if rec.target_path == "" or not rt_file_exists(target):
+    if rec.target_path == "" or not file_exists(target):
         failures.push("{rec.id}: missing target {rec.target_path}")
         return failures
     if rec.mode == "skeleton":
         for f in check_links(root, target, parent_dir(source)):
             failures.push("{rec.id}: {f}")
         return failures
-    val target_text = rt_file_read_text(target)
+    val target_text = file_read(target)
     val first = first_line(target_text)
     if not first.contains("llm-process-gen: managed"):
         failures.push("{rec.id}: missing generated marker in {rec.target_path}")
@@ -373,10 +368,10 @@ fn generate_record(root: text, rec: GeneratedFile, dry_run: bool, force: bool) -
     var failures: [text] = []
     val source = path_join(root, rec.source_path)
     val target = path_join(root, rec.target_path)
-    if rec.source_path == "" or not rt_file_exists(source):
+    if rec.source_path == "" or not file_exists(source):
         failures.push("{rec.id}: missing source {rec.source_path}")
         return failures
-    if rec.mode == "skeleton" and rt_file_exists(target):
+    if rec.mode == "skeleton" and file_exists(target):
         return failures
     val body = render_content(root, rec)
     if rec.mode == "skeleton":
@@ -384,12 +379,12 @@ fn generate_record(root: text, rec: GeneratedFile, dry_run: bool, force: bool) -
             print "would create skeleton {rec.target_path}"
             return failures
         ensure_parent(target)
-        if not rt_file_write_text(target, body):
+        if not file_write(target, body):
             failures.push("{rec.id}: failed to write {rec.target_path}")
         return failures
     val output = marker_for(rec, hash_file(source), hash_text(root, body)) + "\n" + body
-    if rt_file_exists(target):
-        val existing = rt_file_read_text(target)
+    if file_exists(target):
+        val existing = file_read(target)
         val first = first_line(existing)
         if first.contains("llm-process-gen: managed"):
             if marker_field(first, "content_sha256") != hash_text(root, strip_marker(existing)) and not force:
@@ -399,21 +394,21 @@ fn generate_record(root: text, rec: GeneratedFile, dry_run: bool, force: bool) -
             failures.push("{rec.id}: refusing unmarked target {rec.target_path}; rerun with --force")
             return failures
     if dry_run:
-        if rt_file_exists(target) and existing == output:
+        if file_exists(target) and existing == output:
             print "unchanged {rec.target_path}"
-        elif rt_file_exists(target):
+        elif file_exists(target):
             print "would update {rec.target_path}"
         else:
             print "would create {rec.target_path}"
         return failures
     ensure_parent(target)
-    if not rt_file_write_text(target, output):
+    if not file_write(target, output):
         failures.push("{rec.id}: failed to write {rec.target_path}")
     failures
 
 fn render_content(root: text, rec: GeneratedFile) -> text:
     val source = path_join(root, rec.source_path)
-    val raw = rt_file_read_text(source)
+    val raw = file_read(source)
     if rec.mode == "gemini_toml_skill":
         return render_gemini_skill(rec.source_path, raw)
     if rec.mode == "tools_sdn":
@@ -622,7 +617,7 @@ fn check_links(root: text, path: text, fallback_base: text) -> [text]:
     if not path.ends_with(".md"):
         return failures
     val base = parent_dir(path)
-    for line in rt_file_read_text(path).split("\n"):
+    for line in file_read(path).split("\n"):
         var rest = line
         var guard = 0
         while guard < 20:
@@ -638,11 +633,11 @@ fn check_links(root: text, path: text, fallback_base: text) -> [text]:
                 val hash_idx = link.index_of("#") ?? -1
                 link = link.slice(0, hash_idx)
             if should_check_link(link):
-                var exists = rt_file_exists(normalize_relative(base, link))
+                var exists = file_exists(normalize_relative(base, link))
                 if not exists and fallback_base != "":
-                    exists = rt_file_exists(normalize_relative(fallback_base, link))
+                    exists = file_exists(normalize_relative(fallback_base, link))
                 if not exists:
-                    exists = rt_file_exists(normalize_relative(root, link))
+                    exists = file_exists(normalize_relative(root, link))
                 if not exists:
                     failures.push("broken local link {link} in {path}")
             rest = after.slice(close + 1, after.len())
@@ -653,17 +648,17 @@ fn should_check_link(link: text) -> bool:
     link != "" and not link.starts_with("#") and not link.starts_with("http:") and not link.starts_with("https:") and not link.starts_with("mailto:")
 
 fn hash_file(path: text) -> text:
-    val (out, err, code) = rt_process_run("sha256sum", [path])
+    val (out, err, code) = process_run("sha256sum", [path])
     if code != 0:
         return ""
     first_word(out)
 
 fn hash_text(root: text, content: text) -> text:
-    val tmp = path_join(root, ".llm-process-gen.tmp.{rt_getpid()}")
-    if not rt_file_write_text(tmp, content):
+    val tmp = path_join(root, ".llm-process-gen.tmp.{getpid()}")
+    if not file_write(tmp, content):
         return ""
     val digest = hash_file(tmp)
-    rt_file_delete(tmp)
+    file_delete(tmp)
     digest
 
 fn first_word(s: text) -> text:
@@ -699,7 +694,7 @@ fn normalize_relative(base: text, link: text) -> text:
     if link.starts_with("/"):
         return link
     val raw = path_join(base, link)
-    val (out, err, code) = rt_process_run("realpath", ["-m", raw])
+    val (out, err, code) = process_run("realpath", ["-m", raw])
     if code == 0:
         return out.trim()
     raw
@@ -707,7 +702,7 @@ fn normalize_relative(base: text, link: text) -> text:
 fn ensure_parent(path: text):
     val parent = parent_dir(path)
     if parent != ".":
-        rt_process_run("mkdir", ["-p", parent])
+        process_run("mkdir", ["-p", parent])
 
 fn emit_result(r: ResultSummary, json: bool, label: text):
     if json:
