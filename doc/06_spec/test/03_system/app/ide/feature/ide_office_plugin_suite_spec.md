@@ -48,7 +48,7 @@ Validates that IDE-facing Markdown, presentation, spreadsheet, dashboard, databa
 | Plan | doc/03_plan/sys_test/ide_office_plugin_suite.md |
 | Design | doc/05_design/app/office/libreoffice_llm_access.md |
 | Research | doc/01_research/app/office/libreoffice_llm_access.md |
-| Source | `/tmp/simple-office-next47/test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
+| Source | `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 

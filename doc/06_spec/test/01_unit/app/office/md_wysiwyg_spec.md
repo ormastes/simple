@@ -216,7 +216,7 @@ expect(wysiwyg_source_pane(result.view)).to_equal("first")
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `/tmp/simple-office-next47/test/01_unit/app/office/md_wysiwyg_spec.spl` |
+| Source | `test/01_unit/app/office/md_wysiwyg_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
