@@ -431,3 +431,7 @@ possible so they are runner-verifiable.
   `sdn_graph_update_node_role_at` edits semantic role metadata without changing
   label/style/shape/geometry/layer, and `edit-sdd-node-role` exposes
   `node_id|role` through the headless Office action bridge.
+- 2026-06-19 dev: Added Draw/SDD connector kind editing.
+  `sdn_graph_update_edge_kind_at` edits connector kind metadata without
+  changing label/style/route/anchors, and `edit-sdd-edge-kind` exposes
+  `edge_index|kind` through the headless Office action bridge.
