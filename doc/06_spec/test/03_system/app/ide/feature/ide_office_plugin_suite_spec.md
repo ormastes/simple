@@ -170,12 +170,15 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val tui_report = ide_feature_check_report("tui").join("\n")
 val gui_report = ide_feature_check_report("gui").join("\n")
+var registry_checks = ""
+for cap in ide_capabilities():
+    registry_checks = registry_checks + cap.feature_check + "\n"
 expect(tui_report).to_contain("mode: tui")
 expect(gui_report).to_contain("mode: gui")
 expect(tui_report).to_contain("Presentation Slides")
@@ -194,6 +197,10 @@ expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=9")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
+expect(registry_checks).to_contain("metadata=true")
+expect(registry_checks).to_contain("ppt_html=true")
+expect(registry_checks).to_contain("path_meta=true")
+expect(registry_checks).to_contain("contracts=true")
 ```
 
 </details>

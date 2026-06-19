@@ -159,6 +159,8 @@ is the product feature-check bridge:
 it proves render, selection, inspection, reroute, node edit, multi-node layout,
 and canvas metadata without starting GUI/browser/host APIs. Legacy SVG shape helpers remain
 compatibility utilities, not the LLM catalog owner for Draw.
+The IDE capability registry must also carry non-empty `feature_check` marker text
+for every capability so plugin metadata cannot silently drift from the report.
 
 Calc formula hardening should distinguish display-safe functions from the
 f64-returning formula path. `evaluate_formula_display_text` is the verified path
