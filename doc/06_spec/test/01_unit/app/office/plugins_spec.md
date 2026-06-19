@@ -28,7 +28,7 @@ plugins_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -123,6 +123,39 @@ expect(manifest).to_contain("office-excel")
 
 </details>
 
+#### rejects empty plugin libraries
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val malformed = plugin_entry_new("office-word", "", "0.1.0", ["render_document_html"])
+expect(office_plugin_validate([malformed])).to_equal("manifest error: entry 'office-word' has empty library")
+```
+
+</details>
+
+#### rejects empty and duplicate function names
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val empty_function = plugin_entry_new("office-word", "app.office.word.html_render", "0.1.0", [""])
+val word = plugin_entry_new("office-word", "app.office.word.html_render", "0.1.0", ["render_document_html"])
+val ppt = plugin_entry_new("office-ppt", "app.office.slides.html_render", "0.1.0", ["render_document_html"])
+expect(office_plugin_validate([empty_function])).to_equal("manifest error: entry 'office-word' has empty function")
+expect(office_plugin_validate([word, ppt])).to_equal("manifest error: duplicate function 'render_document_html'")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -143,8 +176,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

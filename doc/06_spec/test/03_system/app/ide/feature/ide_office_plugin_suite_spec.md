@@ -366,7 +366,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 496 lines folded for reproduction.
+Runnable source: 497 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -374,7 +374,8 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=95 actions=54")
+expect(office_llm_catalog_is_valid()).to_be(true)
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=97 actions=56")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("html-render")

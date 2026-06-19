@@ -1,0 +1,55 @@
+"""
+Office LLM catalog hardening spec.
+
+## Overview
+
+Verifies that the LLM-facing Office catalog rejects malformed app/action rows
+before agents use the metadata as an automation surface. The catalog is the
+small boundary between advertised Office capabilities and agent-dispatchable
+actions for Markdown, Writer, Calc, Impress, Draw, Designer, Base, Math, and
+Counter.
+
+## Examples
+
+`office_llm_catalog_validate(office_llm_feature_catalog())` returns an empty
+string for the shipped catalog. Duplicate app names, empty evidence keys, empty
+feature lists, and duplicate action names return deterministic error text.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/sys_test/ide_office_plugin_suite.md
+**Design:** doc/07_guide/app/ide_office_plugin_suite.md
+**Research:** N/A
+"""
+
+use std.spec.{describe, it, expect}
+
+use app.office.llm_catalog.{OfficeLlmFeature, office_llm_catalog_is_valid, office_llm_catalog_validate, office_llm_feature_catalog}
+
+fn _row(app_name: text, actions: [text]) -> OfficeLlmFeature:
+    OfficeLlmFeature(
+        app_name: app_name,
+        component: "markdown",
+        owner_module: "app.office.md_wysiwyg",
+        features: ["html-render"],
+        actions: actions,
+        evidence_key: "md_wysiwyg_spec"
+    )
+
+describe "Office LLM catalog validation":
+    it "accepts the shipped Office catalog":
+        expect(office_llm_catalog_is_valid()).to_be(true)
+        expect(office_llm_catalog_validate(office_llm_feature_catalog())).to_equal("")
+
+    it "rejects duplicate app names":
+        expect(office_llm_catalog_validate([_row("Markdown", ["render-md"]), _row("Markdown", ["render-md-2"])])).to_equal("catalog error: duplicate app 'Markdown'")
+
+    it "rejects empty evidence keys":
+        val malformed = OfficeLlmFeature(app_name: "Markdown", component: "markdown", owner_module: "app.office.md_wysiwyg", features: ["html-render"], actions: ["render-md"], evidence_key: "")
+        expect(office_llm_catalog_validate([malformed])).to_equal("catalog error: app 'Markdown' has empty evidence key")
+
+    it "rejects empty feature lists":
+        val malformed = OfficeLlmFeature(app_name: "Markdown", component: "markdown", owner_module: "app.office.md_wysiwyg", features: [], actions: ["render-md"], evidence_key: "md_wysiwyg_spec")
+        expect(office_llm_catalog_validate([malformed])).to_equal("catalog error: app 'Markdown' has no features")
+
+    it "rejects duplicate actions across apps":
+        expect(office_llm_catalog_validate([_row("Markdown", ["render-md"]), _row("Writer", ["render-md"])])).to_equal("catalog error: duplicate action 'render-md'")
