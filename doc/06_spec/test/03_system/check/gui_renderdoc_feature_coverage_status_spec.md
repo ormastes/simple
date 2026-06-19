@@ -27,7 +27,7 @@ gui_renderdoc_feature_coverage_status_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -80,6 +80,8 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 - The Electron Simple Web layout manifest remains visible with its 50 cases.
 - The HTML/CSS rendering manifest traceability gate is included and passing.
 - The audit includes current production parity evidence status when present.
+- The audit requires the production GUI/web parity evidence gate before the
+  aggregate GUI audit can report `pass`.
 - The audit reports the active RenderDoc goal, Simple `.rdc`, and external
   Chrome/Vulkan `.rdc` gates without treating missing host captures as pass.
 - Electron Chromium/Vulkan `.rdc` evidence is fail-closed and required before
@@ -124,7 +126,7 @@ sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 106 lines folded for reproduction.
+Runnable source: 123 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -143,6 +145,18 @@ expect(evidence).to_contain("electron_layout_manifest=tools/electron-live-bitmap
 expect(evidence).to_contain("gui_widget_rendering_fixture_coverage_command=sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_command=PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env sh scripts/check/check-production-gui-web-renderer-parity-gate.shs")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_source_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_case_count=50")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_pass_count=36")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_tracked_count=14")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_fail_count=0")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_surface_manifest_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_backend_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_font_offload_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_status=pass")
 expect(evidence).to_contain("renderdoc_goal_status_command=sh scripts/check/check-html-css-renderdoc-goal-status.shs")
 expect(evidence).to_contain("simple_renderdoc_capture_command=RDOC_OUTPUT_DIR=build/renderdoc/canonical-probe scripts/tool/renderdoc-evidence.shs capture-simple")
 expect(evidence).to_contain("html_renderdoc_capture_command=RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
@@ -179,6 +193,8 @@ val flex_wrap_reverse_cases = _value_of(evidence, "electron_layout_manifest_trac
 val flex_safe_unsafe_center_cases = _value_of(evidence, "electron_layout_manifest_tracked_css_flex_safe_unsafe_center_case_count")
 val rendering_manifest_status = _value_of(evidence, "html_css_rendering_manifest_traceability_status")
 val rendering_manifest_reason = _value_of(evidence, "html_css_rendering_manifest_traceability_reason")
+val production_gate_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_status")
+val production_gate_reason = _value_of(evidence, "production_gui_web_renderer_parity_gate_reason")
 val renderdoc_status = _value_of(evidence, "renderdoc_goal_status")
 val simple_status = _value_of(evidence, "simple_renderdoc_status")
 val external_status = _value_of(evidence, "external_renderdoc_status")
@@ -210,6 +226,8 @@ expect(flex_wrap_reverse_cases).to_equal("1")
 expect(flex_safe_unsafe_center_cases).to_equal("1")
 expect(rendering_manifest_status).to_equal("pass")
 expect(rendering_manifest_reason).to_equal("pass")
+expect(production_gate_status.len()).to_be_greater_than(0)
+expect(production_gate_reason.len()).to_be_greater_than(0)
 expect(renderdoc_status.len()).to_be_greater_than(0)
 expect(simple_status.len()).to_be_greater_than(0)
 expect(external_status.len()).to_be_greater_than(0)
@@ -234,6 +252,7 @@ expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pas
 expect(report).to_contain("- Electron Chromium RenderDoc:")
 expect(report).to_contain("- Electron Chromium/Vulkan RenderDoc:")
 expect(report).to_contain("- Electron Chromium/Vulkan gate:")
+expect(report).to_contain("- Production GUI/web parity gate:")
 ```
 
 </details>
@@ -307,12 +326,45 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-sourc
 
 </details>
 
+#### requires production GUI/web parity evidence after all RenderDoc gates pass
+
+- Create controlled RenderDoc evidence but point production parity at a missing env
+   - Expected: code equals `0`
+- Assert the aggregate audit stays incomplete until production parity evidence passes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create controlled RenderDoc evidence but point production parity at a missing env")
+val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-production-required && mkdir -p build/test-gui-renderdoc-feature-coverage-status-production-required/simple build/test-gui-renderdoc-feature-coverage-status-production-required/external build/test-gui-renderdoc-feature-coverage-status-production-required/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/simple/simple.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-renderdoc-feature-coverage-status-production-required/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/external/evidence.env && printf 'rdoc_backend=electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=build/renderdoc/html/renderdoc_probe.html\\nrdoc_electron=tools/electron-shell/node_modules/.bin/electron\\nrdoc_electron_capture_script=tools/electron-shell/renderdoc_capture_main.cjs\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--enable-features=Vulkan --use-angle=vulkan\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/external/evidence.env RDOC_ELECTRON_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/missing-production/evidence.env BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-production-required/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-production-required/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Assert the aggregate audit stays incomplete until production parity evidence passes")
+val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-production-required/out/evidence.env")
+expect(evidence).to_contain("renderdoc_goal_status=pass")
+expect(evidence).to_contain("simple_renderdoc_status=pass")
+expect(evidence).to_contain("external_renderdoc_status=pass")
+expect(evidence).to_contain("electron_renderdoc_gate_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=unavailable")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=missing-production-parity-evidence")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-production-parity-evidence")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

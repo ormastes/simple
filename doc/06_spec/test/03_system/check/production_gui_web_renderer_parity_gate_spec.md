@@ -1,0 +1,170 @@
+# Production GUI/web renderer parity gate
+
+> Validates the non-launching gate for production GUI/web renderer parity evidence. The gate consumes the existing heavy parity wrapper output and fails closed unless the evidence proves the production renderer matrix, layout manifest, surface manifest, backend parity, font readback, and raw Metal readback are all passing.
+
+<!-- sdn-diagram:id=production_gui_web_renderer_parity_gate_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=production_gui_web_renderer_parity_gate_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+production_gui_web_renderer_parity_gate_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=production_gui_web_renderer_parity_gate_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 2 | 2 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Production GUI/web renderer parity gate
+
+Validates the non-launching gate for production GUI/web renderer parity evidence. The gate consumes the existing heavy parity wrapper output and fails closed unless the evidence proves the production renderer matrix, layout manifest, surface manifest, backend parity, font readback, and raw Metal readback are all passing.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/sys_test/html_css_spec_traceability.md |
+| Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
+| Research | N/A |
+| Source | `test/03_system/check/production_gui_web_renderer_parity_gate_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Validates the non-launching gate for production GUI/web renderer parity
+evidence. The gate consumes the existing heavy parity wrapper output and fails
+closed unless the evidence proves the production renderer matrix, layout
+manifest, surface manifest, backend parity, font readback, and raw Metal
+readback are all passing.
+
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env \
+BUILD_DIR=build/test-production-gui-web-renderer-parity-gate \
+REPORT_PATH=build/test-production-gui-web-renderer-parity-gate/report.md \
+sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true
+```
+
+## Acceptance
+
+- Missing or failed production parity evidence produces typed non-pass gate
+  evidence.
+- Passing gate evidence requires the top-level production parity status and all
+  component statuses to pass.
+- The layout manifest count contract remains 50 total cases, 36 pass cases,
+  14 tracked divergence cases, and 0 fail cases.
+
+## Scenarios
+
+### Production GUI/web renderer parity gate
+
+#### writes typed non-pass evidence for missing or failed parity evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate REPORT_PATH=build/test-production-gui-web-renderer-parity-gate/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_source_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_matrix_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_case_count=50")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_pass_count=36")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_tracked_count=14")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_layout_manifest_fail_count=0")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_surface_manifest_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_backend_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_font_offload_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_status=pass")
+
+val status = _value_of(evidence, "production_gui_web_renderer_parity_gate_status")
+val reason = _value_of(evidence, "production_gui_web_renderer_parity_gate_reason")
+val source_status = _value_of(evidence, "production_gui_web_renderer_parity_gate_source_status")
+if status == "pass":
+    expect(source_status).to_equal("pass")
+else:
+    expect(reason.len()).to_be_greater_than(0)
+```
+
+</details>
+
+#### passes with controlled production parity evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-production-gui-web-renderer-parity-gate-pass && mkdir -p build/test-production-gui-web-renderer-parity-gate-pass/source && printf 'production_gui_web_renderer_parity_status=pass\\nproduction_gui_web_renderer_parity_reason=pass\\nproduction_gui_web_renderer_parity_matrix_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_status=pass\\nproduction_gui_web_renderer_parity_layout_manifest_case_count=50\\nproduction_gui_web_renderer_parity_layout_manifest_pass_count=36\\nproduction_gui_web_renderer_parity_layout_manifest_tracked_count=14\\nproduction_gui_web_renderer_parity_layout_manifest_fail_count=0\\nproduction_gui_web_renderer_parity_surface_manifest_status=pass\\nproduction_gui_web_renderer_parity_backend_status=pass\\nproduction_gui_web_renderer_parity_font_offload_status=pass\\nproduction_gui_web_renderer_parity_metal_readback_status=pass\\n' > build/test-production-gui-web-renderer-parity-gate-pass/source/evidence.env && PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-production-gui-web-renderer-parity-gate-pass/source/evidence.env BUILD_DIR=build/test-production-gui-web-renderer-parity-gate-pass/out REPORT_PATH=build/test-production-gui-web-renderer-parity-gate-pass/report.md sh scripts/check/check-production-gui-web-renderer-parity-gate.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-production-gui-web-renderer-parity-gate-pass/out/evidence.env")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_case_count=50")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_pass_count=36")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_tracked_count=14")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_layout_manifest_fail_count=0")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/sys_test/html_css_spec_traceability.md](doc/03_plan/sys_test/html_css_spec_traceability.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+
+
+</details>

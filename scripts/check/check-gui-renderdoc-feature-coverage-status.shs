@@ -42,7 +42,9 @@ def rel(path: Path) -> str:
 widget_kind_path = ROOT / "src/lib/common/ui/widget_kind.spl"
 html_widgets_path = ROOT / "src/app/ui.render/html_widgets.spl"
 manifest_path = ROOT / "tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt"
-production_env_path = ROOT / "build/production_gui_web_renderer_parity_evidence/evidence.env"
+production_env_path = Path(os.environ.get("PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV", "build/production_gui_web_renderer_parity_evidence/evidence.env"))
+if not production_env_path.is_absolute():
+    production_env_path = ROOT / production_env_path
 electron_env_path = Path(os.environ.get("RDOC_ELECTRON_EVIDENCE_ENV", "build/renderdoc/canonical-probe/electron-html/evidence.env"))
 if not electron_env_path.is_absolute():
     electron_env_path = ROOT / electron_env_path
@@ -188,6 +190,55 @@ if production_env_path.exists() and not production_status:
     production_status = "missing-status"
     production_reason = "existing-evidence-env-missing-production-status"
 
+production_gate_output = ""
+production_gate_code = 127
+if Path("scripts/check/check-production-gui-web-renderer-parity-gate.shs").exists():
+    nested_env = os.environ.copy()
+    nested_env["PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV"] = str(production_env_path)
+    nested_env["BUILD_DIR"] = str(ROOT / "build/gui_renderdoc_feature_coverage_status/production-parity-gate")
+    nested_env["REPORT_PATH"] = str(ROOT / "build/gui_renderdoc_feature_coverage_status/production-parity-gate/report.md")
+    proc = subprocess.run(
+        ["sh", "scripts/check/check-production-gui-web-renderer-parity-gate.shs"],
+        cwd=ROOT,
+        env=nested_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=120,
+        check=False,
+    )
+    production_gate_output = proc.stdout
+    production_gate_code = proc.returncode
+
+production_gate_status = value_of("production_gui_web_renderer_parity_gate_status", production_gate_output)
+production_gate_reason = value_of("production_gui_web_renderer_parity_gate_reason", production_gate_output)
+production_gate_required_source_status = value_of("production_gui_web_renderer_parity_gate_required_source_status", production_gate_output)
+production_gate_required_matrix_status = value_of("production_gui_web_renderer_parity_gate_required_matrix_status", production_gate_output)
+production_gate_required_layout_status = value_of("production_gui_web_renderer_parity_gate_required_layout_manifest_status", production_gate_output)
+production_gate_required_layout_count = value_of("production_gui_web_renderer_parity_gate_required_layout_manifest_case_count", production_gate_output)
+production_gate_required_layout_pass = value_of("production_gui_web_renderer_parity_gate_required_layout_manifest_pass_count", production_gate_output)
+production_gate_required_layout_tracked = value_of("production_gui_web_renderer_parity_gate_required_layout_manifest_tracked_count", production_gate_output)
+production_gate_required_layout_fail = value_of("production_gui_web_renderer_parity_gate_required_layout_manifest_fail_count", production_gate_output)
+production_gate_required_surface_status = value_of("production_gui_web_renderer_parity_gate_required_surface_manifest_status", production_gate_output)
+production_gate_required_backend_status = value_of("production_gui_web_renderer_parity_gate_required_backend_status", production_gate_output)
+production_gate_required_font_status = value_of("production_gui_web_renderer_parity_gate_required_font_offload_status", production_gate_output)
+production_gate_required_metal_status = value_of("production_gui_web_renderer_parity_gate_required_metal_readback_status", production_gate_output)
+production_gate_source_status = value_of("production_gui_web_renderer_parity_gate_source_status", production_gate_output)
+production_gate_matrix_status = value_of("production_gui_web_renderer_parity_gate_matrix_status", production_gate_output)
+production_gate_layout_status = value_of("production_gui_web_renderer_parity_gate_layout_manifest_status", production_gate_output)
+production_gate_layout_count = value_of("production_gui_web_renderer_parity_gate_layout_manifest_case_count", production_gate_output)
+production_gate_layout_pass = value_of("production_gui_web_renderer_parity_gate_layout_manifest_pass_count", production_gate_output)
+production_gate_layout_tracked = value_of("production_gui_web_renderer_parity_gate_layout_manifest_tracked_count", production_gate_output)
+production_gate_layout_fail = value_of("production_gui_web_renderer_parity_gate_layout_manifest_fail_count", production_gate_output)
+production_gate_surface_status = value_of("production_gui_web_renderer_parity_gate_surface_manifest_status", production_gate_output)
+production_gate_backend_status = value_of("production_gui_web_renderer_parity_gate_backend_status", production_gate_output)
+production_gate_font_status = value_of("production_gui_web_renderer_parity_gate_font_offload_status", production_gate_output)
+production_gate_metal_status = value_of("production_gui_web_renderer_parity_gate_metal_readback_status", production_gate_output)
+if not production_gate_status:
+    production_gate_status = "unavailable"
+if not production_gate_reason:
+    production_gate_reason = "missing-production-parity-gate-evidence"
+
 electron_env = electron_env_path.read_text(encoding="utf-8", errors="ignore") if electron_env_path.exists() else ""
 electron_capture_status = value_of("rdoc_capture_status", electron_env)
 electron_capture_reason = value_of("rdoc_capture_reason", electron_env)
@@ -273,9 +324,9 @@ elif renderdoc_status != "pass":
 elif electron_gate_status != "pass":
     coverage_status = "incomplete"
     coverage_reason = electron_gate_reason or "missing-electron-rdoc"
-elif production_status and production_status != "pass":
+elif production_gate_status != "pass":
     coverage_status = "incomplete"
-    coverage_reason = production_reason or "production-gui-web-renderer-parity-incomplete"
+    coverage_reason = production_gate_reason or "production-gui-web-renderer-parity-incomplete"
 
 emit("gui_renderdoc_feature_coverage_status", coverage_status)
 emit("gui_renderdoc_feature_coverage_reason", coverage_reason)
@@ -325,6 +376,32 @@ emit("production_gui_web_renderer_parity_existing_layout_case_count", layout_cou
 emit("production_gui_web_renderer_parity_existing_layout_pass_count", layout_pass)
 emit("production_gui_web_renderer_parity_existing_layout_tracked_count", layout_tracked)
 emit("production_gui_web_renderer_parity_existing_layout_fail_count", layout_fail)
+emit("production_gui_web_renderer_parity_gate_command", f"PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV={rel(production_env_path)} sh scripts/check/check-production-gui-web-renderer-parity-gate.shs")
+emit("production_gui_web_renderer_parity_gate_exit_code", production_gate_code)
+emit("production_gui_web_renderer_parity_gate_status", production_gate_status)
+emit("production_gui_web_renderer_parity_gate_reason", production_gate_reason)
+emit("production_gui_web_renderer_parity_gate_source_status", production_gate_source_status)
+emit("production_gui_web_renderer_parity_gate_matrix_status", production_gate_matrix_status)
+emit("production_gui_web_renderer_parity_gate_layout_manifest_status", production_gate_layout_status)
+emit("production_gui_web_renderer_parity_gate_layout_manifest_case_count", production_gate_layout_count)
+emit("production_gui_web_renderer_parity_gate_layout_manifest_pass_count", production_gate_layout_pass)
+emit("production_gui_web_renderer_parity_gate_layout_manifest_tracked_count", production_gate_layout_tracked)
+emit("production_gui_web_renderer_parity_gate_layout_manifest_fail_count", production_gate_layout_fail)
+emit("production_gui_web_renderer_parity_gate_surface_manifest_status", production_gate_surface_status)
+emit("production_gui_web_renderer_parity_gate_backend_status", production_gate_backend_status)
+emit("production_gui_web_renderer_parity_gate_font_offload_status", production_gate_font_status)
+emit("production_gui_web_renderer_parity_gate_metal_readback_status", production_gate_metal_status)
+emit("production_gui_web_renderer_parity_gate_required_source_status", production_gate_required_source_status)
+emit("production_gui_web_renderer_parity_gate_required_matrix_status", production_gate_required_matrix_status)
+emit("production_gui_web_renderer_parity_gate_required_layout_manifest_status", production_gate_required_layout_status)
+emit("production_gui_web_renderer_parity_gate_required_layout_manifest_case_count", production_gate_required_layout_count)
+emit("production_gui_web_renderer_parity_gate_required_layout_manifest_pass_count", production_gate_required_layout_pass)
+emit("production_gui_web_renderer_parity_gate_required_layout_manifest_tracked_count", production_gate_required_layout_tracked)
+emit("production_gui_web_renderer_parity_gate_required_layout_manifest_fail_count", production_gate_required_layout_fail)
+emit("production_gui_web_renderer_parity_gate_required_surface_manifest_status", production_gate_required_surface_status)
+emit("production_gui_web_renderer_parity_gate_required_backend_status", production_gate_required_backend_status)
+emit("production_gui_web_renderer_parity_gate_required_font_offload_status", production_gate_required_font_status)
+emit("production_gui_web_renderer_parity_gate_required_metal_readback_status", production_gate_required_metal_status)
 emit("renderdoc_goal_status_command", "sh scripts/check/check-html-css-renderdoc-goal-status.shs")
 emit("renderdoc_goal_status_exit_code", goal_code)
 emit("renderdoc_goal_status", renderdoc_status)
@@ -382,6 +459,7 @@ reason="$(sed -n 's/^gui_renderdoc_feature_coverage_reason=//p' "$OUT_ENV" | tai
     echo "- External Chrome/Vulkan RenderDoc: $(sed -n 's/^external_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^external_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- Electron Chromium/Vulkan RenderDoc: $(sed -n 's/^electron_renderdoc_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^electron_renderdoc_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo "- Electron Chromium/Vulkan gate: $(sed -n 's/^electron_renderdoc_gate_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^electron_renderdoc_gate_reason=//p' "$OUT_ENV" | tail -n 1))"
+    echo "- Production GUI/web parity gate: $(sed -n 's/^production_gui_web_renderer_parity_gate_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^production_gui_web_renderer_parity_gate_reason=//p' "$OUT_ENV" | tail -n 1))"
     echo
     echo "## Commands"
     echo
@@ -389,6 +467,7 @@ reason="$(sed -n 's/^gui_renderdoc_feature_coverage_reason=//p' "$OUT_ENV" | tai
     echo "- GUI widget rendering fixture coverage: \`$(sed -n 's/^gui_widget_rendering_fixture_coverage_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- HTML/CSS rendering manifest traceability: \`$(sed -n 's/^html_css_rendering_manifest_traceability_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- Production GUI/web parity: \`$(sed -n 's/^production_gui_web_renderer_parity_command=//p' "$OUT_ENV" | tail -n 1)\`"
+    echo "- Production GUI/web parity gate: \`$(sed -n 's/^production_gui_web_renderer_parity_gate_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- Simple RenderDoc: \`$(sed -n 's/^simple_renderdoc_capture_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- Original Chrome/Vulkan RenderDoc: \`$(sed -n 's/^html_renderdoc_capture_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- Electron Chromium RenderDoc: \`$(sed -n 's/^electron_renderdoc_capture_command=//p' "$OUT_ENV" | tail -n 1)\`"

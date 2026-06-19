@@ -1,0 +1,125 @@
+#!/bin/sh
+# Validate existing production GUI/web renderer parity evidence without launching
+# Electron, Chrome, Tauri, or GPU checks.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/production_gui_web_renderer_parity_gate}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_renderer_parity_gate_$(date -u +%F).md}"
+SOURCE_ENV="${PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV:-build/production_gui_web_renderer_parity_evidence/evidence.env}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_evidence() {
+    status="$1"
+    reason="$2"
+    {
+        echo "production_gui_web_renderer_parity_gate_status=$status"
+        echo "production_gui_web_renderer_parity_gate_reason=$reason"
+        echo "production_gui_web_renderer_parity_gate_source_env=$SOURCE_ENV"
+        echo "production_gui_web_renderer_parity_gate_source_status=${source_status:-}"
+        echo "production_gui_web_renderer_parity_gate_source_reason=${source_reason:-}"
+        echo "production_gui_web_renderer_parity_gate_matrix_status=${matrix_status:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_status=${layout_status:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_case_count=${layout_count:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_pass_count=${layout_pass:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_tracked_count=${layout_tracked:-}"
+        echo "production_gui_web_renderer_parity_gate_layout_manifest_fail_count=${layout_fail:-}"
+        echo "production_gui_web_renderer_parity_gate_surface_manifest_status=${surface_status:-}"
+        echo "production_gui_web_renderer_parity_gate_backend_status=${backend_status:-}"
+        echo "production_gui_web_renderer_parity_gate_font_offload_status=${font_status:-}"
+        echo "production_gui_web_renderer_parity_gate_metal_readback_status=${metal_status:-}"
+        echo "production_gui_web_renderer_parity_gate_required_source_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_matrix_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_case_count=50"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_pass_count=36"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_tracked_count=14"
+        echo "production_gui_web_renderer_parity_gate_required_layout_manifest_fail_count=0"
+        echo "production_gui_web_renderer_parity_gate_required_surface_manifest_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_backend_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_font_offload_status=pass"
+        echo "production_gui_web_renderer_parity_gate_required_metal_readback_status=pass"
+    } >"$OUT_ENV"
+    {
+        echo "# Production GUI Web Renderer Parity Gate"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- source evidence: $SOURCE_ENV"
+        echo "- source status: ${source_status:-}"
+        echo "- source reason: ${source_reason:-}"
+        echo "- matrix: ${matrix_status:-}"
+        echo "- layout manifest: ${layout_status:-} (${layout_pass:-}/${layout_count:-} pass, ${layout_tracked:-} tracked, ${layout_fail:-} fail)"
+        echo "- surface manifest: ${surface_status:-}"
+        echo "- backend parity: ${backend_status:-}"
+        echo "- font offload/readback: ${font_status:-}"
+        echo "- raw Metal framebuffer readback: ${metal_status:-}"
+        echo
+        echo "## Raw Evidence"
+        sed 's/^/- /' "$OUT_ENV"
+    } >"$REPORT_PATH"
+    cat "$OUT_ENV"
+}
+
+if [ ! -s "$SOURCE_ENV" ]; then
+    source_status=""
+    source_reason="missing-production-parity-evidence"
+    matrix_status=""
+    layout_status=""
+    layout_count=""
+    layout_pass=""
+    layout_tracked=""
+    layout_fail=""
+    surface_status=""
+    backend_status=""
+    font_status=""
+    metal_status=""
+    write_evidence "unavailable" "missing-production-parity-evidence"
+    exit 1
+fi
+
+source_status="$(value_of production_gui_web_renderer_parity_status "$SOURCE_ENV")"
+source_reason="$(value_of production_gui_web_renderer_parity_reason "$SOURCE_ENV")"
+matrix_status="$(value_of production_gui_web_renderer_parity_matrix_status "$SOURCE_ENV")"
+layout_status="$(value_of production_gui_web_renderer_parity_layout_manifest_status "$SOURCE_ENV")"
+layout_count="$(value_of production_gui_web_renderer_parity_layout_manifest_case_count "$SOURCE_ENV")"
+layout_pass="$(value_of production_gui_web_renderer_parity_layout_manifest_pass_count "$SOURCE_ENV")"
+layout_tracked="$(value_of production_gui_web_renderer_parity_layout_manifest_tracked_count "$SOURCE_ENV")"
+layout_fail="$(value_of production_gui_web_renderer_parity_layout_manifest_fail_count "$SOURCE_ENV")"
+surface_status="$(value_of production_gui_web_renderer_parity_surface_manifest_status "$SOURCE_ENV")"
+backend_status="$(value_of production_gui_web_renderer_parity_backend_status "$SOURCE_ENV")"
+font_status="$(value_of production_gui_web_renderer_parity_font_offload_status "$SOURCE_ENV")"
+metal_status="$(value_of production_gui_web_renderer_parity_metal_readback_status "$SOURCE_ENV")"
+
+if [ "$source_status" != "pass" ]; then
+    write_evidence "fail" "${source_reason:-production-parity-not-pass}"
+elif [ "$matrix_status" != "pass" ]; then
+    write_evidence "fail" "matrix-not-pass"
+elif [ "$layout_status" != "pass" ]; then
+    write_evidence "fail" "layout-manifest-not-pass"
+elif [ "$layout_count" != "50" ] || [ "$layout_pass" != "36" ] || [ "$layout_tracked" != "14" ] || [ "$layout_fail" != "0" ]; then
+    write_evidence "fail" "layout-manifest-count-mismatch"
+elif [ "$surface_status" != "pass" ]; then
+    write_evidence "fail" "surface-manifest-not-pass"
+elif [ "$backend_status" != "pass" ]; then
+    write_evidence "fail" "backend-parity-not-pass"
+elif [ "$font_status" != "pass" ]; then
+    write_evidence "fail" "font-offload-not-pass"
+elif [ "$metal_status" != "pass" ]; then
+    write_evidence "fail" "metal-readback-not-pass"
+else
+    write_evidence "pass" "pass"
+    exit 0
+fi
+exit 1

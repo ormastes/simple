@@ -13,6 +13,8 @@ RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
 RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs
 RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/canonical-probe/electron-html/evidence.env \
   sh scripts/check/check-renderdoc-electron-html-gate.shs
+PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env \
+  sh scripts/check/check-production-gui-web-renderer-parity-gate.shs
 ```
 
 ## Interfaces
@@ -109,6 +111,14 @@ The current canonical evidence contract is:
   proving the Electron-backed GUI path. The GUI RenderDoc feature audit requires
   this through `scripts/check/check-renderdoc-electron-html-gate.shs` before it
   can report `pass`.
+- Production GUI/web renderer parity path:
+  `build/production_gui_web_renderer_parity_evidence/evidence.env` must report
+  the top-level parity status and component statuses as `pass`, including the
+  renderer matrix, 50-case layout manifest, Tauri/Chrome surface manifest,
+  backend parity, font offload/readback, and raw Metal framebuffer readback.
+  The GUI RenderDoc feature audit requires this through
+  `scripts/check/check-production-gui-web-renderer-parity-gate.shs` before it
+  can report `pass`; missing parity evidence is not treated as optional.
 
 ## External Host Gate
 
