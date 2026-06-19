@@ -354,7 +354,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 461 lines folded for reproduction.
+Runnable source: 464 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -654,9 +654,12 @@ expect(node_deleted.nodes.len()).to_equal(2)
 expect(node_deleted.nodes[1].id).to_equal("C")
 expect(node_deleted.edges.len()).to_equal(0)
 expect(sdn_graph_render_html(grouped)).to_contain("data-shape=\"diamond\"")
+expect(sdn_graph_render_html(grouped)).to_contain("clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)")
 expect(sdn_graph_render_html(grouped)).to_contain("sdn-css-accent")
 expect(sdn_graph_render_html(grouped)).to_contain("data-parent=\"A\"")
 expect(sdn_graph_render_html(draw_style_only)).to_contain("data-shape=\"cylinder\"")
+expect(sdn_graph_render_html(draw_style_only)).to_contain("border-radius:999px / 24px")
+expect(sdn_graph_render_html(draw_style_only)).to_contain("box-shadow:inset 0 8px 0 rgba(15,23,42,0.08)")
 expect(sdn_graph_render_html(draw_style_only)).to_contain("sdn-css-storage")
 expect(draw_label_only.nodes[1].label).to_equal("Storage")
 expect(sdn_graph_render_html(draw_label_only)).to_contain(">Storage</button>")

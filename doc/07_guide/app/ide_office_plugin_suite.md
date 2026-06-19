@@ -148,7 +148,7 @@ Draw/diagram editing should prefer the SDD substrate in
 waypoints, anchors, rendered SVG connector paths, pure edge reroute operations,
 parent/group metadata, transient selection rendering, pure node/edge inspector
 snapshots, pure node shape/style/parent edit operations, guarded multi-node
-alignment/distribution, and rendered canvas/page background and grid metadata. `src/app/ide/draw_sanity.spl`
+alignment/distribution, rendered shape CSS, and rendered canvas/page background and grid metadata. `src/app/ide/draw_sanity.spl`
 is the product feature-check bridge:
 it proves render, selection, inspection, reroute, node edit, multi-node layout,
 and canvas metadata without starting GUI/browser/host APIs. Legacy SVG shape helpers remain

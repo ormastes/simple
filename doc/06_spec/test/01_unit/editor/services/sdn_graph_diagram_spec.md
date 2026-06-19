@@ -160,7 +160,7 @@ expect(graph.canvas_background).to_equal("#ffffff")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -173,6 +173,7 @@ expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-panel\"")
 expect(html).to_contain("data-layer=\"base\"")
 expect(html).to_contain("data-parent=\"Card\"")
 expect(html).to_contain("style=\"left:10px;top:20px;width:200px;height:100px\"")
+expect(html).to_contain("border-radius:999px")
 expect(html).to_contain("class=\"sdd-connector-layer\"")
 expect(html).to_contain("class=\"sdd-connector-path \"")
 expect(html).to_contain("data-edge-index=\"0\"")
@@ -581,7 +582,7 @@ expect(html).to_contain("background-size:24px 24px")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 63 lines folded for reproduction.
+Runnable source: 66 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -624,6 +625,7 @@ expect(updated.nodes[1].shape).to_equal("rect")
 expect(updated.edges[0].from_id).to_equal("A")
 expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-accent sdn-css-selected\"")
 expect(html).to_contain("data-shape=\"diamond\"")
+expect(html).to_contain("clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)")
 expect(html).to_contain("style=\"left:32px;top:48px;width:96px;height:64px\"")
 expect(canon).to_contain("A, Alpha, \"accent selected\", decision, diamond, 32, 48, 96, 64, foreground")
 
@@ -633,6 +635,8 @@ expect(styled.nodes[1].shape).to_equal("cylinder")
 expect(styled.nodes[1].css).to_equal("storage highlight")
 expect(styled.nodes[1].x).to_equal("220")
 expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highlight")
+expect(sdn_graph_render_html(styled)).to_contain("border-radius:999px / 24px")
+expect(sdn_graph_render_html(styled)).to_contain("box-shadow:inset 0 8px 0 rgba(15,23,42,0.08)")
 val labeled = sdn_graph_update_node_label_at(styled, 1, "Data Store")
 expect(labeled.nodes[1].label).to_equal("Data Store")
 expect(labeled.nodes[1].shape).to_equal("cylinder")
