@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 774 lines folded for reproduction.
+Runnable source: 775 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -684,9 +684,10 @@ expect(sdd_action.output).to_contain("data-edge-count=\"0\"")
 expect(selected_sdd_action.output).to_contain("data-selected-node-id=\"A\"")
 expect(selected_sdd_action.output).to_contain("data-selected=\"true\"")
 expect(selected_sdd_action.output).to_contain("data-resize-handle=\"se\" data-node=\"A\" data-node-index=\"0\"")
-expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"start\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-anchor=\"right\" data-x=\"80\" data-y=\"10\"")
-expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"end\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-anchor=\"left\"")
-expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"waypoint\" data-waypoint-index=\"0\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-x=\"80\" data-y=\"10\"")
+expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"start\" data-edit-action=\"reconnect-start\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-anchor=\"right\" data-x=\"80\" data-y=\"10\"")
+expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"end\" data-edit-action=\"reconnect-end\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-anchor=\"left\"")
+expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"label\" data-edit-action=\"move-label\"")
+expect(selected_sdd_edge_action.output).to_contain("data-connector-handle=\"waypoint\" data-edit-action=\"move-waypoint\" data-waypoint-index=\"0\" data-edge-index=\"0\" data-label=\"Link\" data-kind=\"\" data-route=\"orthogonal\" data-x=\"80\" data-y=\"10\"")
 expect(selected_sdd_edge_action.output).to_contain("data-y=\"10\" data-from=\"A\" data-to=\"B\"")
 expect(selected_sdd_edge_action.output).to_contain("data-from=\"A\" data-to=\"B\" data-node=\"A\"")
 expect(selected_sdd_edge_action.output).to_contain("data-from=\"A\" data-to=\"B\" data-node=\"B\"")
