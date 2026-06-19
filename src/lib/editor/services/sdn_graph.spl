@@ -398,6 +398,37 @@ fn sdn_graph_update_node_parent_at(graph: SdnGraph, node_index: i64, parent: tex
         i = i + 1
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
+fn sdn_graph_duplicate_node_checked(graph: SdnGraph, source_id: text, new_id: text, dx: text, dy: text) -> SdnGraphEditResult:
+    if source_id == "" or new_id == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-duplicate-node @@\nexpected: non-empty source and new id\nactual: " + source_id + " -> " + new_id, graph: graph)
+    if _sg_node_id_exists(graph, new_id):
+        return SdnGraphEditResult(accepted: false, reason: "duplicate-id", diff: "@@ sdd-duplicate-node @@\nexpected: unused id\nactual: " + new_id, graph: graph)
+    if _sg_node_id_count(graph, source_id) > 1:
+        return SdnGraphEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ sdd-duplicate-node @@\nexpected: one source node\nactual: " + source_id, graph: graph)
+    val x_offset = _sg_parse_i64_result(dx)
+    val y_offset = _sg_parse_i64_result(dy)
+    if not x_offset.ok or not y_offset.ok:
+        return SdnGraphEditResult(accepted: false, reason: "invalid-offset", diff: "@@ sdd-duplicate-node @@\nexpected: integer dx/dy\nactual: " + dx + "," + dy, graph: graph)
+    var out_nodes: [SdnGraphNode] = []
+    var found = false
+    for node in graph.nodes:
+        out_nodes.push(_sg_clone_node(node))
+        if node.id == source_id:
+            val x = _sg_parse_i64_result(node.x)
+            val y = _sg_parse_i64_result(node.y)
+            if not x.ok or not y.ok:
+                return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-duplicate-node @@\nexpected: integer source x/y\nactual: " + node.x + "," + node.y, graph: graph)
+            var copy = _sg_clone_node(node)
+            copy.id = new_id
+            copy.x = (x.value + x_offset.value).to_text()
+            copy.y = (y.value + y_offset.value).to_text()
+            out_nodes.push(copy)
+            found = true
+    if not found:
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-duplicate-node @@\nexpected: " + source_id + "\nactual: missing", graph: graph)
+    val out = _sg_graph_with_nodes(graph, out_nodes)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-duplicate-node @@\n+ " + new_id, graph: out)
+
 fn sdn_graph_update_canvas(graph: SdnGraph, new_width: text, new_height: text, new_grid: text, new_snap: text, new_zoom: text, new_background: text) -> SdnGraph:
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: new_width, canvas_height: new_height, canvas_grid: new_grid, canvas_snap: new_snap, canvas_zoom: new_zoom, canvas_background: new_background, nodes: graph.nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
@@ -659,6 +690,19 @@ fn _sg_id_in_list(id: text, ids: [text]) -> bool:
         if item == id:
             return true
     false
+
+fn _sg_node_id_exists(graph: SdnGraph, id: text) -> bool:
+    for node in graph.nodes:
+        if node.id == id:
+            return true
+    false
+
+fn _sg_node_id_count(graph: SdnGraph, id: text) -> i64:
+    var count: i64 = 0
+    for node in graph.nodes:
+        if node.id == id:
+            count = count + 1
+    count
 
 fn _sg_selected_count(graph: SdnGraph, node_ids: [text]) -> i64:
     var count: i64 = 0

@@ -228,6 +228,12 @@ ungrouped node.
 document-level width, height, grid, snap, zoom, and background metadata while
 preserving all node, connector, CSS, and weave state.
 
+`sdn_graph_duplicate_node_checked(graph, source_id, new_id, dx, dy)` copies one
+node with a caller-provided unique id and integer x/y offset. It preserves the
+node label, style, role, shape, size, layer, and parent metadata, and fails
+closed with `invalid-id`, `duplicate-id`, `invalid-offset`,
+`ambiguous-source`, `invalid-geometry`, or `missing-node`.
+
 `sdn_graph_geometry_signature(graph, node_ids)` returns the stable
 `id:x,y,width,height` signature for a selected node set in canonical graph
 order. `sdn_graph_align_checked(graph, node_ids, expected_signature, mode)` and

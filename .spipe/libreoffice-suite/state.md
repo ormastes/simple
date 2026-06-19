@@ -331,3 +331,7 @@ possible so they are runner-verifiable.
   headless action bridge as `render-markdown-preview-html`, completing the
   Markdown-source HTML render triad alongside Writer paper HTML and PPT deck
   HTML.
+- 2026-06-19 dev: Advanced SDD Draw copy/paste basics. Added checked
+  `sdn_graph_duplicate_node_checked` for duplicating one node with a unique id
+  and integer offset while preserving style, shape, layer, and parent metadata.
+  Draw catalog metadata now exposes `node-duplicate` and `duplicate-sdd-node`.

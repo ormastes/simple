@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=76 actions=35
+  llm-catalog: apps=9 features=77 actions=36
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -320,7 +320,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 182 lines folded for reproduction.
+Runnable source: 188 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -328,7 +328,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=76 actions=35")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=77 actions=36")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("html-render")
@@ -355,6 +355,7 @@ expect(catalog[4].features.join(",")).to_contain("connector-paths")
 expect(catalog[4].features.join(",")).to_contain("group-containers")
 expect(catalog[4].features.join(",")).to_contain("node-shape-edit")
 expect(catalog[4].features.join(",")).to_contain("node-style-edit")
+expect(catalog[4].features.join(",")).to_contain("node-duplicate")
 expect(catalog[4].features.join(",")).to_contain("canvas-metadata")
 expect(catalog[4].features.join(",")).to_contain("selection")
 expect(catalog[4].features.join(",")).to_contain("inspector")
@@ -365,6 +366,7 @@ expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-parent")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-shape")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-style")
+expect(catalog[4].actions.join(",")).to_contain("duplicate-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-canvas")
 expect(catalog[4].actions.join(",")).to_contain("align-sdd-selection")
 expect(catalog[4].actions.join(",")).to_contain("distribute-sdd-selection")
@@ -398,12 +400,16 @@ val draw_layout_ids = ["A", "B", "C"]
 val draw_layout_signature = sdn_graph_geometry_signature(draw_layout_graph, draw_layout_ids)
 val draw_aligned = sdn_graph_align_checked(draw_layout_graph, draw_layout_ids, draw_layout_signature, "left")
 val draw_distributed = sdn_graph_distribute_checked(draw_layout_graph, draw_layout_ids, draw_layout_signature, "horizontal")
+val draw_duplicate = sdn_graph_duplicate_node_checked(draw_style_only, "B", "B_copy", "24", "12")
 expect(sdn_graph_render_html(rerouted)).to_contain("data-path=\"M 80,10 L 120,10 L 120,40 L 160,40 L 160,10\"")
 expect(sdn_graph_render_html(grouped)).to_contain("data-shape=\"diamond\"")
 expect(sdn_graph_render_html(grouped)).to_contain("sdn-css-accent")
 expect(sdn_graph_render_html(grouped)).to_contain("data-parent=\"A\"")
 expect(sdn_graph_render_html(draw_style_only)).to_contain("data-shape=\"cylinder\"")
 expect(sdn_graph_render_html(draw_style_only)).to_contain("sdn-css-storage")
+expect(draw_duplicate.accepted).to_be(true)
+expect(draw_duplicate.graph.nodes[2].id).to_equal("B_copy")
+expect(sdn_graph_render_html(draw_duplicate.graph)).to_contain("data-node=\"B_copy\"")
 expect(sdn_graph_render_html(draw_canvas)).to_contain("data-canvas-grid=\"24\"")
 expect(sdn_graph_render_html(draw_canvas)).to_contain("style=\"width:1440px;height:960px;\"")
 expect(sdn_graph_render_html_with_selection(draw_style_only, "B", 0)).to_contain("data-selected=\"true\" aria-selected=\"true\"")

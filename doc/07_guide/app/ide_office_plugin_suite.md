@@ -121,8 +121,9 @@ modes:
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`,
   `edit-sdd-node-parent`, `edit-sdd-node-shape`, `edit-sdd-node-style`,
-  `edit-sdd-canvas`, `align-sdd-selection`, `distribute-sdd-selection`,
-  `inspect-sdd-node`, and `inspect-sdd-edge`; Calc has `formula-counta`,
+  `duplicate-sdd-node`, `edit-sdd-canvas`, `align-sdd-selection`,
+  `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
+  Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
   `formula-display-recalc`; Base has `schema-validation`, `count-where`,
   `update-where`, `delete-where`, and `db-edit`; Math has `fraction`,

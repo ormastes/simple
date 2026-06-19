@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -529,6 +529,42 @@ expect(regrouped.nodes[1].parent).to_equal("Container")
 
 </details>
 
+#### duplicates a node with a new id and offset geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: duplicate\nA: Alpha @panel role: box shape: rounded x: 10 y: 20 width: 80 height: 30 layer: base parent: Group\nB: Beta x: 120 y: 20 width: 80 height: 30")
+val copied = sdn_graph_duplicate_node_checked(graph, "A", "A_copy", "16", "24")
+expect(copied.accepted).to_be(true)
+expect(copied.graph.nodes.len()).to_equal(3)
+expect(copied.graph.nodes[1].id).to_equal("A_copy")
+expect(copied.graph.nodes[1].label).to_equal("Alpha")
+expect(copied.graph.nodes[1].css).to_equal("panel")
+expect(copied.graph.nodes[1].shape).to_equal("rounded")
+expect(copied.graph.nodes[1].x).to_equal("26")
+expect(copied.graph.nodes[1].y).to_equal("44")
+expect(copied.graph.nodes[1].parent).to_equal("Group")
+expect(copied.graph.nodes[2].id).to_equal("B")
+expect(sdn_graph_render_html(copied.graph)).to_contain("data-node=\"A_copy\"")
+
+val duplicate_id = sdn_graph_duplicate_node_checked(graph, "A", "B", "16", "24")
+val missing = sdn_graph_duplicate_node_checked(graph, "Nope", "Nope_copy", "16", "24")
+val ambiguous = sdn_graph_duplicate_node_checked(sdn_graph_parse("graph: ambiguous\nA: First x: 0 y: 0\nA: Second x: 10 y: 10"), "A", "A_copy", "4", "4")
+expect(duplicate_id.accepted).to_be(false)
+expect(duplicate_id.reason).to_equal("duplicate-id")
+expect(missing.accepted).to_be(false)
+expect(missing.reason).to_equal("missing-node")
+expect(ambiguous.accepted).to_be(false)
+expect(ambiguous.reason).to_equal("ambiguous-source")
+```
+
+</details>
+
 #### aligns selected SDD nodes with guarded geometry signatures
 
 <details>
@@ -617,8 +653,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
