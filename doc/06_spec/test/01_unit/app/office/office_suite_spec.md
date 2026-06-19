@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 107 | 107 | 0 | 0 |
+| 108 | 108 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1729,6 +1729,27 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed SDD canvas fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val number_result = office_action_dispatch("edit-sdd-canvas", "640|480|16;bad|true|125|#ffffff\ngraph: Canvas\nA: A")
+val long_number_result = office_action_dispatch("edit-sdd-canvas", "1000000000|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
+val snap_result = office_action_dispatch("edit-sdd-canvas", "640|480|16|yes|125|#ffffff\ngraph: Canvas\nA: A")
+val background_result = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|url(javascript:bad)\ngraph: Canvas\nA: A")
+expect(number_result.reason).to_equal("invalid-canvas-number")
+expect(long_number_result.reason).to_equal("invalid-canvas-number")
+expect(snap_result.reason).to_equal("invalid-canvas-snap")
+expect(background_result.reason).to_equal("invalid-canvas-background")
+```
+
+</details>
+
 #### rejects blank SDD style rule keys
 
 <details>
@@ -1985,8 +2006,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 107 |
-| Active scenarios | 107 |
+| Total scenarios | 108 |
+| Active scenarios | 108 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

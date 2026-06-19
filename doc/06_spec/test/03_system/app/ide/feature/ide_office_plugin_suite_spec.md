@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 673 lines folded for reproduction.
+Runnable source: 679 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -579,6 +579,9 @@ val sdd_node_delete_action = office_action_dispatch("delete-sdd-node", "B\ngraph
 val missing_sdd_node_delete_action = office_action_dispatch("delete-sdd-node", "Nope\ngraph: Node Delete\nA: A")
 val sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
 val invalid_sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16;bad|true|125|#ffffff\ngraph: Canvas\nA: A")
+val invalid_sdd_canvas_long_number_action = office_action_dispatch("edit-sdd-canvas", "1000000000|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
+val invalid_sdd_canvas_snap_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|yes|125|#ffffff\ngraph: Canvas\nA: A")
+val invalid_sdd_canvas_background_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|url(javascript:bad)\ngraph: Canvas\nA: A")
 val blank_sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|   \ngraph: Canvas\nA: A")
 val sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10;60x40|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val invalid_sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|curve|60x10|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
@@ -754,6 +757,9 @@ expect(sdd_node_delete_action.output).to_contain("data-node=\"A\"")
 expect(missing_sdd_node_delete_action.reason).to_equal("missing-node")
 expect(sdd_canvas_action.output).to_contain("data-canvas-width=\"640\"")
 expect(invalid_sdd_canvas_action.reason).to_equal("invalid-canvas-number")
+expect(invalid_sdd_canvas_long_number_action.reason).to_equal("invalid-canvas-number")
+expect(invalid_sdd_canvas_snap_action.reason).to_equal("invalid-canvas-snap")
+expect(invalid_sdd_canvas_background_action.reason).to_equal("invalid-canvas-background")
 expect(blank_sdd_canvas_action.reason).to_equal("invalid-args")
 expect(sdd_reroute_action.output).to_contain("data-route=\"orthogonal\"")
 expect(invalid_sdd_reroute_action.reason).to_equal("invalid-args")
