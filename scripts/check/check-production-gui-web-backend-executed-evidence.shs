@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/production_gui_web_backend_executed_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_backend_executed_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_EXPLICIT="${SIMPLE_BIN:-}"
 EVIDENCE_SRC="$BUILD_DIR/backend_executed_gui_scene_evidence.spl"
 EVIDENCE_LOG="$BUILD_DIR/evidence.log"
 ENV_PATH="$BUILD_DIR/evidence.env"
@@ -16,6 +16,20 @@ TIMEOUT_SECS="${PRODUCTION_GUI_BACKEND_TIMEOUT_SECS:-120}"
 
 have() {
     command -v "$1" >/dev/null 2>&1
+}
+
+select_simple_bin() {
+    if [ "$SIMPLE_BIN_EXPLICIT" != "" ]; then
+        printf '%s\n' "$SIMPLE_BIN_EXPLICIT"
+    elif [ -x "bin/simple" ]; then
+        printf '%s\n' "bin/simple"
+    elif [ -x "src/compiler_rust/target/release/simple" ]; then
+        printf '%s\n' "src/compiler_rust/target/release/simple"
+    elif have simple; then
+        command -v simple
+    else
+        printf '%s\n' "bin/simple"
+    fi
 }
 
 run_with_timeout() {
@@ -33,6 +47,7 @@ field_of() {
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$EVIDENCE_SRC" "$EVIDENCE_LOG" "$ENV_PATH" "$REPORT_PATH"
+SIMPLE_BIN="$(select_simple_bin)"
 
 cat >"$EVIDENCE_SRC" <<'SIMPLE'
 use app.wm_compare.production_gui_web_renderer_parity.{run_backend_executed_gui_widget_scene_parity}
@@ -121,6 +136,7 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     {
         echo "production_gui_backend_status=unavailable"
         echo "production_gui_backend_reason=missing-simple-bin"
+        echo "production_gui_backend_simple_bin=$SIMPLE_BIN"
     } >"$ENV_PATH"
     cp "$ENV_PATH" "$EVIDENCE_LOG"
 else
@@ -133,6 +149,7 @@ else
             echo "production_gui_backend_status=fail"
             echo "production_gui_backend_reason=simple-evidence-run-failed"
             echo "production_gui_backend_exit_code=$code"
+            echo "production_gui_backend_simple_bin=$SIMPLE_BIN"
         } >"$ENV_PATH"
     else
         status="$(field_of production_gui_backend_status)"
@@ -143,6 +160,7 @@ else
         {
             echo "production_gui_backend_status=$status"
             echo "production_gui_backend_reason=$reason"
+            echo "production_gui_backend_simple_bin=$SIMPLE_BIN"
             for key in \
                 production_gui_backend_width \
                 production_gui_backend_height \
@@ -208,6 +226,7 @@ status="$(field_of production_gui_backend_status "$ENV_PATH" 2>/dev/null || sed 
     echo
     echo "- status: $(sed -n 's/^production_gui_backend_status=//p' "$ENV_PATH" | tail -n 1)"
     echo "- reason: $(sed -n 's/^production_gui_backend_reason=//p' "$ENV_PATH" | tail -n 1)"
+    echo "- simple bin: $(sed -n 's/^production_gui_backend_simple_bin=//p' "$ENV_PATH" | tail -n 1)"
     echo "- scene: backend-executed Engine2D clear/fill primitive proof"
     echo "- dimensions: ${WIDTH}x${HEIGHT}"
     echo "- CPU SIMD resolved: $(sed -n 's/^production_gui_backend_cpu_simd_resolved=//p' "$ENV_PATH" | tail -n 1)"
