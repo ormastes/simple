@@ -53,8 +53,8 @@ Markdown GUI rendering must use `wysiwyg_preview_document_html`, not a bare
 preview pane. The document helper owns the stable `.wysiwyg-preview` CSS wrapper
 and line-addressable `.wysiwyg-preview-line` rows for the escaped styled HTML
 generated from source lines. Shared Markdown inline HTML helpers escape ordinary
-text and marker interiors before returning `<code>`, `<strong>`, or `<em>`
-fragments.
+text and marker interiors before returning `<code>`, `<strong>`, `<em>`, or
+`<del>` fragments.
 Markdown task-list lines (`- [x]` / `- [ ]`) render as escaped disabled
 checkbox rows inside the same WYSIWYG document wrapper.
 
@@ -262,7 +262,7 @@ rendering for core precedence (`^`, `*`, `/`, `+`, `-`), parentheses,
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
 
-- Markdown: `task_list=true css_doc=true escaped=true metadata=true`
+- Markdown: `task_list=true strike=true css_doc=true escaped=true metadata=true`
 - Slides: `ppt_html=true safe_css=true positioned=true element_meta=true`
 - Draw: `format=sdd name="SDD: Simple Diagram Document" html=true route=true select=true inspect=true child_meta=true path_meta=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_label_point=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - Calc: `display_recalc=true`

@@ -27,7 +27,7 @@ markdown_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 51 | 51 | 0 | 0 |
+| 57 | 57 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -108,6 +108,20 @@ expect(markdown_inline_text("`code`")).to_equal("<code>code</code>")
 
 </details>
 
+#### wraps strikethrough markers
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_inline_text("~~old <tag>~~")).to_equal("<del>old &lt;tag&gt;</del>")
+```
+
+</details>
+
 #### leaves unbalanced bold as literal
 
 <details>
@@ -164,6 +178,20 @@ expect(markdown_inline_text("\\*literal\\*")).to_equal("*literal*")
 
 </details>
 
+#### handles escaped tilde
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_inline_text("\\~literal\\~")).to_equal("~literal~")
+```
+
+</details>
+
 #### protects code span content from bold parsing
 
 <details>
@@ -174,6 +202,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(markdown_inline_text("`**not bold**`")).to_equal("<code>**not bold**</code>")
+```
+
+</details>
+
+#### protects code span content from strikethrough parsing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_inline_text("`~~not struck~~`")).to_equal("<code>~~not struck~~</code>")
 ```
 
 </details>
@@ -364,6 +406,20 @@ expect(markdown_plain_inline("`code`")).to_equal("code")
 
 </details>
 
+#### strips strikethrough markers, keeps text
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_plain_inline("~~old~~")).to_equal("old")
+```
+
+</details>
+
 #### passes plain text unchanged
 
 <details>
@@ -420,6 +476,20 @@ expect(markdown_plain_inline("\\*literal\\*")).to_equal("*literal*")
 
 </details>
 
+#### keeps escaped tilde as literal
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_plain_inline("\\~literal\\~")).to_equal("~literal~")
+```
+
+</details>
+
 #### code span protects ** from being stripped
 
 <details>
@@ -430,6 +500,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(markdown_plain_inline("`**keep**`")).to_equal("**keep**")
+```
+
+</details>
+
+#### code span protects ~~ from being stripped
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_plain_inline("`~~keep~~`")).to_equal("~~keep~~")
 ```
 
 </details>
@@ -804,8 +888,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 51 |
-| Active scenarios | 51 |
+| Total scenarios | 57 |
+| Active scenarios | 57 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

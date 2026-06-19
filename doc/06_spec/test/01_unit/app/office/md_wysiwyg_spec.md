@@ -28,7 +28,7 @@ md_wysiwyg_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -176,6 +176,21 @@ expect(html).to_contain("Open</p>")
 
 </details>
 
+#### renders strikethrough inline HTML through the document wrapper
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = wysiwyg_preview_document_html("Keep ~~old <tag>~~")
+expect(html).to_contain("<del>old &lt;tag&gt;</del>")
+```
+
+</details>
+
 ### markdown WYSIWYG view: beside-the-line editing
 _Editing one line updates only that row's source and preview._
 
@@ -314,8 +329,8 @@ expect(wysiwyg_source_pane(result.view)).to_equal("first")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
