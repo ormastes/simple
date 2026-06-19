@@ -199,8 +199,8 @@ container membership. The root exposes optional canvas metadata as
 `data-canvas-snap`, `data-canvas-zoom`, and `data-canvas-background`, and maps
 canvas width/height to deterministic root style lengths when present. Safe
 canvas background colors and grid spacing are also rendered as root CSS.
-Known node shapes such as `rounded`, `pill`, `circle`, `terminator`, `diamond`,
-and `cylinder` map to deterministic inline CSS in the HTML preview. SDD style rules are
+Known node shapes such as `frame`, `container`, `rounded`, `pill`, `circle`,
+`terminator`, `diamond`, and `cylinder` map to deterministic inline CSS in the HTML preview. SDD style rules are
 appended after built-in shape CSS so document styles can intentionally override
 the default preview shape.
 

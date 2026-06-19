@@ -95,11 +95,11 @@ expect(sdn_graph_file_extension()).to_equal(".sdd.sdn")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: editor\nFrame: Canvas @frame role: container shape: frame x: 12 y: 24 width: 320 height: 180 layer: base\nWidget: Button @component role: control shape: rounded x: 48 y: 80 width: 120 height: 40 layer: controls parent: Frame")
+val graph = sdn_graph_parse("graph: editor\nFrame: Canvas @frame role: container shape: frame x: 12 y: 24 width: 320 height: 180 layer: base\nWidget: Button @component role: control shape: container x: 48 y: 80 width: 120 height: 40 layer: controls parent: Frame")
 expect(graph.nodes.len()).to_equal(2)
 expect(graph.nodes[0].id).to_equal("Frame")
 expect(graph.nodes[0].shape).to_equal("frame")
@@ -108,9 +108,11 @@ expect(graph.nodes[0].y).to_equal("24")
 expect(graph.nodes[0].width).to_equal("320")
 expect(graph.nodes[0].height).to_equal("180")
 expect(graph.nodes[0].layer).to_equal("base")
-expect(graph.nodes[1].shape).to_equal("rounded")
+expect(graph.nodes[1].shape).to_equal("container")
 expect(graph.nodes[1].layer).to_equal("controls")
 expect(graph.nodes[1].parent).to_equal("Frame")
+expect(sdn_graph_render_html(graph)).to_contain("box-shadow:inset 0 0 0 2px rgba(15,23,42,0.18)")
+expect(sdn_graph_render_html(graph)).to_contain("background-color:rgba(248,250,252,0.35)")
 ```
 
 </details>
