@@ -479,7 +479,7 @@ expect(sdn_graph_render_edge_path(graph.edges[0], graph.nodes[0], graph.nodes[1]
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -491,6 +491,11 @@ expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-target sdd-sele
 expect(html).to_contain("data-node=\"B\" data-selected=\"true\" aria-selected=\"true\"")
 expect(html).to_contain("data-layer=\"front\" data-layer-z=\"30\"")
 expect(html).to_contain("z-index:30")
+expect(html).to_contain("class=\"sdd-resize-handle sdd-resize-nw\"")
+expect(html).to_contain("data-resize-handle=\"nw\"")
+expect(html).to_contain("data-resize-handle=\"se\"")
+expect(html).to_contain("width:8px;height:8px")
+expect(html).to_contain("right:-5px;bottom:-5px;cursor:nwse-resize")
 expect(sdn_graph_render_html(graph)).to_contain("data-selected-node-id=\"\"")
 expect(graph.nodes[1].css).to_equal("target")
 ```
