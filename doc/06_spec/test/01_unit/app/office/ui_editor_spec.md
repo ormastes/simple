@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -224,8 +224,24 @@ val sdd = office_ui_design_to_sdd(design)
 expect(sdd).to_contain("graph: Login")
 expect(sdd).to_contain("theme: office-ui")
 expect(sdd).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent, layout_mode, layout_gap, layout_padding, constraint_h, constraint_v|")
-expect(sdd).to_contain("card, \"Login Card\", panel, container, frame, 40, 32, 360, 240, base, , off, 0, 0,0,0,0, left, top")
-expect(sdd).to_contain("submit, \"Sign in\", primary, action, rounded, 72, 200, 120, 36, controls, , off, 0, 0,0,0,0, left, top")
+expect(sdd).to_contain("card, \"Login Card\", panel, container, frame, 40, 32, 360, 240, base, , off, 0, \"0,0,0,0\", left, top")
+expect(sdd).to_contain("submit, \"Sign in\", primary, action, rounded, 72, 200, 120, 36, controls, , off, 0, \"0,0,0,0\", left, top")
+```
+
+</details>
+
+#### quotes SDD table cells containing commas and quotes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Text\nnode note|Save, \"now\"|text|0|0|120|24|copy,primary|1|copy")
+val sdd = office_ui_design_to_sdd(design)
+expect(sdd).to_contain("note, \"Save, \"\"now\"\"\", \"copy,primary\", copy, rounded")
 ```
 
 </details>
@@ -558,8 +574,8 @@ expect(cycle.reason).to_equal("cycle-parent")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
