@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -138,7 +138,7 @@ expect(graph.edges[0].end_anchor).to_equal("left")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -150,6 +150,11 @@ expect(html).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
 expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-panel\"")
 expect(html).to_contain("data-layer=\"base\"")
 expect(html).to_contain("style=\"left:10px;top:20px;width:200px;height:100px\"")
+expect(html).to_contain("class=\"sdd-connector-layer\"")
+expect(html).to_contain("class=\"sdd-connector-path \"")
+expect(html).to_contain("data-edge-index=\"0\"")
+expect(html).to_contain("data-path=\"M 110,120 L 20,120 L 20,40 L 40,40 L 40,74\"")
+expect(html).to_contain("d=\"M 110,120 L 20,120 L 20,40 L 40,40 L 40,74\"")
 expect(html).to_contain("class=\"sdn-graph-edge sdd-connector")
 expect(html).to_contain("data-route=\"orthogonal\"")
 expect(html).to_contain("data-waypoints=\"20x40;40x40\"")
@@ -200,12 +205,66 @@ expect(graph.nodes[1].shape).to_equal("")
 
 </details>
 
+#### renders orthogonal connector paths from anchors and waypoints
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: route\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: orthogonal waypoints: 140x30;200x80 start: right end: left")
+val path = sdn_graph_render_edge_path(graph.edges[0], graph.nodes[0], graph.nodes[1])
+val html = sdn_graph_render_html(graph)
+expect(path).to_equal("M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30")
+expect(html).to_contain("data-edge-index=\"0\"")
+expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")
+expect(html).to_contain("data-waypoints=\"140x30;200x80\"")
+```
+
+</details>
+
+#### defaults to straight connector paths for simple routes
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: simple\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
+expect(sdn_graph_render_edge_path(graph.edges[0], graph.nodes[0], graph.nodes[1])).to_equal("M 90,30 L 220,30")
+```
+
+</details>
+
+#### updates edge routing through a pure edit operation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: edit\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nA -> B: c route: simple start: right end: left")
+val updated = sdn_graph_update_edge_at(graph, 0, "orthogonal", "140x30;200x80", "right", "left")
+val html = sdn_graph_render_html(updated)
+expect(updated.edges[0].route).to_equal("orthogonal")
+expect(updated.edges[0].waypoints).to_equal("140x30;200x80")
+expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30\"")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -168,3 +168,22 @@ deterministic HTML with `sdn-graph`, `sdn-graph-node`, and `sdn-graph-edge`
 classes plus `sdd-diagram`, `sdd-node`, `sdd-connector`, `data-format="sdd"`,
 geometry attributes, connector route/waypoint attributes, and `sdn-css-<name>`
 classes derived from `@name`.
+
+## Rendered Connector Contract
+
+SDD HTML includes an SVG `.sdd-connector-layer` overlay before node buttons.
+Each rendered connector path has:
+
+- `data-edge-index`: stable edge index in canonical graph order.
+- `data-path`: the exact SVG path string used in `d`.
+- `data-route`, `data-waypoints`, `data-start-anchor`, and `data-end-anchor`:
+  editable routing metadata.
+
+`route: simple` renders a straight `M x,y L x,y` path, with optional explicit
+waypoints inserted as straight line segments. `route: orthogonal` renders
+Manhattan-style segments through each waypoint: horizontal to waypoint x, then
+vertical to waypoint y, then horizontal/vertical to the target anchor.
+
+`sdn_graph_update_edge_at` is the pure reroute operation for editor event
+wiring. It updates an edge's route, waypoint string, and anchors by index while
+leaving node geometry and graph metadata untouched.

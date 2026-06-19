@@ -248,9 +248,41 @@ fn sdn_graph_to_canonical_sdn(graph: SdnGraph) -> text:
         out.push("    " + style.css + ", " + style.key + ", " + style.value)
     out.join("\n") + "\n"
 
+fn sdn_graph_render_edge_path(edge: SdnGraphEdge, from_node: SdnGraphNode, to_node: SdnGraphNode) -> text:
+    val start = _sg_anchor_point(from_node, edge.start_anchor)
+    val finish = _sg_anchor_point(to_node, edge.end_anchor)
+    val waypoints = _sg_parse_waypoints(edge.waypoints)
+    if edge.route == "orthogonal":
+        return _sg_build_orthogonal_path(waypoints, start, finish)
+    _sg_build_straight_path(waypoints, start, finish)
+
+fn sdn_graph_update_edge_at(graph: SdnGraph, edge_index: i64, route: text, waypoints: text, start_anchor: text, end_anchor: text) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        val current = graph.edges[i]
+        var next = _sg_clone_edge(current)
+        if i == edge_index:
+            next.route = route
+            next.waypoints = waypoints
+            next.start_anchor = start_anchor
+            next.end_anchor = end_anchor
+        out_edges.push(next)
+        i = i + 1
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
 fn sdn_graph_render_html(graph: SdnGraph) -> text:
     var html: [text] = []
     html.push("<div class=\"sdn-graph sdd-diagram\" data-format=\"sdd\" data-format-name=\"" + sdn_graph_format_name() + "\" data-graph=\"" + _sg_escape_html(graph.name) + "\" data-direction=\"" + _sg_escape_html(graph.direction) + "\" data-theme=\"" + _sg_escape_html(graph.theme) + "\" data-css-file=\"" + _sg_escape_html(graph.css_file) + "\">")
+    if graph.edges.len() > 0:
+        html.push("<svg class=\"sdd-connector-layer\" aria-hidden=\"true\" focusable=\"false\">")
+        var edge_index = 0
+        for edge in graph.edges:
+            val path = _sg_edge_svg_path(graph, edge)
+            if path != "":
+                html.push("<path class=\"sdd-connector-path " + _sg_css_classes(edge.css) + "\" data-edge-index=\"" + edge_index.to_text() + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\" d=\"" + path + "\" fill=\"none\" stroke=\"currentColor\"><title>" + _sg_escape_html(edge.label) + "</title></path>")
+            edge_index = edge_index + 1
+        html.push("</svg>")
     var i = 0
     while i < graph.nodes.len():
         val node = graph.nodes[i]
@@ -265,10 +297,120 @@ fn sdn_graph_render_html(graph: SdnGraph) -> text:
             style = style + ";height:" + _sg_safe_length(node.height)
         html.push("<button type=\"button\" class=\"sdn-graph-node sdd-node " + _sg_css_classes(node.css) + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" data-layer=\"" + _sg_escape_html(node.layer) + "\" data-x=\"" + _sg_escape_html(node.x) + "\" data-y=\"" + _sg_escape_html(node.y) + "\" data-width=\"" + _sg_escape_html(node.width) + "\" data-height=\"" + _sg_escape_html(node.height) + "\" style=\"" + style + "\">" + _sg_escape_html(node.label) + "</button>")
         i = i + 1
+    var edge_div_index = 0
     for edge in graph.edges:
-        html.push("<div class=\"sdn-graph-edge sdd-connector " + _sg_css_classes(edge.css) + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\">" + _sg_escape_html(edge.label) + "</div>")
+        val path = _sg_edge_svg_path(graph, edge)
+        html.push("<div class=\"sdn-graph-edge sdd-connector " + _sg_css_classes(edge.css) + "\" data-edge-index=\"" + edge_div_index.to_text() + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\">" + _sg_escape_html(edge.label) + "</div>")
+        edge_div_index = edge_div_index + 1
     html.push("</div>")
     html.join("")
+
+fn _sg_edge_svg_path(graph: SdnGraph, edge: SdnGraphEdge) -> text:
+    val from_idx = _sg_find_node_index(graph, edge.from_id)
+    val to_idx = _sg_find_node_index(graph, edge.to_id)
+    if from_idx < 0 or to_idx < 0:
+        return ""
+    sdn_graph_render_edge_path(edge, graph.nodes[from_idx], graph.nodes[to_idx])
+
+fn _sg_find_node_index(graph: SdnGraph, id: text) -> i64:
+    var i = 0
+    while i < graph.nodes.len():
+        if graph.nodes[i].id == id:
+            return i
+        i = i + 1
+    -1
+
+fn _sg_anchor_point(node: SdnGraphNode, anchor: text) -> tuple:
+    val x = _sg_int_length(node.x)
+    val y = _sg_int_length(node.y)
+    val w = _sg_int_length_or(node.width, 120)
+    val h = _sg_int_length_or(node.height, 48)
+    if anchor == "left":
+        return (x, y + h / 2)
+    if anchor == "right":
+        return (x + w, y + h / 2)
+    if anchor == "top":
+        return (x + w / 2, y)
+    if anchor == "bottom":
+        return (x + w / 2, y + h)
+    (x + w / 2, y + h / 2)
+
+fn _sg_parse_waypoints(value: text) -> [tuple]:
+    var points: [tuple] = []
+    val trimmed = value.trim()
+    if trimmed == "":
+        return points
+    val tokens = trimmed.split(";")
+    for token in tokens:
+        val t = token.trim()
+        val sep = t.index_of("x")
+        if sep > 0:
+            val x_text = t.slice(0, sep).trim()
+            val y_text = t.slice(sep + 1, t.len()).trim()
+            points.push((_sg_int_length(x_text), _sg_int_length(y_text)))
+    points
+
+fn _sg_build_straight_path(points: [tuple], start: tuple, finish: tuple) -> text:
+    var d = "M " + start.0.to_text() + "," + start.1.to_text()
+    for point in points:
+        d = d + " L " + point.0.to_text() + "," + point.1.to_text()
+    d + " L " + finish.0.to_text() + "," + finish.1.to_text()
+
+fn _sg_build_orthogonal_path(points: [tuple], start: tuple, finish: tuple) -> text:
+    var d = "M " + start.0.to_text() + "," + start.1.to_text()
+    var current_x = start.0
+    var current_y = start.1
+    for point in points:
+        if current_x != point.0:
+            d = d + " L " + point.0.to_text() + "," + current_y.to_text()
+            current_x = point.0
+        if current_y != point.1:
+            d = d + " L " + current_x.to_text() + "," + point.1.to_text()
+            current_y = point.1
+    if current_x != finish.0:
+        d = d + " L " + finish.0.to_text() + "," + current_y.to_text()
+        current_x = finish.0
+    if current_y != finish.1:
+        d = d + " L " + current_x.to_text() + "," + finish.1.to_text()
+    d
+
+fn _sg_clone_edge(edge: SdnGraphEdge) -> SdnGraphEdge:
+    SdnGraphEdge(
+        from_id: edge.from_id,
+        to_id: edge.to_id,
+        label: edge.label,
+        css: edge.css,
+        kind: edge.kind,
+        route: edge.route,
+        waypoints: edge.waypoints,
+        start_anchor: edge.start_anchor,
+        end_anchor: edge.end_anchor
+    )
+
+fn _sg_int_length_or(value: text, fallback: i64) -> i64:
+    val parsed = _sg_int_length(value)
+    if parsed == 0 and value.trim() == "":
+        return fallback
+    parsed
+
+fn _sg_int_length(value: text) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return 0
+    var numeric = ""
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if (ch >= "0" and ch <= "9") or (ch == "-" and i == 0):
+            numeric = numeric + ch
+        elif ch == ".":
+            i = trimmed.len()
+        else:
+            i = trimmed.len()
+        i = i + 1
+    if numeric == "" or numeric == "-":
+        return 0
+    numeric.to_i64()
 
 fn _sg_parse_dense_node(line: text) -> SdnGraphNode:
     val sep = line.index_of(":")

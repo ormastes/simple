@@ -15,8 +15,12 @@ First production slice for the SDN-backed diagram editor dialect.
 - SDD-004: HTML rendering exposes deterministic editor metadata for SDD
   diagrams, nodes, and connectors.
 - SDD-005: Weave rules can apply node layout and shape edits by selector.
+- SDD-006: HTML rendering synthesizes deterministic SVG connector paths from
+  node geometry, start/end anchors, route mode, and waypoints.
+- SDD-007: Diagram routing can be updated through a pure edge reroute operation
+  suitable for IDE/editor event wiring.
 
 ## Out of Scope
 
 Interactive drag handles, draw.io XML import/export, and a full browser editor
-are follow-up slices.
+remain follow-up slices.

@@ -7,6 +7,9 @@
 - SDD-002: Diagram nodes preserve shape, explicit x/y position, width/height,
   and layer metadata.
 - SDD-003: Diagram connectors preserve route, waypoints, and start/end anchors.
+- SDD-006: Diagram connectors render deterministic SVG `data-path` values from
+  anchors and waypoints.
+- SDD-007: Pure reroute edits update edge route, waypoint, and anchor metadata.
 
 ## Evidence
 

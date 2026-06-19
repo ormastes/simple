@@ -110,7 +110,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=9 features=43 actions=12
+  llm-catalog: apps=9 features=44 actions=13
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -274,15 +274,15 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
-expect(catalog.len()).to_equal(8)
+expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=43 actions=12")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=44 actions=13")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -299,6 +299,11 @@ expect(catalog[3].actions.join(",")).to_contain("render-ppt-markdown-html")
 expect(catalog[3].actions.join(",")).to_contain("slide-edit")
 expect(catalog[4].owner_module).to_equal("std.editor.services.sdn_graph")
 expect(catalog[4].features.join(",")).to_contain("sdd-source")
+expect(catalog[4].features.join(",")).to_contain("connector-paths")
+expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
+val draw_graph = sdn_graph_parse("graph: Feature\nA: A x: 0 y: 0 width: 80 height: 20\nB: B x: 160 y: 0 width: 80 height: 20\nA -> B: flow route: simple start: right end: left")
+val rerouted = sdn_graph_update_edge_at(draw_graph, 0, "orthogonal", "120x10;120x40", "right", "left")
+expect(sdn_graph_render_html(rerouted)).to_contain("data-path=\"M 80,10 L 120,10 L 120,40 L 160,40 L 160,10\"")
 expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
 expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
 val ui_design = office_ui_design_parse("design: Feature Check\nnode button|Run|button|16|16|80|32|primary|controls|action")

@@ -144,7 +144,8 @@ possible so they are runner-verifiable.
    Named the SDN-backed diagram dialect **SDD: Simple Diagram Document**
    (`.sdd.sdn`) and started draw.io/Figma-level hardening by adding explicit
    node geometry, layer metadata, connector routes, waypoints, anchors, and
-   weave-based layout edits to `std.editor.services.sdn_graph`.
+   weave-based layout edits to `std.editor.services.sdn_graph`. Follow-on slice
+   adds rendered SVG connector paths and a pure reroute operation.
 13. ACTIVE (local 2026-06-19) — **HTML UI editor substrate**:
    Added a pure `app.office.ui_editor` design-document layer for Figma-like
    positioned frames/components, inspector-ready HTML, SDD export, and guarded
@@ -213,3 +214,8 @@ possible so they are runner-verifiable.
   implementation covers positioned UI nodes, HTML design-surface rendering,
   SDD export, and stale-safe label edits. Draw catalog ownership moves to the
   SDD substrate and Designer is added as the HTML UI editor catalog app.
+- 2026-06-19 dev: Advanced the SDD draw.io-like connector slice. Added SVG
+  connector path synthesis from node geometry, anchors, route mode, and
+  waypoints; exposed `data-edge-index`/`data-path`; added pure
+  `sdn_graph_update_edge_at` reroute editing; and updated the Draw LLM catalog
+  action to include `reroute-sdd-connector`.

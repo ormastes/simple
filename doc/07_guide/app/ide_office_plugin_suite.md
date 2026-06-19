@@ -43,8 +43,9 @@ SDD-compatible tables, and guards label edits with expected-value checks.
 
 Draw/diagram editing should prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
-waypoints, and anchors. Legacy SVG shape helpers remain compatibility utilities,
-not the LLM catalog owner for Draw.
+waypoints, anchors, rendered SVG connector paths, and pure edge reroute
+operations. Legacy SVG shape helpers remain compatibility utilities, not the LLM
+catalog owner for Draw.
 
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
@@ -52,8 +53,9 @@ modes:
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
 - LLM catalog: Writer has `render-writer-markdown-html`; Impress has
-  `render-ppt-markdown-html`; Draw is SDD-backed; Designer has
-  `render-ui-html`, `export-ui-sdd`, and `ui-label-edit`.
+  `render-ppt-markdown-html`; Draw is SDD-backed with
+  `reroute-sdd-connector`; Designer has `render-ui-html`, `export-ui-sdd`, and
+  `ui-label-edit`.
 
 ## Verification
 
