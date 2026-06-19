@@ -366,7 +366,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 494 lines folded for reproduction.
+Runnable source: 496 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -760,6 +760,8 @@ val distributed_ui = office_ui_design_distribute_checked(aligned_ui.design, alig
 expect(moved_ui.reason).to_equal("updated")
 expect(office_ui_design_render_html(ui_design)).to_contain("data-format=\"html-ui\"")
 expect(office_ui_design_render_html(ui_design)).to_contain("data-canvas-width=\"960\"")
+expect(office_ui_design_render_html(ui_design)).to_contain("data-frame-count=\"0\"")
+expect(office_ui_design_render_html(ui_design)).to_contain("data-component-count=\"3\"")
 expect(layered_ui.reason).to_equal("updated")
 expect(styled_ui.reason).to_equal("updated")
 expect(duplicated_ui.reason).to_equal("updated")

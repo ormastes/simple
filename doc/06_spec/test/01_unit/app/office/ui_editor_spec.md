@@ -139,7 +139,7 @@ expect(design.nodes[1].constraint_vertical).to_equal("stretch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -149,6 +149,8 @@ expect(html).to_contain("class=\"office-ui-design\"")
 expect(html).to_contain("data-format=\"html-ui\"")
 expect(html).to_contain("data-format-name=\"HTML UI Design Document\"")
 expect(html).to_contain("data-node-count=\"1\"")
+expect(html).to_contain("data-frame-count=\"0\"")
+expect(html).to_contain("data-component-count=\"1\"")
 expect(html).to_contain("data-canvas-width=\"800\"")
 expect(html).to_contain("data-canvas-height=\"480\"")
 expect(html).to_contain("data-id=\"submit\"")
@@ -167,13 +169,15 @@ expect(html).to_contain("Sign &lt;in&gt;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val design = office_ui_design_parse("design: Inspect\nnode card|Card|frame|0|0|200|120|panel|1|container\nnode action|Action|button|20|20|80|32|primary|controls|action")
 val html = office_ui_design_render_html_with_selection(design, "action")
 expect(html).to_contain("data-selected-node-id=\"action\"")
+expect(html).to_contain("data-frame-count=\"1\"")
+expect(html).to_contain("data-component-count=\"2\"")
 expect(html).to_contain("data-id=\"action\"")
 expect(html).to_contain("office-ui-selected")
 expect(html).to_contain("data-selected=\"true\"")
