@@ -63,28 +63,35 @@ fn evaluate_formula_display_text(expr: text, sheet: Sheet) -> text:
     stable display value while the native f64-return path is not reliable from
     every entrypoint.
     """
+    val result = evaluate_formula_display_text_checked(expr, sheet)
+    if result.ok:
+        return result.value
+    ""
+
+fn evaluate_formula_display_text_checked(expr: text, sheet: Sheet) -> DisplayTextResult:
+    """Evaluate a display-safe formula while preserving whether it was supported."""
     _evaluate_formula_display_text(expr, sheet, 0)
 
-fn _evaluate_formula_display_text(expr: text, sheet: Sheet, depth: i32) -> text:
+fn _evaluate_formula_display_text(expr: text, sheet: Sheet, depth: i32) -> DisplayTextResult:
     if depth > MAX_EVAL_DEPTH:
-        return ""
+        return DisplayTextResult(ok: false, value: "")
     var formula = expr.trim()
     if formula.len() == 0:
-        return ""
+        return DisplayTextResult(ok: false, value: "")
     if formula.starts_with("="):
         formula = formula.substring(1)
     val tokens = tokenize_formula(formula)
     if tokens.len() == 0:
-        return ""
+        return DisplayTextResult(ok: false, value: "")
     if tokens.len() >= 3 and _is_alpha(tokens[0].char_at(0)) and tokens[1] == "(":
         val function_result = _eval_display_function_call(tokens[0].upper(), tokens, 2, sheet, depth)
         if function_result.ok:
-            return function_result.value
-        return ""
+            return DisplayTextResult(ok: true, value: function_result.value)
+        return DisplayTextResult(ok: false, value: "")
     val result = _eval_display_sum(tokens, sheet, depth)
     if not result.ok:
-        return ""
-    "{result.value}"
+        return DisplayTextResult(ok: false, value: "")
+    DisplayTextResult(ok: true, value: "{result.value}")
 
 # =========================================================================
 # Tokenizer
@@ -593,8 +600,10 @@ fn _resolve_cell_display_i64(ref_str: text, sheet: Sheet, depth: i32) -> Display
         CellValue.FormulaVal(expr, cached_display):
             if cached_display != "":
                 return _parse_i64_text(cached_display)
-            val text_value = _evaluate_formula_display_text(expr, sheet, depth + 1)
-            return _parse_i64_text(text_value)
+            val text_result = _evaluate_formula_display_text(expr, sheet, depth + 1)
+            if not text_result.ok:
+                return DisplayEvalResult(ok: false, value: 0)
+            return _parse_i64_text(text_result.value)
         _:
             return DisplayEvalResult(ok: false, value: 0)
 
@@ -606,10 +615,7 @@ fn _resolve_cell_display_text(ref_str: text, sheet: Sheet, depth: i32) -> Displa
         CellValue.FormulaVal(expr, cached_display):
             if cached_display != "":
                 return DisplayTextResult(ok: true, value: cached_display)
-            val text_value = _evaluate_formula_display_text(expr, sheet, depth + 1)
-            if text_value == "":
-                return DisplayTextResult(ok: false, value: "")
-            return DisplayTextResult(ok: true, value: text_value)
+            return _evaluate_formula_display_text(expr, sheet, depth + 1)
         CellValue.Empty:
             return DisplayTextResult(ok: false, value: "")
         _:

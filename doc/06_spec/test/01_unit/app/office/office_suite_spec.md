@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 44 | 44 | 0 | 0 |
+| 45 | 45 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -488,6 +488,76 @@ expect(ui.root_id).to_equal("root")
 
 </details>
 
+#### caches display-safe Calc formulas through app edit confirmation
+
+- var app = SheetsApp new
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- sheet set value
+- app navigate to
+- app formula text = "=COUNTA
+- app confirm edit
+   - Expected: cell_display_text(app.workbook.active().get_cell("C1")) equals `5`
+- app navigate to
+- app formula text = "=VLOOKUP
+- app confirm edit
+   - Expected: cell_display_text(app.workbook.active().get_cell("C2")) equals `2`
+- app navigate to
+- app formula text = "=TRIM
+- app confirm edit
+   - Expected: cell_display_text(app.workbook.active().get_cell("C3")) equals `Mixed Case`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var app = SheetsApp.new()
+val sheet = app.workbook.active()
+sheet.set_value("A1", "Alpha")
+sheet.set_value("A2", "")
+sheet.set_value("A3", "42")
+sheet.set_value("A4", "=LEN(\"xy\")")
+sheet.set_value("B1", "FALSE")
+sheet.set_value("D1", "A-1")
+sheet.set_value("A6", "A-1")
+sheet.set_value("B6", "Bolt")
+sheet.set_value("C6", "=LEN(\"xx\")")
+sheet.set_value("A7", "B-2")
+sheet.set_value("B7", "Nut")
+sheet.set_value("C7", "9")
+app.workbook.sheets = [sheet]
+
+app.navigate_to(2, 0)
+app.formula_text = "=COUNTA(A1:A4,B1,\"x\",\"\")"
+app.confirm_edit()
+expect(cell_display_text(app.workbook.active().get_cell("C1"))).to_equal("5")
+
+app.navigate_to(2, 1)
+app.formula_text = "=VLOOKUP(D1,A6:C7,3,FALSE)"
+app.confirm_edit()
+expect(cell_display_text(app.workbook.active().get_cell("C2"))).to_equal("2")
+
+app.navigate_to(2, 2)
+app.formula_text = "=TRIM(\"  Mixed Case  \")"
+app.confirm_edit()
+expect(cell_display_text(app.workbook.active().get_cell("C3"))).to_equal("Mixed Case")
+```
+
+</details>
+
 #### builds slides ui
 
 <details>
@@ -823,8 +893,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 44 |
-| Active scenarios | 44 |
+| Total scenarios | 45 |
+| Active scenarios | 45 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

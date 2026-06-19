@@ -12,8 +12,12 @@
 - CALC-FUNC-004: The formula display path supports exact-match `VLOOKUP`
   over a rectangular table range, returning display text from a 1-based result
   column in the matched row.
+- CALC-FUNC-005: Calc app edit confirmation stores display-safe formula results
+  in `FormulaVal.cached_display` so the visible sheet grid shows verified
+  `COUNTA`, exact-match `VLOOKUP`, and text-function results after recalc.
 
 ## Out of Scope
 
 Full Excel-compatible function coverage, approximate `VLOOKUP`, nested text
-function calls, and f64-returning numeric verification remain follow-up work.
+function calls, dependency-graph ordering, and f64-returning numeric
+cell-reference verification remain follow-up work.

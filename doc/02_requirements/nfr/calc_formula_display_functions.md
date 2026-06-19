@@ -11,3 +11,6 @@
 - CALC-FUNC-NFR-004: `VLOOKUP` display evaluation must be deterministic and
   bounded by the supplied table range; missing keys, invalid result columns, and
   unsupported approximate-match mode return an empty display string.
+- CALC-FUNC-NFR-005: Calc app formula recalc must remain pure in-process
+  workbook mutation, with no filesystem, shell, browser, network, or GUI
+  dependency while refreshing cached display text.

@@ -3,6 +3,13 @@
 ## Sub-Glossaries
 - [Simple Feature Module (SFM)](simple_feature_module_glossary.md) — `.sfm` feature-module format, layers, DI/AOP, security level, profiles, VERSION.md ([tldr](simple_feature_module_glossary_tldr.md)).
 
+## Calc Display-Safe Recalc
+Calc display-safe recalc is the Office Sheets app path that refreshes
+`FormulaVal.cached_display` through `evaluate_formula_display_text_checked` for
+runner-verifiable formulas such as `COUNTA`, exact-match `VLOOKUP`, `LEN`,
+`LOWER`, `UPPER`, and `TRIM`. It is separate from full numeric formula parity,
+which still depends on the tracked f64 backend blocker.
+
 ## Crate
 Package and module are used in many different meaning across different languages.
 Crate is simple.sdn exist deployment package unit.

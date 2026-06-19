@@ -12,6 +12,9 @@
   requested result column, resolves formula-valued return cells through the
   display path, and fails closed for missing keys, out-of-range columns, and
   unsupported approximate-match mode.
+- `SheetsApp.confirm_edit()` writes display-safe `COUNTA`, exact-match
+  `VLOOKUP`, and text-function results into formula `cached_display`, and the
+  visible cell display reads those cached values after app-level recalc.
 - Existing circular-reference display tests remain the regression gate for
   depth-bounded formula resolution.
 
@@ -19,10 +22,14 @@
 
 - Unit spec:
   `test/01_unit/app/office/sheets/formula_harden_spec.spl`
+- App-level unit spec:
+  `test/01_unit/app/office/office_suite_spec.spl`
 - Generated manual:
   `doc/06_spec/test/01_unit/app/office/sheets/formula_harden_spec.md`
+- Generated app manual:
+  `doc/06_spec/test/01_unit/app/office/office_suite_spec.md`
 
 ## Follow-Up
 
-Full numeric function assertions and recalc correctness remain blocked by the
-tracked f64 backend issue.
+Full numeric function assertions, dependency-graph ordering, and cell-reference
+numeric recalc assertions remain blocked by the tracked f64 backend issue.

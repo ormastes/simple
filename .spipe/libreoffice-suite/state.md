@@ -261,6 +261,12 @@ possible so they are runner-verifiable.
   matched-row display text while failing closed for missing keys, invalid result
   columns, and unsupported approximate mode. Catalog metadata now exposes
   `formula-vlookup`; focused formula hardening and IDE office specs passed.
+- 2026-06-19 dev: Advanced Calc app-level display recalc. `SheetsApp.confirm_edit`
+  now writes the edited sheet back into the workbook, clears stale formula
+  caches, and stores checked display-safe `COUNTA`, exact-match `VLOOKUP`, and
+  text-function results into `FormulaVal.cached_display` for visible grid
+  rendering. Catalog metadata now exposes `formula-display-recalc`; numeric
+  cell-reference recalc remains gated by the tracked f64 backend blocker.
 - 2026-06-19 dev: Advanced Figma-like Designer multi-node layout operations.
   Added geometry signatures plus guarded alignment and distribution helpers over
   selected UI nodes, with all-or-nothing stale/missing/invalid-geometry

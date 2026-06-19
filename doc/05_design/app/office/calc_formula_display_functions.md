@@ -32,8 +32,15 @@ the circular-reference guard. `COUNTA` ranges use `parse_range` and
 same range parser, scans rows from the leftmost column, and rejects missing
 matches, result columns outside the range, and approximate-match mode.
 
+`SheetsApp.confirm_edit()` writes the edited value into a local active-sheet
+copy, recalculates formulas, and stores the recalculated sheet back into the
+workbook. Recalc clears stale formula caches before recomputing each formula
+cell, prefers `evaluate_formula_display_text_checked` for supported display-safe
+formulas, and falls back to the legacy `evaluate_formula` display formatting
+only when the display-safe path reports the formula as unsupported.
+
 ## Limits
 
 Function composition is intentionally top-level only for this slice. Nested text
-functions, approximate `VLOOKUP`, and full Excel-compatible function semantics
-are follow-up work.
+functions, approximate `VLOOKUP`, dependency-graph ordering, and full
+Excel-compatible function semantics are follow-up work.

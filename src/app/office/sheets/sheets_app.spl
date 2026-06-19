@@ -9,7 +9,7 @@ use common.ui.builder.{build_tree_with_title, with_flex}
 use common.ui.theme_registry.{ThemeId, theme_id_key}
 use app.office.sheets.spreadsheet.{Workbook, Sheet}
 use app.office.sheets.cell.{Cell, CellValue, CellRef, CellStyle, cell_ref_to_string, col_to_letter, cell_display_text, parse_cell_ref}
-use app.office.sheets.formula.{evaluate_formula}
+use app.office.sheets.formula.{evaluate_formula, evaluate_formula_display_text_checked}
 
 # =========================================================================
 # Application State
@@ -210,9 +210,10 @@ impl SheetsApp:
         """Apply the formula bar value to the active cell and recalculate formulas."""
         me.editing = false
         val ref_str = cell_ref_to_string(me.active_cell)
-        me.workbook.active().set_value(ref_str, me.formula_text)
-        # Recalculate formulas in the active sheet
-        _recalculate_formulas(me.workbook.active())
+        var sheet = me.workbook.active()
+        sheet.set_value(ref_str, me.formula_text)
+        sheet = _recalculate_formulas(sheet)
+        me.store_active_sheet(sheet)
         me.modified = true
 
     me cancel_edit():
@@ -230,6 +231,18 @@ impl SheetsApp:
                 me.formula_text = value
             _:
                 me.formula_text = ""
+
+    me store_active_sheet(sheet: Sheet):
+        """Replace the active sheet after editing a copied workbook sheet."""
+        var sheets: [Sheet] = []
+        var i = 0
+        for existing in me.workbook.sheets:
+            if i == me.workbook.active_sheet:
+                sheets.push(sheet)
+            else:
+                sheets.push(existing)
+            i = i + 1
+        me.workbook.sheets = sheets
 
 # =========================================================================
 # Internal Helpers
@@ -254,34 +267,60 @@ fn _formula_bar_text(app: SheetsApp) -> text:
         return app.formula_text
     "Enter value or formula..."
 
-fn _recalculate_formulas(sheet: Sheet):
+fn _recalculate_formulas(sheet: Sheet) -> Sheet:
     """Recalculate all formula cells in the sheet, updating their cached display."""
-    for key in sheet.cells.keys():
-        val cell = sheet.get_cell(key)
+    var updated_sheet = _clear_formula_cached_displays(sheet)
+    for key in updated_sheet.cells.keys():
+        val cell = updated_sheet.get_cell(key)
         match cell.value:
             CellValue.FormulaVal(expr, cached_display):
-                val result = evaluate_formula(expr, sheet)
-                var display = ""
-                match result:
-                    CellValue.NumberVal(value):
-                        val int_val = value.to_i64()
-                        val diff = value - int_val.to_f64()
-                        if diff == 0.0:
-                            display = "{int_val}"
-                        else:
-                            display = "{value}"
-                    CellValue.BoolVal(value):
-                        display = if value: "TRUE" else: "FALSE"
-                    CellValue.TextVal(value):
-                        display = value
-                    CellValue.ErrorVal(message):
-                        display = "#ERR: {message}"
-                    _:
-                        display = ""
+                val display = _formula_cache_display(expr, updated_sheet)
                 val updated_cell = Cell(
                     value: CellValue.FormulaVal(expr: expr, cached_display: display),
                     style: cell.style
                 )
-                sheet.set_cell(key, updated_cell)
+                updated_sheet.set_cell(key, updated_cell)
             _:
                 pass_do_nothing("non-formula cells do not need cached formula display updates")
+    updated_sheet
+
+fn _clear_formula_cached_displays(sheet: Sheet) -> Sheet:
+    var updated_sheet = sheet
+    for key in updated_sheet.cells.keys():
+        val cell = updated_sheet.get_cell(key)
+        match cell.value:
+            CellValue.FormulaVal(expr, cached_display):
+                val updated_cell = Cell(
+                    value: CellValue.FormulaVal(expr: expr, cached_display: ""),
+                    style: cell.style
+                )
+                updated_sheet.set_cell(key, updated_cell)
+            _:
+                pass_do_nothing("non-formula cells have no cached formula display")
+    updated_sheet
+
+fn _formula_cache_display(expr: text, sheet: Sheet) -> text:
+    val display_result = evaluate_formula_display_text_checked(expr, sheet)
+    if display_result.ok:
+        return display_result.value
+    _legacy_formula_cache_display(expr, sheet)
+
+fn _legacy_formula_cache_display(expr: text, sheet: Sheet) -> text:
+    val result = evaluate_formula(expr, sheet)
+    match result:
+        CellValue.NumberVal(value):
+            val int_val = value.to_i64()
+            val diff = value - int_val.to_f64()
+            if diff == 0.0:
+                return "{int_val}"
+            return "{value}"
+        CellValue.BoolVal(value):
+            if value:
+                return "TRUE"
+            return "FALSE"
+        CellValue.TextVal(value):
+            return value
+        CellValue.ErrorVal(message):
+            return "#ERR: {message}"
+        _:
+            return ""
