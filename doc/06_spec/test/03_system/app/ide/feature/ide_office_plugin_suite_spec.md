@@ -110,7 +110,7 @@ agent-dashboard: Agent Dashboard [dashboard] -> app.editor.mcp_tools (agent, das
 db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, simple-db, portal-db)
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
-  launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
+  launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 office_actions=9 office_cards=9 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
   llm-catalog: apps=9 features=97 actions=56
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -199,6 +199,8 @@ expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
 expect(tui_report).to_contain("llm-catalog: apps=9")
 expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
+expect(tui_report).to_contain("office_actions=9")
+expect(tui_report).to_contain("office_cards=9")
 expect(registry_checks).to_contain("metadata=true")
 expect(registry_checks).to_contain("ppt_html=true")
 expect(registry_checks).to_contain("path_meta=true")
@@ -1250,7 +1252,7 @@ expect(summary).to_contain("metadata=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1260,8 +1262,11 @@ expect(sanity.tui_mode).to_equal("tui")
 expect(sanity.gui_mode).to_equal("gui")
 expect(sanity.sdl_mode).to_equal("gui-sdl")
 expect(sanity.file_count).to_equal(3)
+expect(sanity.office_action_count).to_equal(9)
+expect(sanity.office_card_count).to_equal(9)
 expect(sanity.unknown_option).to_equal("--bad-mode")
 expect(summary).to_contain("gui=gui")
+expect(summary).to_contain("office_actions=9")
 ```
 
 </details>

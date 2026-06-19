@@ -30,7 +30,9 @@ The launcher-visible product name is `LibreOffice`; cards should use the
 LibreOffice app names Writer, Calc, Impress, Draw, Base, and Math while
 compatible actions remain `open_word`, `open_sheets`, `open_slides`,
 `open_draw`, `open_db`, and `open_math`. `run_office` accepts those launcher
-action names and normalizes them to the same app routes.
+action names and normalizes them to the same app routes. IDE launch feature
+checks report both Office launcher action and card counts so launcher metadata
+cannot drift from the product surface.
 The CLI `word` and `writer` routes load the Markdown-backed Writer surface; the
 older rich-text `WordApp` remains only as a compatibility UI module.
 
