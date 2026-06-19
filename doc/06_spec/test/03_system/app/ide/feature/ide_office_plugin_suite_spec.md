@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -207,6 +207,7 @@ expect(tui_report).to_contain("libre_roundtrip=6")
 expect(registry_checks).to_contain("metadata=true")
 expect(registry_checks).to_contain("ppt_html=true")
 expect(registry_checks).to_contain("path_meta=true")
+expect(registry_checks).to_contain("handle_meta=true")
 expect(registry_checks).to_contain("display_recalc=true")
 expect(registry_checks).to_contain("contracts=true")
 ```
