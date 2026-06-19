@@ -108,7 +108,11 @@ The current canonical evidence contract is:
   evidence env, must pass the original-backend gate with `rdoc_scene=html-css-chrome`,
   `RDOC` magic, and an `rdoc_html_path` ending in
   `test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html`. A local
-  failed capture or missing env is not completion evidence.
+  failed capture or missing env is not completion evidence. The top-level GUI
+  RenderDoc feature audit re-emits the external evidence env, gate scene, gate
+  HTML path, and required backend/scene/status/magic/fixture suffix fields so
+  the original Chrome/Vulkan requirement is visible beside the Simple and
+  Electron lanes.
 - Electron Chromium HTML/CSS path:
   `build/renderdoc/canonical-probe/electron-html/evidence.env` should report
   `rdoc_backend=electron`, `rdoc_scene=html-css-electron`,
