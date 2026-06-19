@@ -200,7 +200,8 @@ fail closed and preserve the original value.
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
 `.office-ui-design` HTML surface with inspector and canvas metadata, exports
-node/frame/component counts to the root, exports nodes to SDD-compatible tables
+node/frame/component counts to the root, emits document-order `data-node-index`
+metadata for layer panels, exports nodes to SDD-compatible tables
 with quoted cells for spaces, commas, and quotes, and guards label/layout/layer
 edits with expected-value checks. Numeric layer values render as deterministic `data-z-index` / CSS
 `z-index` values; semantic layer names fall back to document-order stack values.
