@@ -226,6 +226,8 @@ metadata div has:
   for segment handle overlays.
 - `data-segments`: semicolon-separated rendered segment endpoints as
   `x1,y1-x2,y2`, derived from the path for drag handles and hit testing.
+- `data-segment-midpoints`: semicolon-separated `x,y` segment centers for
+  handle placement.
 - `data-start-x`, `data-start-y`, `data-end-x`, and `data-end-y`: numeric
   endpoint coordinates derived from the rendered path for connector handles.
 - `data-label-x` and `data-label-y`: explicit connector label point from the
