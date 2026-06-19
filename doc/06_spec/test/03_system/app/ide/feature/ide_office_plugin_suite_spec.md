@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 611 lines folded for reproduction.
+Runnable source: 613 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -498,6 +498,7 @@ val stale_ui_label_action = office_action_dispatch("ui-label-edit", "button|Old|
 val blank_ui_label_action = office_action_dispatch("ui-label-edit", "   |Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_layout_action = office_action_dispatch("ui-layout-edit", "   |16|16|80|32|24|32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val blank_geometry_ui_layout_action = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|   |32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "frame|off|0|0,0,0,0|vertical|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container\nnode button|Run|button|16|16|80|32|primary|frame|action")
 val blank_ui_auto_layout_action = office_action_dispatch("ui-auto-layout-edit", "   |off|0|0,0,0,0|vertical|8|4,4,4,4\ndesign: Feature\nnode frame|Panel|frame|0|0|200|120|surface|1|container")
 val ui_constraints_action = office_action_dispatch("ui-constraints-edit", "button|left|top|stretch|top\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -633,6 +634,7 @@ expect(stale_ui_label_action.reason).to_equal("stale-node")
 expect(blank_ui_label_action.reason).to_equal("invalid-args")
 expect(ui_layout_action.output).to_contain("left: 24px")
 expect(blank_ui_layout_action.reason).to_equal("invalid-args")
+expect(blank_geometry_ui_layout_action.reason).to_equal("invalid-args")
 expect(ui_auto_layout_action.output).to_contain("data-layout-mode=\"vertical\"")
 expect(blank_ui_auto_layout_action.reason).to_equal("invalid-args")
 expect(ui_constraints_action.output).to_contain("data-constraint-h=\"stretch\"")

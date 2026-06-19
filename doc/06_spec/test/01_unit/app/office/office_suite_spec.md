@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 89 | 89 | 0 | 0 |
+| 91 | 91 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1323,6 +1323,38 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank UI layout geometry fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|   |32|96|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
+#### accepts max i32 UI layout size fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-layout-edit", "button|16|16|80|32|24|32|2147483647|40\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("width: 2147483647px")
+```
+
+</details>
+
 #### rejects blank UI auto-layout action target ids
 
 <details>
@@ -1659,8 +1691,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 89 |
-| Active scenarios | 89 |
+| Total scenarios | 91 |
+| Active scenarios | 91 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
