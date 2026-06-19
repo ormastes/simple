@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -206,12 +206,47 @@ expect(missing.reason).to_equal("missing-node")
 
 </details>
 
+#### updates numeric layer z-order with guarded checks
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Stack\nnode back|Back|frame|0|0|200|120|panel|1|container\nnode front|Front|button|20|20|80|32|primary|2|action")
+val html = office_ui_design_render_html(design)
+expect(html).to_contain("data-id=\"back\"")
+expect(html).to_contain("data-z-index=\"1\"")
+expect(html).to_contain("data-id=\"front\"")
+expect(html).to_contain("z-index: 2")
+
+val accepted = office_ui_design_update_layer_checked(design, "back", "1", "3")
+expect(accepted.accepted).to_be(true)
+expect(accepted.reason).to_equal("updated")
+expect(accepted.design.nodes[0].layer).to_equal("3")
+expect(office_ui_design_render_html(accepted.design)).to_contain("data-z-index=\"3\"")
+expect(office_ui_design_to_sdd(accepted.design)).to_contain("back, Back, panel, container, frame, 0, 0, 200, 120, 3")
+
+val rejected = office_ui_design_update_layer_checked(design, "back", "wrong", "4")
+expect(rejected.accepted).to_be(false)
+expect(rejected.reason).to_equal("stale-node")
+expect(rejected.design.nodes[0].layer).to_equal("1")
+
+val missing = office_ui_design_update_layer_checked(design, "missing", "1", "2")
+expect(missing.accepted).to_be(false)
+expect(missing.reason).to_equal("missing-node")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

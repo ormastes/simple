@@ -9,6 +9,7 @@
 - Serialize to SDD node tables.
 - Accept matching guarded label edits and reject stale edits.
 - Accept matching guarded move/resize layout edits and reject stale geometry.
+- Render numeric layer values as z-index metadata and guard layer updates.
 
 ## System Coverage
 

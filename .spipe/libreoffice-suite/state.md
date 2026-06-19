@@ -149,7 +149,7 @@ possible so they are runner-verifiable.
 13. ACTIVE (local 2026-06-19) — **HTML UI editor substrate**:
    Added a pure `app.office.ui_editor` design-document layer for Figma-like
    positioned frames/components, inspector-ready HTML, SDD export, and guarded
-   label/layout edits. This is the Office Designer surface; live browser
+   label/layout/layer edits. This is the Office Designer surface; live browser
    editing and collaborative constraints are future slices.
 
 ## Log
@@ -224,3 +224,7 @@ possible so they are runner-verifiable.
   move/resize operations over x/y/width/height, updated Designer catalog
   metadata to expose `layout-edit` and `ui-layout-edit`, and covered the path in
   both the UI editor unit spec and IDE office system spec.
+- 2026-06-19 dev: Advanced Designer stack ordering. Numeric `layer` values now
+  render as deterministic `data-z-index`/CSS `z-index`; non-numeric semantic
+  layers fall back to document order. Added `office_ui_design_update_layer_checked`
+  and catalog metadata for `layer-edit` / `ui-layer-edit`.

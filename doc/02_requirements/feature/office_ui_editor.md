@@ -12,6 +12,8 @@
 - REQ-UI-006: Expose the UI editor through the Office LLM catalog.
 - REQ-UI-007: Guard node layout edits with expected x/y/width/height checks so
   move and resize operations reject stale geometry.
+- REQ-UI-008: Support deterministic layer/z-order metadata for positioned nodes
+  with guarded layer updates.
 
 ## Out of Scope
 

@@ -21,7 +21,7 @@ guards edits with stale-label rejection.
 
 use std.spec.{describe, it, expect}
 
-use app.office.ui_editor.{office_ui_design_parse, office_ui_design_render_html, office_ui_design_to_sdd, office_ui_design_update_label_checked, office_ui_design_update_layout_checked, office_ui_editor_format_name}
+use app.office.ui_editor.{office_ui_design_parse, office_ui_design_render_html, office_ui_design_to_sdd, office_ui_design_update_label_checked, office_ui_design_update_layer_checked, office_ui_design_update_layout_checked, office_ui_editor_format_name}
 
 describe "Office UI editor substrate":
     it "names the HTML UI design document format":
@@ -89,5 +89,29 @@ describe "Office UI editor substrate":
         expect(rejected.diff).to_contain("actual: 72,200,120,36")
 
         val missing = office_ui_design_update_layout_checked(design, "missing", "0", "0", "1", "1", "2", "2", "3", "3")
+        expect(missing.accepted).to_be(false)
+        expect(missing.reason).to_equal("missing-node")
+
+    it "updates numeric layer z-order with guarded checks":
+        val design = office_ui_design_parse("design: Stack\nnode back|Back|frame|0|0|200|120|panel|1|container\nnode front|Front|button|20|20|80|32|primary|2|action")
+        val html = office_ui_design_render_html(design)
+        expect(html).to_contain("data-id=\"back\"")
+        expect(html).to_contain("data-z-index=\"1\"")
+        expect(html).to_contain("data-id=\"front\"")
+        expect(html).to_contain("z-index: 2")
+
+        val accepted = office_ui_design_update_layer_checked(design, "back", "1", "3")
+        expect(accepted.accepted).to_be(true)
+        expect(accepted.reason).to_equal("updated")
+        expect(accepted.design.nodes[0].layer).to_equal("3")
+        expect(office_ui_design_render_html(accepted.design)).to_contain("data-z-index=\"3\"")
+        expect(office_ui_design_to_sdd(accepted.design)).to_contain("back, Back, panel, container, frame, 0, 0, 200, 120, 3")
+
+        val rejected = office_ui_design_update_layer_checked(design, "back", "wrong", "4")
+        expect(rejected.accepted).to_be(false)
+        expect(rejected.reason).to_equal("stale-node")
+        expect(rejected.design.nodes[0].layer).to_equal("1")
+
+        val missing = office_ui_design_update_layer_checked(design, "missing", "1", "2")
         expect(missing.accepted).to_be(false)
         expect(missing.reason).to_equal("missing-node")

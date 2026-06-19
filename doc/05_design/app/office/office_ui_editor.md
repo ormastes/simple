@@ -11,7 +11,13 @@ geometry, layer, and component role.
 `office_ui_design_render_html` emits a single relative `.office-ui-design`
 surface with absolutely positioned `.office-ui-node` children. The output is
 inspector-friendly: stable `data-format`, `data-id`, `data-kind`,
-`data-layer`, and `data-component` attributes are part of the contract.
+`data-layer`, `data-z-index`, and `data-component` attributes are part of the
+contract.
+
+`layer` is dual-purpose by design. Non-numeric values such as `base` and
+`controls` remain semantic layer names and render with document-order fallback
+z-index values. Numeric layer values render directly as deterministic CSS
+`z-index` values for Figma-like stack ordering.
 
 ## SDD Bridge
 
@@ -29,3 +35,7 @@ operation. It moves/resizes a node only when the caller's expected
 x/y/width/height tuple matches the current node geometry, then returns a new
 design plus a compact diff. Stale geometry and missing nodes return rejected
 `OfficeUiEditResult` values without mutating the original design.
+
+`office_ui_design_update_layer_checked` updates semantic or numeric layer
+metadata with the same stale-check contract. Numeric replacements immediately
+affect rendered `data-z-index` and CSS `z-index`.

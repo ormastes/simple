@@ -39,7 +39,9 @@ compatibility path and should escape element text, sanitize CSS colors to simple
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable
 `.office-ui-design` HTML surface with inspector metadata, exports nodes to
-SDD-compatible tables, and guards label/layout edits with expected-value checks.
+SDD-compatible tables, and guards label/layout/layer edits with expected-value
+checks. Numeric layer values render as deterministic `data-z-index` / CSS
+`z-index` values; semantic layer names fall back to document-order stack values.
 
 Draw/diagram editing should prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
@@ -55,7 +57,7 @@ modes:
 - LLM catalog: Writer has `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `reroute-sdd-connector`; Designer has `render-ui-html`, `export-ui-sdd`, and
-  `ui-label-edit` / `ui-layout-edit`.
+  `ui-label-edit` / `ui-layout-edit` / `ui-layer-edit`.
 
 ## Verification
 

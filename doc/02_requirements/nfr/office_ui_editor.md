@@ -6,3 +6,5 @@
 - NFR-UI-003: Geometry must be deterministic and text/i64-oriented to avoid the
   current f64 nested-struct blocker.
 - NFR-UI-004: Feature-check metadata must remain stable for LLM/tool use.
+- NFR-UI-005: Stacking order must be deterministic; numeric layer values map to
+  rendered z-index values, while non-numeric layers fall back to document order.

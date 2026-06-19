@@ -64,10 +64,13 @@ fn office_ui_design_render_html(design: OfficeUiDesign) -> text:
     val w = _office_ui_safe_length(design.width)
     val h = _office_ui_safe_length(design.height)
     var out = "<div class=\"office-ui-design\" data-format=\"html-ui\" data-format-name=\"" + office_ui_editor_format_name() + "\" data-design=\"" + markdown_escape_html(design.name) + "\" style=\"position: relative; width: " + w + "; height: " + h + "; box-sizing: border-box; background: #ffffff; border: 1px solid #d1d5db; overflow: hidden;\">"
+    var z_index = 0
     for node in design.nodes:
         val class_name = "office-ui-node office-ui-" + _office_ui_safe_token(node.kind) + _office_ui_css_class(node.css)
-        val style = "position: absolute; left: " + _office_ui_safe_length(node.x) + "; top: " + _office_ui_safe_length(node.y) + "; width: " + _office_ui_safe_length(node.width) + "; height: " + _office_ui_safe_length(node.height) + "; box-sizing: border-box; border: 1px solid #6b7280; background: #f9fafb; color: #111827; overflow: hidden;"
-        out = out + "<div class=\"" + class_name + "\" data-id=\"" + markdown_escape_html(node.id) + "\" data-kind=\"" + markdown_escape_html(node.kind) + "\" data-layer=\"" + markdown_escape_html(node.layer) + "\" data-component=\"" + markdown_escape_html(node.component) + "\" style=\"" + style + "\">" + markdown_escape_html(node.label) + "</div>"
+        val node_z = _office_ui_layer_z_index(node.layer, z_index)
+        val style = "position: absolute; left: " + _office_ui_safe_length(node.x) + "; top: " + _office_ui_safe_length(node.y) + "; width: " + _office_ui_safe_length(node.width) + "; height: " + _office_ui_safe_length(node.height) + "; z-index: " + node_z + "; box-sizing: border-box; border: 1px solid #6b7280; background: #f9fafb; color: #111827; overflow: hidden;"
+        out = out + "<div class=\"" + class_name + "\" data-id=\"" + markdown_escape_html(node.id) + "\" data-kind=\"" + markdown_escape_html(node.kind) + "\" data-layer=\"" + markdown_escape_html(node.layer) + "\" data-z-index=\"" + node_z + "\" data-component=\"" + markdown_escape_html(node.component) + "\" style=\"" + style + "\">" + markdown_escape_html(node.label) + "</div>"
+        z_index = z_index + 1
     out + "</div>"
 
 fn office_ui_design_to_sdd(design: OfficeUiDesign) -> text:
@@ -126,6 +129,24 @@ fn office_ui_design_update_layout_checked(design: OfficeUiDesign, node_id: text,
         i = i + 1
     OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-node-layout " + node_id + " @@\nexpected: " + expected_x + "," + expected_y + "," + expected_width + "," + expected_height + "\nactual: <missing>\nrejected: " + new_x + "," + new_y + "," + new_width + "," + new_height, design: design)
 
+fn office_ui_design_update_layer_checked(design: OfficeUiDesign, node_id: text, expected_layer: text, new_layer: text) -> OfficeUiEditResult:
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var i = 0
+    while i < design.nodes.len():
+        val current = design.nodes[i]
+        if current.id == node_id:
+            if current.layer != expected_layer:
+                return OfficeUiEditResult(accepted: false, reason: "stale-node", diff: "@@ ui-node-layer " + node_id + " @@\nexpected: " + expected_layer + "\nactual: " + current.layer + "\nrejected: " + new_layer, design: design)
+            var updated = _office_ui_clone_node(current)
+            updated.layer = new_layer
+            out.nodes[i] = updated
+            return OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-node-layer " + node_id + " @@\n- " + expected_layer + "\n+ " + new_layer, design: out)
+        i = i + 1
+    OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-node-layer " + node_id + " @@\nexpected: " + expected_layer + "\nactual: <missing>\nrejected: " + new_layer, design: design)
+
 fn _office_ui_clone_node(node: OfficeUiNode) -> OfficeUiNode:
     OfficeUiNode(
         id: node.id,
@@ -183,6 +204,27 @@ fn _office_ui_css_class(css: text) -> text:
     if safe == "component" and css.trim() == "":
         return ""
     " office-ui-css-" + safe
+
+fn _office_ui_layer_z_index(layer: text, fallback: i64) -> text:
+    val trimmed = layer.trim()
+    if _office_ui_is_i64_token(trimmed):
+        return trimmed
+    fallback.to_text()
+
+fn _office_ui_is_i64_token(value: text) -> bool:
+    if value == "":
+        return false
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        val code = ch.char_code_at(0)
+        if i == 0 and ch == "-":
+            if value.len() == 1:
+                return false
+        elif code < 48 or code > 57:
+            return false
+        i = i + 1
+    true
 
 fn _office_ui_safe_length(value: text) -> text:
     val trimmed = value.trim()

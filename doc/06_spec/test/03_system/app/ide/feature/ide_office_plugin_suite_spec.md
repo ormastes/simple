@@ -110,7 +110,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=9 features=45 actions=14
+  llm-catalog: apps=9 features=46 actions=15
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -274,7 +274,7 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,7 +282,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=45 actions=14")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=46 actions=15")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -306,13 +306,18 @@ val rerouted = sdn_graph_update_edge_at(draw_graph, 0, "orthogonal", "120x10;120
 expect(sdn_graph_render_html(rerouted)).to_contain("data-path=\"M 80,10 L 120,10 L 120,40 L 160,40 L 160,10\"")
 expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
 expect(catalog[5].features.join(",")).to_contain("layout-edit")
+expect(catalog[5].features.join(",")).to_contain("layer-edit")
 expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
 expect(catalog[5].actions.join(",")).to_contain("ui-layout-edit")
+expect(catalog[5].actions.join(",")).to_contain("ui-layer-edit")
 val ui_design = office_ui_design_parse("design: Feature Check\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val moved_ui = office_ui_design_update_layout_checked(ui_design, "button", "16", "16", "80", "32", "24", "32", "96", "40")
+val layered_ui = office_ui_design_update_layer_checked(moved_ui.design, "button", "controls", "3")
 expect(moved_ui.reason).to_equal("updated")
 expect(office_ui_design_render_html(ui_design)).to_contain("data-format=\"html-ui\"")
-expect(office_ui_design_to_sdd(moved_ui.design)).to_contain("button, Run, primary, action, rounded, 24, 32, 96, 40, controls")
+expect(layered_ui.reason).to_equal("updated")
+expect(office_ui_design_render_html(layered_ui.design)).to_contain("data-z-index=\"3\"")
+expect(office_ui_design_to_sdd(layered_ui.design)).to_contain("button, Run, primary, action, rounded, 24, 32, 96, 40, 3")
 expect(catalog[6].owner_module).to_equal("app.office.base_db")
 expect(catalog[7].features.join(",")).to_contain("mathml")
 expect(catalog[8].actions.join(",")).to_contain("counter-action")
