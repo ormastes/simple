@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 547 lines folded for reproduction.
+Runnable source: 549 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -522,6 +522,7 @@ val invalid_sdd_style_action = office_action_dispatch("edit-sdd-node-style", "A|
 val sdd_label_action = office_action_dispatch("edit-sdd-node-label", "A|Renamed\ngraph: Label\nA: Old x: 0 y: 0 width: 20 height: 20")
 val missing_sdd_label_action = office_action_dispatch("edit-sdd-node-label", "Nope|Renamed\ngraph: Label\nA: Old x: 0 y: 0 width: 20 height: 20")
 val sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "A|-8|12|64|32\ngraph: Geometry\nA: Old @accent role: actor shape: diamond x: 0 y: 0 width: 20 height: 20 layer: front")
+val invalid_sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "A|0|0|-1|32\ngraph: Geometry\nA: Old x: 0 y: 0 width: 20 height: 20")
 val sdd_layer_action = office_action_dispatch("edit-sdd-node-layer", "A|front\ngraph: Layer\nA: Old x: 0 y: 0 width: 20 height: 20 layer: back")
 val invalid_sdd_layer_action = office_action_dispatch("edit-sdd-node-layer", "A|front layer\ngraph: Layer\nA: Old x: 0 y: 0 width: 20 height: 20 layer: back")
 val sdd_order_action = office_action_dispatch("order-sdd-node", "A|front\ngraph: Order\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 0 width: 20 height: 20")
@@ -638,6 +639,7 @@ expect(invalid_sdd_style_action.reason).to_equal("invalid-style-token")
 expect(sdd_label_action.output).to_contain(">Renamed</button>")
 expect(missing_sdd_label_action.reason).to_equal("missing-node")
 expect(sdd_geometry_action.output).to_contain("style=\"left:-8px;top:12px;width:64px;height:32px\"")
+expect(invalid_sdd_geometry_action.reason).to_equal("invalid-args")
 expect(sdd_layer_action.output).to_contain("data-layer=\"front\"")
 expect(invalid_sdd_layer_action.reason).to_equal("invalid-layer-token")
 expect(sdd_order_action.output).to_contain("data-node=\"A\"")

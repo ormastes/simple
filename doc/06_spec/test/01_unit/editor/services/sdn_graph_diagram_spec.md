@@ -720,7 +720,7 @@ expect(unsafe.reason).to_equal("invalid-canvas-number")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 92 lines folded for reproduction.
+Runnable source: 96 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -777,6 +777,10 @@ expect(html).to_contain("data-shape=\"diamond\"")
 expect(html).to_contain("clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)")
 expect(html).to_contain("style=\"left:32px;top:48px;width:96px;height:64px\"")
 expect(canon).to_contain("A, Alpha, \"accent selected\", decision, diamond, 32, 48, 96, 64, foreground")
+val bad_geometry = sdn_graph_update_node_geometry_checked(graph, 0, "bad", "48", "96", "64")
+val missing_geometry = sdn_graph_update_node_geometry_checked(graph, 8, "32", "48", "96", "64")
+expect(bad_geometry.reason).to_equal("invalid-geometry")
+expect(missing_geometry.reason).to_equal("missing-node")
 
 val shaped = sdn_graph_update_node_shape_at(graph, 1, "cylinder")
 val styled = sdn_graph_update_node_style_at(shaped, 1, "storage highlight")
