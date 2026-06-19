@@ -8,6 +8,13 @@ BUILD_ROOT="${BUILD_ROOT:-build/production_gui_web_renderer_parity_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_renderer_parity_evidence_$(date -u +%F).md}"
 TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-20}"
 CHROME_SURFACE_TIMEOUT_SECS="${CHROME_LAYOUT_TIMEOUT_SECS:-60}"
+SUBCHECK_TIMEOUT_SECS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180}"
+MATRIX_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_MATRIX_SCRIPT:-scripts/check/check-electron-generated-gui-web-parity-matrix-evidence.shs}"
+LAYOUT_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_SCRIPT:-scripts/check/check-electron-simple-web-layout-manifest-evidence.shs}"
+SURFACE_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SURFACE_SCRIPT:-scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs}"
+BACKEND_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_BACKEND_SCRIPT:-scripts/check/check-production-gui-web-backend-executed-evidence.shs}"
+FONT_OFFLOAD_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_FONT_OFFLOAD_SCRIPT:-scripts/check/check-production-gui-font-offload-evidence.shs}"
+METAL_READBACK_SCRIPT="${PRODUCTION_GUI_WEB_RENDERER_PARITY_METAL_READBACK_SCRIPT:-scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs}"
 
 mkdir -p "$BUILD_ROOT" "$(dirname -- "$REPORT_PATH")"
 rm -f "$BUILD_ROOT/evidence.env" "$REPORT_PATH"
@@ -26,25 +33,60 @@ append_prefixed_env() {
     fi
 }
 
+run_bounded() {
+    stdout_path="$1"
+    stderr_path="$2"
+    timeout_secs="$3"
+    shift 3
+
+    if [ -z "$timeout_secs" ] || [ "$timeout_secs" = "0" ]; then
+        "$@" >"$stdout_path" 2>"$stderr_path"
+    elif command -v timeout >/dev/null 2>&1; then
+        timeout "$timeout_secs" "$@" >"$stdout_path" 2>"$stderr_path"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$timeout_secs" "$@" >"$stdout_path" 2>"$stderr_path"
+    elif command -v perl >/dev/null 2>&1; then
+        perl -e 'my $secs = shift @ARGV; alarm $secs; exec @ARGV;' "$timeout_secs" "$@" >"$stdout_path" 2>"$stderr_path"
+    else
+        "$@" >"$stdout_path" 2>"$stderr_path"
+    fi
+}
+
+is_timeout_exit() {
+    code="$1"
+    [ "$code" = "124" ] || [ "$code" = "137" ] || [ "$code" = "142" ]
+}
+
 run_matrix() {
     case_dir="$BUILD_ROOT/electron_matrix"
     mkdir -p "$case_dir"
     set +e
-    BUILD_ROOT="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
-        sh scripts/check/check-electron-generated-gui-web-parity-matrix-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    run_bounded "$case_dir/stdout.env" "$case_dir/stderr.log" "$SUBCHECK_TIMEOUT_SECS" \
+        env BUILD_ROOT="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+        sh "$MATRIX_SCRIPT"
     code=$?
     set -e
     env_file="$case_dir/evidence.env"
     status=""
     reason=""
+    timed_out=false
+    if is_timeout_exit "$code"; then
+        timed_out=true
+        status=timeout
+        reason=matrix-timeout
+    fi
     if [ -s "$env_file" ]; then
-        status="$(field_of electron_generated_gui_web_matrix_status "$env_file")"
-        reason="$(field_of electron_generated_gui_web_matrix_reason "$env_file")"
+        if [ "$timed_out" != "true" ]; then
+            status="$(field_of electron_generated_gui_web_matrix_status "$env_file")"
+            reason="$(field_of electron_generated_gui_web_matrix_reason "$env_file")"
+        fi
     fi
     {
         echo "production_gui_web_renderer_parity_matrix_exit_code=$code"
         echo "production_gui_web_renderer_parity_matrix_status=$status"
         echo "production_gui_web_renderer_parity_matrix_reason=$reason"
+        echo "production_gui_web_renderer_parity_matrix_timed_out=$timed_out"
+        echo "production_gui_web_renderer_parity_matrix_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
         echo "production_gui_web_renderer_parity_matrix_report=$case_dir/report.md"
     } >>"$BUILD_ROOT/evidence.env"
     append_prefixed_env "matrix_" "$env_file"
@@ -55,8 +97,9 @@ run_layout_manifest() {
     case_dir="$BUILD_ROOT/layout_manifest"
     mkdir -p "$case_dir"
     set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
-        sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    run_bounded "$case_dir/stdout.env" "$case_dir/stderr.log" "$SUBCHECK_TIMEOUT_SECS" \
+        env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+        sh "$LAYOUT_SCRIPT"
     code=$?
     set -e
     env_file="$case_dir/evidence.env"
@@ -66,9 +109,17 @@ run_layout_manifest() {
     pass_count=""
     tracked_count=""
     fail_count=""
+    timed_out=false
+    if is_timeout_exit "$code"; then
+        timed_out=true
+        status=timeout
+        reason=layout-manifest-timeout
+    fi
     if [ -s "$env_file" ]; then
-        status="$(field_of electron_simple_web_layout_manifest_status "$env_file")"
-        reason="$(field_of electron_simple_web_layout_manifest_reason "$env_file")"
+        if [ "$timed_out" != "true" ]; then
+            status="$(field_of electron_simple_web_layout_manifest_status "$env_file")"
+            reason="$(field_of electron_simple_web_layout_manifest_reason "$env_file")"
+        fi
         case_count="$(field_of electron_simple_web_layout_manifest_case_count "$env_file")"
         pass_count="$(field_of electron_simple_web_layout_manifest_pass_count "$env_file")"
         tracked_count="$(field_of electron_simple_web_layout_manifest_tracked_count "$env_file")"
@@ -78,6 +129,8 @@ run_layout_manifest() {
         echo "production_gui_web_renderer_parity_layout_manifest_exit_code=$code"
         echo "production_gui_web_renderer_parity_layout_manifest_status=$status"
         echo "production_gui_web_renderer_parity_layout_manifest_reason=$reason"
+        echo "production_gui_web_renderer_parity_layout_manifest_timed_out=$timed_out"
+        echo "production_gui_web_renderer_parity_layout_manifest_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
         echo "production_gui_web_renderer_parity_layout_manifest_case_count=$case_count"
         echo "production_gui_web_renderer_parity_layout_manifest_pass_count=$pass_count"
         echo "production_gui_web_renderer_parity_layout_manifest_tracked_count=$tracked_count"
@@ -93,13 +146,14 @@ run_surface_manifest() {
     mkdir -p "$case_dir"
     layout_env="$BUILD_ROOT/layout_manifest/evidence.env"
     set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" LAYOUT_ENV="$layout_env" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" CHROME_LAYOUT_TIMEOUT_SECS="$CHROME_SURFACE_TIMEOUT_SECS" \
-        sh scripts/check/check-tauri-chrome-simple-web-layout-manifest-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    run_bounded "$case_dir/stdout.env" "$case_dir/stderr.log" "$SUBCHECK_TIMEOUT_SECS" \
+        env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" LAYOUT_ENV="$layout_env" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" CHROME_LAYOUT_TIMEOUT_SECS="$CHROME_SURFACE_TIMEOUT_SECS" \
+        sh "$SURFACE_SCRIPT"
     code=$?
     set -e
     env_file="$case_dir/evidence.env"
-    font_status=""
-    font_reason=""
+    status=""
+    reason=""
     electron_status=""
     tauri_status=""
     chrome_status=""
@@ -119,9 +173,17 @@ run_surface_manifest() {
     chrome_accepted_count=""
     fake_capture=""
     tolerance=""
+    timed_out=false
+    if is_timeout_exit "$code"; then
+        timed_out=true
+        status=timeout
+        reason=surface-manifest-timeout
+    fi
     if [ -s "$env_file" ]; then
-        status="$(field_of tauri_chrome_simple_web_layout_manifest_status "$env_file")"
-        reason="$(field_of tauri_chrome_simple_web_layout_manifest_reason "$env_file")"
+        if [ "$timed_out" != "true" ]; then
+            status="$(field_of tauri_chrome_simple_web_layout_manifest_status "$env_file")"
+            reason="$(field_of tauri_chrome_simple_web_layout_manifest_reason "$env_file")"
+        fi
         electron_status="$(field_of tauri_chrome_simple_web_layout_manifest_electron_capture_status "$env_file")"
         tauri_status="$(field_of tauri_chrome_simple_web_layout_manifest_tauri_capture_status "$env_file")"
         chrome_status="$(field_of tauri_chrome_simple_web_layout_manifest_chrome_capture_status "$env_file")"
@@ -152,6 +214,8 @@ run_surface_manifest() {
         echo "production_gui_web_renderer_parity_surface_manifest_exit_code=$code"
         echo "production_gui_web_renderer_parity_surface_manifest_status=$status"
         echo "production_gui_web_renderer_parity_surface_manifest_reason=$reason"
+        echo "production_gui_web_renderer_parity_surface_manifest_timed_out=$timed_out"
+        echo "production_gui_web_renderer_parity_surface_manifest_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
         echo "production_gui_web_renderer_parity_surface_manifest_electron_capture_status=$electron_status"
         echo "production_gui_web_renderer_parity_surface_manifest_tauri_capture_status=$tauri_status"
         echo "production_gui_web_renderer_parity_surface_manifest_chrome_capture_status=$chrome_status"
@@ -185,8 +249,9 @@ run_backend() {
     case_dir="$BUILD_ROOT/backend_executed"
     mkdir -p "$case_dir"
     set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
-        sh scripts/check/check-production-gui-web-backend-executed-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    run_bounded "$case_dir/stdout.env" "$case_dir/stderr.log" "$SUBCHECK_TIMEOUT_SECS" \
+        env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh "$BACKEND_SCRIPT"
     code=$?
     set -e
     env_file="$case_dir/evidence.env"
@@ -205,9 +270,17 @@ run_backend() {
     throughput_min=""
     throughput_avg=""
     throughput_max=""
+    timed_out=false
+    if is_timeout_exit "$code"; then
+        timed_out=true
+        status=timeout
+        reason=backend-timeout
+    fi
     if [ -s "$env_file" ]; then
-        status="$(field_of production_gui_backend_status "$env_file")"
-        reason="$(field_of production_gui_backend_reason "$env_file")"
+        if [ "$timed_out" != "true" ]; then
+            status="$(field_of production_gui_backend_status "$env_file")"
+            reason="$(field_of production_gui_backend_reason "$env_file")"
+        fi
         exact="$(field_of production_gui_backend_exact_backend_parity "$env_file")"
         cpu_diff="$(field_of production_gui_backend_cpu_simd_different_pixels "$env_file")"
         metal_resolved="$(field_of production_gui_backend_metal_resolved "$env_file")"
@@ -226,6 +299,8 @@ run_backend() {
         echo "production_gui_web_renderer_parity_backend_exit_code=$code"
         echo "production_gui_web_renderer_parity_backend_status=$status"
         echo "production_gui_web_renderer_parity_backend_reason=$reason"
+        echo "production_gui_web_renderer_parity_backend_timed_out=$timed_out"
+        echo "production_gui_web_renderer_parity_backend_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
         echo "production_gui_web_renderer_parity_backend_exact=$exact"
         echo "production_gui_web_renderer_parity_backend_cpu_simd_different_pixels=$cpu_diff"
         echo "production_gui_web_renderer_parity_backend_metal_resolved=$metal_resolved"
@@ -249,8 +324,9 @@ run_font_offload() {
     case_dir="$BUILD_ROOT/font_offload"
     mkdir -p "$case_dir"
     set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
-        sh scripts/check/check-production-gui-font-offload-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    run_bounded "$case_dir/stdout.env" "$case_dir/stderr.log" "$SUBCHECK_TIMEOUT_SECS" \
+        env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh "$FONT_OFFLOAD_SCRIPT"
     code=$?
     set -e
     env_file="$case_dir/evidence.env"
@@ -272,9 +348,17 @@ run_font_offload() {
     bitmap_ready=""
     bitmap_expected_checksum=""
     bitmap_actual_checksum=""
+    timed_out=false
+    if is_timeout_exit "$code"; then
+        timed_out=true
+        font_status=timeout
+        font_reason=font-offload-timeout
+    fi
     if [ -s "$env_file" ]; then
-        font_status="$(field_of production_gui_font_offload_status "$env_file")"
-        font_reason="$(field_of production_gui_font_offload_reason "$env_file")"
+        if [ "$timed_out" != "true" ]; then
+            font_status="$(field_of production_gui_font_offload_status "$env_file")"
+            font_reason="$(field_of production_gui_font_offload_reason "$env_file")"
+        fi
         vector_backend="$(field_of production_gui_font_offload_vector_backend "$env_file")"
         vector_status="$(field_of production_gui_font_offload_vector_status "$env_file")"
         vector_reason="$(field_of production_gui_font_offload_vector_reason "$env_file")"
@@ -296,6 +380,8 @@ run_font_offload() {
         echo "production_gui_web_renderer_parity_font_offload_exit_code=$code"
         echo "production_gui_web_renderer_parity_font_offload_status=$font_status"
         echo "production_gui_web_renderer_parity_font_offload_reason=$font_reason"
+        echo "production_gui_web_renderer_parity_font_offload_timed_out=$timed_out"
+        echo "production_gui_web_renderer_parity_font_offload_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
         echo "production_gui_web_renderer_parity_font_offload_vector_backend=$vector_backend"
         echo "production_gui_web_renderer_parity_font_offload_vector_status=$vector_status"
         echo "production_gui_web_renderer_parity_font_offload_vector_reason=$vector_reason"
@@ -322,8 +408,9 @@ run_metal_readback() {
     case_dir="$BUILD_ROOT/metal_readback"
     mkdir -p "$case_dir"
     set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
-        sh scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    run_bounded "$case_dir/stdout.env" "$case_dir/stderr.log" "$SUBCHECK_TIMEOUT_SECS" \
+        env BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" \
+        sh "$METAL_READBACK_SCRIPT"
     code=$?
     set -e
     env_file="$case_dir/evidence.env"
@@ -332,9 +419,17 @@ run_metal_readback() {
     spec_status=""
     download=""
     tolerance=""
+    timed_out=false
+    if is_timeout_exit "$code"; then
+        timed_out=true
+        metal_status=timeout
+        metal_reason=metal-readback-timeout
+    fi
     if [ -s "$env_file" ]; then
-        metal_status="$(field_of metal_engine2d_framebuffer_readback_status "$env_file")"
-        metal_reason="$(field_of metal_engine2d_framebuffer_readback_reason "$env_file")"
+        if [ "$timed_out" != "true" ]; then
+            metal_status="$(field_of metal_engine2d_framebuffer_readback_status "$env_file")"
+            metal_reason="$(field_of metal_engine2d_framebuffer_readback_reason "$env_file")"
+        fi
         spec_status="$(field_of metal_engine2d_framebuffer_readback_spec_status "$env_file")"
         download="$(field_of metal_engine2d_framebuffer_gpu_readback_available "$env_file")"
         tolerance="$(field_of metal_engine2d_framebuffer_blur_or_tolerance_used "$env_file")"
@@ -343,6 +438,8 @@ run_metal_readback() {
         echo "production_gui_web_renderer_parity_metal_readback_exit_code=$code"
         echo "production_gui_web_renderer_parity_metal_readback_status=$metal_status"
         echo "production_gui_web_renderer_parity_metal_readback_reason=$metal_reason"
+        echo "production_gui_web_renderer_parity_metal_readback_timed_out=$timed_out"
+        echo "production_gui_web_renderer_parity_metal_readback_timeout_secs=$SUBCHECK_TIMEOUT_SECS"
         echo "production_gui_web_renderer_parity_metal_readback_spec_status=$spec_status"
         echo "production_gui_web_renderer_parity_metal_readback_available=$download"
         echo "production_gui_web_renderer_parity_metal_readback_blur_or_tolerance_used=$tolerance"
