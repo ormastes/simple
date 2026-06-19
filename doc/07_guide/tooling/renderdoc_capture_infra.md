@@ -55,6 +55,13 @@ Important keys:
 - `rdoc_capture_file`: `.rdc` path when one exists.
 - `rdoc_capture_magic`: `RDOC` for a valid RenderDoc capture.
 
+If `renderdoccmd` is unavailable, `capture-simple` and `capture-html` still
+write an `evidence.env` artifact under the requested output directory with
+`rdoc_capture_status=unavailable`,
+`rdoc_capture_reason=missing-renderdoc`, an empty `rdoc_capture_file`, and an
+empty `rdoc_capture_magic`. This is not completion evidence; it makes the
+missing capture explicit for status gates and CI artifacts.
+
 The current canonical evidence contract is:
 
 - Simple in-application path:

@@ -27,7 +27,7 @@ renderdoc_capture_infra_spec
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -89,6 +89,8 @@ renderdoc_test_capture_html
   validation.
 - Capture commands write `evidence.env` with `rdoc_capture_status=` and
   `rdoc_capture_reason=`.
+- Unavailable capture hosts still write fail-closed `evidence.env` artifacts
+  instead of leaving missing evidence.
 - Compatibility wrappers route through the shared CLI.
 - The setup script owns path discovery and Vulkan layer registration.
 
@@ -107,7 +109,7 @@ instead of destabilizing ordinary unit checks.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -120,6 +122,7 @@ expect(cli).to_contain("register-layer")
 expect(common).to_contain("rdoc_capture_simple_vulkan")
 expect(common).to_contain("rdoc_capture_html")
 expect(common).to_contain("rdoc_validate_rdc_magic")
+expect(common).to_contain("rdoc_write_unavailable_capture")
 expect(common).to_contain("evidence.env")
 expect(common).to_contain("rdoc_capture_status=")
 expect(common).to_contain("rdoc_capture_reason=")
@@ -168,12 +171,37 @@ expect(setup).to_contain("rdoc_status_env")
 
 </details>
 
+#### writes typed unavailable capture evidence without requiring RenderDoc
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-renderdoc-unavailable-capture && . scripts/lib/renderdoc-evidence-common.shs; rdoc_write_unavailable_capture build/test-renderdoc-unavailable-capture/simple simple vulkan-engine2d missing-renderdoc || true"
+val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = source("build/test-renderdoc-unavailable-capture/simple/evidence.env")
+expect(evidence).to_contain("rdoc_backend=simple")
+expect(evidence).to_contain("rdoc_scene=vulkan-engine2d")
+expect(evidence).to_contain("rdoc_capture_status=unavailable")
+expect(evidence).to_contain("rdoc_capture_reason=missing-renderdoc")
+expect(evidence).to_contain("rdoc_capture_file=")
+expect(evidence).to_contain("rdoc_capture_size=0")
+expect(evidence).to_contain("rdoc_capture_magic=")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
