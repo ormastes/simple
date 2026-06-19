@@ -82,6 +82,8 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 - Simple RenderDoc evidence must pass the dedicated Simple Vulkan gate.
 - The full goal remains failed until the original external RenderDoc gate
   passes.
+- The gate reports every unsatisfied RenderDoc goal completion lane through
+  `renderdoc_goal_blocked_gate*` evidence fields.
 - Controlled Simple and external-host fixtures can drive the aggregate gate to
   `pass` without depending on stale local build artifacts.
 
@@ -100,6 +102,9 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
    - Expected: simple_status equals `pass`
    - Expected: simple_gate_status equals `pass`
    - Expected: external_status equals `pass`
+   - Expected: blocked_gate equals ``
+   - Expected: blocked_gate_count equals `0`
+   - Expected: blocked_gates equals ``
    - Expected: goal_status equals `fail`
    - Expected: goal_reason equals `original-renderdoc-evidence-missing`
    - Expected: external_status equals `unavailable`
@@ -112,7 +117,7 @@ sh scripts/check/check-html-css-renderdoc-goal-status.shs || true
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 111 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -138,15 +143,45 @@ expect(evidence).to_contain("simple_renderdoc_gate_status=")
 expect(evidence).to_contain("simple_renderdoc_gate_reason=")
 expect(evidence).to_contain("simple_renderdoc_gate_required_backend=simple")
 expect(evidence).to_contain("simple_renderdoc_gate_required_scene=vulkan-engine2d")
+expect(evidence).to_contain("simple_renderdoc_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl")
 expect(evidence).to_contain("simple_renderdoc_gate_required_status=pass")
 expect(evidence).to_contain("simple_renderdoc_gate_required_magic=RDOC")
+expect(evidence).to_contain("simple_renderdoc_capture_file_magic=")
+expect(evidence).to_contain("simple_renderdoc_gate_capture_file_magic=")
 expect(evidence).to_contain("external_renderdoc_status=")
+expect(evidence).to_contain("external_renderdoc_capture_env=")
+expect(evidence).to_contain("external_renderdoc_capture_status=")
+expect(evidence).to_contain("external_renderdoc_capture_reason=")
+expect(evidence).to_contain("external_renderdoc_capture_file=")
+expect(evidence).to_contain("external_renderdoc_capture_magic=")
+expect(evidence).to_contain("external_renderdoc_capture_file_magic=")
+expect(evidence).to_contain("external_renderdoc_capture_html_path=")
+expect(evidence).to_contain("external_renderdoc_gate_status=")
+expect(evidence).to_contain("external_renderdoc_gate_reason=")
+expect(evidence).to_contain("external_renderdoc_gate_capture_file_magic=")
 expect(evidence).to_contain("macos_portability_status=")
+expect(evidence).to_contain("macos_portability_reason=")
+expect(evidence).to_contain("macos_portability_evidence_env=")
+expect(evidence).to_contain("macos_portability_uname_s=")
+expect(evidence).to_contain("macos_portability_uname_m=")
+expect(evidence).to_contain("macos_portability_version=")
+expect(evidence).to_contain("macos_portability_gpu_summary=")
+expect(evidence).to_contain("macos_portability_vulkan_status=")
+expect(evidence).to_contain("macos_portability_vulkan_device=")
+expect(evidence).to_contain("macos_portability_vulkan_driver=")
+expect(evidence).to_contain("macos_portability_renderdoc_status=")
+expect(evidence).to_contain("macos_portability_run_captures=")
+expect(evidence).to_contain("macos_portability_capture_simple_status=")
+expect(evidence).to_contain("macos_portability_capture_html_status=")
+expect(evidence).to_contain("macos_portability_html_gate_status=")
 expect(evidence).to_contain("required_external_backend=original")
 expect(evidence).to_contain("required_external_scene=html-css-chrome")
 expect(evidence).to_contain("required_external_status=pass")
 expect(evidence).to_contain("required_external_magic=RDOC")
 expect(evidence).to_contain("required_external_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("renderdoc_goal_blocked_gate=")
+expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=")
+expect(evidence).to_contain("renderdoc_goal_blocked_gates=")
 
 val goal_status = _value_of(evidence, "html_css_renderdoc_goal_status")
 val goal_reason = _value_of(evidence, "html_css_renderdoc_goal_reason")
@@ -157,17 +192,32 @@ val simple_status = _value_of(evidence, "simple_renderdoc_status")
 val simple_reason = _value_of(evidence, "simple_renderdoc_reason")
 val simple_gate_status = _value_of(evidence, "simple_renderdoc_gate_status")
 val external_status = _value_of(evidence, "external_renderdoc_status")
+val macos_host = _value_of(evidence, "macos_portability_uname_s")
+val macos_vulkan_status = _value_of(evidence, "macos_portability_vulkan_status")
+val macos_renderdoc_status = _value_of(evidence, "macos_portability_renderdoc_status")
+val blocked_gate = _value_of(evidence, "renderdoc_goal_blocked_gate")
+val blocked_gate_count = _value_of(evidence, "renderdoc_goal_blocked_gate_count")
+val blocked_gates = _value_of(evidence, "renderdoc_goal_blocked_gates")
 
 step("Assert that missing local captures fail closed instead of passing by assumption")
 expect(traceability_status).to_equal("pass")
 expect(traceability_html_count).to_equal("105")
 expect(traceability_css_count.to_i64()).to_be_greater_than(389)
+if macos_host == "Darwin":
+    expect(macos_vulkan_status.len()).to_be_greater_than(0)
+    expect(macos_renderdoc_status.len()).to_be_greater_than(0)
 if goal_status == "pass":
     expect(simple_status).to_equal("pass")
     expect(simple_gate_status).to_equal("pass")
     expect(external_status).to_equal("pass")
+    expect(blocked_gate).to_equal("")
+    expect(blocked_gate_count).to_equal("0")
+    expect(blocked_gates).to_equal("")
 else:
     expect(goal_status).to_equal("fail")
+    expect(blocked_gate.len()).to_be_greater_than(0)
+    expect(blocked_gate_count.to_i64()).to_be_greater_than(0)
+    expect(blocked_gates).to_contain(blocked_gate)
     if simple_status == "pass":
         expect(goal_reason).to_equal("original-renderdoc-evidence-missing")
         expect(external_status).to_equal("unavailable")
@@ -181,6 +231,7 @@ val report = rt_file_read_text("build/test-html-css-renderdoc-goal-status/report
 expect(report).to_contain("# HTML/CSS RenderDoc Goal Status")
 expect(report).to_contain("- HTML/CSS traceability: pass (pass)")
 expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pass)")
+expect(report).to_contain("- blocked completion gates:")
 ```
 
 </details>
@@ -195,12 +246,12 @@ expect(report).to_contain("- HTML/CSS rendering manifest traceability: pass (pas
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Create controlled Simple and external-host RenderDoc evidence fixtures")
-val command = "rm -rf build/test-html-css-renderdoc-goal-status-pass && mkdir -p build/test-html-css-renderdoc-goal-status-pass/simple build/test-html-css-renderdoc-goal-status-pass/external && printf 'RDOCsynthetic simple capture\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_scene=html-css-chrome\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\nrdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-html-css-renderdoc-goal-status-pass/external/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/external/evidence.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-pass/out REPORT_PATH=build/test-html-css-renderdoc-goal-status-pass/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs"
+val command = "rm -rf build/test-html-css-renderdoc-goal-status-pass && mkdir -p build/test-html-css-renderdoc-goal-status-pass/simple build/test-html-css-renderdoc-goal-status-pass/external/capture/html && printf 'RDOCsynthetic simple capture\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc && printf 'RDOCsynthetic external capture\\n' > build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_capture_env=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/evidence.env\\nrdoc_external_host_capture_status_raw=pass\\nrdoc_external_host_capture_reason_raw=pass\\nrdoc_external_host_capture_file=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc\\nrdoc_external_host_capture_magic=RDOC\\nrdoc_external_host_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_scene=html-css-chrome\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\nrdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-html-css-renderdoc-goal-status-pass/external/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-html-css-renderdoc-goal-status-pass/external/evidence.env BUILD_DIR=build/test-html-css-renderdoc-goal-status-pass/out REPORT_PATH=build/test-html-css-renderdoc-goal-status-pass/report.md sh scripts/check/check-html-css-renderdoc-goal-status.shs"
 val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -211,15 +262,27 @@ expect(evidence).to_contain("html_css_renderdoc_goal_reason=pass")
 expect(evidence).to_contain("html_css_traceability_status=pass")
 expect(evidence).to_contain("html_css_rendering_manifest_traceability_status=pass")
 expect(evidence).to_contain("simple_renderdoc_status=pass")
+expect(evidence).to_contain("simple_renderdoc_capture_file_magic=RDOC")
 expect(evidence).to_contain("simple_renderdoc_gate_status=pass")
+expect(evidence).to_contain("simple_renderdoc_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("external_renderdoc_status=pass")
+expect(evidence).to_contain("external_renderdoc_capture_status=pass")
+expect(evidence).to_contain("external_renderdoc_capture_magic=RDOC")
+expect(evidence).to_contain("external_renderdoc_capture_file_magic=RDOC")
+expect(evidence).to_contain("external_renderdoc_capture_file=build/test-html-css-renderdoc-goal-status-pass/external/capture/html/html.rdc")
+expect(evidence).to_contain("external_renderdoc_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("external_renderdoc_gate_status=pass")
 expect(evidence).to_contain("external_renderdoc_gate_scene=html-css-chrome")
 expect(evidence).to_contain("external_renderdoc_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("external_renderdoc_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("required_external_backend=original")
 expect(evidence).to_contain("required_external_scene=html-css-chrome")
 expect(evidence).to_contain("required_external_status=pass")
 expect(evidence).to_contain("required_external_magic=RDOC")
 expect(evidence).to_contain("required_external_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("renderdoc_goal_blocked_gate=")
+expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=0")
+expect(evidence).to_contain("renderdoc_goal_blocked_gates=")
 ```
 
 </details>

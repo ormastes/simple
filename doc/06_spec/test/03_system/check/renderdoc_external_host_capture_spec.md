@@ -85,7 +85,7 @@ sh scripts/check/check-renderdoc-external-host-capture.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -103,6 +103,8 @@ expect(evidence).to_contain("rdoc_external_host_required_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_external_host_required_status=pass")
 expect(evidence).to_contain("rdoc_external_host_required_magic=RDOC")
 expect(evidence).to_contain("rdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("rdoc_external_host_capture_file_magic=")
+expect(evidence).to_contain("rdoc_external_host_gate_capture_file_magic=")
 
 val status = _value_of(evidence, "rdoc_external_host_capture_status")
 val reason = _value_of(evidence, "rdoc_external_host_capture_reason")
@@ -125,7 +127,7 @@ expect(report).to_contain("# RenderDoc External Host Capture")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -139,6 +141,8 @@ expect(evidence).to_contain("rdoc_external_host_capture_reason=pass")
 expect(evidence).to_contain("rdoc_external_host_gate_status=pass")
 expect(evidence).to_contain("rdoc_external_host_gate_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
+expect(evidence).to_contain("rdoc_external_host_capture_file_magic=RDOC")
+expect(evidence).to_contain("rdoc_external_host_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("rdoc_external_host_required_backend=original")
 expect(evidence).to_contain("rdoc_external_host_required_scene=html-css-chrome")
 expect(evidence).to_contain("rdoc_external_host_required_status=pass")
