@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 591 lines folded for reproduction.
+Runnable source: 595 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -491,6 +491,7 @@ val legacy_ui_action = office_action_dispatch("ui-render", "design: Feature\nnod
 val legacy_ui_sdd_action = office_action_dispatch("ui-export-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val legacy_sdd_action = office_action_dispatch("render-sdd", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val blank_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "   |button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_label_action = office_action_dispatch("ui-label-edit", "button|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val stale_ui_label_action = office_action_dispatch("ui-label-edit", "button|Old|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_label_action = office_action_dispatch("ui-label-edit", "   |Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -507,6 +508,7 @@ val ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "button
 val blank_ui_style_edit_action = office_action_dispatch("ui-style-token-edit", "   |primary|accent\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_inspect_action = office_action_dispatch("ui-inspect-node", "button\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|A_copy|20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val blank_sdd_duplicate_action = office_action_dispatch("duplicate-sdd-node", "A|   |20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val sdd_style_rule_action = office_action_dispatch("edit-sdd-style-rule", "accent|node|none|fill|#eeeeee\ngraph: Style Rule\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20")
 val sdd_style_rule_delete_action = office_action_dispatch("delete-sdd-style-rule", "accent|fill\n" + sdd_style_rule_action.output)
 val sdd_style_rule_inspect_action = office_action_dispatch("inspect-sdd-style-rule", "accent|fill\ncss |name, extends, target|\n    accent, none, node\nstyles |css, key, value|\n    accent, fill, #eeeeee")
@@ -616,6 +618,7 @@ expect(legacy_sdd_action.action).to_equal("render-sdd-html")
 expect(legacy_sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
+expect(blank_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(ui_label_action.output).to_contain(">Launch</div>")
 expect(stale_ui_label_action.reason).to_equal("stale-node")
 expect(blank_ui_label_action.reason).to_equal("invalid-args")
@@ -634,6 +637,7 @@ expect(ui_inspect_action.output).to_contain("z_index=0")
 expect(ui_inspect_action.output).to_contain("x=16")
 expect(ui_inspect_action.output).to_contain("component=action")
 expect(sdd_duplicate_action.output).to_contain("data-node=\"A_copy\"")
+expect(blank_sdd_duplicate_action.reason).to_equal("invalid-args")
 expect(sdd_style_rule_action.output).to_contain("css |name, extends, target|")
 expect(sdd_style_rule_action.output).to_contain("accent, fill, #eeeeee")
 expect(sdn_graph_render_html(sdn_graph_parse(sdd_style_rule_action.output))).to_contain("background-color:#eeeeee")

@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 80 | 80 | 0 | 0 |
+| 81 | 81 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1387,6 +1387,25 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank duplicate node ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val ui_result = office_action_dispatch("ui-duplicate-node", "   |button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val sdd_result = office_action_dispatch("duplicate-sdd-node", "A|   |20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+expect(ui_result.ok).to_be(false)
+expect(ui_result.reason).to_equal("invalid-args")
+expect(sdd_result.ok).to_be(false)
+expect(sdd_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank SDD node value action target ids
 
 <details>
@@ -1509,8 +1528,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 80 |
-| Active scenarios | 80 |
+| Total scenarios | 81 |
+| Active scenarios | 81 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
