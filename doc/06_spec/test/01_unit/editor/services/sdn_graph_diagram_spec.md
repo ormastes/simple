@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 27 | 27 | 0 | 0 |
+| 28 | 28 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -133,6 +133,25 @@ expect(graph.edges[0].route).to_equal("orthogonal")
 expect(graph.edges[0].waypoints).to_equal("10x20;80x20")
 expect(graph.edges[0].start_anchor).to_equal("right")
 expect(graph.edges[0].end_anchor).to_equal("left")
+```
+
+</details>
+
+#### renders person shape metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: actor\nUser: User shape: person x: 10 y: 10 width: 48 height: 64\nAdmin: Admin shape: actor x: 80 y: 10 width: 48 height: 64")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-shape=\"person\"")
+expect(html).to_contain("data-shape=\"actor\"")
+expect(html).to_contain("border-radius:50% 50% 42% 42%")
+expect(html).to_contain("box-shadow:inset 0 16px 0 rgba(15,23,42,0.10)")
 ```
 
 </details>
@@ -868,8 +887,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 27 |
-| Active scenarios | 27 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
