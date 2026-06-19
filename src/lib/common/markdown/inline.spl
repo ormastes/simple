@@ -1,7 +1,7 @@
 # Common Markdown inline helpers.
 
 # Single-pass inline scanner: handles **bold**, *italic*, ~~strike~~, `code`,
-# escaped markers, and unbalanced markers (treated as literal text).
+# [links](href), escaped markers, and unbalanced markers (treated as literal text).
 # Code spans protect their content from further interpretation.
 fn markdown_inline_text(value: text) -> text:
     if value.len() == 0:
@@ -14,7 +14,7 @@ fn markdown_inline_text(value: text) -> text:
         # Escaped character: backslash before * or `
         if ch == "\\" and i + 1 < n:
             val next = value.char_at(i + 1)
-            if next == "*" or next == "`" or next == "~" or next == "\\":
+            if next == "*" or next == "`" or next == "~" or next == "[" or next == "]" or next == "(" or next == ")" or next == "\\":
                 out = out + markdown_escape_html(next)
                 i = i + 2
             else:
@@ -35,6 +35,34 @@ fn markdown_inline_text(value: text) -> text:
                 i = j + 1
             else:
                 # Unbalanced backtick — emit as literal
+                out = out + markdown_escape_html(ch)
+                i = i + 1
+        # Link: [text](href)
+        elif ch == "[":
+            var label_end = i + 1
+            var found_label = false
+            while label_end < n:
+                if value.char_at(label_end) == "]":
+                    found_label = true
+                    break
+                label_end = label_end + 1
+            if found_label and label_end + 1 < n and value.char_at(label_end + 1) == "(":
+                var href_end = label_end + 2
+                var found_href = false
+                while href_end < n:
+                    if value.char_at(href_end) == ")":
+                        found_href = true
+                        break
+                    href_end = href_end + 1
+                if found_href:
+                    val label = value.slice(i + 1, label_end)
+                    val href = _markdown_link_href(value.slice(label_end + 2, href_end))
+                    out = out + "<a href=\"" + markdown_escape_html(href) + "\">" + markdown_escape_html(label) + "</a>"
+                    i = href_end + 1
+                else:
+                    out = out + markdown_escape_html(ch)
+                    i = i + 1
+            else:
                 out = out + markdown_escape_html(ch)
                 i = i + 1
         # Bold: **text**
@@ -116,7 +144,7 @@ fn markdown_plain_inline(value: text) -> text:
         # Escaped marker: skip the backslash, keep the char
         if ch == "\\" and i + 1 < n:
             val next = value.char_at(i + 1)
-            if next == "*" or next == "`" or next == "~" or next == "\\":
+            if next == "*" or next == "`" or next == "~" or next == "[" or next == "]" or next == "(" or next == ")" or next == "\\":
                 out = out + next
                 i = i + 2
             else:
@@ -136,6 +164,32 @@ fn markdown_plain_inline(value: text) -> text:
                 i = j + 1
             else:
                 # Unbalanced — drop the lone backtick
+                i = i + 1
+        # Link: keep the label, skip the href
+        elif ch == "[":
+            var label_end = i + 1
+            var found_label = false
+            while label_end < n:
+                if value.char_at(label_end) == "]":
+                    found_label = true
+                    break
+                label_end = label_end + 1
+            if found_label and label_end + 1 < n and value.char_at(label_end + 1) == "(":
+                var href_end = label_end + 2
+                var found_href = false
+                while href_end < n:
+                    if value.char_at(href_end) == ")":
+                        found_href = true
+                        break
+                    href_end = href_end + 1
+                if found_href:
+                    out = out + value.slice(i + 1, label_end)
+                    i = href_end + 1
+                else:
+                    out = out + ch
+                    i = i + 1
+            else:
+                out = out + ch
                 i = i + 1
         # Bold **
         elif ch == "*" and i + 1 < n and value.char_at(i + 1) == "*":
@@ -186,3 +240,10 @@ fn markdown_plain_inline(value: text) -> text:
             out = out + ch
             i = i + 1
     out
+
+fn _markdown_link_href(href: text) -> text:
+    val clean = href.trim()
+    val lower = clean.lower()
+    if lower.starts_with("javascript:") or lower.starts_with("data:"):
+        return "#"
+    clean

@@ -27,7 +27,7 @@ markdown_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 57 | 57 | 0 | 0 |
+| 62 | 62 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -122,6 +122,34 @@ expect(markdown_inline_text("~~old <tag>~~")).to_equal("<del>old &lt;tag&gt;</de
 
 </details>
 
+#### wraps inline links with escaped label and href
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_inline_text("[Docs <x>](docs?a=1&b=2)")).to_equal("<a href=\"docs?a=1&amp;b=2\">Docs &lt;x&gt;</a>")
+```
+
+</details>
+
+#### blocks unsafe inline link protocols
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_inline_text("[bad](javascript:alert)")).to_equal("<a href=\"#\">bad</a>")
+```
+
+</details>
+
 #### leaves unbalanced bold as literal
 
 <details>
@@ -188,6 +216,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(markdown_inline_text("\\~literal\\~")).to_equal("~literal~")
+```
+
+</details>
+
+#### handles escaped link markers
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_inline_text("\\[literal\\]\\(x\\)")).to_equal("[literal](x)")
 ```
 
 </details>
@@ -420,6 +462,20 @@ expect(markdown_plain_inline("~~old~~")).to_equal("old")
 
 </details>
 
+#### strips link hrefs, keeps labels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_plain_inline("See [Docs](docs.md)")).to_equal("See Docs")
+```
+
+</details>
+
 #### passes plain text unchanged
 
 <details>
@@ -486,6 +542,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(markdown_plain_inline("\\~literal\\~")).to_equal("~literal~")
+```
+
+</details>
+
+#### keeps escaped link markers as literal
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(markdown_plain_inline("\\[literal\\]\\(x\\)")).to_equal("[literal](x)")
 ```
 
 </details>
@@ -888,8 +958,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 57 |
-| Active scenarios | 57 |
+| Total scenarios | 62 |
+| Active scenarios | 62 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
