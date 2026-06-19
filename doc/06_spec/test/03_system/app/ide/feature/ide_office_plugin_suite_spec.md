@@ -110,8 +110,8 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=5 roundtrip=5 names=5
-  llm-catalog: apps=8 features=37 actions=9
-  llm-apps: Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter
+  llm-catalog: apps=9 features=43 actions=12
+  llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
 </details>
@@ -183,8 +183,8 @@ expect(tui_report).to_contain("edit-command: slide-edit=true stale-reject=true")
 expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
 expect(tui_report).to_contain("agent-dashboard: tools=")
 expect(tui_report).to_contain("status=degraded-review-required")
-expect(tui_report).to_contain("llm-catalog: apps=8")
-expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter")
+expect(tui_report).to_contain("llm-catalog: apps=9")
+expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
 ```
 
 </details>
@@ -274,15 +274,15 @@ expect(tui_lines[21]).to_equal(gui_lines[21])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(8)
-expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=8 features=37 actions=9")
+expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=43 actions=12")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -297,10 +297,16 @@ expect(catalog[3].features.join(",")).to_contain("markdown-source")
 expect(catalog[3].features.join(",")).to_contain("css-like-design")
 expect(catalog[3].actions.join(",")).to_contain("render-ppt-markdown-html")
 expect(catalog[3].actions.join(",")).to_contain("slide-edit")
-expect(catalog[4].owner_module).to_equal("common.drawing.vector_shapes")
-expect(catalog[5].owner_module).to_equal("app.office.base_db")
-expect(catalog[6].features.join(",")).to_contain("mathml")
-expect(catalog[7].actions.join(",")).to_contain("counter-action")
+expect(catalog[4].owner_module).to_equal("std.editor.services.sdn_graph")
+expect(catalog[4].features.join(",")).to_contain("sdd-source")
+expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
+expect(catalog[5].actions.join(",")).to_contain("export-ui-sdd")
+val ui_design = office_ui_design_parse("design: Feature Check\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(office_ui_design_render_html(ui_design)).to_contain("data-format=\"html-ui\"")
+expect(office_ui_design_to_sdd(ui_design)).to_contain("theme: office-ui")
+expect(catalog[6].owner_module).to_equal("app.office.base_db")
+expect(catalog[7].features.join(",")).to_contain("mathml")
+expect(catalog[8].actions.join(",")).to_contain("counter-action")
 ```
 
 </details>

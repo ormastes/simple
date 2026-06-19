@@ -12,6 +12,8 @@ admin, and LibreOffice-like app catalog checks through
 - IDE Markdown probe: `src/app/ide/markdown_render.spl`
 - Slide/PPT HTML render: `src/app/office/slides/html_render.spl`
 - IDE slide probe: `src/app/ide/slides_compat.spl`
+- HTML UI editor: `src/app/office/ui_editor.spl`
+- SDD diagram substrate: `src/lib/editor/services/sdn_graph.spl`
 - LLM-readable catalog: `src/app/office/llm_catalog.spl`
 - IDE system spec:
   `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl`
@@ -34,13 +36,24 @@ compatibility path and should escape element text, sanitize CSS colors to simple
 `#RGB` or `#RRGGBB` values, clamp negative geometry to `0px`, and emit a fixed
 960x540 relative slide with absolutely positioned element boxes.
 
+Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
+substrate. It parses positioned frame/component records, renders a stable
+`.office-ui-design` HTML surface with inspector metadata, exports nodes to
+SDD-compatible tables, and guards label edits with expected-value checks.
+
+Draw/diagram editing should prefer the SDD substrate in
+`std.editor.services.sdn_graph` for geometry, layers, connector routes,
+waypoints, and anchors. Legacy SVG shape helpers remain compatibility utilities,
+not the LLM catalog owner for Draw.
+
 IDE feature checks should expose these hardening markers in both TUI and GUI
 modes:
 
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
 - LLM catalog: Writer has `render-writer-markdown-html`; Impress has
-  `render-ppt-markdown-html`.
+  `render-ppt-markdown-html`; Draw is SDD-backed; Designer has
+  `render-ui-html`, `export-ui-sdd`, and `ui-label-edit`.
 
 ## Verification
 
@@ -51,16 +64,19 @@ bin/simple check \
   src/app/office/md_wysiwyg.spl \
   src/app/office/md_wysiwyg_gui.spl \
   src/app/office/slides/html_render.spl \
+  src/app/office/ui_editor.spl \
   src/app/ide/markdown_render.spl \
   src/app/ide/slides_compat.spl \
   test/01_unit/app/office/md_wysiwyg_spec.spl \
   test/01_unit/app/office/md_wysiwyg_render_spec.spl \
   test/01_unit/app/office/slides/html_render_spec.spl \
+  test/01_unit/app/office/ui_editor_spec.spl \
   test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
 
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/md_wysiwyg_spec.spl
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/md_wysiwyg_render_spec.spl
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/slides/html_render_spec.spl
+SIMPLE_LIB=src bin/simple test test/01_unit/app/office/ui_editor_spec.spl
 SIMPLE_LIB=src bin/simple test test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
 bin/simple-interp src/app/ide/main.spl --feature-check --tui
 bin/simple-interp src/app/ide/main.spl --feature-check --gui

@@ -1,0 +1,184 @@
+# Office UI Editor
+#
+# Pure HTML design-surface substrate for office UI/document mockups. This is the
+# Figma-like layer for positioned frames/components, while SDD remains the
+# canonical diagram interchange format.
+
+use std.common.markdown.inline.{markdown_escape_html}
+
+struct OfficeUiNode:
+    id: text
+    label: text
+    kind: text
+    css: text
+    x: text
+    y: text
+    width: text
+    height: text
+    layer: text
+    component: text
+
+struct OfficeUiDesign:
+    name: text
+    width: text
+    height: text
+    nodes: [OfficeUiNode]
+
+struct OfficeUiEditResult:
+    accepted: bool
+    reason: text
+    diff: text
+    design: OfficeUiDesign
+
+fn office_ui_editor_format_name() -> text:
+    "HTML UI Design Document"
+
+fn office_ui_design_empty() -> OfficeUiDesign:
+    OfficeUiDesign(name: "", width: "960", height: "540", nodes: [])
+
+fn office_ui_node(id: text, label: text, kind: text, x: text, y: text, width: text, height: text) -> OfficeUiNode:
+    OfficeUiNode(id: id, label: label, kind: kind, css: "", x: x, y: y, width: width, height: height, layer: "", component: "")
+
+fn office_ui_design_parse(source: text) -> OfficeUiDesign:
+    var design = office_ui_design_empty()
+    val lines = source.split("\n")
+    for raw in lines:
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        if line.starts_with("design:"):
+            design.name = line.slice(7, line.len()).trim()
+        elif line.starts_with("size:"):
+            val size_text = line.slice(5, line.len()).trim()
+            val dims = size_text.split("x")
+            if dims.len() >= 2:
+                design.width = dims[0].trim()
+                design.height = dims[1].trim()
+        elif line.starts_with("node "):
+            val node_text = line.slice(5, line.len()).trim()
+            val node = _office_ui_parse_dense_node(node_text)
+            design.nodes.push(node)
+    design
+
+fn office_ui_design_render_html(design: OfficeUiDesign) -> text:
+    val w = _office_ui_safe_length(design.width)
+    val h = _office_ui_safe_length(design.height)
+    var out = "<div class=\"office-ui-design\" data-format=\"html-ui\" data-format-name=\"" + office_ui_editor_format_name() + "\" data-design=\"" + markdown_escape_html(design.name) + "\" style=\"position: relative; width: " + w + "; height: " + h + "; box-sizing: border-box; background: #ffffff; border: 1px solid #d1d5db; overflow: hidden;\">"
+    for node in design.nodes:
+        val class_name = "office-ui-node office-ui-" + _office_ui_safe_token(node.kind) + _office_ui_css_class(node.css)
+        val style = "position: absolute; left: " + _office_ui_safe_length(node.x) + "; top: " + _office_ui_safe_length(node.y) + "; width: " + _office_ui_safe_length(node.width) + "; height: " + _office_ui_safe_length(node.height) + "; box-sizing: border-box; border: 1px solid #6b7280; background: #f9fafb; color: #111827; overflow: hidden;"
+        out = out + "<div class=\"" + class_name + "\" data-id=\"" + markdown_escape_html(node.id) + "\" data-kind=\"" + markdown_escape_html(node.kind) + "\" data-layer=\"" + markdown_escape_html(node.layer) + "\" data-component=\"" + markdown_escape_html(node.component) + "\" style=\"" + style + "\">" + markdown_escape_html(node.label) + "</div>"
+    out + "</div>"
+
+fn office_ui_design_to_sdd(design: OfficeUiDesign) -> text:
+    var out: [text] = []
+    out.push("graph: " + design.name)
+    out.push("theme: office-ui")
+    out.push("")
+    out.push("nodes |id, label, css, role, shape, x, y, width, height, layer|")
+    for node in design.nodes:
+        val shape = if node.kind == "frame" then "frame" else: "rounded"
+        val role = if node.component != "" then node.component else: node.kind
+        out.push("    " + node.id + ", " + _office_ui_quote_if_space(node.label) + ", " + _office_ui_quote_if_space(node.css) + ", " + role + ", " + shape + ", " + node.x + ", " + node.y + ", " + node.width + ", " + node.height + ", " + node.layer)
+    out.push("")
+    out.push("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
+    out.join("\n") + "\n"
+
+fn office_ui_design_update_label_checked(design: OfficeUiDesign, node_id: text, expected: text, replacement: text) -> OfficeUiEditResult:
+    var out_nodes: [OfficeUiNode] = []
+    for original in design.nodes:
+        out_nodes.push(_office_ui_clone_node(original))
+    var out = OfficeUiDesign(name: design.name, width: design.width, height: design.height, nodes: out_nodes)
+    var i = 0
+    while i < design.nodes.len():
+        val current = design.nodes[i]
+        if current.id == node_id:
+            if current.label != expected:
+                return OfficeUiEditResult(accepted: false, reason: "stale-node", diff: "@@ ui-node " + node_id + " @@\nexpected: " + expected + "\nactual: " + current.label + "\nrejected: " + replacement, design: design)
+            var updated = _office_ui_clone_node(current)
+            updated.label = replacement
+            out.nodes[i] = updated
+            return OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-node " + node_id + " @@\n- " + expected + "\n+ " + replacement, design: out)
+        i = i + 1
+    OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-node " + node_id + " @@\nexpected: " + expected + "\nactual: <missing>\nrejected: " + replacement, design: design)
+
+fn _office_ui_clone_node(node: OfficeUiNode) -> OfficeUiNode:
+    OfficeUiNode(
+        id: node.id,
+        label: node.label,
+        kind: node.kind,
+        css: node.css,
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+        layer: node.layer,
+        component: node.component
+    )
+
+fn _office_ui_parse_dense_node(line: text) -> OfficeUiNode:
+    val parts = line.split("|")
+    var node = office_ui_node("", "", "component", "0", "0", "120", "40")
+    if parts.len() >= 1:
+        node.id = parts[0].trim()
+    if parts.len() >= 2:
+        node.label = parts[1].trim()
+    if parts.len() >= 3:
+        node.kind = parts[2].trim()
+    if parts.len() >= 4:
+        node.x = parts[3].trim()
+    if parts.len() >= 5:
+        node.y = parts[4].trim()
+    if parts.len() >= 6:
+        node.width = parts[5].trim()
+    if parts.len() >= 7:
+        node.height = parts[6].trim()
+    if parts.len() >= 8:
+        node.css = parts[7].trim()
+    if parts.len() >= 9:
+        node.layer = parts[8].trim()
+    if parts.len() >= 10:
+        node.component = parts[9].trim()
+    node
+
+fn _office_ui_safe_token(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        val code = ch.char_code_at(0)
+        if (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or ch == "-" or ch == "_":
+            out = out + ch
+        i = i + 1
+    if out == "":
+        return "component"
+    out
+
+fn _office_ui_css_class(css: text) -> text:
+    val safe = _office_ui_safe_token(css)
+    if safe == "component" and css.trim() == "":
+        return ""
+    " office-ui-css-" + safe
+
+fn _office_ui_safe_length(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return "0px"
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        val code = ch.char_code_at(0)
+        val ok = (code >= 48 and code <= 57) or ch == "." or ch == "-" or ch == "%"
+        if not ok:
+            if trimmed.ends_with("px") or trimmed.ends_with("em") or trimmed.ends_with("rem"):
+                return trimmed
+            return "0px"
+        i = i + 1
+    if trimmed.ends_with("%"):
+        return trimmed
+    trimmed + "px"
+
+fn _office_ui_quote_if_space(value: text) -> text:
+    if value.contains(" "):
+        return "\"" + value + "\""
+    value

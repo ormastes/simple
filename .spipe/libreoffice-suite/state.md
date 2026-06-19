@@ -145,6 +145,11 @@ possible so they are runner-verifiable.
    (`.sdd.sdn`) and started draw.io/Figma-level hardening by adding explicit
    node geometry, layer metadata, connector routes, waypoints, anchors, and
    weave-based layout edits to `std.editor.services.sdn_graph`.
+13. ACTIVE (local 2026-06-19) — **HTML UI editor substrate**:
+   Added a pure `app.office.ui_editor` design-document layer for Figma-like
+   positioned frames/components, inspector-ready HTML, SDD export, and guarded
+   label edits. This is the Office Designer surface; live browser editing and
+   collaborative constraints are future slices.
 
 ## Log
 
@@ -203,3 +208,8 @@ possible so they are runner-verifiable.
   `x/y/width/height/layer`, edge `route/waypoints/start_anchor/end_anchor`,
   deterministic `sdd-*` HTML metadata, canonical table output, and weave-based
   layout edits. Focused `sdn_graph_diagram_spec` passed 6/0.
+- 2026-06-19 dev: Started the HTML UI editor slice. Added local research,
+  requirements, NFR, test plan, and design docs for `app.office.ui_editor`;
+  implementation covers positioned UI nodes, HTML design-surface rendering,
+  SDD export, and stale-safe label edits. Draw catalog ownership moves to the
+  SDD substrate and Designer is added as the HTML UI editor catalog app.
