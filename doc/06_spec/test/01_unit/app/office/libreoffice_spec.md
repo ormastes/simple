@@ -172,7 +172,7 @@ expect(names).to_contain("Math")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -180,6 +180,9 @@ val entries = libreoffice_plugin_entries()
 expect(entries.len()).to_equal(6)
 val first = entries[0]
 expect(first.name).to_equal("libreoffice-writer")
+val draw = entries[3]
+expect(draw.name).to_equal("libreoffice-draw")
+expect(draw.library).to_equal("std.editor.services.sdn_graph")
 ```
 
 </details>
