@@ -382,3 +382,8 @@ possible so they are runner-verifiable.
   action bridge. `md-edit` accepts `line_no|expected_source|new_source`
   followed by the Markdown body, returns updated Markdown source, and rejects
   stale or missing lines with the existing deterministic WYSIWYG diff.
+- 2026-06-19 dev: Wired Calc and Impress checked edits into the headless Office
+  action bridge. `sheet-edit` and `slide-edit` accept
+  `target_id|expected|replacement` followed by compact source bodies, return
+  updated assignments, and reject stale values with existing deterministic
+  diffs.
