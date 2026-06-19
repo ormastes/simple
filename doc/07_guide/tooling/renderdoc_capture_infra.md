@@ -99,13 +99,15 @@ the 105/105 HTML tag coverage and 62/62 implemented CSS property coverage in
 the same evidence env as the Simple, original Chrome, Electron, and production
 parity gates.
 
-The same aggregate audit reports every unsatisfied completion lane through
-`blocked_completion_gates` and `blocked_completion_gate_count`, while retaining
-`blocked_completion_gate` as the first outstanding gate for older consumers.
-The list is derived from the Simple Vulkan RenderDoc gate, original
-Chrome/Vulkan RenderDoc gate, Electron Chromium/Vulkan RenderDoc gate, and the
-production GUI/web parity gate, so concurrent missing captures are not hidden by
-a single status reason.
+The nested HTML/CSS RenderDoc goal status gate reports every unsatisfied
+RenderDoc goal lane through `renderdoc_goal_blocked_gates` and
+`renderdoc_goal_blocked_gate_count`. The top-level GUI audit re-emits those
+fields and reports the full completion list through `blocked_completion_gates`
+and `blocked_completion_gate_count`, while retaining `blocked_completion_gate`
+as the first outstanding gate for older consumers. The top-level list is derived
+from the nested Simple/original Chrome RenderDoc lanes, Electron
+Chromium/Vulkan RenderDoc gate, and the production GUI/web parity gate, so
+concurrent missing captures are not hidden by a single status reason.
 
 The current canonical evidence contract is:
 
