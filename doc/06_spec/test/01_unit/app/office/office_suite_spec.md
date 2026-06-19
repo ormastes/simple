@@ -446,13 +446,14 @@ expect(result.output).to_contain("Title")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val result = office_action_dispatch("render-ppt-markdown-html", "# Deck\\n\\n## Slide\\nBody")
 expect(result.ok).to_be(true)
 expect(result.output).to_contain("class=\"md-ppt-deck\"")
+expect(result.output).to_contain("data-format=\"markdown-ppt\"")
 expect(result.output).to_contain("Slide")
 ```
 

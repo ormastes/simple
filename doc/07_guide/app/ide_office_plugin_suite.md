@@ -42,7 +42,8 @@ Writer rendering must expose Markdown source -> paper/document HTML through
 count.
 
 PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
-`render_ppt_markdown_html`. The object-model slide renderer remains a
+`render_ppt_markdown_html`, with root metadata for format and slide count. The
+object-model slide renderer remains a
 compatibility path and should escape element text, sanitize CSS colors to simple
 `#RGB` or `#RRGGBB` values, clamp negative geometry to `0px`, and emit a fixed
 960x540 relative slide with absolutely positioned element boxes.
