@@ -28,7 +28,7 @@ simple_web_renderer_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 64 | 64 | 0 | 0 |
+| 65 | 65 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -692,6 +692,29 @@ expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(120)
 expect(_count_color(pixels, 0xFF334155u32)).to_equal(156)
 expect(_count_color(pixels, 0xFF14B8A6u32)).to_equal(180)
 expect(_count_color(pixels, 0xFFA855F7u32)).to_equal(168)
+```
+
+</details>
+
+#### matches Chrome metadata and image-map non-painting tag geometry
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><base href='https://example.invalid/'><meta name='viewport' content='width=device-width'><link rel='preload' href='x.dat' as='fetch'><title>nonpaint</title><script type='application/json'>{}</script><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc;color:transparent;font-size:0}.stage{display:flex;gap:4px;background-color:#e5e7eb;padding:4px;width:88px;height:56px}.left,.right{display:block;width:36px}.a{display:block;background-color:#1d4ed8;width:30px;height:8px}.b{display:block;background-color:#22c55e;width:26px;height:8px;margin-top:3px}.c{display:block;background-color:#f59e0b;width:22px;height:8px;margin-top:3px}.d{display:block;background-color:#ef4444;width:28px;height:8px}.e{display:block;background-color:#334155;width:24px;height:8px;margin-top:3px}map,area{display:none;margin:0;padding:0;border:0;color:transparent;font-size:0;line-height:0}</style></head><body><section class='stage'><div class='left'><div class='a'></div><map name='m'><area shape='rect' coords='0,0,1,1' href='#'></map><div class='b'></div><div class='c'></div></div><div class='right'><div class='d'></div><div class='e'></div></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+expect(pixels.len()).to_equal(96 * 64)
+expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(5104)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(240)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(208)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(176)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(224)
+expect(_count_color(pixels, 0xFF334155u32)).to_equal(192)
+expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(0)
 ```
 
 </details>
@@ -1421,8 +1444,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 64 |
-| Active scenarios | 64 |
+| Total scenarios | 65 |
+| Active scenarios | 65 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
