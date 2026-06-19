@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -163,6 +163,22 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val html = render_writer_markdown_html("# <script>alert(1)</script>")
 expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+```
+
+</details>
+
+#### sanitizes unsafe Writer Markdown stylesheet URLs
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("---\ncss_file: javascript:alert(1)\n---\n\nBody")
+expect(html).to_contain("<link rel=\"stylesheet\" href=\"#\">")
+expect(html).to_contain("<p>Body</p>")
 ```
 
 </details>
@@ -358,8 +374,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
