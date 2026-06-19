@@ -295,7 +295,8 @@ modes:
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
-  `formula-display-recalc`; Base has `schema-validation`, `html-render`, `query-table`,
+  `formula-display-recalc`; Base has `schema-validation`, `html-render`,
+  `html-cell-coordinates`, `html-escape`, invalid schema rejection, `query-table`,
   `count-where`, `select-where`, `project-column`, `update-where`,
   `delete-where`, `render-base-table-html`, and `db-edit`; Math has `fraction`,
   `subscript`, `fenced-group`, `precedence-parser`, `checked-rendering`,
