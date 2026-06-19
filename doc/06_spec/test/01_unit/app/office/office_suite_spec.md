@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 101 | 101 | 0 | 0 |
+| 102 | 102 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1582,6 +1582,21 @@ expect(sdd_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed duplicate UI node ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("ui-duplicate-node", "button|button copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank duplicate UI node offsets
 
 <details>
@@ -1877,8 +1892,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 101 |
-| Active scenarios | 101 |
+| Total scenarios | 102 |
+| Active scenarios | 102 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

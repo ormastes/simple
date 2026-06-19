@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 651 lines folded for reproduction.
+Runnable source: 653 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -493,6 +493,7 @@ val legacy_ui_sdd_action = office_action_dispatch("ui-export-sdd", "design: Feat
 val legacy_sdd_action = office_action_dispatch("render-sdd", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
 val ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "   |button_copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val invalid_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button copy|20|10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val blank_offset_ui_duplicate_action = office_action_dispatch("ui-duplicate-node", "button|button_copy|   |10\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_label_action = office_action_dispatch("ui-label-edit", "button|Run|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val stale_ui_label_action = office_action_dispatch("ui-label-edit", "button|Old|Launch\ndesign: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
@@ -644,6 +645,7 @@ expect(legacy_sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(ui_duplicate_action.output).to_contain("data-id=\"button_copy\"")
 expect(blank_ui_duplicate_action.reason).to_equal("invalid-args")
+expect(invalid_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(blank_offset_ui_duplicate_action.reason).to_equal("invalid-args")
 expect(ui_label_action.output).to_contain(">Launch</div>")
 expect(stale_ui_label_action.reason).to_equal("stale-node")

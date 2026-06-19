@@ -77,8 +77,8 @@ deterministic diff.
 
 Duplicate actions use a compact first-line edit header:
 `source_id|new_id|dx|dy`, followed by the UI or SDD document body. The
-`ui-duplicate-node` action returns rendered UI HTML; `duplicate-sdd-node`
-returns rendered SDD HTML.
+`ui-duplicate-node` action returns rendered UI HTML and rejects malformed new
+node IDs as `invalid-args`; `duplicate-sdd-node` returns rendered SDD HTML.
 Blank duplicate source/new IDs or offsets are rejected as `invalid-args`.
 
 Designer edit actions use compact first-line edit headers followed by the UI
