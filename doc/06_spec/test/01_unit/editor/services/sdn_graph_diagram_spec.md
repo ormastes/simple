@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -241,6 +241,41 @@ expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, heigh
 expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base, ")
 expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
 expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
+```
+
+</details>
+
+#### resolves reusable SDD style rules into safe rendered HTML
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: style\ncss base:\n    fill: #ffffff\n    stroke: #334455\n    radius: 8\ncss accent:\n    extends: base\n    text: #111111\ncss primary:\n    target: edge\n    stroke: #224466\n    stroke_width: 3\nA: Alpha @accent x: 0 y: 0 width: 80 height: 20\nB: Beta x: 120 y: 0 width: 80 height: 20\nA -> B: link @primary route: simple start: right end: left")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("background-color:#ffffff")
+expect(html).to_contain("border-color:#334455")
+expect(html).to_contain("border-radius:8")
+expect(html).to_contain("color:#111111")
+expect(html).to_contain("stroke-width:3")
+
+val updated = sdn_graph_set_style_rule_checked(graph, "accent", "node", "base", "fill", "#eeeeee")
+expect(updated.accepted).to_be(true)
+expect(sdn_graph_to_canonical_sdn(updated.graph)).to_contain("accent, fill, #eeeeee")
+expect(sdn_graph_render_html(updated.graph)).to_contain("background-color:#eeeeee")
+val reparsed = sdn_graph_parse(sdn_graph_to_canonical_sdn(updated.graph))
+expect(reparsed.css_defs.len()).to_equal(4)
+expect(reparsed.styles.len()).to_equal(7)
+expect(sdn_graph_render_html(reparsed)).to_contain("background-color:#eeeeee")
+val bad_target = sdn_graph_set_style_rule_checked(graph, "accent", "canvas", "base", "fill", "#eeeeee")
+val bad_value = sdn_graph_set_style_rule_checked(graph, "accent", "node", "base", "fill", "red;position:absolute")
+val bad_token = sdn_graph_set_style_rule_checked(graph, "accent,bad", "node", "base", "fill", "#eeeeee")
+expect(bad_target.reason).to_equal("invalid-target")
+expect(bad_value.reason).to_equal("invalid-style-value")
+expect(bad_token.reason).to_equal("invalid-style-token")
 ```
 
 </details>
@@ -732,8 +767,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

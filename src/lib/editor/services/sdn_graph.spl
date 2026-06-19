@@ -252,6 +252,18 @@ fn sdn_graph_parse(content: text) -> SdnGraph:
                 graph.edges.push(edge)
             i = parsed_edges.1
             continue
+        elif _sg_is_table_header(line, "css"):
+            val parsed_css = _sg_parse_css_table(lines, i)
+            for css in parsed_css.0:
+                graph.css_defs.push(css)
+            i = parsed_css.1
+            continue
+        elif _sg_is_table_header(line, "styles"):
+            val parsed_styles = _sg_parse_styles_table(lines, i)
+            for style in parsed_styles.0:
+                graph.styles.push(style)
+            i = parsed_styles.1
+            continue
         elif _sg_has_edge_operator(line):
             graph.edges.push(_sg_parse_dense_edge(line))
             current_css = ""
@@ -371,6 +383,42 @@ fn sdn_graph_add_node_checked(graph: SdnGraph, id: text, label: text, css: text,
     out_nodes.push(SdnGraphNode(id: id, label: label, css: css, role: role, shape: shape, x: x, y: y, width: width, height: height, layer: layer, parent: parent))
     val updated = SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
     SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-add-node @@\nadded: " + id, graph: updated)
+
+fn sdn_graph_set_style_rule_checked(graph: SdnGraph, css: text, target: text, parent_css: text, key: text, value: text) -> SdnGraphEditResult:
+    if css == "" or key == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-rule", diff: "@@ sdd-style-rule @@\nexpected: non-empty css and key\nactual: " + css + "|" + key, graph: graph)
+    if not _sg_safe_style_token(css) or not _sg_safe_style_token(key) or (parent_css != "" and not _sg_safe_style_token(parent_css)):
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-token", diff: "@@ sdd-style-rule @@\nexpected: table-safe css, parent, and key\nactual: " + css + "|" + parent_css + "|" + key, graph: graph)
+    if target != "" and target != "node" and target != "edge":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-target", diff: "@@ sdd-style-rule @@\nexpected: node or edge\nactual: " + target, graph: graph)
+    if value.trim() != "" and _sg_safe_css_value(value) == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-style-value", diff: "@@ sdd-style-rule @@\nexpected: safe CSS value\nactual: " + value, graph: graph)
+    var out_defs: [SdnGraphCss] = []
+    var found_def = false
+    for css_def in graph.css_defs:
+        if css_def.name == css:
+            val next_target = if target != "" then target else: css_def.target
+            val next_parent = if parent_css != "" then parent_css else: css_def.parent_css
+            out_defs.push(SdnGraphCss(name: css, parent_css: next_parent, target: next_target))
+            found_def = true
+        else:
+            out_defs.push(css_def)
+    if not found_def:
+        val new_target = if target != "" then target else: "node"
+        val new_parent = if parent_css != "" then parent_css else: "none"
+        out_defs.push(SdnGraphCss(name: css, parent_css: new_parent, target: new_target))
+    var out_styles: [SdnGraphStyle] = []
+    var found_style = false
+    for style in graph.styles:
+        if style.css == css and style.key == key:
+            out_styles.push(SdnGraphStyle(css: css, key: key, value: value))
+            found_style = true
+        else:
+            out_styles.push(style)
+    if not found_style:
+        out_styles.push(SdnGraphStyle(css: css, key: key, value: value))
+    val updated = SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: graph.edges, css_defs: out_defs, styles: out_styles, weaves: graph.weaves)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-style-rule @@\nupdated: " + css + "." + key, graph: updated)
 
 fn sdn_graph_update_edge_label_at(graph: SdnGraph, edge_index: i64, label: text) -> SdnGraph:
     var out_edges: [SdnGraphEdge] = []
@@ -670,8 +718,9 @@ fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text,
             val edge_selected = edge_index == selected_edge_index
             val edge_selected_text = _sg_bool_text(edge_selected)
             val edge_selected_class = if edge_selected then " sdd-selected" else: ""
+            val edge_style = _sg_resolved_style_attr(graph, edge.css, "edge")
             if path != "":
-                html.push("<path class=\"sdd-connector-path " + _sg_css_classes(edge.css) + edge_selected_class + "\" data-edge-index=\"" + edge_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\" d=\"" + path + "\" fill=\"none\" stroke=\"currentColor\"><title>" + _sg_escape_html(edge.label) + "</title></path>")
+                html.push("<path class=\"sdd-connector-path " + _sg_css_classes(edge.css) + edge_selected_class + "\" data-edge-index=\"" + edge_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\" d=\"" + path + "\" fill=\"none\" stroke=\"currentColor\"" + edge_style + "><title>" + _sg_escape_html(edge.label) + "</title></path>")
             edge_index = edge_index + 1
         html.push("</svg>")
     var i = 0
@@ -689,6 +738,9 @@ fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text,
             style = style + ";width:" + _sg_safe_length(node.width)
         if node.height != "":
             style = style + ";height:" + _sg_safe_length(node.height)
+        val node_style = _sg_resolved_style(graph, node.css, "node")
+        if node_style != "":
+            style = style + ";" + node_style
         html.push("<button type=\"button\" class=\"sdn-graph-node sdd-node " + _sg_css_classes(node.css) + node_selected_class + "\" data-node=\"" + _sg_escape_html(node.id) + "\" data-selected=\"" + node_selected_text + "\" aria-selected=\"" + node_selected_text + "\" data-role=\"" + _sg_escape_html(node.role) + "\" data-shape=\"" + _sg_escape_html(node.shape) + "\" data-layer=\"" + _sg_escape_html(node.layer) + "\" data-parent=\"" + _sg_escape_html(node.parent) + "\" data-x=\"" + _sg_escape_html(node.x) + "\" data-y=\"" + _sg_escape_html(node.y) + "\" data-width=\"" + _sg_escape_html(node.width) + "\" data-height=\"" + _sg_escape_html(node.height) + "\" style=\"" + style + "\">" + _sg_escape_html(node.label) + "</button>")
         i = i + 1
     var edge_div_index = 0
@@ -697,7 +749,7 @@ fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text,
         val edge_selected = edge_div_index == selected_edge_index
         val edge_selected_text = _sg_bool_text(edge_selected)
         val edge_selected_class = if edge_selected then " sdd-selected" else: ""
-        html.push("<div class=\"sdn-graph-edge sdd-connector " + _sg_css_classes(edge.css) + edge_selected_class + "\" data-edge-index=\"" + edge_div_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\">" + _sg_escape_html(edge.label) + "</div>")
+        html.push("<div class=\"sdn-graph-edge sdd-connector " + _sg_css_classes(edge.css) + edge_selected_class + "\" data-edge-index=\"" + edge_div_index.to_text() + "\" data-selected=\"" + edge_selected_text + "\" aria-selected=\"" + edge_selected_text + "\" data-from=\"" + _sg_escape_html(edge.from_id) + "\" data-to=\"" + _sg_escape_html(edge.to_id) + "\" data-kind=\"" + _sg_escape_html(edge.kind) + "\" data-route=\"" + _sg_escape_html(edge.route) + "\" data-waypoints=\"" + _sg_escape_html(edge.waypoints) + "\" data-start-anchor=\"" + _sg_escape_html(edge.start_anchor) + "\" data-end-anchor=\"" + _sg_escape_html(edge.end_anchor) + "\" data-path=\"" + path + "\"" + _sg_resolved_style_attr(graph, edge.css, "edge") + ">" + _sg_escape_html(edge.label) + "</div>")
         edge_div_index = edge_div_index + 1
     html.push("</div>")
     html.join("")
@@ -1059,6 +1111,32 @@ fn _sg_parse_edges_table(lines: [text], start: i64) -> ([SdnGraphEdge], i64):
         i = i + 1
     (edges, i)
 
+fn _sg_parse_css_table(lines: [text], start: i64) -> ([SdnGraphCss], i64):
+    var css_defs: [SdnGraphCss] = []
+    var i = start + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "" or line.contains("|") or line.ends_with(":"):
+            return (css_defs, i)
+        val cols = _sg_split_csv(line)
+        if cols.len() >= 3:
+            css_defs.push(SdnGraphCss(name: cols[0].trim(), parent_css: cols[1].trim(), target: cols[2].trim()))
+        i = i + 1
+    (css_defs, i)
+
+fn _sg_parse_styles_table(lines: [text], start: i64) -> ([SdnGraphStyle], i64):
+    var styles: [SdnGraphStyle] = []
+    var i = start + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "" or line.contains("|") or line.ends_with(":"):
+            return (styles, i)
+        val cols = _sg_split_csv(line)
+        if cols.len() >= 3:
+            styles.push(SdnGraphStyle(css: cols[0].trim(), key: cols[1].trim(), value: _sg_unquote(cols[2].trim())))
+        i = i + 1
+    (styles, i)
+
 fn _sg_is_table_header(line: text, name: text) -> bool:
     line.starts_with(name + " |")
 
@@ -1194,6 +1272,99 @@ fn _sg_css_classes(css: text) -> text:
         if token != "":
             out.push("sdn-css-" + _sg_escape_attr_token(token))
     out.join(" ")
+
+fn _sg_resolved_style_attr(graph: SdnGraph, css: text, target: text) -> text:
+    val style = _sg_resolved_style(graph, css, target)
+    if style == "":
+        return ""
+    " style=\"" + style + "\""
+
+fn _sg_resolved_style(graph: SdnGraph, css: text, target: text) -> text:
+    var out: [text] = []
+    for raw in css.split(" "):
+        val token = raw.trim()
+        if token != "":
+            val rule = _sg_resolved_style_for_token(graph, token, target, 0)
+            if rule != "":
+                out.push(rule)
+    out.join(";")
+
+fn _sg_resolved_style_for_token(graph: SdnGraph, css: text, target: text, depth: i64) -> text:
+    if depth > 4:
+        return ""
+    val css_target = _sg_css_target_for(graph, css)
+    if css_target != "" and css_target != target:
+        return ""
+    var out: [text] = []
+    val parent = _sg_css_parent_for(graph, css)
+    if parent != "" and parent != "none" and parent != css:
+        val inherited = _sg_resolved_style_for_token(graph, parent, target, depth + 1)
+        if inherited != "":
+            out.push(inherited)
+    for style in graph.styles:
+        if style.css == css:
+            val declaration = _sg_style_declaration(style.key, style.value, target)
+            if declaration != "":
+                out.push(declaration)
+    out.join(";")
+
+fn _sg_css_target_for(graph: SdnGraph, css: text) -> text:
+    for css_def in graph.css_defs:
+        if css_def.name == css:
+            return css_def.target
+    ""
+
+fn _sg_css_parent_for(graph: SdnGraph, css: text) -> text:
+    for css_def in graph.css_defs:
+        if css_def.name == css:
+            return css_def.parent_css
+    ""
+
+fn _sg_style_declaration(key: text, value: text, target: text) -> text:
+    val safe = _sg_safe_css_value(value)
+    if safe == "":
+        return ""
+    if target == "node":
+        if key == "fill":
+            return "background-color:" + safe
+        if key == "stroke":
+            return "border-color:" + safe
+        if key == "stroke_width":
+            return "border-width:" + safe
+        if key == "radius":
+            return "border-radius:" + safe
+        if key == "text":
+            return "color:" + safe
+    elif target == "edge":
+        if key == "stroke" or key == "fill" or key == "text":
+            return "color:" + safe
+        if key == "stroke_width":
+            return "stroke-width:" + safe
+    ""
+
+fn _sg_safe_css_value(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return ""
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "#" or ch == "." or ch == "-" or ch == "_" or ch == "%" or ch == " " or ch == "(" or ch == ")"):
+            return ""
+        i = i + 1
+    trimmed
+
+fn _sg_safe_style_token(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return false
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.char_at(i)
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "-" or ch == "_"):
+            return false
+        i = i + 1
+    true
 
 fn _sg_escape_html(s: text) -> text:
     var result: [text] = []

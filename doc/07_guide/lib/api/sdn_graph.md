@@ -121,6 +121,12 @@ styles |css, key, value|
     primary, stroke_width, 2
 ```
 
+The HTML renderer resolves reusable `css` rules for known paint keys. Node
+rules map `fill`, `stroke`, `stroke_width`, `radius`, and `text` to safe inline
+HTML styles. Edge rules map `stroke`, `fill`, `text`, and `stroke_width` onto
+the connector color/stroke style. Unknown keys are preserved in canonical SDD
+but not emitted as arbitrary CSS.
+
 ## Weaving
 
 `weave @:` injects CSS labels into graph entities matched by selectors.
@@ -226,6 +232,10 @@ attached connectors, and clears child parent references to that node id.
 height, layer, parent)` appends one diagram node with caller-provided SDD
 metadata. It fails closed with `invalid-id` or `duplicate-id` so node ids remain
 stable for selection, connectors, and inspectors.
+
+`sdn_graph_set_style_rule_checked(graph, css, target, parent_css, key, value)`
+adds or updates one reusable style-table rule and rejects invalid targets or
+unsafe CSS values.
 
 `sdn_graph_update_node_at` is the broad pure node edit operation for editor
 event wiring. It updates one node's CSS labels, role, shape, x/y geometry,

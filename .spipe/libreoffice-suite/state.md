@@ -444,3 +444,8 @@ possible so they are runner-verifiable.
   geometry, layer, and parent metadata while rejecting empty or duplicate ids;
   `add-sdd-node` exposes it through the headless Office action bridge and IDE
   Draw sanity probe.
+- 2026-06-19 dev: Added Draw/SDD reusable style-rule editing and rendering.
+  `sdn_graph_set_style_rule_checked` adds or updates canonical css/style table
+  rules, rejects invalid targets and unsafe CSS values, and the HTML renderer
+  resolves known node/edge paint keys into safe inline styles. `edit-sdd-style-rule`
+  exposes the bridge through the headless Office action surface.
