@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 527 lines folded for reproduction.
+Runnable source: 529 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -531,6 +531,7 @@ val missing_sdd_node_delete_action = office_action_dispatch("delete-sdd-node", "
 val sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
 val invalid_sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16;bad|true|125|#ffffff\ngraph: Canvas\nA: A")
 val sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|orthogonal|60x10;60x40|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val invalid_sdd_reroute_action = office_action_dispatch("reroute-sdd-connector", "0|curve|60x10|right|left\ngraph: Route\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|A|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
 val sdd_duplicate_edge_action = office_action_dispatch("duplicate-sdd-edge", "0\ngraph: Edge Copy\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: flow @primary route: simple start: right end: left")
 val missing_sdd_add_edge_action = office_action_dispatch("add-sdd-edge", "B|Nope|return|secondary|reply|simple||left|right\ngraph: Edge Add\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20")
@@ -641,6 +642,7 @@ expect(missing_sdd_node_delete_action.reason).to_equal("missing-node")
 expect(sdd_canvas_action.output).to_contain("data-canvas-width=\"640\"")
 expect(invalid_sdd_canvas_action.reason).to_equal("invalid-canvas-number")
 expect(sdd_reroute_action.output).to_contain("data-route=\"orthogonal\"")
+expect(invalid_sdd_reroute_action.reason).to_equal("invalid-route")
 expect(sdd_add_edge_action.output).to_contain(">return</div>")
 expect(sdd_add_edge_action.output).to_contain("data-kind=\"reply\"")
 expect(sdd_duplicate_edge_action.reason).to_equal("updated")

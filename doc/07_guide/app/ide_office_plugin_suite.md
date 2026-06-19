@@ -113,7 +113,7 @@ and rejects duplicate IDs, blank IDs, and missing parent IDs.
 `edit-sdd-edge-kind` uses `edge_index|kind`.
 `edit-sdd-edge-endpoints` uses `edge_index|from_id|to_id`.
 `delete-sdd-edge` uses `edge_index`.
-`reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`.
+`reroute-sdd-connector` uses `edge_index|route|waypoints|start_anchor|end_anchor`; route is empty, `simple`, or `orthogonal`, anchors are empty or cardinal, and waypoints use semicolon-separated integer `x` pairs.
 Node, edge, canvas, layout, and connector edit actions return rendered SDD HTML
 for the updated document. Style-rule edit/delete actions return canonical SDD
 text for round-trip persistence.
