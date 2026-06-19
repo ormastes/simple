@@ -59,8 +59,10 @@ fragments.
 Writer rendering must expose Markdown source -> paper/document HTML through
 `render_writer_markdown_html`, with root metadata for format and source line
 count. Writer paper HTML renders Markdown headings, paragraphs, tables, and
-images as document HTML while escaping user text and attributes. The rich-text
-compatibility adapter must also escape block text before emitting HTML.
+images as document HTML while escaping user text and attributes; Markdown table
+separator alignment markers (`:---`, `---:`, `:-:`) become stable `data-align`
+and `text-align` cell metadata. The rich-text compatibility adapter must also
+escape block text before emitting HTML.
 
 PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
 `render_ppt_markdown_html`, with root metadata for format and slide count. The
