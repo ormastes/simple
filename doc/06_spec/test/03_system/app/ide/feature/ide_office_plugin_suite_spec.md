@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 543 lines folded for reproduction.
+Runnable source: 545 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -548,6 +548,7 @@ val invalid_sdd_edge_style_action = office_action_dispatch("edit-sdd-edge-style"
 val sdd_edge_kind_action = office_action_dispatch("edit-sdd-edge-kind", "0|async\ngraph: Edge Kind\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link kind: request route: simple start: right end: left")
 val invalid_sdd_edge_kind_action = office_action_dispatch("edit-sdd-edge-kind", "0|async bad\ngraph: Edge Kind\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link kind: request route: simple start: right end: left")
 val sdd_edge_endpoints_action = office_action_dispatch("edit-sdd-edge-endpoints", "0|B|A\ngraph: Edge Endpoints\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
+val missing_sdd_edge_endpoint_index_action = office_action_dispatch("edit-sdd-edge-endpoints", "1|B|A\ngraph: Edge Endpoints\nA: A\nB: B\nA -> B: link")
 val sdd_edge_delete_action = office_action_dispatch("delete-sdd-edge", "0\ngraph: Edge Delete\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val missing_sdd_edge_label_action = office_action_dispatch("edit-sdd-edge-label", "1|approved\ngraph: Edge Label\nA: A\nB: B\nA -> B: link")
 val invalid_sdd_edge_label_point_action = office_action_dispatch("edit-sdd-edge-label-point", "0|bad\"x|12\ngraph: Edge Label Point\nA: A\nB: B\nA -> B: link")
@@ -670,6 +671,7 @@ expect(invalid_sdd_edge_style_action.reason).to_equal("invalid-style-token")
 expect(sdd_edge_kind_action.output).to_contain("data-kind=\"async\"")
 expect(invalid_sdd_edge_kind_action.reason).to_equal("invalid-kind-token")
 expect(sdd_edge_endpoints_action.output).to_contain("data-from=\"B\" data-to=\"A\"")
+expect(missing_sdd_edge_endpoint_index_action.reason).to_equal("missing-edge")
 expect(sdd_edge_delete_action.reason).to_equal("updated")
 expect(sdd_edge_delete_action.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(missing_sdd_edge_label_action.reason).to_equal("missing-edge")

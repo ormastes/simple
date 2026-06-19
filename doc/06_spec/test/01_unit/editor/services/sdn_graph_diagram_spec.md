@@ -592,7 +592,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 76 lines folded for reproduction.
+Runnable source: 81 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -618,6 +618,8 @@ val bad_style = sdn_graph_update_edge_style_checked(labeled, 0, "warning,bad")
 val kinded = sdn_graph_update_edge_kind_at(styled, 0, "async")
 val bad_kind = sdn_graph_update_edge_kind_checked(styled, 0, "async bad")
 val reconnected = sdn_graph_update_edge_endpoints_at(kinded, 0, "B", "A")
+val checked_reconnected = sdn_graph_update_edge_endpoints_checked(kinded, 0, " B ", " A ")
+val bad_endpoint = sdn_graph_update_edge_endpoints_checked(kinded, 0, "B", "Missing")
 val deleted = sdn_graph_delete_edge_at(reconnected, 0)
 val html = sdn_graph_render_html(updated)
 val labeled_html = sdn_graph_render_html(labeled)
@@ -669,6 +671,9 @@ expect(sdn_graph_render_html(kinded)).to_contain("data-kind=\"async\"")
 expect(reconnected.edges[0].from_id).to_equal("B")
 expect(reconnected.edges[0].to_id).to_equal("A")
 expect(reconnected.edges[0].label).to_equal("approved")
+expect(checked_reconnected.graph.edges[0].from_id).to_equal("B")
+expect(checked_reconnected.graph.edges[0].to_id).to_equal("A")
+expect(bad_endpoint.reason).to_equal("missing-node")
 expect(reconnected_html).to_contain("data-from=\"B\" data-to=\"A\"")
 expect(deleted.edges.len()).to_equal(0)
 expect(sdn_graph_render_html(deleted)).to_contain("data-selected-edge-index=\"-1\"")
