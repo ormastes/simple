@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -721,6 +721,33 @@ expect(missing.reason).to_equal("missing-edge")
 
 </details>
 
+#### reorders a node to the front or back
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: order\nA: Alpha x: 0 y: 0\nB: Beta x: 10 y: 0\nC: Gamma x: 20 y: 0")
+val front = sdn_graph_reorder_node_checked(graph, "A", "front")
+val back = sdn_graph_reorder_node_checked(front.graph, "C", "back")
+val invalid = sdn_graph_reorder_node_checked(graph, "A", "middle")
+val missing = sdn_graph_reorder_node_checked(graph, "Nope", "front")
+val ambiguous = sdn_graph_reorder_node_checked(sdn_graph_parse("graph: ambiguous\nA: First\nA: Second"), "A", "front")
+expect(front.accepted).to_be(true)
+expect(front.graph.nodes[2].id).to_equal("A")
+expect(back.accepted).to_be(true)
+expect(back.graph.nodes[0].id).to_equal("C")
+expect(sdn_graph_to_canonical_sdn(back.graph)).to_contain("C, Gamma")
+expect(invalid.reason).to_equal("invalid-position")
+expect(missing.reason).to_equal("missing-node")
+expect(ambiguous.reason).to_equal("ambiguous-source")
+```
+
+</details>
+
 #### aligns selected SDD nodes with guarded geometry signatures
 
 <details>
@@ -809,8 +836,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

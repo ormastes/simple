@@ -236,6 +236,9 @@ stable for selection, connectors, and inspectors.
 `sdn_graph_duplicate_edge_checked(graph, edge_index)` appends an exact copy of
 one connector and fails closed with `missing-edge` for out-of-range indexes.
 
+`sdn_graph_reorder_node_checked(graph, node_id, position)` moves one node to
+`front` or `back` document/render order without changing its layer metadata.
+
 `sdn_graph_set_style_rule_checked(graph, css, target, parent_css, key, value)`
 adds or updates one reusable style-table rule and rejects invalid targets or
 unsafe CSS values.

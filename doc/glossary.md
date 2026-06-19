@@ -600,7 +600,7 @@ Human-readable, version-control-friendly data format used by all Simple database
 
 SDN-backed diagram dialect for Markdown docs and IDE diagram previews. Preferred
 files use `.sdd.sdn`. SDD extends relationship graphs with diagram-editor
-metadata: node shape, x/y position, width/height, layer, connector route,
+metadata: node shape, x/y position, width/height, layer, document/render order, connector route,
 parent/container membership for draw.io-like groups, node duplication with
 offset geometry, waypoints, start/end anchors, draw canvas/page metadata,
 rendered SVG connector paths, reusable CSS labels, connector duplication, style-rule delete/inspection, and resolved style-table paint

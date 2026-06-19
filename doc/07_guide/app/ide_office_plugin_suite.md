@@ -83,6 +83,7 @@ geometry signature and return rendered HTML for the updated document.
 
 SDD node edit actions use `node_id|value` for label, parent, shape, style, layer, and role edits.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`.
+`order-sdd-node` uses `node_id|front` or `node_id|back` to change document/render order.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text.
 `delete-sdd-style-rule` uses `css|key` and returns canonical SDD text with that reusable rule removed.
 `inspect-sdd-style-rule` uses `css|key` and returns compact style-rule readback text.
@@ -187,7 +188,7 @@ modes:
 
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
-- Draw: `html=true route=true select=true inspect=true edit=true geometry=true layer=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
+- Draw: `html=true route=true select=true inspect=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true`
 - LLM catalog: Markdown has `render-markdown-preview-html` and `md-edit`; Writer has
   `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
@@ -196,7 +197,7 @@ modes:
   `duplicate-sdd-edge`, `edit-sdd-edge-label`, `edit-sdd-edge-style`, `edit-sdd-edge-kind`, `edit-sdd-edge-endpoints`,
   `delete-sdd-edge`, `delete-sdd-node`, `edit-sdd-node-geometry`,
   `edit-sdd-node-label`, `edit-sdd-node-parent`, `edit-sdd-node-shape`,
-  `edit-sdd-node-style`, `edit-sdd-node-layer`, `edit-sdd-node-role`,
+  `edit-sdd-node-style`, `edit-sdd-node-layer`, `order-sdd-node`, `edit-sdd-node-role`,
   `duplicate-sdd-node`, `edit-sdd-canvas`, `align-sdd-selection`,
   `distribute-sdd-selection`, `inspect-sdd-node`, and `inspect-sdd-edge`;
   Calc has `formula-counta`,

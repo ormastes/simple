@@ -79,7 +79,7 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph nodes=3 edges=2 html=true route=true select=true inspect=true edit=true geometry=true layer=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
+  check: draw: sdn_graph nodes=3 edges=2 html=true route=true select=true inspect=true edit=true geometry=true layer=true order=true role=true node_create=true style_rule=true style_delete=true style_inspect=true edge_create=true edge_duplicate=true edge_style=true edge_kind=true reconnect=true delete=true node_delete=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -91,7 +91,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=94 actions=53
+  llm-catalog: apps=9 features=95 actions=54
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -115,7 +115,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -136,6 +136,7 @@ expect(out).to_contain("node_create=true")
 expect(out).to_contain("style_rule=true")
 expect(out).to_contain("style_delete=true")
 expect(out).to_contain("style_inspect=true")
+expect(out).to_contain("order=true")
 expect(out).to_contain("edge_duplicate=true")
 expect(out).to_contain("node_delete=true")
 expect(out).to_contain("canvas=true")
@@ -143,7 +144,7 @@ expect(out).to_contain("sheets: Spreadsheet")
 expect(out).to_contain("agent-dashboard: Agent Dashboard")
 expect(out).to_contain("db-admin: Database Admin")
 expect(out).to_contain("plugin-manifest: plugins: entries=6")
-expect(out).to_contain("llm-catalog: apps=9 features=94 actions=53")
+expect(out).to_contain("llm-catalog: apps=9 features=95 actions=54")
 
 step("Capture the TUI report so the manual shows the CLI surface")
 expect(_write_tui_capture(out)).to_equal(0)

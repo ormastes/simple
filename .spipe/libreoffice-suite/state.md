@@ -462,3 +462,7 @@ possible so they are runner-verifiable.
   `sdn_graph_duplicate_edge_checked` appends an exact connector copy by index,
   `duplicate-sdd-edge` exposes it through the headless Office action bridge,
   and IDE feature checks now report `edge_duplicate=true`.
+- 2026-06-19 dev: Added Draw/SDD node order editing.
+  `sdn_graph_reorder_node_checked` moves a node to front/back document order
+  without changing layer metadata, `order-sdd-node` exposes it through Office,
+  and IDE feature checks now report `order=true`.
