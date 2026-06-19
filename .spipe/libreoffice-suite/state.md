@@ -228,3 +228,7 @@ possible so they are runner-verifiable.
   render as deterministic `data-z-index`/CSS `z-index`; non-numeric semantic
   layers fall back to document order. Added `office_ui_design_update_layer_checked`
   and catalog metadata for `layer-edit` / `ui-layer-edit`.
+- 2026-06-19 dev: Advanced Designer selection and inspector support. Added
+  transient selected-node rendering with `data-selected` / `aria-selected`
+  metadata and a read-only `office_ui_design_inspect_node` snapshot API, exposed
+  through catalog metadata as `selection`, `inspector`, and `ui-inspect-node`.

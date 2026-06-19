@@ -30,6 +30,21 @@ struct OfficeUiEditResult:
     diff: text
     design: OfficeUiDesign
 
+struct OfficeUiInspector:
+    found: bool
+    reason: text
+    id: text
+    label: text
+    kind: text
+    css: text
+    x: text
+    y: text
+    width: text
+    height: text
+    layer: text
+    component: text
+    z_index: text
+
 fn office_ui_editor_format_name() -> text:
     "HTML UI Design Document"
 
@@ -61,15 +76,21 @@ fn office_ui_design_parse(source: text) -> OfficeUiDesign:
     design
 
 fn office_ui_design_render_html(design: OfficeUiDesign) -> text:
+    office_ui_design_render_html_with_selection(design, "")
+
+fn office_ui_design_render_html_with_selection(design: OfficeUiDesign, selected_id: text) -> text:
     val w = _office_ui_safe_length(design.width)
     val h = _office_ui_safe_length(design.height)
-    var out = "<div class=\"office-ui-design\" data-format=\"html-ui\" data-format-name=\"" + office_ui_editor_format_name() + "\" data-design=\"" + markdown_escape_html(design.name) + "\" style=\"position: relative; width: " + w + "; height: " + h + "; box-sizing: border-box; background: #ffffff; border: 1px solid #d1d5db; overflow: hidden;\">"
+    var out = "<div class=\"office-ui-design\" data-format=\"html-ui\" data-format-name=\"" + office_ui_editor_format_name() + "\" data-design=\"" + markdown_escape_html(design.name) + "\" data-selected-node-id=\"" + markdown_escape_html(selected_id) + "\" style=\"position: relative; width: " + w + "; height: " + h + "; box-sizing: border-box; background: #ffffff; border: 1px solid #d1d5db; overflow: hidden;\">"
     var z_index = 0
     for node in design.nodes:
-        val class_name = "office-ui-node office-ui-" + _office_ui_safe_token(node.kind) + _office_ui_css_class(node.css)
+        val selected = node.id == selected_id
+        val selected_class = if selected then " office-ui-selected" else: ""
+        val selected_value = if selected then "true" else: "false"
+        val class_name = "office-ui-node office-ui-" + _office_ui_safe_token(node.kind) + _office_ui_css_class(node.css) + selected_class
         val node_z = _office_ui_layer_z_index(node.layer, z_index)
         val style = "position: absolute; left: " + _office_ui_safe_length(node.x) + "; top: " + _office_ui_safe_length(node.y) + "; width: " + _office_ui_safe_length(node.width) + "; height: " + _office_ui_safe_length(node.height) + "; z-index: " + node_z + "; box-sizing: border-box; border: 1px solid #6b7280; background: #f9fafb; color: #111827; overflow: hidden;"
-        out = out + "<div class=\"" + class_name + "\" data-id=\"" + markdown_escape_html(node.id) + "\" data-kind=\"" + markdown_escape_html(node.kind) + "\" data-layer=\"" + markdown_escape_html(node.layer) + "\" data-z-index=\"" + node_z + "\" data-component=\"" + markdown_escape_html(node.component) + "\" style=\"" + style + "\">" + markdown_escape_html(node.label) + "</div>"
+        out = out + "<div class=\"" + class_name + "\" data-id=\"" + markdown_escape_html(node.id) + "\" data-kind=\"" + markdown_escape_html(node.kind) + "\" data-layer=\"" + markdown_escape_html(node.layer) + "\" data-z-index=\"" + node_z + "\" data-selected=\"" + selected_value + "\" aria-selected=\"" + selected_value + "\" data-component=\"" + markdown_escape_html(node.component) + "\" style=\"" + style + "\">" + markdown_escape_html(node.label) + "</div>"
         z_index = z_index + 1
     out + "</div>"
 
@@ -146,6 +167,29 @@ fn office_ui_design_update_layer_checked(design: OfficeUiDesign, node_id: text, 
             return OfficeUiEditResult(accepted: true, reason: "updated", diff: "@@ ui-node-layer " + node_id + " @@\n- " + expected_layer + "\n+ " + new_layer, design: out)
         i = i + 1
     OfficeUiEditResult(accepted: false, reason: "missing-node", diff: "@@ ui-node-layer " + node_id + " @@\nexpected: " + expected_layer + "\nactual: <missing>\nrejected: " + new_layer, design: design)
+
+fn office_ui_design_inspect_node(design: OfficeUiDesign, node_id: text) -> OfficeUiInspector:
+    var index = 0
+    while index < design.nodes.len():
+        val node = design.nodes[index]
+        if node.id == node_id:
+            return OfficeUiInspector(
+                found: true,
+                reason: "selected",
+                id: node.id,
+                label: node.label,
+                kind: node.kind,
+                css: node.css,
+                x: node.x,
+                y: node.y,
+                width: node.width,
+                height: node.height,
+                layer: node.layer,
+                component: node.component,
+                z_index: _office_ui_layer_z_index(node.layer, index)
+            )
+        index = index + 1
+    OfficeUiInspector(found: false, reason: "missing-node", id: node_id, label: "", kind: "", css: "", x: "", y: "", width: "", height: "", layer: "", component: "", z_index: "")
 
 fn _office_ui_clone_node(node: OfficeUiNode) -> OfficeUiNode:
     OfficeUiNode(

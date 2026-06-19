@@ -28,7 +28,7 @@ ui_editor_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -124,6 +124,47 @@ expect(html).to_contain("data-id=\"submit\"")
 expect(html).to_contain("data-layer=\"controls\"")
 expect(html).to_contain("left: 72px")
 expect(html).to_contain("Sign &lt;in&gt;")
+```
+
+</details>
+
+#### renders selected node state and exposes inspector metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val design = office_ui_design_parse("design: Inspect\nnode card|Card|frame|0|0|200|120|panel|1|container\nnode action|Action|button|20|20|80|32|primary|controls|action")
+val html = office_ui_design_render_html_with_selection(design, "action")
+expect(html).to_contain("data-selected-node-id=\"action\"")
+expect(html).to_contain("data-id=\"action\"")
+expect(html).to_contain("office-ui-selected")
+expect(html).to_contain("data-selected=\"true\"")
+expect(html).to_contain("aria-selected=\"true\"")
+expect(html).to_contain("data-id=\"card\"")
+expect(html).to_contain("data-selected=\"false\"")
+
+val info = office_ui_design_inspect_node(design, "card")
+expect(info.found).to_be(true)
+expect(info.reason).to_equal("selected")
+expect(info.id).to_equal("card")
+expect(info.label).to_equal("Card")
+expect(info.kind).to_equal("frame")
+expect(info.x).to_equal("0")
+expect(info.y).to_equal("0")
+expect(info.width).to_equal("200")
+expect(info.height).to_equal("120")
+expect(info.layer).to_equal("1")
+expect(info.component).to_equal("container")
+expect(info.z_index).to_equal("1")
+
+val missing = office_ui_design_inspect_node(design, "missing")
+expect(missing.found).to_be(false)
+expect(missing.reason).to_equal("missing-node")
+expect(missing.id).to_equal("missing")
 ```
 
 </details>
@@ -245,8 +286,8 @@ expect(missing.reason).to_equal("missing-node")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -19,6 +19,16 @@ contract.
 z-index values. Numeric layer values render directly as deterministic CSS
 `z-index` values for Figma-like stack ordering.
 
+`office_ui_design_render_html_with_selection` is a compatibility extension over
+the renderer. It adds root `data-selected-node-id`, per-node
+`data-selected`/`aria-selected`, and the `office-ui-selected` class for the
+selected node. Selection is intentionally not stored on `OfficeUiDesign`.
+
+`office_ui_design_inspect_node` returns an `OfficeUiInspector` snapshot for a
+node id, including label, kind, css token, geometry, layer, component role, and
+resolved z-index. Missing nodes return `found=false` with reason
+`missing-node`; successful reads return reason `selected`.
+
 ## SDD Bridge
 
 `office_ui_design_to_sdd` serializes nodes to the SDD table shape already used

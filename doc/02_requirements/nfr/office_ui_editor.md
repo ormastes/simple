@@ -8,3 +8,5 @@
 - NFR-UI-004: Feature-check metadata must remain stable for LLM/tool use.
 - NFR-UI-005: Stacking order must be deterministic; numeric layer values map to
   rendered z-index values, while non-numeric layers fall back to document order.
+- NFR-UI-006: Selection and inspector reads must be pure derived views; they
+  must not mutate node data or introduce persisted selection state.

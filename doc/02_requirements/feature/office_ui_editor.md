@@ -14,6 +14,8 @@
   move and resize operations reject stale geometry.
 - REQ-UI-008: Support deterministic layer/z-order metadata for positioned nodes
   with guarded layer updates.
+- REQ-UI-009: Support transient node selection rendering and read-only
+  inspector snapshots without persisting selection into the design document.
 
 ## Out of Scope
 

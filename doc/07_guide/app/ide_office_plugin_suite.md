@@ -42,6 +42,9 @@ substrate. It parses positioned frame/component records, renders a stable
 SDD-compatible tables, and guards label/layout/layer edits with expected-value
 checks. Numeric layer values render as deterministic `data-z-index` / CSS
 `z-index` values; semantic layer names fall back to document-order stack values.
+Selection and inspection are read-only derived views: selected renders add
+`data-selected`/`aria-selected` metadata, and `ui-inspect-node` returns a node
+snapshot without mutating the design document.
 
 Draw/diagram editing should prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
@@ -57,7 +60,7 @@ modes:
 - LLM catalog: Writer has `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `reroute-sdd-connector`; Designer has `render-ui-html`, `export-ui-sdd`, and
-  `ui-label-edit` / `ui-layout-edit` / `ui-layer-edit`.
+  `ui-label-edit` / `ui-layout-edit` / `ui-layer-edit` / `ui-inspect-node`.
 
 ## Verification
 
