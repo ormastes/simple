@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 61 | 61 | 0 | 0 |
+| 63 | 63 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -394,6 +394,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(run_office(["sheet-edit", "A1", "old", "new", "A1=old;not-a-ref=2"])).to_equal(2)
+```
+
+</details>
+
+#### rejects sheet edit commands with duplicate source references
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["sheet-edit", "A1", "old", "new", "A1=old;A01=new"])).to_equal(2)
 ```
 
 </details>
@@ -1094,6 +1108,22 @@ expect(sheet.cell_count()).to_equal(0)
 
 </details>
 
+#### rejects duplicate sheet action source references
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("sheet-edit", "A1|new|next\nA1=old;A01=new")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("duplicate-source-ref")
+```
+
+</details>
+
 #### updates slide text elements only when expected text matches
 
 - SlideElementKind TextBox
@@ -1207,8 +1237,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 61 |
-| Active scenarios | 61 |
+| Total scenarios | 63 |
+| Active scenarios | 63 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
