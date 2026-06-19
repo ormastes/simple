@@ -1,3 +1,4 @@
+#[runtime_intrinsics]
 # Async Web Server
 #
 # Concurrent HTTP server with WebSocket push updates.
@@ -25,8 +26,8 @@ use app.ui.web.origin_guard.{OriginGuard}
 use app.ui.web.session_token.{load_secret}
 use app.ui.web.auth_params.{ui_web_bind_host_from_env_value, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_json_security_headers, ui_web_html_security_headers, ui_web_request_head_status, ui_web_sensitive_route_method_allowed}
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_read, file_exists, env_get}
+
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_time_ms() -> u64
 
@@ -66,8 +67,8 @@ class AsyncWebServer:
                 val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "web")
                 if store != nil:
                     session.attach_access_store(store)
-                val content = if rt_file_exists(file_path):
-                    rt_file_read_text(file_path)
+                val content = if file_exists(file_path):
+                    file_read(file_path)
                 else:
                     ""
                 var event_ch: BoundedChannel<UIEvent> = BoundedChannel.new(256)
@@ -96,7 +97,7 @@ class AsyncWebServer:
         Task 2 (thread): File watcher -- check for file changes periodically
         Task 3 (main thread after accept_timeout): Process events + broadcast
         """
-        val bind_host = ui_web_bind_host_from_env_value(rt_env_get("SIMPLE_UI_WEB_BIND_HOST") ?? "", rt_env_get("SIMPLE_UI_WEB_ALLOW_PUBLIC_BIND") ?? "")
+        val bind_host = ui_web_bind_host_from_env_value(env_get("SIMPLE_UI_WEB_BIND_HOST") ?? "", env_get("SIMPLE_UI_WEB_ALLOW_PUBLIC_BIND") ?? "")
         print "Starting Async UI Web Server on {bind_host}:{self.port}..."
         print "Open http://localhost:{self.port} in your browser"
         print "Supports multiple concurrent connections with live push"
@@ -342,10 +343,10 @@ class AsyncWebServer:
 
     me reload_file():
         """Reload the UI file from disk."""
-        if not rt_file_exists(self.file_path):
+        if not file_exists(self.file_path):
             return
 
-        val current_content = rt_file_read_text(self.file_path)
+        val current_content = file_read(self.file_path)
         if current_content != self.last_file_content:
             self.last_file_content = current_content
             val tree_result = parse_ui_to_tree(self.file_path)
@@ -429,17 +430,17 @@ class AsyncWebServer:
 fn file_watcher_loop(file_path: Any, event_channel: Any):
     """Periodically check file for changes and push FileChanged events."""
     var last_content = ""
-    if rt_file_exists(file_path as text):
-        last_content = rt_file_read_text(file_path as text)
+    if file_exists(file_path as text):
+        last_content = file_read(file_path as text)
 
     loop:
         thread_sleep(500)
 
         val path = file_path as text
-        if not rt_file_exists(path):
+        if not file_exists(path):
             continue
 
-        val current = rt_file_read_text(path)
+        val current = file_read(path)
         if current != last_content:
             last_content = current
             val ch = event_channel as BoundedChannel<UIEvent>
@@ -508,7 +509,7 @@ fn run_async_web(file_path: text, port: i32) -> i64:
 
 fn run_async_web_with_access_store(file_path: text, port: i32, access_db_path: text) -> i64:
     """Start async web server mode for a .ui.sdn file."""
-    if not rt_file_exists(file_path):
+    if not file_exists(file_path):
         print "Error: File not found: {file_path}"
         return 1
 

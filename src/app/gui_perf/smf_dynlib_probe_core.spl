@@ -10,12 +10,8 @@ use std.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
 use std.gui.pure_core.{GuiInputEvent, gui_pointer_event, gui_key_event, gui_dispatch_events}
 use std.gui.pure_smf_dynlib_perf.{GuiDynlibPerfReport, gui_dynlib_perf_report}
 use app.gui_perf.smf_dynlib_artifact.{gui_smf_parse_header}
-
-extern fn rt_env_get(key: text) -> text
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_platform_name() -> text
-extern fn rt_file_read_bytes(path: text) -> [u8]?
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+use std.io_runtime.{env_get, time_now_unix_micros, file_read_bytes, file_write_bytes}
+use std.nogc_sync_mut.io_runtime.{platform_name}
 
 class GuiDynlibProbeConfig:
     artifact_path: text
@@ -41,7 +37,7 @@ fn gui_dynlib_probe_default_config() -> GuiDynlibProbeConfig:
     )
 
 fn _env_or(key: text, fallback: text) -> text:
-    val value = rt_env_get(key) ?? ""
+    val value = env_get(key) ?? ""
     if value == "":
         return fallback
     value
@@ -108,9 +104,9 @@ fn gui_dynlib_probe_bytes_equal(left: [u8], right: [u8]) -> bool:
 fn gui_dynlib_probe_write_cache_bytes_verified(cache_path: text, bytes: [u8]) -> bool:
     if bytes.len() == 0:
         return false
-    if not rt_file_write_bytes(cache_path, bytes):
+    if not file_write_bytes(cache_path, bytes):
         return false
-    val reread = rt_file_read_bytes(cache_path) ?? []
+    val reread = file_read_bytes(cache_path) ?? []
     gui_dynlib_probe_bytes_equal(bytes, reread)
 
 fn _gui_dynlib_probe_arch_code(host_arch: text) -> i64:
@@ -183,9 +179,9 @@ fn gui_dynlib_probe_load_host_evidence(config: GuiDynlibProbeConfig) -> GuiDynli
     GuiDynlibProbeLoadEvidence(loader_mode: "host_dynlib", call_source: "dynlib_symbol_call", symbol_resolved: true, fallback_used: false, dynlib_path: config.artifact_path)
 
 fn gui_dynlib_probe_extract_smf_library_to_cache(artifact_path: text) -> text:
-    val host_os = rt_platform_name()
+    val host_os = platform_name()
     val cache_path = gui_dynlib_probe_smf_cache_path(artifact_path, host_os)
-    val smf_bytes = rt_file_read_bytes(artifact_path) ?? []
+    val smf_bytes = file_read_bytes(artifact_path) ?? []
     if smf_bytes.len() == 0:
         return ""
     val stub = gui_dynlib_probe_extract_smf_library_bytes_for_host_arch(smf_bytes, gui_dynlib_probe_host_arch_from_env(host_os))
@@ -234,9 +230,9 @@ fn gui_dynlib_probe_direct_samples(iterations: i32, warmup_count: i32) -> [i64]:
     val total = iterations + warmup_count
     while i < total:
         val events = gui_dynlib_probe_workload(i)
-        val t0 = rt_time_now_unix_micros()
+        val t0 = time_now_unix_micros()
         val batch = gui_dispatch_events(events, 0)
-        val t1 = rt_time_now_unix_micros()
+        val t1 = time_now_unix_micros()
         if batch.commands.len() > 0 and i >= warmup_count:
             var elapsed = t1 - t0
             if elapsed < 0:
@@ -262,9 +258,9 @@ fn gui_dynlib_probe_dynlib_samples(dynlib_path: text, symbol_name: text, iterati
     while i < total:
         args[0] = i.to_i64()
         args[1] = 12 + i.to_i64()
-        val t0 = rt_time_now_unix_micros()
+        val t0 = time_now_unix_micros()
         val command_count = spl_wffi_call_i64(sym, args, 4)
-        val t1 = rt_time_now_unix_micros()
+        val t1 = time_now_unix_micros()
         if command_count > 0 and i >= warmup_count:
             var elapsed = t1 - t0
             if elapsed < 0:
@@ -275,7 +271,7 @@ fn gui_dynlib_probe_dynlib_samples(dynlib_path: text, symbol_name: text, iterati
     samples
 
 fn gui_dynlib_probe_report(config: GuiDynlibProbeConfig, evidence: GuiDynlibProbeLoadEvidence, samples_us: [i64]) -> GuiDynlibPerfReport:
-    val host_os = rt_platform_name()
+    val host_os = platform_name()
     val host_arch = gui_dynlib_probe_host_arch_from_env(host_os)
     gui_dynlib_perf_report(
         config.artifact_path,

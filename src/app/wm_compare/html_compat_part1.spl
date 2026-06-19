@@ -1,3 +1,4 @@
+#[runtime_intrinsics]
 # Part 1 of src/app/wm_compare/html_compat.spl
 use app.wm_compare.html_compat.*
 # HTML Compat — Phase 2 Chrome ↔ Simple HTML/CSS Pixel Equivalence
@@ -27,28 +28,20 @@ use std.nogc_sync_mut.sffi.io.{
     dir_create_all}
 use app.common.string_builder.{StringBuilder}
 
-# rt_file_read_text and rt_file_read_bytes are wrapped in Option by the
-# bootstrap interpreter, so we declare them directly and use the `?? ""`
-# / `?? []` fallback pattern (matching the test_runner / database modules).
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_read_bytes(path: text) -> [u8]
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+use std.io_runtime.{file_read, file_read_bytes, file_exists, env_get}
 
-# rt_process_run is the raw runtime extern. We invoke it directly because
+# rt_process_run_timeout is the raw runtime extern. We invoke it directly because
 # `capture_electron`'s `val (out, err, exit_code) = shell(...)` struct
 # destructure trips an interpreter bug ("variable `exit_code` not found"),
 # and the parent path uses `std.io.shell` which behaves slightly different
 # under bootstrap. Going through the runtime extern keeps the harness
 # portable across stages.
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 # NOTE: We do NOT use std.common.image.ppm_decode here. Its
 # `decode_ppm_to_argb` calls `data.len().to_i32()`, which crashes under
 # the bootstrap interpreter ("method `to_i32` not found on type i64").
 # We inline a minimal P6 decoder below using `as i32` casts.
 
-extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_cwd() -> text
 
 class CaptureResult:
@@ -431,11 +424,11 @@ fn load_combined_html(fixture: Fixture) -> text:
     string so any divergence is purely a render-pipeline difference, not
     a fixture mismatch.
     """
-    val html = rt_file_read_text(fixture.html_path) ?? ""
+    val html = file_read(fixture.html_path)
     if fixture.css_path == "":
         return html
 
-    val css = rt_file_read_text(fixture.css_path) ?? ""
+    val css = file_read(fixture.css_path)
     val style_tag = "<style>\n" + css + "</style>\n</head>"
 
     # Inject before </head>. All fixture HTML files have exactly one
@@ -467,7 +460,7 @@ fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
     # Use absolute paths and explicit cwd via /bin/sh -c.
     val w_str = "{width}"
     val h_str = "{height}"
-    val display = rt_env_get("DISPLAY") ?? ""
+    val display = env_get("DISPLAY")
     if display == "":
         return capture_error(
             "electron", width, height,
@@ -488,7 +481,7 @@ fn capture_chrome(html: text, width: i32, height: i32) -> CaptureResult:
         if exit_code != 0:
             return capture_error("electron", width, height, "Electron live-bitmap capture failed: {stderr}")
 
-    val ppm_data: [u8] = rt_file_read_bytes(ppm_path) ?? []
+    val ppm_data: [u8] = file_read_bytes(ppm_path) ?? []
     if ppm_data.len() == 0:
         return capture_error("electron", width, height, "Failed to read PPM output file")
 
@@ -510,9 +503,9 @@ fn chrome_capture_temp_ppm_path() -> text:
 fn load_chrome_golden(fixture: Fixture, width: i32, height: i32) -> CaptureResult:
     """Load the checked-in Chromium PPM golden for a fixture."""
     val path = chrome_ppm_path(fixture.id)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return capture_error("chromium_golden", width, height, "missing Chromium golden: {path}")
-    val ppm_data: [u8] = rt_file_read_bytes(path) ?? []
+    val ppm_data: [u8] = file_read_bytes(path) ?? []
     if ppm_data.len() == 0:
         return capture_error("chromium_golden", width, height, "empty Chromium golden: {path}")
     val img = decode_ppm_local(ppm_data)
@@ -531,9 +524,9 @@ fn load_chrome_golden(fixture: Fixture, width: i32, height: i32) -> CaptureResul
 
 fn load_ppm_capture(path: text, backend_name: text, width: i32, height: i32) -> CaptureResult:
     """Load a PPM capture from an explicit path and validate the viewport."""
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return capture_error(backend_name, width, height, "missing PPM capture: {path}")
-    val ppm_data: [u8] = rt_file_read_bytes(path) ?? []
+    val ppm_data: [u8] = file_read_bytes(path) ?? []
     if ppm_data.len() == 0:
         return capture_error(backend_name, width, height, "empty PPM capture: {path}")
     val img = decode_ppm_local(ppm_data)
@@ -569,17 +562,17 @@ fn _simple_capture_candidate_runnable(candidate: text) -> bool:
 fn _simple_capture_select_candidate(candidate: text) -> text:
     if candidate == "":
         return ""
-    if not rt_file_exists(candidate):
+    if not file_exists(candidate):
         return ""
     if _simple_capture_candidate_runnable(candidate):
         return candidate
     ""
 
 fn _simple_capture_binary_path() -> text:
-    val configured = rt_env_get("SIMPLE_BINARY") ?? ""
+    val configured = env_get("SIMPLE_BINARY")
     if _simple_capture_candidate_runnable(configured):
         return configured
-    val configured_bin = rt_env_get("SIMPLE_BIN") ?? ""
+    val configured_bin = env_get("SIMPLE_BIN")
     if _simple_capture_candidate_runnable(configured_bin):
         return configured_bin
 
@@ -635,7 +628,7 @@ fn capture_simple(fixture_id: text, html: text, width: i32, height: i32, timeout
             "simple_browser_engine", width, height,
             "child render failed: {detail}")
 
-    val ppm_data: [u8] = rt_file_read_bytes(ppm_path) ?? []
+    val ppm_data: [u8] = file_read_bytes(ppm_path) ?? []
     if ppm_data.len() == 0:
         return capture_error(
             "simple_browser_engine", width, height,
