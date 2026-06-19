@@ -30,6 +30,8 @@ Compatibility wrappers remain:
 Common variables:
 
 - `RDOC_HOME`: RenderDoc install root containing `bin/renderdoccmd`.
+  On macOS, this may also be a `RenderDoc.app` bundle containing
+  `Contents/MacOS/renderdoccmd`.
 - `RDOC_CHROME`: Chrome/Chromium binary for HTML capture.
 - `RDOC_OUTPUT_DIR`: base output directory.
 - `RDOC_CAPTURE_TIMEOUT_SECS`: bounded capture timeout.
@@ -53,15 +55,17 @@ Important keys:
 - `rdoc_capture_file`: `.rdc` path when one exists.
 - `rdoc_capture_magic`: `RDOC` for a valid RenderDoc capture.
 
-The current local canonical evidence is:
+The current canonical evidence contract is:
 
 - Simple in-application path:
-  `build/renderdoc/canonical-probe/simple/evidence.env` reports
-  `rdoc_capture_status=pass` and `rdoc_capture_magic=RDOC`.
+  `build/renderdoc/canonical-probe/simple/evidence.env` must report
+  `rdoc_capture_status=pass`, `rdoc_capture_magic=RDOC`, and an existing
+  `.rdc` file. If that env/file is missing, the GUI RenderDoc goal remains
+  incomplete with `missing-simple-rdoc`.
 - Original Chrome HTML/CSS path:
-  `build/renderdoc/canonical-probe/html/evidence.env` reports
-  `rdoc_capture_status=fail` and `rdoc_capture_reason=missing-rdc` after Chrome
-  GPU-process segfaults through `librenderdoc.so`.
+  `build/renderdoc/canonical-probe/html/evidence.env`, or an external-host
+  evidence env, must pass the original-backend gate with `RDOC` magic. A local
+  failed capture or missing env is not completion evidence.
 
 ## External Host Gate
 
@@ -95,6 +99,10 @@ run and writes `rdoc_external_host_capture_status=unavailable` with
 macOS does not provide native Vulkan drivers. Use the LunarG Vulkan SDK with
 MoltenVK, or another Metal-backed Vulkan portability implementation, when
 testing the Simple Vulkan path on macOS.
+
+The setup helper resolves either an unpacked RenderDoc tree with
+`bin/renderdoccmd` or a macOS `RenderDoc.app` bundle, and prints both
+`LD_LIBRARY_PATH` and `DYLD_LIBRARY_PATH` exports for prepared capture hosts.
 
 The shared CLI remains the preferred interface:
 

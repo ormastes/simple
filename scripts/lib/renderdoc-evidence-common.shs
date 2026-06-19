@@ -11,7 +11,7 @@ rdoc_repo_root() {
 }
 
 rdoc_find_renderdoc_home() {
-    if [ "${RDOC_HOME:-}" != "" ] && [ -x "$RDOC_HOME/bin/renderdoccmd" ]; then
+    if [ "${RDOC_HOME:-}" != "" ] && [ -x "$(rdoc_renderdoccmd_path "$RDOC_HOME")" ]; then
         printf '%s\n' "$RDOC_HOME"
         return 0
     fi
@@ -26,7 +26,40 @@ rdoc_find_renderdoc_home() {
             return 0
         fi
     done
+    for candidate in \
+        /Applications/RenderDoc.app \
+        "$HOME/Applications/RenderDoc.app" \
+        "$root"/build/tools/RenderDoc.app \
+        "$root"/build/tools/renderdoc/RenderDoc.app
+    do
+        if [ -x "$(rdoc_renderdoccmd_path "$candidate")" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
     return 1
+}
+
+rdoc_renderdoccmd_path() {
+    renderdoc_home="$1"
+    if [ -x "$renderdoc_home/bin/renderdoccmd" ]; then
+        printf '%s\n' "$renderdoc_home/bin/renderdoccmd"
+    elif [ -x "$renderdoc_home/Contents/MacOS/renderdoccmd" ]; then
+        printf '%s\n' "$renderdoc_home/Contents/MacOS/renderdoccmd"
+    else
+        printf '%s\n' "$renderdoc_home/bin/renderdoccmd"
+    fi
+}
+
+rdoc_renderdoc_lib_path() {
+    renderdoc_home="$1"
+    if [ -d "$renderdoc_home/lib" ]; then
+        printf '%s\n' "$renderdoc_home/lib"
+    elif [ -d "$renderdoc_home/Contents/MacOS" ]; then
+        printf '%s\n' "$renderdoc_home/Contents/MacOS"
+    else
+        printf '%s\n' "$renderdoc_home/lib"
+    fi
 }
 
 rdoc_find_chrome() {
@@ -58,8 +91,8 @@ rdoc_status_env() {
     echo "rdoc_root=$root"
     echo "rdoc_home=$renderdoc_home"
     if [ "$renderdoc_home" != "" ]; then
-        echo "rdoc_cmd=$renderdoc_home/bin/renderdoccmd"
-        echo "rdoc_lib=$renderdoc_home/lib"
+        echo "rdoc_cmd=$(rdoc_renderdoccmd_path "$renderdoc_home")"
+        echo "rdoc_lib=$(rdoc_renderdoc_lib_path "$renderdoc_home")"
     else
         echo "rdoc_cmd="
         echo "rdoc_lib="
@@ -151,9 +184,12 @@ rdoc_capture_simple_vulkan() {
         echo "rdoc_renderdoc_home=$renderdoc_home"
         echo "rdoc_log=$out_dir/renderdoc-simple.log"
     } | tee "$env_path"
-    LD_LIBRARY_PATH="$renderdoc_home/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+    rdoc_lib="$(rdoc_renderdoc_lib_path "$renderdoc_home")"
+    LD_LIBRARY_PATH="$rdoc_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    DYLD_LIBRARY_PATH="$rdoc_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
     SIMPLE_EXECUTION_MODE=interpret \
-        "$renderdoc_home/bin/renderdoccmd" capture -d "$root" -c "$out_dir/simple_gui" -w \
+        "$rdoc_cmd" capture -d "$root" -c "$out_dir/simple_gui" -w \
         "$simple_bin" run "$prog" >"$out_dir/renderdoc-simple.log" 2>&1 || true
     sed -n '1,120p' "$out_dir/renderdoc-simple.log"
     rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
@@ -208,7 +244,8 @@ rdoc_capture_html() {
     } | tee "$env_path"
     if command -v xvfb-run >/dev/null 2>&1; then
         if command -v timeout >/dev/null 2>&1; then
-            timeout "$timeout_secs" "$renderdoc_home/bin/renderdoccmd" capture -w --opt-hook-children \
+            rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+            timeout "$timeout_secs" "$rdoc_cmd" capture -w --opt-hook-children \
                 -c "$out_dir/html_chrome" \
                 xvfb-run -a "$chrome_bin" \
                 --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
@@ -218,7 +255,8 @@ rdoc_capture_html() {
                 --screenshot="$out_dir/html_chrome.png" \
                 "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
         else
-            "$renderdoc_home/bin/renderdoccmd" capture -w --opt-hook-children \
+            rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+            "$rdoc_cmd" capture -w --opt-hook-children \
                 -c "$out_dir/html_chrome" \
                 xvfb-run -a "$chrome_bin" \
                 --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
@@ -230,7 +268,8 @@ rdoc_capture_html() {
         fi
     else
         if command -v timeout >/dev/null 2>&1; then
-            timeout "$timeout_secs" "$renderdoc_home/bin/renderdoccmd" capture -w --opt-hook-children \
+            rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+            timeout "$timeout_secs" "$rdoc_cmd" capture -w --opt-hook-children \
                 -c "$out_dir/html_chrome" \
                 "$chrome_bin" \
                 --headless=new --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \
@@ -240,7 +279,8 @@ rdoc_capture_html() {
                 --screenshot="$out_dir/html_chrome.png" \
                 "file://$html_path" >"$out_dir/renderdoc-html.log" 2>&1 || true
         else
-            "$renderdoc_home/bin/renderdoccmd" capture -w --opt-hook-children \
+            rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
+            "$rdoc_cmd" capture -w --opt-hook-children \
                 -c "$out_dir/html_chrome" \
                 "$chrome_bin" \
                 --headless=new --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage \

@@ -86,7 +86,7 @@ sh scripts/check/check-renderdoc-macos-portability-probe.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -99,6 +99,7 @@ expect(evidence).to_contain("rdoc_macos_probe_status=")
 expect(evidence).to_contain("rdoc_macos_probe_reason=")
 expect(evidence).to_contain("rdoc_macos_uname_s=")
 expect(evidence).to_contain("rdoc_macos_vulkan_status=")
+expect(evidence).to_contain("rdoc_macos_vulkan_driver=")
 expect(evidence).to_contain("rdoc_macos_renderdoc_status=")
 expect(evidence).to_contain("rdoc_macos_capture_simple_status=")
 expect(evidence).to_contain("rdoc_macos_capture_html_status=")
