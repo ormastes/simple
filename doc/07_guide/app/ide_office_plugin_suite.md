@@ -127,7 +127,8 @@ Layout actions use `mode_or_axis|id1,id2,...`, followed by the UI or SDD
 document body. `ui-align-selection`, `ui-distribute-selection`,
 `align-sdd-selection`, and `distribute-sdd-selection` compute the current
 geometry signature and return rendered HTML for the updated document.
-Blank layout modes/axes or selection lists are rejected as `invalid-args`.
+Blank layout modes/axes, blank selection lists, or malformed selection IDs are
+rejected as `invalid-args`.
 
 SDD node edit actions use `node_id|value` for label, parent, shape, style, layer, and role edits; style labels are space-separated safe tokens, and shape, layer, and role are empty or one safe token.
 Blank or malformed SDD node edit ids are rejected as `invalid-args`.
