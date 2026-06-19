@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 755 lines folded for reproduction.
+Runnable source: 756 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -649,6 +649,7 @@ val sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "0\ngra
 val missing_sdd_inspect_edge_action = office_action_dispatch("inspect-sdd-edge", "1\ngraph: Inspect\nA: A\nB: B\nA -> B: link")
 expect(md_action.output).to_contain("class=\"wysiwyg-preview\"")
 expect(md_action.output).to_contain("data-format=\"markdown-wysiwyg\"")
+expect(md_action.output).to_contain("data-format-name=\"Writer Markdown\"")
 expect(md_action.output).to_contain("data-line-count=\"1\"")
 expect(md_action.output).to_contain("data-line-no=\"0\"")
 expect(md_action.output).to_contain("<h1>Markdown</h1>")

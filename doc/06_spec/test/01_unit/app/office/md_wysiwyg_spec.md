@@ -117,7 +117,7 @@ expect(pane).to_equal("alpha\nbeta")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -125,6 +125,7 @@ val view = build_wysiwyg_view("hello")
 val pane = wysiwyg_preview_pane(view)
 expect(pane).to_start_with("<div class=\"wysiwyg-preview\"")
 expect(pane).to_contain("data-format=\"markdown-wysiwyg\"")
+expect(pane).to_contain("data-format-name=\"Writer Markdown\"")
 expect(pane).to_contain("data-line-count=\"1\"")
 expect(pane).to_contain("class=\"wysiwyg-preview-line\" data-line-no=\"0\"")
 expect(pane).to_contain("line-height: 1.5;")
