@@ -646,7 +646,7 @@ expect(legacy_sdd.output).to_contain("graph: Feature")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -657,6 +657,8 @@ val legacy = office_action_dispatch("render-sdd", "graph: Feature\\nA: Alpha x: 
 expect(result.ok).to_be(true)
 expect(result.output).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(result.output).to_contain("data-node=\"A\"")
+expect(result.output).to_contain("data-node-index=\"0\"")
+expect(result.output).to_contain("data-label=\"Alpha\"")
 expect(result.output).to_contain("data-selected-node-id=\"\"")
 expect(result.output).to_contain("data-selected-edge-index=\"-1\"")
 expect(selected.ok).to_be(true)
