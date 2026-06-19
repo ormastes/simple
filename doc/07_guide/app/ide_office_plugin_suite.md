@@ -94,10 +94,10 @@ document body. `ui-align-selection`, `ui-distribute-selection`,
 `align-sdd-selection`, and `distribute-sdd-selection` compute the current
 geometry signature and return rendered HTML for the updated document.
 
-SDD node edit actions use `node_id|value` for label, parent, shape, style, layer, and role edits.
+SDD node edit actions use `node_id|value` for label, parent, shape, style, layer, and role edits; style labels are space-separated safe tokens, and shape, layer, and role are empty or one safe token.
 Parent edits reject missing parent IDs and parent cycles.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`
-and rejects duplicate IDs, blank IDs, and missing parent IDs.
+and rejects duplicate IDs, blank IDs, missing parent IDs, and unsafe style, role, shape, or layer tokens.
 `order-sdd-node` uses `node_id|front` or `node_id|back` to change document/render order.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text; `extends` must be `none`, empty, or an existing non-self CSS rule.
 `delete-sdd-style-rule` uses `css|key` and returns canonical SDD text with that reusable rule removed.

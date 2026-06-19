@@ -704,7 +704,7 @@ expect(unsafe.reason).to_equal("invalid-canvas-number")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 85 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -729,12 +729,20 @@ expect(sdn_graph_render_html(added.graph)).to_contain("sdn-css-accent sdn-css-se
 val duplicate_added = sdn_graph_add_node_checked(graph, "A", "Again", "", "", "", "", "", "", "", "", "")
 val invalid_added = sdn_graph_add_node_checked(graph, "", "Blank", "", "", "", "", "", "", "", "", "")
 val missing_parent_added = sdn_graph_add_node_checked(graph, "D", "Detached", "", "", "", "", "", "", "", "", "Missing")
+val bad_add_style = sdn_graph_add_node_checked(graph, "D", "Bad", "accent,bad", "", "", "", "", "", "", "", "")
+val bad_add_role = sdn_graph_add_node_checked(graph, "D", "Bad", "", "role bad", "", "", "", "", "", "", "")
+val bad_add_shape = sdn_graph_add_node_checked(graph, "D", "Bad", "", "", "bad,shape", "", "", "", "", "", "")
+val bad_add_layer = sdn_graph_add_node_checked(graph, "D", "Bad", "", "", "", "", "", "", "", "front layer", "")
 expect(duplicate_added.accepted).to_be(false)
 expect(duplicate_added.reason).to_equal("duplicate-id")
 expect(invalid_added.accepted).to_be(false)
 expect(invalid_added.reason).to_equal("invalid-id")
 expect(missing_parent_added.accepted).to_be(false)
 expect(missing_parent_added.reason).to_equal("missing-parent")
+expect(bad_add_style.reason).to_equal("invalid-style-token")
+expect(bad_add_role.reason).to_equal("invalid-role-token")
+expect(bad_add_shape.reason).to_equal("invalid-shape-token")
+expect(bad_add_layer.reason).to_equal("invalid-layer-token")
 val updated = sdn_graph_update_node_at(graph, 0, "accent selected", "decision", "diamond", "32", "48", "96", "64", "foreground")
 val html = sdn_graph_render_html(updated)
 val canon = sdn_graph_to_canonical_sdn(updated)
@@ -756,9 +764,17 @@ expect(canon).to_contain("A, Alpha, \"accent selected\", decision, diamond, 32, 
 
 val shaped = sdn_graph_update_node_shape_at(graph, 1, "cylinder")
 val styled = sdn_graph_update_node_style_at(shaped, 1, "storage highlight")
+val bad_style = sdn_graph_update_node_style_checked(styled, 1, "storage,bad")
+val bad_shape = sdn_graph_update_node_shape_checked(styled, 1, "bad shape")
+val bad_layer = sdn_graph_update_node_layer_checked(styled, 1, "front layer")
+val bad_role = sdn_graph_update_node_role_checked(styled, 1, "data base")
 expect(styled.nodes[1].shape).to_equal("cylinder")
 expect(styled.nodes[1].css).to_equal("storage highlight")
 expect(styled.nodes[1].x).to_equal("220")
+expect(bad_style.reason).to_equal("invalid-style-token")
+expect(bad_shape.reason).to_equal("invalid-shape-token")
+expect(bad_layer.reason).to_equal("invalid-layer-token")
+expect(bad_role.reason).to_equal("invalid-role-token")
 expect(sdn_graph_render_html(styled)).to_contain("sdn-css-storage sdn-css-highlight")
 expect(sdn_graph_render_html(styled)).to_contain("border-radius:999px / 24px")
 expect(sdn_graph_render_html(styled)).to_contain("box-shadow:inset 0 8px 0 rgba(15,23,42,0.08)")
