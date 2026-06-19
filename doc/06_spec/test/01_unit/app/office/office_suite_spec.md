@@ -1,6 +1,6 @@
 # office_suite_spec
 
-> Office suite unit specification.
+> Exercises the canonical Office app entrypoint, launcher, headless action dispatcher, and app-specific UI construction paths. The suite verifies Markdown-backed Writer, Calc, Impress, Draw/SDD, Designer, Base, Math, Counter, Mail, and Planner stay reachable through the shared LibreOffice-like shell.
 
 <!-- sdn-diagram:id=office_suite_spec.arch -->
 <details class="sdn-source">
@@ -29,14 +29,14 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 51 | 51 | 0 | 0 |
+| 52 | 52 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # office_suite_spec
 
-Office suite unit specification.
+Exercises the canonical Office app entrypoint, launcher, headless action dispatcher, and app-specific UI construction paths. The suite verifies Markdown-backed Writer, Calc, Impress, Draw/SDD, Designer, Base, Math, Counter, Mail, and Planner stay reachable through the shared LibreOffice-like shell.
 
 ## At a Glance
 
@@ -44,12 +44,33 @@ Office suite unit specification.
 |-------|-------|
 | Category | Application |
 | Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/sys_test/ide_office_plugin_suite.md |
+| Design | doc/07_guide/app/ide_office_plugin_suite.md |
+| Research | N/A |
 | Source | `test/01_unit/app/office/office_suite_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Office suite unit specification.
-Exercises the canonical office app entrypoint, launcher, and app-specific UI construction paths.
+## Overview
+
+Exercises the canonical Office app entrypoint, launcher, headless action
+dispatcher, and app-specific UI construction paths. The suite verifies
+Markdown-backed Writer, Calc, Impress, Draw/SDD, Designer, Base, Math, Counter,
+Mail, and Planner stay reachable through the shared LibreOffice-like shell.
+
+## Examples
+
+`run_office(["writer"])` loads the Markdown-backed Writer surface.
+`office_action_dispatch("render-writer-markdown-html", source)` renders the
+HTML document path. `office_catalog_dispatch_probe()` verifies every
+LLM-catalog action is recognized by the dispatcher and no advertised action
+falls through to `unknown-action`.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/sys_test/ide_office_plugin_suite.md
+**Design:** doc/07_guide/app/ide_office_plugin_suite.md
+**Research:** N/A
 
 ## Scenarios
 
@@ -514,6 +535,23 @@ val result = office_action_dispatch("unknown-action", "")
 expect(result.ok).to_be(false)
 expect(result.code).to_equal(1)
 expect(result.reason).to_equal("unknown-action")
+```
+
+</details>
+
+#### recognizes every LLM catalog office action
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val probe = office_catalog_dispatch_probe()
+expect(probe.advertised_count).to_equal(56)
+expect(probe.recognized_count).to_equal(56)
+expect(probe.missing_actions.len()).to_equal(0)
 ```
 
 </details>
@@ -1005,11 +1043,17 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 51 |
-| Active scenarios | 51 |
+| Total scenarios | 52 |
+| Active scenarios | 52 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/sys_test/ide_office_plugin_suite.md](doc/03_plan/sys_test/ide_office_plugin_suite.md)
+- **Design:** [doc/07_guide/app/ide_office_plugin_suite.md](doc/07_guide/app/ide_office_plugin_suite.md)
 
 
 </details>
