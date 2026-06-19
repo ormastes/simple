@@ -139,7 +139,7 @@ expect(design.nodes[1].constraint_vertical).to_equal("stretch")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,6 +154,7 @@ expect(html).to_contain("data-component-count=\"1\"")
 expect(html).to_contain("data-canvas-width=\"800\"")
 expect(html).to_contain("data-canvas-height=\"480\"")
 expect(html).to_contain("data-id=\"submit\"")
+expect(html).to_contain("data-label=\"Sign &lt;in&gt;\"")
 expect(html).to_contain("data-layer=\"controls\"")
 expect(html).to_contain("data-parent=\"\"")
 expect(html).to_contain("data-layout-mode=\"off\"")
@@ -169,7 +170,7 @@ expect(html).to_contain("Sign &lt;in&gt;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -179,6 +180,7 @@ expect(html).to_contain("data-selected-node-id=\"action\"")
 expect(html).to_contain("data-frame-count=\"1\"")
 expect(html).to_contain("data-component-count=\"2\"")
 expect(html).to_contain("data-id=\"action\"")
+expect(html).to_contain("data-label=\"Action\"")
 expect(html).to_contain("office-ui-selected")
 expect(html).to_contain("data-selected=\"true\"")
 expect(html).to_contain("aria-selected=\"true\"")
