@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 95 | 95 | 0 | 0 |
+| 96 | 96 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -746,6 +746,27 @@ Reproduction: this block contains the complete executable scenario source.
 val result = office_action_dispatch("query-table", "count-where|   |open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
 expect(result.ok).to_be(false)
 expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
+#### rejects blank Base edit columns
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val update_result = office_action_dispatch("db-edit", "update-where|   |open|status|done\ntable: Feature\ncolumns: id,status\nrow: 1,open")
+val delete_result = office_action_dispatch("db-edit", "delete-where|   |open\ntable: Feature\ncolumns: id,status\nrow: 1,open")
+val missing_result = office_action_dispatch("db-edit", "update-where|missing|open|status|done\ntable: Feature\ncolumns: id,status\nrow: 1,open")
+expect(update_result.ok).to_be(false)
+expect(update_result.reason).to_equal("invalid-args")
+expect(delete_result.ok).to_be(false)
+expect(delete_result.reason).to_equal("invalid-args")
+expect(missing_result.reason).to_equal("missing-match-column")
 ```
 
 </details>
@@ -1755,8 +1776,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 95 |
-| Active scenarios | 95 |
+| Total scenarios | 96 |
+| Active scenarios | 96 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

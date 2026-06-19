@@ -141,8 +141,8 @@ uses `count-where|column|value`, `select-where|column|value`, or
 `data-format="base-table"`, `data-column-count`, and `data-row-count`, and
 rejects blank table names plus missing, blank, duplicate, or row-width-mismatched columns. `db-edit` uses `insert|v1,v2`,
 `update-where|match_column|match_value|update_column|new_value`, or
-`delete-where|match_column|match_value`, rejects invalid schemas, and returns
-the updated table text.
+`delete-where|match_column|match_value`, rejects blank edit columns as
+`invalid-args`, rejects invalid schemas, and returns the updated table text.
 
 Calc and Impress edit actions use `target_id|expected|replacement` followed by
 the compact `A1=value;B1=value` or `element_id=value;...` body. `sheet-edit`
