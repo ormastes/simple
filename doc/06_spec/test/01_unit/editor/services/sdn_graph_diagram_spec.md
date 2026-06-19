@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 30 | 30 | 0 | 0 |
+| 31 | 31 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -313,6 +313,23 @@ expect(sdn_graph_render_html(graph)).to_contain("data-label-x=\"88\" data-label-
 val unsafe = sdn_graph_parse("graph: unsafe-label\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, c, , normal, orthogonal, \"140x30;200x80\", right, left, bad\\\"x, 80")
 expect(sdn_graph_render_html(unsafe)).to_contain("data-label-x=\"155\" data-label-y=\"80\"")
 expect(sdn_graph_render_html(unsafe).contains("bad\\\"x")).to_be(false)
+```
+
+</details>
+
+#### drops unsafe connector kind class tokens while preserving escaped kind metadata
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: unsafe-kind\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, c, , bad&quot;onclick=1, simple, , right, left, , ")
+val html = sdn_graph_render_html(graph)
+expect(html).to_contain("data-kind=\"bad&amp;quot;onclick=1\"")
+expect(html.contains("sdd-kind-bad")).to_be(false)
 ```
 
 </details>
@@ -1090,8 +1107,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 30 |
-| Active scenarios | 30 |
+| Total scenarios | 31 |
+| Active scenarios | 31 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
