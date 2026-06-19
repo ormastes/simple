@@ -19,9 +19,7 @@
 # Usage:
 #   Can be run as standalone script, or imported and called directly
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_getpid() -> i64
+use std.io_runtime.{file_read, file_exists, getpid}
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use app.compile.native_profile_counter.{
@@ -42,7 +40,7 @@ use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 fn find_mold_linker() -> text:
     val current_dir = shell_output("pwd")
     val local_mold = current_dir + "/bin/mold/mold"
-    if rt_file_exists(local_mold):
+    if file_exists(local_mold):
         return local_mold
     val which_result = shell_output("which mold 2>/dev/null")
     if which_result.len() > 0:
@@ -133,7 +131,7 @@ fn llvm_direct_function_name_from_simple_line(line: text) -> text:
     rest[0:paren].trim()
 
 pub fn llvm_direct_minimal_c_source_from_simple(source_file: text) -> text:
-    val source = rt_file_read_text(source_file) ?? ""
+    val source = file_read(source_file)
     var functions: [text] = []
     val lines = source.split("\n")
     var i = 0
@@ -179,7 +177,7 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
         info("compile", "Compiling " + source_file + " via LLVM...")
 
     # Step 1: Generate textual C for the LLVM direct lane.
-    val pid = rt_getpid()
+    val pid = getpid()
     val temp_cpp = _get_temp_dir() + "/simple_llvm_" + str(pid) + ".cpp"
     if not file_write(temp_cpp, llvm_direct_minimal_c_source_from_simple(source_file)):
         error("compile", "C generation failed")
@@ -189,7 +187,7 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
         val cpp_size = file_size(temp_cpp)
         debug("compile", "Generated C++ (" + str(cpp_size) + " bytes)")
 
-    var generated_source = rt_file_read_text(temp_cpp) ?? ""
+    var generated_source = file_read(temp_cpp)
     if not llvm_direct_generated_c_is_textual(generated_source):
         generated_source = llvm_direct_minimal_c_source_from_simple(source_file)
         if not file_write(temp_cpp, generated_source):
@@ -215,11 +213,11 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
             debug("compile", "Simple profile counters injected: " + str(instrumented.slot_count) + " slot(s), metadata=" + metadata_path)
 
     if opts.simple_layout_section_map_path != "":
-        if not rt_file_exists(opts.simple_layout_section_map_path):
+        if not file_exists(opts.simple_layout_section_map_path):
             error("compile", "Simple layout section map not found: " + opts.simple_layout_section_map_path)
             file_delete(temp_cpp)
             return 1
-        val section_map_text = rt_file_read_text(opts.simple_layout_section_map_path) ?? ""
+        val section_map_text = file_read(opts.simple_layout_section_map_path)
         val applied = native_layout_apply_c_section_map(generated_source, section_map_text, true)
         if applied.diagnostic_count > 0:
             error("compile", "Simple layout section map failed: " + applied.diagnostics.join(","))
