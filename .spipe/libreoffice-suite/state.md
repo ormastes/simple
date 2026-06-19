@@ -312,8 +312,8 @@ possible so they are runner-verifiable.
 - 2026-06-19 dev: Rendered SDD Draw canvas grid spacing. Safe `canvas_grid`
   values now produce deterministic root CSS dot grids via `background-size`.
 - 2026-06-19 dev: Rendered SDD Draw node shapes. Existing `shape` metadata now
-  maps common Draw shapes to deterministic HTML CSS for circle, terminator,
-  diamond, and cylinder/database previews.
+  maps common Draw shapes to deterministic HTML CSS for rounded, pill, circle,
+  terminator, diamond, and cylinder/database previews.
 - 2026-06-19 dev: Promoted SDD Draw to the IDE feature-check surface. Added a
   pure `app.ide.draw_sanity` probe and registered Draw as a first-class IDE
   capability, so `simple ide --feature-check --tui|--gui` now reports six

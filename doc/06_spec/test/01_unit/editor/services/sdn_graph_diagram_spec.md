@@ -160,11 +160,11 @@ expect(graph.canvas_background).to_equal("#ffffff")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: editor\nCard: Card @panel shape: rounded x: 10 y: 20 width: 200 height: 100 layer: base\nAction: Action @button shape: pill x: 40 y: 60 width: 80 height: 28 layer: controls parent: Card\nCard -> Action: opens route: orthogonal waypoints: 20x40;40x40 start: bottom end: left")
+val graph = sdn_graph_parse("graph: editor\nCard: Card @panel shape: rounded x: 10 y: 20 width: 200 height: 100 layer: base\nAction: Action @button shape: pill x: 40 y: 60 width: 80 height: 28 layer: controls parent: Card\nBadge: Badge shape: roundrect x: 152 y: 60 width: 64 height: 28 layer: controls parent: Card\nCard -> Action: opens route: orthogonal waypoints: 20x40;40x40 start: bottom end: left")
 val html = sdn_graph_render_html(graph)
 expect(html).to_contain("class=\"sdn-graph sdd-diagram\"")
 expect(html).to_contain("data-format=\"sdd\"")
@@ -172,7 +172,11 @@ expect(html).to_contain("data-format-name=\"SDD: Simple Diagram Document\"")
 expect(html).to_contain("class=\"sdn-graph-node sdd-node sdn-css-panel\"")
 expect(html).to_contain("data-layer=\"base\"")
 expect(html).to_contain("data-parent=\"Card\"")
-expect(html).to_contain("style=\"left:10px;top:20px;width:200px;height:100px\"")
+expect(html).to_contain("left:10px;top:20px;width:200px;height:100px")
+expect(html).to_contain("data-shape=\"rounded\"")
+expect(html).to_contain("border-radius:8px")
+expect(html).to_contain("data-shape=\"pill\"")
+expect(html).to_contain("data-shape=\"roundrect\"")
 expect(html).to_contain("border-radius:999px")
 expect(html).to_contain("class=\"sdd-connector-layer\"")
 expect(html).to_contain("class=\"sdd-connector-path \"")
