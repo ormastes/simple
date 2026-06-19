@@ -4,9 +4,10 @@
 use std.gpu.engine2d.vector_font_offload.{vector_font_glyph_pixels_checksum, vector_font_glyph_readback_evidence, vector_font_offload_evidence, vector_font_preferred_offload_evidence, vector_font_preferred_glyph_readback_evidence}
 use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
 
-fn accel(attempts: i64, cuda_hits: i64, opencl_hits: i64, cpu_hits: i64, returned_glyphs: i64, returned_pixels: i64, reason: text) -> VectorFontAcceleratorStats:
+fn accel(attempts: i64, metal_hits: i64, cuda_hits: i64, opencl_hits: i64, cpu_hits: i64, returned_glyphs: i64, returned_pixels: i64, reason: text) -> VectorFontAcceleratorStats:
     VectorFontAcceleratorStats(
         attempts: attempts,
+        metal_hits: metal_hits,
         cuda_hits: cuda_hits,
         opencl_hits: opencl_hits,
         cpu_fallback_hits: cpu_hits,
@@ -20,7 +21,7 @@ describe "Engine2D vector font offload evidence":
     it "marks CUDA vector font evidence production ready only after GPU glyph pixels return":
         val evidence = vector_font_offload_evidence(
             "cuda", 48, 24, true, true, 4096,
-            accel(1, 1, 0, 0, 1, 128, "cuda-vector-font-glyph-pixels-returned")
+            accel(1, 0, 1, 0, 0, 1, 128, "cuda-vector-font-glyph-pixels-returned")
         )
 
         expect(evidence.generated_ready).to_equal(true)
@@ -35,7 +36,7 @@ describe "Engine2D vector font offload evidence":
     it "keeps generated-ready OpenCL evidence separate from missing glyph readback":
         val evidence = vector_font_offload_evidence(
             "opencl", 48, 24, true, true, 8192,
-            accel(1, 0, 1, 1, 0, 0, "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+            accel(1, 0, 0, 1, 1, 0, 0, "opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return")
         )
 
         expect(evidence.generated_ready).to_equal(true)
@@ -45,10 +46,23 @@ describe "Engine2D vector font offload evidence":
         expect(evidence.reason).to_equal("opencl-vector-font-proof-matched-cpu-with-cpu-glyph-return")
         expect(evidence.generated.launch_api).to_equal("clEnqueueNDRangeKernel")
 
+    it "keeps generated-ready Metal proof separate from missing glyph readback":
+        val evidence = vector_font_offload_evidence(
+            "metal", 48, 24, true, true, 8192,
+            accel(1, 1, 0, 0, 1, 0, 0, "metal-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+        )
+
+        expect(evidence.generated_ready).to_equal(true)
+        expect(evidence.gpu_glyph_returned).to_equal(false)
+        expect(evidence.production_ready).to_equal(false)
+        expect(evidence.status_code).to_equal("gpu-proof-with-cpu-glyph")
+        expect(evidence.reason).to_equal("metal-vector-font-proof-matched-cpu-with-cpu-glyph-return")
+        expect(evidence.generated.launch_api).to_equal("MTLComputeCommandEncoder.dispatchThreads")
+
     it "fails closed when the generated backend runtime is unavailable":
         val evidence = vector_font_offload_evidence(
             "cuda", 48, 24, false, false, 4096,
-            accel(1, 0, 0, 1, 0, 0, "production-gpu-dispatch-not-wired")
+            accel(1, 0, 0, 0, 1, 0, 0, "production-gpu-dispatch-not-wired")
         )
 
         expect(evidence.generated_ready).to_equal(false)
@@ -59,7 +73,7 @@ describe "Engine2D vector font offload evidence":
     it "reports CPU fallback as an incomplete vector font offload state":
         val evidence = vector_font_offload_evidence(
             "cuda", 48, 24, true, true, 4096,
-            accel(1, 0, 0, 1, 0, 0, "production-gpu-dispatch-not-wired")
+            accel(1, 0, 0, 0, 1, 0, 0, "production-gpu-dispatch-not-wired")
         )
 
         expect(evidence.generated_ready).to_equal(true)
@@ -72,11 +86,11 @@ describe "Engine2D vector font offload evidence":
         val evidence = vector_font_preferred_offload_evidence(
             ["vulkan", "amd-hip", "cpu"],
             48, 24, true, true, 4096,
-            accel(1, 0, 0, 1, 0, 0, "preferred-vector-font-offload-cpu-glyph")
+            accel(1, 0, 0, 0, 1, 0, 0, "preferred-vector-font-offload-cpu-glyph")
         )
         val fallback = vector_font_preferred_offload_evidence(
             ["unknown"], 48, 24, true, true, 4096,
-            accel(1, 0, 0, 1, 0, 0, "no-known-vector-font-backend")
+            accel(1, 0, 0, 0, 1, 0, 0, "no-known-vector-font-backend")
         )
 
         expect(evidence.backend_name).to_equal("rocm")
@@ -92,7 +106,7 @@ describe "Engine2D vector font offload evidence":
         val checksum = vector_font_glyph_pixels_checksum(pixels)
         val evidence = vector_font_glyph_readback_evidence(
             "cuda", 4, 1, 4096, 7, 11, true, true, true,
-            accel(1, 1, 0, 0, 1, 4, "cuda-vector-font-glyph-pixels-returned"),
+            accel(1, 0, 1, 0, 0, 1, 4, "cuda-vector-font-glyph-pixels-returned"),
             pixels, checksum
         )
 
@@ -111,13 +125,13 @@ describe "Engine2D vector font offload evidence":
         val evidence = vector_font_preferred_glyph_readback_evidence(
             ["vulkan", "amd-hip", "cpu"],
             4, 1, 4096, 7, 11, true, true, true,
-            accel(1, 0, 0, 0, 1, 4, "rocm-vector-font-glyph-pixels-returned"),
+            accel(1, 0, 0, 0, 0, 1, 4, "rocm-vector-font-glyph-pixels-returned"),
             pixels, checksum
         )
         val fallback = vector_font_preferred_glyph_readback_evidence(
             ["unknown"],
             4, 1, 4096, 7, 11, true, true, true,
-            accel(1, 0, 0, 1, 1, 4, "no-known-vector-font-readback-backend"),
+            accel(1, 0, 0, 0, 1, 1, 4, "no-known-vector-font-readback-backend"),
             pixels, checksum
         )
 
@@ -138,7 +152,7 @@ describe "Engine2D vector font offload evidence":
         val checksum = vector_font_glyph_pixels_checksum(pixels)
         val evidence = vector_font_glyph_readback_evidence(
             "cuda", 4, 1, 4096, 7, 11, true, true, true,
-            accel(1, 1, 0, 0, 0, 0, "cuda-vector-font-glyph-pixels-missing"),
+            accel(1, 0, 1, 0, 0, 0, 0, "cuda-vector-font-glyph-pixels-missing"),
             pixels, checksum
         )
 
