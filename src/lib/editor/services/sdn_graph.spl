@@ -236,7 +236,7 @@ fn sdn_graph_parse(content: text) -> SdnGraph:
             current_weave_layer = line.slice(6, line.len()).trim()
         elif in_weave and line.starts_with("parent:"):
             current_weave_parent = line.slice(7, line.len()).trim()
-        elif current_css != "" and line.contains(":"):
+        elif current_css != "" and line.contains(":") and (raw.starts_with(" ") or raw.starts_with("\t")):
             val sep = line.index_of(":")
             val key = line.slice(0, sep).trim()
             val value = line.slice(sep + 1, line.len()).trim()
@@ -769,7 +769,7 @@ fn sdn_graph_inspect_node(graph: SdnGraph, node_id: text) -> SdnGraphNodeInspect
     val node_index = _sg_find_node_index(graph, node_id)
     if node_index < 0:
         return SdnGraphNodeInspector(found: false, reason: "missing-node", id: node_id, label: "", css: "", role: "", shape: "", x: "", y: "", width: "", height: "", layer: "", parent: "")
-    val node = graph.nodes[node_index]
+    val node = _sg_effective_node_geometry(graph, graph.nodes[node_index])
     SdnGraphNodeInspector(found: true, reason: "selected", id: node.id, label: node.label, css: node.css, role: node.role, shape: node.shape, x: node.x, y: node.y, width: node.width, height: node.height, layer: node.layer, parent: node.parent)
 
 fn sdn_graph_inspect_edge(graph: SdnGraph, edge_index: i64) -> SdnGraphEdgeInspector:
@@ -813,7 +813,7 @@ fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text,
         html.push("</svg>")
     var i = 0
     while i < graph.nodes.len():
-        val node = graph.nodes[i]
+        val node = _sg_effective_node_geometry(graph, graph.nodes[i])
         val node_selected = selected_node_id != "" and node.id == selected_node_id
         val node_selected_text = _sg_bool_text(node_selected)
         val node_selected_class = if node_selected then " sdd-selected" else: ""
@@ -880,7 +880,7 @@ fn _sg_edge_svg_path(graph: SdnGraph, edge: SdnGraphEdge) -> text:
     val to_idx = _sg_find_node_index(graph, edge.to_id)
     if from_idx < 0 or to_idx < 0:
         return ""
-    sdn_graph_render_edge_path(edge, graph.nodes[from_idx], graph.nodes[to_idx])
+    sdn_graph_render_edge_path(edge, _sg_effective_node_geometry(graph, graph.nodes[from_idx]), _sg_effective_node_geometry(graph, graph.nodes[to_idx]))
 
 fn _sg_find_node_index(graph: SdnGraph, id: text) -> i64:
     var i = 0
@@ -971,6 +971,18 @@ fn _sg_clone_node(node: SdnGraphNode) -> SdnGraphNode:
         layer: node.layer,
         parent: node.parent
     )
+
+fn _sg_effective_node_geometry(graph: SdnGraph, node: SdnGraphNode) -> SdnGraphNode:
+    var out = _sg_clone_node(node)
+    if out.x == "":
+        out.x = _sg_resolved_style_value(graph, out.css, "node", "x")
+    if out.y == "":
+        out.y = _sg_resolved_style_value(graph, out.css, "node", "y")
+    if out.width == "":
+        out.width = _sg_resolved_style_value(graph, out.css, "node", "width")
+    if out.height == "":
+        out.height = _sg_resolved_style_value(graph, out.css, "node", "height")
+    out
 
 fn _sg_graph_with_nodes(graph: SdnGraph, nodes: [SdnGraphNode]) -> SdnGraph:
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
@@ -1401,6 +1413,31 @@ fn _sg_resolved_style(graph: SdnGraph, css: text, target: text) -> text:
             if rule != "":
                 out.push(rule)
     out.join(";")
+
+fn _sg_resolved_style_value(graph: SdnGraph, css: text, target: text, key: text) -> text:
+    var value = ""
+    for raw in css.split(" "):
+        val token = raw.trim()
+        if token != "":
+            val token_value = _sg_resolved_style_value_for_token(graph, token, target, key, 0)
+            if token_value != "":
+                value = token_value
+    value
+
+fn _sg_resolved_style_value_for_token(graph: SdnGraph, css: text, target: text, key: text, depth: i64) -> text:
+    if depth > 4:
+        return ""
+    val css_target = _sg_css_target_for(graph, css)
+    if css_target != "" and css_target != target:
+        return ""
+    var value = ""
+    val parent = _sg_css_parent_for(graph, css)
+    if parent != "" and parent != "none" and parent != css:
+        value = _sg_resolved_style_value_for_token(graph, parent, target, key, depth + 1)
+    for style in graph.styles:
+        if style.css == css and style.key == key and _sg_safe_css_value(style.value) != "":
+            value = style.value
+    value
 
 fn _sg_resolved_style_for_token(graph: SdnGraph, css: text, target: text, depth: i64) -> text:
     if depth > 4:

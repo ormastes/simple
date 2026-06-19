@@ -121,11 +121,13 @@ styles |css, key, value|
     primary, stroke_width, 2
 ```
 
-The HTML renderer resolves reusable `css` rules for known paint keys. Node
-rules map `fill`, `stroke`, `stroke_width`, `radius`, and `text` to safe inline
-HTML styles. Edge rules map `stroke`, `fill`, `text`, and `stroke_width` onto
-the connector color/stroke style. Unknown keys are preserved in canonical SDD
-but not emitted as arbitrary CSS.
+The HTML renderer resolves reusable `css` rules for known paint and geometry
+keys. Node rules map `fill`, `stroke`, `stroke_width`, `radius`, `shape`, and
+`text` to safe inline HTML styles; `x`, `y`, `width`, and `height` fill missing
+node preview geometry before connector paths are rendered. Edge rules map
+`stroke`, `fill`, `text`, and `stroke_width` onto the connector color/stroke
+style. Unknown keys are preserved in canonical SDD but not emitted as arbitrary
+CSS.
 
 ## Weaving
 

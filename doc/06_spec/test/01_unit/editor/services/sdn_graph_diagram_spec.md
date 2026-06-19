@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 28 | 28 | 0 | 0 |
+| 29 | 29 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -343,6 +343,30 @@ expect(bad_target.reason).to_equal("invalid-target")
 expect(bad_value.reason).to_equal("invalid-style-value")
 expect(bad_token.reason).to_equal("invalid-style-token")
 expect(bad_delete.reason).to_equal("invalid-style-token")
+```
+
+</details>
+
+#### resolves reusable SDD layout hints into node geometry styles
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: layout-style\ncss panel:\n    x: 32\n    y: 48\n    width: 160\n    height: 90\nCard: Card @panel\nTarget: Target x: 240 y: 48 width: 80 height: 40\nCard -> Target: opens route: simple start: right end: left")
+val html = sdn_graph_render_html(graph)
+val inspected = sdn_graph_inspect_node(graph, "Card")
+expect(html).to_contain("left:32px")
+expect(html).to_contain("top:48px")
+expect(html).to_contain("width:160px")
+expect(html).to_contain("height:90px")
+expect(html).to_contain("data-x=\"32\"")
+expect(html).to_contain("data-path=\"M 192,93 L 240,68\"")
+expect(inspected.x).to_equal("32")
+expect(inspected.width).to_equal("160")
 ```
 
 </details>
@@ -890,8 +914,8 @@ expect(unsupported.reason).to_equal("unsupported-distribute-axis")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 28 |
-| Active scenarios | 28 |
+| Total scenarios | 29 |
+| Active scenarios | 29 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
