@@ -141,7 +141,7 @@ expect(html).to_contain(">5</td>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -152,6 +152,8 @@ expect(embeds[0].code).to_equal("print \"hi\"")
 expect(embeds[1].language).to_equal("script")
 val html = md_document_render_script_embeds_html("# Note\n\n```simple\nprint \"hi\"\n```")
 expect(html).to_contain("class=\"md-script-embed\"")
+expect(html).to_contain("data-format=\"markdown-script-embed\"")
+expect(html).to_contain("data-format-name=\"Markdown Script Embed\"")
 expect(html).to_contain("data-language=\"simple\"")
 expect(html).to_contain("print &quot;hi&quot;")
 ```
