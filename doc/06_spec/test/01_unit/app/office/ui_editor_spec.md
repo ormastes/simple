@@ -169,7 +169,7 @@ expect(html).to_contain("Sign &lt;in&gt;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -185,6 +185,9 @@ expect(html).to_contain("aria-selected=\"true\"")
 expect(html).to_contain("class=\"office-ui-resize-handle office-ui-resize-nw\"")
 expect(html).to_contain("data-resize-handle=\"nw\"")
 expect(html).to_contain("data-resize-handle=\"se\"")
+expect(html).to_contain("width: 8px; height: 8px")
+expect(html).to_contain("left: -5px; top: -5px; cursor: nwse-resize")
+expect(html).to_contain("right: -5px; bottom: -5px; cursor: nwse-resize")
 expect(html).to_contain("data-id=\"card\"")
 expect(html).to_contain("data-selected=\"false\"")
 
