@@ -78,7 +78,8 @@ deterministic diff.
 Duplicate actions use a compact first-line edit header:
 `source_id|new_id|dx|dy`, followed by the UI or SDD document body. The
 `ui-duplicate-node` action returns rendered UI HTML and rejects malformed new
-node IDs as `invalid-args`; `duplicate-sdd-node` returns rendered SDD HTML.
+node IDs as `invalid-args`; `duplicate-sdd-node` returns rendered SDD HTML and
+rejects malformed source or new node IDs as `invalid-args`.
 Blank duplicate source/new IDs or offsets are rejected as `invalid-args`.
 
 Designer edit actions use compact first-line edit headers followed by the UI
@@ -101,19 +102,19 @@ geometry signature and return rendered HTML for the updated document.
 Blank layout modes/axes or selection lists are rejected as `invalid-args`.
 
 SDD node edit actions use `node_id|value` for label, parent, shape, style, layer, and role edits; style labels are space-separated safe tokens, and shape, layer, and role are empty or one safe token.
-Blank SDD node edit ids are rejected as `invalid-args`.
-Parent edits reject missing parent IDs and parent cycles.
+Blank or malformed SDD node edit ids are rejected as `invalid-args`.
+Parent edits reject malformed replacement parent IDs, missing parent IDs, and parent cycles.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`
 and rejects duplicate IDs, blank IDs, missing parent IDs, malformed geometry, and unsafe style, role, shape, or layer tokens.
 `order-sdd-node` uses `node_id|front` or `node_id|back` to change document/render order.
-Blank SDD order node ids are rejected as `invalid-args`.
+Blank or malformed SDD order node ids are rejected as `invalid-args`.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text; `css`, `target`, and `key` are required, and `extends` must be `none`, empty, or an existing non-self CSS rule.
 `delete-sdd-style-rule` uses `css|key` and returns canonical SDD text with that reusable rule removed.
 `inspect-sdd-style-rule` uses `css|key`, rejects malformed css/key tokens as `invalid-args`, and returns compact style-rule readback text.
 Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`; `x` and `y` are signed integers, and size fields are non-negative integers.
-Blank SDD geometry node ids are rejected as `invalid-args`.
-`delete-sdd-node` uses `node_id`, rejects missing IDs, and removes attached connectors.
+Blank or malformed SDD geometry node ids are rejected as `invalid-args`.
+`delete-sdd-node` uses `node_id`, rejects blank or malformed IDs, and removes attached connectors.
 `edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`; every field is required, numeric fields must be non-negative integers, snap is `true` or `false`, and background must be a safe CSS value.
 `add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start|end` and applies the same route, anchor, waypoint, and `invalid-args` validation as connector reroute.
 `duplicate-sdd-edge` uses `edge_index`.

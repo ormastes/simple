@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 104 | 104 | 0 | 0 |
+| 105 | 105 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1765,6 +1765,33 @@ expect(style_result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects malformed SDD edit target ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val duplicate_result = office_action_dispatch("duplicate-sdd-node", "A bad|A_copy|20|10\ngraph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+val style_result = office_action_dispatch("edit-sdd-node-style", "A bad|accent\ngraph: Style\nA: A x: 0 y: 0 width: 20 height: 20")
+val geometry_result = office_action_dispatch("edit-sdd-node-geometry", "A bad|0|0|20|20\ngraph: Geometry\nA: A x: 0 y: 0 width: 20 height: 20")
+val order_result = office_action_dispatch("order-sdd-node", "A bad|front\ngraph: Order\nA: A\nB: B")
+val delete_result = office_action_dispatch("delete-sdd-node", "A bad\ngraph: Delete\nA: A")
+val parent_result = office_action_dispatch("edit-sdd-node-parent", "A|Bad Parent\ngraph: Parent\nA: A\nB: B")
+val missing_parent_target_result = office_action_dispatch("edit-sdd-node-parent", "Nope|Bad Parent\ngraph: Parent\nA: A\nB: B")
+expect(duplicate_result.reason).to_equal("invalid-args")
+expect(style_result.reason).to_equal("invalid-args")
+expect(geometry_result.reason).to_equal("invalid-args")
+expect(order_result.reason).to_equal("invalid-args")
+expect(delete_result.reason).to_equal("invalid-args")
+expect(parent_result.reason).to_equal("invalid-args")
+expect(missing_parent_target_result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank SDD style rule edit fields
 
 <details>
@@ -1926,8 +1953,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 104 |
-| Active scenarios | 104 |
+| Total scenarios | 105 |
+| Active scenarios | 105 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
