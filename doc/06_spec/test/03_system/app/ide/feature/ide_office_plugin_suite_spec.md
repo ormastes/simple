@@ -29,7 +29,7 @@ ide_office_plugin_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -92,13 +92,15 @@ Display policy: `embed_tui`
 ```text
 Simple IDE feature check
 mode: tui
-capabilities: 5
+capabilities: 6
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
   check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true css_doc=true escaped=true
   edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
+draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
+  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -109,7 +111,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
-  plugin-manifest: plugins: entries=5 roundtrip=5 names=5
+  plugin-manifest: plugins: entries=6 roundtrip=6 names=6
   llm-catalog: apps=9 features=73 actions=32
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
@@ -125,13 +127,14 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val ids = ide_capability_ids().join(",")
 expect(ids).to_contain("markdown")
 expect(ids).to_contain("slides")
+expect(ids).to_contain("draw")
 expect(ids).to_contain("sheets")
 expect(ids).to_contain("agent-dashboard")
 expect(ids).to_contain("db-admin")
@@ -144,7 +147,7 @@ expect(ids).to_contain("db-admin")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -154,6 +157,7 @@ for cap in caps:
     owners = owners + cap.owner_module + "\n"
 expect(owners).to_contain("std.editor.render.md_renderer")
 expect(owners).to_contain("app.office.slides")
+expect(owners).to_contain("std.editor.services.sdn_graph")
 expect(owners).to_contain("app.office.sheets")
 expect(owners).to_contain("app.editor.mcp_tools")
 expect(owners).to_contain("std.editor.core.session_db")
@@ -166,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -175,6 +179,9 @@ val gui_report = ide_feature_check_report("gui").join("\n")
 expect(tui_report).to_contain("mode: tui")
 expect(gui_report).to_contain("mode: gui")
 expect(tui_report).to_contain("Presentation Slides")
+expect(tui_report).to_contain("draw: Diagram Draw")
+expect(tui_report).to_contain("draw: sdn_graph")
+expect(tui_report).to_contain("canvas=true")
 expect(gui_report).to_contain("Database Admin")
 expect(tui_report).to_contain("tui-panels:")
 expect(tui_report).to_contain("slides: app.office.slides")
@@ -194,26 +201,28 @@ expect(tui_report).to_contain("llm-apps: Markdown,Writer,Calc,Impress,Draw,Desig
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val lines = ide_feature_check_report("tui")
-expect(lines.len()).to_equal(22)
+expect(lines.len()).to_equal(24)
 expect(lines[0]).to_equal("Simple IDE feature check")
 expect(lines[1]).to_equal("mode: tui")
-expect(lines[2]).to_equal("capabilities: 5")
+expect(lines[2]).to_equal("capabilities: 6")
 expect(lines[3]).to_start_with("markdown:")
 expect(lines[5]).to_start_with("  edit-command:")
 expect(lines[6]).to_start_with("slides:")
 expect(lines[8]).to_start_with("  edit-command:")
-expect(lines[9]).to_start_with("sheets:")
-expect(lines[11]).to_start_with("  edit-command:")
-expect(lines[13]).to_start_with("agent-dashboard:")
-expect(lines[15]).to_start_with("db-admin:")
-expect(lines[19]).to_start_with("  plugin-manifest:")
-expect(lines[20]).to_start_with("  llm-catalog:")
-expect(lines[21]).to_start_with("  llm-apps:")
+expect(lines[9]).to_start_with("draw:")
+expect(lines[10]).to_start_with("  check:")
+expect(lines[11]).to_start_with("sheets:")
+expect(lines[13]).to_start_with("  edit-command:")
+expect(lines[15]).to_start_with("agent-dashboard:")
+expect(lines[17]).to_start_with("db-admin:")
+expect(lines[21]).to_start_with("  plugin-manifest:")
+expect(lines[22]).to_start_with("  llm-catalog:")
+expect(lines[23]).to_start_with("  llm-apps:")
 ```
 
 </details>
@@ -223,7 +232,7 @@ expect(lines[21]).to_start_with("  llm-apps:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -232,6 +241,7 @@ val capture = lines.join("\n")
 expect(_max_line_width(lines)).to_be_less_than(121)
 expect(capture).to_contain("markdown: Markdown Preview")
 expect(capture).to_contain("slides: Presentation Slides")
+expect(capture).to_contain("draw: Diagram Draw")
 expect(capture).to_contain("sheets: Spreadsheet")
 expect(capture).to_contain("db-admin: Database Admin")
 expect(capture).to_contain("  tui: tui-panels:")
@@ -246,7 +256,7 @@ expect(_capture_file_state(capture)).to_equal("matched")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -264,7 +274,32 @@ expect(tui_lines[12]).to_equal(gui_lines[12])
 expect(tui_lines[14]).to_equal(gui_lines[14])
 expect(tui_lines[18]).to_equal(gui_lines[18])
 expect(tui_lines[20]).to_equal(gui_lines[20])
-expect(tui_lines[21]).to_equal(gui_lines[21])
+expect(tui_lines[22]).to_equal(gui_lines[22])
+expect(tui_lines[23]).to_equal(gui_lines[23])
+```
+
+</details>
+
+#### reports Draw SDD capability through a pure IDE sanity probe
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val probe = ide_draw_sanity_probe()
+expect(probe.owner_module).to_equal("std.editor.services.sdn_graph")
+expect(probe.node_count).to_equal(2)
+expect(probe.edge_count).to_equal(1)
+expect(probe.html_render).to_be(true)
+expect(probe.selected_render).to_be(true)
+expect(probe.reroute_edit).to_be(true)
+expect(probe.node_edit).to_be(true)
+expect(probe.inspector).to_be(true)
+expect(probe.canvas_metadata).to_be(true)
+expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 ```
 
 </details>
@@ -862,18 +897,20 @@ expect(summary).to_contain("ppt=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val probe = ide_plugin_manifest_probe()
 val summary = ide_plugin_manifest_summary()
-expect(probe.entry_count).to_equal(5)
-expect(probe.roundtrip_count).to_equal(5)
+expect(probe.entry_count).to_equal(6)
+expect(probe.roundtrip_count).to_equal(6)
 expect(probe.names.join(",")).to_contain("ide.slides")
+expect(probe.names.join(",")).to_contain("ide.draw")
 expect(probe.names.join(",")).to_contain("ide.sheets")
 expect(probe.manifest_text).to_contain("builtin:app.office.slides")
-expect(summary).to_contain("roundtrip=5")
+expect(probe.manifest_text).to_contain("builtin:std.editor.services.sdn_graph")
+expect(summary).to_contain("roundtrip=6")
 ```
 
 </details>
@@ -882,8 +919,8 @@ expect(summary).to_contain("roundtrip=5")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

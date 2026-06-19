@@ -1,0 +1,45 @@
+# IDE Draw/SDD capability probe.
+#
+# Keeps the IDE feature-check surface pure while proving that the SDD-backed
+# Draw app path can render, select, inspect, edit, reroute, and preserve canvas
+# metadata without starting GUI/browser/host APIs.
+
+use std.editor.services.sdn_graph.{sdn_graph_inspect_edge, sdn_graph_inspect_node, sdn_graph_parse, sdn_graph_render_html, sdn_graph_render_html_with_selection, sdn_graph_update_canvas, sdn_graph_update_edge_at, sdn_graph_update_node_parent_at, sdn_graph_update_node_shape_at, sdn_graph_update_node_style_at}
+
+struct IdeDrawSanityProbe:
+    owner_module: text
+    node_count: i64
+    edge_count: i64
+    html_render: bool
+    selected_render: bool
+    reroute_edit: bool
+    node_edit: bool
+    inspector: bool
+    canvas_metadata: bool
+
+fn ide_draw_sanity_probe() -> IdeDrawSanityProbe:
+    val graph = sdn_graph_parse("graph: DrawCheck\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: Start @plain role: source shape: rect x: 0 y: 0 width: 80 height: 20\nB: End @target role: sink shape: rounded x: 160 y: 0 width: 80 height: 20\nA -> B: flow @primary route: simple start: right end: left")
+    val rerouted = sdn_graph_update_edge_at(graph, 0, "orthogonal", "120x10;120x40", "right", "left")
+    val shaped = sdn_graph_update_node_shape_at(rerouted, 1, "cylinder")
+    val styled = sdn_graph_update_node_style_at(shaped, 1, "storage selected")
+    val grouped = sdn_graph_update_node_parent_at(styled, 1, "A")
+    val canvas = sdn_graph_update_canvas(grouped, "1024", "768", "16", "true", "125", "#ffffff")
+    val html = sdn_graph_render_html(canvas)
+    val selected = sdn_graph_render_html_with_selection(canvas, "B", 0)
+    val node = sdn_graph_inspect_node(canvas, "B")
+    val edge = sdn_graph_inspect_edge(canvas, 0)
+    IdeDrawSanityProbe(
+        owner_module: "std.editor.services.sdn_graph",
+        node_count: canvas.nodes.len(),
+        edge_count: canvas.edges.len(),
+        html_render: html.contains("class=\"sdn-graph sdd-diagram\"") and html.contains("data-canvas-grid=\"16\""),
+        selected_render: selected.contains("data-selected=\"true\" aria-selected=\"true\""),
+        reroute_edit: edge.path == "M 80,10 L 120,10 L 120,40 L 160,40 L 160,10",
+        node_edit: node.shape == "cylinder" and node.css == "storage selected" and node.parent == "A",
+        inspector: node.found and edge.found,
+        canvas_metadata: canvas.canvas_width == "1024" and canvas.canvas_snap == "true"
+    )
+
+fn ide_draw_sanity_summary() -> text:
+    val probe = ide_draw_sanity_probe()
+    "draw: sdn_graph nodes={probe.node_count} edges={probe.edge_count} html={probe.html_render} route={probe.reroute_edit} select={probe.selected_render} inspect={probe.inspector} edit={probe.node_edit} canvas={probe.canvas_metadata}"

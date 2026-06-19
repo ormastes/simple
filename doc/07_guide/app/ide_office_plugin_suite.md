@@ -1,7 +1,7 @@
 # IDE Office Plugin Suite Guide
 
-The IDE Office plugin suite exposes Markdown, slides, sheets, dashboard, DB
-admin, and LibreOffice-like app catalog checks through
+The IDE Office plugin suite exposes Markdown, slides, Draw/SDD diagrams,
+sheets, dashboard, DB admin, and LibreOffice-like app catalog checks through
 `src/app/ide/feature_report.spl`.
 
 ## Canonical Surfaces
@@ -12,6 +12,7 @@ admin, and LibreOffice-like app catalog checks through
 - IDE Markdown probe: `src/app/ide/markdown_render.spl`
 - Slide/PPT HTML render: `src/app/office/slides/html_render.spl`
 - IDE slide probe: `src/app/ide/slides_compat.spl`
+- IDE Draw probe: `src/app/ide/draw_sanity.spl`
 - HTML UI editor: `src/app/office/ui_editor.spl`
 - SDD diagram substrate: `src/lib/editor/services/sdn_graph.spl`
 - LLM-readable catalog: `src/app/office/llm_catalog.spl`
@@ -57,8 +58,11 @@ Draw/diagram editing should prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
 waypoints, anchors, rendered SVG connector paths, pure edge reroute operations,
 parent/group metadata, transient selection rendering, pure node/edge inspector
-snapshots, and pure node shape/style/parent edit operations. Legacy SVG shape
-helpers remain compatibility utilities, not the LLM catalog owner for Draw.
+snapshots, pure node shape/style/parent edit operations, and canvas/page
+metadata. `src/app/ide/draw_sanity.spl` is the product feature-check bridge:
+it proves render, selection, inspection, reroute, node edit, and canvas metadata
+without starting GUI/browser/host APIs. Legacy SVG shape helpers remain
+compatibility utilities, not the LLM catalog owner for Draw.
 
 Calc formula hardening should distinguish display-safe functions from the
 f64-returning formula path. `evaluate_formula_display_text` is the verified path
@@ -88,11 +92,12 @@ modes:
 
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
+- Draw: `html=true route=true select=true inspect=true edit=true canvas=true`
 - LLM catalog: Writer has `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`,
   `edit-sdd-node-parent`, `edit-sdd-node-shape`, `edit-sdd-node-style`,
-  `inspect-sdd-node`, and `inspect-sdd-edge`; Calc has `formula-counta`,
+  `edit-sdd-canvas`, `inspect-sdd-node`, and `inspect-sdd-edge`; Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
   `formula-display-recalc`; Base has `schema-validation`, `count-where`,
   `update-where`, `delete-where`, and `db-edit`; Math has `fraction`,

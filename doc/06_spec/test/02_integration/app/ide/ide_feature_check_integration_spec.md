@@ -71,21 +71,28 @@ Display policy: `embed_tui`
 ```text
 Simple IDE feature check
 mode: tui
-capabilities: 5
+capabilities: 6
 markdown: Markdown Preview [document-renderer] -> std.editor.render.md_renderer (md, markdown)
-  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true
+  check: markdown: std.editor.render.md_renderer blocks=3 lines=6 preview=6 heading=true table=true css_doc=true escaped=true
+  edit-command: md-edit=true stale-reject=true reason=stale-line
 slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation, slides)
-  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true
+  check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
+  edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
+draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
+  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
+  edit-command: sheet-edit=true stale-reject=true reason=stale-cell
   gui: gui-backend: theme=dark size=1200x800 md=true ppt=true sheet=true config=true
 agent-dashboard: Agent Dashboard [dashboard] -> app.editor.mcp_tools (agent, dashboard, mcp)
-  check: agent-dashboard: app.editor.mcp_tools tools=19 lsp=true wiki=true modes=3
+  check: agent-dashboard: tools=19 lsp=10 wiki=3 modes=3 team=3 blocked=2 status=degraded-review-required
 db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, simple-db, portal-db)
   check: db-admin: owners=5 targets=4 state=normal/1 contracts=Rel/BlkNo/Lsn/TxnId/PhysPtr/PageBuf page-size=4096
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
-  plugin-manifest: plugins: entries=5 roundtrip=5 names=5
+  plugin-manifest: plugins: entries=6 roundtrip=6 names=6
+  llm-catalog: apps=9 features=73 actions=32
+  llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
 </details>
@@ -108,7 +115,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -119,15 +126,17 @@ expect(code).to_equal(0)
 step("Review the feature-check header and TUI mode")
 expect(out).to_start_with("Simple IDE feature check")
 expect(out).to_contain("mode: tui")
-expect(out).to_contain("capabilities: 5")
+expect(out).to_contain("capabilities: 6")
 
 step("Confirm every Office plugin capability is visible")
 expect(out).to_contain("markdown: Markdown Preview")
 expect(out).to_contain("slides: Presentation Slides")
+expect(out).to_contain("draw: Diagram Draw")
+expect(out).to_contain("canvas=true")
 expect(out).to_contain("sheets: Spreadsheet")
 expect(out).to_contain("agent-dashboard: Agent Dashboard")
 expect(out).to_contain("db-admin: Database Admin")
-expect(out).to_contain("plugin-manifest: plugins: entries=5")
+expect(out).to_contain("plugin-manifest: plugins: entries=6")
 
 step("Capture the TUI report so the manual shows the CLI surface")
 expect(_write_tui_capture(out)).to_equal(0)
