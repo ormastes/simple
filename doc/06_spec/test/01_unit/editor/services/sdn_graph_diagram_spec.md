@@ -181,7 +181,7 @@ expect(graph.canvas_background).to_equal("#ffffff")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -205,6 +205,7 @@ expect(html).to_contain("data-edge-index=\"0\"")
 expect(html).to_contain("data-path=\"M 110,120 L 20,120 L 20,40 L 40,40 L 40,74\"")
 expect(html).to_contain("d=\"M 110,120 L 20,120 L 20,40 L 40,40 L 40,74\"")
 expect(html).to_contain("class=\"sdn-graph-edge sdd-connector")
+expect(html.contains("sdd-kind-normal")).to_be(false)
 expect(html).to_contain("data-route=\"orthogonal\"")
 expect(html).to_contain("data-waypoints=\"20x40;40x40\"")
 expect(html).to_contain("data-start-anchor=\"bottom\"")
@@ -475,17 +476,18 @@ expect(graph.nodes[1].css).to_equal("target")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: select-edge\nA: Alpha x: 10 y: 20 width: 80 height: 20\nB: Beta x: 220 y: 20 width: 80 height: 20\nA -> B: c @primary route: simple start: right end: left")
+val graph = sdn_graph_parse("graph: select-edge\nA: Alpha x: 10 y: 20 width: 80 height: 20\nB: Beta x: 220 y: 20 width: 80 height: 20\nA ~> B: c @primary route: simple start: right end: left")
 val selected = sdn_graph_render_html_with_selection(graph, "", 0)
 val invalid = sdn_graph_render_html_with_selection(graph, "", 99)
 expect(selected).to_contain("data-selected-edge-index=\"0\"")
-expect(selected).to_contain("class=\"sdd-connector-path sdn-css-primary sdd-selected\"")
+expect(selected).to_contain("class=\"sdd-connector-path sdn-css-primary sdd-kind-async sdd-selected\"")
 expect(selected).to_contain("data-edge-index=\"0\" data-selected=\"true\" aria-selected=\"true\"")
-expect(selected).to_contain("class=\"sdn-graph-edge sdd-connector sdn-css-primary sdd-selected\"")
+expect(selected).to_contain("data-kind=\"async\"")
+expect(selected).to_contain("class=\"sdn-graph-edge sdd-connector sdn-css-primary sdd-kind-async sdd-selected\"")
 expect(invalid).to_contain("data-selected-edge-index=\"99\"")
 expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-selected=\"false\"")
 ```
