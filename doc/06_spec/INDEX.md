@@ -4,19 +4,20 @@
 
 ## Quick Stats
 
-- **Total Features:** 2
-- **Complete Documentation:** 1 (50%)
+- **Total Features:** 3
+- **Complete Documentation:** 2 (67%)
 - **Stubs Remaining:** 1
-- **Total Lines:** 169
-- **Warnings:** 1
+- **Total Lines:** 201
+- **Warnings:** 2
 
 ---
 
-## Other (1 features)
+## Other (2 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
 | [HTML/CSS RenderDoc goal status gate](test/03_system/check/html_css_renderdoc_goal_status_spec.md) | Minimal | N/A | 2 | 20% | 32 lines |
+| [Chrome opacity rounding policy specification](test/03_system/check/chrome_opacity_rounding_policy_spec.md) | Minimal | N/A | 3 | 20% | 32 lines |
 
 ## Standard Library (1 features)
 
