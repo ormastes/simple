@@ -9,6 +9,7 @@ sheets, dashboard, DB admin, and LibreOffice-like app catalog checks through
 - Markdown WYSIWYG model: `src/app/office/md_wysiwyg.spl`
 - Markdown GUI render entry: `src/app/office/md_wysiwyg_gui.spl`
 - Writer Markdown render: `src/app/office/word/html_render.spl`
+- Office headless action bridge: `src/app/office/mod.spl`
 - IDE Markdown probe: `src/app/ide/markdown_render.spl`
 - Slide/PPT HTML render: `src/app/office/slides/html_render.spl`
 - IDE slide probe: `src/app/ide/slides_compat.spl`
@@ -36,6 +37,14 @@ PPT/Impress rendering must expose Markdown source -> slide-deck HTML through
 compatibility path and should escape element text, sanitize CSS colors to simple
 `#RGB` or `#RRGGBB` values, clamp negative geometry to `0px`, and emit a fixed
 960x540 relative slide with absolutely positioned element boxes.
+
+Headless Office actions are exposed through
+`office_action_dispatch(action, source)` in `app.office.mod`. This is the stable
+non-GUI bridge for cataloged render/export actions:
+`render-writer-markdown-html`, `render-ppt-markdown-html`, `render-ui-html`,
+`export-ui-sdd`, and `render-sdd-html-with-selection`. The bridge delegates to
+the canonical Writer, Impress, Designer, and SDD renderers rather than
+duplicating rendering logic.
 
 Designer/UI editing uses `app.office.ui_editor` as a pure HTML design document
 substrate. It parses positioned frame/component records, renders a stable

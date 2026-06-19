@@ -311,3 +311,9 @@ possible so they are runner-verifiable.
   capability, so `simple ide --feature-check --tui|--gui` now reports six
   capabilities and includes SDD render, reroute, selection, inspection, node
   edit, and canvas evidence. Plugin manifests now include `ide.draw`.
+- 2026-06-19 dev: Added the headless Office action bridge. `app.office.mod`
+  now exposes `office_action_dispatch` for cataloged render/export actions:
+  Writer Markdown HTML, PPT Markdown HTML, Designer HTML render, Designer SDD
+  export, and selected SDD Draw HTML render. This gives agents and CLI callers
+  one stable non-GUI path to execute the suite actions advertised in the LLM
+  catalog.

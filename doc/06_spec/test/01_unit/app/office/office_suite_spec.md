@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 45 | 45 | 0 | 0 |
+| 50 | 50 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -404,6 +404,99 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(run_office(["unknown"])).to_equal(1)
+```
+
+</details>
+
+#### dispatches Writer Markdown HTML rendering as a headless office action
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("render-writer-markdown-html", "# Title\\n\\nBody")
+expect(result.ok).to_be(true)
+expect(result.code).to_equal(0)
+expect(result.output).to_contain("class=\"md-paper\"")
+expect(result.output).to_contain("Title")
+```
+
+</details>
+
+#### dispatches PPT Markdown HTML rendering as a headless office action
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("render-ppt-markdown-html", "# Deck\\n\\n## Slide\\nBody")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("class=\"md-ppt-deck\"")
+expect(result.output).to_contain("Slide")
+```
+
+</details>
+
+#### dispatches UI render and SDD export catalog actions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = "design: Feature\\nsize: 640x480\\nnode button|Run|button|16|20|96|32|primary|controls|action"
+val html = office_action_dispatch("render-ui-html", source)
+val sdd = office_action_dispatch("export-ui-sdd", source)
+expect(html.ok).to_be(true)
+expect(html.output).to_contain("data-format=\"html-ui\"")
+expect(html.output).to_contain("Run")
+expect(sdd.ok).to_be(true)
+expect(sdd.output).to_contain("graph: Feature")
+expect(sdd.output).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent")
+```
+
+</details>
+
+#### dispatches selected SDD HTML rendering from the Draw catalog action
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+expect(result.ok).to_be(true)
+expect(result.output).to_contain("class=\"sdn-graph sdd-diagram\"")
+expect(result.output).to_contain("data-node=\"A\"")
+expect(result.output).to_contain("data-selected-node-id=\"\"")
+expect(result.output).to_contain("data-selected-edge-index=\"-1\"")
+```
+
+</details>
+
+#### rejects unknown headless office actions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("unknown-action", "")
+expect(result.ok).to_be(false)
+expect(result.code).to_equal(1)
+expect(result.reason).to_equal("unknown-action")
 ```
 
 </details>
@@ -893,8 +986,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 45 |
-| Active scenarios | 45 |
+| Total scenarios | 50 |
+| Active scenarios | 50 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

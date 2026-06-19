@@ -317,7 +317,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 152 lines folded for reproduction.
+Runnable source: 163 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -361,6 +361,17 @@ expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-style")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-canvas")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-edge")
+val writer_action = office_action_dispatch("render-writer-markdown-html", "# Writer")
+val ppt_action = office_action_dispatch("render-ppt-markdown-html", "# Deck\n\n## Slide")
+val ui_action = office_action_dispatch("render-ui-html", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
+val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
+expect(writer_action.output).to_contain("class=\"md-paper\"")
+expect(ppt_action.output).to_contain("class=\"md-ppt-deck\"")
+expect(ui_action.output).to_contain("data-format=\"html-ui\"")
+expect(ui_sdd_action.output).to_contain("nodes |id, label, css, role, shape")
+expect(sdd_action.output).to_contain("class=\"sdn-graph sdd-diagram\"")
+expect(sdd_action.output).to_contain("data-selected-edge-index=\"-1\"")
 val draw_graph = sdn_graph_parse("graph: Feature\ncanvas: width: 800 height: 600 grid: 10 snap: false zoom: 100 background: white\nA: A x: 0 y: 0 width: 80 height: 20\nB: B x: 160 y: 0 width: 80 height: 20\nA -> B: flow route: simple start: right end: left")
 val rerouted = sdn_graph_update_edge_at(draw_graph, 0, "orthogonal", "120x10;120x40", "right", "left")
 val shaped = sdn_graph_update_node_at(rerouted, 0, "accent", "decision", "diamond", "12", "8", "96", "48", "front")
