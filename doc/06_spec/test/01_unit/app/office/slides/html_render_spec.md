@@ -188,7 +188,7 @@ expect(html).to_contain("left: 0px; top: 0px;")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -196,6 +196,7 @@ val html = render_ppt_markdown_html("---\nlayout: presentation\n---\n\n## Slide 
 expect(html).to_start_with("<section class=\"md-ppt-deck\"")
 expect(html).to_contain("data-layout=\"presentation\"")
 expect(html).to_contain("data-format=\"markdown-ppt\"")
+expect(html).to_contain("data-format-name=\"Impress Markdown\"")
 expect(html).to_contain("data-slide-count=\"2\"")
 expect(html).to_contain("data-slide=\"1\"")
 expect(html).to_contain("<h2>Slide One</h2>")

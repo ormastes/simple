@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 756 lines folded for reproduction.
+Runnable source: 757 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -662,6 +662,7 @@ expect(writer_action.output).to_contain("class=\"md-paper\"")
 expect(writer_action.output).to_contain("data-format=\"markdown-paper\"")
 expect(ppt_action.output).to_contain("class=\"md-ppt-deck\"")
 expect(ppt_action.output).to_contain("data-format=\"markdown-ppt\"")
+expect(ppt_action.output).to_contain("data-format-name=\"Impress Markdown\"")
 expect(sheet_edit_action.output).to_equal("A1=new")
 expect(sheet_edit_action.reason).to_equal("updated")
 expect(sheet_duplicate_source_action.reason).to_equal("duplicate-source-ref")
