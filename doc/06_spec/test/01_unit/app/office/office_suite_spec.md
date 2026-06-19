@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 83 | 83 | 0 | 0 |
+| 84 | 84 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1473,6 +1473,22 @@ expect(result.reason).to_equal("invalid-args")
 
 </details>
 
+#### rejects blank SDD canvas fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|   \ngraph: Canvas\nA: A")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("invalid-args")
+```
+
+</details>
+
 #### rejects blank SDD style rule keys
 
 <details>
@@ -1563,8 +1579,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 83 |
-| Active scenarios | 83 |
+| Total scenarios | 84 |
+| Active scenarios | 84 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -113,7 +113,7 @@ Blank SDD style-rule css or key arguments are rejected as `invalid-args`.
 `edit-sdd-node-geometry` uses `node_id|x|y|width|height`; `x` and `y` are signed integers, and size fields are non-negative integers.
 Blank SDD geometry node ids are rejected as `invalid-args`.
 `delete-sdd-node` uses `node_id`, rejects missing IDs, and removes attached connectors.
-`edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`; numeric fields must be non-negative integers, snap is `true` or `false`, and background must be a safe CSS value.
+`edit-sdd-canvas` uses `width|height|grid|snap|zoom|background`; every field is required, numeric fields must be non-negative integers, snap is `true` or `false`, and background must be a safe CSS value.
 `add-sdd-edge` uses `from_id|to_id|label|css|kind|route|waypoints|start|end` and applies the same route, anchor, and waypoint validation as connector reroute.
 `duplicate-sdd-edge` uses `edge_index`.
 `edit-sdd-node-label` uses `node_id|new_label` and rejects missing node IDs.
