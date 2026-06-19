@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 517 lines folded for reproduction.
+Runnable source: 519 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -522,6 +522,7 @@ val invalid_sdd_order_action = office_action_dispatch("order-sdd-node", "A|middl
 val sdd_role_action = office_action_dispatch("edit-sdd-node-role", "A|database\ngraph: Role\nA: Old role: actor x: 0 y: 0 width: 20 height: 20")
 val stale_sdd_geometry_action = office_action_dispatch("edit-sdd-node-geometry", "Nope|0|0|10|10\ngraph: Geometry\nA: A")
 val sdd_parent_action = office_action_dispatch("edit-sdd-node-parent", "B|A\ngraph: Parent\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20")
+val sdd_parent_cycle_action = office_action_dispatch("edit-sdd-node-parent", "A|B\ngraph: Parent Cycle\nA: A x: 0 y: 0 width: 80 height: 80\nB: B x: 10 y: 10 width: 20 height: 20 parent: A")
 val sdd_node_delete_action = office_action_dispatch("delete-sdd-node", "B\ngraph: Node Delete\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 100 y: 0 width: 20 height: 20\nA -> B: link route: simple start: right end: left")
 val missing_sdd_node_delete_action = office_action_dispatch("delete-sdd-node", "Nope\ngraph: Node Delete\nA: A")
 val sdd_canvas_action = office_action_dispatch("edit-sdd-canvas", "640|480|16|true|125|#ffffff\ngraph: Canvas\nA: A")
@@ -624,6 +625,7 @@ expect(invalid_sdd_order_action.reason).to_equal("invalid-position")
 expect(sdd_role_action.output).to_contain("data-role=\"database\"")
 expect(stale_sdd_geometry_action.reason).to_equal("missing-node")
 expect(sdd_parent_action.output).to_contain("data-parent=\"A\"")
+expect(sdd_parent_cycle_action.reason).to_equal("parent-cycle")
 expect(sdd_inspect_node_action.output).to_contain("child_count=1")
 expect(sdd_inspect_node_action.output).to_contain("child_bounds=12,16,32,26")
 expect(sdd_node_delete_action.reason).to_equal("updated")

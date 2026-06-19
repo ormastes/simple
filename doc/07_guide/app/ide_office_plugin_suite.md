@@ -95,6 +95,7 @@ document body. `ui-align-selection`, `ui-distribute-selection`,
 geometry signature and return rendered HTML for the updated document.
 
 SDD node edit actions use `node_id|value` for label, parent, shape, style, layer, and role edits.
+Parent edits reject missing parent IDs and parent cycles.
 `add-sdd-node` uses `id|label|css|role|shape|x|y|width|height|layer|parent`.
 `order-sdd-node` uses `node_id|front` or `node_id|back` to change document/render order.
 `edit-sdd-style-rule` uses `css|target|extends|key|value` and returns canonical SDD text.

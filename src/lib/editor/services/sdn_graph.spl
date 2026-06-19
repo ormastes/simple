@@ -647,6 +647,42 @@ fn sdn_graph_update_node_parent_at(graph: SdnGraph, node_index: i64, parent: tex
         i = i + 1
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: out_nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
+fn _sg_node_parent_by_id(graph: SdnGraph, id: text) -> text:
+    for node in graph.nodes:
+        if node.id == id:
+            return node.parent
+    ""
+
+fn _sg_parent_would_cycle(graph: SdnGraph, node_id: text, parent: text) -> bool:
+    var current = parent
+    var depth = 0
+    while current != "" and depth < graph.nodes.len():
+        if current == node_id:
+            return true
+        current = _sg_node_parent_by_id(graph, current)
+        depth = depth + 1
+    false
+
+fn sdn_graph_update_node_parent_checked(graph: SdnGraph, node_id: text, parent: text) -> SdnGraphEditResult:
+    if node_id == "":
+        return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-node-parent @@\nexpected: node id\nactual: empty", graph: graph)
+    if _sg_node_id_count(graph, node_id) > 1:
+        return SdnGraphEditResult(accepted: false, reason: "ambiguous-source", diff: "@@ sdd-node-parent @@\nexpected: one node\nactual: " + node_id, graph: graph)
+    var node_index: i64 = -1
+    var i = 0
+    while i < graph.nodes.len():
+        if graph.nodes[i].id == node_id:
+            node_index = i
+        i = i + 1
+    if node_index < 0:
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-node-parent @@\nexpected: " + node_id + "\nactual: missing", graph: graph)
+    if parent != "" and not _sg_node_id_exists(graph, parent):
+        return SdnGraphEditResult(accepted: false, reason: "missing-parent", diff: "@@ sdd-node-parent @@\nexpected: existing parent or empty\nactual: " + parent, graph: graph)
+    if _sg_parent_would_cycle(graph, node_id, parent):
+        return SdnGraphEditResult(accepted: false, reason: "parent-cycle", diff: "@@ sdd-node-parent @@\nexpected: acyclic parent\nactual: " + node_id + " -> " + parent, graph: graph)
+    val updated = sdn_graph_update_node_parent_at(graph, node_index, parent)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-node-parent @@\nupdated: " + node_id + " parent=" + parent, graph: updated)
+
 fn sdn_graph_reorder_node_checked(graph: SdnGraph, node_id: text, position: text) -> SdnGraphEditResult:
     if node_id == "":
         return SdnGraphEditResult(accepted: false, reason: "invalid-id", diff: "@@ sdd-node-order @@\nexpected: node id\nactual: empty", graph: graph)

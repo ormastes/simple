@@ -753,7 +753,7 @@ expect(node_deleted.edges.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -787,6 +787,15 @@ expect(sdn_graph_render_html(styled_child)).to_contain("data-child-bounds=\"12,1
 
 val regrouped = sdn_graph_update_node_parent_at(ungrouped, 1, "Container")
 expect(regrouped.nodes[1].parent).to_equal("Container")
+val checked_regrouped = sdn_graph_update_node_parent_checked(ungrouped, "Child", "Container")
+expect(checked_regrouped.accepted).to_be(true)
+expect(checked_regrouped.graph.nodes[1].parent).to_equal("Container")
+val missing_parent = sdn_graph_update_node_parent_checked(ungrouped, "Child", "Missing")
+expect(missing_parent.accepted).to_be(false)
+expect(missing_parent.reason).to_equal("missing-parent")
+val cycle = sdn_graph_update_node_parent_checked(regrouped, "Container", "Child")
+expect(cycle.accepted).to_be(false)
+expect(cycle.reason).to_equal("parent-cycle")
 val deleted_parent = sdn_graph_delete_node_at(regrouped, 0)
 expect(deleted_parent.nodes.len()).to_equal(1)
 expect(deleted_parent.nodes[0].id).to_equal("Child")
