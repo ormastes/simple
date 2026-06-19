@@ -278,16 +278,20 @@ expect(html).to_contain("style=\"width:100px;height:80px;\"")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val graph = sdn_graph_parse("graph: flow\nA: Start @start shape: circle x: 8 y: 12 width: 48 height: 48 layer: base\nB: End @end shape: terminator x: 120 y: 12 width: 80 height: 48 layer: base\nA -> B: done route: simple waypoints: 56x36 start: right end: left")
+val graph = sdn_graph_parse("graph: flow\nA: Start @start shape: circle x: 8 y: 12 width: 48 height: 48 layer: base\nB: End @end shape: terminator x: 120 y: 12 width: 80 height: 48 layer: base\nA -> B: done route: simple waypoints: 56x36 start: right end: left label_x: 88 label_y: 36")
 val canon = sdn_graph_to_canonical_sdn(graph)
 expect(canon).to_contain("nodes |id, label, css, role, shape, x, y, width, height, layer, parent|")
 expect(canon).to_contain("A, Start, start, , circle, 8, 12, 48, 48, base, ")
-expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
-expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left")
+expect(canon).to_contain("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|")
+expect(canon).to_contain("A, B, done, , normal, simple, 56x36, right, left, 88, 36")
+expect(sdn_graph_render_html(graph)).to_contain("data-label-x=\"88\" data-label-y=\"36\"")
+val unsafe = sdn_graph_parse("graph: unsafe-label\nA: A x: 10 y: 20 width: 80 height: 20\nB: B x: 220 y: 20 width: 80 height: 20\nedges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|\n    A, B, c, , normal, orthogonal, \"140x30;200x80\", right, left, bad\\\"x, 80")
+expect(sdn_graph_render_html(unsafe)).to_contain("data-label-x=\"155\" data-label-y=\"80\"")
+expect(sdn_graph_render_html(unsafe).contains("bad\\\"x")).to_be(false)
 ```
 
 </details>
@@ -503,7 +507,7 @@ expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -528,6 +532,8 @@ expect(edge.kind).to_equal("action")
 expect(edge.route).to_equal("orthogonal")
 expect(edge.waypoints).to_equal("140x30;200x80")
 expect(edge.path).to_equal("M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30")
+expect(edge.label_x).to_equal("")
+expect(edge.label_y).to_equal("")
 ```
 
 </details>
@@ -559,7 +565,7 @@ expect(edge.edge_index).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -567,6 +573,7 @@ val graph = sdn_graph_parse("graph: edit\nA: A x: 10 y: 20 width: 80 height: 20\
 val created = sdn_graph_add_edge(graph, "B", "A", "return", "secondary", "reply", "simple", "", "left", "right")
 val updated = sdn_graph_update_edge_at(created, 0, "orthogonal", "140x30;200x80", "right", "left")
 val labeled = sdn_graph_update_edge_label_at(updated, 0, "approved")
+val label_pointed = sdn_graph_update_edge_label_point_at(labeled, 0, "155", "55")
 val styled = sdn_graph_update_edge_style_at(labeled, 0, "warning dashed")
 val kinded = sdn_graph_update_edge_kind_at(styled, 0, "async")
 val reconnected = sdn_graph_update_edge_endpoints_at(kinded, 0, "B", "A")
@@ -595,6 +602,9 @@ expect(html).to_contain("data-path=\"M 90,30 L 140,30 L 200,30 L 200,80 L 220,80
 expect(labeled.edges[0].label).to_equal("approved")
 expect(labeled.edges[0].route).to_equal("orthogonal")
 expect(labeled_html).to_contain(">approved</div>")
+expect(label_pointed.edges[0].label_x).to_equal("155")
+expect(label_pointed.edges[0].label_y).to_equal("55")
+expect(sdn_graph_render_html(label_pointed)).to_contain("data-label-x=\"155\" data-label-y=\"55\"")
 expect(styled.edges[0].css).to_equal("warning dashed")
 expect(styled.edges[0].route).to_equal("orthogonal")
 expect(styled_html).to_contain("sdn-css-warning sdn-css-dashed")

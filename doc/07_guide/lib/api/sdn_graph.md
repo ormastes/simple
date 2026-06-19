@@ -68,12 +68,12 @@ nodes |id, label, css, role, shape, x, y, width, height, layer, parent|
     Panel, Settings, card, , rounded, 40, 80, 220, 120, ui,
     Button, Save, primary, , rounded, 72, 120, 96, 32, ui, Panel
 
-edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|
-    User, Auth, Login, primary, normal, , , ,
-    Auth, DB, Query, db, normal, , , ,
-    Panel, Auth, config, , normal, orthogonal, "150x100;150x40", right, left
-    Auth, Log, Event, async, async, , , ,
-    UI, DB, forbidden, violation, forbidden, , , ,
+edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|
+    User, Auth, Login, primary, normal, , , , , ,
+    Auth, DB, Query, db, normal, , , , , ,
+    Panel, Auth, config, , normal, orthogonal, "150x100;150x40", right, left, 180, 70
+    Auth, Log, Event, async, async, , , , , ,
+    UI, DB, forbidden, violation, forbidden, , , , , ,
 ```
 
 ## CSS Definitions
@@ -222,8 +222,9 @@ metadata div has:
 - `data-path`: the exact SVG path string used in `d`.
 - `data-path-bounds`: `min_x,min_y,max_x,max_y` derived from the rendered path
   points when numeric.
-- `data-label-x` and `data-label-y`: connector label center derived from the
-  rendered path bounds when numeric.
+- `data-label-x` and `data-label-y`: explicit connector label point from the
+  edge row when present, otherwise the center derived from rendered path bounds
+  when numeric.
 - `data-kind`: connector kind metadata, also reflected as `sdd-kind-<kind>` for
   non-`normal` kinds.
 - `data-route`, `data-waypoints`, `data-start-anchor`, and `data-end-anchor`:
@@ -240,6 +241,8 @@ leaving node geometry and graph metadata untouched.
 `sdn_graph_add_edge` appends one connector with caller-provided endpoint, label,
 CSS labels, kind, route, waypoint, and anchor metadata.
 `sdn_graph_update_edge_label_at` updates only the visible connector label.
+`sdn_graph_update_edge_label_point_at` updates only the persisted connector
+label point used by editor drag handles.
 `sdn_graph_update_edge_style_at` updates only connector CSS labels.
 `sdn_graph_update_edge_kind_at` updates only connector kind metadata.
 `sdn_graph_update_edge_endpoints_at` reconnects a connector's source and target

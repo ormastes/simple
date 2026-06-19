@@ -27,6 +27,8 @@ struct SdnGraphEdge:
     waypoints: text
     start_anchor: text
     end_anchor: text
+    label_x: text
+    label_y: text
 
 struct SdnGraphNodeInspector:
     found: bool
@@ -56,6 +58,8 @@ struct SdnGraphEdgeInspector:
     waypoints: text
     start_anchor: text
     end_anchor: text
+    label_x: text
+    label_y: text
     path: text
 
 struct SdnGraphStyleInspector:
@@ -338,9 +342,9 @@ fn sdn_graph_to_canonical_sdn(graph: SdnGraph) -> text:
     for node in graph.nodes:
         out.push("    " + node.id + ", " + node.label + ", " + _sg_quote_if_space(node.css) + ", " + node.role + ", " + node.shape + ", " + node.x + ", " + node.y + ", " + node.width + ", " + node.height + ", " + node.layer + ", " + node.parent)
     out.push("")
-    out.push("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor|")
+    out.push("edges |from, to, label, css, kind, route, waypoints, start_anchor, end_anchor, label_x, label_y|")
     for edge in graph.edges:
-        out.push("    " + edge.from_id + ", " + edge.to_id + ", " + edge.label + ", " + _sg_quote_if_space(edge.css) + ", " + edge.kind + ", " + edge.route + ", " + _sg_quote_if_space(edge.waypoints) + ", " + edge.start_anchor + ", " + edge.end_anchor)
+        out.push("    " + edge.from_id + ", " + edge.to_id + ", " + edge.label + ", " + _sg_quote_if_space(edge.css) + ", " + edge.kind + ", " + edge.route + ", " + _sg_quote_if_space(edge.waypoints) + ", " + edge.start_anchor + ", " + edge.end_anchor + ", " + edge.label_x + ", " + edge.label_y)
     out.push("")
     out.push("css |name, extends, target|")
     for css in graph.css_defs:
@@ -378,7 +382,20 @@ fn sdn_graph_add_edge(graph: SdnGraph, from_id: text, to_id: text, label: text, 
     var out_edges: [SdnGraphEdge] = []
     for edge in graph.edges:
         out_edges.push(_sg_clone_edge(edge))
-    out_edges.push(SdnGraphEdge(from_id: from_id, to_id: to_id, label: label, css: css, kind: kind, route: route, waypoints: waypoints, start_anchor: start_anchor, end_anchor: end_anchor))
+    out_edges.push(SdnGraphEdge(from_id: from_id, to_id: to_id, label: label, css: css, kind: kind, route: route, waypoints: waypoints, start_anchor: start_anchor, end_anchor: end_anchor, label_x: "", label_y: ""))
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn sdn_graph_update_edge_label_point_at(graph: SdnGraph, edge_index: i64, label_x: text, label_y: text) -> SdnGraph:
+    var out_edges: [SdnGraphEdge] = []
+    var i = 0
+    while i < graph.edges.len():
+        val current = graph.edges[i]
+        var next = _sg_clone_edge(current)
+        if i == edge_index:
+            next.label_x = label_x
+            next.label_y = label_y
+        out_edges.push(next)
+        i = i + 1
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: graph.nodes, edges: out_edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
 fn sdn_graph_duplicate_edge_checked(graph: SdnGraph, edge_index: i64) -> SdnGraphEditResult:
@@ -774,9 +791,9 @@ fn sdn_graph_inspect_node(graph: SdnGraph, node_id: text) -> SdnGraphNodeInspect
 
 fn sdn_graph_inspect_edge(graph: SdnGraph, edge_index: i64) -> SdnGraphEdgeInspector:
     if edge_index < 0 or edge_index >= graph.edges.len():
-        return SdnGraphEdgeInspector(found: false, reason: "missing-edge", edge_index: edge_index, from_id: "", to_id: "", label: "", css: "", kind: "", route: "", waypoints: "", start_anchor: "", end_anchor: "", path: "")
+        return SdnGraphEdgeInspector(found: false, reason: "missing-edge", edge_index: edge_index, from_id: "", to_id: "", label: "", css: "", kind: "", route: "", waypoints: "", start_anchor: "", end_anchor: "", label_x: "", label_y: "", path: "")
     val edge = graph.edges[edge_index]
-    SdnGraphEdgeInspector(found: true, reason: "selected", edge_index: edge_index, from_id: edge.from_id, to_id: edge.to_id, label: edge.label, css: edge.css, kind: edge.kind, route: edge.route, waypoints: edge.waypoints, start_anchor: edge.start_anchor, end_anchor: edge.end_anchor, path: _sg_edge_svg_path(graph, edge))
+    SdnGraphEdgeInspector(found: true, reason: "selected", edge_index: edge_index, from_id: edge.from_id, to_id: edge.to_id, label: edge.label, css: edge.css, kind: edge.kind, route: edge.route, waypoints: edge.waypoints, start_anchor: edge.start_anchor, end_anchor: edge.end_anchor, label_x: edge.label_x, label_y: edge.label_y, path: _sg_edge_svg_path(graph, edge))
 
 fn sdn_graph_render_html(graph: SdnGraph) -> text:
     sdn_graph_render_html_with_selection(graph, "", -1)
@@ -804,8 +821,8 @@ fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text,
         for edge in graph.edges:
             val path = _sg_edge_svg_path(graph, edge)
             val path_bounds = _sg_path_bounds_text(path)
-            val label_x = _sg_path_label_axis_text(path, "x")
-            val label_y = _sg_path_label_axis_text(path, "y")
+            val label_x = _sg_edge_label_axis_text(edge, path, "x")
+            val label_y = _sg_edge_label_axis_text(edge, path, "y")
             val edge_selected = edge_index == selected_edge_index
             val edge_selected_text = _sg_bool_text(edge_selected)
             val edge_selected_class = if edge_selected then " sdd-selected" else: ""
@@ -848,8 +865,8 @@ fn sdn_graph_render_html_with_selection(graph: SdnGraph, selected_node_id: text,
     for edge in graph.edges:
         val path = _sg_edge_svg_path(graph, edge)
         val path_bounds = _sg_path_bounds_text(path)
-        val label_x = _sg_path_label_axis_text(path, "x")
-        val label_y = _sg_path_label_axis_text(path, "y")
+        val label_x = _sg_edge_label_axis_text(edge, path, "x")
+        val label_y = _sg_edge_label_axis_text(edge, path, "y")
         val edge_selected = edge_div_index == selected_edge_index
         val edge_selected_text = _sg_bool_text(edge_selected)
         val edge_selected_class = if edge_selected then " sdd-selected" else: ""
@@ -1030,6 +1047,13 @@ fn _sg_path_bounds_text(path: text) -> text:
         return ""
     bounds.min_x.to_text() + "," + bounds.min_y.to_text() + "," + bounds.max_x.to_text() + "," + bounds.max_y.to_text()
 
+fn _sg_edge_label_axis_text(edge: SdnGraphEdge, path: text, axis: text) -> text:
+    if axis == "x" and _sg_is_i64_token(edge.label_x):
+        return edge.label_x
+    if axis == "y" and _sg_is_i64_token(edge.label_y):
+        return edge.label_y
+    _sg_path_label_axis_text(path, axis)
+
 fn _sg_path_label_axis_text(path: text, axis: text) -> text:
     val bounds = _sg_path_bounds(path)
     if not bounds.ok:
@@ -1081,7 +1105,9 @@ fn _sg_clone_edge(edge: SdnGraphEdge) -> SdnGraphEdge:
         route: edge.route,
         waypoints: edge.waypoints,
         start_anchor: edge.start_anchor,
-        end_anchor: edge.end_anchor
+        end_anchor: edge.end_anchor,
+        label_x: edge.label_x,
+        label_y: edge.label_y
     )
 
 fn _sg_clone_node(node: SdnGraphNode) -> SdnGraphNode:
@@ -1314,8 +1340,8 @@ fn _sg_parse_dense_edge(line: text) -> SdnGraphEdge:
         to_id = rest.slice(0, colon).trim()
         val after = rest.slice(colon + 1, rest.len()).trim()
         label = _sg_label_before_meta(after)
-        return SdnGraphEdge(from_id: from_id, to_id: to_id, label: label, css: _sg_collect_at(after), kind: _sg_edge_kind(op, _sg_meta_value(after, "kind")), route: _sg_meta_value(after, "route"), waypoints: _sg_meta_value(after, "waypoints"), start_anchor: _sg_meta_value(after, "start"), end_anchor: _sg_meta_value(after, "end"))
-    SdnGraphEdge(from_id: from_id, to_id: to_id, label: "", css: "", kind: _sg_edge_kind(op, ""), route: "", waypoints: "", start_anchor: "", end_anchor: "")
+        return SdnGraphEdge(from_id: from_id, to_id: to_id, label: label, css: _sg_collect_at(after), kind: _sg_edge_kind(op, _sg_meta_value(after, "kind")), route: _sg_meta_value(after, "route"), waypoints: _sg_meta_value(after, "waypoints"), start_anchor: _sg_meta_value(after, "start"), end_anchor: _sg_meta_value(after, "end"), label_x: _sg_meta_value(after, "label_x"), label_y: _sg_meta_value(after, "label_y"))
+    SdnGraphEdge(from_id: from_id, to_id: to_id, label: "", css: "", kind: _sg_edge_kind(op, ""), route: "", waypoints: "", start_anchor: "", end_anchor: "", label_x: "", label_y: "")
 
 fn _sg_parse_weave_selector(line: text) -> tuple:
     val target = if line.starts_with("node where ") then "node" else: "edge"
@@ -1359,7 +1385,9 @@ fn _sg_parse_edges_table(lines: [text], start: i64) -> ([SdnGraphEdge], i64):
             val waypoints = if cols.len() >= 7 then _sg_unquote(cols[6].trim()) else: ""
             val start_anchor = if cols.len() >= 8 then cols[7].trim() else: ""
             val end_anchor = if cols.len() >= 9 then cols[8].trim() else: ""
-            edges.push(SdnGraphEdge(from_id: cols[0].trim(), to_id: cols[1].trim(), label: _sg_unquote(cols[2].trim()), css: _sg_unquote(cols[3].trim()), kind: cols[4].trim(), route: route, waypoints: waypoints, start_anchor: start_anchor, end_anchor: end_anchor))
+            val label_x = if cols.len() >= 10 then cols[9].trim() else: ""
+            val label_y = if cols.len() >= 11 then cols[10].trim() else: ""
+            edges.push(SdnGraphEdge(from_id: cols[0].trim(), to_id: cols[1].trim(), label: _sg_unquote(cols[2].trim()), css: _sg_unquote(cols[3].trim()), kind: cols[4].trim(), route: route, waypoints: waypoints, start_anchor: start_anchor, end_anchor: end_anchor, label_x: label_x, label_y: label_y))
         i = i + 1
     (edges, i)
 
