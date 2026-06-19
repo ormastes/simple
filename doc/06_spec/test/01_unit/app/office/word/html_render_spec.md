@@ -29,7 +29,7 @@ html_render_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -274,6 +274,21 @@ expect(html).to_contain("<p>Second &lt;safe&gt;</p>")
 
 </details>
 
+#### renders Writer Markdown thematic breaks as document rules
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = render_writer_markdown_html("Before\n---\nAfter")
+expect(html).to_contain("<p>Before</p><hr class=\"md-writer-rule\"><p>After</p>")
+```
+
+</details>
+
 #### renders Writer Markdown fenced code as escaped code HTML
 
 <details>
@@ -327,8 +342,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
