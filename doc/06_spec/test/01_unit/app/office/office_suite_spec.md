@@ -29,7 +29,7 @@ office_suite_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 63 | 63 | 0 | 0 |
+| 65 | 65 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -48,7 +48,7 @@ Exercises the canonical Office app entrypoint, launcher, headless action dispatc
 | Plan | doc/03_plan/sys_test/ide_office_plugin_suite.md |
 | Design | doc/07_guide/app/ide_office_plugin_suite.md |
 | Research | N/A |
-| Source | `test/01_unit/app/office/office_suite_spec.spl` |
+| Source | `/tmp/simple-office-next101/test/01_unit/app/office/office_suite_spec.spl` |
 | Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
@@ -492,6 +492,20 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 expect(run_office(["slide-edit", "title", "old", "new", "=old"])).to_equal(2)
+```
+
+</details>
+
+#### rejects slide edit commands with duplicate source ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(run_office(["slide-edit", "title", "old", "new", "title=old;title=new"])).to_equal(2)
 ```
 
 </details>
@@ -1201,6 +1215,22 @@ expect(result.slide.elements.len()).to_equal(0)
 
 </details>
 
+#### rejects duplicate slide action source ids
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = office_action_dispatch("slide-edit", "title|new|next\ntitle=old;title=new")
+expect(result.ok).to_be(false)
+expect(result.reason).to_equal("duplicate-source-id")
+```
+
+</details>
+
 #### replaces the first office search match
 
 <details>
@@ -1237,8 +1267,8 @@ expect(priority_icon(task.priority)).to_equal("-")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 63 |
-| Active scenarios | 63 |
+| Total scenarios | 65 |
+| Active scenarios | 65 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

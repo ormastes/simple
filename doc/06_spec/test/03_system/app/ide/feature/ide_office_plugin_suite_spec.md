@@ -379,7 +379,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 559 lines folded for reproduction.
+Runnable source: 561 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -481,6 +481,7 @@ val sheet_stale_edit_action = office_action_dispatch("sheet-edit", "A1|missing|n
 val sheet_duplicate_source_action = office_action_dispatch("sheet-edit", "A1|new|next\nA1=old;A01=new")
 val slide_edit_action = office_action_dispatch("slide-edit", "title|Old|New\ntitle=Old")
 val slide_stale_edit_action = office_action_dispatch("slide-edit", "title|Missing|New\ntitle=Old")
+val slide_duplicate_source_action = office_action_dispatch("slide-edit", "title|New|Next\ntitle=Old;title=New")
 val ui_action = office_action_dispatch("render-ui-html", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val ui_sdd_action = office_action_dispatch("export-ui-sdd", "design: Feature\nnode button|Run|button|16|16|80|32|primary|controls|action")
 val sdd_action = office_action_dispatch("render-sdd-html-with-selection", "graph: Feature\nA: Alpha x: 0 y: 0 width: 80 height: 20")
@@ -582,6 +583,7 @@ expect(sheet_duplicate_source_action.reason).to_equal("duplicate-source-ref")
 expect(sheet_stale_edit_action.reason).to_equal("stale-cell")
 expect(slide_edit_action.output).to_equal("title=New")
 expect(slide_edit_action.reason).to_equal("updated")
+expect(slide_duplicate_source_action.reason).to_equal("duplicate-source-id")
 expect(slide_stale_edit_action.reason).to_equal("stale-slide-element")
 expect(ui_action.output).to_contain("data-format=\"html-ui\"")
 expect(ui_action.output).to_contain("data-node-count=\"1\"")

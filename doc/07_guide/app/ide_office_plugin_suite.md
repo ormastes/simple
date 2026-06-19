@@ -136,9 +136,9 @@ the updated table text.
 
 Calc and Impress edit actions use `target_id|expected|replacement` followed by
 the compact `A1=value;B1=value` or `element_id=value;...` body. `sheet-edit`
-rejects malformed, invalid, or duplicate source cell refs. `sheet-edit` and
-`slide-edit` return the updated target assignment and reject stale values with
-deterministic diffs.
+rejects malformed, invalid, or duplicate source cell refs. `slide-edit` rejects
+malformed, missing, or duplicate source element ids. `sheet-edit` and `slide-edit`
+return the updated target assignment and reject stale values with deterministic diffs.
 
 Math actions accept one expression body. `render-mathml` returns MathML,
 `render-mathml-checked` returns MathML with malformed-input rejection reasons,
