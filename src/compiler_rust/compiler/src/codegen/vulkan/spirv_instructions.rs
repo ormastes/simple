@@ -16,6 +16,12 @@ impl SpirvModule {
     /// This is the core translation logic that maps MIR instructions to SPIR-V operations.
     pub(super) fn lower_instruction(&mut self, inst: &MirInst) -> Result<(), CompileError> {
         match inst {
+            // Inline assembly has no meaningful SPIR-V/Vulkan-compute lowering.
+            MirInst::InlineAsm { .. } => {
+                return Err(CompileError::Codegen(
+                    "inline asm is not supported in SPIR-V/Vulkan compute codegen".to_string(),
+                ));
+            }
             // Constants
             MirInst::ConstInt { dest, value } => {
                 // Determine type based on value range

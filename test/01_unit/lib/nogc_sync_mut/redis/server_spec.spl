@@ -1,0 +1,210 @@
+"""
+# Redis Server (RESP) spec
+
+Exercises the in-process RESP request parser, command dispatcher, and reply
+encoders with no real socket: RESP byte buffers are fed to
+`parse_next_request` / `RedisServer.dispatch` and the encoded reply bytes are
+asserted via `decode_reply`.
+"""
+
+use std.nogc_sync_mut.redis.server.{RedisServer, parse_next_request, resp_status, resp_bulk, resp_integer, resp_nil, resp_error, resp_empty_array}
+
+# --- helpers -----------------------------------------------------------------
+
+fn enc(args: [text]) -> text:
+    """Encode args as a RESP command array (client-side framing)."""
+    var out = "*{args.len()}\r\n"
+    for a in args:
+        out = out + "${a.len()}\r\n{a}\r\n"
+    out
+
+# Run one full command (encode -> parse -> dispatch) and return reply text.
+fn run_cmd(srv: RedisServer, args: [text]) -> text:
+    val buf = enc(args)
+    val req = parse_next_request(buf)
+    if not req.?:
+        return "<<incomplete>>"
+    srv.dispatch(req.unwrap().args)
+
+describe "RESP reply encoders":
+    it "encodes a simple status string":
+        expect(resp_status("OK")).to_equal("+OK\r\n")
+
+    it "encodes an error":
+        expect(resp_error("ERR boom")).to_equal("-ERR boom\r\n")
+
+    it "encodes an integer":
+        expect(resp_integer(42)).to_equal(":42\r\n")
+
+    it "encodes a bulk string with length prefix":
+        expect(resp_bulk("hello")).to_equal("$5\r\nhello\r\n")
+
+    it "encodes a null bulk string":
+        expect(resp_nil()).to_equal("$-1\r\n")
+
+    it "encodes an empty array":
+        expect(resp_empty_array()).to_equal("*0\r\n")
+
+describe "RESP request parsing":
+    it "parses a RESP array of bulk strings into args":
+        val buf = enc(["SET", "k", "v"])
+        val req = parse_next_request(buf)
+        expect(req.?).to_equal(true)
+        expect(req.unwrap().args[0]).to_equal("SET")
+        expect(req.unwrap().args[2]).to_equal("v")
+
+    it "leaves an empty remainder after one complete command":
+        val buf = enc(["PING"])
+        val req = parse_next_request(buf)
+        expect(req.unwrap().rest).to_equal("")
+
+    it "returns nil for an incomplete buffer":
+        val full = enc(["GET", "key"])
+        val partial = full.substring(0, full.len() - 3)
+        val req = parse_next_request(partial)
+        expect(req.?).to_equal(false)
+
+    it "parses an inline command (PING\\r\\n)":
+        val req = parse_next_request("PING\r\n")
+        expect(req.?).to_equal(true)
+        expect(req.unwrap().args[0]).to_equal("PING")
+
+describe "command dispatch: PING":
+    it "replies PONG with no argument":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["PING"])).to_equal("+PONG\r\n")
+
+    it "echoes its argument as a bulk string":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["PING", "hi"])).to_equal("$2\r\nhi\r\n")
+
+describe "command dispatch: SET / GET":
+    it "SET replies +OK":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["SET", "name", "ada"])).to_equal("+OK\r\n")
+
+    it "GET returns the stored bulk value":
+        var srv = RedisServer.create()
+        run_cmd(srv, ["SET", "name", "ada"])
+        expect(run_cmd(srv, ["GET", "name"])).to_equal("$3\r\nada\r\n")
+
+    it "GET of a missing key is a null bulk":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["GET", "missing"])).to_equal("$-1\r\n")
+
+    it "SET overwrites an existing key":
+        var srv = RedisServer.create()
+        run_cmd(srv, ["SET", "k", "one"])
+        run_cmd(srv, ["SET", "k", "two"])
+        expect(run_cmd(srv, ["GET", "k"])).to_equal("$3\r\ntwo\r\n")
+
+describe "command dispatch: DEL / EXISTS":
+    it "EXISTS is 0 for a missing key":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["EXISTS", "nope"])).to_equal(":0\r\n")
+
+    it "EXISTS is 1 after SET":
+        var srv = RedisServer.create()
+        run_cmd(srv, ["SET", "k", "v"])
+        expect(run_cmd(srv, ["EXISTS", "k"])).to_equal(":1\r\n")
+
+    it "DEL removes a key and returns 1":
+        var srv = RedisServer.create()
+        run_cmd(srv, ["SET", "k", "v"])
+        expect(run_cmd(srv, ["DEL", "k"])).to_equal(":1\r\n")
+        expect(run_cmd(srv, ["EXISTS", "k"])).to_equal(":0\r\n")
+
+    it "DEL of a missing key returns 0":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["DEL", "ghost"])).to_equal(":0\r\n")
+
+describe "command dispatch: INCR":
+    it "INCR a fresh key starts at 1":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["INCR", "c"])).to_equal(":1\r\n")
+
+    it "INCR increments an existing counter":
+        var srv = RedisServer.create()
+        run_cmd(srv, ["INCR", "c"])
+        run_cmd(srv, ["INCR", "c"])
+        expect(run_cmd(srv, ["INCR", "c"])).to_equal(":3\r\n")
+
+    it "INCR on a non-integer value errors":
+        var srv = RedisServer.create()
+        run_cmd(srv, ["SET", "c", "abc"])
+        expect(run_cmd(srv, ["INCR", "c"])).to_equal("-ERR value is not an integer or out of range\r\n")
+
+describe "command dispatch: EXPIRE / TTL (lazy expiry)":
+    it "TTL of a missing key is -2":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["TTL", "k"])).to_equal(":-2\r\n")
+
+    it "TTL of a key with no expiry is -1":
+        var srv = RedisServer.create()
+        run_cmd(srv, ["SET", "k", "v"])
+        expect(run_cmd(srv, ["TTL", "k"])).to_equal(":-1\r\n")
+
+    it "EXPIRE on a missing key returns 0":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["EXPIRE", "k", "10"])).to_equal(":0\r\n")
+
+    it "EXPIRE sets a deadline and TTL reports remaining seconds":
+        var srv = RedisServer.create()
+        srv.now_seconds = 1000
+        run_cmd(srv, ["SET", "k", "v"])
+        expect(run_cmd(srv, ["EXPIRE", "k", "30"])).to_equal(":1\r\n")
+        expect(run_cmd(srv, ["TTL", "k"])).to_equal(":30\r\n")
+
+    it "lazily expires a key once its deadline passes":
+        var srv = RedisServer.create()
+        srv.now_seconds = 1000
+        run_cmd(srv, ["SET", "k", "v"])
+        run_cmd(srv, ["EXPIRE", "k", "5"])
+        srv.now_seconds = 1006
+        expect(run_cmd(srv, ["GET", "k"])).to_equal("$-1\r\n")
+        expect(run_cmd(srv, ["EXISTS", "k"])).to_equal(":0\r\n")
+
+describe "command dispatch: FLUSHALL / COMMAND / QUIT":
+    it "FLUSHALL clears all keys":
+        var srv = RedisServer.create()
+        run_cmd(srv, ["SET", "a", "1"])
+        run_cmd(srv, ["SET", "b", "2"])
+        expect(run_cmd(srv, ["FLUSHALL"])).to_equal("+OK\r\n")
+        expect(run_cmd(srv, ["EXISTS", "a"])).to_equal(":0\r\n")
+
+    it "COMMAND returns an empty array for the handshake":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["COMMAND"])).to_equal("*0\r\n")
+
+    it "COMMAND COUNT returns an integer":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["COMMAND", "COUNT"])).to_equal(":0\r\n")
+
+    it "QUIT replies +OK":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["QUIT"])).to_equal("+OK\r\n")
+
+    it "rejects an unknown command":
+        var srv = RedisServer.create()
+        expect(run_cmd(srv, ["BOGUS"])).to_equal("-ERR unknown command 'BOGUS'\r\n")
+
+describe "pipelining: multiple commands in one buffer":
+    it "drains two concatenated commands in order":
+        var srv = RedisServer.create()
+        val buf = enc(["SET", "k", "v"]) + enc(["GET", "k"])
+        # First command.
+        val r1 = parse_next_request(buf)
+        expect(r1.?).to_equal(true)
+        val rep1 = srv.dispatch(r1.unwrap().args)
+        expect(rep1).to_equal("+OK\r\n")
+        # Second command, parsed from the retained remainder.
+        val r2 = parse_next_request(r1.unwrap().rest)
+        expect(r2.?).to_equal(true)
+        val rep2 = srv.dispatch(r2.unwrap().args)
+        expect(rep2).to_equal("$1\r\nv\r\n")
+
+    it "returns an empty remainder after draining both commands":
+        val buf = enc(["PING"]) + enc(["PING"])
+        val r1 = parse_next_request(buf)
+        val r2 = parse_next_request(r1.unwrap().rest)
+        expect(r2.unwrap().rest).to_equal("")

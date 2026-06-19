@@ -21,11 +21,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <errno.h>
 #include <math.h>
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #if defined(_WIN32)
@@ -35,11 +37,126 @@
 #if !defined(_WIN32)
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/sendfile.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <pthread.h>
+#endif
+
+typedef struct {
+    const char* name;
+    uint64_t count;
+} RtNativeProfileSlot;
+
+#define RT_NATIVE_PROFILE_MAX 8192
+static RtNativeProfileSlot rt_native_profile_slots[RT_NATIVE_PROFILE_MAX];
+static size_t rt_native_profile_used = 0;
+static int rt_native_profile_atexit_registered = 0;
+static int rt_native_profile_dumped = 0;
+#if !defined(_WIN32)
+static pthread_mutex_t rt_native_profile_lock = PTHREAD_MUTEX_INITIALIZER;
+#define RT_NATIVE_PROFILE_LOCK() pthread_mutex_lock(&rt_native_profile_lock)
+#define RT_NATIVE_PROFILE_UNLOCK() pthread_mutex_unlock(&rt_native_profile_lock)
+#else
+#define RT_NATIVE_PROFILE_LOCK() ((void)0)
+#define RT_NATIVE_PROFILE_UNLOCK() ((void)0)
+#endif
+
+static void rt_native_profile_dump(void);
+#if !defined(_WIN32)
+static void rt_native_profile_signal_dump(int sig);
+#endif
+
+void rt_native_profile_count(const char* name) {
+    if (!name || !*name) return;
+    RT_NATIVE_PROFILE_LOCK();
+    if (!rt_native_profile_atexit_registered) {
+        atexit(rt_native_profile_dump);
+#if !defined(_WIN32)
+        signal(SIGINT, rt_native_profile_signal_dump);
+        signal(SIGTERM, rt_native_profile_signal_dump);
+#endif
+        rt_native_profile_atexit_registered = 1;
+    }
+    for (size_t i = 0; i < rt_native_profile_used; i++) {
+        if (strcmp(rt_native_profile_slots[i].name, name) == 0) {
+            rt_native_profile_slots[i].count++;
+            RT_NATIVE_PROFILE_UNLOCK();
+            return;
+        }
+    }
+    if (rt_native_profile_used < RT_NATIVE_PROFILE_MAX) {
+        rt_native_profile_slots[rt_native_profile_used].name = name;
+        rt_native_profile_slots[rt_native_profile_used].count = 1;
+        rt_native_profile_used++;
+    }
+    RT_NATIVE_PROFILE_UNLOCK();
+}
+
+static int rt_native_profile_slot_cmp(const void* lhs, const void* rhs) {
+    const RtNativeProfileSlot* a = *(const RtNativeProfileSlot* const*)lhs;
+    const RtNativeProfileSlot* b = *(const RtNativeProfileSlot* const*)rhs;
+    if (a->count < b->count) return 1;
+    if (a->count > b->count) return -1;
+    return strcmp(a->name, b->name);
+}
+
+static void rt_native_profile_dump(void) {
+    const char* out = getenv("SIMPLE_NATIVE_PROFILE_OUT");
+    if (!out || !*out || rt_native_profile_used == 0) return;
+    if (rt_native_profile_dumped) return;
+    rt_native_profile_dumped = 1;
+    FILE* fp = strcmp(out, "stderr") == 0 ? stderr : fopen(out, "w");
+    if (!fp) return;
+
+    RT_NATIVE_PROFILE_LOCK();
+    size_t used = rt_native_profile_used;
+    RtNativeProfileSlot** rows = (RtNativeProfileSlot**)malloc(sizeof(RtNativeProfileSlot*) * used);
+    if (rows) {
+        for (size_t i = 0; i < used; i++) rows[i] = &rt_native_profile_slots[i];
+        qsort(rows, used, sizeof(RtNativeProfileSlot*), rt_native_profile_slot_cmp);
+        fputs("count\tfunction\n", fp);
+        for (size_t i = 0; i < used; i++) {
+            fprintf(fp, "%llu\t%s\n", (unsigned long long)rows[i]->count, rows[i]->name);
+        }
+        free(rows);
+    }
+    RT_NATIVE_PROFILE_UNLOCK();
+
+    if (fp != stderr) fclose(fp);
+}
+
+#if !defined(_WIN32)
+static void rt_native_profile_signal_dump(int sig) {
+    const char* out = getenv("SIMPLE_NATIVE_PROFILE_OUT");
+    if (out && *out && !rt_native_profile_dumped && rt_native_profile_used > 0) {
+        rt_native_profile_dumped = 1;
+        FILE* fp = strcmp(out, "stderr") == 0 ? stderr : fopen(out, "w");
+        if (fp) {
+            fputs("count\tfunction\n", fp);
+            for (size_t i = 0; i < rt_native_profile_used; i++) {
+                fprintf(fp, "%llu\t%s\n",
+                        (unsigned long long)rt_native_profile_slots[i].count,
+                        rt_native_profile_slots[i].name);
+            }
+            if (fp != stderr) fclose(fp);
+        }
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+#endif
+
+#if !defined(_WIN32)
+static void rt_tcp_ignore_sigpipe(void) {
+    static int ignored = 0;
+    if (!ignored) {
+        signal(SIGPIPE, SIG_IGN);
+        ignored = 1;
+    }
+}
 #endif
 
 bool rt_dir_create(const char* path, bool recursive) {
@@ -143,9 +260,40 @@ void rt_host_gpu_queue_reset(void);
 
 int64_t rt_cuda_available(void) { return 0; }
 int64_t rt_cuda_device_count(void) { return 0; }
-int32_t rt_vk_available(void) { return 0; }
-int64_t rt_vulkan_is_available(void) { return 0; }
-int64_t rt_vulkan_device_count(void) { return 0; }
+
+/* Real Vulkan availability + device count via runtime dlopen (no hard link dep).
+ * Replicates the minimal stable Vulkan ABI so the runtime needs no vulkan headers.
+ * Any failure -> 0 (safe fallback). Validated against vulkaninfo device count. */
+#include <dlfcn.h>
+struct RtVkApplicationInfo_ { int sType; const void* pNext; const char* pAppName; unsigned appVer; const char* pEngName; unsigned engVer; unsigned apiVer; };
+struct RtVkInstanceCreateInfo_ { int sType; const void* pNext; unsigned flags; const struct RtVkApplicationInfo_* pApp; unsigned layerCount; const char* const* layers; unsigned extCount; const char* const* exts; };
+static int rt_vulkan_count_cached = -1;
+static void rt_vulkan_detect(void) {
+    if (rt_vulkan_count_cached >= 0) return;
+    rt_vulkan_count_cached = 0;
+    void* lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) lib = dlopen("libvulkan.1.dylib", RTLD_NOW | RTLD_LOCAL); /* macOS/MoltenVK */
+    if (!lib) return;
+    typedef int  (*rt_pfn_create)(const struct RtVkInstanceCreateInfo_*, const void*, void**);
+    typedef int  (*rt_pfn_enum)(void*, unsigned*, void**);
+    typedef void (*rt_pfn_destroy)(void*, const void*);
+    rt_pfn_create  pCreate  = (rt_pfn_create)dlsym(lib, "vkCreateInstance");
+    rt_pfn_enum    pEnum    = (rt_pfn_enum)dlsym(lib, "vkEnumeratePhysicalDevices");
+    rt_pfn_destroy pDestroy = (rt_pfn_destroy)dlsym(lib, "vkDestroyInstance");
+    if (!pCreate || !pEnum) return;
+    struct RtVkApplicationInfo_ ai; memset(&ai, 0, sizeof(ai)); ai.sType = 0; ai.apiVer = (1u << 22);
+    struct RtVkInstanceCreateInfo_ ici; memset(&ici, 0, sizeof(ici)); ici.sType = 1; ici.pApp = &ai;
+    void* inst = 0;
+    if (pCreate(&ici, 0, &inst) != 0 || !inst) return;
+    unsigned ndev = 0;
+    if (pEnum(inst, &ndev, 0) == 0) rt_vulkan_count_cached = (int)ndev;
+    if (pDestroy) pDestroy(inst, 0);
+    /* lib handle intentionally kept open for process lifetime */
+}
+int32_t rt_vk_available(void) { rt_vulkan_detect(); return rt_vulkan_count_cached > 0 ? 1 : 0; }
+int64_t rt_vulkan_is_available(void) { rt_vulkan_detect(); return rt_vulkan_count_cached > 0 ? 1 : 0; }
+int64_t rt_vulkan_device_count(void) { rt_vulkan_detect(); return (int64_t)(rt_vulkan_count_cached > 0 ? rt_vulkan_count_cached : 0); }
 
 static int64_t rt_host_gpu_queue_now_us(void) {
     struct timespec ts;
@@ -1108,6 +1256,72 @@ int64_t rt_string_to_int(int64_t value) {
     if (n > 0) memcpy(buf, s->data, (size_t)n);
     buf[n] = '\0';
     return (int64_t)strtoll(buf, NULL, 10);
+}
+
+typedef struct RtCoreStringBuilder {
+    char* data;
+    uint64_t len;
+    uint64_t cap;
+} RtCoreStringBuilder;
+
+static int rt_string_builder_reserve(RtCoreStringBuilder* b, uint64_t needed) {
+    if (!b) return 0;
+    if (needed <= b->cap) return 1;
+    uint64_t next = b->cap ? b->cap : 64;
+    while (next < needed) {
+        if (next > UINT64_MAX / 2) {
+            next = needed;
+            break;
+        }
+        next *= 2;
+    }
+    char* grown = (char*)realloc(b->data, (size_t)next + 1);
+    if (!grown) return 0;
+    b->data = grown;
+    b->cap = next;
+    return 1;
+}
+
+int64_t rt_string_builder_new(void) {
+    RtCoreStringBuilder* b = (RtCoreStringBuilder*)calloc(1, sizeof(RtCoreStringBuilder));
+    if (!b) return 0;
+    return (int64_t)(uintptr_t)b;
+}
+
+int64_t rt_string_builder_push(int64_t handle, int64_t value) {
+    RtCoreStringBuilder* b = (RtCoreStringBuilder*)(uintptr_t)handle;
+    RtCoreString* s = rt_core_as_string(value);
+    if (!b || !s) return 0;
+    uint64_t needed = b->len + s->len;
+    if (needed < b->len || !rt_string_builder_reserve(b, needed)) return 0;
+    if (s->len > 0) {
+        memcpy(b->data + b->len, s->data, (size_t)s->len);
+    }
+    b->len = needed;
+    b->data[b->len] = '\0';
+    return 1;
+}
+
+int64_t rt_string_builder_finish(int64_t handle) {
+    RtCoreStringBuilder* b = (RtCoreStringBuilder*)(uintptr_t)handle;
+    if (!b) return rt_core_nil();
+    int64_t result = rt_string_new((const uint8_t*)b->data, b->len);
+    free(b->data);
+    free(b);
+    return result;
+}
+
+int64_t rt_string_builder_len(int64_t handle) {
+    RtCoreStringBuilder* b = (RtCoreStringBuilder*)(uintptr_t)handle;
+    if (!b) return -1;
+    return (int64_t)b->len;
+}
+
+void rt_string_builder_free(int64_t handle) {
+    RtCoreStringBuilder* b = (RtCoreStringBuilder*)(uintptr_t)handle;
+    if (!b) return;
+    free(b->data);
+    free(b);
 }
 
 void rt_print_str(const uint8_t* ptr, uint64_t len) {
@@ -2274,6 +2488,20 @@ int rt_file_exists(const char* path) {
     return 0;
 }
 
+int64_t rt_file_size(const char* path) {
+    if (!path) return rt_value_int(-1);
+    struct stat st;
+    if (stat(path, &st) != 0) return rt_value_int(-1);
+    return rt_value_int((int64_t)st.st_size);
+}
+
+int64_t rt_file_stat(const char* path) {
+    if (!path) return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return (int64_t)st.st_mtime;
+}
+
 int rt_file_delete(const char* path) {
     if (!path) return 0;
     return remove(path) == 0 ? 1 : 0;
@@ -2284,7 +2512,7 @@ const char* rt_env_get(const char* key) {
     return spl_env_get(key);
 }
 
-/* rt_file_write, rt_file_copy, rt_file_size, rt_file_stat, rt_file_append
+/* rt_file_write, rt_file_copy, rt_file_append
  * are still defined in runtime.c only — add them here when needed. */
 
 static char* rt_core_string_to_cpath(int64_t value) {
@@ -3081,12 +3309,18 @@ int64_t rt_io_tcp_read_line(int64_t fd) {
 }
 
 int64_t rt_io_tcp_write(int64_t fd, int64_t data_val) {
+#if !defined(_WIN32)
+    rt_tcp_ignore_sigpipe();
+#endif
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
     if (!ca || !ca->data || ca->len <= 0) return 0;
     return (int64_t)write((int)fd, ca->data, (size_t)ca->len);
 }
 
 int64_t rt_io_tcp_write_text(int64_t fd, int64_t text_val) {
+#if !defined(_WIN32)
+    rt_tcp_ignore_sigpipe();
+#endif
     RtCoreString* s = rt_core_as_string(text_val);
     if (!s || s->len == 0) return 0;
     return (int64_t)write((int)fd, s->data, (size_t)s->len);
@@ -3094,6 +3328,153 @@ int64_t rt_io_tcp_write_text(int64_t fd, int64_t text_val) {
 
 int64_t rt_io_tcp_write_bytes(int64_t fd, int64_t data_val) {
     return rt_io_tcp_write(fd, data_val);
+}
+
+#if !defined(_WIN32)
+#define RT_SENDFILE_FD_CACHE_MAX 64
+typedef struct {
+    char* path;
+    int fd;
+    int64_t expires_at_ms;
+} RtSendfileFdCacheEntry;
+
+static _Thread_local RtSendfileFdCacheEntry rt_sendfile_fd_cache[RT_SENDFILE_FD_CACHE_MAX];
+
+static int64_t rt_now_monotonic_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
+}
+
+static int64_t rt_sendfile_fd_cache_ttl_ms(void) {
+    const char* raw = getenv("SIMPLE_HTTP_STATIC_METADATA_CACHE_MS");
+    if (!raw || !*raw) return 0;
+    char* end = NULL;
+    long long ttl = strtoll(raw, &end, 10);
+    if (end == raw || ttl <= 0) return 0;
+    return (int64_t)ttl;
+}
+
+static int rt_sendfile_open_path(const char* path, int64_t* cached_out) {
+    if (cached_out) *cached_out = 0;
+    int64_t ttl = rt_sendfile_fd_cache_ttl_ms();
+    if (ttl <= 0) return open(path, O_RDONLY);
+
+    int64_t now = rt_now_monotonic_ms();
+    int free_slot = -1;
+    for (int i = 0; i < RT_SENDFILE_FD_CACHE_MAX; i++) {
+        RtSendfileFdCacheEntry* e = &rt_sendfile_fd_cache[i];
+        if (!e->path) {
+            if (free_slot < 0) free_slot = i;
+            continue;
+        }
+        if (strcmp(e->path, path) == 0) {
+            if (now > 0 && e->expires_at_ms >= now && e->fd >= 0) {
+                if (cached_out) *cached_out = 1;
+                return e->fd;
+            }
+            close(e->fd);
+            free(e->path);
+            e->path = NULL;
+            e->fd = -1;
+            e->expires_at_ms = 0;
+            if (free_slot < 0) free_slot = i;
+        }
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return fd;
+    if (free_slot >= 0 && now > 0) {
+        RtSendfileFdCacheEntry* e = &rt_sendfile_fd_cache[free_slot];
+        e->path = spl_strdup(path);
+        if (e->path) {
+            e->fd = fd;
+            e->expires_at_ms = now + ttl;
+            if (cached_out) *cached_out = 1;
+            return fd;
+        }
+    }
+    return fd;
+}
+
+static void rt_sendfile_release_fd(int fd, int64_t cached) {
+    if (!cached && fd >= 0) close(fd);
+}
+#endif
+
+int64_t rt_io_tcp_sendfile_path(int64_t fd, int64_t path_val, int64_t offset, int64_t length) {
+#if defined(_WIN32)
+    (void)fd; (void)path_val; (void)offset; (void)length;
+    return -1;
+#else
+    rt_tcp_ignore_sigpipe();
+    char* path = rt_core_string_to_cpath(path_val);
+    if (!path) return -1;
+    int64_t cached_fd = 0;
+    int file_fd = rt_sendfile_open_path(path, &cached_fd);
+    free(path);
+    if (file_fd < 0) return -1;
+    off_t off = (off_t)rt_core_numeric_arg(offset);
+    int64_t total = 0;
+    int64_t remaining = rt_core_numeric_arg(length);
+    while (remaining > 0) {
+        ssize_t n = sendfile((int)fd, file_fd, &off, (size_t)remaining);
+        if (n > 0) {
+            total += (int64_t)n;
+            remaining -= (int64_t)n;
+            continue;
+        }
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        break;
+    }
+    rt_sendfile_release_fd(file_fd, cached_fd);
+    return total > 0 ? total : -1;
+#endif
+}
+
+int64_t rt_io_tcp_sendfile_path_with_header(int64_t fd, int64_t header_val, int64_t path_val, int64_t offset, int64_t length) {
+#if defined(_WIN32)
+    (void)fd; (void)header_val; (void)path_val; (void)offset; (void)length;
+    return -1;
+#else
+    rt_tcp_ignore_sigpipe();
+    char* path = rt_core_string_to_cpath(path_val);
+    if (!path) return -1;
+    int64_t cached_fd = 0;
+    int file_fd = rt_sendfile_open_path(path, &cached_fd);
+    free(path);
+    if (file_fd < 0) return -1;
+    off_t off = (off_t)rt_core_numeric_arg(offset);
+    int64_t remaining = rt_core_numeric_arg(length);
+    RtCoreString* header = rt_core_as_string(header_val);
+    int64_t total = 0;
+    if (header && header->len > 0) {
+        uint64_t pos = 0;
+        while (pos < header->len) {
+            ssize_t n = write((int)fd, header->data + pos, (size_t)(header->len - pos));
+            if (n > 0) {
+                pos += (uint64_t)n;
+                total += (int64_t)n;
+                continue;
+            }
+            if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+            rt_sendfile_release_fd(file_fd, cached_fd);
+            return total > 0 ? total : -1;
+        }
+    }
+    while (remaining > 0) {
+        ssize_t n = sendfile((int)fd, file_fd, &off, (size_t)remaining);
+        if (n > 0) {
+            total += (int64_t)n;
+            remaining -= (int64_t)n;
+            continue;
+        }
+        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        break;
+    }
+    rt_sendfile_release_fd(file_fd, cached_fd);
+    return total > 0 ? total : -1;
+#endif
 }
 
 int64_t rt_io_tcp_flush(int64_t fd) {
@@ -3464,6 +3845,7 @@ void __simple_runtime_init(void) {
 }
 
 void __simple_runtime_shutdown(void) {
+    rt_native_profile_dump();
     fflush(stdout);
     fflush(stderr);
 }
