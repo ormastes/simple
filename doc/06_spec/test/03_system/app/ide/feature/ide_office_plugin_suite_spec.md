@@ -100,7 +100,7 @@ slides: Presentation Slides [office-app] -> app.office.slides (ppt, presentation
   check: slides: app.office.slides count=2 thumb=Slide 2: Roadmap canvas=2 outline=2 designs=2 css=true transform=true ppt_html=true safe_css=true positioned=true
   edit-command: slide-edit=true stale-reject=true reason=stale-slide-element
 draw: Diagram Draw [office-app] -> std.editor.services.sdn_graph (draw, diagram, sdd, sdn)
-  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true canvas=true
+  check: draw: sdn_graph nodes=2 edges=1 html=true route=true select=true inspect=true edit=true layout=true canvas=true
 sheets: Spreadsheet [office-app] -> app.office.sheets (excel, xlsx, tabular, csv)
   check: sheets: app.office.sheets formats=excel,xlsx,csv,tabular range=A1:C1 formula=5 evaluator=true
   edit-command: sheet-edit=true stale-reject=true reason=stale-cell
@@ -112,7 +112,7 @@ db-admin: Database Admin [database] -> std.editor.core.session_db (embedded-db, 
   tui: tui-panels: preview=4 outline=2 md=true table=true slide-outline=true styled=true
   launch: launch: tui=tui gui=gui sdl=gui-sdl files=3 unknown=--bad-mode
   plugin-manifest: plugins: entries=6 roundtrip=6 names=6
-  llm-catalog: apps=9 features=73 actions=32
+  llm-catalog: apps=9 features=75 actions=34
   llm-apps: Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter
 ```
 
@@ -170,7 +170,7 @@ expect(owners).to_contain("std.editor.core.session_db")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -181,6 +181,7 @@ expect(gui_report).to_contain("mode: gui")
 expect(tui_report).to_contain("Presentation Slides")
 expect(tui_report).to_contain("draw: Diagram Draw")
 expect(tui_report).to_contain("draw: sdn_graph")
+expect(tui_report).to_contain("layout=true")
 expect(tui_report).to_contain("canvas=true")
 expect(gui_report).to_contain("Database Admin")
 expect(tui_report).to_contain("tui-panels:")
@@ -285,7 +286,7 @@ expect(tui_lines[23]).to_equal(gui_lines[23])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -298,7 +299,9 @@ expect(probe.selected_render).to_be(true)
 expect(probe.reroute_edit).to_be(true)
 expect(probe.node_edit).to_be(true)
 expect(probe.inspector).to_be(true)
+expect(probe.layout_edit).to_be(true)
 expect(probe.canvas_metadata).to_be(true)
+expect(ide_draw_sanity_summary()).to_contain("layout=true")
 expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 ```
 
@@ -317,7 +320,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 163 lines folded for reproduction.
+Runnable source: 177 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -325,7 +328,7 @@ val catalog = office_llm_feature_catalog()
 val names = office_llm_catalog_app_names().join(",")
 expect(catalog.len()).to_equal(9)
 expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=73 actions=32")
+expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=75 actions=34")
 
 expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
 expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -353,12 +356,16 @@ expect(catalog[4].features.join(",")).to_contain("node-style-edit")
 expect(catalog[4].features.join(",")).to_contain("canvas-metadata")
 expect(catalog[4].features.join(",")).to_contain("selection")
 expect(catalog[4].features.join(",")).to_contain("inspector")
+expect(catalog[4].features.join(",")).to_contain("align-layout")
+expect(catalog[4].features.join(",")).to_contain("distribute-layout")
 expect(catalog[4].actions.join(",")).to_contain("render-sdd-html-with-selection")
 expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-parent")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-shape")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-style")
 expect(catalog[4].actions.join(",")).to_contain("edit-sdd-canvas")
+expect(catalog[4].actions.join(",")).to_contain("align-sdd-selection")
+expect(catalog[4].actions.join(",")).to_contain("distribute-sdd-selection")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-node")
 expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-edge")
 val writer_action = office_action_dispatch("render-writer-markdown-html", "# Writer")
@@ -381,6 +388,11 @@ val draw_style_only = sdn_graph_update_node_style_at(draw_shape_only, 1, "storag
 val draw_canvas = sdn_graph_update_canvas(draw_style_only, "1440", "960", "24", "true", "150", "#f8fafc")
 val inspected_draw_node = sdn_graph_inspect_node(draw_style_only, "B")
 val inspected_draw_edge = sdn_graph_inspect_edge(draw_style_only, 0)
+val draw_layout_graph = sdn_graph_parse("graph: Layout\nB: B x: 120 y: 120 width: 20 height: 20\nA: A x: 0 y: 0 width: 20 height: 20\nC: C x: 20 y: 20 width: 20 height: 20")
+val draw_layout_ids = ["A", "B", "C"]
+val draw_layout_signature = sdn_graph_geometry_signature(draw_layout_graph, draw_layout_ids)
+val draw_aligned = sdn_graph_align_checked(draw_layout_graph, draw_layout_ids, draw_layout_signature, "left")
+val draw_distributed = sdn_graph_distribute_checked(draw_layout_graph, draw_layout_ids, draw_layout_signature, "horizontal")
 expect(sdn_graph_render_html(rerouted)).to_contain("data-path=\"M 80,10 L 120,10 L 120,40 L 160,40 L 160,10\"")
 expect(sdn_graph_render_html(grouped)).to_contain("data-shape=\"diamond\"")
 expect(sdn_graph_render_html(grouped)).to_contain("sdn-css-accent")
@@ -396,6 +408,11 @@ expect(inspected_draw_node.shape).to_equal("cylinder")
 expect(inspected_draw_edge.found).to_be(true)
 expect(inspected_draw_edge.route).to_equal("orthogonal")
 expect(inspected_draw_edge.path).to_equal("M 80,10 L 120,10 L 120,40 L 160,40 L 160,10")
+expect(draw_aligned.accepted).to_be(true)
+expect(draw_aligned.graph.nodes[0].x).to_equal("0")
+expect(draw_distributed.accepted).to_be(true)
+expect(draw_distributed.graph.nodes[0].x).to_equal("120")
+expect(draw_distributed.graph.nodes[2].x).to_equal("60")
 expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
 expect(catalog[5].features.join(",")).to_contain("selection")
 expect(catalog[5].features.join(",")).to_contain("inspector")

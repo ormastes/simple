@@ -46,6 +46,8 @@ Rules:
   matching nodes or edges by selector.
 - Pure edit APIs can update one node's shape/style metadata or one connector's
   route metadata without reparsing or touching unrelated graph entries.
+- Multi-node layout APIs align or distribute selected nodes with a guarded
+  geometry signature so stale editor selections fail closed.
 - `css_file:` imports an external stylesheet for final SVG or HTML output.
 
 ## Canonical Tables
@@ -225,6 +227,17 @@ ungrouped node.
 `sdn_graph_update_canvas` is the pure canvas/page edit operation. It updates
 document-level width, height, grid, snap, zoom, and background metadata while
 preserving all node, connector, CSS, and weave state.
+
+`sdn_graph_geometry_signature(graph, node_ids)` returns the stable
+`id:x,y,width,height` signature for a selected node set in canonical graph
+order. `sdn_graph_align_checked(graph, node_ids, expected_signature, mode)` and
+`sdn_graph_distribute_checked(graph, node_ids, expected_signature, axis)` are
+the draw.io-style multi-node layout operations. They return a
+`SdnGraphEditResult` and fail closed with `stale-selection`, `missing-node`,
+`invalid-selection`, `unsupported-align-mode`, `unsupported-distribute-axis`, or
+`invalid-geometry` instead of partially mutating a graph. Supported align modes
+are `left`, `center`, `right`, `top`, `middle`, and `bottom`; supported
+distribution axes are `horizontal` and `vertical`.
 
 ## Selection And Inspection
 

@@ -42,7 +42,7 @@ use app.office.base_db.{count_where, delete_where, insert_row_checked, new_table
 use app.office.math_editor.{math_fenced, math_fraction, math_subscript, math_to_mathml, math_to_mathml_checked}
 use app.office.ui_editor.{office_ui_design_align_checked, office_ui_design_distribute_checked, office_ui_design_geometry_signature, office_ui_design_inspect_node, office_ui_design_parse, office_ui_design_read_style_token, office_ui_design_render_html, office_ui_design_render_html_with_selection, office_ui_design_resolve_auto_layout, office_ui_design_set_parent_checked, office_ui_design_to_sdd, office_ui_design_update_auto_layout_checked, office_ui_design_update_constraint_checked, office_ui_design_update_layer_checked, office_ui_design_update_layout_checked, office_ui_design_update_style_token_checked}
 use app.office.slides.slide.{SlideElement, SlideElementKind, SlideLayout, add_slide_element, slide_layout_display_name, slide_layout_short_name, slide_with_elements}
-use std.editor.services.sdn_graph.{sdn_graph_inspect_edge, sdn_graph_inspect_node, sdn_graph_parse, sdn_graph_render_html, sdn_graph_render_html_with_selection, sdn_graph_update_canvas, sdn_graph_update_edge_at, sdn_graph_update_node_at, sdn_graph_update_node_parent_at, sdn_graph_update_node_shape_at, sdn_graph_update_node_style_at}
+use std.editor.services.sdn_graph.{sdn_graph_align_checked, sdn_graph_distribute_checked, sdn_graph_geometry_signature, sdn_graph_inspect_edge, sdn_graph_inspect_node, sdn_graph_parse, sdn_graph_render_html, sdn_graph_render_html_with_selection, sdn_graph_update_canvas, sdn_graph_update_edge_at, sdn_graph_update_node_at, sdn_graph_update_node_parent_at, sdn_graph_update_node_shape_at, sdn_graph_update_node_style_at}
 use common.office.number.{office_parse_non_negative_i32, office_parse_signed_decimal_f64, office_parse_unsigned_decimal_f64, office_pow10_f64, office_pow10_i64}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -104,6 +104,7 @@ describe "IDE office plugin suite capabilities":
         expect(tui_report).to_contain("Presentation Slides")
         expect(tui_report).to_contain("draw: Diagram Draw")
         expect(tui_report).to_contain("draw: sdn_graph")
+        expect(tui_report).to_contain("layout=true")
         expect(tui_report).to_contain("canvas=true")
         expect(gui_report).to_contain("Database Admin")
         expect(tui_report).to_contain("tui-panels:")
@@ -177,7 +178,9 @@ describe "IDE office plugin suite capabilities":
         expect(probe.reroute_edit).to_be(true)
         expect(probe.node_edit).to_be(true)
         expect(probe.inspector).to_be(true)
+        expect(probe.layout_edit).to_be(true)
         expect(probe.canvas_metadata).to_be(true)
+        expect(ide_draw_sanity_summary()).to_contain("layout=true")
         expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 
     it "exposes a complete LLM-readable app feature catalog":
@@ -185,7 +188,7 @@ describe "IDE office plugin suite capabilities":
         val names = office_llm_catalog_app_names().join(",")
         expect(catalog.len()).to_equal(9)
         expect(names).to_equal("Markdown,Writer,Calc,Impress,Draw,Designer,Base,Math,Counter")
-        expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=73 actions=32")
+        expect(office_llm_catalog_summary()).to_equal("llm-catalog: apps=9 features=75 actions=34")
 
         expect(catalog[0].owner_module).to_equal("app.office.md_wysiwyg")
         expect(catalog[0].features.join(",")).to_contain("guarded-edit")
@@ -213,12 +216,16 @@ describe "IDE office plugin suite capabilities":
         expect(catalog[4].features.join(",")).to_contain("canvas-metadata")
         expect(catalog[4].features.join(",")).to_contain("selection")
         expect(catalog[4].features.join(",")).to_contain("inspector")
+        expect(catalog[4].features.join(",")).to_contain("align-layout")
+        expect(catalog[4].features.join(",")).to_contain("distribute-layout")
         expect(catalog[4].actions.join(",")).to_contain("render-sdd-html-with-selection")
         expect(catalog[4].actions.join(",")).to_contain("reroute-sdd-connector")
         expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-parent")
         expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-shape")
         expect(catalog[4].actions.join(",")).to_contain("edit-sdd-node-style")
         expect(catalog[4].actions.join(",")).to_contain("edit-sdd-canvas")
+        expect(catalog[4].actions.join(",")).to_contain("align-sdd-selection")
+        expect(catalog[4].actions.join(",")).to_contain("distribute-sdd-selection")
         expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-node")
         expect(catalog[4].actions.join(",")).to_contain("inspect-sdd-edge")
         val writer_action = office_action_dispatch("render-writer-markdown-html", "# Writer")
@@ -241,6 +248,11 @@ describe "IDE office plugin suite capabilities":
         val draw_canvas = sdn_graph_update_canvas(draw_style_only, "1440", "960", "24", "true", "150", "#f8fafc")
         val inspected_draw_node = sdn_graph_inspect_node(draw_style_only, "B")
         val inspected_draw_edge = sdn_graph_inspect_edge(draw_style_only, 0)
+        val draw_layout_graph = sdn_graph_parse("graph: Layout\nB: B x: 120 y: 120 width: 20 height: 20\nA: A x: 0 y: 0 width: 20 height: 20\nC: C x: 20 y: 20 width: 20 height: 20")
+        val draw_layout_ids = ["A", "B", "C"]
+        val draw_layout_signature = sdn_graph_geometry_signature(draw_layout_graph, draw_layout_ids)
+        val draw_aligned = sdn_graph_align_checked(draw_layout_graph, draw_layout_ids, draw_layout_signature, "left")
+        val draw_distributed = sdn_graph_distribute_checked(draw_layout_graph, draw_layout_ids, draw_layout_signature, "horizontal")
         expect(sdn_graph_render_html(rerouted)).to_contain("data-path=\"M 80,10 L 120,10 L 120,40 L 160,40 L 160,10\"")
         expect(sdn_graph_render_html(grouped)).to_contain("data-shape=\"diamond\"")
         expect(sdn_graph_render_html(grouped)).to_contain("sdn-css-accent")
@@ -256,6 +268,11 @@ describe "IDE office plugin suite capabilities":
         expect(inspected_draw_edge.found).to_be(true)
         expect(inspected_draw_edge.route).to_equal("orthogonal")
         expect(inspected_draw_edge.path).to_equal("M 80,10 L 120,10 L 120,40 L 160,40 L 160,10")
+        expect(draw_aligned.accepted).to_be(true)
+        expect(draw_aligned.graph.nodes[0].x).to_equal("0")
+        expect(draw_distributed.accepted).to_be(true)
+        expect(draw_distributed.graph.nodes[0].x).to_equal("120")
+        expect(draw_distributed.graph.nodes[2].x).to_equal("60")
         expect(catalog[5].owner_module).to_equal("app.office.ui_editor")
         expect(catalog[5].features.join(",")).to_contain("selection")
         expect(catalog[5].features.join(",")).to_contain("inspector")

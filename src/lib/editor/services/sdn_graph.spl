@@ -98,6 +98,27 @@ struct SdnGraph:
     styles: [SdnGraphStyle]
     weaves: [SdnGraphWeave]
 
+struct SdnGraphEditResult:
+    accepted: bool
+    reason: text
+    diff: text
+    graph: SdnGraph
+
+struct SdnGraphI64Result:
+    ok: bool
+    value: i64
+
+struct SdnGraphBounds:
+    ok: bool
+    min_x: i64
+    min_y: i64
+    max_x: i64
+    max_y: i64
+
+struct SdnGraphAlignedNode:
+    ok: bool
+    node: SdnGraphNode
+
 fn sdn_graph_empty() -> SdnGraph:
     SdnGraph(
         name: "",
@@ -380,6 +401,86 @@ fn sdn_graph_update_node_parent_at(graph: SdnGraph, node_index: i64, parent: tex
 fn sdn_graph_update_canvas(graph: SdnGraph, new_width: text, new_height: text, new_grid: text, new_snap: text, new_zoom: text, new_background: text) -> SdnGraph:
     SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: new_width, canvas_height: new_height, canvas_grid: new_grid, canvas_snap: new_snap, canvas_zoom: new_zoom, canvas_background: new_background, nodes: graph.nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
 
+fn sdn_graph_geometry_signature(graph: SdnGraph, node_ids: [text]) -> text:
+    var parts: [text] = []
+    for node in graph.nodes:
+        if _sg_id_in_list(node.id, node_ids):
+            parts.push(node.id + ":" + node.x + "," + node.y + "," + node.width + "," + node.height)
+    parts.join(";")
+
+fn sdn_graph_align_checked(graph: SdnGraph, node_ids: [text], expected_signature: text, mode: text) -> SdnGraphEditResult:
+    val actual_signature = sdn_graph_geometry_signature(graph, node_ids)
+    if actual_signature != expected_signature:
+        return SdnGraphEditResult(accepted: false, reason: "stale-selection", diff: "@@ sdd-align " + mode + " @@\nexpected: " + expected_signature + "\nactual: " + actual_signature, graph: graph)
+    if node_ids.len() < 2:
+        return SdnGraphEditResult(accepted: false, reason: "invalid-selection", diff: "@@ sdd-align " + mode + " @@\nexpected: at least 2 nodes\nactual: " + node_ids.len().to_text(), graph: graph)
+    val selected_count = _sg_selected_count(graph, node_ids)
+    if selected_count != node_ids.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-align " + mode + " @@\nexpected: " + node_ids.join(",") + "\nactual: " + actual_signature, graph: graph)
+    if not _sg_align_mode_supported(mode):
+        return SdnGraphEditResult(accepted: false, reason: "unsupported-align-mode", diff: "@@ sdd-align " + mode + " @@\nexpected: left|center|right|top|middle|bottom\nactual: " + mode, graph: graph)
+    val bounds = _sg_selected_bounds(graph, node_ids)
+    if not bounds.ok:
+        return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-align " + mode + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
+    var out_nodes: [SdnGraphNode] = []
+    for original in graph.nodes:
+        out_nodes.push(_sg_clone_node(original))
+    var out = _sg_graph_with_nodes(graph, out_nodes)
+    var i = 0
+    while i < out.nodes.len():
+        val node = out.nodes[i]
+        if _sg_id_in_list(node.id, node_ids):
+            val aligned = _sg_align_node(node, mode, bounds)
+            if not aligned.ok:
+                return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-align " + mode + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
+            out.nodes[i] = aligned.node
+        i = i + 1
+    val new_signature = sdn_graph_geometry_signature(out, node_ids)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-align " + mode + " @@\n- " + expected_signature + "\n+ " + new_signature, graph: out)
+
+fn sdn_graph_distribute_checked(graph: SdnGraph, node_ids: [text], expected_signature: text, axis: text) -> SdnGraphEditResult:
+    val actual_signature = sdn_graph_geometry_signature(graph, node_ids)
+    if actual_signature != expected_signature:
+        return SdnGraphEditResult(accepted: false, reason: "stale-selection", diff: "@@ sdd-distribute " + axis + " @@\nexpected: " + expected_signature + "\nactual: " + actual_signature, graph: graph)
+    if node_ids.len() < 3:
+        return SdnGraphEditResult(accepted: false, reason: "invalid-selection", diff: "@@ sdd-distribute " + axis + " @@\nexpected: at least 3 nodes\nactual: " + node_ids.len().to_text(), graph: graph)
+    val selected_count = _sg_selected_count(graph, node_ids)
+    if selected_count != node_ids.len():
+        return SdnGraphEditResult(accepted: false, reason: "missing-node", diff: "@@ sdd-distribute " + axis + " @@\nexpected: " + node_ids.join(",") + "\nactual: " + actual_signature, graph: graph)
+    if axis != "horizontal" and axis != "vertical":
+        return SdnGraphEditResult(accepted: false, reason: "unsupported-distribute-axis", diff: "@@ sdd-distribute " + axis + " @@\nexpected: horizontal|vertical\nactual: " + axis, graph: graph)
+    val bounds = _sg_selected_bounds(graph, node_ids)
+    if not bounds.ok:
+        return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
+    val total_span = _sg_selected_axis_size(graph, node_ids, axis)
+    if not total_span.ok:
+        return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
+    val available = if axis == "horizontal" then bounds.max_x - bounds.min_x else bounds.max_y - bounds.min_y
+    val gap = (available - total_span.value) / (selected_count - 1)
+    var out_nodes: [SdnGraphNode] = []
+    for original in graph.nodes:
+        out_nodes.push(_sg_clone_node(original))
+    var out = _sg_graph_with_nodes(graph, out_nodes)
+    var i = 0
+    while i < out.nodes.len():
+        val node = out.nodes[i]
+        if _sg_id_in_list(node.id, node_ids):
+            val size = if axis == "horizontal" then _sg_parse_i64_result(node.width) else _sg_parse_i64_result(node.height)
+            if not size.ok:
+                return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
+            val cursor = _sg_distribution_cursor_for_node(graph, node_ids, axis, node.id, bounds, gap)
+            if not cursor.ok:
+                return SdnGraphEditResult(accepted: false, reason: "invalid-geometry", diff: "@@ sdd-distribute " + axis + " @@\nexpected: integer geometry\nactual: " + actual_signature, graph: graph)
+            var updated = _sg_clone_node(node)
+            if axis == "horizontal":
+                updated.x = cursor.value.to_text()
+            else:
+                updated.y = cursor.value.to_text()
+            out.nodes[i] = updated
+        i = i + 1
+    val new_signature = sdn_graph_geometry_signature(out, node_ids)
+    SdnGraphEditResult(accepted: true, reason: "updated", diff: "@@ sdd-distribute " + axis + " @@\n- " + expected_signature + "\n+ " + new_signature, graph: out)
+
 fn sdn_graph_inspect_node(graph: SdnGraph, node_id: text) -> SdnGraphNodeInspector:
     val node_index = _sg_find_node_index(graph, node_id)
     if node_index < 0:
@@ -549,6 +650,152 @@ fn _sg_clone_node(node: SdnGraphNode) -> SdnGraphNode:
         layer: node.layer,
         parent: node.parent
     )
+
+fn _sg_graph_with_nodes(graph: SdnGraph, nodes: [SdnGraphNode]) -> SdnGraph:
+    SdnGraph(name: graph.name, direction: graph.direction, theme: graph.theme, css_file: graph.css_file, canvas_width: graph.canvas_width, canvas_height: graph.canvas_height, canvas_grid: graph.canvas_grid, canvas_snap: graph.canvas_snap, canvas_zoom: graph.canvas_zoom, canvas_background: graph.canvas_background, nodes: nodes, edges: graph.edges, css_defs: graph.css_defs, styles: graph.styles, weaves: graph.weaves)
+
+fn _sg_id_in_list(id: text, ids: [text]) -> bool:
+    for item in ids:
+        if item == id:
+            return true
+    false
+
+fn _sg_selected_count(graph: SdnGraph, node_ids: [text]) -> i64:
+    var count: i64 = 0
+    for node in graph.nodes:
+        if _sg_id_in_list(node.id, node_ids):
+            count = count + 1
+    count
+
+fn _sg_selected_axis_size(graph: SdnGraph, node_ids: [text], axis: text) -> SdnGraphI64Result:
+    var total: i64 = 0
+    for node in graph.nodes:
+        if _sg_id_in_list(node.id, node_ids):
+            val size = if axis == "horizontal" then _sg_parse_i64_result(node.width) else _sg_parse_i64_result(node.height)
+            if not size.ok:
+                return SdnGraphI64Result(ok: false, value: 0)
+            total = total + size.value
+    SdnGraphI64Result(ok: true, value: total)
+
+fn _sg_distribution_cursor_for_node(graph: SdnGraph, node_ids: [text], axis: text, node_id: text, bounds: SdnGraphBounds, gap: i64) -> SdnGraphI64Result:
+    val target_index = _sg_find_node_index(graph, node_id)
+    if target_index < 0:
+        return SdnGraphI64Result(ok: false, value: 0)
+    val target_pos = _sg_node_axis_position(graph.nodes[target_index], axis)
+    if not target_pos.ok:
+        return SdnGraphI64Result(ok: false, value: 0)
+    var cursor = if axis == "horizontal" then bounds.min_x else bounds.min_y
+    var i = 0
+    while i < graph.nodes.len():
+        val candidate = graph.nodes[i]
+        if _sg_id_in_list(candidate.id, node_ids):
+            val candidate_pos = _sg_node_axis_position(candidate, axis)
+            val candidate_size = if axis == "horizontal" then _sg_parse_i64_result(candidate.width) else _sg_parse_i64_result(candidate.height)
+            if not candidate_pos.ok or not candidate_size.ok:
+                return SdnGraphI64Result(ok: false, value: 0)
+            if candidate_pos.value < target_pos.value or (candidate_pos.value == target_pos.value and i < target_index):
+                cursor = cursor + candidate_size.value + gap
+        i = i + 1
+    SdnGraphI64Result(ok: true, value: cursor)
+
+fn _sg_node_axis_position(node: SdnGraphNode, axis: text) -> SdnGraphI64Result:
+    if axis == "horizontal":
+        return _sg_parse_i64_result(node.x)
+    _sg_parse_i64_result(node.y)
+
+fn _sg_align_mode_supported(mode: text) -> bool:
+    mode == "left" or mode == "center" or mode == "right" or mode == "top" or mode == "middle" or mode == "bottom"
+
+fn _sg_selected_bounds(graph: SdnGraph, node_ids: [text]) -> SdnGraphBounds:
+    var initialized = false
+    var min_x: i64 = 0
+    var min_y: i64 = 0
+    var max_x: i64 = 0
+    var max_y: i64 = 0
+    for node in graph.nodes:
+        if _sg_id_in_list(node.id, node_ids):
+            val x = _sg_parse_i64_result(node.x)
+            val y = _sg_parse_i64_result(node.y)
+            val w = _sg_parse_i64_result(node.width)
+            val h = _sg_parse_i64_result(node.height)
+            if not x.ok or not y.ok or not w.ok or not h.ok:
+                return SdnGraphBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+            val right = x.value + w.value
+            val bottom = y.value + h.value
+            if not initialized:
+                min_x = x.value
+                min_y = y.value
+                max_x = right
+                max_y = bottom
+                initialized = true
+            else:
+                if x.value < min_x:
+                    min_x = x.value
+                if y.value < min_y:
+                    min_y = y.value
+                if right > max_x:
+                    max_x = right
+                if bottom > max_y:
+                    max_y = bottom
+    if not initialized:
+        return SdnGraphBounds(ok: false, min_x: 0, min_y: 0, max_x: 0, max_y: 0)
+    SdnGraphBounds(ok: true, min_x: min_x, min_y: min_y, max_x: max_x, max_y: max_y)
+
+fn _sg_align_node(node: SdnGraphNode, mode: text, bounds: SdnGraphBounds) -> SdnGraphAlignedNode:
+    val x = _sg_parse_i64_result(node.x)
+    val y = _sg_parse_i64_result(node.y)
+    val w = _sg_parse_i64_result(node.width)
+    val h = _sg_parse_i64_result(node.height)
+    if not x.ok or not y.ok or not w.ok or not h.ok:
+        return SdnGraphAlignedNode(ok: false, node: node)
+    var updated = _sg_clone_node(node)
+    if mode == "left":
+        updated.x = bounds.min_x.to_text()
+    elif mode == "center":
+        val center = (bounds.min_x + bounds.max_x) / 2
+        updated.x = (center - (w.value / 2)).to_text()
+    elif mode == "right":
+        updated.x = (bounds.max_x - w.value).to_text()
+    elif mode == "top":
+        updated.y = bounds.min_y.to_text()
+    elif mode == "middle":
+        val middle = (bounds.min_y + bounds.max_y) / 2
+        updated.y = (middle - (h.value / 2)).to_text()
+    elif mode == "bottom":
+        updated.y = (bounds.max_y - h.value).to_text()
+    SdnGraphAlignedNode(ok: true, node: updated)
+
+fn _sg_parse_i64_result(value: text) -> SdnGraphI64Result:
+    val trimmed = value.trim()
+    if not _sg_is_i64_token(trimmed):
+        return SdnGraphI64Result(ok: false, value: 0)
+    var negative = false
+    var i = 0
+    if trimmed.char_at(0) == "-":
+        negative = true
+        i = 1
+    var out: i64 = 0
+    while i < trimmed.len():
+        out = out * 10 + (trimmed.char_at(i).char_code_at(0) - 48).to_i64()
+        i = i + 1
+    if negative:
+        out = 0 - out
+    SdnGraphI64Result(ok: true, value: out)
+
+fn _sg_is_i64_token(value: text) -> bool:
+    if value == "":
+        return false
+    var i = 0
+    if value.char_at(0) == "-":
+        if value.len() == 1:
+            return false
+        i = 1
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
 
 fn _sg_int_length_or(value: text, fallback: i64) -> i64:
     val parsed = _sg_int_length(value)

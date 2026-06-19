@@ -604,8 +604,8 @@ metadata: node shape, x/y position, width/height, layer, connector route,
 parent/container membership for draw.io-like groups, waypoints, start/end
 anchors, draw canvas/page metadata, rendered SVG connector paths, reusable CSS
 labels, direct node shape/style/parent/canvas edit operations, transient
-selection rendering, pure
-node/connector inspector snapshots, and weave-based batch style or layout edits.
+selection rendering, pure node/connector inspector snapshots, guarded multi-node
+align/distribute operations, and weave-based batch style or layout edits.
 Implemented in
 `src/lib/editor/services/sdn_graph.spl`; guide:
 `doc/07_guide/lib/api/sdn_graph.md`.

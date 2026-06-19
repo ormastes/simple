@@ -147,8 +147,8 @@ possible so they are runner-verifiable.
    (`.sdd.sdn`) and started draw.io/Figma-level hardening by adding explicit
    node geometry, layer metadata, connector routes, waypoints, anchors, and
    weave-based layout edits, rendered SVG connector paths, pure reroute
-   operations, node shape/style edits, and parent/group membership to
-   `std.editor.services.sdn_graph`.
+   operations, node shape/style edits, parent/group membership, and guarded
+   multi-node align/distribute operations to `std.editor.services.sdn_graph`.
 13. ACTIVE (local 2026-06-19) — **HTML UI editor substrate**:
    Added a pure `app.office.ui_editor` design-document layer for Figma-like
    positioned frames/components, inspector-ready HTML, SDD export, and guarded
@@ -322,3 +322,8 @@ possible so they are runner-verifiable.
   level/tuning tokens; SDD Draw nodes export as stable game sprite records; Base
   exact-match query rows export as `key=value` game state records. Focused
   `game_bridge_spec` passed 8/0.
+- 2026-06-19 dev: Advanced SDD Draw multi-node layout editing. Added guarded
+  geometry signatures plus pure `sdn_graph_align_checked` and
+  `sdn_graph_distribute_checked` helpers for draw.io-like align/distribute
+  operations, exposed `align-layout` / `distribute-layout` in the Draw catalog,
+  and added `layout=true` to the IDE Draw sanity surface.

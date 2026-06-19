@@ -68,10 +68,11 @@ Draw/diagram editing should prefer the SDD substrate in
 `std.editor.services.sdn_graph` for geometry, layers, connector routes,
 waypoints, anchors, rendered SVG connector paths, pure edge reroute operations,
 parent/group metadata, transient selection rendering, pure node/edge inspector
-snapshots, pure node shape/style/parent edit operations, and canvas/page
-metadata. `src/app/ide/draw_sanity.spl` is the product feature-check bridge:
-it proves render, selection, inspection, reroute, node edit, and canvas metadata
-without starting GUI/browser/host APIs. Legacy SVG shape helpers remain
+snapshots, pure node shape/style/parent edit operations, guarded multi-node
+alignment/distribution, and canvas/page metadata. `src/app/ide/draw_sanity.spl`
+is the product feature-check bridge:
+it proves render, selection, inspection, reroute, node edit, multi-node layout,
+and canvas metadata without starting GUI/browser/host APIs. Legacy SVG shape helpers remain
 compatibility utilities, not the LLM catalog owner for Draw.
 
 Calc formula hardening should distinguish display-safe functions from the
@@ -108,12 +109,13 @@ modes:
 
 - Markdown: `css_doc=true escaped=true`
 - Slides: `ppt_html=true safe_css=true positioned=true`
-- Draw: `html=true route=true select=true inspect=true edit=true canvas=true`
+- Draw: `html=true route=true select=true inspect=true edit=true layout=true canvas=true`
 - LLM catalog: Writer has `render-writer-markdown-html`; Impress has
   `render-ppt-markdown-html`; Draw is SDD-backed with
   `render-sdd-html-with-selection`, `reroute-sdd-connector`,
   `edit-sdd-node-parent`, `edit-sdd-node-shape`, `edit-sdd-node-style`,
-  `edit-sdd-canvas`, `inspect-sdd-node`, and `inspect-sdd-edge`; Calc has `formula-counta`,
+  `edit-sdd-canvas`, `align-sdd-selection`, `distribute-sdd-selection`,
+  `inspect-sdd-node`, and `inspect-sdd-edge`; Calc has `formula-counta`,
   `formula-text-functions`, `formula-vlookup`, and
   `formula-display-recalc`; Base has `schema-validation`, `count-where`,
   `update-where`, `delete-where`, and `db-edit`; Math has `fraction`,
@@ -136,6 +138,7 @@ bin/simple check \
   src/app/office/slides/html_render.spl \
   src/app/office/ui_editor.spl \
   src/app/office/game_bridge.spl \
+  src/lib/editor/services/sdn_graph.spl \
   src/app/ide/markdown_render.spl \
   src/app/ide/slides_compat.spl \
   test/01_unit/app/office/md_wysiwyg_spec.spl \
@@ -143,6 +146,7 @@ bin/simple check \
   test/01_unit/app/office/slides/html_render_spec.spl \
   test/01_unit/app/office/ui_editor_spec.spl \
   test/01_unit/app/office/game_bridge_spec.spl \
+  test/01_unit/editor/services/sdn_graph_diagram_spec.spl \
   test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
 
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/md_wysiwyg_spec.spl
@@ -150,10 +154,12 @@ SIMPLE_LIB=src bin/simple test test/01_unit/app/office/md_wysiwyg_render_spec.sp
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/slides/html_render_spec.spl
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/ui_editor_spec.spl
 SIMPLE_LIB=src bin/simple test test/01_unit/app/office/game_bridge_spec.spl
+SIMPLE_LIB=src bin/simple test test/01_unit/editor/services/sdn_graph_diagram_spec.spl
 SIMPLE_LIB=src bin/simple test test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
 bin/simple-interp src/app/ide/main.spl --feature-check --tui
 bin/simple-interp src/app/ide/main.spl --feature-check --gui
 bin/simple spipe-docgen test/01_unit/app/office/game_bridge_spec.spl --output doc/06_spec --no-index
+bin/simple spipe-docgen test/01_unit/editor/services/sdn_graph_diagram_spec.spl --output doc/06_spec --no-index
 bin/simple spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl --output doc/06_spec --no-index
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```

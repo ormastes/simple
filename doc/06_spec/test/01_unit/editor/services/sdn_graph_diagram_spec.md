@@ -27,7 +27,7 @@ sdn_graph_diagram_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -529,12 +529,96 @@ expect(regrouped.nodes[1].parent).to_equal("Container")
 
 </details>
 
+#### aligns selected SDD nodes with guarded geometry signatures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: align\nA: A x: 10 y: 20 width: 30 height: 20\nB: B x: 80 y: 40 width: 20 height: 20\nC: C x: 150 y: 80 width: 30 height: 20")
+val ids = ["A", "B", "C"]
+val signature = sdn_graph_geometry_signature(graph, ids)
+expect(signature).to_equal("A:10,20,30,20;B:80,40,20,20;C:150,80,30,20")
+
+val left = sdn_graph_align_checked(graph, ids, signature, "left")
+expect(left.accepted).to_be(true)
+expect(left.reason).to_equal("updated")
+expect(left.graph.nodes[0].x).to_equal("10")
+expect(left.graph.nodes[1].x).to_equal("10")
+expect(left.graph.nodes[2].x).to_equal("10")
+expect(left.diff).to_contain("@@ sdd-align left @@")
+
+val middle = sdn_graph_align_checked(graph, ids, signature, "middle")
+expect(middle.accepted).to_be(true)
+expect(middle.graph.nodes[0].y).to_equal("50")
+expect(middle.graph.nodes[1].y).to_equal("50")
+expect(middle.graph.nodes[2].y).to_equal("50")
+
+val stale = sdn_graph_align_checked(graph, ids, "A:0,0,1,1", "left")
+expect(stale.accepted).to_be(false)
+expect(stale.reason).to_equal("stale-selection")
+
+val missing = sdn_graph_align_checked(graph, ["A", "Missing"], sdn_graph_geometry_signature(graph, ["A", "Missing"]), "left")
+expect(missing.accepted).to_be(false)
+expect(missing.reason).to_equal("missing-node")
+
+val unsupported = sdn_graph_align_checked(graph, ids, signature, "diagonal")
+expect(unsupported.accepted).to_be(false)
+expect(unsupported.reason).to_equal("unsupported-align-mode")
+```
+
+</details>
+
+#### distributes selected SDD nodes with guarded geometry signatures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val graph = sdn_graph_parse("graph: distribute\nB: B x: 120 y: 120 width: 20 height: 20\nA: A x: 0 y: 0 width: 20 height: 20\nC: C x: 20 y: 20 width: 20 height: 20")
+val ids = ["A", "B", "C"]
+val signature = sdn_graph_geometry_signature(graph, ids)
+val horizontal = sdn_graph_distribute_checked(graph, ids, signature, "horizontal")
+expect(horizontal.accepted).to_be(true)
+expect(horizontal.reason).to_equal("updated")
+expect(horizontal.graph.nodes[0].x).to_equal("120")
+expect(horizontal.graph.nodes[1].x).to_equal("0")
+expect(horizontal.graph.nodes[2].x).to_equal("60")
+expect(horizontal.graph.nodes[2].y).to_equal("20")
+expect(sdn_graph_to_canonical_sdn(horizontal.graph)).to_contain("C, C, , , , 60, 20, 20, 20")
+
+val vertical = sdn_graph_distribute_checked(graph, ids, signature, "vertical")
+expect(vertical.accepted).to_be(true)
+expect(vertical.graph.nodes[2].y).to_equal("60")
+
+val too_few = sdn_graph_distribute_checked(graph, ["A", "B"], sdn_graph_geometry_signature(graph, ["A", "B"]), "horizontal")
+expect(too_few.accepted).to_be(false)
+expect(too_few.reason).to_equal("invalid-selection")
+
+val invalid = sdn_graph_parse("graph: invalid\nA: A x: left y: 0 width: 20 height: 20\nB: B x: 20 y: 20 width: 20 height: 20\nC: C x: 120 y: 120 width: 20 height: 20")
+val invalid_result = sdn_graph_distribute_checked(invalid, ids, sdn_graph_geometry_signature(invalid, ids), "horizontal")
+expect(invalid_result.accepted).to_be(false)
+expect(invalid_result.reason).to_equal("invalid-geometry")
+
+val unsupported = sdn_graph_distribute_checked(graph, ids, signature, "diagonal")
+expect(unsupported.accepted).to_be(false)
+expect(unsupported.reason).to_equal("unsupported-distribute-axis")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
