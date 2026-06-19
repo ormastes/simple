@@ -380,7 +380,7 @@ expect(ide_draw_sanity_summary()).to_contain("canvas=true")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 751 lines folded for reproduction.
+Runnable source: 755 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -579,6 +579,8 @@ val ui_distribute_action = office_action_dispatch("ui-distribute-selection", "ho
 val sdd_distribute_action = office_action_dispatch("distribute-sdd-selection", "horizontal|A,B,C\ngraph: Dist\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 0 width: 20 height: 20\nC: C x: 100 y: 0 width: 20 height: 20")
 val invalid_ui_align_action = office_action_dispatch("ui-align-selection", "left|a,b bad\ndesign: Align\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|20|20|20|secondary|2|action")
 val invalid_sdd_distribute_action = office_action_dispatch("distribute-sdd-selection", "horizontal|A,B bad,C\ngraph: Dist\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 0 width: 20 height: 20\nC: C x: 100 y: 0 width: 20 height: 20")
+val invalid_ui_align_mode_action = office_action_dispatch("ui-align-selection", "diagonal|a,b\ndesign: Align\nnode a|A|button|0|0|20|20|primary|1|action\nnode b|B|button|40|20|20|20|secondary|2|action")
+val invalid_sdd_distribute_axis_action = office_action_dispatch("distribute-sdd-selection", "radial|A,B,C\ngraph: Dist\nA: A x: 0 y: 0 width: 20 height: 20\nB: B x: 40 y: 0 width: 20 height: 20\nC: C x: 100 y: 0 width: 20 height: 20")
 val sdd_shape_action = office_action_dispatch("edit-sdd-node-shape", "A|diamond\ngraph: Shape\nA: A x: 0 y: 0 width: 20 height: 20")
 val sdd_style_action = office_action_dispatch("edit-sdd-node-style", "A|accent\ngraph: Style\nA: A x: 0 y: 0 width: 20 height: 20")
 val blank_sdd_style_action = office_action_dispatch("edit-sdd-node-style", "   |accent\ngraph: Style\nA: A x: 0 y: 0 width: 20 height: 20")
@@ -773,6 +775,8 @@ expect(ui_distribute_action.output).to_contain("left: 50px")
 expect(sdd_distribute_action.output).to_contain("style=\"left:50px")
 expect(invalid_ui_align_action.reason).to_equal("invalid-args")
 expect(invalid_sdd_distribute_action.reason).to_equal("invalid-args")
+expect(invalid_ui_align_mode_action.reason).to_equal("invalid-args")
+expect(invalid_sdd_distribute_axis_action.reason).to_equal("invalid-args")
 expect(sdd_shape_action.output).to_contain("data-shape=\"diamond\"")
 expect(sdd_style_action.output).to_contain("sdn-css-accent")
 expect(blank_sdd_style_action.reason).to_equal("invalid-args")
