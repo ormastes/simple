@@ -517,7 +517,7 @@ expect(invalid).to_contain("data-edge-index=\"0\" data-selected=\"false\" aria-s
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -542,6 +542,11 @@ expect(edge.kind).to_equal("action")
 expect(edge.route).to_equal("orthogonal")
 expect(edge.waypoints).to_equal("140x30;200x80")
 expect(edge.path).to_equal("M 90,30 L 140,30 L 200,30 L 200,80 L 220,80 L 220,30")
+expect(edge.path_bounds).to_equal("90,30,220,80")
+expect(edge.segment_count).to_equal("5")
+expect(edge.segments).to_equal("90,30-140,30;140,30-200,30;200,30-200,80;200,80-220,80;220,80-220,30")
+expect(edge.segment_midpoints).to_equal("115,30;170,30;200,55;210,80;220,55")
+expect(edge.segment_orientations).to_equal("h;h;v;h;v")
 expect(edge.label_x).to_equal("")
 expect(edge.label_y).to_equal("")
 ```

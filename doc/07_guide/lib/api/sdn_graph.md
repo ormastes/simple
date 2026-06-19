@@ -336,4 +336,5 @@ Use `sdn_graph_inspect_node(graph, node_id)` and
 `sdn_graph_inspect_edge(graph, edge_index)` for read-only editor sidebars.
 Inspectors return deterministic found/missing snapshots without mutating the
 graph. Edge inspection includes the computed SVG path when both endpoints can
-be resolved.
+be resolved, plus rendered path bounds, segment count, segment endpoints,
+segment midpoints, and segment orientations for editor sidebars.
